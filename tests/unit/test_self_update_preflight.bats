@@ -188,6 +188,7 @@ CURLSHIM
     [ "$(cat "$HOME/.autospec/installed-version")" = "oldsha1" ]
     [ "$(cat "$HOME/.autospec/remote-version")" = "newsha9" ]
     [ -s "$HOME/.autospec/self-update.log" ]
+    [ "$(stat -f '%Lp' "$HOME/.autospec/self-update.log" 2>/dev/null || stat -c '%a' "$HOME/.autospec/self-update.log")" = "600" ]
     grep -q "compile error: cfg mismatch" "$HOME/.autospec/self-update.log"
     [ -s "$HOME/.autospec/last-update-failure.json" ]
     run jq -e '
@@ -257,6 +258,54 @@ MVSHIM
     [ "$(cat "$HOME/.autospec/installed-version")" = "oldsha1" ]
     [ ! -e "$HOME/.autospec/last-update-check" ]
     echo "$output" | grep -q "WARN: self-update state publication failed"
+    ! echo "$output" | grep -q "\[autospec\] updated"
+}
+
+@test "success timestamp publication failure restores prior installed receipt" {
+    mkdir -p "$HOME/.autospec"
+    echo "oldsha1" > "$HOME/.autospec/installed-version"
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in *commits/main*) printf '{"sha":"newsha99"}\n'; exit 0 ;; esac
+done
+printf '#!/usr/bin/env bash\nexit 0\n'
+CURLSHIM
+    cat > "$SHIMDIR/mv" << 'MVSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do target="$arg"; done
+case "$target" in */last-update-check) exit 74 ;; *) exec /bin/mv "$@" ;; esac
+MVSHIM
+    chmod +x "$SHIMDIR/curl" "$SHIMDIR/mv"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME/.autospec/installed-version")" = "oldsha1" ]
+    [ ! -e "$HOME/.autospec/last-update-check" ]
+    echo "$output" | grep -q "WARN: self-update state publication failed"
+    ! echo "$output" | grep -q "\[autospec\] updated"
+}
+
+@test "success timestamp publication failure removes newly-created installed receipt" {
+    mkdir -p "$HOME/.autospec"
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in *commits/main*) printf '{"sha":"newsha99"}\n'; exit 0 ;; esac
+done
+printf '#!/usr/bin/env bash\nexit 0\n'
+CURLSHIM
+    cat > "$SHIMDIR/mv" << 'MVSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do target="$arg"; done
+case "$target" in */last-update-check) exit 74 ;; *) exec /bin/mv "$@" ;; esac
+MVSHIM
+    chmod +x "$SHIMDIR/curl" "$SHIMDIR/mv"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    [ ! -e "$HOME/.autospec/installed-version" ]
+    [ ! -e "$HOME/.autospec/last-update-check" ]
     ! echo "$output" | grep -q "\[autospec\] updated"
 }
 

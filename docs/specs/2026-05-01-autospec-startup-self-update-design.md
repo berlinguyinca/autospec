@@ -63,7 +63,10 @@ these files:
 ~/.autospec/self-update.log{,.1}      # current and one rotated bounded log
 ```
 
-State receipts use guarded temp-file plus `mv` publication. Diagnostic files are mode `0600`.
+State receipts use guarded temp-file plus `mv` publication. The installed-version receipt is backed
+up before publication and restored (or removed when it did not previously exist) if the paired
+successful-check timestamp cannot publish. The state block uses `umask 077`, and the diagnostic log
+is pre-created at mode `0600` before installer output is piped into it.
 Missing files are valid and mean no successful check, no known version, or no recorded failure.
 
 ### 2.3 install.sh integration

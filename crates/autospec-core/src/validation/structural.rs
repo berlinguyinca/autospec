@@ -2233,6 +2233,8 @@ impl StructuralValidator {
             "tail -c 65536",
             "installer_exit_code",
             "state publication failed ($INSTALLED)",
+            "umask 077",
+            "INSTALLED_BACKUP",
         ] {
             if !canonical.contains(required) {
                 return Err(format!(

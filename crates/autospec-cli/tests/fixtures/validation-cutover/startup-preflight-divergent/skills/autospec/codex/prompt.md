@@ -2,6 +2,8 @@
 
 ```bash
 SKILL_NAME=autospec
+umask 077
+INSTALLED_BACKUP="$HOME/.autospec/installed.backup"
 FAILURE_RECORD="$HOME/.autospec/last-update-failure.json"
 UPDATE_LOG="$HOME/.autospec/self-update.log"
 REMOTE_VERSION="$HOME/.autospec/remote-version"
