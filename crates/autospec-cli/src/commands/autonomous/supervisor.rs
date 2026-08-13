@@ -6,6 +6,9 @@ pub(super) const RESTART_FAST_EXIT_LIMIT: u32 = 5;
 /// Ceiling on the restart backoff, so a quarantine decision is still reached in bounded time.
 pub(super) const RESTART_BACKOFF_MAX_SECS: u64 = 300;
 
+/// Consecutive live probes required before a replacement clears the failure streak.
+pub(super) const RESTART_HEALTHY_PROBE_LIMIT: u32 = 12;
+
 /// Restart policy for the supervisor: how many conductors in a row died on the way up, whether
 /// to keep trying, and how long to wait before the next attempt.
 ///
@@ -15,21 +18,31 @@ pub(super) const RESTART_BACKOFF_MAX_SECS: u64 = 300;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RestartPolicy {
     pub(super) consecutive_fast_exits: u32,
+    pub(super) consecutive_live_probes: u32,
     pub(super) quarantined: bool,
 }
 
 impl RestartPolicy {
     /// Record the outcome of a restart. `alive` is the result of re-probing the replacement
     /// after a grace period -- not merely whether the spawn call returned.
-    pub(super) fn record_restart(&mut self, alive: bool) {
+    pub(super) fn record_restart(&mut self, alive: bool) -> bool {
         if alive {
-            self.consecutive_fast_exits = 0;
-            return;
+            self.consecutive_live_probes = self.consecutive_live_probes.saturating_add(1);
+            if self.consecutive_live_probes < RESTART_HEALTHY_PROBE_LIMIT {
+                return false;
+            }
+            if !self.quarantined {
+                self.consecutive_fast_exits = 0;
+            }
+            self.consecutive_live_probes = 0;
+            return true;
         }
+        self.consecutive_live_probes = 0;
         self.consecutive_fast_exits = self.consecutive_fast_exits.saturating_add(1);
         if self.consecutive_fast_exits >= RESTART_FAST_EXIT_LIMIT {
             self.quarantined = true;
         }
+        true
     }
 
     /// False once the breaker has tripped: the supervisor keeps observing and reporting, but
@@ -71,13 +84,16 @@ pub(super) fn supervise(options: Options) -> Result<(), String> {
             options.pid.clone()
         };
         let mut conductor_running = process_alive(&watched_pid);
-        if let Some(previous) = pending_restart.take() {
+        if let Some(previous) = pending_restart.as_ref() {
             // Judge the last relaunch now that it has had a full interval to get going. A spawn
             // returning is not a start: trusting it is what let 1017 doomed conductors each be
             // logged `conductor=running` (berlinguyinca/autospec#3012 section 1).
             let survived = process_alive(&previous);
-            restart_policy.record_restart(survived);
-            if !survived && !restart_policy.may_restart() {
+            let settled = restart_policy.record_restart(survived);
+            if settled {
+                pending_restart = None;
+            }
+            if settled && !survived && !restart_policy.may_restart() {
                 eprintln!(
                     "autospec-supervise: {} consecutive conductors exited immediately; no longer restarting. Inspect the conductor log, resolve the cause, then run `autospec-autonomous restart`.",
                     restart_policy.consecutive_fast_exits
