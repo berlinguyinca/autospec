@@ -77,6 +77,14 @@ Turns a feature description into a spec PR and a GitHub issue tree.
 - Existing spec: skip Phases 1-2, reuse tracked `docs/specs/*.md`
 - `--init`: reverse-engineer existing repo → bootstrap docs + specs
 
+For database, authorization, destructive-operation, confidentiality, or
+production-availability work, Phase 1 selects `feature_profile: security_database`.
+Autospec commits a `.autospec/spec-artifacts/<slug>.security-database.yml` sidecar
+with the Markdown spec, validates evidence, authoritative controls, negative tests,
+dependencies, and atomic ownership, then renders child issues deterministically.
+Unverified prerequisites receive `autospec:blocked-prerequisite` instead of
+`auto-implement`; `/autospec-run` rechecks them immediately before dispatch.
+
 ### `/autospec-run`
 
 <!-- autospec-doc-scope:

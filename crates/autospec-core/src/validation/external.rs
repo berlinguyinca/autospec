@@ -88,6 +88,7 @@ pub enum ExternalCheck {
     MutationAndNegativePath,
     LintImplementationHelpers,
     LintIssueHelpers,
+    SecurityArtifactProfile,
     Phase4CiStatusCompare,
     DefineSpecWorktreeRouting,
     RunGroomPreflightContract,
@@ -221,6 +222,7 @@ impl ExternalCheck {
             Self::MutationAndNegativePath => run_mutation_and_negative_path(id, required, root),
             Self::LintImplementationHelpers => run_lint_implementation_helpers(id, required, root),
             Self::LintIssueHelpers => run_lint_issue_helpers(id, required, root),
+            Self::SecurityArtifactProfile => run_security_artifact_profile(id, required, root),
             Self::Phase4CiStatusCompare => run_phase4_ci_status_compare(id, required, root),
             Self::DefineSpecWorktreeRouting => run_define_spec_worktree_routing(id, required, root),
             Self::RunGroomPreflightContract => run_groom_preflight_contract(id, required, root),
@@ -243,6 +245,32 @@ fn run_validation_matrix_smoke(id: &str, required: bool, root: &Path) -> CheckRe
         [
             ToolCommand::new("bash", ["tests/smoke/validation-matrix.sh"])
                 .expect("validation-matrix smoke is a direct script invocation"),
+        ],
+    )
+}
+
+fn run_security_artifact_profile(id: &str, required: bool, root: &Path) -> CheckResult {
+    run_commands(
+        id,
+        required,
+        root,
+        [
+            ToolCommand::new(
+                "python3",
+                ["scripts/validate-security-artifact.py", "--help"],
+            )
+            .expect("security artifact validator help uses direct arguments"),
+            ToolCommand::new(
+                "python3",
+                [
+                    "scripts/validate-security-artifact.py",
+                    "tests/fixtures/security-artifact/valid.yml",
+                ],
+            )
+            .expect("security artifact fixture validation uses direct arguments"),
+            bats_command("tests/security-artifact-validator.bats"),
+            bats_command("tests/unit/test_security_profile_skill_contract.bats"),
+            bats_command("tests/unit/test_autospec_run_security_prerequisites.bats"),
         ],
     )
 }

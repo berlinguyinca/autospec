@@ -318,6 +318,9 @@ impl ValidationCheck {
             "check_lint_issue_helpers" => {
                 CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers)
             }
+            "check_security_artifact_profile" => {
+                CheckOwner::ExternalBatch(ExternalCheck::SecurityArtifactProfile)
+            }
             "check_phase4_ci_status_compare" => {
                 CheckOwner::ExternalBatch(ExternalCheck::Phase4CiStatusCompare)
             }
@@ -604,6 +607,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_autospec_stl_design_guardrails",
     "check_existing_spec_mode",
     "check_lint_issue_helpers",
+    "check_security_artifact_profile",
     "check_lint_implementation_helpers",
     "check_implementer_contract",
     "check_reviewer_contract",
@@ -763,6 +767,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_autospec_listen_files",
     "check_examples_dir",
     "check_lint_issue_helpers",
+    "check_security_artifact_profile",
     "check_lint_implementation_helpers",
     "check_implementer_contract",
     "check_reviewer_contract",

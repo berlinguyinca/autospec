@@ -4,7 +4,7 @@
 > *Per-symbol reference for all public CLI surfaces and shared scripts.*
 
 <!-- autospec-doc-scope:
-  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "skills/autospec-doc/scripts/*.mjs", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
+  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "scripts/**/*.py", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "skills/autospec-doc/scripts/*.mjs", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
   reason: "API reference for all autospec shared scripts, their shipping path, and the ship-completeness guard"
   mismatch_action: warn
   generated: true
@@ -13,7 +13,7 @@
 ## Shared scripts (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Installed to `~/.autospec/scripts/`. The top-level `install.sh` globs every repo-root
-`scripts/*.{sh,mjs,ps1}` (excluding the install-time-only `scripts/lib/`) plus the entire
+`scripts/*.{sh,mjs,ps1,py,yml}` (excluding the install-time-only `scripts/lib/`) plus the entire
 `skills/autospec-shared/scripts/` tree into `~/.autospec/scripts/` for all harnesses
 (`claude|codex|opencode|all`), so new repo-root helper scripts ship automatically without a
 hand-maintained list. The per-skill standalone installers (`skills/*/install.sh`) enumerate a
@@ -21,6 +21,31 @@ hand-maintained list. The per-skill standalone installers (`skills/*/install.sh`
 The `tests/ship-completeness.bats` guard asserts every `${AUTOSPEC_SCRIPTS_DIR}`-referenced
 script is in the shippable set and that no bare repo-relative script invocation remains in any
 skill surface.
+
+### `validate-security-artifact.py`
+
+Validates the committed `autospec.security_database.v1` sidecar before a spec PR
+or generated issue is filed. It rejects unresolved evidence, blocked queued work,
+uncontrolled threats, missing authoritative database/platform controls, unowned
+negative tests, uncovered spec sections, invalid dependencies, cycles, and split
+atomic contracts. Evidence sources are treated as data and are never executed.
+
+```
+Usage: validate-security-artifact.py [--json] <artifact.yml>
+Exit: 0 = valid; otherwise the number of findings, capped at 64
+```
+
+### `gen-issue-skeleton.sh`
+
+Renders structured YAML into the canonical issue body and runs `lint-issue.sh`
+before emitting output. Common inputs include files touched, local-LLM notes, and
+dependencies. `feature_profile: security_database` additionally requires and
+renders Evidence consumed, Controls covered, and Prerequisites.
+
+```
+Usage: gen-issue-skeleton.sh --input <issue.yml>
+       gen-issue-skeleton.sh < issue.yml
+```
 
 ### `autospec-watchdog.sh`
 
