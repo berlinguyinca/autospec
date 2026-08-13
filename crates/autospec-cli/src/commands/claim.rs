@@ -5003,7 +5003,9 @@ fn retire_released_startup_heartbeat(
 fn retire_released_startup_heartbeat(
     _identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
-    Ok(())
+    Err(CommandFailure::diagnostic(
+        "predecessor heartbeat retirement requires Linux pidfd ownership",
+    ))
 }
 #[cfg(target_os = "linux")]
 fn prepare_heartbeat_root_parent_with_hook(
@@ -7408,5 +7410,5 @@ use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,
     server_lease_is_stale,
 };
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

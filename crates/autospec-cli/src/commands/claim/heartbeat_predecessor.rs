@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
 pub(super) fn retire(
     repo: &str,
     issue: u64,
@@ -36,4 +37,15 @@ pub(super) fn retire(
         }
     }
     retire_released_startup_heartbeat_with_hook(identity, true, &mut |_, _| Ok(()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn retire(
+    _repo: &str,
+    _issue: u64,
+    _prior: Option<&ClaimRefHead>,
+) -> Result<(), CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "predecessor heartbeat retirement requires Linux pidfd ownership",
+    ))
 }

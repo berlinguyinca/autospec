@@ -4,7 +4,9 @@ use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -50,11 +52,11 @@ use autospec_core::lint::{
 use nix::fcntl::OFlag;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{renameat2, RenameFlags};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use nix::unistd::{fork, getpgid, pipe2, write as fd_write, ForkResult, Pid};
 use yaml_edit::Document;
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
@@ -990,12 +992,60 @@ pub(crate) fn legacy_bridge_proves_claim(
     Ok(proven)
 }
 
+const LINUX_EXECUTOR_REQUIRED: &str =
+    "executor supervision requires Linux pidfd ownership";
+
+#[cfg(not(target_os = "linux"))]
+fn require_linux_executor_supervision() -> Result<(), String> {
+    Err(LINUX_EXECUTOR_REQUIRED.to_string())
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn run_executor_bridge(
     request: &ExecutorBridgeRequest,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     run_executor_bridge_with_codex_probe(request, preflight_codex_sandbox)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn run_executor_bridge(
+    _request: &ExecutorBridgeRequest,
+) -> Result<BridgeRunReceipt, BridgeRunFailure> {
+    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
+    unreachable!("non-Linux executor admission always fails")
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[test]
+fn executor_bridge_fails_closed_before_state_mutation_without_linux_pidfds() {
+    assert_eq!(
+        require_linux_executor_supervision().unwrap_err(),
+        "executor supervision requires Linux pidfd ownership"
+    );
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[test]
+fn executor_bridge_keeps_harness_alias_parsing_portable() {
+    let aliases = HarnessConfig::parse_alias_table("codex\tcodex\t--yolo\tCodex CLI\n")
+        .expect("parse portable harness alias");
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(aliases[0].kind, HarnessKind::Codex);
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[test]
+fn executor_bridge_keeps_primary_supervisor_resolution_portable() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let resolved = resolve_executor_supervisor_executable(Ok(executable.clone()), None)
+        .expect("resolve primary executable");
+    assert_eq!(
+        resolved,
+        fs::canonicalize(executable).expect("canonical test executable")
+    );
+}
+
+#[cfg(target_os = "linux")]
 fn run_executor_bridge_with_codex_probe(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
@@ -5527,6 +5577,7 @@ fn direct_launch_document(
     .to_string()
 }
 
+#[cfg(target_os = "linux")]
 fn direct_process_identities(
     child: &ForkedChild,
     executable: &Path,
@@ -6043,6 +6094,7 @@ fn retire_direct_launch(paths: &DirectAttemptPaths, attempt_id: &str) -> Result<
     finish_direct_retirement(paths, &transaction, attempt_id)
 }
 
+#[cfg(target_os = "linux")]
 fn reconcile_direct_launch(
     paths: &DirectAttemptPaths,
     expected_intent_body: Option<&str>,
@@ -6242,7 +6294,16 @@ fn reconcile_direct_launch(
     Ok(had_launch)
 }
 
-#[cfg(unix)]
+#[cfg(not(target_os = "linux"))]
+fn reconcile_direct_launch(
+    _paths: &DirectAttemptPaths,
+    _expected_intent_body: Option<&str>,
+) -> Result<bool, String> {
+    require_linux_executor_supervision()?;
+    unreachable!("non-Linux executor admission always fails")
+}
+
+#[cfg(target_os = "linux")]
 fn reap_terminal_direct_identity(identity: &ProcessIdentity) -> Result<(), String> {
     let pid = Pid::from_raw(
         i32::try_from(identity.pid)
@@ -6421,6 +6482,7 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "linux")]
 fn execute_supervised_direct_attempt(
     attempt_id: &str,
     worktree: &Path,
@@ -6764,6 +6826,7 @@ fn execute_supervised_direct_attempt(
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn execute_direct_plan(
     worktree: &Path,
     plan: &DirectCommandPlan,
@@ -7112,6 +7175,18 @@ pub(crate) fn execute_direct_plan(
         return Err("executor direct command commit identity drifted during execution".to_string());
     }
     Ok(observed)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn execute_direct_plan(
+    _worktree: &Path,
+    _plan: &DirectCommandPlan,
+    _artifact_root: &Path,
+    _runtime: Option<&DirectRuntimeAdapter>,
+    _stall_timeout: Duration,
+) -> Result<Vec<ObservedDirectCommand>, String> {
+    require_linux_executor_supervision()?;
+    unreachable!("non-Linux executor admission always fails")
 }
 
 fn changed_automatic_reviewer_failure(
@@ -14668,6 +14743,7 @@ fn resolve_draft_executable(adapter: &DraftPrAdapter) -> Result<PathBuf, String>
         .map_err(|error| format!("canonicalize executor draft gh executable: {error}"))
 }
 
+#[cfg(target_os = "linux")]
 fn create_draft_pull_request<Refresh>(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -15130,6 +15206,23 @@ where
         )
         .into())
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_draft_pull_request<Refresh>(
+    _state_path: &Path,
+    _state: &mut PersistedInvocation,
+    _body: &str,
+    _issue_title: &str,
+    _base: &str,
+    _adapter: &DraftPrAdapter,
+    _refresh: &mut Refresh,
+) -> Result<(), BridgeRunFailure>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
+{
+    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
+    unreachable!("non-Linux executor admission always fails")
 }
 
 fn list_bridge_pull_requests(
@@ -15874,7 +15967,7 @@ fn launch_child_failpoint() -> u8 {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn terminate_post_fork(code: i32) -> ! {
     // SAFETY: exit_group accepts only the current process exit status and is async-signal-safe.
     unsafe {
@@ -15886,7 +15979,9 @@ fn terminate_post_fork(code: i32) -> ! {
 }
 
 // The forked-child supervisor primitives; see the module header there.
+#[cfg(target_os = "linux")]
 mod post_fork;
+#[cfg(target_os = "linux")]
 use post_fork::*;
 
 #[cfg(test)]
@@ -16411,6 +16506,7 @@ fn finalize_recovered_completion(
     Ok(SupervisionOutcome::Exited { exit_code })
 }
 
+#[cfg(target_os = "linux")]
 fn supervise_validated_harness_with_claim_renewal(
     state_path: &Path,
     event_log: &Path,
@@ -16777,6 +16873,20 @@ fn supervise_validated_harness_with_claim_renewal(
     )
 }
 
+#[cfg(not(target_os = "linux"))]
+fn supervise_validated_harness_with_claim_renewal(
+    _state_path: &Path,
+    _event_log: &Path,
+    _state: &mut PersistedInvocation,
+    _harness: Option<&ValidatedInvocation>,
+    _snapshot: &MutationSnapshot,
+    _config: SupervisionConfig,
+    _renewal: ClaimRenewalSchedule,
+) -> Result<SupervisionOutcome, String> {
+    require_linux_executor_supervision()?;
+    unreachable!("non-Linux executor admission always fails")
+}
+
 #[cfg(target_os = "linux")]
 fn process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -16831,7 +16941,7 @@ fn resolve_legacy_supervisor(_harness: &ProcessIdentity) -> Result<ProcessIdenti
     Err("legacy executor supervisor migration requires Linux pidfds".to_string())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
 struct ChildExit {
     code: i32,
@@ -17646,7 +17756,7 @@ fn pidfd_open(pid: u32) -> Result<OwnedFd, String> {
     Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct ForkedChild {
     supervisor_pid: Pid,
     harness: OwnedProcess,
@@ -17657,13 +17767,13 @@ struct ForkedChild {
     reaped: Option<ChildExit>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct SpawnParentGuard {
     supervisor_pid: Pid,
     processes: Option<OwnedProcessSet>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct SpawnFailure {
     reason: String,
@@ -17673,7 +17783,7 @@ struct SpawnFailure {
     cleanup_succeeded: bool,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl SpawnFailure {
     fn before_ownership(reason: String) -> Self {
         Self {
@@ -17686,14 +17796,14 @@ impl SpawnFailure {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl From<String> for SpawnFailure {
     fn from(reason: String) -> Self {
         Self::before_ownership(reason)
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl SpawnParentGuard {
     fn new(supervisor_pid: Pid, processes: OwnedProcessSet) -> Self {
         Self {
@@ -17727,7 +17837,7 @@ impl SpawnParentGuard {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for SpawnParentGuard {
     fn drop(&mut self) {
         if let Some(processes) = self.processes.as_mut() {
@@ -17737,7 +17847,7 @@ impl Drop for SpawnParentGuard {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl ForkedChild {
     fn id(&self) -> u32 {
         self.harness.birth.pid
@@ -17846,7 +17956,7 @@ impl ForkedChild {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_pipe_until_deadline(
     descriptor: i32,
     timeout: Duration,
@@ -17918,7 +18028,7 @@ fn read_pipe_until_deadline(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_exact_pipe_until_deadline(
     descriptor: i32,
     destination: &mut [u8],
@@ -17972,13 +18082,13 @@ fn read_exact_pipe_until_deadline(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct LaunchGuard {
     child: Option<ForkedChild>,
     birth: ProcessIdentity,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl LaunchGuard {
     fn child_mut(&mut self) -> &mut ForkedChild {
         self.child.as_mut().expect("launch guard owns child")
@@ -17997,7 +18107,7 @@ impl LaunchGuard {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
@@ -18205,7 +18315,7 @@ fn prepare_output_pump(paths: &OutputSinkPaths) -> Result<OutputPumpFiles, Strin
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn spawn_blocked_harness(
     harness: &ValidatedInvocation,
     sinks: &OutputSinkPaths,
@@ -18711,6 +18821,7 @@ fn repaired_supervisor_resolution_failure(terminal: &AttemptTerminal) -> bool {
     .is_ok()
 }
 
+#[cfg(target_os = "linux")]
 fn launch_and_supervise(
     state_path: &Path,
     event_log: &Path,
@@ -19095,6 +19206,7 @@ fn launch_and_supervise(
     result
 }
 
+#[cfg(target_os = "linux")]
 fn supervise_adopted_process(
     state_path: &Path,
     event_log: &Path,
@@ -20106,6 +20218,7 @@ fn observe_process_group(pid: u32) -> Result<Option<u32>, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn terminate_exact_process_group(
     expected: &ProcessIdentity,
     child: &mut Child,
@@ -20121,7 +20234,7 @@ fn terminate_exact_process_group(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn terminate_owned_forked_process_group(
     expected: &ProcessIdentity,
     child: &mut ForkedChild,
@@ -20132,7 +20245,7 @@ fn terminate_owned_forked_process_group(
     child.terminate()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn process_table_entries() -> Result<Vec<(u32, ProcessBirth)>, String> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(|error| format!("read executor boot identity: {error}"))?
@@ -23045,5 +23158,5 @@ use continuation::*;
 mod continuation_children;
 use continuation_children::*;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

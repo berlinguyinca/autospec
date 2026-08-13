@@ -453,7 +453,7 @@ fn open_private_lock_at(parent: &File, name: &Path) -> Result<File, CommandFailu
         parent,
         name,
         flags,
-        Mode::from_bits_truncate(PRIVATE_FILE_MODE),
+        Mode::from_bits_truncate(PRIVATE_FILE_MODE as nix::libc::mode_t),
     )
     .map_err(|error| private_open_error(name, std::io::Error::from_raw_os_error(error as i32)))?;
     let file = File::from(descriptor);
