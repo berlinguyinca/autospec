@@ -305,7 +305,6 @@ impl ResolvedHarness {
 }
 
 #[cfg(target_os = "linux")]
-
 pub(super) fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
     if !is_bare_path(path) && !path.is_absolute() {
         return Err(format!(

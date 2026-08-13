@@ -317,20 +317,25 @@ pub(super) fn parse_direct_command_plan(line: &str) -> Result<DirectCommandPlan,
     ];
     let commands = segments
         .into_iter()
-        .map(|argv| {
-            if argv.len() > MAX_DIRECT_COMMAND_ARGS {
-                return Err("executor direct command has too many arguments".to_string());
-            }
-            if CONTROL_WORDS.contains(&argv[0].as_str()) {
-                return Err(format!(
-                    "executor direct command rejects shell control builtin {}",
-                    argv[0]
-                ));
-            }
-            Ok(DirectCommand::success(argv))
-        })
+        .map(|argv| validate_direct_argv(argv, &CONTROL_WORDS))
         .collect::<Result<Vec<_>, String>>()?;
     Ok(DirectCommandPlan { commands })
+}
+
+fn validate_direct_argv(
+    argv: Vec<String>,
+    control_words: &[&str],
+) -> Result<DirectCommand, String> {
+    if argv.len() > MAX_DIRECT_COMMAND_ARGS {
+        return Err("executor direct command has too many arguments".to_string());
+    }
+    if control_words.contains(&argv[0].as_str()) {
+        return Err(format!(
+            "executor direct command rejects shell control builtin {}",
+            argv[0]
+        ));
+    }
+    Ok(DirectCommand::success(argv))
 }
 
 fn finish_direct_token(

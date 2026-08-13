@@ -85,6 +85,12 @@ impl ToolCommand {
         self
     }
 
+    /// The environment overrides this command will apply, so a caller that must *prove*
+    /// an override is present can assert on it without spawning the process.
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        &self.environment
+    }
+
     pub fn program(&self) -> &Path {
         &self.program
     }
@@ -259,4 +265,53 @@ fn repository_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("autospec-core manifest is two directories below the repository root")
         .to_path_buf()
+}
+
+/// A Bats invocation with the refine lens pinned to the offline path.
+///
+/// `scripts/refine-prompt.sh` resolves its lens mode to `auto` by default, and `auto` is
+/// LLM-*first*: it dispatches the model each round and only falls back to the template
+/// lens when no dispatcher is reachable. With `claude` on PATH — which is the normal
+/// state on a developer machine and on any host running autospec — a generic fixture
+/// therefore spawned a real, billable model process, and `autospec validate` spent most
+/// of an hour waiting on them (#2568).
+///
+/// Pinning `deterministic` here cannot disable the tests that genuinely exercise the LLM
+/// path: `_resolve_lens_mode` gives `--lens-mode` precedence over this environment
+/// variable, so a suite that passes the flag still gets the LLM lens.
+///
+/// Every Bats command validate runs goes through this function. That is the point — the
+/// bug was one unset variable across ten construction sites, and a single site missed on
+/// the next edit reintroduces it silently, as a slow run rather than a failure.
+pub(crate) fn bats_command(suite: &str) -> ToolCommand {
+    ToolCommand::new("bats", [suite])
+        .expect("Bats validation has a static suite path")
+        .with_env("AUTOSPEC_REFINE_LENS_MODE", "deterministic")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn every_validate_bats_command_pins_the_lens_offline() {
+        let command = bats_command("tests/refine/test_refine_path_security.bats");
+        assert_eq!(command.program(), std::path::Path::new("bats"));
+        assert_eq!(
+            command.args(),
+            [OsStr::new("tests/refine/test_refine_path_security.bats")]
+        );
+        let pinned = command
+            .environment()
+            .iter()
+            .find(|(key, _)| key == OsStr::new("AUTOSPEC_REFINE_LENS_MODE"))
+            .map(|(_, value)| value.clone());
+        assert_eq!(
+            pinned.as_deref(),
+            Some(OsStr::new("deterministic")),
+            "validate would dispatch a real model: refine-prompt.sh defaults to auto, \
+             which is LLM-first whenever a dispatcher is on PATH"
+        );
+    }
 }

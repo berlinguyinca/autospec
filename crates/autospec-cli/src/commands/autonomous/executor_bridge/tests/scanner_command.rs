@@ -264,11 +264,11 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
         &rule,
         r#"rules:
   - id: autospec-test-dangerous-call
-languages:
-  - generic
-message: deterministic test finding
-severity: ERROR
-pattern-regex: dangerous_call
+    languages:
+      - generic
+    message: deterministic test finding
+    severity: ERROR
+    pattern-regex: dangerous_call
 "#,
     )
     .expect("deterministic Semgrep rule");

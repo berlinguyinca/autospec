@@ -61,6 +61,7 @@ mod snapshot_identity;
 mod structured_review;
 mod structured_review_receipt;
 mod support_base;
+mod support_harness_env;
 mod support_invocation;
 mod support_launch;
 mod support_review;

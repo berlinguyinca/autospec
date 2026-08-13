@@ -4,6 +4,7 @@ mod repositories;
 
 pub use conductor::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+    BLOCKED_BACKLOG_THRESHOLD,
 };
 
 pub use repositories::{

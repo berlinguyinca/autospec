@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::command::bats_command;
 use super::command::{enter_fast_validation_mode, ToolCommand};
 use super::results::{output_digest, CheckResult};
 
@@ -568,8 +569,7 @@ fn run_release_verdict_script(id: &str, required: bool, root: &Path) -> CheckRes
     let commands = [
         ToolCommand::new("bash", ["-n", "scripts/compute-release-verdict.sh"])
             .expect("bash syntax command is a direct argument vector"),
-        ToolCommand::new("bats", ["tests/compute-release-verdict.bats"])
-            .expect("Bats validation has a static test-file argument"),
+        bats_command("tests/compute-release-verdict.bats"),
     ];
     run_commands(id, required, root, commands)
 }
@@ -588,7 +588,7 @@ fn run_bats_suites(id: &str, required: bool, root: &Path, suites: &[&str]) -> Ch
         return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
     }
     let commands = suites.iter().map(|suite| {
-        ToolCommand::new("bats", [*suite]).expect("Bats validation has a static suite path")
+        bats_command(suite)
     });
     run_commands(id, required, root, commands)
 }
@@ -631,8 +631,7 @@ fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) ->
         );
     }
     let commands = suites.into_iter().map(|suite| {
-        ToolCommand::new("bats", [suite.as_str()])
-            .expect("Bats validation has a static discovered suite path")
+        bats_command(suite.as_str())
     });
     run_commands(id, required, root, commands)
 }
@@ -662,8 +661,7 @@ fn run_bats_directory_allow_empty_if_available(
         .collect::<Vec<_>>();
     suites.sort();
     let commands = suites.into_iter().map(|suite| {
-        ToolCommand::new("bats", [suite.as_str()])
-            .expect("Bats validation has a static discovered suite path")
+        bats_command(suite.as_str())
     });
     run_commands(id, required, root, commands)
 }
@@ -2449,8 +2447,7 @@ fn run_qa_verify_first_discipline(id: &str, required: bool, root: &Path) -> Chec
     if program_on_path("bats") {
         for suite in SUITES {
             if root.join(suite).is_file() {
-                let bats = ToolCommand::new("bats", [*suite])
-                    .expect("optional QA Bats suite uses a static argument")
+                let bats = bats_command(suite)
                     .execute_in(id, required, root);
                 let failed = bats.is_failure();
                 results.push(bats);
@@ -2845,8 +2842,7 @@ fn run_release_area_contract(id: &str, required: bool, root: &Path) -> CheckResu
     let mut results = vec![script];
     if program_on_path("bats") && root.join(SUITE).is_file() {
         results.push(
-            ToolCommand::new("bats", [SUITE])
-                .expect("release area Bats suite uses a static argument")
+            bats_command(SUITE)
                 .execute_in(id, required, root),
         );
     }
@@ -3236,11 +3232,8 @@ fn run_autospec_parallel_dispatch(id: &str, required: bool, root: &Path) -> Chec
         required,
         root,
         [
-            ToolCommand::new("bats", [SUITES[0]])
-                .expect("parallel-dispatch Bats suite uses a static path"),
-            ToolCommand::new("bats", [SUITES[1]])
-                .expect("startup-evidence Bats suite uses a static path")
-                .without_env("AUTOSPEC_RUN_ONLY_ISSUES"),
+            bats_command(SUITES[0]),
+            bats_command(SUITES[1]).without_env("AUTOSPEC_RUN_ONLY_ISSUES"),
         ],
     );
     aggregate(id, required, vec![syntax, bats])
@@ -5478,8 +5471,7 @@ fn run_mutation_and_negative_path(id: &str, required: bool, root: &Path) -> Chec
         ] {
             if root.join(suite).is_file() {
                 commands.push(
-                    ToolCommand::new("bats", [suite])
-                        .expect("mutation Bats execution is a direct argument vector"),
+                    bats_command(suite),
                 );
             }
         }
@@ -5995,8 +5987,7 @@ fn run_phase4_test_suites(id: &str, required: bool, root: &Path) -> CheckResult 
     const FLEET_SUITE: &str = "tests/e2e/test_autospec_fleet_dry_run.bats";
     let fleet = if root.join(FLEET_SUITE).is_file() && root.join("tests/fixtures/fleet").is_dir() {
         if program_on_path("bats") {
-            ToolCommand::new("bats", [FLEET_SUITE])
-                .expect("fleet dry-run Bats suite is a direct argument vector")
+            bats_command(FLEET_SUITE)
                 .with_env("AUTOSPEC_FLEET_LIVE_E2E", "0")
                 .execute_in(id, required, root)
         } else {

@@ -27,7 +27,7 @@ use autospec_core::coordination::{
     parse_dependency_issue_json, ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope,
     ConductorState,
 };
-use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
+use autospec_core::execution::QueueStatus;
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -47,6 +47,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod blocked_cycle;
+mod gh_read;
+mod program;
+mod one_shot_selector;
+use one_shot_selector::{
+    load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
+};
 #[allow(dead_code)]
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
@@ -2400,16 +2407,18 @@ fn run_foreground_cycles(
         let cycle =
             run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission);
         let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
-        let completion = cycle?;
+        let mut completion = cycle?;
         heartbeat_result?;
         completed_cycles = completed_cycles.saturating_add(1);
-        let loopable_state = match &completion {
-            ForegroundCompletion::State(state) => {
-                state.phase() == ConductorPhase::Scan
-                    || no_ready_selection_pause(state).map_err(CommandFailure::diagnostic)?
-            }
-            ForegroundCompletion::Lifecycle(_) => false,
-        };
+        // A blocked issue must cost its own selection, never the whole conductor.
+        // Without this the paused state is not loopable, the process exits, and a
+        // supervisor restarts it straight back into the identical failure.
+        if continuous {
+            completion = blocked_cycle::continue_after_blocked_cycle(layout, options, completion)
+                .map_err(CommandFailure::diagnostic)?;
+        }
+        let loopable_state =
+            blocked_cycle::foreground_cycle_is_loopable(&completion).map_err(CommandFailure::diagnostic)?;
         let keep_running = continuous
             && cycle_limit.is_none_or(|limit| completed_cycles < limit)
             && loopable_state;
@@ -3044,25 +3053,17 @@ fn synchronize_fresh_selection_base(
 
 fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{issue}");
-    let output = Command::new("gh")
-        .args([
+    let output = gh_read::run_gh_read_with_retry(
+        &[
             "api",
             "--method",
             "GET",
             &endpoint,
             "--jq",
             r#"{labels:[.labels[].name], state:.state}"#,
-        ])
-        .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot run gh issue reread {issue}: {error}"))
-        })?;
-    output.status.success().then_some(()).ok_or_else(|| {
-        CommandFailure::diagnostic(format!(
-            "gh issue reread {issue} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    })?;
+        ],
+        &format!("gh issue reread {issue}"),
+    )?;
     let current = parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), issue)
         .map_err(|error| {
             CommandFailure::diagnostic(format!(
@@ -5012,38 +5013,6 @@ fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
     }
 }
 
-fn one_shot_selector_path(layout: &RunLayout) -> PathBuf {
-    layout.state_dir.join("one-shot-selector.json")
-}
-
-fn load_one_shot_selector(layout: &RunLayout, issue: u64) -> Result<OneShotIssueSelector, String> {
-    let mut selector = OneShotIssueSelector::new(issue)?;
-    if fs::read_to_string(one_shot_selector_path(layout))
-        .map(|contents| contents.contains("\"consumed\":true"))
-        .unwrap_or(false)
-    {
-        let _ = selector.observe_status(issue, &QueueStatus::Passed)?;
-    }
-    Ok(selector)
-}
-
-fn persist_one_shot_selector(
-    layout: &RunLayout,
-    selector: &OneShotIssueSelector,
-) -> Result<(), String> {
-    fs::create_dir_all(&layout.state_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
-    atomic_write(
-        &one_shot_selector_path(layout),
-        &format!("{}\n", selector.status_json()),
-    )
-}
-
-fn one_shot_selector_consumed(layout: &RunLayout) -> bool {
-    fs::read_to_string(one_shot_selector_path(layout))
-        .map(|contents| contents.contains("\"consumed\":true"))
-        .unwrap_or(false)
-}
 
 fn command_error(error: super::CommandFailure) -> String {
     error.message
@@ -5308,8 +5277,7 @@ fn companion_command(options: &Options, subcommand: &str) -> Result<ForegroundCo
         }
     }
     Ok(ForegroundCommand {
-        program: std::env::current_exe()
-            .map_err(|error| format!("cannot resolve autonomous executable: {error}"))?,
+        program: program::autonomous_program("autonomous executable")?,
         args,
     })
 }
@@ -5325,8 +5293,7 @@ fn foreground_command(options: &Options) -> Result<ForegroundCommand, String> {
     ];
     args.extend(conductor_passthrough_args(options));
     Ok(ForegroundCommand {
-        program: std::env::current_exe()
-            .map_err(|error| format!("cannot resolve foreground conductor program: {error}"))?,
+        program: program::autonomous_program("foreground conductor program")?,
         args,
     })
 }

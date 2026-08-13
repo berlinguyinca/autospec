@@ -15256,7 +15256,7 @@ fn fast_forward_integration_base(
     reference: &str,
     remote_oid: &str,
 ) -> Result<(), String> {
-    let local_oid = integration_base_oid(repo, &reference)?;
+    let local_oid = integration_base_oid(repo, reference)?;
     if !canonical_git_oid(&local_oid) {
         return Err(format!("integration base {branch} has no local branch"));
     }
@@ -15266,7 +15266,7 @@ fn fast_forward_integration_base(
     }
     if git(
         repo,
-        &["merge-base", "--is-ancestor", &local_oid, &remote_oid],
+        &["merge-base", "--is-ancestor", &local_oid, remote_oid],
     )
     .is_err()
     {
@@ -15293,7 +15293,7 @@ fn validate_integration_base_checkouts(
 ) -> Result<Vec<PathBuf>, String> {
     let canonical_repo = fs::canonicalize(repo)
         .map_err(|error| format!("canonicalize {}: {error}", repo.display()))?;
-    let checkouts = integration_base_checkouts(repo, &reference)?;
+    let checkouts = integration_base_checkouts(repo, reference)?;
     let checked_out_here = checkouts == vec![canonical_repo];
     if !checkouts.is_empty() && !checked_out_here {
         return Err(format!(

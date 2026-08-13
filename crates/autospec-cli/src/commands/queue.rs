@@ -12,6 +12,7 @@ use autospec_core::coordination::{
 };
 
 use super::claim::{
+    lease::requeue_abandoned_active_issue,
     active_issue_counts_toward_worker_capacity, reconcile_authoritative_active_issue,
     recover_active_issue,
 };
@@ -481,14 +482,13 @@ pub(crate) fn ready_plan_for(
     repo: &str,
     batch_size: usize,
 ) -> Result<ReadyQueuePlan, CommandFailure> {
-    let candidates = list_issues(repo, "auto-implement")?;
     let mut active = list_issues(repo, "in-progress-by-bot")?;
     for issue in &active {
         let _ = reconcile_authoritative_active_issue(repo, issue.number);
-    }
-    for issue in &active {
         let _ = recover_active_issue(repo, issue.number, 300);
+        let _ = requeue_abandoned_active_issue(repo, issue.number);
     }
+    let candidates = list_issues(repo, "auto-implement")?;
     active = list_issues(repo, "in-progress-by-bot")?
         .into_iter()
         .filter(|issue| {
