@@ -66,18 +66,23 @@ With `--issue`: prints the JSON content of that heartbeat, or empty if not found
 -->
 
 Enforces Phase 4 linked-worktree safety before agents edit or commit. The `assert`
-subcommand refuses the primary checkout, dirty worktrees, and stale bases under
-`--strict-base`; `resolve-branch` returns the PR-aware ladder verdict; `create`
-creates or adopts the per-issue linked worktree.
+subcommand refuses the primary checkout, dirty worktrees, stale bases under
+`--strict-base`, and branches outside an optional `--branch-pattern` glob;
+`resolve-branch` returns the PR-aware ladder verdict; `create` creates or adopts
+the per-issue linked worktree.
 
 ```
-Usage: worktree-guard.sh assert [--base <ref>] [--strict-base]
+Usage: worktree-guard.sh assert [--base <ref>] [--strict-base] [--branch-pattern <glob>]
        worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
        worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
        worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
 Env:   AUTOSPEC_BASE_BRANCH   default base branch/ref when --base is omitted
 Config: .autospec/autospec.yml git.base_branch is used when AUTOSPEC_BASE_BRANCH is unset
 ```
+
+`assert --branch-pattern` exits `6` with `code_health:wrong_branch` when the
+current branch does not match the shell glob. Phase 4 uses `feat/*` so agents
+cannot implement directly on a base or operator branch.
 
 Base precedence is `--base`, then `AUTOSPEC_BASE_BRANCH`, then
 `.autospec/autospec.yml` `git.base_branch`, then `origin/main`. Plain branch
