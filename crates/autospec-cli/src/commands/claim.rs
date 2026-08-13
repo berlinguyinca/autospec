@@ -7027,14 +7027,6 @@ fn observe_local_startup_pid(
     StartupPidLiveness::Unknown
 }
 
-fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
-    heartbeat_root().is_ok_and(|root| {
-        root.join(super::autonomous::drain::repository_progress_key(repo))
-            .join(format!("{issue}.json"))
-            .is_file()
-    })
-}
-
 fn branch_ref_exists(branch: &str) -> bool {
     if branch.trim().is_empty() {
         return false;
@@ -7427,7 +7419,9 @@ fn print_state_help() {
     );
 }
 
+mod heartbeat_liveness;
 pub(crate) mod lease;
+use heartbeat_liveness::startup_heartbeat_exists;
 use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,
     server_lease_is_stale,
