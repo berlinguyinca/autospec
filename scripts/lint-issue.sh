@@ -162,11 +162,22 @@ strip_ui_sections() {
 # already passed its 400-word budget.
 strip_generated_metadata() {
     awk '
-        /<!-- autospec-classify:begin -->/ { skip = 1; next }
-        /<!-- autospec-shared-contracts:begin -->/ { skip = 1; next }
-        /<!-- autospec-classify:end -->/ { skip = 0; next }
-        /<!-- autospec-shared-contracts:end -->/ { skip = 0; next }
-        !skip { print }
+        {
+            lines[NR] = $0
+            if ($0 ~ /<!-- autospec-classify:begin -->/) classify_begin = NR
+            if ($0 ~ /<!-- autospec-classify:end -->/) classify_end = NR
+            if ($0 ~ /<!-- autospec-shared-contracts:begin -->/) shared_begin = NR
+            if ($0 ~ /<!-- autospec-shared-contracts:end -->/) shared_end = NR
+        }
+        END {
+            for (line = 1; line <= NR; line++) {
+                in_classify = classify_begin && classify_end && classify_begin < classify_end \
+                    && line >= classify_begin && line <= classify_end
+                in_shared = shared_begin && shared_end && shared_begin < shared_end \
+                    && line >= shared_begin && line <= shared_end
+                if (!in_classify && !in_shared) print lines[line]
+            }
+        }
     '
 }
 

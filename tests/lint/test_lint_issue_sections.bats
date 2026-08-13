@@ -349,6 +349,21 @@ MD
     echo "$output" | grep -q "BODY_TOO_LONG"
 }
 
+@test "body-size: unmatched generated marker cannot hide authored prose" {
+    write_good_body "$TMP/b.md"
+    {
+        echo ""
+        echo "## Model fit"
+        echo ""
+        echo "<!-- autospec-classify:begin -->"
+        for i in $(seq 1 450); do printf 'word '; done
+        echo ""
+    } >> "$TMP/b.md"
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "BODY_TOO_LONG"
+}
+
 # ── OUTLINE_TOO_LONG ──────────────────────────────────────────────────────────
 
 @test "outline-size: 31 outline lines triggers OUTLINE_TOO_LONG" {
