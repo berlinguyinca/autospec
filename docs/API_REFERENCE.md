@@ -770,10 +770,10 @@ Exit: 0 = success (empty/missing input writes an empty array), 1 = `jq` missing.
 
 Files surviving gaps from a gap JSON as `needs-classify,gap-remediation,priority:high`
 issues, retaining `origin:self` provenance. Dedupes each gap against open issues (matching
-`dedupe_key`/title and active `docs:drift` self-heal labels). It deliberately leaves model-fit
-labels unset. The existing autonomous Tier 1.5 promoter later grooms incomplete bodies,
-applies the full classification/quality contract, and delegates final safety admission to
-Rust before any gap reaches `auto-implement`. Round state in
+`dedupe_key`/title and active `docs:drift` self-heal labels). Before filing, it renders the
+finding into the complete issue template and requires `lint-issue.sh` to pass. It deliberately
+leaves model-fit labels unset. The existing autonomous Tier 1.5 promoter later classifies the
+issue and delegates final safety admission to Rust before it reaches `auto-implement`. Round state in
 `~/.autospec/gap-round-state.json`, capped at `AUTOSPEC_GAP_MAX_ROUNDS` (default 2).
 
 ```
@@ -781,6 +781,7 @@ Usage: bash gap-remediation-loop.sh --gaps <path> --file
 Env:   AUTOSPEC_STATE_DIR        state dir (default: ~/.autospec)
        AUTOSPEC_GAP_REPO         repo slug for gh (default: gh repo context)
        AUTOSPEC_GAP_MAX_ROUNDS   hard round cap (default: 2)
+       AUTOSPEC_ISSUE_LINTER     lint-issue.sh path override
 ```
 
 Exit: 0 = success (best-effort), 2 = `gh` CLI absent (cannot file issues).

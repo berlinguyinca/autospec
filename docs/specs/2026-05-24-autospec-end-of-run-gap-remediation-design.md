@@ -7,7 +7,7 @@
 
 ## Goal
 
-After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, and (3) stage every surviving gap through the `needs-classify` lifecycle. Generated gaps do not bypass issue grooming, quality checks, or Rust-backed safety admission; the existing autonomous Tier 1.5 path owns that later transition.
+After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, and (3) render every survivor into the full issue-quality template before staging it through the `needs-classify` lifecycle. Generated gaps do not bypass quality checks or Rust-backed safety admission; the existing autonomous Tier 1.5 path owns that later transition.
 
 ## Motivation
 
@@ -41,7 +41,7 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 2. **`gap-remediation-loop.sh`** (deterministic driver, `skills/autospec-shared/scripts/`):
    - Reads the emitted gap JSON.
    - **Dedupes** (D4) against (a) open issues by `dedupe_key`/title-hash and (b) issues carrying an active `docs:drift` self-heal label.
-   - Files survivors via `gh issue create --label needs-classify,gap-remediation,priority:high,origin:self`; the autonomous Tier 1.5 promoter later grooms, classifies, and delegates admission to the Rust safety gate.
+   - Deterministically renders each survivor into the full issue template, requires `lint-issue.sh` to pass, and only then files it via `gh issue create --label needs-classify,gap-remediation,priority:high,origin:self`. Tier 1.5 later classifies and delegates admission to the Rust safety gate.
    - Tracks round state in `~/.autospec/gap-round-state.json`; enforces `AUTOSPEC_GAP_MAX_ROUNDS` (D2); reports convergence vs cap-hit.
    - Pure bash, `set +e` best-effort discipline (per `feedback_bash_*` memory); no RETURN-trap cleanup.
 
@@ -60,9 +60,9 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 ```
 queue drains (ALL_DONE)
   → autospec-review --remediation  (broad review + filter, Tier A)  → gaps-<run-id>.json
-  → gap-remediation-loop.sh        (dedupe + file needs-classify,gap-remediation issues)
+  → gap-remediation-loop.sh        (dedupe + render + quality-lint + file needs-classify issues)
   → Phase 6 final report           (staged gaps are visible, not claimed closed)
-  → later Tier 1.5 cycle           (groom + quality/model-fit + Rust admission)
+  → later Tier 1.5 cycle           (model-fit + Rust admission)
   → later Phase-4 monitor          (drains only admitted gap issues)
 ```
 

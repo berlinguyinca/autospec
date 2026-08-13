@@ -6,14 +6,17 @@
 # Run: bats skills/autospec-shared/tests/unit/gap-remediation-loop.bats
 
 LOOP="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gap-remediation-loop.sh"
+LINT_ISSUE="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/lint-issue.sh"
 
 setup() {
     TEST_TMP="$(mktemp -d)"
     export AUTOSPEC_STATE_DIR="$TEST_TMP"
     export AUTOSPEC_GAP_REPO="testorg/testrepo"
+    export AUTOSPEC_ISSUE_LINTER="$LINT_ISSUE"
     # Stub gh: records `issue create` calls, serves a configurable open-issue list.
     mkdir -p "$TEST_TMP/bin"
     export GH_CREATE_LOG="$TEST_TMP/gh-create.log"
+    export GH_BODY_FILE="$TEST_TMP/created-body.md"
     export CLASSIFY_LOG="$TEST_TMP/classify.log"
     export GH_ISSUE_LIST_JSON="$TEST_TMP/open-issues.json"
     printf '[]\n' > "$GH_ISSUE_LIST_JSON"
@@ -28,6 +31,13 @@ case "$*" in
   *"issue create"*)
     # Emit a fake URL ending in an issue number and log the invocation.
     printf '%s\n' "$*" >> "$GH_CREATE_LOG"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--body" ]; then
+        printf '%s\n' "$2" > "$GH_BODY_FILE"
+        break
+      fi
+      shift
+    done
     echo "https://github.com/testorg/testrepo/issues/999"
     exit 0 ;;
   *"issue edit"*)
@@ -79,6 +89,8 @@ teardown() {
     grep -q "priority:high" "$GH_CREATE_LOG"
     grep -q "origin:self" "$GH_CREATE_LOG"
     [ ! -f "$CLASSIFY_LOG" ]
+    run bash "$LINT_ISSUE" "$GH_BODY_FILE"
+    [ "$status" -eq 0 ]
 }
 
 @test "dedupes against an open issue carrying the same dedupe_key in its body" {

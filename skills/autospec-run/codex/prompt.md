@@ -1672,7 +1672,7 @@ If `deferred[]` is empty, omit the section.
 
 ## Phase 5.5 — End-of-run gap remediation
 
-Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. It broad-reviews the shipped work and stages surviving gaps as `needs-classify` issues. Generated gap bodies are not assumed to satisfy the implementation template or quality contract, so this run does not promote or drain them. The existing autonomous Tier 1.5 promotion path owns grooming, classification, and Rust-backed safety admission in a later cycle.
+Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. It broad-reviews the shipped work and stages surviving gaps as `needs-classify` issues only after the deterministic driver renders the complete issue template and `lint-issue.sh` accepts it. This run does not promote or drain them. The existing autonomous Tier 1.5 promotion path owns classification and Rust-backed safety admission in a later cycle.
 
 **Skip the whole phase when:**
 
@@ -1780,7 +1780,7 @@ Run one staging pass:
 
    The driver prints `gap-remediation: survivors=<N> filed=<N> round=<N>`. Capture `<N>` survivors.
 3. **Converge:** if `survivors == 0`, break — the run is clean.
-4. **Stage for admission:** if `survivors > 0`, stop this Phase 5.5 loop and report the newly staged `needs-classify,gap-remediation` issues in Phase 6. Do not invoke the Phase 4 monitor for them and do not add `auto-implement` inline. The autonomous Tier 1.5 promoter will deterministically groom incomplete bodies, apply quality/model-fit metadata, and delegate final admission to Rust. A later autospec run may review the resulting merged remediation work.
+4. **Stage for admission:** if `survivors > 0`, stop this Phase 5.5 loop and report the newly staged `needs-classify,gap-remediation` issues in Phase 6. Do not invoke the Phase 4 monitor for them and do not add `auto-implement` inline. The driver has already enforced the issue-quality contract; the autonomous Tier 1.5 promoter owns model-fit classification and delegates final admission to Rust. A later autospec run may review the resulting merged remediation work.
 
 **Termination guarantees:** convergence (0 survivors) ends the loop immediately; any staged survivor ends this run's remediation loop without entering the implementation queue; the `dedupe_key` prevents a later run from re-filing the same open gap; and the driver retains its hard round-state cap as defense in depth.
 
