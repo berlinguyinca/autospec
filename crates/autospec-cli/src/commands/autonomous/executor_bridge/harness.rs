@@ -60,7 +60,6 @@ pub(crate) struct ResolvedHarness {
     pub(super) opencode_variant: Option<String>,
 }
 
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HarnessInvocation {
     pub(crate) program: PathBuf,
@@ -328,8 +327,10 @@ impl ResolvedHarness {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
+pub(super) fn safe_executable(
+    path: &Path,
+    env: &BTreeMap<String, OsString>,
+) -> Result<PathBuf, String> {
     if !is_bare_path(path) && !path.is_absolute() {
         return Err(format!(
             "executor harness path must be absolute or a bare PATH alias: {}",
@@ -410,7 +411,6 @@ pub(super) fn temporary_path(path: &Path, env: &BTreeMap<String, OsString>) -> b
 /// `scripts/lib/opencode-containment-adapter.sh` under `AUTOSPEC_SCRIPTS_DIR`
 /// or `~/.autospec/scripts`. Returns `None` when neither exists — the mutating
 /// OpenCode implementer then fails closed with `executor_harness_uncontained`.
-#[cfg(target_os = "linux")]
 fn default_opencode_adapter(env: &BTreeMap<String, OsString>) -> Option<Result<PathBuf, String>> {
     let mut candidates = Vec::new();
     if let Some(scripts_dir) = env.get("AUTOSPEC_SCRIPTS_DIR") {

@@ -1,6 +1,6 @@
 // executor_bridge tests: integration-smoke review evidence.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::{git, GitFixture};
 use super::support_invocation::supervision_state;
 use autospec_core::autonomous::review_policy::{

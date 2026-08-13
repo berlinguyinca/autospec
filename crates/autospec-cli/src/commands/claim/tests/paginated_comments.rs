@@ -11,8 +11,14 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use super::super as claim;
-use super::support::{STARTUP_HEARTBEAT_ENV, anchored_startup_heartbeat_fixture, claim_record, expected_startup_heartbeat, expired_heartbeat_snapshot, lifecycle_evidence, mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture};
+use crate::commands::claim;
+#[cfg(target_os = "linux")]
+use super::support::{
+    anchored_startup_heartbeat_fixture, expected_startup_heartbeat,
+    expired_heartbeat_snapshot, mutate_retained, startup_heartbeat_document,
+    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+};
+use super::support::{claim_record, lifecycle_evidence};
 
 #[cfg(target_os = "linux")]
 #[test]

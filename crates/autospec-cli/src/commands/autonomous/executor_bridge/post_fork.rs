@@ -22,7 +22,7 @@ use super::*;
 /// `descriptor` must be a writable file descriptor owned by this process, and
 /// `bytes` must remain valid for the duration of the call. Short writes are
 /// retried and EINTR is resumed, so the caller sees all-or-nothing.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offset: u64) -> bool {
     while !bytes.is_empty() {
         // SAFETY: the caller owns descriptor and the slice remains valid for this syscall.
@@ -56,7 +56,7 @@ pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offse
 /// `descriptor` must be a writable descriptor whose ring slot layout matches
 /// `encode_output_cursor`; the record is fixed-size and written at a slot offset
 /// derived from `generation`, so it never runs past the region reserved for it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_persist_output_cursor(
     descriptor: i32,
     generation: u64,
@@ -81,7 +81,7 @@ pub(super) unsafe fn raw_persist_output_cursor(
 /// `pipe_fd` and `ring_fd` must be owned readable and writable descriptors. The
 /// buffer is stack-allocated here and sized before the fork, so the pump performs
 /// no allocation on the post-fork path.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_pump_stream(
     pipe_fd: i32,
     ring_fd: i32,
@@ -159,7 +159,7 @@ pub(super) unsafe fn raw_pump_stream(
 ///
 /// `descriptor` must be a writable descriptor owned by this process and `bytes`
 /// must stay valid for the call. Retries on EINTR and partial writes.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
     let mut offset = 0;
     while offset < bytes.len() {
@@ -189,7 +189,7 @@ pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
 ///
 /// Must run in the forked supervisor, which is the subreaper for the process
 /// group it is polling; waitpid is called with WNOHANG so it never blocks.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_children_quiescent() -> i32 {
     loop {
         let mut status = 0_i32;
@@ -215,7 +215,7 @@ pub(super) unsafe fn raw_children_quiescent() -> i32 {
 /// Must run in the forked supervisor. `harness_pid` is the one child excluded
 /// from adoption, so its dedicated waitpid path keeps the exit status this
 /// reaper would otherwise consume.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) -> i32 {
     loop {
         // WNOWAIT lets the exact harness retain its dedicated waitpid path while terminated
@@ -267,7 +267,7 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
 /// Must be called only on the child side of fork, with every descriptor argument
 /// owned and every buffer sized before the fork. It never returns to Rust: all
 /// exits go through terminate_post_fork.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn raw_supervisor_loop(
     harness_pid: nix::libc::pid_t,

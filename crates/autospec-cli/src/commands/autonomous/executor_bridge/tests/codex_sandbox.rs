@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{resolve_base, BridgePhase};
 use super::support_base::{DetachedSupervisorCleanup, GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment};
 use super::support_invocation::{detach_harness_for_adoption, supervision_state};

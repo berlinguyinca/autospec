@@ -1,4 +1,4 @@
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use autospec_core::autonomous::review_policy::{classify_review_requirements, ReviewPolicyInput};
 use std::fs;
 use std::path::Path;

@@ -10,54 +10,74 @@
 // the same set it always did, one module path deeper. Fixtures used by a single module
 // moved with it; the ones shared across modules are in the support_* files.
 
+#[cfg(target_os = "linux")]
 mod adoption_cleanup;
 mod attempt_generation;
+#[cfg(target_os = "linux")]
 mod attempt_retirement;
 mod base_merge;
+#[cfg(target_os = "linux")]
 mod branch_predecessor;
+#[cfg(target_os = "linux")]
 mod cleanup_reap;
+#[cfg(target_os = "linux")]
 mod cleanup_restart;
 mod closeout_harness;
 mod closeout_remote;
 mod closeout_repairs;
 mod codex_permission;
+#[cfg(target_os = "linux")]
 mod codex_sandbox;
 mod commit_rust;
 mod continuation_event;
+#[cfg(target_os = "linux")]
 mod descendant_spawn;
 mod dispatcher_temporary;
+#[cfg(target_os = "linux")]
 mod draft_release;
 mod explore_pin_staleness;
 mod full_suite;
 mod generation_input;
+#[cfg(target_os = "linux")]
 mod harness_death;
+#[cfg(target_os = "linux")]
 mod harness_supervisor;
+#[cfg(target_os = "linux")]
 mod identity_reviewer;
 mod integration_smoke;
 mod json_identity;
 mod license_checker;
+#[cfg(target_os = "linux")]
 mod merged_reconciliation;
 mod npm_inputs;
 mod ordered_publication;
 mod production_entry;
 mod proxy_direct;
 mod prunable_zero;
+#[cfg(target_os = "linux")]
 mod pull_mutation;
+#[cfg(target_os = "linux")]
 mod quarantine_nested;
 mod ready_harness;
 mod remote_base;
 mod repair_implementation;
+#[cfg(target_os = "linux")]
 mod restart_direct;
 mod result_reviewer;
 mod review_provider;
 mod reviewer_automatic;
+#[cfg(target_os = "linux")]
 mod reviewer_runtime;
 mod runtime_close;
+#[cfg(target_os = "linux")]
 mod runtime_fixture;
+#[cfg(target_os = "linux")]
 mod rust_commit;
 mod scanner_command;
 mod scope_root;
+#[cfg(target_os = "linux")]
 mod sidecar_launch;
+#[cfg(target_os = "linux")]
 mod snapshot_identity;
 mod structured_review;
 mod structured_review_receipt;

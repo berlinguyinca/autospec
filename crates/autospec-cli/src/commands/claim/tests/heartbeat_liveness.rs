@@ -11,7 +11,7 @@
 // env-based test raced them and made an unrelated bridge_terminal case fail intermittently.
 // The predicate is where the liveness decision lives; the caller only supplies the path.
 
-use super::super as claim;
+use crate::commands::claim;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 

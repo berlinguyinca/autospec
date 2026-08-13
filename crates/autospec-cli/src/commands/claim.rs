@@ -1352,15 +1352,6 @@ fn open_optional_heartbeat_directory(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn released_predecessor_heartbeat_evidence_exists(
-    _identity: ClaimMutationIdentity<'_>,
-) -> Result<bool, CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "released predecessor heartbeat recovery is unavailable on this platform",
-    ))
-}
-
 fn read(args: &[String]) -> Result<(), CommandFailure> {
     let options = parse_read_options(args)?;
     let repo = match options.repo {
@@ -2525,6 +2516,7 @@ pub(crate) fn recover_released_bridge_claim(
     Ok(exact)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn with_released_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     operation: impl FnOnce() -> Result<T, CommandFailure>,
@@ -2549,7 +2541,7 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(test, not(target_os = "linux")))]
 fn with_retained_bridge_predecessor_authority<T>(
     _identity: ClaimMutationIdentity<'_>,
     _observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -4152,7 +4144,7 @@ fn write_startup_heartbeat(
     claim_id: &str,
     session_id: Option<&str>,
 ) -> Result<(), CommandFailure> {
-    let root = heartbeat_root()?;
+    let _root = heartbeat_root()?;
     let timestamp = unix_now()?;
     let ttl_seconds = claim_ttl_seconds().max(1);
     let pid = std::process::id();
@@ -4161,7 +4153,7 @@ fn write_startup_heartbeat(
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
-    let body = format!(
+    let _body = format!(
         "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{ttl_seconds},\"pid\":{pid},\"nonce\":\"{}\",\"host\":\"{}\",\"boot_id\":\"{}\",\"process_start\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
         json_escape(&nonce),
@@ -4174,11 +4166,11 @@ fn write_startup_heartbeat(
     );
     #[cfg(target_os = "linux")]
     return publish_startup_heartbeat_transaction_with_hook(
-        &root,
+        &_root,
         repo,
         issue,
         session_id,
-        body.as_bytes(),
+        _body.as_bytes(),
         &mut |_, _| Ok(()),
     );
     #[cfg(not(target_os = "linux"))]
@@ -4366,6 +4358,7 @@ fn publish_startup_heartbeat_transaction_with_hook(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn same_startup_heartbeat_generation(left: &[u8], right: &[u8]) -> bool {
     let normalize = |document: &[u8]| {
         parse_startup_heartbeat(document).map(|mut evidence| {
@@ -5003,7 +4996,9 @@ fn retire_released_startup_heartbeat(
 fn retire_released_startup_heartbeat(
     _identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
-    Ok(())
+    Err(CommandFailure::diagnostic(
+        "predecessor heartbeat retirement requires Linux pidfd ownership",
+    ))
 }
 #[cfg(target_os = "linux")]
 fn prepare_heartbeat_root_parent_with_hook(
@@ -5624,7 +5619,7 @@ fn classify_startup_heartbeat(
     classify_startup_heartbeat_snapshot(file, expected, now, observe_pid)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn classify_startup_heartbeat_at(
     directory: &impl std::os::fd::AsFd,
     name: &std::ffi::OsStr,

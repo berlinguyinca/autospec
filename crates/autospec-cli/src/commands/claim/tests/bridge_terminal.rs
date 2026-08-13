@@ -8,7 +8,7 @@ use autospec_core::claim::{ExecutorResultEvidence, RemoteComment};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{BRIDGE_TRANSITION_ENV, ClaimRefFixture, assert_bridge_transition_projection, claim_record, git};
 
 #[test]

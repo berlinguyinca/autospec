@@ -2,13 +2,16 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{
     assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
-    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+    startup_heartbeat_fixture,
 };
+#[cfg(target_os = "linux")]
+use super::support::STARTUP_HEARTBEAT_ENV;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
@@ -351,7 +354,7 @@ fn classify_startup_heartbeat_returns_snapshot_only_for_expired_dead_local_pid()
     std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live() {
     use claim::StartupHeartbeatClassification::Blocking;

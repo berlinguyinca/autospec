@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{provision_issue_worktree, resolve_base};
 use super::support_base::{git, git_stdout, test_root, GitFixture, TEST_SEQUENCE};
 use std::collections::BTreeMap;
@@ -398,6 +398,7 @@ fn autonomous_executor_bridge_explore_links_fail_closed_before_base_fallback() {
         .is_symlink());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
     let fixture = GitFixture::new("worktree");
@@ -445,6 +446,7 @@ fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
     let _ = fs::remove_dir_all(sibling_scope);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before_launch() {
     bridge::METADATA_WIP_SYNC_EVENTS

@@ -5,7 +5,7 @@
 use super::super::{ClaimRefAdvance, advance_claim_ref_in, private_claim_git_dir_in, read_claim_ref_in, validated_claim_remote};
 use autospec_core::claim::RunStateRecord;
 use std::path::Path;
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{ClaimRefFixture, claim_record, git_stdout, race_claim_ref_transitions, seed_claim, source_function};
 
 #[test]
