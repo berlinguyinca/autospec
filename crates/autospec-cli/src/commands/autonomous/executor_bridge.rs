@@ -20379,7 +20379,7 @@ fn fetch_and_resolve_base(
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let fetch_refspec = format!("refs/heads/{branch}:{remote_ref}");
     git(repo, &["fetch", "--quiet", "origin", &fetch_refspec])
-        .map_err(|error| format!("TRANSIENT: fetch executor base: {error}"))?;
+        .map_err(|error| base_fetch::classify_error(branch, explore_mode, error))?;
     let base_oid = git_stdout(
         repo,
         &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
@@ -23032,8 +23032,8 @@ pub(crate) use harness::*;
 mod codex_sandbox;
 use codex_sandbox::*;
 
-// Trusted git binding and hook containment: making git operations trustworthy while
-// untrusted executor code runs beside them.
+mod base_fetch;
+// Trusted git binding and hook containment for untrusted executor code.
 mod trusted_git;
 use trusted_git::*;
 
