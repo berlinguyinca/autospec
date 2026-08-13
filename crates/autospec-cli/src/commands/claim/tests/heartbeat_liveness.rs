@@ -62,7 +62,7 @@ fn a_heartbeat_owned_by_a_live_process_is_not_gone() {
     let pid = std::process::id();
     let path = heartbeat_with_start(&directory, pid, &this_boot(), &start_identity_of(pid));
     assert!(
-        !claim::startup_heartbeat_owner_is_gone(&path),
+        !claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
         "a live owner must keep its claim -- releasing it would let two workers run one issue"
     );
 }
@@ -74,7 +74,7 @@ fn a_heartbeat_owned_by_a_dead_process_is_gone() {
     // Above the kernel's pid maximum, so probing yields ESRCH rather than naming a real process.
     let path = heartbeat(&directory, i32::MAX as u32, &this_boot());
     assert!(
-        claim::startup_heartbeat_owner_is_gone(&path),
+        claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
         "a heartbeat whose owner is provably gone must stop blocking recovery (#3012 §2)"
     );
 }
@@ -91,7 +91,7 @@ fn a_dead_pid_from_another_boot_fails_closed() {
         "00000000-0000-0000-0000-000000000000",
     );
     assert!(
-        !claim::startup_heartbeat_owner_is_gone(&path),
+        !claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
         "a record from another boot is not evidence of death; it must fail closed"
     );
 }
@@ -103,7 +103,7 @@ fn an_unparseable_heartbeat_fails_closed() {
     let path = directory.join("42.json");
     std::fs::write(&path, b"{not json").expect("write");
     assert!(
-        !claim::startup_heartbeat_owner_is_gone(&path),
+        !claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
         "an unreadable heartbeat is not proof of death; it must keep blocking"
     );
 }
@@ -113,7 +113,7 @@ fn an_unparseable_heartbeat_fails_closed() {
 fn a_missing_heartbeat_fails_closed() {
     let directory = sandbox("absent");
     assert!(
-        !claim::startup_heartbeat_owner_is_gone(&directory.join("42.json")),
+        !claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&directory.join("42.json")),
         "absence is handled by the caller's is_file() check, not by claiming death"
     );
 }
@@ -133,7 +133,7 @@ fn a_recycled_pid_within_this_boot_is_gone() {
         "fixture assumes a real start identity"
     );
     assert!(
-        claim::startup_heartbeat_owner_is_gone(&path),
+        claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
         "a recycled pid is not the original owner"
     );
 }
