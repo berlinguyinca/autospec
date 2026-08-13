@@ -98,8 +98,9 @@ admin-squash-merges the PR only after the full target-repo test suite passes.
 **Phase 5.5 — end-of-run gap remediation:** after the queue drains, the run scopes
 `/autospec-review --since <run-start>` (run-start captured via `run-batch-start.sh`) to work
 shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and files them as
-`auto-implement,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`), capped at
-`AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2) to bound the feedback loop.
+`needs-classify,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`). The run
+then invokes `/autospec-classify`; only gaps admitted through the Rust safety gate reach
+`auto-implement`. The loop is capped at `AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2).
 
 Attributed high-severity escapes also enter the bounded Tier-3 review-policy
 learning loop. Autospec asks eight fixed questions about the failed invariant,

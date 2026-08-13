@@ -768,9 +768,11 @@ Exit: 0 = success (empty/missing input writes an empty array), 1 = `jq` missing.
 
 ### `gap-remediation-loop.sh`
 
-Files surviving gaps from a gap JSON as `auto-implement,gap-remediation,priority:high` issues.
-Dedupes each gap against open issues (matching `dedupe_key`/title and active `docs:drift`
-self-heal labels), then classifies survivors via classify-model-fit backfill. Round state in
+Files surviving gaps from a gap JSON as `needs-classify,gap-remediation,priority:high`
+issues, retaining `origin:self` provenance. Dedupes each gap against open issues (matching
+`dedupe_key`/title and active `docs:drift` self-heal labels), then backfills deterministic
+model-fit labels. `/autospec-classify` owns final Rust-backed safety admission before any
+gap reaches `auto-implement`. Round state in
 `~/.autospec/gap-round-state.json`, capped at `AUTOSPEC_GAP_MAX_ROUNDS` (default 2).
 
 ```

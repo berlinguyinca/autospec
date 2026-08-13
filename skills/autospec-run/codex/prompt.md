@@ -1672,7 +1672,7 @@ If `deferred[]` is empty, omit the section.
 
 ## Phase 5.5 — End-of-run gap remediation
 
-Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. Replaces the old report-only post-batch audit: it broad-reviews the shipped work, files surviving gaps as `auto-implement` issues, and re-runs the monitor to close them — bounded by a round cap.
+Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. Replaces the old report-only post-batch audit: it broad-reviews the shipped work, files surviving gaps as `needs-classify` issues, classifies and admits them through the Rust safety gate, and re-runs the monitor to close admitted gaps — bounded by a round cap.
 
 **Skip the whole phase when:**
 
@@ -1785,12 +1785,13 @@ Loop (`round = 1 … MAX`):
 
    The driver prints `gap-remediation: survivors=<N> filed=<N> round=<N>`. Capture `<N>` survivors.
 3. **Converge:** if `survivors == 0`, break — the run is clean.
-4. **Drain:** otherwise capture the gap-window watermark, then re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-filed `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work. Capture the watermark BEFORE the gap PRs merge so the next round's broad review (step 1) scopes `--since` to only these gap PRs (spec Phase 2 child E):
+4. **Classify and admit:** collect open issues carrying both `gap-remediation` and `needs-classify`, then invoke `/autospec-classify --issues <comma-separated issue numbers>`. The classifier persists model-fit and quality metadata before invoking the Rust safety review. Only issues admitted to `auto-implement` proceed; blocked or malformed gaps remain visible and are reported in Phase 6 rather than bypassing admission.
+5. **Drain:** capture the gap-window watermark, then re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-admitted `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work. Capture the watermark BEFORE the gap PRs merge so the next round's broad review (step 1) scopes `--since` to only these gap PRs (spec Phase 2 child E):
 
    ```bash
    GAP_ROUND_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # next round scopes --since to gap PRs filed here onward
    ```
-5. Increment `round`. The driver also enforces `AUTOSPEC_GAP_MAX_ROUNDS` internally (it refuses to file once the round-state hits the cap), so the loop never spins.
+6. Increment `round`. The driver also enforces `AUTOSPEC_GAP_MAX_ROUNDS` internally (it refuses to file once the round-state hits the cap), so the loop never spins.
 
 **Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.
 

@@ -64,9 +64,11 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"survivors=1"* ]]
     grep -q "issue create" "$GH_CREATE_LOG"
-    grep -q "auto-implement" "$GH_CREATE_LOG"
+    ! grep -q "auto-implement" "$GH_CREATE_LOG"
+    grep -q "needs-classify" "$GH_CREATE_LOG"
     grep -q "gap-remediation" "$GH_CREATE_LOG"
     grep -q "priority:high" "$GH_CREATE_LOG"
+    grep -q "origin:self" "$GH_CREATE_LOG"
 }
 
 @test "dedupes against an open issue carrying the same dedupe_key in its body" {

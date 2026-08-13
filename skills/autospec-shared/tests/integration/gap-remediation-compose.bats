@@ -86,9 +86,10 @@ teardown() {
     [[ "$output" == *"survivors=1"* ]]
     [[ "$output" == *"filed=1"* ]]
 
-    # An auto-implement gap-remediation issue was filed for the survivor.
+    # A pending-classification gap-remediation issue was filed for the survivor.
     grep -q "issue create" "$GH_CREATE_LOG"
-    grep -q "auto-implement" "$GH_CREATE_LOG"
+    ! grep -q "auto-implement" "$GH_CREATE_LOG"
+    grep -q "needs-classify" "$GH_CREATE_LOG"
     grep -q "gap-remediation" "$GH_CREATE_LOG"
 
     # Round state advanced exactly once.

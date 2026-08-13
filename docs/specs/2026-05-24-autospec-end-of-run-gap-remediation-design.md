@@ -7,7 +7,7 @@
 
 ## Goal
 
-After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, (3) file every surviving gap as an `auto-implement` issue, and (4) re-run the implementation loop to close them — bounded by a configurable round cap. This replaces the current end-of-run behavior, which only *reports* gap counts and never closes them.
+After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, (3) file every surviving gap through the `needs-classify` safety-admission lifecycle, and (4) re-run the implementation loop for admitted gaps — bounded by a configurable round cap. This replaces the current end-of-run behavior, which only *reports* gap counts and never closes them.
 
 ## Motivation
 
@@ -17,7 +17,7 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 
 | # | Decision | Choice |
 |---|----------|--------|
-| D1 | What "address" means | Auto-file every surviving gap as an `auto-implement` issue and re-loop (not report-only, not inline-only). |
+| D1 | What "address" means | Auto-file every surviving gap as `needs-classify`, admit it through the Rust safety gate, and re-loop admitted work. |
 | D2 | Loop bound | `AUTOSPEC_GAP_MAX_ROUNDS`, default **2**. Early-exit on convergence (a round that files 0 new gaps). |
 | D3 | Review scope | **Broad** — spec-coverage + correctness + test-quality + integration-wiring + docs — followed by an evaluate-findings/critic false-positive filter before filing. |
 | D4 | Severity policy | File **all** severities (incl. docs/warn), **but dedupe** against open issues + active `docs:drift` self-heal so nothing double-files. |
@@ -41,7 +41,7 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 2. **`gap-remediation-loop.sh`** (deterministic driver, `skills/autospec-shared/scripts/`):
    - Reads the emitted gap JSON.
    - **Dedupes** (D4) against (a) open issues by `dedupe_key`/title-hash and (b) issues carrying an active `docs:drift` self-heal label.
-   - Files survivors via `gh issue create --label auto-implement,gap-remediation,priority:high`, then `autospec-classify` to backfill `ctx:*`/`reasoning:*`.
+   - Files survivors via `gh issue create --label needs-classify,gap-remediation,priority:high,origin:self`, then `/autospec-classify` adds quality/model-fit metadata and delegates admission to the Rust safety gate.
    - Tracks round state in `~/.autospec/gap-round-state.json`; enforces `AUTOSPEC_GAP_MAX_ROUNDS` (D2); reports convergence vs cap-hit.
    - Pure bash, `set +e` best-effort discipline (per `feedback_bash_*` memory); no RETURN-trap cleanup.
 
@@ -50,8 +50,9 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
    round = 1;  MAX = ${AUTOSPEC_GAP_MAX_ROUNDS:-2}
    while round <= MAX:
      gaps = autospec-review --remediation --since BATCH_START --emit-gaps ~/.autospec/gaps-<run-id>.json
-     survivors = gap-remediation-loop.sh --file --dedupe   # files + returns count filed
+     survivors = gap-remediation-loop.sh --file --dedupe   # files needs-classify + returns count
      if survivors == 0: break          # converged
+     autospec-classify newly-filed gap-remediation issues  # Rust-backed admission
      run Phase-4 monitor (opus, batch=1) until gap-remediation issues drain
      round++
    report (closed this phase + filter-suppressed + still-open-after-cap) → Phase 6 final report
@@ -63,8 +64,9 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 ```
 queue drains (ALL_DONE)
   → autospec-review --remediation  (broad review + filter, Tier A)  → gaps-<run-id>.json
-  → gap-remediation-loop.sh        (dedupe + file auto-implement,gap-remediation issues)
-  → Phase-4 monitor                (opus, batch=1, drains gap issues)
+  → gap-remediation-loop.sh        (dedupe + file needs-classify,gap-remediation issues)
+  → autospec-classify              (quality/model-fit + Rust safety admission)
+  → Phase-4 monitor                (opus, batch=1, drains admitted gap issues)
   → re-review (next round)         → converge (0 new) OR hit MAX
   → Phase 6 final report
 ```
