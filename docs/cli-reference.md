@@ -234,8 +234,12 @@ Matching ownership is rechecked for final selection and dispatch, preserving the
 terminal foreground work persists its decision before releasing only its exact matching token.
 `autonomous status --json` reports the same scoped
 `AUTOSPEC_AUTONOMOUS_SPEND_DIR/<owner__repo>/spend.json` ledger used by admission, not the retired
-global spend file. I/O and transaction failures are
-diagnostics (`2`) with no decision JSON, while malformed/foreign records and token fencing are
+global spend file. Both `autonomous status --json` and `autonomous list --json` also include a
+top-level `toolchain` object with `installed_version`, `remote_version`,
+`installed_age_secs`, `last_update_failed`, and `last_update_failure_path`. The version and failure
+records are read from `~/.autospec/`; missing data is represented explicitly as JSON `null` or
+`false`. Foreground conductor entry warns without blocking when the failure record exists. I/O and
+transaction failures are diagnostics (`2`) with no decision JSON, while malformed/foreign records and token fencing are
 JSON rejects (`3`). The local lease coordinates only the shared filesystem; GitHub claim ownership
 remains the remote mutation arbiter.
 

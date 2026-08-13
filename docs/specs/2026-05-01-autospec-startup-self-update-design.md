@@ -4,6 +4,23 @@
 **Repo**: github.com/berlinguyinca/autospec
 **Status**: Approved (Phase 2 brainstorm complete; ready to decompose into issues)
 
+## 2026-08-13 reliability amendment
+
+The success rate-limit and failure diagnostics are now distinct. The preflight writes
+`last-update-check` only after an up-to-date check or completed install. A failed installer keeps
+the prior working install and does not advance that 24-hour success guard, so the next invocation
+can retry.
+
+Installer output is retained in the bounded 64 KiB `~/.autospec/self-update.log`; the previous
+bounded log is rotated once to `self-update.log.1`. A non-zero installer exit also atomically
+writes private `~/.autospec/last-update-failure.json` containing the attempt timestamp, remote SHA,
+exit code, output tail, and log path. `~/.autospec/remote-version` records the last successfully
+resolved remote SHA. A successful check removes the stale failure record.
+
+`autospec autonomous status --json` and `autospec autonomous list --json` expose these values in a
+top-level `toolchain` object. Foreground conductor entry emits a non-blocking warning naming the
+failure record when it exists. The recent-success fast path remains local and silent.
+
 ## 1. Goals
 
 When the user invokes any autospec skill (`/autospec`, `/autospec-define`,

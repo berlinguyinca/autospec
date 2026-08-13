@@ -1583,6 +1583,64 @@ enum RepairOutcome {
     StopRequested,
 }
 
+struct ToolchainFreshness {
+    installed_version: Option<String>,
+    remote_version: Option<String>,
+    installed_age_secs: Option<u64>,
+    last_update_failure_path: Option<String>,
+}
+
+impl ToolchainFreshness {
+    fn load() -> Self {
+        let root = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".autospec");
+        let installed_path = root.join("installed-version");
+        let failure_path = root.join("last-update-failure.json");
+        Self {
+            installed_version: read_trimmed_file(&installed_path),
+            remote_version: read_trimmed_file(&root.join("remote-version")),
+            installed_age_secs: fs::metadata(&installed_path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .map(|age| age.as_secs()),
+            last_update_failure_path: failure_path
+                .is_file()
+                .then(|| failure_path.display().to_string()),
+        }
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"installed_version\":{},\"remote_version\":{},\"installed_age_secs\":{},\"last_update_failed\":{},\"last_update_failure_path\":{}}}",
+            optional_json_string(self.installed_version.as_deref()),
+            optional_json_string(self.remote_version.as_deref()),
+            self.installed_age_secs
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            self.last_update_failure_path.is_some(),
+            optional_json_string(self.last_update_failure_path.as_deref()),
+        )
+    }
+
+    fn warn_if_failed(&self) {
+        if let Some(path) = &self.last_update_failure_path {
+            eprintln!(
+                "WARN: autospec self-update failed; continuing on installed version; record: {path}"
+            );
+        }
+    }
+}
+
+fn read_trimmed_file(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn repair_stopped_conductor(
     layout: &RunLayout,
     options: &Options,
@@ -1684,9 +1742,10 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         .unwrap_or_else(|| read_state_metadata(&layout));
     state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
+    let toolchain = ToolchainFreshness::load();
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1707,12 +1766,23 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             spend.budget_issues,
             spend.filed_issues,
             spend.budget_issues,
+            toolchain.to_json(),
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
         );
     } else {
         println!("autospec autonomous status: ok");
+        println!(
+            "toolchain installed={} remote={} age_secs={} last_update_failed={}",
+            toolchain.installed_version.as_deref().unwrap_or("unknown"),
+            toolchain.remote_version.as_deref().unwrap_or("unknown"),
+            toolchain
+                .installed_age_secs
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            toolchain.last_update_failure_path.is_some()
+        );
     }
     Ok(())
 }
@@ -1875,14 +1945,26 @@ fn list(options: Options) -> Result<(), String> {
         }
     }
     rows.sort();
+    let toolchain = ToolchainFreshness::load();
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"list\",\"runs\":[{}],\"conductors\":[{}]}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"list\",\"toolchain\":{},\"runs\":[{}],\"conductors\":[{}]}}",
+            toolchain.to_json(),
             rows.join(","),
             rows.join(",")
         );
     } else {
         println!("autospec autonomous runs");
+        println!(
+            "toolchain installed={} remote={} age_secs={} last_update_failed={}",
+            toolchain.installed_version.as_deref().unwrap_or("unknown"),
+            toolchain.remote_version.as_deref().unwrap_or("unknown"),
+            toolchain
+                .installed_age_secs
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            toolchain.last_update_failure_path.is_some()
+        );
         for row in rows {
             println!("{row}");
         }
@@ -2222,6 +2304,7 @@ fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
 }
 
 fn run_foreground(options: Options) -> Result<(), CommandFailure> {
+    ToolchainFreshness::load().warn_if_failed();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
