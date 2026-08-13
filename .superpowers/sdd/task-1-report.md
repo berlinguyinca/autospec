@@ -281,3 +281,64 @@ Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
 The known 113 broader macOS fixture/tool failures were not rerun or suppressed in this pass.
 Linux pidfd, `/proc`, fork, subreaper, direct-process ownership, and Linux executable semantics
 remain gated for Linux CI.
+
+## Final narrow review-fix report (2026-08-13)
+
+### Result
+
+- Narrowed `classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live` from
+  generic Unix to Linux because it requires `/proc` process identity.
+- Removed only Task 1's newly exposed non-Linux production warnings by cfg-gating Linux imports
+  and helpers, retaining test-only fallbacks only for tests, and marking values consumed solely by
+  Linux branches as intentionally unused on unsupported platforms.
+
+### RED and GREEN
+
+Before narrowing the test case, the complete macOS module run proved the platform defect:
+
+```text
+cargo test -q -p autospec-cli --bin autospec heartbeat_classify
+
+running 8 tests
+classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live --- FAILED
+.......
+
+called `Result::unwrap()` on an `Err` value: CommandFailure { message: "heartbeat process identity requires Linux /proc", exit_code: 2, kind: Diagnostic }
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 530 filtered out; finished in 2.01s
+```
+
+After narrowing the case to Linux, every heartbeat-classification test discovered on macOS passed:
+
+```text
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 530 filtered out; finished in 2.01s
+```
+
+Required named regressions also passed:
+
+```text
+unsupported_platform_stale_recovery_is_fail_closed: 1 passed; 536 filtered out
+fresh_acquisition_without_predecessor_needs_no_linux_retirement: 1 passed; 536 filtered out
+released_predecessor_requires_linux_pidfd_retirement: 1 passed; 536 filtered out
+```
+
+### Compilation and diff verification
+
+```text
+cargo check -p autospec-cli
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.74s
+warnings: 0
+
+cargo build --release -p autospec-cli
+Finished `release` profile [optimized] target(s) in 10.88s
+warnings: 0
+
+cargo test --workspace --no-run
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.21s
+
+git diff --check
+exit 0
+```
+
+The broader macOS fixture/tool failures remain out of scope and were not repaired or suppressed.
+Linux process-ownership execution remains pending Linux CI.

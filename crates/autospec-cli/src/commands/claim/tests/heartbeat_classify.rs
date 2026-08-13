@@ -354,7 +354,7 @@ fn classify_startup_heartbeat_returns_snapshot_only_for_expired_dead_local_pid()
     std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live() {
     use claim::StartupHeartbeatClassification::Blocking;

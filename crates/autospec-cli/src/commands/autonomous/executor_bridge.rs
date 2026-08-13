@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CString, OsStr, OsString};
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -12,7 +14,9 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::process::Child;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU8};
@@ -24,10 +28,12 @@ use crate::commands::autonomous::gh_read::run_gh_read_with_retry_in;
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
-    transition_bridge_claim, with_released_bridge_predecessor_authority, BridgeClaimDisposition,
-    BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
+    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
+    ClaimRefreshResult,
     ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
 };
+#[cfg(target_os = "linux")]
+use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
@@ -40,9 +46,9 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
-use autospec_core::lint::implementation::{
-    directive_for, parse_blocking_hook_failure, ImplementationLintRule,
-};
+#[cfg(target_os = "linux")]
+use autospec_core::lint::implementation::parse_blocking_hook_failure;
+use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
 use autospec_core::lint::{
     evaluate_patch_size, lint_implementation, lint_issue_implementation_contract,
     parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
@@ -18773,7 +18779,7 @@ fn resolve_executor_supervisor_executable(
                 "{primary_error}; executor supervisor argv-zero fallback is not an absolute path"
             )
         })?;
-    let canonical = fs::canonicalize(fallback).map_err(|error| {
+    let _canonical = fs::canonicalize(fallback).map_err(|error| {
         format!(
             "{primary_error}; canonicalize executor supervisor argv-zero fallback {}: {error}",
             fallback.display()
@@ -18784,10 +18790,10 @@ fn resolve_executor_supervisor_executable(
         let running = fs::metadata("/proc/self/exe").map_err(|error| {
             format!("{primary_error}; inspect running executor supervisor image: {error}")
         })?;
-        let candidate = fs::metadata(&canonical).map_err(|error| {
+        let candidate = fs::metadata(&_canonical).map_err(|error| {
             format!(
                 "{primary_error}; inspect executor supervisor argv-zero fallback {}: {error}",
-                canonical.display()
+                _canonical.display()
             )
         })?;
         if running.dev() != candidate.dev() || running.ino() != candidate.ino() {
@@ -18795,7 +18801,7 @@ fn resolve_executor_supervisor_executable(
                 "{primary_error}; executor supervisor argv-zero fallback does not identify the running image"
             ));
         }
-        Ok(canonical)
+        Ok(_canonical)
     }
     #[cfg(not(target_os = "linux"))]
     Err(format!(
@@ -23156,6 +23162,7 @@ use trusted_git::*;
 mod continuation;
 use continuation::*;
 mod continuation_children;
+#[cfg(any(test, target_os = "linux"))]
 use continuation_children::*;
 
 #[cfg(test)]
