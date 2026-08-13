@@ -7,7 +7,7 @@
 # matches, and (b) open issues carrying an active `docs:drift` self-heal label with a
 # matching title. Survivors are filed via `gh issue create --label
 # needs-classify,gap-remediation,priority:high`, leaving Rust-backed admission to
-# `/autospec-classify`; deterministic model-fit labels are backfilled best-effort.
+# the autonomous Tier 1.5 promoter, which owns the complete classification transition.
 # Round state is tracked in
 # ~/.autospec/gap-round-state.json and capped at AUTOSPEC_GAP_MAX_ROUNDS (default 2).
 #
@@ -164,14 +164,6 @@ _gh_issue_create() {
     gh issue create "$@"
   fi
 }
-_gh_issue_edit() {
-  if [ -n "${AUTOSPEC_GAP_REPO:-}" ]; then
-    gh issue edit "$1" --repo "$AUTOSPEC_GAP_REPO" "${@:2}"
-  else
-    gh issue edit "$@"
-  fi
-}
-
 # ── Snapshot open issues once (number, title, body, label names) ──────────────
 _open_issues="$(_gh_issue_list --state open --limit 500 \
   --json number,title,body,labels 2>/dev/null || echo '[]')"
@@ -271,21 +263,6 @@ while [ "$_i" -lt "$_gap_count" ]; do
   fi
   _filed=$((_filed + 1))
 
-  # Backfill ctx:*/reasoning:* via classify (best-effort; non-fatal).
-  _num="$(printf '%s' "$_url" | grep -oE '[0-9]+$' || true)"
-  if [ -n "$_num" ] && [ -x "$AUTOSPEC_SCRIPTS_DIR/classify-model-fit.sh" ]; then
-    _tmp_body="$(mktemp)"
-    printf '%s' "$_issue_body" > "$_tmp_body"
-    _cls="$(bash "$AUTOSPEC_SCRIPTS_DIR/classify-model-fit.sh" "$_tmp_body" --json 2>/dev/null || true)"
-    rm -f "$_tmp_body"
-    if [ -n "$_cls" ]; then
-      _ctx="$(printf '%s' "$_cls" | jq -r '.ctx // empty' 2>/dev/null || true)"
-      _rsn="$(printf '%s' "$_cls" | jq -r '.reasoning // empty' 2>/dev/null || true)"
-      if [ -n "$_ctx" ] && [ -n "$_rsn" ]; then
-        _gh_issue_edit "$_num" --add-label "ctx:$_ctx,reasoning:$_rsn" >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
 done
 
 # ── All-dropped exit-3: input non-empty but every gap failed schema ────────────

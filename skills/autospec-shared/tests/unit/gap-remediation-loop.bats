@@ -14,6 +14,7 @@ setup() {
     # Stub gh: records `issue create` calls, serves a configurable open-issue list.
     mkdir -p "$TEST_TMP/bin"
     export GH_CREATE_LOG="$TEST_TMP/gh-create.log"
+    export CLASSIFY_LOG="$TEST_TMP/classify.log"
     export GH_ISSUE_LIST_JSON="$TEST_TMP/open-issues.json"
     printf '[]\n' > "$GH_ISSUE_LIST_JSON"
     cat > "$TEST_TMP/bin/gh" <<'EOF'
@@ -37,6 +38,14 @@ esac
 exit 0
 EOF
     chmod +x "$TEST_TMP/bin/gh"
+    cat > "$TEST_TMP/classify-model-fit.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$CLASSIFY_LOG"
+printf '{"ctx":"32k","reasoning":"shallow"}\n'
+EOF
+    chmod +x "$TEST_TMP/classify-model-fit.sh"
+    export AUTOSPEC_SCRIPTS_DIR="$TEST_TMP"
+    cp "$(dirname "$LOOP")/gap-json-lib.sh" "$TEST_TMP/gap-json-lib.sh"
     export PATH="$TEST_TMP/bin:$PATH"
 
     # A clean gap that has no dedupe collision.
@@ -69,6 +78,7 @@ teardown() {
     grep -q "gap-remediation" "$GH_CREATE_LOG"
     grep -q "priority:high" "$GH_CREATE_LOG"
     grep -q "origin:self" "$GH_CREATE_LOG"
+    [ ! -f "$CLASSIFY_LOG" ]
 }
 
 @test "dedupes against an open issue carrying the same dedupe_key in its body" {
