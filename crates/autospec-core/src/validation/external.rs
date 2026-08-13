@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::command::bats_command;
-use super::command::{enter_fast_validation_mode, ToolCommand};
+use super::command::{
+    bats_command, enter_fast_validation_mode, security_artifact_commands, ToolCommand,
+};
 use super::results::{output_digest, CheckResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +223,9 @@ impl ExternalCheck {
             Self::MutationAndNegativePath => run_mutation_and_negative_path(id, required, root),
             Self::LintImplementationHelpers => run_lint_implementation_helpers(id, required, root),
             Self::LintIssueHelpers => run_lint_issue_helpers(id, required, root),
-            Self::SecurityArtifactProfile => run_security_artifact_profile(id, required, root),
+            Self::SecurityArtifactProfile => {
+                run_commands(id, required, root, security_artifact_commands())
+            }
             Self::Phase4CiStatusCompare => run_phase4_ci_status_compare(id, required, root),
             Self::DefineSpecWorktreeRouting => run_define_spec_worktree_routing(id, required, root),
             Self::RunGroomPreflightContract => run_groom_preflight_contract(id, required, root),
@@ -236,7 +239,6 @@ impl ExternalCheck {
         }
     }
 }
-
 fn run_validation_matrix_smoke(id: &str, required: bool, root: &Path) -> CheckResult {
     run_commands(
         id,
@@ -248,33 +250,6 @@ fn run_validation_matrix_smoke(id: &str, required: bool, root: &Path) -> CheckRe
         ],
     )
 }
-
-fn run_security_artifact_profile(id: &str, required: bool, root: &Path) -> CheckResult {
-    run_commands(
-        id,
-        required,
-        root,
-        [
-            ToolCommand::new(
-                "python3",
-                ["scripts/validate-security-artifact.py", "--help"],
-            )
-            .expect("security artifact validator help uses direct arguments"),
-            ToolCommand::new(
-                "python3",
-                [
-                    "scripts/validate-security-artifact.py",
-                    "tests/fixtures/security-artifact/valid.yml",
-                ],
-            )
-            .expect("security artifact fixture validation uses direct arguments"),
-            bats_command("tests/security-artifact-validator.bats"),
-            bats_command("tests/unit/test_security_profile_skill_contract.bats"),
-            bats_command("tests/unit/test_autospec_run_security_prerequisites.bats"),
-        ],
-    )
-}
-
 fn run_bash_syntax(id: &str, required: bool, root: &Path) -> CheckResult {
     let mut targets = Vec::new();
     for skill_dir in trio_directories(root) {
@@ -291,7 +266,6 @@ fn run_bash_syntax(id: &str, required: bool, root: &Path) -> CheckResult {
             targets.push(script.to_string());
         }
     }
-
     run_bash_syntax_targets(id, required, root, targets)
 }
 
@@ -314,7 +288,6 @@ fn run_bash_syntax_targets(
     }
     aggregate(id, required, results)
 }
-
 fn run_commands(
     id: &str,
     required: bool,
@@ -332,7 +305,6 @@ fn run_commands(
     }
     aggregate(id, required, results)
 }
-
 fn run_frontmatter(id: &str, required: bool, root: &Path) -> CheckResult {
     let python_available = program_on_path("python3");
     let mut results = Vec::new();

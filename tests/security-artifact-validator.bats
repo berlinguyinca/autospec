@@ -41,6 +41,18 @@ assert_rejected_with() {
   assert_rejected_with "blocked-queued.yml" "BLOCKING_PREREQUISITE_QUEUED"
 }
 
+@test "blocking prerequisites gate every declared issue even when the issue omits the reverse reference" {
+  assert_rejected_with "blocked-prerequisite-omitted.yml" "BLOCKING_PREREQUISITE_QUEUED"
+}
+
+@test "blocking prerequisite consumers require a non-empty gate mapping and blocked label" {
+  assert_rejected_with "blocked-gates-empty.yml" "BLOCKING_PREREQUISITE_QUEUED"
+}
+
+@test "requires every control to have an issue owner" {
+  assert_rejected_with "control-unowned.yml" "CONTROL_UNOWNED"
+}
+
 @test "rejects unknown issue dependencies" {
   assert_rejected_with "unknown-dependency.yml" "DEPENDENCY_UNKNOWN"
 }
@@ -58,6 +70,10 @@ assert_rejected_with() {
 
 @test "keeps atomic contracts in one issue" {
   assert_rejected_with "atomic-split.yml" "ATOMIC_CONTRACT_SPLIT"
+}
+
+@test "requires every atomic group member to map to an issue" {
+  assert_rejected_with "atomic-unowned.yml" "ATOMIC_CONTRACT_UNOWNED"
 }
 
 @test "requires produces and consumes issue mappings" {

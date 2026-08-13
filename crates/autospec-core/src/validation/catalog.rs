@@ -556,15 +556,12 @@ impl ValidationCatalog {
     pub fn checks(&self) -> &[ValidationCheck] {
         &self.checks
     }
-
     pub fn ids(&self) -> Vec<&'static str> {
         self.checks.iter().map(|check| check.id).collect()
     }
-
     pub fn legacy_top_level_calls(&self) -> &'static [&'static str] {
         LEGACY_TOP_LEVEL_CALL_IDS
     }
-
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = BTreeSet::new();
 
@@ -606,8 +603,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_governance_headings",
     "check_autospec_stl_design_guardrails",
     "check_existing_spec_mode",
-    "check_lint_issue_helpers",
-    "check_security_artifact_profile",
+    "check_lint_issue_helpers", "check_security_artifact_profile",
     "check_lint_implementation_helpers",
     "check_implementer_contract",
     "check_reviewer_contract",
@@ -766,8 +762,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_agents_md_subagent_matrix",
     "check_autospec_listen_files",
     "check_examples_dir",
-    "check_lint_issue_helpers",
-    "check_security_artifact_profile",
+    "check_lint_issue_helpers", "check_security_artifact_profile",
     "check_lint_implementation_helpers",
     "check_implementer_contract",
     "check_reviewer_contract",

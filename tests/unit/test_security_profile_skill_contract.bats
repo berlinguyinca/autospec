@@ -13,6 +13,8 @@ setup() {
     grep -Fq 'gen-issue-skeleton.sh' "$file"
     grep -Fq 'autospec:blocked-prerequisite' "$file"
     grep -Fq 'AUTHORITATIVE_CONTROL_MISSING' "$file"
+    grep -Fq 'non-empty `gates` list' "$file"
+    grep -Fq "one issue's \`produces\` list" "$file"
     grep -Fq 'ordinary profile' "$file"
   done
 }

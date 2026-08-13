@@ -105,7 +105,7 @@ The profile requires at least one authoritative control for every threat whose f
 
 ### Blocking prerequisites
 
-Prerequisites carry an ID, a safe verification command or evidence reference, and the issue IDs they gate. A blocked consumer may be filed for visibility, but it receives `autospec:blocked-prerequisite` instead of `auto-implement`. Phase 3.5 may promote it only after the prerequisite has verified evidence.
+Prerequisites carry an ID, a safe verification command or evidence reference, and a non-empty `gates` list of issue keys. Every gated issue repeats the prerequisite ID. A blocked consumer may be filed for visibility, but it receives `autospec:blocked-prerequisite` and must not receive `auto-implement`. Phase 3.5 may promote it only after the prerequisite has verified evidence.
 
 Open questions are therefore classified rather than copied indiscriminately into implementation issues. For example, actual table names and replica availability are blocking; an already chosen identifier precedence rule is a resolved decision.
 
@@ -117,7 +117,9 @@ Each planned child declares:
 - exact prerequisite IDs and sibling dependency keys;
 - control IDs it implements;
 - verification IDs it supplies;
-- whether it must remain atomic with a coupled validation artifact.
+- whether it must remain atomic with a coupled validation artifact. Every member
+  of an atomic group appears in exactly one child's `produces` list, and all
+  members of a group resolve to the same child.
 
 The issue list is an intermediate plan, not the final Markdown body. Phase 3 resolves sibling keys to GitHub issue numbers only after the graph validates.
 

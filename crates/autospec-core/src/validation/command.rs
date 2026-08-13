@@ -289,6 +289,27 @@ pub(crate) fn bats_command(suite: &str) -> ToolCommand {
         .with_env("AUTOSPEC_REFINE_LENS_MODE", "deterministic")
 }
 
+pub(crate) fn security_artifact_commands() -> Vec<ToolCommand> {
+    vec![
+        ToolCommand::new(
+            "python3",
+            ["scripts/validate-security-artifact.py", "--help"],
+        )
+        .expect("security artifact validator help uses direct arguments"),
+        ToolCommand::new(
+            "python3",
+            [
+                "scripts/validate-security-artifact.py",
+                "tests/fixtures/security-artifact/valid.yml",
+            ],
+        )
+        .expect("security artifact fixture validation uses direct arguments"),
+        bats_command("tests/security-artifact-validator.bats"),
+        bats_command("tests/unit/test_security_profile_skill_contract.bats"),
+        bats_command("tests/unit/test_autospec_run_security_prerequisites.bats"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,7 +10,7 @@ setup() {
 }
 
 @test "external check runs validator help, valid fixture, and profile Bats" {
-  file="$REPO_ROOT/crates/autospec-core/src/validation/external.rs"
+  file="$REPO_ROOT/crates/autospec-core/src/validation/command.rs"
   grep -Fq 'scripts/validate-security-artifact.py' "$file"
   grep -Fq 'tests/fixtures/security-artifact/valid.yml' "$file"
   grep -Fq 'tests/security-artifact-validator.bats' "$file"

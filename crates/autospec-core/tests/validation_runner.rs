@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 142);
-    assert_eq!(full.unique_ids().len(), 137);
+    assert_eq!(full.ids().len(), 143);
+    assert_eq!(full.unique_ids().len(), 138);
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));

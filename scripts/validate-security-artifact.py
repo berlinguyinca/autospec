@@ -168,7 +168,9 @@ def validate(data: Any) -> Findings:
 
     issue_sections: set[str] = set()
     owned_tests: set[str] = set()
+    owned_controls: set[str] = set()
     atomic_owners: dict[str, list[str]] = {}
+    produced_by: dict[str, list[str]] = {}
     graph: dict[str, list[str]] = {}
     for issue_key, row in issues.items():
         consumed_evidence = string_list(row, "evidence", f"issue {issue_key}", findings)
@@ -188,6 +190,9 @@ def validate(data: Any) -> Findings:
             findings.add("PROFILE_SCHEMA_INVALID", f"issue {issue_key} must declare at least one consumed input")
         issue_sections.update(covers)
         owned_tests.update(issue_tests)
+        owned_controls.update(consumed_controls)
+        for contract in produces:
+            produced_by.setdefault(contract, []).append(issue_key)
 
         for evidence_id in consumed_evidence:
             if evidence_id not in evidence:
@@ -197,10 +202,19 @@ def validate(data: Any) -> Findings:
         for prerequisite_id in consumed_prerequisites:
             if prerequisite_id not in prerequisites:
                 findings.add("PROFILE_SCHEMA_INVALID", f"issue {issue_key} references unknown prerequisite {prerequisite_id}")
-            elif prerequisites[prerequisite_id].get("status") != "verified" and "auto-implement" in labels:
+                continue
+            prerequisite = prerequisites[prerequisite_id]
+            if issue_key not in prerequisite.get("gates", []):
+                findings.add(
+                    "PROFILE_SCHEMA_INVALID",
+                    f"issue {issue_key} references prerequisite {prerequisite_id} without a gate mapping",
+                )
+            if prerequisite.get("status") != "verified" and (
+                "autospec:blocked-prerequisite" not in labels or "auto-implement" in labels
+            ):
                 findings.add(
                     "BLOCKING_PREREQUISITE_QUEUED",
-                    f"issue {issue_key} is queued while prerequisite {prerequisite_id} is blocking",
+                    f"issue {issue_key} must be blocked while prerequisite {prerequisite_id} is blocking",
                 )
         for control_id in consumed_controls:
             if control_id not in controls:
@@ -222,9 +236,47 @@ def validate(data: Any) -> Findings:
     for test_id in negative_tests:
         if test_id not in owned_tests:
             findings.add("NEGATIVE_TEST_UNOWNED", f"negative test {test_id} has no issue owner")
-    for group_id, owners in atomic_owners.items():
-        if len(set(owners)) > 1:
-            findings.add("ATOMIC_CONTRACT_SPLIT", f"atomic group {group_id} is split across {', '.join(sorted(set(owners)))}")
+    for control_id in controls:
+        if control_id not in owned_controls:
+            findings.add("CONTROL_UNOWNED", f"control {control_id} has no issue owner")
+
+    for prerequisite_id, row in prerequisites.items():
+        gates = string_list(row, "gates", f"prerequisite {prerequisite_id}", findings)
+        if not gates:
+            findings.add("PROFILE_SCHEMA_INVALID", f"prerequisite {prerequisite_id} must gate at least one issue")
+        for issue_key in gates:
+            issue = issues.get(issue_key)
+            if issue is None:
+                findings.add(
+                    "PROFILE_SCHEMA_INVALID",
+                    f"prerequisite {prerequisite_id} gates unknown issue {issue_key}",
+                )
+                continue
+            if prerequisite_id not in issue.get("prerequisites", []):
+                findings.add(
+                    "PROFILE_SCHEMA_INVALID",
+                    f"prerequisite {prerequisite_id} gates issue {issue_key} without a reverse reference",
+                )
+            labels = issue.get("labels", [])
+            if row.get("status") == "blocking" and (
+                "autospec:blocked-prerequisite" not in labels or "auto-implement" in labels
+            ):
+                findings.add(
+                    "BLOCKING_PREREQUISITE_QUEUED",
+                    f"issue {issue_key} must be blocked while prerequisite {prerequisite_id} is blocking",
+                )
+
+    for group_id, row in atomic_groups.items():
+        member_owners: set[str] = set()
+        for member in string_list(row, "members", f"atomic group {group_id}", findings):
+            owners = produced_by.get(member, [])
+            if not owners:
+                findings.add("ATOMIC_CONTRACT_UNOWNED", f"atomic group {group_id} member {member} has no issue owner")
+            member_owners.update(owners)
+        declared_owners = set(atomic_owners.get(group_id, []))
+        if len(member_owners) > 1 or len(declared_owners) > 1 or member_owners != declared_owners:
+            owners = sorted(member_owners | declared_owners)
+            findings.add("ATOMIC_CONTRACT_SPLIT", f"atomic group {group_id} is split across {', '.join(owners)}")
 
     visiting: set[str] = set()
     visited: set[str] = set()

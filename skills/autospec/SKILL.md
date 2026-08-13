@@ -340,6 +340,10 @@ before opening the spec PR. Any finding, including
 never fall back to free-form generation. The ordinary profile does not create
 or validate this sidecar. Commit the Markdown spec and sidecar together; use
 `git add -f` for the sidecar if the target repository ignores `.autospec/`.
+Every prerequisite must declare a non-empty `gates` list and every gated issue
+must repeat that prerequisite ID. Every control must have an issue owner. Each
+atomic-group member must appear in exactly one issue's `produces` list, with all
+members of that group owned by the same issue.
 
 ## Team personality selection
 
@@ -435,8 +439,9 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > `python3 "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/validate-security-artifact.py" <artifact>`.
 > Validation must pass before creating labels or calling `gh issue create`.
 > Then perform a Tier-A portfolio review: confirm every threat has a control,
-> every control has a negative test owner, every required spec section is
-> covered, dependencies are acyclic, and atomic contracts remain in one issue.
+> every control has both a negative test and an issue owner, every required spec
+> section is covered, dependencies are acyclic, every prerequisite names its
+> gated issues, and atomic-group members resolve to one issue's `produces` list.
 > Do not weaken controls to make decomposition pass. An issue with an unresolved
 > prerequisite receives `autospec:blocked-prerequisite` instead of
 > `auto-implement`; it may be filed for visibility but is not queued. The
