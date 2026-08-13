@@ -942,11 +942,11 @@ do not fall back to an inline label-swap path.
 >    # .autospec/qa-verdict.json from this active worktree instead.
 >    export AUTOSPEC_REPO_DIR="$PWD"
 >    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
->    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
+>    # non-zero exit (in_primary_checkout / dirty / stale_base / wrong_branch) is NEVER worked
 >    # around — comment the emitted code_health identifier on the issue, restore
 >    # the `auto-implement` label (swap `in-progress-by-bot` → `auto-implement`),
 >    # remove the heartbeat, and stop this issue.
->    if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert; then
+>    if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert --expected-branch <BRANCH> --branch-pattern 'feat/*'; then
 >      gh issue comment <ISSUE> --body "worktree-guard assert failed (see code_health identifier above); restoring auto-implement"
 >      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
 >      exit 1
@@ -959,7 +959,7 @@ do not fall back to an inline label-swap path.
 >    <!-- claim-guard-acquire:begin -->
 >    ```bash
 >    TARGETS="<space-separated skills/paths from the issue's Files touched>"
->    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert || exit $?
+>    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert --expected-branch <BRANCH> --branch-pattern 'feat/*' || exit $?
 >    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh scan $TARGETS || true
 >    if ! AUTOSPEC_CLAIM_GUARD=strict bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS; then
 >      gh issue comment <ISSUE> --body "claim-guard acquire conflict (see code_health:claim_conflict identifier above); another live session owns this edit surface — restoring auto-implement"
