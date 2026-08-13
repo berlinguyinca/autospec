@@ -40,8 +40,11 @@ STATE_DIR="${AUTOSPEC_STATE_DIR:-$HOME/.autospec}"
 MAX_ROUNDS="${AUTOSPEC_GAP_MAX_ROUNDS:-2}"
 ROUND_STATE="$STATE_DIR/gap-round-state.json"
 SKIP_FLAG="$STATE_DIR/no-review.flag"
-ISSUE_LINTER="${AUTOSPEC_ISSUE_LINTER:-$AUTOSPEC_SCRIPTS_DIR/lint-issue.sh}"
-if [ ! -f "$ISSUE_LINTER" ]; then
+if [ -n "${AUTOSPEC_ISSUE_LINTER:-}" ]; then
+  ISSUE_LINTER="$AUTOSPEC_ISSUE_LINTER"
+elif [ -f "$AUTOSPEC_SCRIPTS_DIR/lint-issue.sh" ]; then
+  ISSUE_LINTER="$AUTOSPEC_SCRIPTS_DIR/lint-issue.sh"
+else
   ISSUE_LINTER="$SCRIPT_DIR/../../../scripts/lint-issue.sh"
 fi
 

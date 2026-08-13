@@ -93,6 +93,22 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "refuses remote filing when the rendered issue fails the quality contract" {
+    jq '.[0].dedupe_key = "should"' "$TEST_TMP/gaps.json" > "$TEST_TMP/invalid-quality.json"
+    run bash "$LOOP" --gaps "$TEST_TMP/invalid-quality.json" --file
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"failed quality lint"* ]]
+    [ ! -f "$GH_CREATE_LOG" ]
+}
+
+@test "refuses remote filing when the configured issue linter is unavailable" {
+    export AUTOSPEC_ISSUE_LINTER="$TEST_TMP/missing-lint-issue.sh"
+    run bash "$LOOP" --gaps "$TEST_TMP/gaps.json" --file
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"issue linter unavailable"* ]]
+    [ ! -f "$GH_CREATE_LOG" ]
+}
+
 @test "dedupes against an open issue carrying the same dedupe_key in its body" {
     cat > "$GH_ISSUE_LIST_JSON" <<'EOF'
 [{"number":42,"title":"old","body":"dedupe_key: cross-repo-search-trailing-pipe","labels":[{"name":"auto-implement"}]}]
