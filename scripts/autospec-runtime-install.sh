@@ -201,10 +201,11 @@ runtime_install_main() {
     chmod 500 "$STAGE_DIR/generation/autospec" || return 2
     receipt="$STAGE_DIR/generation/receipt"
     autospec_runtime_write_receipt "$repo" "$STAGE_DIR/generation/autospec" "$receipt" "$SOURCE_DIGEST" || return 2
-    autospec_runtime_verify_generation "$repo" "$SOURCE_DIGEST" "$STAGE_DIR/generation" || { runtime_install_error verification-failed; return 2; }
+    autospec_runtime_verify_generation "$repo" "$SOURCE_DIGEST" "$STAGE_DIR/generation" 700 || { runtime_install_error verification-failed; return 2; }
     sync || { runtime_install_error sync-failed; return 2; }
     runtime_write_journal publishing || return 2
     mv "$STAGE_DIR/generation" "$generation" || return 2
+    chmod 500 "$generation" || return 2
     autospec_runtime_verify_generation "$repo" "$SOURCE_DIGEST" "$generation" || { runtime_install_error verification-failed; return 2; }
     sync || { runtime_install_error sync-failed; return 2; }
     runtime_publish_bin_link || return 2

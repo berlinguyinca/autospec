@@ -205,14 +205,15 @@ autospec_runtime_parse_receipt() {
 }
 
 autospec_runtime_verify_generation() {
-    local repo digest generation binary receipt actual repo_canonical mode owner
+    local repo digest generation binary receipt actual repo_canonical mode owner expected_mode
     repo=$1; digest=$2; generation=$3; binary="$generation/autospec"; receipt="$generation/receipt"
+    expected_mode=${4:-500}
     repo_canonical=$(autospec_runtime_repo_dir "$repo") || return 2
     autospec_runtime_valid_sha256 "$digest" || return 1
     [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
     mode=$(autospec_runtime_stat_mode "$generation") || return 1
     owner=$(autospec_runtime_stat_owner "$generation") || return 1
-    [ "$mode" = 700 ] && [ "$owner" = "$(id -u)" ] || return 1
+    [ "$mode" = "$expected_mode" ] && [ "$owner" = "$(id -u)" ] || return 1
     autospec_runtime_parse_receipt "$receipt" || return 1
     [ "$receipt_repo" = "$repo_canonical" ] && [ "$receipt_source" = "$digest" ] || return 1
     actual=$(autospec_runtime_file_sha256 "$binary") || return 1

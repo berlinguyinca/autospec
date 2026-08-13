@@ -71,7 +71,7 @@ wait_for_file() {
   [ "$generation_binary" = "$TEST_HOME/.autospec/runtime-generations/$digest/autospec" ]
   [ -f "$(dirname "$generation_binary")/receipt" ]
   [ "$(mode_of "$TEST_HOME/.autospec")" = 700 ]
-  [ "$(mode_of "$(dirname "$generation_binary")")" = 700 ]
+  [ "$(mode_of "$(dirname "$generation_binary")")" = 500 ]
   [ "$(mode_of "$(dirname "$generation_binary")/receipt")" = 600 ]
   [ "$(readlink "$TEST_HOME/.autospec/runtime-generations/current")" = "$digest" ]
 
