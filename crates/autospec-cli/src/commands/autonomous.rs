@@ -67,7 +67,6 @@ mod premerge;
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
-mod lifecycle_stop_notice;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
