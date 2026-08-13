@@ -43,6 +43,8 @@ use std::os::unix::process::CommandExt;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
+#[allow(dead_code)]
+pub(crate) mod accountability;
 mod blocked_cycle;
 mod foreground_failure;
 mod lifecycle_stop_notice;
