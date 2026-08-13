@@ -34,17 +34,9 @@ already ~34 skills with a history of skills operators "never saw."
    the new work competes fairly under ONE quota — do NOT give it a separate
    spend budget (that re-creates the two-loop problem).
 
-**Growth specifics (Plan 5 pivot, 2026-07-10):** grow-define/grow-run stay as
-the reusable halves (exactly like define/run relate to autonomous). Fold in a
-growth-discovery tier (→grow-define), an outbound-approval poll (→grow-run R3,
-Tier-0-style), and a periodic measure step (→grow-run R4, digest-style). NOT a
-new `/autospec-grow` skill.
-
-**Live bug this surfaced:** `growth:artifact` issues carry `auto-implement`
-(grow-define-file-issues.sh:25), so autospec-autonomous Tier 1 ALREADY drains
-them today — bypassing the content-quality gate stranded in grow-run R1. Fix by
-routing `growth:artifact` through `/autospec-run`'s existing `fab-route.sh`
-label-router (autospec-run SKILL.md:404-425) so the gate fires for BOTH the bare
-Tier-1 drain and grow-run R1. Fix this BEFORE folding in, else the fold-in makes
-the bypass the default path. Related: [[feedback_roi_check_new_components]],
-[[feedback_autospec_skill_per_capability]].
+**Historical evidence (resolved):** the 2026-07-10 growth rollout applied this
+pattern as conductor tiers 5–7 while keeping grow-define/grow-run as reusable
+halves. Its initial `growth:artifact` quality-gate bypass was subsequently fixed
+in the shared `fab-route.sh` label router. Preserve the architectural lesson;
+do not treat that shipped migration as pending work. Related:
+[[feedback_roi_check_new_components]], [[feedback_autospec_skill_per_capability]].
