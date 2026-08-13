@@ -66,6 +66,7 @@ mod premerge;
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
+mod lifecycle_stop_notice;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
@@ -1759,10 +1760,9 @@ fn stop(options: Options) -> Result<(), String> {
             draining
         );
     } else {
-        println!(
-            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped} draining={draining}",
-            options.stop_mode.as_str(),
-            stop_flag.display()
+        print!(
+            "{}",
+            lifecycle_stop_notice::render(options.stop_mode.as_str(), &stop_flag, stopped, draining)
         );
     }
     Ok(())
