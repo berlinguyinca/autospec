@@ -7,6 +7,52 @@ mkbody() { printf '%s' "$1" > "$TMP/b"; }
   run bash "$SCRIPT" "$TMP/b" --labels "bug"
   echo "$output" | jq -e '.decision == "eligible"'
 }
+
+@test "lint-passing complete issue template is eligible without string intent tokens" {
+  mkbody '## Goal
+
+Resolve gap `gap-1` in `scripts/widget.sh` using captured evidence.
+
+## Files to read first
+
+- `scripts/widget.sh`
+
+## Implementation scope
+
+- Correct the reported behavior in `scripts/widget.sh`.
+
+## Implementation outline
+
+1. Reproduce the reported behavior.
+2. Apply the scoped correction.
+
+## Tests required
+
+- Add a regression test for `scripts/widget.sh`.
+
+## Dependencies
+
+none
+
+## Files touched
+
+- `scripts/widget.sh`
+
+## Acceptance criteria
+
+- [ ] A regression test covering the reported gap passes 1 time.
+
+## Verification
+
+### Primary smoke test (inner loop)
+
+```bash
+git diff --check
+```'
+  run bash "$SCRIPT" "$TMP/b" --labels "needs-classify,gap-remediation"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.decision == "eligible" and (.reason | test("quality"; "i"))'
+}
 @test "epic label routes to epic" {
   mkbody "big umbrella of work across many subsystems"
   run bash "$SCRIPT" "$TMP/b" --labels "epic,enhancement"

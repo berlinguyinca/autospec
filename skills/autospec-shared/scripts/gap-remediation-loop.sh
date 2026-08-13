@@ -300,7 +300,7 @@ done
 
 # ── All-dropped exit-3: input non-empty but every gap failed schema ────────────
 if [ "$_gap_count" -gt 0 ] && [ "$_dropped" -eq "$_gap_count" ]; then
-  printf 'gap-remediation: ERROR all %s gaps failed schema or issue-quality validation; nothing filed — fix the producer and re-run\n' \
+  printf 'gap-remediation: ERROR all %s gaps failed schema or issue-quality validation; nothing filed — fix the producer (see emit-gaps.sh) or rendered template and re-run\n' \
     "$_gap_count" >&2
   _report 0 0 "$_current_round" "$_dropped"
   exit 3

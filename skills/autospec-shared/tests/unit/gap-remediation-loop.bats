@@ -7,6 +7,7 @@
 
 LOOP="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gap-remediation-loop.sh"
 LINT_ISSUE="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/lint-issue.sh"
+PROMOTE_ELIGIBILITY="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/promote-eligibility.sh"
 
 setup() {
     TEST_TMP="$(mktemp -d)"
@@ -91,6 +92,9 @@ teardown() {
     [ ! -f "$CLASSIFY_LOG" ]
     run bash "$LINT_ISSUE" "$GH_BODY_FILE"
     [ "$status" -eq 0 ]
+    run bash "$PROMOTE_ELIGIBILITY" "$GH_BODY_FILE" --labels "needs-classify,gap-remediation"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.decision == "eligible"'
 }
 
 @test "refuses remote filing when the rendered issue fails the quality contract" {
