@@ -45,25 +45,14 @@ for node in ast.walk(tree):
     ):
         assigned = node.value
         break
-if not isinstance(assigned, ast.Dict):
-    raise SystemExit("DEFAULT_SKELETON is not a dict literal in " + source)
+if assigned is None:
+    raise SystemExit("DEFAULT_SKELETON not found in " + source)
 
-# Read the literal out of the syntax tree node by node. The stdlib literal-only
-# evaluator would be shorter and equally safe, but SECURITY matches its name with an
-# unanchored substring pattern — the same shape as the `sys.exit(` false positive in
-# design doc 1.6 — and that rule does not consult `linter:allow-`, so there is no way to
-# annotate it. Walking the nodes also pins the shape: a value that stops being a plain
-# literal fails here rather than silently changing what gets linted.
-skeleton = {}
-for key_node, value_node in zip(assigned.keys, assigned.values):
-    if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
-        raise SystemExit("skeleton keys are expected to be string literals")
-    if isinstance(value_node, ast.List):
-        skeleton[key_node.value] = [None] * len(value_node.elts)
-    elif isinstance(value_node, ast.Constant):
-        skeleton[key_node.value] = value_node.value
-    else:
-        raise SystemExit("unexpected skeleton value for %r" % (key_node.value,))
+# This walked the syntax tree node by node until #3057, because SECURITY read the stdlib
+# literal parser's name as the dangerous builtin it is the safe alternative to, and no
+# annotation could reach the rule. Both are fixed, so the direct call is back — and its
+# presence here is the end-to-end regression test for that fix.
+skeleton = ast.literal_eval(assigned)
 
 lines = []
 for key, value in skeleton.items():

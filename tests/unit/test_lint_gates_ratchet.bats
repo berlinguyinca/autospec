@@ -171,6 +171,78 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
 }
 
+@test "delegate rc: a delegate whose count disagrees with its output is a broken contract" {
+    write_lines small.py 20
+    git add small.py
+    # Tolerated for as long as the delegate undercounted itself — two rules emitted from
+    # inside a pipeline, so their increments were lost to the subshell (#3080). #3081 restored
+    # the contract, so a mismatch is a defect again and the wrapper says so rather than
+    # guessing which of the two numbers to believe.
+    printf '#!/usr/bin/env bash\nprintf "TODO_LEFT:a.py:1: first\\nTODO_LEFT:a.py:2: second\\n"\nexit 1\n' \
+        > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 1'
+}
+
+@test "delegate rc: a count that matches its output is accepted" {
+    write_lines small.py 20
+    git add small.py
+    printf '#!/usr/bin/env bash\nprintf "TODO_LEFT:a.py:1: first\\nTODO_LEFT:a.py:2: second\\n"\nexit 2\n' \
+        > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q '^TODO_LEFT:a.py:2: second'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+}
+
+@test "delegate rc: a duplicate-name finding alongside another is counted, not disbelieved" {
+    # check_duplicate_names emitted from inside a pipeline too, and it was the last rule that
+    # did. Under strict equality that made any commit pairing a duplicate name with a second
+    # finding look like a crashed delegate — the #3080 shape, on a different rule.
+    printf 'def shared():\n    return 1\n' > one.py
+    printf 'def shared():\n    return 2\n' > two.py
+    printf 'x = 1  # TODO tracked\n' > three.py
+    git add one.py two.py three.py
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
+    # Asserted on the status, not with a mid-body `! … | grep`: bash ignores a failing
+    # negated command under `set -e`, so such an assertion is silently skipped unless it is
+    # the test's last line. 2 is the LINT_DELEGATE_FAILED path; 1 is findings, as wanted.
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "duplicate function name 'shared'"
+    printf '%s\n' "$output" | grep -q '^TODO_LEFT:three.py'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+}
+
+@test "delegate rc: enforcing complexity on a long file with a long function is not a crash" {
+    # End to end against the real delegate, which is where this was found: the file is both
+    # over the limit and holds one long function, so it prints two blocking COMPLEXITY
+    # findings and exits 1.
+    python3 -c "
+open('big.py', 'w').write('def f():\n' + '    x = 1\n' * 700)
+"
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    python3 -c "
+lines = open('big.py').read().splitlines()
+lines[10] = '    x = 2'
+open('big.py', 'w').write('\n'.join(lines) + '\n')
+"
+    git add big.py
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^COMPLEXITY:big.py:.*AUTOSPEC_MAX_FUNC_LOC"
+}
+
 @test "policy: a low delegate error code without findings is not reported as clean" {
     write_lines small.py 20
     git add small.py

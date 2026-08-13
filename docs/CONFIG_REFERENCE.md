@@ -252,7 +252,10 @@ promotion samples.
 | `AUTOSPEC_HARNESS_DISPATCHER` | auto-detected | Force a harness dispatcher (claude/opencode/codex). |
 | `AUTOSPEC_HANDOFF_DISPATCHER_KIND` | initiating session | Select the native autonomous executor (`claude`, `codex`, or `opencode`); overrides Codex, Claude, and OpenCode runtime markers. Without a marker, executors are PATH-probed in alias-table order. |
 | `AUTOSPEC_HARNESS_RUNTIME_ALIASES` | `$AUTOSPEC_CONFIG_DIR/harness-runtime-aliases.tsv`, otherwise `~/.autospec/config/harness-runtime-aliases.tsv` | Override the installed four-column TSV mapping harness kind, executable alias, approval alias, and display name. |
-| `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | (unset) | Absolute proven containment adapter required before the native executor may launch OpenCode. |
+| `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | auto-discovered (`~/.autospec/scripts/lib/opencode-containment-adapter.sh`) | Absolute containment adapter required before the native executor may launch mutating OpenCode work; auto-discovered from `AUTOSPEC_SCRIPTS_DIR`/`~/.autospec/scripts` when unset, and fails closed with `executor_harness_uncontained` when absent. |
+| `AUTOSPEC_OPENCODE_MODEL` | (unset) | OpenCode implementer/reviewer model in `provider/model` form (`--model`); unset keeps the harness default. Drives the AGENTS.md two-tier OpenCode selection. |
+| `AUTOSPEC_OPENCODE_VARIANT` | (unset) | OpenCode reasoning-effort variant (`--variant`, e.g. `high`/`max`/`minimal`); pairs with `AUTOSPEC_OPENCODE_MODEL`. |
+| `AUTOSPEC_USAGE_PROBE_OPENCODE` | auto-discovered (`~/.autospec/scripts/lib/opencode-usage-probe.sh`) | Executable that prints a live usage percent (0-100); the shipped probe reads the OpenCode SQLite DB (`OPENCODE_DB_PATH`) for a trailing-window token tally. |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
 ## Local model supply discovery
@@ -455,7 +458,7 @@ implementation and still blocks new oversized files and any growth of an existin
 
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_COMPLEXITY_ENFORCE` | `0` | `1` makes `COMPLEXITY` findings blocking again — every threshold below, plus nesting depth and duplicate function names. The thresholds themselves apply either way; this decides whether exceeding one is a veto or a note. |
+| `AUTOSPEC_COMPLEXITY_ENFORCE` | `0` | `1` makes `COMPLEXITY` findings blocking again — every threshold below, plus nesting depth and duplicate function names. The thresholds themselves apply either way; this decides whether exceeding one is a veto or a note. Read by **both** linters: `scripts/lint-implementation.sh` and the Rust `autospec lint implementation`, which the Phase 4 executor uses to admit a diff. They disagreed for one release, so the autonomous path still vetoed while the pre-commit path did not (#3056). Advisory does not mean silent: `--directives` renders an advisory finding as `Consider <RULE>: …` alongside the blocking `Fix <RULE>: …` lines, so the agent writing the code still hears it (#3079). |
 | `AUTOSPEC_MAX_FILE_LOC` | `600` | File-length limit the ratchet enforces. Rough guidance meant to stop multi-thousand-line files, not to police a modest overage. Keep in step with `MAX_LOC` in the CI workflow. |
 | `AUTOSPEC_MAX_CYCLOMATIC` | `10` | Cyclomatic-complexity limit, measured per function. |
 | `AUTOSPEC_MAX_FUNC_LOC` | `50` | Per-function length limit. |

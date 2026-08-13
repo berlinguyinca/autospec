@@ -22,7 +22,7 @@
 # Per-harness invocation table (issue #723):
 #   Claude Code → claude "/autospec" "--autonomous" "$PROMPT"
 #   Codex CLI   → codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"
-#   OpenCode    → opencode "/autospec" "--autonomous" "$PROMPT"   (best-effort)
+#   OpenCode    → opencode "/autospec" "--autonomous" "$PROMPT"
 #
 # Path-safety (mirrors PR #693): rejects relative paths and any binary under
 # /tmp, /private/tmp, /var/tmp, /var/folders, or $TMPDIR, before AND after

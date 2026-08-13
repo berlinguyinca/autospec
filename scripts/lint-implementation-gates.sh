@@ -276,15 +276,26 @@ set -e
 delegate_blocking="$(printf '%s\n' "$DELEGATE_OUT" \
   | grep -E '^(ERROR:)?[A-Z][A-Z_]+:' \
   | grep -cv '^INFO:' || true)"
+#
+# Compared for EQUALITY below the exit cap. This was briefly loosened to `rc <= printed`,
+# because two rules emitted from inside a pipeline and their counter increments were lost to
+# the subshell, so the delegate undercounted itself and a working commit was refused as a
+# crashed gate (#3080). #3081 restored the contract, so the exact comparison is back: a
+# delegate that prints three findings and claims one is now itself a defect, and saying so
+# is the point of checking at all.
+#
+# The two inexact arms are inexact for real reasons. At the 64 cap the true count is
+# unknowable from the code alone, and a scope explosion exits 200 after printing its own
+# uncounted sentinel line, so both assert a floor rather than a value.
 delegate_rc_matches=0
 if [ "$DELEGATE_RC" -eq 0 ] && [ "$delegate_blocking" -eq 0 ]; then
   delegate_rc_matches=1
+elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 1 ]; then
+  delegate_rc_matches=1
 elif [ "$DELEGATE_RC" -eq 64 ] && [ "$delegate_blocking" -ge 64 ]; then
   delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -gt 0 ] && [ "$DELEGATE_RC" -lt 64 ] \
-    && [ "$DELEGATE_RC" -eq "$delegate_blocking" ]; then
-  delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 200 ]; then
+elif [ "$DELEGATE_RC" -ge 1 ] && [ "$DELEGATE_RC" -lt 64 ] \
+    && [ "$delegate_blocking" -eq "$DELEGATE_RC" ]; then
   delegate_rc_matches=1
 fi
 if [ "$delegate_rc_matches" -ne 1 ]; then

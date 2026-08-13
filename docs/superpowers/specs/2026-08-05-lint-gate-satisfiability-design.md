@@ -205,6 +205,81 @@ and duplicate function names. That is accepted: they are heuristics whose cost a
 veto — extracting code mid-bugfix, or an out-of-band override — exceeded the
 tidiness they bought.
 
+### Fix 6 — `SECURITY`'s eval pattern is boundary-anchored, and annotatable
+
+The same defect as §1.6, in a second rule: the pattern is an unanchored substring, so it
+reports `ast.literal_eval` — the stdlib parser that accepts literals and rejects every
+expression form, i.e. the recommended *safe* alternative to the builtin the rule exists to
+catch. Fix 4 anchored `xit(` and left this one.
+
+Anchored as `(^|[^A-Za-z0-9_])eval\(`. The dot is deliberately **outside** the class, unlike
+Fix 4's `xit(`: that fix had to exclude the dot to stop matching `sys.exit(`, whereas here
+the dotted `builtins.eval` form is the dangerous call itself and must still report.
+Measured on a probe file: `ast.literal_eval` and `lead_eval` are clean, while a bare and a
+dotted eval call both still report.
+
+`detect_security` also never consulted `is_line_allowed`, so `# linter:allow-SECURITY <reason>`
+could not clear it — and because prose is scanned as code, a comment written to explain an
+exemption became a second finding. The only routes left were a blanket
+`Guardian: skip-SECURITY`, the last rule anyone should blanket-skip, or rewriting working code
+to dodge a substring. The scan now consults `is_line_allowed` on the line it reports, so the
+documented hatch is real for it.
+
+Comments are **not** stripped before this scan, the way `lint-ui.sh` learned to strip them: a
+secret sitting in a comment is still a leaked secret. Prose naming a pattern therefore still
+reports, and the escape hatch is how you clear it.
+
+### Fix 7 — findings emitted inside a pipeline are counted
+
+Three rules — `check_function_loc`, the nesting-depth rule, and `check_duplicate_names` — emitted
+from the right-hand side of a pipe. Bash runs that in a subshell, so their `FINDINGS_COUNT` and
+`RULE_EMIT_COUNT` increments were discarded on exit, and the exit code contradicted what had just
+been printed. All three now read their producer through a here-document, the idiom every other
+loop in the file already uses.
+
+Two things were wrong, not one. Measured on 24 long functions across three files, enforcement on:
+
+| | exit code | blocking lines | truncation markers |
+|---|---|---|---|
+| before | 3 | 35 | 4 |
+| after | 11 | 11 | 1 |
+
+The exit code undercounted — which forced the local wrapper to loosen its cross-check for a
+release (#3080), and which `qa-phase4.sh` reports to operators. And the per-rule emit cap
+restarted for every file, because each file's findings were counted in a fresh subshell. Within a
+single file the cap held, which is why this survived so long: the obvious test passes.
+
+With the contract restored, `lint-implementation-gates.sh` compares `rc == printed` again below
+the exit cap. A delegate that prints three findings and claims one is a defect, and saying so is
+the point of cross-checking at all.
+
+### Fix 8 — advisory findings are offered as guidance, not dropped
+
+Making `COMPLEXITY` advisory (Fix 5) had a consequence nobody chose: `--directives` skips `INFO:`
+lines, and the Phase 4 repair loop derives its rule list from the pre-commit hook's *failure*
+text. An advisory finding therefore reached the implementing agent neither as a block nor as
+guidance, and the four heuristics that the CI file-size ratchet does not cover — function length,
+nesting depth, cyclomatic score, duplicate names — went unenforced and unmentioned on every path.
+
+The operator's instruction was about not being *blocked*, not about not being *told*, so
+`--directives` now renders two tiers:
+
+```
+Fix TODO_LEFT: Remove deferred-work markers from non-test code; …
+Consider COMPLEXITY: Split functions >50 LOC, files >500 LOC, or nesting >4 — …
+```
+
+One line per rule and tier. The directive text is per-rule, so eleven long functions previously
+meant eleven identical sentences; deduplicating is what makes the second tier affordable to add.
+The tier follows severity rather than rule id, so `AUTOSPEC_COMPLEXITY_ENFORCE=1` moves the same
+finding back into `Fix`.
+
+Two limits worth stating. A rule waived by `Guardian: skip-<RULE>` also arrives as `INFO:` and so
+is re-offered as a `Consider` line, which is mild noise against an explicit waiver — the two
+cases are indistinguishable downstream today. And the Rust repair prompt in `executor_bridge.rs`
+still renders only blocking rules, because its rule list is persisted per repair attempt and
+carrying a second tier means a state-schema change; that half is tracked separately.
+
 ## 3. Bootstrap order — no bypass required
 
 The fixes live in `scripts/lint-implementation.sh` (1,796 LOC) and
