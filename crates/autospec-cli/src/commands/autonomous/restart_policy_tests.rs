@@ -6,7 +6,7 @@
 // asserted below: an immediate exit is counted rather than trusted, repeated ones trip a
 // breaker, and the wait grows while restarts keep failing.
 
-use super::{RestartPolicy, RESTART_BACKOFF_MAX_SECS, RESTART_FAST_EXIT_LIMIT};
+use super::supervisor::{RestartPolicy, RESTART_BACKOFF_MAX_SECS, RESTART_FAST_EXIT_LIMIT};
 
 #[test]
 fn a_healthy_restart_resets_the_counter_and_keeps_the_configured_cadence() {
