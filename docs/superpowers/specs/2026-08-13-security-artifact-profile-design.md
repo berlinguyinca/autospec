@@ -67,6 +67,7 @@ facts: []
 assumptions: []
 priority_order: []
 blocking_prerequisites: []
+threats: []
 controls: []
 negative_tests: []
 residual_risks: []
@@ -86,11 +87,12 @@ Secrets and sensitive query results are never stored in the sidecar. Evidence re
 
 ### Controls
 
-Each control has a stable ID, threat, mitigation, enforcement owner, authority strength, failure consequence, and verification IDs. Authority strength is one of `advisory`, `runtime`, or `authoritative`.
+Each threat has a stable ID. Each control references that threat ID and records its mitigation, enforcement owner, authority strength, failure consequence, and verification IDs. Authority strength is one of `advisory`, `runtime`, or `authoritative`.
 
 ```yaml
 controls:
   - id: T1
+    threat_id: TH1
     threat: data modification
     mitigation: restricted database role holds SELECT only
     owner: database

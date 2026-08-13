@@ -25,6 +25,10 @@ assert_rejected_with() {
   assert_rejected_with "missing-authority.yml" "AUTHORITATIVE_CONTROL_MISSING"
 }
 
+@test "requires every declared threat to have a control" {
+  assert_rejected_with "threat-without-control.yml" "THREAT_WITHOUT_CONTROL"
+}
+
 @test "requires every control to own a negative test" {
   assert_rejected_with "control-without-test.yml" "CONTROL_WITHOUT_TEST"
 }

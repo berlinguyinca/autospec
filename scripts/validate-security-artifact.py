@@ -14,6 +14,7 @@ REQUIRED_LISTS = (
     "required_sections",
     "evidence",
     "priority_order",
+    "threats",
     "blocking_prerequisites",
     "controls",
     "negative_tests",
@@ -105,6 +106,7 @@ def validate(data: Any) -> Findings:
     evidence_rows = mapping_rows(data, "evidence", findings)
     prerequisite_rows = mapping_rows(data, "blocking_prerequisites", findings)
     control_rows = mapping_rows(data, "controls", findings)
+    threat_rows = mapping_rows(data, "threats", findings)
     test_rows = mapping_rows(data, "negative_tests", findings)
     atomic_rows = mapping_rows(data, "atomic_groups", findings)
     issue_rows = mapping_rows(data, "issues", findings)
@@ -112,6 +114,7 @@ def validate(data: Any) -> Findings:
     evidence = indexed(evidence_rows, "id", "evidence", findings)
     prerequisites = indexed(prerequisite_rows, "id", "blocking_prerequisites", findings)
     controls = indexed(control_rows, "id", "controls", findings)
+    threats = indexed(threat_rows, "id", "threats", findings)
     negative_tests = indexed(test_rows, "id", "negative_tests", findings)
     atomic_groups = indexed(atomic_rows, "id", "atomic_groups", findings)
     issues = indexed(issue_rows, "key", "issues", findings)
@@ -143,6 +146,15 @@ def validate(data: Any) -> Findings:
                 "AUTHORITATIVE_CONTROL_MISSING",
                 f"control {control_id} requires an authoritative database or platform owner",
             )
+
+    controlled_threats = {row.get("threat_id") for row in controls.values()}
+    for threat_id in threats:
+        if threat_id not in controlled_threats:
+            findings.add("THREAT_WITHOUT_CONTROL", f"threat {threat_id} has no control")
+    for control_id, row in controls.items():
+        threat_id = row.get("threat_id")
+        if threat_id not in threats:
+            findings.add("PROFILE_SCHEMA_INVALID", f"control {control_id} references unknown threat {threat_id}")
 
     issue_sections: set[str] = set()
     owned_tests: set[str] = set()
