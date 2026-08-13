@@ -946,7 +946,7 @@ do not fall back to an inline label-swap path.
 >    # .autospec/qa-verdict.json from this active worktree instead.
 >    export AUTOSPEC_REPO_DIR="$PWD"
 >    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
->    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
+>    # non-zero exit (in_primary_checkout / dirty / stale_base / wrong_branch) is NEVER worked
 >    # around — comment the emitted code_health identifier on the issue, restore
 >    # the `auto-implement` label (swap `in-progress-by-bot` → `auto-implement`),
 >    # remove the heartbeat, and stop this issue.

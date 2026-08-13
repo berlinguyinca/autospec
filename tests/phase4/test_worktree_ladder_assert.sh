@@ -16,6 +16,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+check_exact_branch_guards() {
+    file="$1"
+    expected_count="$2"
+    actual_count="$(grep -c "worktree-guard.sh assert --expected-branch <BRANCH> --branch-pattern 'feat/\*'" "$file" || true)"
+    [ "$actual_count" -eq "$expected_count" ]
+}
+
 # ── File sets for both run trios ─────────────────────────────────────────────
 
 RUN_SKILL="$SCRIPT_DIR/skills/autospec-run/SKILL.md"
@@ -59,14 +66,31 @@ done
 
 for f in $RUN_SKILL $RUN_CODEX $RUN_OPENCODE $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
+    expected_count=2
+    [ "$f" = "$PHASE4" ] && expected_count=1
 
-    grep -q "worktree-guard.sh assert --expected-branch <BRANCH> --branch-pattern 'feat/\*'" "$f" \
-        || fail "$name: missing exact feat/* branch identity gate (step 2)"
+    check_exact_branch_guards "$f" "$expected_count" \
+        || fail "$name: expected $expected_count exact feat/* branch identity gates (step 2)"
 
 done
 
+# Mutation proof: removing one of the two legacy guards must fail the same check.
+mutated="$(mktemp)"
+trap 'rm -f "$mutated"' EXIT
+awk '!changed && /worktree-guard[.]sh assert --expected-branch/ {
+        sub(/ --expected-branch <BRANCH> --branch-pattern '\''feat\/[*]'\''/, "")
+        changed=1
+     }
+     { print }' "$RUN_SKILL" > "$mutated"
+if check_exact_branch_guards "$mutated" 2; then
+    fail "mutation proof: one unguarded legacy assertion was accepted"
+fi
+
 for f in $ALL_SIX $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
+
+    grep -q 'worktree-guard.sh assert' "$f" \
+        || fail "$name: missing worktree-guard.sh assert gate (step 2)"
 
     grep -q 'MUST exit 0' "$f" \
         || fail "$name: assert gate must require exit 0 before any edit"
