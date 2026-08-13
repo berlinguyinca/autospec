@@ -7,7 +7,7 @@
 
 ## Goal
 
-After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, (3) file every surviving gap through the `needs-classify` safety-admission lifecycle, and (4) re-run the implementation loop for admitted gaps — bounded by a configurable round cap. This replaces the current end-of-run behavior, which only *reports* gap counts and never closes them.
+After an autospec run drains its `auto-implement` queue, automatically (1) review the shipped work for gaps across broad dimensions, (2) filter false positives, and (3) stage every surviving gap through the `needs-classify` lifecycle. Generated gaps do not bypass issue grooming, quality checks, or Rust-backed safety admission; the existing autonomous Tier 1.5 path owns that later transition.
 
 ## Motivation
 
@@ -17,8 +17,8 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 
 | # | Decision | Choice |
 |---|----------|--------|
-| D1 | What "address" means | Auto-file every surviving gap as `needs-classify`, admit it through the Rust safety gate, and re-loop admitted work. |
-| D2 | Loop bound | `AUTOSPEC_GAP_MAX_ROUNDS`, default **2**. Early-exit on convergence (a round that files 0 new gaps). |
+| D1 | What "address" means | Auto-file every surviving gap as `needs-classify`; never admit or drain generated bodies inline. |
+| D2 | Run bound | One staging pass per autospec run. The driver retains `AUTOSPEC_GAP_MAX_ROUNDS` as defensive state for direct/repeated invocation. |
 | D3 | Review scope | **Broad** — spec-coverage + correctness + test-quality + integration-wiring + docs — followed by an evaluate-findings/critic false-positive filter before filing. |
 | D4 | Severity policy | File **all** severities (incl. docs/warn), **but dedupe** against open issues + active `docs:drift` self-heal so nothing double-files. |
 | D5 | Architecture | Extend `/autospec-review` with a remediation mode (broad + filter + machine-readable gap emission); `/autospec-run` drives the bounded loop. (Approach A.) |
@@ -41,21 +41,17 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 2. **`gap-remediation-loop.sh`** (deterministic driver, `skills/autospec-shared/scripts/`):
    - Reads the emitted gap JSON.
    - **Dedupes** (D4) against (a) open issues by `dedupe_key`/title-hash and (b) issues carrying an active `docs:drift` self-heal label.
-   - Files survivors via `gh issue create --label needs-classify,gap-remediation,priority:high,origin:self`, then `/autospec-classify` adds quality/model-fit metadata and delegates admission to the Rust safety gate.
+   - Files survivors via `gh issue create --label needs-classify,gap-remediation,priority:high,origin:self`; the autonomous Tier 1.5 promoter later grooms, classifies, and delegates admission to the Rust safety gate.
    - Tracks round state in `~/.autospec/gap-round-state.json`; enforces `AUTOSPEC_GAP_MAX_ROUNDS` (D2); reports convergence vs cap-hit.
    - Pure bash, `set +e` best-effort discipline (per `feedback_bash_*` memory); no RETURN-trap cleanup.
 
 3. **`/autospec-run` Phase 5.5** (new SKILL.md section replacing the post-batch audit):
    ```
-   round = 1;  MAX = ${AUTOSPEC_GAP_MAX_ROUNDS:-2}
-   while round <= MAX:
-     gaps = autospec-review --remediation --since BATCH_START --emit-gaps ~/.autospec/gaps-<run-id>.json
-     survivors = gap-remediation-loop.sh --file --dedupe   # files needs-classify + returns count
-     if survivors == 0: break          # converged
-     autospec-classify newly-filed gap-remediation issues  # Rust-backed admission
-     run Phase-4 monitor (opus, batch=1) until gap-remediation issues drain
-     round++
-   report (closed this phase + filter-suppressed + still-open-after-cap) → Phase 6 final report
+   gaps = autospec-review --remediation --since BATCH_START --emit-gaps ~/.autospec/gaps-<run-id>.json
+   survivors = gap-remediation-loop.sh --file --dedupe   # files needs-classify + returns count
+   if survivors == 0: report clean
+   else: report staged gap-remediation issues
+   autonomous Tier 1.5 later grooms/classifies/admit gaps
    ```
    - **Skip controls unchanged:** `~/.autospec/no-review.flag`, `--no-postreview` skip the whole phase.
 
@@ -65,18 +61,17 @@ The current interlock runs `/autospec-review --since "${BATCH_START_DATE}"` at e
 queue drains (ALL_DONE)
   → autospec-review --remediation  (broad review + filter, Tier A)  → gaps-<run-id>.json
   → gap-remediation-loop.sh        (dedupe + file needs-classify,gap-remediation issues)
-  → autospec-classify              (quality/model-fit + Rust safety admission)
-  → Phase-4 monitor                (opus, batch=1, drains admitted gap issues)
-  → re-review (next round)         → converge (0 new) OR hit MAX
-  → Phase 6 final report
+  → Phase 6 final report           (staged gaps are visible, not claimed closed)
+  → later Tier 1.5 cycle           (groom + quality/model-fit + Rust admission)
+  → later Phase-4 monitor          (drains only admitted gap issues)
 ```
 
 ### Termination / anti-loop guarantees
 
-- **`gap-remediation` label** makes remediation issues recognizable so a later round does not re-flag freshly-fixed work as a new gap.
-- **`dedupe_key`** prevents re-filing the same gap across rounds.
-- **Convergence:** a round that files 0 new survivors ends the loop immediately.
-- **Hard cap:** `AUTOSPEC_GAP_MAX_ROUNDS` (default 2); on cap-hit with gaps remaining, the loop stops and surfaces the remainder to the operator — it never spins.
+- **`gap-remediation` label** makes remediation issues recognizable so a later run does not re-file the same open work.
+- **`dedupe_key`** prevents re-filing the same gap across runs.
+- **Convergence:** a pass that finds 0 new survivors reports clean immediately.
+- **No inline drain:** a pass that stages survivors stops after reporting them, so it cannot spin on unadmitted work. The driver's `AUTOSPEC_GAP_MAX_ROUNDS` remains defense in depth for direct/repeated invocation.
 
 ## Error handling
 

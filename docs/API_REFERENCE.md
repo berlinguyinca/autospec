@@ -771,8 +771,9 @@ Exit: 0 = success (empty/missing input writes an empty array), 1 = `jq` missing.
 Files surviving gaps from a gap JSON as `needs-classify,gap-remediation,priority:high`
 issues, retaining `origin:self` provenance. Dedupes each gap against open issues (matching
 `dedupe_key`/title and active `docs:drift` self-heal labels), then backfills deterministic
-model-fit labels. `/autospec-classify` owns final Rust-backed safety admission before any
-gap reaches `auto-implement`. Round state in
+model-fit labels. The existing autonomous Tier 1.5 promoter later grooms incomplete bodies,
+applies the full classification/quality contract, and delegates final safety admission to
+Rust before any gap reaches `auto-implement`. Round state in
 `~/.autospec/gap-round-state.json`, capped at `AUTOSPEC_GAP_MAX_ROUNDS` (default 2).
 
 ```
