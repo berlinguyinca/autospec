@@ -16,7 +16,7 @@ The counter-team is **Security and product comprehension**: a security reviewer 
 
 The feature has two independent durable boundaries joined at `start`:
 
-1. A shell compatibility preflight runs before Rust argument parsing. It compares the requested checkout with a private installed runtime receipt. A stale start drains the existing scoped conductor gracefully, publishes one coherent binary/receipt generation, then forwards the original arguments to the Rust launcher.
+1. A shell compatibility preflight runs before Rust argument parsing. It compares the requested checkout with a private installed runtime receipt. A stale start drains the existing scoped conductor gracefully, publishes one immutable binary/receipt generation, then executes that exact generation path with the original arguments. A narrow runtime-only installer performs this operation without reinstalling skills, harnesses, or peer tooling.
 2. The launcher creates or recovers one run-accountability record after acquiring the lifecycle lease and before spawning the conductor. Local private state is authoritative for recovery. A marker-bounded GitHub epic is the human-readable projection and may optionally be added to a configured GitHub Project.
 
 Read-only and stop commands bypass runtime rebuilding. Later GitHub projection failures do not corrupt the local journal or duplicate an epic; pending projections retry at later safe boundaries. A new conductor is not spawned until creation or adoption of its epic is verified.
@@ -45,13 +45,17 @@ The receipt schema records the canonical checkout path, Git `HEAD`, a determinis
 
 Missing, malformed, unsafe, older-schema, source-mismatched, or binary-mismatched receipts are stale. Unsafe ownership, modes, symlinks, ambiguous locks, or interrupted transaction journals fail closed.
 
-Installation serializes through a private lock containing independently validated numeric PID and timestamp fields. Before any rename, it writes a private transaction journal naming the phase and artifacts. Recovery distinguishes an abandoned clean lock from an interrupted publication. Binary and receipt backups are retained until both artifacts are verified and the transaction is durably committed. Signals may interrupt any external command without creating a cross-generation pair. There is no production fault-injection hook; tests inject failures through PATH shims.
+Installation writes an immutable generation directory keyed by source digest. The directory contains the binary and receipt, is fully verified and synced before publication, and is never mutated afterward. A single atomic `current` pointer supports ordinary CLI discovery, while start/restart execute the exact generation path returned by their preflight so a concurrent refresh for another repository cannot substitute a different binary.
+
+Publication serializes through a private global generation lock containing independently validated canonical positive PID, process-start identity, and timestamp fields. Before pointer publication, it writes a private transaction journal naming the phase and artifacts. Recovery distinguishes an abandoned clean lock from an interrupted publication. Signals may interrupt any external command without exposing a partial generation or losing recovery evidence. Recovery defers further signals until journal cleanup and lock release complete. There is no production fault-injection hook; tests inject failures through PATH shims.
+
+Build identity is computed through batched hashing rather than one process per file. It includes non-Rust crate assets reachable by build scripts, `include_bytes!`, and `include_str!`. A matching checkout fast path has a sub-50ms target after filesystem cache warmup.
 
 ## Start-boundary refresh
 
 Bare `autospec-autonomous`, `start`, `restart`, and `autospec-autonomous-start` run the preflight. `status`, `list`, `logs`, `timeline`, `watch`, `monitor`, `supervise`, `cleanup`, and `stop` remain usable without a build.
 
-The preflight resolves `--repo-dir` or the caller's Git root, recomputes freshness after acquiring a repo-scoped lock, and preserves all original Rust arguments. When stale state is live, it uses the existing graceful stop contract and waits for conductor, monitor, and supervisor metadata to become stopped. It never force-kills work or launches a competing conductor. Build failure leaves the prior generation intact and exits non-zero rather than relaunching stale work.
+The preflight resolves `--repo-dir` or the caller's Git root, recomputes freshness after acquiring a repo-scoped refresh lock, and preserves all original Rust arguments. Start/restart fail closed with an actionable diagnostic when the helper is missing; read-only and stop commands still bypass it. When stale state is live, it uses the existing graceful stop contract and waits for conductor, monitor, and supervisor metadata to become stopped. It never force-kills work or launches a competing conductor. Build failure leaves the prior generation intact and exits non-zero rather than relaunching stale work.
 
 ```mermaid
 stateDiagram-v2
@@ -110,7 +114,7 @@ All GitHub text is derived from typed fields and escaped before Mermaid renderin
 TDD covers each behavior before production changes:
 
 1. Receipt identity: deterministic digests, relevant dirty/untracked changes, strict schema/calendar/path validation, unsafe targets, and binary tampering.
-2. Installer transaction: concurrent installers, signal immediately after binary rename, SIGKILL between renames, stale clean versus interrupted locks, malformed PID/timestamp, rollback, cleanup failure, and no-prior-generation recovery.
+2. Installer transaction: immutable-generation publication, cross-repository concurrent starts, signal and SIGKILL at every publication boundary, stale clean versus interrupted locks, malformed/reused PID metadata, pointer rollback, cleanup failure, and no-prior-generation recovery.
 3. Start refresh: current bypass, stale stopped rebuild, stale live graceful drain, argument preservation, concurrency, failed build retention, ambiguous metadata fail-closed, and read-only/stop bypass.
 4. Epic lifecycle: exactly-once creation, lost-response marker recovery, follow/supervisor adoption, explicit-restart succession, project assignment, queue exclusion, human-text preservation, local-first outbox retry, body-size compaction, Mermaid escaping, and pre-spawn gating.
 5. Event projection: claim, implementation, review, PR, merge, failure, blocked, and close events produce concise What/Why/Evidence paragraphs and correct links.
@@ -123,6 +127,8 @@ Required verification is `cargo test --workspace`, `cargo clippy --workspace --a
 
 - A direct stale start cannot attach to or launch an outdated runtime.
 - Binary and receipt always describe one verified installation generation after success, interruption, or recovery.
+- Concurrent repository starts execute the exact generation each preflight verified, even when another repository publishes a newer global `current` pointer.
+- Runtime freshness does not reinstall skills, harnesses, peer tools, or unrelated user-environment configuration.
 - Every conductor generation has exactly one verified GitHub run epic before its process is spawned.
 - The epic explains what is being built and why in short paragraphs, contains Mermaid flow/state visuals, and links issues, PRs, and evidence.
 - Restarts and adoption reuse the same epic; new generations create new epics.
