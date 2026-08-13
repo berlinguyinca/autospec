@@ -64,10 +64,12 @@ done
 
 # ── 2. Mandatory assert gate before any edit, stop-on-failure, in all 6 ──────
 
-for f in $RUN_SKILL $RUN_CODEX $RUN_OPENCODE $PHASE4; do
+for f in $ALL_SIX $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
-    expected_count=2
-    [ "$f" = "$PHASE4" ] && expected_count=1
+    expected_count=1
+    case "$f" in
+        "$RUN_SKILL"|"$RUN_CODEX"|"$RUN_OPENCODE") expected_count=2 ;;
+    esac
 
     check_exact_branch_guards "$f" "$expected_count" \
         || fail "$name: expected $expected_count exact feat/* branch identity gates (step 2)"

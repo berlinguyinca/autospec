@@ -48,6 +48,7 @@ use super::{claim, queue, CommandFailure};
 
 mod blocked_cycle;
 mod foreground_failure;
+mod lifecycle_stop_notice;
 use foreground_failure::ForegroundFailure;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
@@ -66,7 +67,6 @@ mod premerge;
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
-mod lifecycle_stop_notice;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
@@ -977,7 +977,7 @@ fn lifecycle_decision_json(decision: &LifecycleDecision) -> String {
         ),
         LifecycleDecision::Stop { mode } => format!(
             "{{\"decision\":\"stop\",\"mode\":\"{}\"}}",
-            lifecycle_stop_name(*mode)
+            lifecycle_stop_notice::name(*mode)
         ),
         LifecycleDecision::Park { reason } => format!(
             "{{\"decision\":\"park\",\"reason\":\"{}\"}}",
@@ -1009,13 +1009,6 @@ fn lifecycle_tier_name(tier: LifecycleTier) -> &'static str {
         LifecycleTier::Tier6 => "6",
         LifecycleTier::Tier7 => "7",
         LifecycleTier::Idle => "idle",
-    }
-}
-
-fn lifecycle_stop_name(mode: LifecycleStopMode) -> &'static str {
-    match mode {
-        LifecycleStopMode::Graceful => "graceful",
-        LifecycleStopMode::Immediate => "immediate",
     }
 }
 
@@ -4500,6 +4493,10 @@ fn acquire_lifecycle_start(
     let stored_stop = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)?;
     if matches!(transition, LifecycleTransition::Start) {
         if let Some(mode) = stored_stop {
+            lifecycle_stop_notice::print_blocked_start(
+                lifecycle_stop_notice::name(mode),
+                &stop_flag_path(layout),
+            );
             let decision = decide_lifecycle(
                 &LifecycleInput::from_scope(scope)
                     .with_transition(transition)
