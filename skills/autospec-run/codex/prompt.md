@@ -1884,8 +1884,8 @@ operation). When invoked with `--autonomous`, or when
   remediation and Phase 6 final reports can distinguish autonomous runs
   from interactive ones.
 - Honors the same safety guardrails as `/autospec` and `/autospec-define`:
-  destructive remote actions, out-of-scope file changes, and cost gate
-  (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`) still
+  destructive remote actions, out-of-scope file changes, and the token cost gate
+  (`AUTOSPEC_AUTONOMOUS_TOKEN_CAP`) still
   surface confirmations via `autospec-autonomy-gate.sh --check all`,
   exit 1 = ask anyway.
 - Does NOT add any additional user-facing gates. The flag is informational

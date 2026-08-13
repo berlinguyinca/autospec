@@ -1021,8 +1021,7 @@ the orchestrator invokes `autospec-autonomy-gate.sh` with
 - Destructive remote actions (force-push, repo archive/delete, mass label
   changes, prod DB writes).
 - Out-of-scope planned files (extend beyond Goal + Implementation outline).
-- Cost gate (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, default 10; or
-  `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`, default 500k).
+- Cost gate (`AUTOSPEC_AUTONOMOUS_TOKEN_CAP`, default 500k).
 - Existing `feedback_autospec_autonomy_scope.md` rules.
 
 The handoff to `/autospec-run` preserves the `--autonomous` flag so the

@@ -40,11 +40,16 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-# --- 4. spec exceeds AUTOSPEC_AUTONOMOUS_ISSUE_CAP → cost gate ---
-@test "autonomous: issue count over cap triggers cost gate" {
-  AUTOSPEC_AUTONOMOUS_ISSUE_CAP=10 run bash "$GATE" --check cost --issues 25 --tokens 100000
+# --- 4. issue count is uncapped; token estimate still gates cost ---
+@test "autonomous: issue count does not trigger cost gate" {
+  AUTOSPEC_AUTONOMOUS_ISSUE_CAP=1 run bash "$GATE" --check cost --issues 999999 --tokens 100000
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "autonomous: issue cap variable is absent from the gate contract" {
+  run grep -F "AUTOSPEC_AUTONOMOUS_ISSUE_CAP" "$GATE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"AUTOSPEC_AUTONOMOUS_ISSUE_CAP"* ]]
 }
 
 @test "autonomous: token estimate over cap triggers cost gate" {

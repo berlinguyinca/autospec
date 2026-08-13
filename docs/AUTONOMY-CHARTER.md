@@ -43,8 +43,7 @@ operator already admin-auto-merges). Surface a confirmation ONLY for:
 - **Force-push to a protected branch** (e.g. `main`).
 - **Out-of-scope file changes** — planned files extending beyond the spec's
   Goal + Implementation outline.
-- **Cost over threshold** — issue count or token estimate above the aggressive
-  caps (§4).
+- **Cost over threshold** — token estimate above the aggressive cap (§4).
 - **A genuine no-clear-winner fork** — two+ options with no defensible default.
   (Note: a fork where one option is clearly better is *not* this — pick it.)
 
@@ -59,14 +58,16 @@ everything the gate does **not** flag.
 | Lever | Default | Aggressive (recommended) |
 |---|---|---|
 | `~/.autospec/autonomous.flag` | absent (interactive) | **present** |
-| `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` | 10 | **40** |
 | `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` | 500000 | **2000000** |
 | `~/.autospec/no-review.flag` | absent (review auto-fires) | absent |
 
-To raise the cost caps persistently, export in your shell profile:
+Autonomous specs have no per-spec issue-count cap. The separate cumulative
+`AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES` resource budget remains in force for the
+long-running autonomous conductor.
+
+To raise the token cap persistently, export in your shell profile:
 
 ```sh
-export AUTOSPEC_AUTONOMOUS_ISSUE_CAP=40
 export AUTOSPEC_AUTONOMOUS_TOKEN_CAP=2000000
 ```
 

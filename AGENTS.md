@@ -142,7 +142,7 @@ is confident enough to recommend a next step, it takes it and reports rather tha
 asking permission. Safety is unchanged: `scripts/autospec-autonomy-gate.sh
 --check all` still surfaces a confirmation for destructive remote actions,
 force-push to a protected branch, out-of-scope files, cost over the aggressive
-caps (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`), and
+token cap (`AUTOSPEC_AUTONOMOUS_TOKEN_CAP`), and
 genuine no-clear-winner forks. Full policy and rationale (mined from session
 transcripts): [`docs/AUTONOMY-CHARTER.md`](docs/AUTONOMY-CHARTER.md).
 
