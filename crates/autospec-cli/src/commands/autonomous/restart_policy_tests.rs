@@ -9,13 +9,36 @@
 use super::supervisor::{RestartPolicy, RESTART_BACKOFF_MAX_SECS, RESTART_FAST_EXIT_LIMIT};
 
 #[test]
+fn a_restart_that_survives_one_poll_but_dies_before_healthy_uptime_counts_as_failed() {
+    let mut policy = RestartPolicy::default();
+    policy.record_restart(false);
+    policy.record_restart(false);
+
+    policy.record_restart(true);
+    policy.record_restart(true);
+    policy.record_restart(true);
+    assert_eq!(
+        policy.consecutive_fast_exits, 2,
+        "a short-lived replacement must not clear the existing failure streak"
+    );
+
+    policy.record_restart(false);
+    assert_eq!(
+        policy.consecutive_fast_exits, 3,
+        "a delayed startup exit still counts toward quarantine"
+    );
+}
+
+#[test]
 fn a_healthy_restart_resets_the_counter_and_keeps_the_configured_cadence() {
     let mut policy = RestartPolicy::default();
     policy.record_restart(false);
     policy.record_restart(false);
     assert_eq!(policy.consecutive_fast_exits, 2);
 
-    policy.record_restart(true);
+    for _ in 0..12 {
+        policy.record_restart(true);
+    }
 
     assert_eq!(
         policy.consecutive_fast_exits, 0,
@@ -96,6 +119,7 @@ fn the_backoff_grows_and_is_capped() {
 fn the_counter_saturates_rather_than_overflowing() {
     let mut policy = RestartPolicy {
         consecutive_fast_exits: u32::MAX,
+        consecutive_live_probes: 0,
         quarantined: true,
     };
     policy.record_restart(false);

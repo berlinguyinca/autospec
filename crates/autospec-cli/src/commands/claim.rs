@@ -1065,7 +1065,15 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         {
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
-        retire_released_predecessor_heartbeat(&repo, options.issue, prior.as_ref())?;
+        if let Err(error) = heartbeat_predecessor::retire(&repo, options.issue, prior.as_ref()) {
+            eprintln!("WARN: predecessor heartbeat retirement deferred: {}", error.message);
+            return unavailable_claim(
+                options.issue,
+                &repo,
+                Some(&worker_id),
+                "predecessor_heartbeat_retirement_failed",
+            );
+        }
     }
 
     let (claim_id, mut head, phase) = if let Some(phase) = resume {
@@ -1253,33 +1261,6 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         claim_id,
         session_id: options.session_id,
     })
-}
-
-fn retire_released_predecessor_heartbeat(
-    repo: &str,
-    issue: u64,
-    prior: Option<&ClaimRefHead>,
-) -> Result<(), CommandFailure> {
-    let Some(record) = prior
-        .map(|head| &head.record)
-        .filter(|record| record.state == "released")
-    else {
-        return Ok(());
-    };
-    let claim_id = record.claim_id.as_deref().ok_or_else(|| {
-        CommandFailure::diagnostic("released predecessor heartbeat has no claim identity")
-    })?;
-    let identity = ClaimMutationIdentity {
-        repo,
-        issue,
-        worker_id: &record.worker_id,
-        branch: &record.branch,
-        claim_id,
-    };
-    if !released_predecessor_heartbeat_evidence_exists(identity)? {
-        return Ok(());
-    }
-    retire_released_startup_heartbeat_with_hook(identity, true, &mut |_, _| Ok(()))
 }
 
 #[cfg(target_os = "linux")]
@@ -7420,6 +7401,7 @@ fn print_state_help() {
 }
 
 mod heartbeat_liveness;
+mod heartbeat_predecessor;
 pub(crate) mod lease;
 use heartbeat_liveness::startup_heartbeat_exists;
 use lease::{
