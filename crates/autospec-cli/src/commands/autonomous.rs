@@ -3,7 +3,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-
 use autospec_core::autonomous::blast_radius::{
     classify_paths_with_registry_name, default_legacy_registry, parse_fenced_surfaces,
 };
@@ -43,9 +42,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use super::{claim, queue, CommandFailure};
-
 mod blocked_cycle;
 mod foreground_failure;
 mod lifecycle_stop_notice;
@@ -62,19 +59,16 @@ use one_shot_selector::{
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
 mod premerge;
-// Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
 mod resilience;
-// Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
+mod toolchain_freshness;
 #[allow(dead_code)]
 mod tier15;
-// Tier 1.5 is read-only foreground discovery; retained receipts replay before collection.
 #[allow(dead_code)]
 mod tier15_receipts;
-// Tier 2 runs bounded evidence-only model children and persists sealed local receipts.
 #[allow(dead_code)]
 mod tier2;
 mod tier2_publisher;
@@ -85,7 +79,6 @@ mod tier2_receipts;
 mod tier2_runner;
 #[cfg(test)]
 mod tier2_runner_tests;
-// Tier 3 remains disabled in production until a typed metadata package exists.
 #[cfg(test)]
 mod tier2_receipts_failure_prefix_tests;
 #[cfg(test)]
@@ -96,7 +89,6 @@ mod tier2_receipts_tests;
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
-// Tier 4 participates in foreground traversal but remains disabled by checked-in policy.
 #[cfg(test)]
 #[path = "autonomous/review_governance_tests.rs"]
 mod review_governance_tests;
@@ -1074,7 +1066,7 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
         return Ok(());
     }
 
-    ToolchainFreshness::load().warn_if_failed();
+    toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
@@ -1584,64 +1576,6 @@ enum RepairOutcome {
     StopRequested,
 }
 
-struct ToolchainFreshness {
-    installed_version: Option<String>,
-    remote_version: Option<String>,
-    installed_age_secs: Option<u64>,
-    last_update_failure_path: Option<String>,
-}
-
-impl ToolchainFreshness {
-    fn load() -> Self {
-        let root = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".autospec");
-        let installed_path = root.join("installed-version");
-        let failure_path = root.join("last-update-failure.json");
-        Self {
-            installed_version: read_trimmed_file(&installed_path),
-            remote_version: read_trimmed_file(&root.join("remote-version")),
-            installed_age_secs: fs::metadata(&installed_path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                .map(|age| age.as_secs()),
-            last_update_failure_path: failure_path
-                .is_file()
-                .then(|| failure_path.display().to_string()),
-        }
-    }
-
-    fn to_json(&self) -> String {
-        format!(
-            "{{\"installed_version\":{},\"remote_version\":{},\"installed_age_secs\":{},\"last_update_failed\":{},\"last_update_failure_path\":{}}}",
-            optional_json_string(self.installed_version.as_deref()),
-            optional_json_string(self.remote_version.as_deref()),
-            self.installed_age_secs
-                .map(|age| age.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-            self.last_update_failure_path.is_some(),
-            optional_json_string(self.last_update_failure_path.as_deref()),
-        )
-    }
-
-    fn warn_if_failed(&self) {
-        if let Some(path) = &self.last_update_failure_path {
-            eprintln!(
-                "WARN: autospec self-update failed; continuing on installed version; record: {path}"
-            );
-        }
-    }
-}
-
-fn read_trimmed_file(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn repair_stopped_conductor(
     layout: &RunLayout,
     options: &Options,
@@ -1743,7 +1677,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         .unwrap_or_else(|| read_state_metadata(&layout));
     state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
-    let toolchain = ToolchainFreshness::load();
+    let toolchain = toolchain_freshness::ToolchainFreshness::load();
     if options.json {
         println!(
             "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
@@ -1774,16 +1708,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         );
     } else {
         println!("autospec autonomous status: ok");
-        println!(
-            "toolchain installed={} remote={} age_secs={} last_update_failed={}",
-            toolchain.installed_version.as_deref().unwrap_or("unknown"),
-            toolchain.remote_version.as_deref().unwrap_or("unknown"),
-            toolchain
-                .installed_age_secs
-                .map(|age| age.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            toolchain.last_update_failure_path.is_some()
-        );
+        toolchain.print_human();
     }
     Ok(())
 }
@@ -1946,7 +1871,7 @@ fn list(options: Options) -> Result<(), String> {
         }
     }
     rows.sort();
-    let toolchain = ToolchainFreshness::load();
+    let toolchain = toolchain_freshness::ToolchainFreshness::load();
     if options.json {
         println!(
             "{{\"command\":\"autonomous\",\"subcommand\":\"list\",\"toolchain\":{},\"runs\":[{}],\"conductors\":[{}]}}",
@@ -1956,16 +1881,7 @@ fn list(options: Options) -> Result<(), String> {
         );
     } else {
         println!("autospec autonomous runs");
-        println!(
-            "toolchain installed={} remote={} age_secs={} last_update_failed={}",
-            toolchain.installed_version.as_deref().unwrap_or("unknown"),
-            toolchain.remote_version.as_deref().unwrap_or("unknown"),
-            toolchain
-                .installed_age_secs
-                .map(|age| age.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            toolchain.last_update_failure_path.is_some()
-        );
+        toolchain.print_human();
         for row in rows {
             println!("{row}");
         }
@@ -2305,7 +2221,7 @@ fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
 }
 
 fn run_foreground(options: Options) -> Result<(), CommandFailure> {
-    ToolchainFreshness::load().warn_if_failed();
+    toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
