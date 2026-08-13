@@ -862,13 +862,13 @@ for lineno in sorted(findings):
     local rc=$?
     [ "$rc" -eq 0 ] || return 1
 
-    # Emit one finding per offending function.
-    if [ -n "$out" ]; then
-        printf '%s\n' "$out" | while IFS="$(printf '\t')" read -r fline fdepth; do
-            [ -z "$fline" ] && continue
-            emit_capped "COMPLEXITY" "$diff_file" "$fline" "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
-        done
-    fi
+    # One finding per offending function. Here-document, not pipe — see Fix 7 (#3081).
+    while IFS="$(printf '\t')" read -r fline fdepth; do
+        [ -z "$fline" ] && continue
+        emit_capped "COMPLEXITY" "$diff_file" "$fline" "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
+    done <<EOF
+$out
+EOF
     return 0
 }
 
@@ -1379,21 +1379,22 @@ $(get_diff_files)
 EOF
 }
 
-# check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC.
-# Shell (.sh/.bash) functions are already checked by detect_complexity (diff-based);
-# this check covers Python, TypeScript, JavaScript, and Go using full-file analysis.
+# check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC, by full-file
+# analysis. Shell functions are covered by detect_complexity instead, from the diff. Python
+# ONLY: .ts/.js/.go were admitted by the extension filter and then fell through the
+# Python-only body, so they were never analysed — the filter now says what the code does.
 check_function_loc() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         [ -f "$diff_file" ] || continue
-        case "$diff_file" in
-            *.py|*.ts|*.js|*.go) ;;
-            *) continue ;;
-        esac
-        local func_name func_start func_loc
-        # Python: def <name>( — count lines until next def/class at same indent
-        if printf '%s' "$diff_file" | grep -qE '\.py$'; then
-            awk '
+        case "$diff_file" in *.py) ;; *) continue ;; esac
+        # def <name>( — lines until the next def/class. Here-document, not pipe, so the
+        # counters survive (Fix 7); func_name below is awk's, not the shell's.
+        while IFS=: read -r fname fstart floc; do
+            [ -z "$fname" ] && continue
+            emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+        done <<EOF
+$(awk '
                 /^[[:space:]]*(def |class )[A-Za-z_]/ {
                     if (func_name && NR - func_start > max_loc) {
                         print func_name ":" func_start ":" (NR - func_start)
@@ -1405,10 +1406,8 @@ check_function_loc() {
                         print func_name ":" func_start ":" (NR - func_start)
                     }
                 }
-            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
-                emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
-            done
-        fi
+            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file")
+EOF
     done <<EOF
 $(get_diff_files)
 EOF
@@ -1464,15 +1463,15 @@ check_duplicate_names() {
     # own setUp/tearDown). Flagging these is a false positive; a real accidental
     # dup of a domain function name still flags.
     local _DUP_NAME_EXEMPT=" setUp tearDown setUpClass tearDownClass asyncSetUp asyncTearDown __init__ __enter__ __exit__ main "
-    if [ -n "$dupes" ]; then
-        echo "$dupes" | while IFS= read -r dupe_name; do
-            [ -z "$dupe_name" ] && continue
-            case "$_DUP_NAME_EXEMPT" in
-                *" $dupe_name "*) continue ;;
-            esac
-            emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
-        done
-    fi
+    while IFS= read -r dupe_name; do  # here-document below, not a pipe — see Fix 7
+        [ -z "$dupe_name" ] && continue
+        case "$_DUP_NAME_EXEMPT" in
+            *" $dupe_name "*) continue ;;
+        esac
+        emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
+    done <<EOF
+$dupes
+EOF
 }
 
 
@@ -1646,19 +1645,19 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         fi
     } > "$TMP_FINDINGS" 2>&1
 
-    # Reformat each finding as a directive line
+    # Two tiers: blocking is a "Fix", advisory INFO a "Consider" — dropping INFO left the agent
+    # neither blocked nor told (Fix 8, #3079). One line per rule and tier: the directive text is
+    # per-rule, so eleven long functions would otherwise repeat one sentence eleven times.
+    _seen_directives=""
     while IFS= read -r finding; do
-        # Extract RULE_ID from "RULE_ID:path:line: desc" format
-        rule_id="$(printf '%s' "$finding" | cut -d: -f1)"
-        # Skip INFO lines
-        if [ "$rule_id" = "INFO" ]; then
-            continue
-        fi
-        if [ "$rule_id" = "ERROR" ]; then
-            rule_id="$(printf '%s' "$finding" | cut -d: -f2)"
-        fi
-        directive="$(rule_directive "$rule_id")"
-        printf 'Fix %s: %s\n' "$rule_id" "$directive"
+        rule_id="${finding%%:*}"; verb="Fix"       # "RULE:path:line: desc", INFO:/ERROR: first
+        case "$rule_id" in
+            INFO)  verb="Consider"; _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+            ERROR) _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+        esac
+        case "$_seen_directives" in *" ${verb}:${rule_id} "*) continue ;; esac
+        _seen_directives="${_seen_directives} ${verb}:${rule_id} "
+        printf '%s %s: %s\n' "$verb" "$rule_id" "$(rule_directive "$rule_id")"
     done < "$TMP_FINDINGS"
 else
     detect_pr_size

@@ -171,14 +171,13 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
 }
 
-@test "delegate rc: a delegate reporting fewer findings than it printed is still trusted" {
+@test "delegate rc: a delegate whose count disagrees with its output is a broken contract" {
     write_lines small.py 20
     git add small.py
-    # The delegate undercounts itself: check_function_loc and the nesting-depth rule emit
-    # inside a `... | while read` pipeline, so those FINDINGS_COUNT increments happen in a
-    # subshell and never reach the exit code. A crash can only truncate output, never add
-    # finding lines, so "printed more than it claimed" is the one direction that cannot mean
-    # a crash — and an equality test refused those runs outright.
+    # Tolerated for as long as the delegate undercounted itself — two rules emitted from
+    # inside a pipeline, so their increments were lost to the subshell (#3080). #3081 restored
+    # the contract, so a mismatch is a defect again and the wrapper says so rather than
+    # guessing which of the two numbers to believe.
     printf '#!/usr/bin/env bash\nprintf "TODO_LEFT:a.py:1: first\\nTODO_LEFT:a.py:2: second\\n"\nexit 1\n' \
         > fake-delegate.sh
     chmod +x fake-delegate.sh
@@ -186,10 +185,41 @@ open('big.py', 'w').writelines(lines)
     cp fake-delegate.sh fakescripts/lint-implementation.sh
     cp "$GATES" fakescripts/lint-implementation-gates.sh
     run bash fakescripts/lint-implementation-gates.sh --staged
-    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
-    # Still blocking — the findings are real, they are simply miscounted.
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 1'
+}
+
+@test "delegate rc: a count that matches its output is accepted" {
+    write_lines small.py 20
+    git add small.py
+    printf '#!/usr/bin/env bash\nprintf "TODO_LEFT:a.py:1: first\\nTODO_LEFT:a.py:2: second\\n"\nexit 2\n' \
+        > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q '^TODO_LEFT:a.py:2: second'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+}
+
+@test "delegate rc: a duplicate-name finding alongside another is counted, not disbelieved" {
+    # check_duplicate_names emitted from inside a pipeline too, and it was the last rule that
+    # did. Under strict equality that made any commit pairing a duplicate name with a second
+    # finding look like a crashed delegate — the #3080 shape, on a different rule.
+    printf 'def shared():\n    return 1\n' > one.py
+    printf 'def shared():\n    return 2\n' > two.py
+    printf 'x = 1  # TODO tracked\n' > three.py
+    git add one.py two.py three.py
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
+    # Asserted on the status, not with a mid-body `! … | grep`: bash ignores a failing
+    # negated command under `set -e`, so such an assertion is silently skipped unless it is
+    # the test's last line. 2 is the LINT_DELEGATE_FAILED path; 1 is findings, as wanted.
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "duplicate function name 'shared'"
+    printf '%s\n' "$output" | grep -q '^TODO_LEFT:three.py'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
 }
 
 @test "delegate rc: enforcing complexity on a long file with a long function is not a crash" {
