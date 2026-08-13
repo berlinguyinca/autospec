@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     provision_issue_worktree, recover_invocation, resolve_base, write_invocation_atomic,
     BridgeIdentity, BridgePhase, HarnessKind, PersistedInvocation,

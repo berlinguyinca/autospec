@@ -6,7 +6,7 @@ use autospec_core::claim::RunStateRecord;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{STARTUP_HEARTBEAT_ENV, expected_startup_heartbeat, startup_heartbeat_fixture};
 
 #[cfg(target_os = "linux")]

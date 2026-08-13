@@ -23158,5 +23158,5 @@ use continuation::*;
 mod continuation_children;
 use continuation_children::*;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests;

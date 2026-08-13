@@ -43,9 +43,56 @@ pub(super) fn retire(
 pub(super) fn retire(
     _repo: &str,
     _issue: u64,
-    _prior: Option<&ClaimRefHead>,
+    prior: Option<&ClaimRefHead>,
 ) -> Result<(), CommandFailure> {
+    if !prior.is_some_and(|head| head.record.state == "released") {
+        return Ok(());
+    }
     Err(CommandFailure::diagnostic(
         "predecessor heartbeat retirement requires Linux pidfd ownership",
     ))
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    fn predecessor(state: &str) -> ClaimRefHead {
+        ClaimRefHead {
+            oid: "oid".to_string(),
+            generation: "generation".to_string(),
+            record: RunStateRecord::new(
+                "owner/repo",
+                42,
+                "worker-a",
+                state,
+                "feat/worker-a",
+                "",
+                state,
+                Vec::new(),
+                "2026-08-13T00:00:00Z",
+                "2026-08-13T00:00:00Z",
+                300,
+            )
+            .with_claim_id("claim-a"),
+        }
+    }
+
+    #[test]
+    fn fresh_acquisition_without_predecessor_needs_no_linux_retirement() {
+        retire("owner/repo", 42, None).expect("fresh acquisition has nothing to retire");
+    }
+
+    #[test]
+    fn released_predecessor_requires_linux_pidfd_retirement() {
+        let prior = predecessor("released");
+
+        let error = retire("owner/repo", 42, Some(&prior))
+            .expect_err("released predecessor retirement must fail closed");
+
+        assert_eq!(
+            error.message,
+            "predecessor heartbeat retirement requires Linux pidfd ownership"
+        );
+    }
 }

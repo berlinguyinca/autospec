@@ -1,6 +1,6 @@
 // executor_bridge tests: strict semantic reviewer verdicts and schema-5 receipts.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_invocation::{implementation_proof_fixture, reviewer_request};
 use autospec_core::autonomous::review_policy::{classify_review_requirements, ReviewPolicyInput};
 use std::fs;

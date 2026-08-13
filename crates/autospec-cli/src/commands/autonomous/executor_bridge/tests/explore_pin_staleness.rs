@@ -6,7 +6,7 @@
 // permanent condition every cycle and the repository stayed wedged with no actionable signal --
 // on autotrade a month-old pin from a dry run blocked every conductor for hours.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::GitFixture;
 use std::collections::BTreeMap;
 use std::fs;

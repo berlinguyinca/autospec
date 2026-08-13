@@ -4,7 +4,7 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{anchored_startup_heartbeat_fixture, assert_mode, drift_heartbeat_at, expected_startup_heartbeat, expired_heartbeat_snapshot, heartbeat_copy_path, heartbeat_handoff_count, startup_heartbeat_fixture, write_new_heartbeat_at};
 
 #[cfg(unix)]

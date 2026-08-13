@@ -3,13 +3,15 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more than
 // one test module builds on, so they are `pub(super)` rather than private.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     resolve_base, BridgeIdentity, BridgePhase, ExecutorBridgeRequest, HarnessInvocation,
     HarnessKind, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
     SupervisionConfig,
 };
-use super::support_base::{git, git_stdout, DetachedForkedCleanup, GitFixture, TEST_SEQUENCE};
+#[cfg(target_os = "linux")]
+use super::support_base::DetachedForkedCleanup;
+use super::support_base::{git, git_stdout, GitFixture, TEST_SEQUENCE};
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]

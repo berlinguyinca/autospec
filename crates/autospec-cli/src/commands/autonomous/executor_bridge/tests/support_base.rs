@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more than
 // one test module builds on, so they are `pub(super)` rather than private.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, PersistedInvocation, ProcessIdentity};
 use super::support_invocation::supervision_state;
 use std::collections::BTreeMap;
@@ -340,12 +340,15 @@ pub(super) fn observe_spawned_identity(pid: u32, args: &[String]) -> ProcessIden
 
 pub(super) fn test_root(label: &str) -> PathBuf {
     let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "autospec-autonomous-executor-bridge-{label}-{}-{sequence}",
-        std::process::id()
-    ));
+    let root = std::env::current_dir()
+        .expect("current executor bridge test directory")
+        .join("target/executor-bridge-tests")
+        .join(format!(
+            "autospec-autonomous-executor-bridge-{label}-{}-{sequence}",
+            std::process::id()
+        ));
     fs::create_dir_all(&root).expect("create executor bridge test root");
-    root
+    fs::canonicalize(root).expect("canonical executor bridge test root")
 }
 
 pub(super) fn write_alias_table(root: &Path, body: &str) -> PathBuf {

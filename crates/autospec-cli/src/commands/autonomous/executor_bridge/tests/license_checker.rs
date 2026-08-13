@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as bridge;
+use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::{GitFixture, git, git_stdout, test_environment, write_executable};
 use super::support_launch::completed_generation_bundle;
 use std::collections::BTreeMap;

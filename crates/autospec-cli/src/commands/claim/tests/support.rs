@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
-use super::super as claim;
+use crate::commands::claim;
 
 pub(super) static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
 

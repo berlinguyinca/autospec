@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{
     assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
     startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,

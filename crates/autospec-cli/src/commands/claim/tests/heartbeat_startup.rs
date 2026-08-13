@@ -5,7 +5,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use super::super as claim;
+use crate::commands::claim;
 use super::support::{STARTUP_HEARTBEAT_ENV, inject_heartbeat_boundary, startup_heartbeat_fixture};
 
 #[cfg(target_os = "linux")]

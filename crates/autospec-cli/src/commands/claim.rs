@@ -7410,5 +7410,5 @@ use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,
     server_lease_is_stale,
 };
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests;
