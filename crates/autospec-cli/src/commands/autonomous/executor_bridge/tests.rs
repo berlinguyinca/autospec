@@ -27,6 +27,7 @@ mod continuation_event;
 mod descendant_spawn;
 mod dispatcher_temporary;
 mod draft_release;
+mod explore_pin_staleness;
 mod full_suite;
 mod generation_input;
 mod harness_death;
