@@ -5747,22 +5747,50 @@ fn process_identity(pid: &str) -> Option<ProcessIdentity> {
         });
     }
 
-    let output = Command::new("ps")
-        .args(["-o", "pgid=,lstart=", "-p", pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(target_os = "macos")]
+    {
+        let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
+        let mut process = unsafe { std::mem::zeroed::<nix::libc::proc_bsdinfo>() };
+        let process_size = std::mem::size_of::<nix::libc::proc_bsdinfo>();
+        if unsafe {
+            nix::libc::proc_pidinfo(
+                pid,
+                nix::libc::PROC_PIDTBSDINFO,
+                0,
+                &mut process as *mut _ as *mut _,
+                i32::try_from(process_size).ok()?,
+            )
+        } != i32::try_from(process_size).ok()?
+        {
+            return None;
+        }
+        let seconds = process.pbi_start_tvsec.checked_mul(1_000_000)?;
+        let start_time_ticks = seconds.checked_add(process.pbi_start_tvusec)?;
+        return (start_time_ticks > 0).then_some(ProcessIdentity {
+            pgid: i32::try_from(process.pbi_pgid).ok()?,
+            start_time_ticks,
+        });
     }
-    let line = String::from_utf8(output.stdout).ok()?;
-    let mut fields = line.split_whitespace();
-    let pgid = fields.next()?.parse().ok()?;
-    let started = fields.collect::<Vec<_>>().join(" ");
-    let digest = sha256_hex(started.as_bytes());
-    Some(ProcessIdentity {
-        pgid,
-        start_time_ticks: u64::from_str_radix(digest.get(..16)?, 16).ok()?,
-    })
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let output = Command::new("ps")
+            .args(["-o", "pgid=,lstart=", "-p", pid])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let line = String::from_utf8(output.stdout).ok()?;
+        let mut fields = line.split_whitespace();
+        let pgid = fields.next()?.parse().ok()?;
+        let started = fields.collect::<Vec<_>>().join(" ");
+        let digest = sha256_hex(started.as_bytes());
+        Some(ProcessIdentity {
+            pgid,
+            start_time_ticks: u64::from_str_radix(digest.get(..16)?, 16).ok()?,
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]

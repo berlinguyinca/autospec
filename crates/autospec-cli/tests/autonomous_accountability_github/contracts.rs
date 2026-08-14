@@ -50,6 +50,10 @@ fn autonomous_resume_dry_run_is_strictly_read_only() {
     fixture.record_immediate_stop();
     fixture.install_closed_epic();
     let mut conductor = fixture.install_running_conductor();
+    assert_authoritative_conductor_metadata(
+        &fixture.scope().join("conductor.pid"),
+        conductor.id(),
+    );
     let stop_before = fs::read_to_string(fixture.stop_flag()).expect("read stop flag");
     let files_before = snapshot_tree(&fixture.root);
 
@@ -64,6 +68,20 @@ fn autonomous_resume_dry_run_is_strictly_read_only() {
     let issue_after = fs::read_to_string(fixture.issue_state()).unwrap();
     let gh_was_called = fixture.gh_calls().exists();
     let launch_was_written = fixture.scope().join("launch.json").exists();
+
+    let resumed = fixture
+        .command("resume")
+        .args(["--epic", "12", "--json"])
+        .output()
+        .expect("resume after preview");
+    let mut conductor_terminated = false;
+    for _ in 0..100 {
+        if conductor.try_wait().unwrap().is_some() {
+            conductor_terminated = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     fixture.stop_spawned_run();
     let _ = conductor.kill();
@@ -86,6 +104,16 @@ fn autonomous_resume_dry_run_is_strictly_read_only() {
     assert_eq!(
         files_after, files_before,
         "dry-run must not write run state"
+    );
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        conductor_terminated,
+        "non-preview resume must recognize and terminate the owned conductor group"
     );
 }
 
@@ -245,12 +273,15 @@ esac
             .process_group(0)
             .spawn()
             .unwrap();
+        let identity = native_process_identity(conductor.id()).expect("capture conductor identity");
         fs::create_dir_all(self.scope()).unwrap();
         fs::write(
             self.scope().join("conductor.pid"),
             format!(
-                "{{\"pid\":{},\"repo\":\"acme/widgets\",\"scope\":\"acme_widgets\"}}\n",
-                conductor.id()
+                "{{\"pid\":{},\"repo\":\"acme/widgets\",\"scope\":\"acme_widgets\",\"pgid\":{},\"start_time_ticks\":{}}}\n",
+                conductor.id(),
+                identity.pgid,
+                identity.start_time_ticks,
             ),
         )
         .unwrap();
@@ -300,6 +331,67 @@ fn snapshot_tree(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     let mut snapshot = BTreeMap::new();
     visit(root, root, &mut snapshot);
     snapshot
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Eq, PartialEq)]
+struct NativeProcessIdentity {
+    pgid: u32,
+    start_time_ticks: u64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_authoritative_conductor_metadata(path: &Path, pid: u32) {
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("read conductor metadata"))
+            .expect("parse conductor metadata");
+    let observed = native_process_identity(pid).expect("capture live conductor identity");
+    assert_eq!(metadata["pid"], pid);
+    assert_eq!(metadata["pgid"], observed.pgid);
+    assert_eq!(metadata["start_time_ticks"], observed.start_time_ticks);
+}
+
+#[cfg(target_os = "linux")]
+fn native_process_identity(pid: u32) -> Option<NativeProcessIdentity> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let fields = fields.split_whitespace().collect::<Vec<_>>();
+    let pgid = u32::try_from(nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(
+        i32::try_from(pid).ok()?,
+    )))
+    .ok()?
+    .as_raw())
+    .ok()?;
+    Some(NativeProcessIdentity {
+        pgid,
+        start_time_ticks: fields.get(19)?.parse().ok()?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn native_process_identity(pid: u32) -> Option<NativeProcessIdentity> {
+    let mut process = unsafe { std::mem::zeroed::<nix::libc::proc_bsdinfo>() };
+    let process_size = std::mem::size_of::<nix::libc::proc_bsdinfo>();
+    if unsafe {
+        nix::libc::proc_pidinfo(
+            i32::try_from(pid).ok()?,
+            nix::libc::PROC_PIDTBSDINFO,
+            0,
+            &mut process as *mut _ as *mut _,
+            i32::try_from(process_size).ok()?,
+        )
+    } != i32::try_from(process_size).ok()?
+    {
+        return None;
+    }
+    let start_time_ticks = process
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(process.pbi_start_tvusec)?;
+    Some(NativeProcessIdentity {
+        pgid: process.pbi_pgid,
+        start_time_ticks,
+    })
 }
 
 #[test]
