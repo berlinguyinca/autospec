@@ -5,6 +5,7 @@ use autospec_core::claim::{parse_remote_comments_json, parse_run_state_comment, 
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -185,7 +186,7 @@ fn launch_modes_reject_non_start_subcommands_before_mutation() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn restart_dry_run_is_strictly_read_only() {
     let fixture = ForegroundFixture::new();
     git_fixture(&fixture.repo_dir, &["init", "-q"]);
@@ -7520,6 +7521,7 @@ impl Drop for ForegroundFixture {
 
 static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(path).expect("read fixture tree") {

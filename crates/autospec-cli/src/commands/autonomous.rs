@@ -5738,13 +5738,14 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
 
 fn process_identity(pid: &str) -> Option<ProcessIdentity> {
     #[cfg(target_os = "linux")]
-    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+    {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let (_, fields) = stat.rsplit_once(") ")?;
         let fields = fields.split_whitespace().collect::<Vec<_>>();
-        return Some(ProcessIdentity {
+        Some(ProcessIdentity {
             pgid: fields.get(2)?.parse().ok()?,
             start_time_ticks: fields.get(19)?.parse().ok()?,
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]

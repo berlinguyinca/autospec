@@ -1,7 +1,10 @@
 use super::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeMap;
 #[cfg(unix)]
-use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+use std::os::unix::fs::PermissionsExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -44,7 +47,7 @@ fn resume_rejects_force_before_touching_a_stopped_run() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn autonomous_resume_dry_run_is_strictly_read_only() {
     let fixture = CliResumeFixture::new("resume-dry-run");
     fixture.record_immediate_stop();
@@ -261,7 +264,7 @@ esac
         fs::set_permissions(gh, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn install_running_conductor(&self) -> std::process::Child {
         let bin = self.root.join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -312,6 +315,7 @@ impl Drop for CliResumeFixture {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn snapshot_tree(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(path).unwrap() {
