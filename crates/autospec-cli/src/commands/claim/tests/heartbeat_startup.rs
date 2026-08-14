@@ -2,13 +2,15 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+#[cfg(target_os = "linux")]
+use super::support::inject_heartbeat_boundary;
+use super::support::{startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV};
+use crate::commands::claim;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use crate::commands::claim;
-use super::support::{STARTUP_HEARTBEAT_ENV, inject_heartbeat_boundary, startup_heartbeat_fixture};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn startup_heartbeat_atomic_publication() {
     use claim::HeartbeatPublicationDurability::{Durable, Unconfirmed};
@@ -193,20 +195,25 @@ fn startup_heartbeat_atomic_publication() {
         )
     };
     assert!(attempt(43, "session-b", prepared, ("session", "before-link")).is_err());
-    assert!(
-        !repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists()
-    );
+    assert!(!repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists());
 
     std::fs::remove_file(&issue).unwrap();
     let transaction_umask = umask(Mode::from_bits_truncate(0o777));
     write().unwrap();
     umask(transaction_umask);
-    assert_eq!(
-        [&issue, &session]
-            .map(|path| { std::fs::metadata(path).unwrap().permissions().mode() & 0o7777 }),
-        [0o600; 2]
-    );
     let expected = std::fs::read(&issue).unwrap();
+    for path in [&issue, &session] {
+        let stored = std::fs::read(path).unwrap();
+        assert!(claim::same_startup_heartbeat_generation(
+            &stored,
+            expected.as_slice()
+        ));
+        assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o600);
+        assert!(!std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
     let mut stable_drift: serde_json::Value = serde_json::from_slice(&expected).unwrap();
     stable_drift["nonce"] = "foreign-generation".into();
     let stable_drift = serde_json::to_vec(&stable_drift).unwrap();
@@ -383,9 +390,7 @@ fn startup_heartbeat_restrictive_umask() {
         }
         Ok(())
     };
-    assert!(
-        claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err()
-    );
+    assert!(claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err());
     assert!(
         parent.is_dir(),
         "published parent remains pending durability"
@@ -417,7 +422,7 @@ fn startup_heartbeat_restrictive_umask() {
         .contains("could not remove staged heartbeat root parent"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn retryable_release_requires_exact_heartbeat_evidence() {
     let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
