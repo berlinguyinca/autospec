@@ -13257,11 +13257,10 @@ fn remove_exact_owned_worktree(
         &["worktree", "list", "--porcelain"],
     )?;
     if !state.identity.worktree.exists() {
-        let expected_path = format!("worktree {}", state.identity.worktree.display());
         let expected_branch = format!("branch refs/heads/{}", state.identity.branch);
         let matching = registry
             .split("\n\n")
-            .filter(|block| block.lines().any(|line| line == expected_path))
+            .filter(|block| worktree_block_matches_path(block, &state.identity.worktree))
             .collect::<Vec<_>>();
         if matching.len() > 1 {
             return Err("executor worktree registration is ambiguous".to_string());
@@ -13303,8 +13302,8 @@ fn remove_exact_owned_worktree(
                 &["worktree", "list", "--porcelain"],
             )?;
             if after
-                .lines()
-                .any(|line| line == format!("worktree {}", state.identity.worktree.display()))
+                .split("\n\n")
+                .any(|block| worktree_block_matches_path(block, &state.identity.worktree))
             {
                 return Err("prunable executor worktree registration survived removal".to_string());
             }
@@ -13326,9 +13325,7 @@ fn remove_exact_owned_worktree(
     let matches = registry
         .split("\n\n")
         .filter(|block| {
-            block
-                .lines()
-                .any(|line| line == format!("worktree {}", canonical.display()))
+            worktree_block_matches_path(block, &canonical)
                 && block.lines().any(|line| line == expected_branch)
         })
         .count();
@@ -20439,18 +20436,11 @@ fn provision_issue_worktree_for_claim(
                 "executor branch already exists outside the expected worktree: {branch}"
             ));
         }
-        git(
+        git_with_path(
             &canonical_repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                &branch,
-                path.to_str()
-                    .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-                &base.base_oid,
-            ],
+            &["worktree", "add", "--quiet", "-b", &branch],
+            &path,
+            &[&base.base_oid],
         )?;
         record_worktree_creation_identity(&canonical_repo, &branch, base)?;
         validate_existing_worktree(&canonical_repo, &path, &branch, &scope_root, base)?;
@@ -20598,7 +20588,6 @@ fn reclaim_prunable_zero_effect_branch(
 
     let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
     let blocks = registry.split("\n\n").collect::<Vec<_>>();
-    let expected_path = format!("worktree {}", path.display());
     let expected_branch = format!("branch {branch_ref}");
     let expected_head = format!("HEAD {local_head}");
     if path.exists() {
@@ -20608,14 +20597,14 @@ fn reclaim_prunable_zero_effect_branch(
         let matching_registrations = blocks
             .iter()
             .filter(|block| {
-                block.lines().any(|line| line == expected_path)
+                worktree_block_matches_path(block, path)
                     || block.lines().any(|line| line == expected_branch)
             })
             .count();
         let exact_live = blocks
             .iter()
             .filter(|block| {
-                block.lines().any(|line| line == expected_path)
+                worktree_block_matches_path(block, path)
                     && block.lines().any(|line| line == expected_branch)
                     && block.lines().any(|line| line == expected_head)
                     && !block.lines().any(|line| line.starts_with("prunable "))
@@ -20657,7 +20646,7 @@ fn reclaim_prunable_zero_effect_branch(
     let exact_prunable = prunable
         .iter()
         .filter(|block| {
-            block.lines().any(|line| line == expected_path)
+            worktree_block_matches_path(block, path)
                 && block.lines().any(|line| line == expected_branch)
                 && block.lines().any(|line| line == expected_head)
         })
@@ -20665,7 +20654,7 @@ fn reclaim_prunable_zero_effect_branch(
     let matching_registrations = blocks
         .iter()
         .filter(|block| {
-            block.lines().any(|line| line == expected_path)
+            worktree_block_matches_path(block, path)
                 || block.lines().any(|line| line == expected_branch)
         })
         .count();
@@ -20692,21 +20681,13 @@ fn reclaim_prunable_zero_effect_branch(
     }
 
     if exact_prunable == 1 {
-        git(
-            repo,
-            &[
-                "worktree",
-                "remove",
-                path.to_str()
-                    .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-            ],
-        )?;
+        git_with_path(repo, &["worktree", "remove"], path, &[])?;
     }
     let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
-    if registry
-        .lines()
-        .any(|line| line == expected_path || line == expected_branch)
-    {
+    if registry.split("\n\n").any(|block| {
+        worktree_block_matches_path(block, path)
+            || block.lines().any(|line| line == expected_branch)
+    }) {
         return Err("executor prunable registration survived exact removal".to_string());
     }
     if git_stdout(
@@ -20717,17 +20698,7 @@ fn reclaim_prunable_zero_effect_branch(
         return Err("executor prunable branch changed during registration removal".to_string());
     }
     fail_prunable_reclaim(1, "after registration removal")?;
-    git(
-        repo,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            path.to_str()
-                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-            branch,
-        ],
-    )?;
+    git_with_path(repo, &["worktree", "add", "--quiet"], path, &[branch])?;
     fail_prunable_reclaim(2, "after worktree reattachment")?;
     clear_worktree_repair_intent(&intent_path, scope_root)?;
     Ok(true)
@@ -21136,8 +21107,7 @@ fn exact_prunable_zero_effect_completion(
                 .any(|line| line == "prunable gitdir file points to non-existent location")
         })
         .collect::<Vec<_>>();
-    let expected = format!("worktree {}", state.identity.worktree.display());
-    Ok(prunable.len() == 1 && prunable[0].lines().any(|line| line == expected.as_str()))
+    Ok(prunable.len() == 1 && worktree_block_matches_path(prunable[0], &state.identity.worktree))
 }
 
 fn zero_effect_recovery_marker_path(state_path: &Path) -> PathBuf {
@@ -21562,10 +21532,9 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
                 .any(|line| line == "prunable gitdir file points to non-existent location")
         })
         .collect::<Vec<_>>();
-    let expected = format!("worktree {}", state.identity.worktree.display());
     let expected_prunable = prunable
         .iter()
-        .any(|block| block.lines().any(|line| line == expected));
+        .any(|block| worktree_block_matches_path(block, &state.identity.worktree));
     if !intent_path.exists() {
         if prunable.len() != 1 || !expected_prunable {
             return Err(
@@ -21580,7 +21549,7 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
     } else if !expected_prunable {
         let expected_branch = format!("branch {branch_ref}");
         if registry.split("\n\n").any(|block| {
-            block.lines().any(|line| line == expected)
+            worktree_block_matches_path(block, &state.identity.worktree)
                 || block.lines().any(|line| line == expected_branch)
         }) {
             return Err(
@@ -21600,19 +21569,11 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
     if WORKTREE_REPAIR_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
         return Err("injected executor worktree repair crash after prune".to_string());
     }
-    git(
+    git_with_path(
         &repo,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            state
-                .identity
-                .worktree
-                .to_str()
-                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-            &state.identity.branch,
-        ],
+        &["worktree", "add", "--quiet"],
+        &state.identity.worktree,
+        &[&state.identity.branch],
     )?;
     validate_repaired_worktree(state, &repo, scope_root)?;
     clear_worktree_repair_intent(&intent_path, scope_root)?;
@@ -22695,19 +22656,11 @@ fn recreate_missing_post_ci_worktree(
         "executor post-CI worktree recreation intent",
     )?;
     clear_exact_prunable_registration(repo, state, head)?;
-    git(
+    git_with_path(
         repo,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            state
-                .identity
-                .worktree
-                .to_str()
-                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-            &state.identity.branch,
-        ],
+        &["worktree", "add", "--quiet"],
+        &state.identity.worktree,
+        &[&state.identity.branch],
     )?;
     validate_recovery_worktree(
         repo,
@@ -22802,16 +22755,16 @@ fn clear_exact_prunable_registration(
     head: &str,
 ) -> Result<(), String> {
     let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
-    let path_line = format!("worktree {}", state.identity.worktree.display());
     let branch_line = format!("branch refs/heads/{}", state.identity.branch);
     let mut matching = registry.split("\n\n").filter(|block| {
-        block.lines().any(|line| line == path_line) || block.lines().any(|line| line == branch_line)
+        worktree_block_matches_path(block, &state.identity.worktree)
+            || block.lines().any(|line| line == branch_line)
     });
     let Some(block) = matching.next() else {
         return Ok(());
     };
     if matching.next().is_some()
-        || !block.lines().any(|line| line == path_line)
+        || !worktree_block_matches_path(block, &state.identity.worktree)
         || !block.lines().any(|line| line == branch_line)
         || !block.lines().any(|line| line == format!("HEAD {head}"))
         || !block.lines().any(|line| line.starts_with("prunable "))
@@ -22820,18 +22773,11 @@ fn clear_exact_prunable_registration(
             "executor post-CI recovery worktree registration is not exact and prunable".to_string(),
         );
     }
-    git(
+    git_with_path(
         repo,
-        &[
-            "worktree",
-            "remove",
-            "--force",
-            state
-                .identity
-                .worktree
-                .to_str()
-                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
-        ],
+        &["worktree", "remove", "--force"],
+        &state.identity.worktree,
+        &[],
     )
 }
 
@@ -22925,12 +22871,8 @@ fn validate_recovery_creation_identity(
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let args = args
-        .iter()
-        .map(|argument| normalize_git_argument(argument))
-        .collect::<Vec<_>>();
     let output = Command::new("git")
-        .args(args.iter().map(|argument| argument.as_ref()))
+        .args(args)
         .current_dir(repo)
         .output()
         .map_err(|error| format!("run git {args:?}: {error}"))?;
@@ -22952,12 +22894,8 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let args = args
-        .iter()
-        .map(|argument| normalize_git_argument(argument))
-        .collect::<Vec<_>>();
     let output = Command::new("git")
-        .args(args.iter().map(|argument| argument.as_ref()))
+        .args(args)
         .current_dir(repo)
         .output()
         .map_err(|error| format!("run git {args:?}: {error}"))?;

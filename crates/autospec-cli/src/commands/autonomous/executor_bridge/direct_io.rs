@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::Path;
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
@@ -16,6 +17,48 @@ pub(super) fn normalize_git_argument(argument: &str) -> std::borrow::Cow<'_, str
         }
     }
     std::borrow::Cow::Borrowed(argument)
+}
+
+pub(super) fn git_with_path(
+    repo: &Path,
+    before: &[&str],
+    path: &Path,
+    after: &[&str],
+) -> Result<(), String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?;
+    let path = normalize_git_argument(path);
+    let args = before
+        .iter()
+        .copied()
+        .chain(std::iter::once(path.as_ref()))
+        .chain(after.iter().copied())
+        .collect::<Vec<_>>();
+    super::git(repo, &args)
+}
+
+pub(super) fn worktree_block_matches_path(block: &str, expected: &Path) -> bool {
+    block
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|observed| worktree_path_matches(observed, expected))
+}
+
+fn worktree_path_matches(observed: &str, expected: &Path) -> bool {
+    if std::fs::canonicalize(observed).is_ok_and(|canonical| canonical == expected) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let expected = expected.to_string_lossy();
+        let expected = normalize_git_argument(expected.as_ref()).replace('/', "\\");
+        return observed.replace('/', "\\").eq_ignore_ascii_case(&expected);
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(observed) == expected
+    }
 }
 
 pub(super) fn read_exact_at_portable(
