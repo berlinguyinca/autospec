@@ -15,6 +15,7 @@ fn windows_rename_buffer_includes_the_complete_abi_header_and_utf16_name() {
         buffer.len(),
         std::mem::size_of::<WindowsFileRenameInfo>()
             + destination.len() * std::mem::size_of::<u16>()
+            + std::mem::size_of::<u16>()
     );
     let info = buffer.as_ptr().cast::<WindowsFileRenameInfo>();
     // SAFETY: the builder returned an initialized header followed by the encoded name.
@@ -29,6 +30,7 @@ fn windows_rename_buffer_includes_the_complete_abi_header_and_utf16_name() {
             std::slice::from_raw_parts((*info).file_name.as_ptr(), destination.len()),
             destination
         );
+        assert_eq!(*(*info).file_name.as_ptr().add(destination.len()), 0);
     }
 }
 

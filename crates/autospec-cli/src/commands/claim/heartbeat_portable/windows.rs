@@ -6,6 +6,8 @@ pub(super) const WINDOWS_DELETE: u32 = 0x0001_0000;
 #[cfg(windows)]
 pub(super) const WINDOWS_FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
 #[cfg(windows)]
+pub(super) const WINDOWS_FILE_TRAVERSE: u32 = 0x0000_0020;
+#[cfg(windows)]
 pub(super) const WINDOWS_FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 #[cfg(windows)]
 pub(super) const WINDOWS_GENERIC_READ: u32 = 0x8000_0000;
@@ -43,7 +45,10 @@ pub(super) fn open_windows_directory(path: &Path) -> std::io::Result<fs::File> {
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
-            WINDOWS_FILE_LIST_DIRECTORY | WINDOWS_FILE_READ_ATTRIBUTES | WINDOWS_SYNCHRONIZE,
+            WINDOWS_FILE_LIST_DIRECTORY
+                | WINDOWS_FILE_TRAVERSE
+                | WINDOWS_FILE_READ_ATTRIBUTES
+                | WINDOWS_SYNCHRONIZE,
             FILE_SHARE_ALL,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -202,6 +207,13 @@ unsafe extern "system" {
         ea_buffer: *mut std::ffi::c_void,
         ea_length: u32,
     ) -> i32;
+    fn NtSetInformationFile(
+        file_handle: std::os::windows::io::RawHandle,
+        io_status_block: *mut WindowsIoStatusBlock,
+        file_information: *mut std::ffi::c_void,
+        length: u32,
+        file_information_class: u32,
+    ) -> i32;
     fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
@@ -225,17 +237,25 @@ pub(super) fn rename_windows_file_handle(
         .collect::<Vec<_>>();
     let mut buffer =
         build_windows_file_rename_info_buffer(directory.as_raw_handle().cast(), &destination)?;
-    // SAFETY: file and directory are live handles and buffer contains FILE_RENAME_INFO.
-    if unsafe {
-        SetFileInformationByHandle(
+    let mut status_block = WindowsIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    // SAFETY: file and directory are live handles and buffer contains
+    // FILE_RENAME_INFORMATION with a NUL-terminated name backing its byte-counted payload.
+    let status = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle(),
-            3,
+            &mut status_block,
             buffer.as_mut_ptr().cast(),
             buffer.len() as u32,
+            10,
         )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
+    };
+    if status < 0 {
+        // SAFETY: conversion is a pure mapping from the returned NTSTATUS.
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        Err(std::io::Error::from_raw_os_error(error as i32))
     } else {
         Ok(())
     }
@@ -286,7 +306,7 @@ pub(super) fn build_windows_file_rename_info_buffer(
             )
         })?;
     let header_size = std::mem::size_of::<WindowsFileRenameInfo>();
-    let mut buffer = vec![0_u8; header_size + name_bytes as usize];
+    let mut buffer = vec![0_u8; header_size + name_bytes as usize + std::mem::size_of::<u16>()];
     let info = buffer.as_mut_ptr().cast::<WindowsFileRenameInfo>();
     // SAFETY: buffer is sized for the fixed header plus the complete UTF-16 name.
     unsafe {
