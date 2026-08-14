@@ -22,3 +22,5 @@ if [ "$1" = issue ] && [ "${2:-}" = view ] && [ "${3:-}" = 999 ]; then
   jq -n --rawfile body "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" '{number:999,url:"https://github.com/test/repo/issues/999",state:"OPEN",body:$body,labels:[{name:"epic"},{name:"type:tracker"},{name:"no-auto"},{name:"autospec:run-accountability"}]}'
   exit 0
 fi
+if [ "$1" = issue ] && [ "${2:-}" = close ] && [ "${3:-}" = 999 ]; then exit 0; fi
+if [ "$1" = issue ] && [ "${2:-}" = reopen ] && [ "${3:-}" = 999 ]; then exit 0; fi

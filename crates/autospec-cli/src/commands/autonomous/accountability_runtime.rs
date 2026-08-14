@@ -78,7 +78,7 @@ pub(super) fn bind_accountability_epic(
             ResumePolicy::ActiveOnly
         },
         project_number: accountability_project_number(),
-        adopted_lease_generation: Some(lease.generation()),
+        adopted_lease_generation: lease.accountability_predecessor_generation(),
     };
     let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
         .map_err(resilience_lease_error)?;

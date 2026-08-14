@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/autonomous_accountability_acquisition.rs"] mod autonomous_accountability_acquisition;
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -6468,8 +6469,7 @@ exit 1
         let remote = self.root.join("bridge-origin.git");
         git_fixture(&self.root, &["init", "--bare", remote.to_str().unwrap()]);
         git_fixture(&self.repo_dir, &["init", "-b", "main"]);
-        fs::write(self.repo_dir.join(".git/info/exclude"), ".autospec/\n")
-            .expect("ignore bridge evidence artifacts");
+        autonomous_accountability_acquisition::write_git_exclude(&self.repo_dir);
         git_fixture(
             &self.repo_dir,
             &["config", "user.name", "Autospec Bridge Test"],
