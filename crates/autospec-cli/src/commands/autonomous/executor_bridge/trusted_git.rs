@@ -12,7 +12,9 @@
 
 use super::*;
 
+mod hook_directory;
 mod signing_program;
+use hook_directory::resolve_hooks_directory;
 use signing_program::resolve_signing_program;
 
 #[derive(Debug)]
@@ -141,16 +143,17 @@ pub(super) fn trusted_worktree_git_paths(
     } else {
         binding.worktree.join(hooks)
     };
-    let hooks = fs::canonicalize(hooks)
-        .map_err(|error| format!("canonicalize executor Git hook directory: {error}"))?;
+    let (hooks, hooks_exist) = resolve_hooks_directory(&hooks)?;
     if !test_primary && hooks.starts_with(&binding.worktree) {
         return Err(
             "executor Git hook directory is writable by the sandboxed implementer".to_string(),
         );
     }
-    for entry in fs::read_dir(&hooks)
-        .map_err(|error| format!("inventory executor Git hook directory: {error}"))?
-    {
+    let entries = hooks_exist
+        .then(|| fs::read_dir(&hooks))
+        .transpose()
+        .map_err(|error| format!("inventory executor Git hook directory: {error}"))?;
+    for entry in entries.into_iter().flatten() {
         let hook = entry.map_err(|error| format!("inventory executor Git hook entry: {error}"))?;
         let file_type = hook
             .file_type()
