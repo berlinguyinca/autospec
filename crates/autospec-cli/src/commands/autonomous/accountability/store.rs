@@ -11,13 +11,39 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 const STATE_FILE: &str = "accountability.json";
 const EVENTS_FILE: &str = "accountability-events.jsonl";
 const OUTBOX_FILE: &str = "accountability-outbox.jsonl";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryState {
+    Active,
+    Parked,
+    Terminal,
+}
+
+impl RecoveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Parked => "parked",
+            Self::Terminal => "terminal",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, AccountabilityError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "parked" => Ok(Self::Parked),
+            "terminal" => Ok(Self::Terminal),
+            _ => Err(AccountabilityError::new("invalid recovery state")),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryManifest {
@@ -28,6 +54,9 @@ pub struct RecoveryManifest {
     pub remote_digest: String,
     pub high_watermark: u64,
     pub journal_segment: u64,
+    pub recovery_state: RecoveryState,
+    pub linked_issues: Vec<u64>,
+    pub linked_pull_requests: Vec<u64>,
 }
 
 impl RecoveryManifest {
@@ -53,10 +82,7 @@ impl RecoveryManifest {
                 "recovery manifest digest must be SHA-256",
             ));
         }
-        let epic_url = match Evidence::github_url(epic_url)? {
-            Evidence::GithubUrl(url) => url,
-            _ => unreachable!(),
-        };
+        let epic_url = validate_epic_url(&identity, epic_number, epic_url.as_ref())?;
         Ok(Self {
             identity,
             epic_number,
@@ -65,17 +91,47 @@ impl RecoveryManifest {
             remote_digest: remote_digest.to_ascii_lowercase(),
             high_watermark,
             journal_segment,
+            recovery_state: RecoveryState::Active,
+            linked_issues: Vec::new(),
+            linked_pull_requests: Vec::new(),
         })
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(&json!({
+    pub fn with_recovery_state(
+        mut self,
+        recovery_state: RecoveryState,
+        linked_issues: Vec<u64>,
+        linked_pull_requests: Vec<u64>,
+    ) -> Result<Self, AccountabilityError> {
+        validate_links(&linked_issues)?;
+        validate_links(&linked_pull_requests)?;
+        self.recovery_state = recovery_state;
+        self.linked_issues = linked_issues;
+        self.linked_pull_requests = linked_pull_requests;
+        Ok(self)
+    }
+
+    fn unsigned_value(&self) -> Value {
+        json!({
             "schema":ACCOUNTABILITY_SCHEMA, "identity":self.identity.to_value(),
             "epic_number":self.epic_number, "epic_url":self.epic_url,
             "projection_revision":self.projection_revision, "remote_digest":self.remote_digest,
             "high_watermark":self.high_watermark, "journal_segment":self.journal_segment,
-        }))
-        .expect("JSON value serializes")
+            "recovery_state":self.recovery_state.as_str(), "linked_issues":self.linked_issues,
+            "linked_pull_requests":self.linked_pull_requests,
+        })
+    }
+
+    pub fn to_json(&self) -> String {
+        let value = self.unsigned_value();
+        let digest = sha256_hex(
+            serde_json::to_string(&value)
+                .expect("JSON value serializes")
+                .as_bytes(),
+        );
+        let mut object = value.as_object().expect("manifest is object").clone();
+        object.insert("manifest_digest".to_owned(), json!(digest));
+        serde_json::to_string(&object).expect("JSON value serializes")
     }
 
     pub fn parse(document: &str) -> Result<Self, AccountabilityError> {
@@ -88,7 +144,7 @@ impl RecoveryManifest {
                 "unsupported recovery manifest schema",
             ));
         }
-        Self::new(
+        let manifest = Self::new(
             RunIdentity::from_value(super::required(object, "identity")?)?,
             super::unsigned(object, "epic_number")?,
             super::string(object, "epic_url")?,
@@ -96,7 +152,23 @@ impl RecoveryManifest {
             super::string(object, "remote_digest")?,
             super::unsigned(object, "high_watermark")?,
             super::unsigned(object, "journal_segment")?,
-        )
+        )?
+        .with_recovery_state(
+            RecoveryState::parse(super::string(object, "recovery_state")?)?,
+            parse_links(super::required(object, "linked_issues")?)?,
+            parse_links(super::required(object, "linked_pull_requests")?)?,
+        )?;
+        let expected = sha256_hex(
+            serde_json::to_string(&manifest.unsigned_value())
+                .expect("JSON value serializes")
+                .as_bytes(),
+        );
+        if super::string(object, "manifest_digest")? != expected {
+            return Err(AccountabilityError::new(
+                "recovery manifest integrity digest mismatch",
+            ));
+        }
+        Ok(manifest)
     }
 
     pub fn parse_for_repository(
@@ -125,6 +197,7 @@ pub struct AccountabilityStatus {
     pub acknowledged_high_watermark: u64,
     pub journal_segment: u64,
     pub prior_remote_digest: Option<String>,
+    pub segment_chain_digest: String,
 }
 
 #[derive(Default)]
@@ -141,6 +214,8 @@ struct State {
     pending_projection_count: u64,
     journal_segment: u64,
     prior_remote_digest: Option<String>,
+    segment_chain_digest: String,
+    create_attempted: bool,
 }
 
 pub struct AccountabilityStore {
@@ -157,11 +232,19 @@ impl AccountabilityStore {
             reject_unsafe_file(&root.join(name))?;
         }
         let mut state = if root.join(STATE_FILE).exists() {
-            parse_state(&fs::read_to_string(root.join(STATE_FILE)).map_err(io_error)?)?
+            parse_state(&read_private_file(&root.join(STATE_FILE))?)?
         } else {
             State::default()
         };
-        let events = recover_events(&root.join(EVENTS_FILE), state.launch.as_ref())?;
+        enforce_cross_file_invariants(&root, &state)?;
+        reconcile_outbox(&root, &mut state)?;
+        let segment_base = state.last_seq.saturating_sub(state.event_count);
+        let events = recover_events(
+            &root.join(EVENTS_FILE),
+            state.launch.as_ref(),
+            &state.segment_chain_digest,
+            segment_base,
+        )?;
         if let Some(last) = events.last() {
             state.last_seq = last.seq;
             state.event_count = events.len() as u64;
@@ -193,6 +276,13 @@ impl AccountabilityStore {
         }
         self.state.launch = Some(launch);
         self.state.journal_segment = 1;
+        self.state.segment_chain_digest = sha256_hex(
+            format!(
+                "{}\0segment\01",
+                self.state.launch.as_ref().unwrap().identity.run_id()
+            )
+            .as_bytes(),
+        );
         ensure_private_file(&self.path(EVENTS_FILE))?;
         ensure_private_file(&self.path(OUTBOX_FILE))?;
         self.persist_state()
@@ -218,8 +308,22 @@ impl AccountabilityStore {
         self.state.desired_high_watermark = manifest.high_watermark;
         self.state.acknowledged_high_watermark = manifest.high_watermark;
         self.state.last_seq = manifest.high_watermark;
-        self.state.journal_segment = manifest.journal_segment + 1;
-        self.state.prior_remote_digest = Some(manifest.remote_digest);
+        self.state.journal_segment = manifest
+            .journal_segment
+            .checked_add(1)
+            .ok_or_else(|| AccountabilityError::new("journal segment overflow"))?;
+        self.state.prior_remote_digest = Some(manifest.remote_digest.clone());
+        self.state.segment_chain_digest = sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}",
+                manifest.identity.run_id(),
+                self.state.prior_remote_digest.as_deref().unwrap(),
+                manifest.high_watermark,
+                self.state.journal_segment
+            )
+            .as_bytes(),
+        );
+        self.state.create_attempted = true;
         ensure_private_file(&self.path(EVENTS_FILE))?;
         ensure_private_file(&self.path(OUTBOX_FILE))?;
         self.persist_state()?;
@@ -241,8 +345,17 @@ impl AccountabilityStore {
             self.state.launch.as_ref().ok_or_else(|| {
                 AccountabilityError::new("begin_launch is required before events")
             })?;
-        let seq = self.state.last_seq + 1;
-        let record = EventRecord::create(launch.identity.run_id(), seq, event);
+        let seq = self
+            .state
+            .last_seq
+            .checked_add(1)
+            .ok_or_else(|| AccountabilityError::new("event sequence overflow"))?;
+        let record = EventRecord::create(
+            launch.identity.run_id(),
+            &self.state.segment_chain_digest,
+            seq,
+            event,
+        );
         append_synced_line(&self.path(EVENTS_FILE), &record.to_value())?;
         self.events.push(record.clone());
         self.state.last_seq = seq;
@@ -263,7 +376,11 @@ impl AccountabilityStore {
             ));
         }
         let digest = sha256_hex(markdown.as_bytes());
-        let revision = self.state.projection_revision + 1;
+        let revision = self
+            .state
+            .projection_revision
+            .checked_add(1)
+            .ok_or_else(|| AccountabilityError::new("projection revision overflow"))?;
         let desired_high_watermark = self.state.last_seq;
         let projection = RenderedProjection {
             revision,
@@ -306,10 +423,10 @@ impl AccountabilityStore {
                 "projection acknowledgment does not match the desired projection",
             ));
         }
-        atomic_write(&self.path(OUTBOX_FILE), b"")?;
         self.state.acknowledged_high_watermark = high_watermark;
         self.state.pending_projection_count = 0;
-        self.persist_state()
+        self.persist_state()?;
+        atomic_write(&self.path(OUTBOX_FILE), b"")
     }
 
     pub fn status(&self) -> AccountabilityStatus {
@@ -328,7 +445,53 @@ impl AccountabilityStore {
             acknowledged_high_watermark: self.state.acknowledged_high_watermark,
             journal_segment: self.state.journal_segment,
             prior_remote_digest: self.state.prior_remote_digest.clone(),
+            segment_chain_digest: self.state.segment_chain_digest.clone(),
         }
+    }
+
+    pub fn identity(&self) -> Option<&RunIdentity> {
+        self.state.launch.as_ref().map(|launch| &launch.identity)
+    }
+
+    pub fn create_attempted(&self) -> bool {
+        self.state.create_attempted
+    }
+
+    pub fn mark_create_attempted(&mut self) -> Result<(), AccountabilityError> {
+        if self.state.launch.is_none() {
+            return Err(AccountabilityError::new(
+                "begin_launch is required before remote creation",
+            ));
+        }
+        self.state.create_attempted = true;
+        self.persist_state()
+    }
+
+    pub fn bind_epic(
+        &mut self,
+        epic_number: u64,
+        epic_url: impl AsRef<str>,
+    ) -> Result<(), AccountabilityError> {
+        if epic_number == 0 || self.state.launch.is_none() {
+            return Err(AccountabilityError::new(
+                "a positive epic and launch identity are required",
+            ));
+        }
+        let epic_url = match Evidence::github_url(epic_url)? {
+            Evidence::GithubUrl(url) => url,
+            _ => unreachable!(),
+        };
+        if let Some(existing) = self.state.epic_number {
+            if existing != epic_number || self.state.epic_url.as_deref() != Some(&epic_url) {
+                return Err(AccountabilityError::new(
+                    "accountability store is already bound to a different epic",
+                ));
+            }
+            return Ok(());
+        }
+        self.state.epic_number = Some(epic_number);
+        self.state.epic_url = Some(epic_url);
+        self.persist_state()
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -348,6 +511,8 @@ impl AccountabilityStore {
             "pending_projection_count":self.state.pending_projection_count,
             "journal_segment":self.state.journal_segment,
             "prior_remote_digest":self.state.prior_remote_digest,
+            "segment_chain_digest":self.state.segment_chain_digest,
+            "create_attempted":self.state.create_attempted,
         }))
         .expect("JSON value serializes");
         atomic_write(&self.path(STATE_FILE), &document)
@@ -390,21 +555,135 @@ fn parse_state(document: &str) -> Result<State, AccountabilityError> {
         pending_projection_count: number("pending_projection_count")?,
         journal_segment: number("journal_segment")?,
         prior_remote_digest: optional_string("prior_remote_digest"),
+        segment_chain_digest: optional_string("segment_chain_digest").unwrap_or_default(),
+        create_attempted: object
+            .get("create_attempted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
+}
+
+fn validate_links(values: &[u64]) -> Result<(), AccountabilityError> {
+    if values.contains(&0) || values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(AccountabilityError::new(
+            "linked identifiers must be positive, sorted, and unique",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_links(value: &Value) -> Result<Vec<u64>, AccountabilityError> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| AccountabilityError::new("linked identifiers must be an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| AccountabilityError::new("linked identifier must be unsigned"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_links(&values)?;
+    Ok(values)
+}
+
+fn validate_epic_url(
+    identity: &RunIdentity,
+    epic_number: u64,
+    value: &str,
+) -> Result<String, AccountabilityError> {
+    let expected = format!(
+        "https://github.com/{}/issues/{epic_number}",
+        identity.repository().as_str()
+    );
+    if value != expected {
+        return Err(AccountabilityError::new(
+            "epic URL must exactly match the manifest repository and issue number",
+        ));
+    }
+    Ok(expected)
+}
+
+fn enforce_cross_file_invariants(root: &Path, state: &State) -> Result<(), AccountabilityError> {
+    if state.launch.is_some() {
+        if !root.join(EVENTS_FILE).is_file() || !root.join(OUTBOX_FILE).is_file() {
+            return Err(AccountabilityError::new(
+                "accountability metadata requires both journal and outbox files",
+            ));
+        }
+        if state.journal_segment == 0 || state.segment_chain_digest.len() != 64 {
+            return Err(AccountabilityError::new(
+                "invalid journal segment chain metadata",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_outbox(root: &Path, state: &mut State) -> Result<(), AccountabilityError> {
+    if state.launch.is_none() {
+        return Ok(());
+    }
+    let path = root.join(OUTBOX_FILE);
+    let document = read_private_file(&path)?;
+    if document.is_empty() {
+        if state.pending_projection_count > 0 {
+            return Err(AccountabilityError::new(
+                "pending projection metadata has no durable outbox record",
+            ));
+        }
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(document.trim_end())
+        .map_err(|error| AccountabilityError::new(format!("invalid projection outbox: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| AccountabilityError::new("projection outbox must be an object"))?;
+    let revision = super::unsigned(object, "revision")?;
+    let digest = super::string(object, "digest")?;
+    let high_watermark = super::unsigned(object, "desired_high_watermark")?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AccountabilityError::new(
+            "projection outbox digest is invalid",
+        ));
+    }
+    if state.pending_projection_count == 0
+        && state.projection_revision == revision
+        && state.acknowledged_high_watermark >= high_watermark
+    {
+        atomic_write(&path, b"")?;
+    } else if revision > state.projection_revision && state.pending_projection_count == 0 {
+        state.projection_revision = revision;
+        state.desired_digest = Some(digest.to_owned());
+        state.desired_high_watermark = high_watermark;
+        state.pending_projection_count = 1;
+    } else if state.pending_projection_count != 1
+        || state.projection_revision != revision
+        || state.desired_digest.as_deref() != Some(digest)
+        || state.desired_high_watermark != high_watermark
+    {
+        return Err(AccountabilityError::new(
+            "projection outbox and metadata disagree",
+        ));
+    }
+    Ok(())
 }
 
 fn recover_events(
     path: &Path,
     launch: Option<&LaunchDescriptor>,
+    segment_chain_digest: &str,
+    segment_base: u64,
 ) -> Result<Vec<EventRecord>, AccountabilityError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let mut file = OpenOptions::new()
+    let mut file = private_options()
         .read(true)
         .write(true)
         .open(path)
         .map_err(io_error)?;
+    validate_open_file(&file)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(io_error)?;
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -427,7 +706,7 @@ fn recover_events(
         ));
     };
     let mut records = Vec::new();
-    let mut prior = 0;
+    let mut prior = segment_base;
     for line in bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -435,8 +714,13 @@ fn recover_events(
         let value: Value = serde_json::from_slice(line).map_err(|error| {
             AccountabilityError::new(format!("invalid completed event line: {error}"))
         })?;
-        let record = EventRecord::from_value(launch.identity.run_id(), &value)?;
-        if record.seq != prior + 1 && prior != 0 {
+        let record =
+            EventRecord::from_value(launch.identity.run_id(), segment_chain_digest, &value)?;
+        if record.seq
+            != prior
+                .checked_add(1)
+                .ok_or_else(|| AccountabilityError::new("event sequence overflow"))?
+        {
             return Err(AccountabilityError::new(
                 "event journal sequence is not monotonic",
             ));
@@ -454,6 +738,7 @@ fn append_synced_line(path: &Path, value: &Value) -> Result<(), AccountabilityEr
         .create(true)
         .open(path)
         .map_err(io_error)?;
+    validate_open_file(&file)?;
     serde_json::to_writer(&mut file, value)
         .map_err(|error| AccountabilityError::new(error.to_string()))?;
     file.write_all(b"\n").map_err(io_error)?;
@@ -469,6 +754,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), AccountabilityError>
         .create_new(true)
         .open(&temporary)
         .map_err(io_error)?;
+    validate_open_file(&file)?;
     if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
         let _ = fs::remove_file(&temporary);
         return Err(io_error(error));
@@ -494,6 +780,13 @@ fn ensure_private_directory(path: &Path) -> Result<(), AccountabilityError> {
             ));
         }
     } else {
+        #[cfg(unix)]
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .map_err(io_error)?;
+        #[cfg(not(unix))]
         fs::create_dir_all(path).map_err(io_error)?;
     }
     #[cfg(unix)]
@@ -503,11 +796,12 @@ fn ensure_private_directory(path: &Path) -> Result<(), AccountabilityError> {
 
 fn ensure_private_file(path: &Path) -> Result<(), AccountabilityError> {
     reject_unsafe_file(path)?;
-    private_options()
+    let file = private_options()
         .create(true)
         .append(true)
         .open(path)
         .map_err(io_error)?;
+    validate_open_file(&file)?;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
     Ok(())
@@ -521,6 +815,12 @@ fn reject_unsafe_file(path: &Path) -> Result<(), AccountabilityError> {
             ));
         }
         validate_owner(&metadata)?;
+        #[cfg(unix)]
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(AccountabilityError::new(
+                "accountability file permissions must be 0600",
+            ));
+        }
     }
     Ok(())
 }
@@ -543,8 +843,35 @@ fn validate_owner(_metadata: &fs::Metadata) -> Result<(), AccountabilityError> {
 fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
-    options.mode(0o600);
     options
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    options
+}
+
+fn read_private_file(path: &Path) -> Result<String, AccountabilityError> {
+    let mut file = private_options().read(true).open(path).map_err(io_error)?;
+    validate_open_file(&file)?;
+    let mut document = String::new();
+    file.read_to_string(&mut document).map_err(io_error)?;
+    Ok(document)
+}
+
+fn validate_open_file(file: &File) -> Result<(), AccountabilityError> {
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(AccountabilityError::new(
+            "accountability descriptor is not a regular file",
+        ));
+    }
+    validate_owner(&metadata)?;
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(AccountabilityError::new(
+            "accountability descriptor permissions must be 0600",
+        ));
+    }
+    Ok(())
 }
 
 fn io_error(error: std::io::Error) -> AccountabilityError {

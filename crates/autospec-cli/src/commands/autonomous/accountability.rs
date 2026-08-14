@@ -2,13 +2,15 @@ use autospec_core::autonomous::waterfall::sha256_hex;
 use serde_json::{json, Value};
 use std::fmt;
 
+#[path = "accountability/github.rs"]
+pub mod github;
 #[path = "accountability/render.rs"]
 mod render;
 #[path = "accountability/store.rs"]
 mod store;
 
 #[allow(unused_imports)]
-pub use store::{AccountabilityStatus, AccountabilityStore, RecoveryManifest};
+pub use store::{AccountabilityStatus, AccountabilityStore, RecoveryManifest, RecoveryState};
 
 pub const ACCOUNTABILITY_SCHEMA: u64 = 1;
 
@@ -108,6 +110,14 @@ impl RunIdentity {
 
     pub fn repository(&self) -> &RepositoryIdentity {
         &self.repository
+    }
+
+    pub fn run_nonce(&self) -> &str {
+        self.nonce.as_str()
+    }
+
+    pub fn lease_generation(&self) -> u64 {
+        self.lease_generation.get()
     }
 
     fn to_value(&self) -> Value {
@@ -375,7 +385,7 @@ impl AccountabilityEvent {
         why: impl Into<String>,
         evidence: Vec<Evidence>,
     ) -> Result<Self, AccountabilityError> {
-        if evidence.is_empty() {
+        if evidence.is_empty() || evidence.len() > 8 {
             return Err(AccountabilityError::new("event evidence is mandatory"));
         }
         Ok(Self {
@@ -414,31 +424,49 @@ impl AccountabilityEvent {
 pub struct EventRecord {
     pub seq: u64,
     pub event_id: String,
+    pub segment_chain_digest: String,
     pub kind: EventKind,
     pub event: AccountabilityEvent,
 }
 
 impl EventRecord {
-    fn create(run_id: &str, seq: u64, event: AccountabilityEvent) -> Self {
+    fn create(
+        run_id: &str,
+        segment_chain_digest: &str,
+        seq: u64,
+        event: AccountabilityEvent,
+    ) -> Self {
         let canonical = serde_json::to_string(&event.to_value()).expect("JSON value serializes");
-        let event_id = sha256_hex(format!("{run_id}\0{seq}\0{canonical}").as_bytes());
+        let event_id =
+            sha256_hex(format!("{run_id}\0{segment_chain_digest}\0{seq}\0{canonical}").as_bytes());
         Self {
             seq,
             event_id,
+            segment_chain_digest: segment_chain_digest.to_owned(),
             kind: event.kind.clone(),
             event,
         }
     }
 
     fn to_value(&self) -> Value {
-        json!({"seq":self.seq,"event_id":self.event_id,"event":self.event.to_value()})
+        json!({"seq":self.seq,"event_id":self.event_id,"segment_chain_digest":self.segment_chain_digest,"event":self.event.to_value()})
     }
 
-    fn from_value(run_id: &str, value: &Value) -> Result<Self, AccountabilityError> {
+    fn from_value(
+        run_id: &str,
+        expected_chain: &str,
+        value: &Value,
+    ) -> Result<Self, AccountabilityError> {
         let object = object(value, "event record")?;
         let seq = unsigned(object, "seq")?;
         let event = AccountabilityEvent::from_value(required(object, "event")?)?;
-        let record = Self::create(run_id, seq, event);
+        let chain = string(object, "segment_chain_digest")?;
+        if chain != expected_chain {
+            return Err(AccountabilityError::new(
+                "event journal segment chain mismatch",
+            ));
+        }
+        let record = Self::create(run_id, chain, seq, event);
         if string(object, "event_id")? != record.event_id {
             return Err(AccountabilityError::new("event ID digest mismatch"));
         }
@@ -481,9 +509,33 @@ fn validate_summary(value: String, field: &str) -> Result<String, Accountability
 
 fn sanitize_text(value: &str, limit: usize) -> String {
     let mut output = String::with_capacity(value.len().min(limit));
+    let mut redact_next = false;
     for token in value.split_whitespace() {
-        let secret = token.starts_with("ghp_")
+        let lower = token.to_ascii_lowercase();
+        let credential_assignment = [
+            "github_token=",
+            "token=",
+            "password=",
+            "api_key=",
+            "apikey=",
+            "secret=",
+        ]
+        .iter()
+        .any(|key| lower.starts_with(key));
+        let secret = redact_next
+            || lower == "bearer"
+            || token.starts_with("ghp_")
             || token.starts_with("github_pat_")
+            || lower.starts_with("xoxb-")
+            || lower.starts_with("xoxp-")
+            || lower.starts_with("glpat-")
+            || lower.starts_with("sk-")
+            || credential_assignment
+            || lower == "private"
+            || lower == "key"
+            || lower.contains("private") && lower.contains("key")
+            || lower.contains("-----begin")
+            || lower.contains("-----end")
             || (token.starts_with("AKIA") && token.len() >= 20)
             || token.starts_with('/')
             || token.contains("%%{")
@@ -491,8 +543,9 @@ fn sanitize_text(value: &str, limit: usize) -> String {
             || token.contains("-->")
             || token.to_ascii_lowercase().contains("<script");
         let token = if secret { "[redacted]" } else { token };
+        redact_next = lower == "bearer";
         for character in token.chars() {
-            if output.len() >= limit {
+            if output.len() + character.len_utf8() > limit {
                 break;
             }
             if !character.is_control()

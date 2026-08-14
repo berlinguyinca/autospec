@@ -103,6 +103,10 @@ impl ConductorLease {
         &self.token
     }
 
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn from_store(store: &ResilienceStore, token: String, generation: u64) -> Self {
         Self {
             token,

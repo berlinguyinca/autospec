@@ -17,12 +17,7 @@ pub(super) fn markdown(launch: &LaunchDescriptor, events: &[EventRecord]) -> Str
     body.push_str(&timeline(events));
     body.push_str(&deliverables(events));
     body.push_str(&risks(events));
-    if body.len() > MAX_MARKDOWN_BYTES {
-        body.truncate(MAX_MARKDOWN_BYTES);
-        while !body.is_char_boundary(body.len()) {
-            body.pop();
-        }
-    }
+    debug_assert!(body.len() <= MAX_MARKDOWN_BYTES);
     body
 }
 
@@ -89,7 +84,39 @@ fn timeline(events: &[EventRecord]) -> String {
 
 fn deliverables(events: &[EventRecord]) -> String {
     let mut values = Vec::new();
-    for record in events {
+    let deliverable_count = events
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.kind,
+                EventKind::IssueClaimed { .. }
+                    | EventKind::PullRequestOpened { .. }
+                    | EventKind::Merged { .. }
+            )
+        })
+        .count();
+    let omitted = deliverable_count.saturating_sub(MAX_WORK_NODES);
+    if omitted > 0 {
+        values.push(format!(
+            "- {omitted} older deliverables remain in the private journal"
+        ));
+    }
+    for record in events
+        .iter()
+        .rev()
+        .filter(|record| {
+            matches!(
+                record.kind,
+                EventKind::IssueClaimed { .. }
+                    | EventKind::PullRequestOpened { .. }
+                    | EventKind::Merged { .. }
+            )
+        })
+        .take(MAX_WORK_NODES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         match record.kind {
             EventKind::IssueClaimed { issue } => values.push(format!("- Issue #{issue}: claimed")),
             EventKind::PullRequestOpened { pull_request } => {
@@ -146,7 +173,7 @@ fn evidence(event: &AccountabilityEvent) -> String {
 }
 
 fn sentence(value: &str) -> String {
-    let value = sanitize_text(value, 720);
+    let value = sanitize_text(value, 320);
     if value.ends_with(['.', '!', '?']) {
         value
     } else {

@@ -4,7 +4,7 @@ mod accountability;
 
 use accountability::{
     AccountabilityEvent, AccountabilityStore, EventKind, Evidence, LaunchDescriptor,
-    LeaseGeneration, RecoveryManifest, RepositoryIdentity, RunIdentity, RunNonce,
+    LeaseGeneration, RecoveryManifest, RecoveryState, RepositoryIdentity, RunIdentity, RunNonce,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -235,6 +235,81 @@ fn projection_ack_requires_matching_revision_digest_and_high_watermark() {
 }
 
 #[test]
+fn open_reconciles_render_and_ack_crash_boundaries_without_losing_retry_state() {
+    let fixture = Fixture::new("projection-crashes");
+    let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+    store
+        .begin_launch(launch(identity("00112233445566778899aabbccddeeff", 7)))
+        .unwrap();
+    store
+        .append_event(event(EventKind::RunStarted, "one"))
+        .unwrap();
+    let projection = store.render().unwrap();
+    drop(store);
+
+    let state_path = fixture.path().join("accountability.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state["projection_revision"] = serde_json::json!(0);
+    state["desired_digest"] = serde_json::Value::Null;
+    state["desired_high_watermark"] = serde_json::json!(0);
+    state["pending_projection_count"] = serde_json::json!(0);
+    write_private(&state_path, serde_json::to_vec(&state).unwrap());
+    let mut recovered = AccountabilityStore::open(fixture.path()).unwrap();
+    assert_eq!(recovered.status().pending_projection_count, 1);
+    assert_eq!(recovered.status().projection_revision, projection.revision);
+
+    recovered
+        .ack_projection(projection.revision, &projection.digest, 1)
+        .unwrap();
+    write_private(
+        &fixture.path().join("accountability-outbox.jsonl"),
+        format!(
+            "{{\"revision\":{},\"digest\":\"{}\",\"desired_high_watermark\":1}}\n",
+            projection.revision, projection.digest
+        )
+        .into_bytes(),
+    );
+    drop(recovered);
+    let reconciled = AccountabilityStore::open(fixture.path()).unwrap();
+    assert_eq!(reconciled.status().pending_projection_count, 0);
+    assert_eq!(
+        fs::metadata(fixture.path().join("accountability-outbox.jsonl"))
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn missing_required_journal_or_outbox_fails_closed() {
+    let fixture = Fixture::new("missing-journal");
+    let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+    store
+        .begin_launch(launch(identity("00112233445566778899aabbccddeeff", 7)))
+        .unwrap();
+    store
+        .append_event(event(EventKind::RunStarted, "one"))
+        .unwrap();
+    drop(store);
+    fs::remove_file(fixture.path().join("accountability-events.jsonl")).unwrap();
+    assert!(AccountabilityStore::open(fixture.path()).is_err());
+
+    let fixture = Fixture::new("missing-outbox");
+    let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+    store
+        .begin_launch(launch(identity("00112233445566778899aabbccddeeff", 7)))
+        .unwrap();
+    store
+        .append_event(event(EventKind::RunStarted, "one"))
+        .unwrap();
+    store.render().unwrap();
+    drop(store);
+    fs::remove_file(fixture.path().join("accountability-outbox.jsonl")).unwrap();
+    assert!(AccountabilityStore::open(fixture.path()).is_err());
+}
+
+#[test]
 fn renderer_is_bounded_and_aggregates_after_twenty_five_work_nodes() {
     let fixture = Fixture::new("bounded-render");
     let mut store = AccountabilityStore::open(fixture.path()).unwrap();
@@ -309,6 +384,46 @@ fn sanitizer_excludes_secret_shaped_text_paths_and_markdown_breakouts() {
 }
 
 #[test]
+fn sanitizer_redacts_common_credentials_and_large_unicode_input_stays_structural() {
+    let fixture = Fixture::new("credential-unicode");
+    let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+    store
+        .begin_launch(launch(identity("00112233445566778899aabbccddeeff", 7)))
+        .unwrap();
+    let secrets = "Bearer abcdefghijklmnop GITHUB_TOKEN=secret xoxb-1234567890 glpat-abcdef sk-proj-abcdef -----BEGIN PRIVATE KEY-----";
+    for issue in 1..=200 {
+        store
+            .append_event(
+                AccountabilityEvent::new(
+                    EventKind::IssueClaimed { issue },
+                    format!("{} {}", "🧪".repeat(800), secrets),
+                    format!("Unicode-safe rationale {}", "界".repeat(800)),
+                    vec![Evidence::outcome(format!(
+                        "proof {secrets} {}",
+                        "é".repeat(800)
+                    ))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let body = store.render().unwrap().markdown;
+    assert!(body.len() <= 48 * 1024);
+    assert_eq!(body.matches("```mermaid").count(), 2);
+    assert!(body.ends_with(".\n"));
+    for secret in [
+        "abcdefghijklmnop",
+        "GITHUB_TOKEN=secret",
+        "xoxb-",
+        "glpat-",
+        "sk-proj-",
+        "PRIVATE KEY",
+    ] {
+        assert!(!body.contains(secret), "leaked {secret}");
+    }
+}
+
+#[test]
 fn comprehension_fixture_renders_two_diagrams_and_what_why_evidence_paragraphs() {
     let fixture = Fixture::new("comprehension");
     let mut store = AccountabilityStore::open(fixture.path()).unwrap();
@@ -373,6 +488,9 @@ fn recovery_manifest_is_typed_versioned_and_rejects_tampering() {
         3,
     )
     .unwrap();
+    let manifest = manifest
+        .with_recovery_state(RecoveryState::Parked, vec![21, 22], vec![44])
+        .unwrap();
     let encoded = manifest.to_json();
     let decoded = RecoveryManifest::parse(&encoded).unwrap();
 
@@ -383,6 +501,20 @@ fn recovery_manifest_is_typed_versioned_and_rejects_tampering() {
     assert!(RecoveryManifest::parse_for_repository(
         &wrong_repository,
         &RepositoryIdentity::parse("acme/widgets").unwrap()
+    )
+    .is_err());
+    assert!(RecoveryManifest::parse(
+        &encoded.replace("\"linked_issues\":[21,22]", "\"linked_issues\":[22,21]")
+    )
+    .is_err());
+    assert!(RecoveryManifest::new(
+        identity("00112233445566778899aabbccddeeff", 7),
+        3135,
+        "https://github.com/acme/other/issues/3135",
+        9,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        27,
+        3
     )
     .is_err());
 }
@@ -423,6 +555,36 @@ fn resume_reconstructs_a_chained_segment_and_records_the_source_epic() {
     let line = fs::read_to_string(fixture.path().join("accountability-events.jsonl")).unwrap();
     assert!(line.contains("resumed_from_epic"));
     assert!(line.contains("\"epic\":3135"));
+    assert!(line.contains("\"segment_chain_digest\""));
+
+    drop(store);
+    let reopened = AccountabilityStore::open(fixture.path()).unwrap();
+    assert_eq!(reopened.status().segment_chain_digest.len(), 64);
+}
+
+#[test]
+fn checked_counters_reject_overflow_during_resume_and_append() {
+    let fixture = Fixture::new("counter-overflow");
+    let manifest = RecoveryManifest::new(
+        identity("00112233445566778899aabbccddeeff", 7),
+        3135,
+        "https://github.com/acme/widgets/issues/3135",
+        u64::MAX,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap();
+    let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+    assert!(store
+        .resume_from_manifest(manifest, "Resume", "Recover safely")
+        .is_err());
+}
+
+fn write_private(path: &Path, bytes: Vec<u8>) {
+    fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 use std::io::Write;
