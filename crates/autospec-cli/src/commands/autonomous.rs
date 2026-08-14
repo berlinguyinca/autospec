@@ -283,7 +283,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match options.subcommand.as_str() {
         "start" => start(options, launch_mode),
         "restart" => restart(options),
-        "resume" => start(options, LaunchMode::Detached),
+        "resume" => restart(options),
         "status" => status(options),
         "monitor" => monitor(options).map_err(CommandFailure::diagnostic),
         "supervise" => supervise(options).map_err(CommandFailure::diagnostic),
@@ -785,13 +785,13 @@ fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
         );
     }
     if options.follow && options.json {
-        return Err(
-            "--json is not supported with --follow; use autospec autonomous status --json"
-                .to_string(),
-        );
+        return Err("--json is not supported with --follow; use autospec autonomous status --json".to_string());
     }
     if options.subcommand == "resume" && options.epic.is_none() {
         return Err("autospec autonomous resume requires --epic N".to_string());
+    }
+    if options.subcommand == "resume" && options.force {
+        return Err("--force is not valid with resume".to_string());
     }
     if options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume") {
         return Err("--epic is valid only with autospec autonomous start or resume".to_string());
@@ -1720,7 +1720,6 @@ fn stop(options: Options) -> Result<(), String> {
     }
     Ok(())
 }
-
 fn restart(options: Options) -> Result<(), CommandFailure> {
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
@@ -1784,7 +1783,8 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     };
     if stop_options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"restart\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"{}\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            json_escape(&stop_options.subcommand),
             json_escape(&options.repo),
             stopped,
             json_escape(&binding.run_id),
@@ -1795,7 +1795,7 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
             unit_json(&supervisor)
         );
     } else {
-        println!("autospec autonomous restarted");
+        println!("autospec autonomous {} completed", stop_options.subcommand);
         println!("accountability epic: {}", binding.url);
     }
     Ok(())
