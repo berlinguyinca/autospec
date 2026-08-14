@@ -999,41 +999,6 @@ pub(crate) fn legacy_bridge_proves_claim(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_executor_bridge(
-    request: &ExecutorBridgeRequest,
-) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    run_executor_bridge_observed(request, |_| Ok(()))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BridgeLifecycleBoundary {
-    PullRequestOpened { pull_request: u64 },
-    ReviewStarted { pull_request: u64 },
-    Verified { pull_request: u64 },
-    Merged { pull_request: u64 },
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn run_executor_bridge_observed(
-    request: &ExecutorBridgeRequest,
-    mut observe: impl FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
-) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    run_executor_bridge_with_codex_probe_observed(
-        request,
-        preflight_codex_sandbox,
-        &mut observe,
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn run_executor_bridge_with_codex_probe(
-    request: &ExecutorBridgeRequest,
-    codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
-) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    run_executor_bridge_with_codex_probe_observed(request, codex_probe, &mut |_| Ok(()))
-}
-
-#[cfg(target_os = "linux")]
 fn run_executor_bridge_with_codex_probe_observed(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
@@ -1501,23 +1466,7 @@ fn run_executor_bridge_with_codex_probe_observed(
             &remote,
         )?;
     }
-    let review_pull_request = state
-        .pr
-        .ok_or_else(|| "executor review path has no pull request".to_string())?;
-    observe(BridgeLifecycleBoundary::PullRequestOpened {
-        pull_request: review_pull_request,
-    })
-    .map_err(|error| {
-        BridgeRunFailure::invariant(format!(
-            "accountability pull-request boundary rejected: {error}"
-        ))
-    })?;
-    observe(BridgeLifecycleBoundary::ReviewStarted {
-        pull_request: review_pull_request,
-    })
-    .map_err(|error| {
-        BridgeRunFailure::invariant(format!("accountability review boundary rejected: {error}"))
-    })?;
+    let review_pull_request = observe_pull_request_and_review(&state, observe)?;
     let Some(premerge_receipt) = ensure_premerge_and_review(
         request,
         &environment,
@@ -1529,14 +1478,7 @@ fn run_executor_bridge_with_codex_probe_observed(
     else {
         return Ok(pending_bridge_receipt(request)?);
     };
-    observe(BridgeLifecycleBoundary::Verified {
-        pull_request: review_pull_request,
-    })
-    .map_err(|error| {
-        BridgeRunFailure::invariant(format!(
-            "accountability verification boundary rejected: {error}"
-        ))
-    })?;
+    observe_verified(review_pull_request, observe)?;
     if state.phase == BridgePhase::ReviewPassed {
         originate_and_accept_executor_result(
             &request.state_path,
@@ -1564,9 +1506,7 @@ fn run_executor_bridge_with_codex_probe_observed(
     let pull_request = state
         .pr
         .ok_or_else(|| "executor merged state has no pull request".to_string())?;
-    observe(BridgeLifecycleBoundary::Merged { pull_request }).map_err(|error| {
-        BridgeRunFailure::invariant(format!("accountability merge boundary rejected: {error}"))
-    })?;
+    observe_merged(pull_request, observe)?;
     let head_oid = state
         .head_oid
         .clone()
@@ -23065,6 +23005,9 @@ mod base_fetch;
 // Trusted git binding and hook containment for untrusted executor code.
 mod trusted_git;
 use trusted_git::*;
+
+mod accountability_lifecycle;
+#[cfg(target_os = "linux")] use accountability_lifecycle::*;
 
 // The continuation checkpoint: preserving a run that outgrew the patch-size gate or met only
 // some of its criteria, and carrying the rest forward as child issues. `use continuation::*`

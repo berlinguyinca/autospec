@@ -3707,18 +3707,6 @@ fn foreground_rejects_unsafe_released_predecessor_heartbeat_root_before_acquire(
     assert_eq!(fs::read_dir(&heartbeat_target).unwrap().count(), 0);
 }
 
-fn seed_preserved_issue_branch(fixture: &ForegroundFixture, branch: &str) {
-    git_fixture(
-        &fixture.repo_dir,
-        &["config", "user.email", "test@example.com"],
-    );
-    git_fixture(&fixture.repo_dir, &["config", "user.name", "Autospec Test"]);
-    fs::write(fixture.repo_dir.join("README.md"), "fixture\n").expect("seed repository");
-    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
-    git_fixture(&fixture.repo_dir, &["commit", "-m", "seed repository"]);
-    git_fixture(&fixture.repo_dir, &["branch", branch]);
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
@@ -4970,18 +4958,8 @@ fn autonomous_health_config_is_isolated_to_its_repository() {
         .output()
         .expect("run default repository");
 
-    assert!(
-        configured_output.status.success(),
-        "configured code={:?} stdout={} stderr={}",
-        configured_output.status.code(),
-        String::from_utf8_lossy(&configured_output.stdout),
-        String::from_utf8_lossy(&configured_output.stderr)
-    );
-    assert!(
-        defaulted_output.status.success(),
-        "defaulted stderr={}",
-        String::from_utf8_lossy(&defaulted_output.stderr)
-    );
+    assert!(configured_output.status.success());
+    assert!(defaulted_output.status.success());
     assert!(fs::read_to_string(&configured.calls)
         .expect("read configured calls")
         .contains("repos/test/repo/branches/master_ai"));
@@ -6191,28 +6169,7 @@ impl ForegroundFixture {
             r####"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_FOREGROUND_CALLS"
-if [ "$1" = api ] && printf '%s\n' "$@" | grep -q 'labels=autospec%3Arun-accountability'; then
-  if [ -s "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" ]; then
-    jq -n --rawfile body "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" '[[{"number":999,"url":"https://api.github.com/repos/test/repo/issues/999","html_url":"https://github.com/test/repo/issues/999","state":"open","body":$body,"labels":[{"name":"epic"},{"name":"type:tracker"},{"name":"no-auto"},{"name":"autospec:run-accountability"}]}]]'
-  else
-    printf '%s\n' '[[]]'
-  fi
-  exit 0
-fi
-if [ "$1" = label ] && [ "${2:-}" = create ]; then exit 0; fi
-if [ "$1" = issue ] && [ "${2:-}" = create ] && printf '%s\n' "$@" | grep -q 'Autonomous run'; then
-  cat > "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY"
-  printf '%s\n' 'https://github.com/test/repo/issues/999'
-  exit 0
-fi
-if [ "$1" = issue ] && [ "${2:-}" = edit ] && [ "${3:-}" = 999 ]; then
-  cat > "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY"
-  exit 0
-fi
-if [ "$1" = issue ] && [ "${2:-}" = view ] && [ "${3:-}" = 999 ]; then
-  jq -n --rawfile body "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" '{number:999,url:"https://github.com/test/repo/issues/999",state:"OPEN",body:$body,labels:[{name:"epic"},{name:"type:tracker"},{name:"no-auto"},{name:"autospec:run-accountability"}]}'
-  exit 0
-fi
+if [ -n "${AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER:-}" ]; then . "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"; fi
 if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
   while :; do sleep 1; done
 fi
@@ -6687,6 +6644,7 @@ printf '%s\n' '[]' > "$report"
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/foreground_accountability_gh.sh"))
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))

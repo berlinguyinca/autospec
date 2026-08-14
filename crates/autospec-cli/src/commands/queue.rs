@@ -21,6 +21,8 @@ use super::lint::{
 };
 use super::CommandFailure;
 
+mod accountability;
+use accountability::{is_accountability_issue, reviewable_issue};
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -246,15 +248,6 @@ fn set_review_limit(
     Ok(())
 }
 
-fn reviewable_issue(issue: &RemoteIssue) -> bool {
-    !issue.closed
-        && issue_has_label(issue, "auto-implement")
-        && !issue_has_label(issue, "needs-classify")
-        && !issue_has_label(issue, "autospec:needs-human")
-        && !issue_has_label(issue, "security:quarantined")
-        && !issue_has_label(issue, "autospec:run-accountability")
-}
-
 fn issue_has_label(issue: &RemoteIssue, label: &str) -> bool {
     issue.labels.iter().any(|current| current == label)
 }
@@ -308,7 +301,7 @@ fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, 
 fn reviewable_pass(issue: &RemoteIssue) -> Result<bool, CommandFailure> {
     Ok(!issue.closed
         && issue_has_label(issue, "auto-implement")
-        && !issue_has_label(issue, "autospec:run-accountability")
+        && !is_accountability_issue(issue)
         && confirm_issue_safety_for_queue(&issue_safety_input(issue))?)
 }
 
@@ -486,7 +479,7 @@ pub(crate) fn ready_plan_for(
     }
     let candidates = list_issues(repo, "auto-implement")?
         .into_iter()
-        .filter(|issue| !issue_has_label(issue, "autospec:run-accountability"))
+        .filter(|issue| !is_accountability_issue(issue))
         .collect::<Vec<_>>();
     active = list_issues(repo, "in-progress-by-bot")?
         .into_iter()
@@ -1203,6 +1196,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
+    include!("queue/accountability_tests.rs");
     use super::{fetch_issue_page_with_retries, reviewable_issue};
     use autospec_core::coordination::parse_remote_issue_page_json;
 
@@ -1234,12 +1228,4 @@ mod tests {
         assert_eq!(error, "still invalid");
     }
 
-    #[test]
-    fn accountability_epic_never_enters_the_implementation_review_queue() {
-        let page = parse_remote_issue_page_json(
-            r#"{"raw_count":1,"items":[{"number":3135,"title":"Run epic","body":"managed","labels":["auto-implement","autospec:run-accountability"],"author":{"login":"autospec"}}]}"#,
-        )
-        .expect("parse issue page");
-        assert!(!reviewable_issue(&page.issues[0]));
-    }
 }

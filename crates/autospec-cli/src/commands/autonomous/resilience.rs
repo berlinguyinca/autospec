@@ -17,6 +17,8 @@ use autospec_core::autonomous_lifecycle::{
 };
 
 mod records;
+mod spawn;
+pub(super) use spawn::{assert_lifecycle_before_spawn, renew_lifecycle};
 
 use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
 
@@ -682,34 +684,6 @@ pub(super) fn admit_owned_lifecycle(
         .map_err(store_error_to_lease_error)
 }
 
-pub(super) fn renew_lifecycle(
-    repo: &str,
-    lease: &ConductorLease,
-) -> Result<(), LifecycleLeaseError> {
-    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
-    renew_lifecycle_store(&store, lease)
-}
-
-pub(super) fn assert_lifecycle_before_spawn(
-    repo: &str,
-    lease: &ConductorLease,
-) -> Result<(), LifecycleLeaseError> {
-    const RETRY_DELAYS: [Duration; 3] = [
-        Duration::from_millis(10),
-        Duration::from_millis(20),
-        Duration::from_millis(40),
-    ];
-    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
-    for delay in RETRY_DELAYS {
-        match store.renew(lease) {
-            Ok(()) => return Ok(()),
-            Err(StoreError::Held) => thread::sleep(delay),
-            Err(error) => return Err(store_error_to_lease_error(error)),
-        }
-    }
-    Err(LifecycleLeaseError::Held)
-}
-
 pub(super) fn start_lifecycle_heartbeat(
     repo: &str,
     lease: &ConductorLease,
@@ -1169,6 +1143,7 @@ fn pid_is_dead(_pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
+    include!("resilience/spawn_tests.rs");
     use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
@@ -1594,41 +1569,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn matching_token_transfers_a_pre_spawn_renewed_lease() {
-        let root = test_root("adopt-pre-spawn-renewed");
-        let store = test_store(&root);
-        let (_, claimed) = match store.acquire(None, 1, 1) {
-            Ok(value) => value,
-            Err(_) => panic!("acquire claimed lease"),
-        };
-        if store.renew(&claimed).is_err() {
-            panic!("epic reconciliation renews before spawn");
-        }
-
-        let before = match store.read_state() {
-            Ok(Some((state, _))) => state,
-            _ => panic!("read renewed state"),
-        };
-        assert_eq!(before.status, "running");
-        let adopted = match store.adopt(&claimed.token) {
-            Ok(lease) => lease,
-            Err(_) => panic!("spawned child must adopt the exact renewed generation"),
-        };
-
-        assert_eq!(adopted.token, claimed.token);
-        assert_eq!(adopted.generation, claimed.generation);
-        let after = match store.read_state() {
-            Ok(Some((state, _))) => state,
-            _ => panic!("read transferred state"),
-        };
-        assert_eq!(after.status, "running");
-        assert_eq!(after.lease_generation, Some(claimed.generation));
-        assert_eq!(after.lock_pid, Some(std::process::id()));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn acquisition_does_not_claim_when_core_policy_parks_or_rejects() {
         let capacity_root = test_root("capacity");
         let capacity = test_store(&capacity_root);
