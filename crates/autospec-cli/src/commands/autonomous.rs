@@ -5434,21 +5434,33 @@ fn read_launch_json(state_dir: &Path) -> String {
 }
 
 fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
+    read_unit_with_process_observer(name, layout, observe_unit_process_identity)
+}
+
+fn read_unit_with_process_observer(
+    name: &str,
+    layout: &RunLayout,
+    observe_identity: impl FnOnce(&str) -> Result<Option<ProcessIdentity>, String>,
+) -> UnitStatus {
     let pid_file = layout.state_dir.join(format!("{name}.pid"));
     let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
     let raw_pid = fs::read_to_string(&pid_file).unwrap_or_default();
     let raw_pid = raw_pid.trim();
     let pid = metadata_pid(raw_pid).unwrap_or_else(|| raw_pid.to_string());
     let recorded_identity = metadata_process_identity(raw_pid);
-    let current_identity = process_identity(&pid);
+    let current_identity = if pid.is_empty() {
+        Ok(None)
+    } else {
+        observe_identity(&pid)
+    };
     let identity_mismatch = recorded_identity
-        .zip(current_identity)
+        .zip(current_identity.as_ref().ok().copied().flatten())
         .is_some_and(|(recorded, current)| recorded != current);
     let logpath = fs::read_to_string(&logpath_file)
         .unwrap_or_default()
         .trim()
         .to_string();
-    let metadata_state = if identity_mismatch {
+    let metadata_state = if current_identity.is_err() || identity_mismatch {
         UnitMetadataState::Ambiguous
     } else if raw_pid.is_empty() {
         if logpath.is_empty() {
@@ -5712,6 +5724,14 @@ fn reap_terminated_child(_pid: &str) -> Result<(), String> {
 }
 
 fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
+    terminate_unit_with_process_observer(name, unit, observe_unit_process_identity)
+}
+
+fn terminate_unit_with_process_observer(
+    name: &str,
+    unit: &UnitStatus,
+    observe_identity: impl FnOnce(&str) -> Result<Option<ProcessIdentity>, String>,
+) -> Result<bool, String> {
     if unit.identity_mismatch {
         return Err(format!(
             "refusing to terminate {name} pid {}: process identity mismatch",
@@ -5731,11 +5751,25 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
             "refusing to terminate {name}: ambiguous scoped process metadata"
         )),
         UnitMetadataState::Live | UnitMetadataState::Stale => {
-            let owned = unit
+            let recorded = unit
                 .recorded_identity
-                .is_some_and(|identity| identity.pgid.to_string() == unit.pid && group_alive)
-                || (unit.recorded_identity.is_none()
-                    && legacy_process_group_matches(name, &unit.pid));
+                .ok_or_else(|| {
+                    format!(
+                        "refusing to terminate {name} pid {}: exact process identity is unavailable",
+                        unit.pid
+                    )
+                })?;
+            let observed = observe_identity(&unit.pid).map_err(|error| {
+                format!(
+                    "refusing to terminate {name} pid {}: ambiguous process identity observation: {error}",
+                    unit.pid
+                )
+            })?;
+            let owned = observed.is_some_and(|observed| {
+                recorded == observed
+                    && recorded.pgid.to_string() == unit.pid
+                    && group_alive
+            });
             if !owned {
                 return Err(format!(
                     "refusing to terminate {name} pid {}: process group ownership is unverified",
@@ -5748,85 +5782,52 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
 }
 
 fn process_identity(pid: &str) -> Option<ProcessIdentity> {
+    observe_unit_process_identity(pid).ok().flatten()
+}
+
+fn observe_unit_process_identity(pid: &str) -> Result<Option<ProcessIdentity>, String> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let birth = platform_process::observe_birth(pid.parse().ok()?)
-            .ok()
-            .flatten()?;
+        let pid = pid
+            .parse::<u32>()
+            .map_err(|_| "autonomous process PID is invalid".to_string())?;
+        let Some(birth) = platform_process::observe_birth(pid)? else {
+            return Ok(None);
+        };
         #[cfg(target_os = "linux")]
-        let start_time_ticks = birth.start_identity.parse().ok()?;
+        let start_time_ticks = birth
+            .start_identity
+            .parse()
+            .map_err(|_| "Linux process start identity is invalid".to_string())?;
         #[cfg(target_os = "macos")]
         let start_time_ticks = {
-            let (seconds, micros) = birth.start_identity.split_once('.')?;
+            let (seconds, micros) = birth
+                .start_identity
+                .split_once('.')
+                .ok_or_else(|| "Darwin process start identity is invalid".to_string())?;
             seconds
                 .parse::<u64>()
-                .ok()?
-                .checked_mul(1_000_000)?
-                .checked_add(micros.parse().ok()?)?
+                .map_err(|_| "Darwin process start seconds are invalid".to_string())?
+                .checked_mul(1_000_000)
+                .and_then(|seconds| {
+                    micros
+                        .parse::<u64>()
+                        .ok()
+                        .and_then(|micros| seconds.checked_add(micros))
+                })
+                .ok_or_else(|| "Darwin process start identity is out of range".to_string())?
         };
-        return Some(ProcessIdentity {
-            pgid: i32::try_from(birth.process_group).ok()?,
+        return Ok(Some(ProcessIdentity {
+            pgid: i32::try_from(birth.process_group)
+                .map_err(|_| "autonomous process group is out of range".to_string())?,
             start_time_ticks,
-        });
+        }));
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
-        None
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
-    let Ok(expected_pgid) = pid.parse::<i32>() else {
-        return false;
-    };
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let member_pid = entry.file_name().to_string_lossy().to_string();
-        process_identity(&member_pid).is_some_and(|identity| identity.pgid == expected_pgid)
-            && read_process_argv(&entry.path().join("cmdline"))
-                .is_some_and(|argv| legacy_unit_argv_matches(name, &argv))
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn read_process_argv(path: &Path) -> Option<Vec<String>> {
-    Some(
-        fs::read(path)
-            .ok()?
-            .split(|byte| *byte == 0)
-            .filter(|argument| !argument.is_empty())
-            .map(|argument| String::from_utf8_lossy(argument).to_string())
-            .collect(),
-    )
-}
-
-#[cfg(not(target_os = "linux"))]
-fn legacy_process_group_matches(_name: &str, _pid: &str) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn legacy_unit_argv_matches(name: &str, argv: &[String]) -> bool {
-    let autospec_program = argv.iter().any(|argument| {
-        Path::new(argument)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| matches!(value, "autospec" | "autospec-autonomous.sh"))
-    });
-    if !autospec_program {
-        return false;
-    }
-    let has_argument = |expected: &str| argv.iter().any(|argument| argument == expected);
-    match name {
-        "conductor" => has_argument("run-foreground"),
-        "monitor" => has_argument("monitor"),
-        "supervisor" => has_argument("supervise") || has_argument("supervisor"),
-        _ => false,
+        Err("autonomous process identity requires Linux or macOS native process APIs".to_string())
     }
 }
 
@@ -7296,6 +7297,76 @@ mod autonomous_metadata_tests {
 
     fn metadata(pid: u32, repo: &str, scope: &str) -> String {
         format!(r#"{{"pid":{pid},"repo":"{repo}","scope":"{scope}"}}"#)
+    }
+
+    fn metadata_with_identity(pid: u32, start_time_ticks: u64) -> String {
+        format!(
+            r#"{{"pid":{pid},"repo":"{REPO}","scope":"{SCOPE}","pgid":{pid},"start_time_ticks":{start_time_ticks}}}"#
+        )
+    }
+
+    fn metadata_layout(label: &str) -> (PathBuf, RunLayout) {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-autonomous-metadata-{label}-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create metadata fixture");
+        let layout = RunLayout {
+            state_dir: root.clone(),
+            log_dir: root.join("logs"),
+            scope: SCOPE.to_string(),
+            repo: REPO.to_string(),
+        };
+        (root, layout)
+    }
+
+    #[test]
+    fn autonomous_process_observation_error_is_ambiguous() {
+        let (root, layout) = metadata_layout("observation-error");
+        let pid = std::process::id();
+        fs::write(
+            layout.state_dir.join("conductor.pid"),
+            metadata_with_identity(pid, 1),
+        )
+        .expect("write unit metadata");
+
+        let unit = read_unit_with_process_observer("conductor", &layout, |_| {
+            Err("injected native observation error".to_string())
+        });
+
+        assert_eq!(unit.metadata_state, UnitMetadataState::Ambiguous);
+        assert!(!unit.running);
+        fs::remove_dir_all(root).expect("remove metadata fixture");
+    }
+
+    #[test]
+    fn autonomous_termination_refuses_ambiguous_birth_observation() {
+        let (root, layout) = metadata_layout("termination-observation-error");
+        let pid = std::process::id();
+        let unit = UnitStatus {
+            pid: pid.to_string(),
+            running: true,
+            stale_pid: false,
+            metadata_only: false,
+            metadata_state: UnitMetadataState::Live,
+            recorded_identity: Some(ProcessIdentity {
+                pgid: i32::try_from(pid).expect("test pid fits i32"),
+                start_time_ticks: 1,
+            }),
+            identity_mismatch: false,
+            pid_file: layout.state_dir.join("conductor.pid"),
+            logpath: String::new(),
+            logpath_file: layout.state_dir.join("conductor.logpath"),
+        };
+
+        let error = terminate_unit_with_process_observer("conductor", &unit, |_| {
+            Err("injected native observation error".to_string())
+        })
+        .expect_err("ambiguous observation must refuse termination");
+
+        assert!(error.contains("injected native observation error"));
+        fs::remove_dir_all(root).expect("remove metadata fixture");
     }
 
     #[test]

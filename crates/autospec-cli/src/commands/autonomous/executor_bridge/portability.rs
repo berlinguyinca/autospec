@@ -151,21 +151,103 @@ mod tests {
 
 #[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 mod autonomous_runtime_support_tests {
-    use crate::commands::autonomous::platform_process::ensure_autonomous_runtime_supported;
+    use crate::commands::autonomous;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    struct Environment {
+        previous: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl Environment {
+        fn set(values: &[(&'static str, &Path)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(key, value)| {
+                    let previous = std::env::var_os(key);
+                    // SAFETY: the unsupported-platform tests serialize all environment mutation.
+                    unsafe { std::env::set_var(key, value) };
+                    (*key, previous)
+                })
+                .collect();
+            Self { previous }
+        }
+    }
+
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.drain(..).rev() {
+                // SAFETY: the unsupported-platform tests serialize all environment mutation.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn launch_arguments(command: &str, repo_dir: &Path, dry_run: bool) -> Vec<String> {
+        let mut arguments = vec![
+            command.to_string(),
+            "--repo".to_string(),
+            "owner/repo".to_string(),
+            "--repo-dir".to_string(),
+            repo_dir.display().to_string(),
+        ];
+        if dry_run {
+            arguments.push("--dry-run".to_string());
+        }
+        arguments
+    }
 
     #[test]
-    fn unsupported_platform_rejects_autonomous_runtime_before_fixture_creation() {
+    fn unsupported_platform_rejects_mutating_launches_before_artifact_creation() {
+        let _serial = ENVIRONMENT.lock().expect("lock environment");
         let root = std::env::temp_dir().join(format!(
             "autospec-unsupported-runtime-{}",
             std::process::id()
         ));
+        let repo_dir = root.join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("create valid repository directory");
+        let operator = root.join("operator");
+        let logs = root.join("logs");
+        let claims = root.join("claims");
+        let heartbeats = root.join("heartbeats");
+        let _environment = Environment::set(&[
+            ("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator),
+            ("AUTOSPEC_AUTONOMOUS_LOG_DIR", &logs),
+            ("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claims),
+            ("AUTOSPEC_HEARTBEAT_DIR", &heartbeats),
+        ]);
         let fixtures = [
-            root.join("layout"),
-            root.join("claim"),
-            root.join("accountability"),
+            operator.clone(),
+            operator.join("owner_repo"),
+            operator.join("owner_repo/lifecycle.json"),
+            operator.join("owner_repo/accountability.json"),
+            operator.join("owner_repo/conductor.pid"),
+            logs.clone(),
+            logs.join("owner_repo"),
+            claims.clone(),
+            heartbeats.clone(),
+            repo_dir.join(".autospec"),
         ];
-        assert!(fixtures.iter().all(|fixture| !fixture.exists()));
-        assert!(ensure_autonomous_runtime_supported().is_err());
-        assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+        for command in ["start", "restart", "resume"] {
+            let error = autonomous::run(&launch_arguments(command, &repo_dir, false))
+                .expect_err("unsupported mutating launch must fail");
+            assert!(error.message.contains("requires Linux or macOS"));
+            assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+        }
+
+        for command in ["start", "restart", "resume"] {
+            autonomous::run(&launch_arguments(command, &repo_dir, true))
+                .expect("unsupported dry-run preview remains available");
+            assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+        }
+        std::fs::remove_dir_all(root).expect("remove unsupported-platform fixture");
     }
 }
