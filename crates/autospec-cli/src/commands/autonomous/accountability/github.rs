@@ -1,6 +1,6 @@
 use super::{
-    AccountabilityError, AccountabilityStore, RecoveryManifest, RecoveryState, RenderedProjection,
-    RepositoryIdentity,
+    AccountabilityError, AccountabilityStore, ProjectionDisposition, RecoveryManifest,
+    RecoveryState, RenderedProjection, RepositoryIdentity,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use serde_json::Value;
@@ -70,6 +70,10 @@ pub enum GithubCommand {
         repository: String,
         number: u64,
     },
+    CloseIssue {
+        repository: String,
+        number: u64,
+    },
     AddToProject {
         repository: String,
         project_number: u64,
@@ -84,13 +88,24 @@ pub trait GithubTransport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GithubFailure {
     Retryable(String),
+    RetryAfter { message: String, delay: Duration },
     Ambiguous(String),
     Definitive(String),
 }
 
 impl GithubFailure {
     fn retryable(&self) -> bool {
-        matches!(self, Self::Retryable(_) | Self::Ambiguous(_))
+        matches!(
+            self,
+            Self::Retryable(_) | Self::RetryAfter { .. } | Self::Ambiguous(_)
+        )
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RetryAfter { delay, .. } => Some(*delay),
+            _ => None,
+        }
     }
 }
 
@@ -100,6 +115,7 @@ impl fmt::Display for GithubFailure {
             Self::Retryable(message) | Self::Ambiguous(message) | Self::Definitive(message) => {
                 formatter.write_str(message)
             }
+            Self::RetryAfter { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -124,6 +140,7 @@ struct RemoteIssue {
 struct ReconcileError {
     error: AccountabilityError,
     retryable: bool,
+    retry_after: Option<Duration>,
 }
 
 pub fn bind_epic<T, R>(
@@ -136,10 +153,12 @@ where
     T: GithubTransport,
     R: FnMut() -> Result<(), String>,
 {
-    if let Some(number) = request.explicit_epic {
-        return bind_explicit(store, github, request, number, &mut renew_lease);
-    }
-    bind_generated(store, github, request, &mut renew_lease)
+    let result = if let Some(number) = request.explicit_epic {
+        bind_explicit(store, github, request, number, &mut renew_lease)
+    } else {
+        bind_generated(store, github, request, &mut renew_lease)
+    };
+    result.map_err(|error| error.into_projection(ProjectionDisposition::IntegrityBlock))
 }
 
 fn bind_generated<T, R>(
@@ -217,9 +236,10 @@ where
                         name: label.to_owned(),
                     })
                     .map_err(|error| {
-                        AccountabilityError::new(format!(
-                            "cannot ensure accountability label {label}: {error}"
-                        ))
+                        github_projection_error(
+                            format!("cannot ensure accountability label {label}"),
+                            error,
+                        )
                     })?;
             }
             store.mark_create_attempted()?;
@@ -236,9 +256,10 @@ where
                     .collect(),
             });
             if let Err(error @ GithubFailure::Definitive(_)) = create_result {
-                return Err(AccountabilityError::new(format!(
-                    "cannot create accountability epic: {error}"
-                )));
+                return Err(github_projection_error(
+                    "cannot create accountability epic",
+                    error,
+                ));
             }
         }
         let mut found = None;
@@ -250,7 +271,7 @@ where
                 Err(failure) => {
                     last_error = Some(failure.error.to_string());
                     if failure.retryable && attempt + 1 < RECONCILE_ATTEMPTS {
-                        thread::sleep(Duration::from_millis(25));
+                        thread::sleep(failure.retry_after.unwrap_or(Duration::from_millis(25)));
                         continue;
                     }
                     return Err(failure.error);
@@ -270,10 +291,13 @@ where
             }
         }
         found.ok_or_else(|| {
-            AccountabilityError::new(format!(
+            AccountabilityError::projection(
+                format!(
                 "accountability epic creation visibility is unresolved; refusing duplicate create{}",
                 last_error.map_or_else(String::new, |error| format!(": {error}"))
-            ))
+                ),
+                ProjectionDisposition::DegradableTransport,
+            )
         })?
     };
     validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
@@ -320,7 +344,12 @@ where
             "epic marker and managed recovery manifest do not agree",
         ));
     }
-    validate_resume_policy(&issue, &manifest, request.resume_policy)?;
+    validate_resume_policy(
+        &issue,
+        &manifest,
+        request.resume_policy,
+        store.identity().is_some(),
+    )?;
     if issue.state.eq_ignore_ascii_case("closed") {
         if request.resume_policy != ResumePolicy::ReopenClosed {
             return Err(AccountabilityError::new(
@@ -333,7 +362,7 @@ where
                 repository: request.repository.as_str().to_owned(),
                 number,
             })
-            .map_err(|error| AccountabilityError::new(format!("cannot reopen epic: {error}")))?;
+            .map_err(|error| github_projection_error("cannot reopen epic", error))?;
         issue = view_issue(github, &request.repository, number, renew_lease)?;
         validate_issue(&issue, &request.repository, Some(&marker_run_id))?;
         if issue.state.eq_ignore_ascii_case("closed") {
@@ -398,6 +427,9 @@ where
         projection.desired_high_watermark,
         status.journal_segment.max(1),
     )?;
+    let (recovery_state, linked_issues, linked_pull_requests) = store.recovery_projection();
+    let manifest =
+        manifest.with_recovery_state(recovery_state, linked_issues, linked_pull_requests)?;
     let body = compose_managed_body(marker, &projection.markdown, &manifest, &issue.body);
     renew(renew_lease)?;
     github
@@ -406,7 +438,7 @@ where
             number: issue.number,
             body,
         })
-        .map_err(|error| AccountabilityError::new(format!("cannot project epic: {error}")))?;
+        .map_err(|error| github_projection_error("cannot project epic", error))?;
     let verified = view_issue(github, repository, issue.number, renew_lease)?;
     validate_issue(
         &verified,
@@ -424,6 +456,15 @@ where
         return Err(AccountabilityError::new(
             "GitHub returned a stale accountability projection",
         ));
+    }
+    if recovery_state != RecoveryState::Active {
+        renew(renew_lease)?;
+        github
+            .execute(GithubCommand::CloseIssue {
+                repository: repository.as_str().to_owned(),
+                number: issue.number,
+            })
+            .map_err(|error| github_projection_error("cannot close projected epic", error))?;
     }
     store.ack_projection(
         projection.revision,
@@ -473,19 +514,26 @@ where
     renew(renew_lease).map_err(|error| ReconcileError {
         error,
         retryable: false,
+        retry_after: None,
     })?;
     let output = github
         .execute(GithubCommand::ListAccountabilityIssues {
             repository: repository.as_str().to_owned(),
         })
-        .map_err(|error| ReconcileError {
-            retryable: error.retryable(),
-            error: AccountabilityError::new(format!("cannot reconcile epics: {error}")),
+        .map_err(|error| {
+            let retryable = error.retryable();
+            let retry_after = error.retry_after();
+            ReconcileError {
+                retryable,
+                retry_after,
+                error: github_projection_error("cannot reconcile epics", error),
+            }
         })?;
     Ok(parse_issue_pages(&output)
         .map_err(|error| ReconcileError {
             error,
             retryable: false,
+            retry_after: None,
         })?
         .into_iter()
         .filter(|issue| issue.body.matches(marker).count() == 1)
@@ -508,7 +556,7 @@ where
             repository: repository.as_str().to_owned(),
             number,
         })
-        .map_err(|error| AccountabilityError::new(format!("cannot view epic: {error}")))?;
+        .map_err(|error| github_projection_error("cannot view epic", error))?;
     parse_issue(&serde_json::from_str(&output).map_err(json_error)?)
 }
 
@@ -563,7 +611,7 @@ fn validate_remote_manifest(
             "bound epic recovery manifest does not match its marker and identity",
         ));
     }
-    validate_resume_policy(issue, &manifest, ResumePolicy::ActiveOnly)?;
+    validate_resume_policy(issue, &manifest, ResumePolicy::ActiveOnly, true)?;
     Ok(manifest)
 }
 
@@ -586,17 +634,16 @@ fn validate_resume_policy(
     issue: &RemoteIssue,
     manifest: &RecoveryManifest,
     policy: ResumePolicy,
+    has_local_identity: bool,
 ) -> Result<(), AccountabilityError> {
     let open = issue.state.eq_ignore_ascii_case("open");
-    let allowed = matches!(
-        (open, manifest.recovery_state, policy),
-        (true, RecoveryState::Active, _)
-            | (
-                false,
-                RecoveryState::Parked | RecoveryState::Terminal,
-                ResumePolicy::ReopenClosed
+    let allowed = open && manifest.recovery_state == RecoveryState::Active && has_local_identity
+        || !open
+            && matches!(
+                manifest.recovery_state,
+                RecoveryState::Parked | RecoveryState::Terminal
             )
-    );
+            && policy == ResumePolicy::ReopenClosed;
     if allowed {
         Ok(())
     } else {
@@ -604,6 +651,15 @@ fn validate_resume_policy(
             "accountability epic open/closed state and recovery ownership policy disagree",
         ))
     }
+}
+
+fn github_projection_error(context: impl AsRef<str>, error: GithubFailure) -> AccountabilityError {
+    let disposition = if error.retryable() {
+        ProjectionDisposition::DegradableTransport
+    } else {
+        ProjectionDisposition::IntegrityBlock
+    };
+    AccountabilityError::projection(format!("{}: {error}", context.as_ref()), disposition)
 }
 
 fn parse_single_marker(body: &str) -> Result<(&str, &str), AccountabilityError> {
@@ -785,6 +841,7 @@ fn parse_issue(value: &Value) -> Result<RemoteIssue, AccountabilityError> {
 }
 
 fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
+    let create_issue = matches!(&command, GithubCommand::CreateIssue { .. });
     let mutating = !matches!(
         command,
         GithubCommand::ListAccountabilityIssues { .. } | GithubCommand::ViewIssue { .. }
@@ -874,6 +931,16 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
             ],
             None,
         ),
+        GithubCommand::CloseIssue { repository, number } => (
+            vec![
+                "issue".to_string(),
+                "close".to_string(),
+                number.to_string(),
+                "--repo".to_string(),
+                repository,
+            ],
+            None,
+        ),
         GithubCommand::AddToProject {
             repository,
             project_number,
@@ -918,14 +985,46 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
         .map_err(|error| GithubFailure::Ambiguous(format!("cannot wait for gh: {error}")))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if let Some(delay) = parse_retry_after(&message) {
+            return Err(GithubFailure::RetryAfter { message, delay });
+        }
         return Err(if mutating {
-            GithubFailure::Definitive(message)
+            if create_issue && !definitive_gh_failure(&message) {
+                GithubFailure::Ambiguous(message)
+            } else {
+                GithubFailure::Definitive(message)
+            }
         } else {
             GithubFailure::Retryable(message)
         });
     }
     String::from_utf8(output.stdout)
         .map_err(|error| GithubFailure::Definitive(format!("gh returned invalid UTF-8: {error}")))
+}
+
+fn parse_retry_after(message: &str) -> Option<Duration> {
+    message.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("retry-after")
+            .then(|| value.trim().parse::<u64>().ok().map(Duration::from_secs))?
+    })
+}
+
+fn definitive_gh_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "validation failed",
+        "authentication",
+        "forbidden",
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+        "unprocessable entity",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn json_error(error: serde_json::Error) -> AccountabilityError {

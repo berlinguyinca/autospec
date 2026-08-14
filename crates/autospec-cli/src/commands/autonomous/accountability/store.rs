@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -19,8 +20,9 @@ const STATE_FILE: &str = "accountability.json";
 const EVENTS_FILE: &str = "accountability-events.jsonl";
 const OUTBOX_FILE: &str = "accountability-outbox.jsonl";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RecoveryState {
+    #[default]
     Active,
     Parked,
     Terminal,
@@ -199,6 +201,7 @@ pub struct AccountabilityStatus {
     pub prior_remote_digest: Option<String>,
     pub segment_chain_digest: String,
     pub lifecycle_phase: String,
+    pub last_projected_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -219,6 +222,10 @@ struct State {
     create_attempted: bool,
     resume_event_pending: bool,
     lifecycle_phase: String,
+    recovery_state: RecoveryState,
+    linked_issues: Vec<u64>,
+    linked_pull_requests: Vec<u64>,
+    last_projected_at: Option<u64>,
 }
 
 pub struct AccountabilityStore {
@@ -330,6 +337,9 @@ impl AccountabilityStore {
         self.state.create_attempted = true;
         self.state.resume_event_pending = true;
         self.state.lifecycle_phase = "bound_not_spawned".to_owned();
+        self.state.recovery_state = RecoveryState::Active;
+        self.state.linked_issues = manifest.linked_issues.clone();
+        self.state.linked_pull_requests = manifest.linked_pull_requests.clone();
         ensure_private_file(&self.path(EVENTS_FILE))?;
         ensure_private_file(&self.path(OUTBOX_FILE))?;
         self.persist_state()?;
@@ -384,7 +394,28 @@ impl AccountabilityStore {
             .last_seq
             .checked_add(1)
             .ok_or_else(|| AccountabilityError::new("event sequence overflow"))?;
-        let terminal = matches!(event.kind, EventKind::Completed | EventKind::Stopped);
+        let terminal = matches!(&event.kind, EventKind::Completed | EventKind::Stopped);
+        match &event.kind {
+            EventKind::WorkSelected { issue: Some(issue) }
+            | EventKind::ClaimStarted { issue }
+            | EventKind::IssueClaimed { issue }
+            | EventKind::ImplementationStarted { issue }
+            | EventKind::Quarantined { issue } => {
+                insert_link(&mut self.state.linked_issues, *issue)
+            }
+            EventKind::PullRequestOpened { pull_request }
+            | EventKind::PullRequestVerified { pull_request }
+            | EventKind::ReviewStarted { pull_request }
+            | EventKind::Merged { pull_request } => {
+                insert_link(&mut self.state.linked_pull_requests, *pull_request)
+            }
+            EventKind::Parked => self.state.recovery_state = RecoveryState::Parked,
+            EventKind::Completed | EventKind::Stopped => {
+                self.state.recovery_state = RecoveryState::Terminal
+            }
+            EventKind::ResumedFromEpic { .. } => self.state.recovery_state = RecoveryState::Active,
+            _ => {}
+        }
         let record = EventRecord::create(
             launch.identity.run_id(),
             &self.state.segment_chain_digest,
@@ -455,10 +486,10 @@ impl AccountabilityStore {
         })?;
         let markdown = render::markdown(launch, &self.events);
         let digest = sha256_hex(markdown.as_bytes());
-        if self.state.desired_digest.as_deref() != Some(&digest) {
-            return Err(AccountabilityError::new(
-                "pending projection digest no longer matches the durable journal",
-            ));
+        if self.state.desired_digest.as_deref() != Some(&digest)
+            || self.state.desired_high_watermark != self.state.last_seq
+        {
+            return self.render();
         }
         Ok(RenderedProjection {
             revision: self.state.projection_revision,
@@ -485,6 +516,12 @@ impl AccountabilityStore {
         }
         self.state.acknowledged_high_watermark = high_watermark;
         self.state.pending_projection_count = 0;
+        self.state.last_projected_at = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| AccountabilityError::new("system clock precedes Unix epoch"))?
+                .as_secs(),
+        );
         self.persist_state()?;
         atomic_write(&self.path(OUTBOX_FILE), b"")
     }
@@ -507,11 +544,16 @@ impl AccountabilityStore {
             prior_remote_digest: self.state.prior_remote_digest.clone(),
             segment_chain_digest: self.state.segment_chain_digest.clone(),
             lifecycle_phase: self.state.lifecycle_phase.clone(),
+            last_projected_at: self.state.last_projected_at,
         }
     }
 
     pub fn identity(&self) -> Option<&RunIdentity> {
         self.state.launch.as_ref().map(|launch| &launch.identity)
+    }
+
+    pub fn has_event(&self, kind: &EventKind) -> bool {
+        self.events.iter().any(|record| &record.kind == kind)
     }
 
     pub fn create_attempted(&self) -> bool {
@@ -520,6 +562,14 @@ impl AccountabilityStore {
 
     pub fn desired_projection_digest(&self) -> Option<&str> {
         self.state.desired_digest.as_deref()
+    }
+
+    pub fn recovery_projection(&self) -> (RecoveryState, Vec<u64>, Vec<u64>) {
+        (
+            self.state.recovery_state,
+            self.state.linked_issues.clone(),
+            self.state.linked_pull_requests.clone(),
+        )
     }
 
     pub fn mark_create_attempted(&mut self) -> Result<(), AccountabilityError> {
@@ -595,6 +645,10 @@ impl AccountabilityStore {
             "create_attempted":self.state.create_attempted,
             "resume_event_pending":self.state.resume_event_pending,
             "lifecycle_phase":self.state.lifecycle_phase,
+            "recovery_state":self.state.recovery_state.as_str(),
+            "linked_issues":self.state.linked_issues,
+            "linked_pull_requests":self.state.linked_pull_requests,
+            "last_projected_at":self.state.last_projected_at,
         }))
         .expect("JSON value serializes");
         atomic_write(&self.path(STATE_FILE), &document)
@@ -654,7 +708,30 @@ fn parse_state(document: &str) -> Result<State, AccountabilityError> {
                 String::new()
             }
         }),
+        recovery_state: object
+            .get("recovery_state")
+            .and_then(Value::as_str)
+            .map(RecoveryState::parse)
+            .transpose()?
+            .unwrap_or_default(),
+        linked_issues: object
+            .get("linked_issues")
+            .map(parse_links)
+            .transpose()?
+            .unwrap_or_default(),
+        linked_pull_requests: object
+            .get("linked_pull_requests")
+            .map(parse_links)
+            .transpose()?
+            .unwrap_or_default(),
+        last_projected_at: object.get("last_projected_at").and_then(Value::as_u64),
     })
+}
+
+fn insert_link(links: &mut Vec<u64>, value: u64) {
+    if let Err(index) = links.binary_search(&value) {
+        links.insert(index, value);
+    }
 }
 
 fn validate_links(values: &[u64]) -> Result<(), AccountabilityError> {
@@ -746,7 +823,8 @@ fn reconcile_outbox(root: &Path, state: &mut State) -> Result<(), Accountability
         && state.acknowledged_high_watermark >= high_watermark
     {
         atomic_write(&path, b"")?;
-    } else if revision > state.projection_revision && state.pending_projection_count == 0 {
+    } else if revision > state.projection_revision && high_watermark >= state.desired_high_watermark
+    {
         state.projection_revision = revision;
         state.desired_digest = Some(digest.to_owned());
         state.desired_high_watermark = high_watermark;
