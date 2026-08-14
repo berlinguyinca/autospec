@@ -3,16 +3,14 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-@test "install.sh builds and atomically installs the Rust runtime broker" {
+@test "install.sh delegates Rust runtime publication to immutable generations" {
   grep -q '^install_autospec_runtime_binary()' "$REPO_ROOT/install.sh"
   grep -qF 'cargo build --release -p autospec-cli' "$REPO_ROOT/install.sh"
-  grep -qF 'cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"' "$REPO_ROOT/install.sh"
-  grep -qF 'runtime_source="$cargo_target_dir/release/autospec"' "$REPO_ROOT/install.sh"
-  grep -qF 'runtime_target="$HOME/.autospec/bin/autospec"' "$REPO_ROOT/install.sh"
-  grep -qF 'runtime_temporary="$(mktemp "$autospec_bin_dir/.autospec.XXXXXX")"' "$REPO_ROOT/install.sh"
-  grep -qF 'mv "$runtime_temporary" "$runtime_target"' "$REPO_ROOT/install.sh"
+  grep -qF 'scripts/autospec-runtime-install.sh" --repo-dir "$REPO_ROOT"' "$REPO_ROOT/install.sh"
+  grep -qF 'runtime-generations' "$REPO_ROOT/scripts/autospec-runtime-install.sh"
+  grep -qF 'runtime_atomic_replace "$temporary" "$pointer"' "$REPO_ROOT/scripts/autospec-runtime-install.sh"
   grep -qF '[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)' "$REPO_ROOT/install.sh"
-  grep -qF '[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec' "$REPO_ROOT/install.sh"
+  grep -qF '[dry-run] install_autospec_runtime_binary: $REPO_ROOT/scripts/autospec-runtime-install.sh --repo-dir $REPO_ROOT' "$REPO_ROOT/install.sh"
   grep -q '^install_autospec_runtime_binary$' "$REPO_ROOT/install.sh"
 }
 

@@ -45,7 +45,7 @@ identity() {
   [ "$output" != "$first" ]
 }
 
-@test "identity includes staged unstaged untracked and deleted build inputs but excludes documentation" {
+@test "identity includes repository HEAD staged unstaged untracked and deleted build inputs" {
   identity
   baseline="$output"
 
@@ -54,11 +54,17 @@ identity() {
   identity
   [ "$output" = "$baseline" ]
 
+  git -C "$FIXTURE_REPO" add README.md NOTES.md
+  git -C "$FIXTURE_REPO" commit -qm docs
+  identity
+  committed_docs="$output"
+  [ "$committed_docs" != "$baseline" ]
+
   printf 'pub const STAGED: u8 = 2;\n' >>"$FIXTURE_REPO/crates/demo/src/lib.rs"
   git -C "$FIXTURE_REPO" add crates/demo/src/lib.rs
   identity
   staged="$output"
-  [ "$staged" != "$baseline" ]
+  [ "$staged" != "$committed_docs" ]
 
   printf 'pub const UNTRACKED: u8 = 3;\n' >"$FIXTURE_REPO/crates/demo/src/untracked.rs"
   identity
@@ -68,6 +74,18 @@ identity() {
   rm "$FIXTURE_REPO/crates/demo/Cargo.toml"
   identity
   [ "$output" != "$untracked" ]
+}
+
+@test "identity conservatively includes root and build-script reachable non-document assets" {
+  identity
+  baseline="$output"
+  printf 'root-config\n' >"$FIXTURE_REPO/runtime.template"
+  identity
+  root_asset="$output"
+  [ "$root_asset" != "$baseline" ]
+  printf 'nested-asset\n' >"$FIXTURE_REPO/crates/demo/nested.schema"
+  identity
+  [ "$output" != "$root_asset" ]
 }
 
 @test "check fails closed for missing generation and ensure returns an exact verified generation" {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runtime source identity and immutable-generation freshness checks.
 
-autospec_runtime_receipt_schema=1
+autospec_runtime_receipt_schema=2
 
 autospec_runtime_error() {
     printf 'error:%s\n' "$1" >&2
@@ -51,9 +51,8 @@ autospec_runtime_repo_dir() {
 
 autospec_runtime_path_relevant() {
     case "$1" in
-        Cargo.toml|Cargo.lock|rust-toolchain|rust-toolchain.toml|.cargo/*) return 0 ;;
-        *.rs|*/Cargo.toml|crates/*) case "$1" in *.md|*/target/*) return 1 ;; *) return 0 ;; esac ;;
-        *) return 1 ;;
+        target/*|*/target/*|docs/*|*.md|*.mdx|LICENSE*|CHANGELOG*) return 1 ;;
+        *) return 0 ;;
     esac
 }
 
@@ -95,7 +94,7 @@ autospec_runtime_source_digest() (
         printf '%s\n' "$path" >>"$paths" || exit 2
     done <"$raw"
     sort "$paths" >"$sorted" || { autospec_runtime_error source-sort-failed; exit 2; }
-    printf 'R%s\0%s\0' "${#repo}" "$repo" >"$stream" || exit 2
+    : >"$stream"
     while IFS= read -r path; do
         [ -n "$path" ] || continue
         if [ ! -e "$repo/$path" ]; then
@@ -113,6 +112,32 @@ autospec_runtime_source_digest() (
     done <"$sorted"
     autospec_runtime_sha256_file "$stream"
 )
+
+autospec_runtime_head() {
+    local head
+    head=$(git -C "$1" rev-parse --verify HEAD 2>/dev/null) || { autospec_runtime_error repo-head-unavailable; return 2; }
+    [[ $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { autospec_runtime_error repo-head-invalid; return 2; }
+    printf '%s\n' "$head"
+}
+
+autospec_runtime_identity_tuple() {
+    local repo head source identity
+    repo=$(autospec_runtime_repo_dir "$1") || return 2
+    head=$(autospec_runtime_head "$repo") || return 2
+    source=$(autospec_runtime_source_digest "$repo") || return 2
+    identity=$(autospec_runtime_tuple_digest "$repo" "$head" "$source") || return 2
+    printf '%s\n%s\n%s\n%s\n' "$repo" "$head" "$source" "$identity"
+}
+
+autospec_runtime_tuple_digest() {
+    local repo=$1 head=$2 source=$3 tuple
+    tuple=$(autospec_runtime_temp_file) || return 2
+    trap 'rm -f "$tuple"' RETURN
+    printf 'repo=%s\0head=%s\0source=%s\0' "$repo" "$head" "$source" >"$tuple" || return 2
+    autospec_runtime_sha256_file "$tuple"
+    rm -f "$tuple"
+    trap - RETURN
+}
 
 autospec_runtime_stat_mode() {
     stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
@@ -145,12 +170,12 @@ autospec_runtime_valid_timestamp() {
 }
 
 autospec_runtime_write_receipt() {
-    local repo binary output source_digest binary_digest head installed_at temporary parent
+    local repo binary output source_digest identity_digest binary_digest head installed_at temporary parent
     repo=$(autospec_runtime_repo_dir "$1") || return 2
-    binary=$2; output=$3; source_digest=${4:-}
-    [ -n "$source_digest" ] || source_digest=$(autospec_runtime_source_digest "$repo") || return 2
+    binary=$2; output=$3; source_digest=$4; identity_digest=$5; head=$6
+    autospec_runtime_valid_sha256 "$source_digest" || return 2
+    autospec_runtime_valid_sha256 "$identity_digest" || return 2
     binary_digest=$(autospec_runtime_file_sha256 "$binary") || return 2
-    head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || { autospec_runtime_error repo-head-unavailable; return 2; }
     [[ $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { autospec_runtime_error repo-head-invalid; return 2; }
     case "$repo" in *$'\n'*|*$'\r'*) autospec_runtime_error receipt-repo-path-unsafe; return 2 ;; esac
     installed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 2
@@ -168,6 +193,7 @@ autospec_runtime_write_receipt() {
         printf 'repo_dir=%s\n' "$repo"
         printf 'head=%s\n' "$head"
         printf 'source_sha256=%s\n' "$source_digest"
+        printf 'identity_sha256=%s\n' "$identity_digest"
         printf 'binary_sha256=%s\n' "$binary_digest"
         printf 'installed_at=%s\n' "$installed_at"
     } >"$temporary" || return 2
@@ -176,15 +202,16 @@ autospec_runtime_write_receipt() {
 }
 
 autospec_runtime_parse_receipt() {
-    local receipt line1 line2 line3 line4 line5 line6 extra mode owner
+    local receipt line1 line2 line3 line4 line5 line6 line7 extra mode owner
     receipt=$1
     [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
     mode=$(autospec_runtime_stat_mode "$receipt") || return 1
     owner=$(autospec_runtime_stat_owner "$receipt") || return 1
-    [ "$mode" = 600 ] && [ "$owner" = "$(id -u)" ] || return 1
+    { [ "$mode" = 600 ] || [ "$mode" = 400 ]; } && [ "$owner" = "$(id -u)" ] || return 1
     exec 3<"$receipt" || return 1
     if ! IFS= read -r line1 <&3 || ! IFS= read -r line2 <&3 || ! IFS= read -r line3 <&3 \
-        || ! IFS= read -r line4 <&3 || ! IFS= read -r line5 <&3 || ! IFS= read -r line6 <&3; then
+        || ! IFS= read -r line4 <&3 || ! IFS= read -r line5 <&3 || ! IFS= read -r line6 <&3 \
+        || ! IFS= read -r line7 <&3; then
         exec 3<&-
         return 1
     fi
@@ -194,18 +221,20 @@ autospec_runtime_parse_receipt() {
     case "$line2" in repo_dir=*) receipt_repo=${line2#repo_dir=} ;; *) return 1 ;; esac
     case "$line3" in head=*) receipt_head=${line3#head=} ;; *) return 1 ;; esac
     case "$line4" in source_sha256=*) receipt_source=${line4#source_sha256=} ;; *) return 1 ;; esac
-    case "$line5" in binary_sha256=*) receipt_binary=${line5#binary_sha256=} ;; *) return 1 ;; esac
-    case "$line6" in installed_at=*) receipt_installed=${line6#installed_at=} ;; *) return 1 ;; esac
+    case "$line5" in identity_sha256=*) receipt_identity=${line5#identity_sha256=} ;; *) return 1 ;; esac
+    case "$line6" in binary_sha256=*) receipt_binary=${line6#binary_sha256=} ;; *) return 1 ;; esac
+    case "$line7" in installed_at=*) receipt_installed=${line7#installed_at=} ;; *) return 1 ;; esac
     case "$receipt_repo" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
     [ "$receipt_schema" = "$autospec_runtime_receipt_schema" ] \
         && autospec_runtime_valid_sha256 "$receipt_source" \
+        && autospec_runtime_valid_sha256 "$receipt_identity" \
         && autospec_runtime_valid_sha256 "$receipt_binary" \
         && [[ $receipt_head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
         && autospec_runtime_valid_timestamp "$receipt_installed"
 }
 
 autospec_runtime_verify_generation() {
-    local repo digest generation binary receipt actual repo_canonical mode owner expected_mode
+    local repo digest generation binary receipt actual expected_identity repo_canonical current_head mode owner expected_mode
     repo=$1; digest=$2; generation=$3; binary="$generation/autospec"; receipt="$generation/receipt"
     expected_mode=${4:-500}
     repo_canonical=$(autospec_runtime_repo_dir "$repo") || return 2
@@ -215,7 +244,10 @@ autospec_runtime_verify_generation() {
     owner=$(autospec_runtime_stat_owner "$generation") || return 1
     [ "$mode" = "$expected_mode" ] && [ "$owner" = "$(id -u)" ] || return 1
     autospec_runtime_parse_receipt "$receipt" || return 1
-    [ "$receipt_repo" = "$repo_canonical" ] && [ "$receipt_source" = "$digest" ] || return 1
+    current_head=$(autospec_runtime_head "$repo_canonical") || return 1
+    expected_identity=$(autospec_runtime_tuple_digest "$receipt_repo" "$receipt_head" "$receipt_source") || return 1
+    [ "$receipt_repo" = "$repo_canonical" ] && [ "$receipt_head" = "$current_head" ] \
+        && [ "$receipt_identity" = "$digest" ] && [ "$receipt_identity" = "$expected_identity" ] || return 1
     actual=$(autospec_runtime_file_sha256 "$binary") || return 1
     mode=$(autospec_runtime_stat_mode "$binary") || return 1
     owner=$(autospec_runtime_stat_owner "$binary") || return 1
@@ -223,16 +255,17 @@ autospec_runtime_verify_generation() {
 }
 
 autospec_runtime_check() {
-    local repo digest root current target generation
+    local repo identity root current target generation tuple
     repo=$(autospec_runtime_repo_dir "$1") || return 2
-    digest=$(autospec_runtime_source_digest "$repo") || return 2
+    tuple=$(autospec_runtime_identity_tuple "$repo") || return 2
+    identity=$(printf '%s\n' "$tuple" | sed -n '4p')
     root="${AUTOSPEC_RUNTIME_ROOT:-$HOME/.autospec/runtime-generations}"
     current="$root/current"
     [ -L "$current" ] || { printf 'stale:current-missing\n'; return 10; }
     target=$(readlink "$current") || { autospec_runtime_error current-unreadable; return 2; }
-    [ "$target" = "$digest" ] || { printf 'stale:source-digest\n'; return 10; }
-    generation="$root/$digest"
-    autospec_runtime_verify_generation "$repo" "$digest" "$generation" || {
+    [ "$target" = "$identity" ] || { printf 'stale:source-digest\n'; return 10; }
+    generation="$root/$identity"
+    autospec_runtime_verify_generation "$repo" "$identity" "$generation" || {
         printf 'stale:generation-invalid\n'
         return 10
     }
@@ -254,7 +287,7 @@ autospec_runtime_main() {
     done
     [ -n "$repo" ] || { autospec_runtime_usage; return 2; }
     case "$action" in
-        identity) autospec_runtime_source_digest "$repo" ;;
+        identity) autospec_runtime_identity_tuple "$repo" | sed -n '4p' ;;
         check) autospec_runtime_check "$repo" ;;
         ensure) exec bash "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/autospec-runtime-install.sh" --repo-dir "$repo" ;;
         *) autospec_runtime_usage; return 2 ;;

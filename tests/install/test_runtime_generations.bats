@@ -72,7 +72,8 @@ wait_for_file() {
   [ -f "$(dirname "$generation_binary")/receipt" ]
   [ "$(mode_of "$TEST_HOME/.autospec")" = 700 ]
   [ "$(mode_of "$(dirname "$generation_binary")")" = 500 ]
-  [ "$(mode_of "$(dirname "$generation_binary")/receipt")" = 600 ]
+  [ "$(mode_of "$generation_binary")" = 500 ]
+  [ "$(mode_of "$(dirname "$generation_binary")/receipt")" = 400 ]
   [ "$(readlink "$TEST_HOME/.autospec/runtime-generations/current")" = "$digest" ]
 
   before="$(shasum -a 256 "$generation_binary" | awk '{print $1}')"
@@ -81,6 +82,26 @@ wait_for_file() {
   [ "$output" = "$generation_binary" ]
   [ "$(wc -l <"$BUILD_LOG" | tr -d ' ')" -eq 1 ]
   [ "$(shasum -a 256 "$generation_binary" | awk '{print $1}')" = "$before" ]
+}
+
+@test "warm generation reuse avoids a second source inventory and stays bounded" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  real_git="$(command -v git)"
+  cat >"$FAKE_BIN/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = ls-files ]; then printf 'inventory\n' >>'$TEST_ROOT/inventory.log'; fi
+done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKE_BIN/git"
+  started="$(python3 -c 'import time; print(time.monotonic_ns())')"
+  install_runtime
+  elapsed_ms="$(( ($(python3 -c 'import time; print(time.monotonic_ns())') - started) / 1000000 ))"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_ROOT/inventory.log" ]
+  [ "$elapsed_ms" -lt 1000 ]
 }
 
 @test "installer rejects a moving source and retains the prior current generation" {
@@ -150,6 +171,35 @@ wait_for_file() {
   [ ! -e "$TEST_HOME/.autospec/runtime-install.transaction" ]
 }
 
+@test "crashes immediately before and after generation rename recover through the durable journal" {
+  real_mv="$(command -v mv)"
+  for boundary in before after; do
+    boundary_home="$TEST_ROOT/home-$boundary"
+    mkdir "$boundary_home"
+    cat >"$FAKE_BIN/mv" <<SH
+#!/usr/bin/env bash
+case "\$1" in */.stage.*)
+  if [ '$boundary' = before ]; then kill -KILL "\$PPID"; sleep 1; exit 137; fi
+  '$real_mv' "\$@" || exit \$?
+  kill -KILL "\$PPID"; sleep 1; exit 137 ;;
+esac
+exec '$real_mv' "\$@"
+SH
+    chmod +x "$FAKE_BIN/mv"
+    env HOME="$boundary_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/$boundary.path" &
+    pid=$!
+    wait "$pid" || true
+    [ -f "$boundary_home/.autospec/runtime-install.transaction" ]
+    rm "$FAKE_BIN/mv"
+    run env HOME="$boundary_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO"
+    [ "$status" -eq 0 ]
+    [ -x "$output" ]
+    [ ! -e "$boundary_home/.autospec/runtime-install.transaction" ]
+  done
+}
+
 @test "lock metadata rejects ambiguity but reclaims a reused process identity" {
   lock="$TEST_HOME/.autospec/runtime-install.lock"
   mkdir -p "$lock"
@@ -167,6 +217,51 @@ wait_for_file() {
   install_runtime
   [ "$status" -eq 0 ]
   [ -x "$output" ]
+}
+
+@test "lock metadata accepts only canonical positive platform PIDs" {
+  lock="$TEST_HOME/.autospec/runtime-install.lock"
+  if [ -r /proc/sys/kernel/pid_max ]; then pid_max="$(cat /proc/sys/kernel/pid_max)"; else pid_max="$(sysctl -n kern.pid_max 2>/dev/null || printf 99999)"; fi
+  over_max=$((pid_max + 1))
+  for pid in 0 -1 +1 01 "$over_max" 999999999999999999999999; do
+    rm -rf "$lock"
+    mkdir -p "$lock"
+    chmod 700 "$TEST_HOME/.autospec" "$lock"
+    printf 'pid=%s\nstart=x\ncreated_at=2026-08-13T00:00:00Z\n' "$pid" >"$lock/owner"
+    chmod 600 "$lock/owner"
+    install_runtime
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "malformed transaction paths fail closed and preserve recovery evidence" {
+  mkdir -p "$TEST_HOME/.autospec/runtime-generations"
+  chmod 700 "$TEST_HOME/.autospec" "$TEST_HOME/.autospec/runtime-generations"
+  journal="$TEST_HOME/.autospec/runtime-install.transaction"
+  printf 'schema=1\nphase=sealed\nrepo=%s\nhead=%040d\nsource_sha256=%064d\ndigest=%064d\nstage=%s\nbuild=%s\ndestination=%s\n' \
+    "$FIXTURE_REPO" 0 0 0 "$TEST_HOME/.autospec/runtime-generations/../escape" \
+    "$TEST_HOME/.autospec/.runtime-build.bad" "$TEST_HOME/.autospec/runtime-generations/bad" >"$journal"
+  chmod 600 "$journal"
+  install_runtime
+  [ "$status" -ne 0 ]
+  [ -f "$journal" ]
+}
+
+@test "pointer publication uses a temporary symlink and directory sync" {
+  real_python="$(command -v python3)"
+  cat >"$FAKE_BIN/python3" <<SH
+#!/usr/bin/env bash
+script='$TEST_ROOT/python-script'
+cat >"\$script"
+grep -E 'os\.replace|os\.fsync' "\$script" >>'$TEST_ROOT/python.log' || true
+exec '$real_python' "\$@" <"\$script"
+SH
+  chmod +x "$FAKE_BIN/python3"
+  install_runtime
+  [ "$status" -eq 0 ]
+  grep -q 'replace' "$TEST_ROOT/python.log"
+  grep -q 'fsync' "$TEST_ROOT/python.log"
+  [ -L "$TEST_HOME/.autospec/runtime-generations/current" ]
 }
 
 @test "top-level installer delegates runtime publication to the narrow installer" {
