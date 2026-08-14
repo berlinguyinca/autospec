@@ -438,7 +438,6 @@ impl ValidationCheck {
         }
     }
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckReachability {
     TopLevel,
@@ -457,7 +456,6 @@ impl CheckReachability {
         }
     }
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckModes {
     CatalogSlot,

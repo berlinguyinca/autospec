@@ -3,22 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::state::json::{JsonParser, JsonValue};
 
-const SERIAL_LABELS: &[&str] = &[
-    "reasoning:deep",
-    "priority:high",
-    "regression",
-    "audit",
-    "release",
-];
-const BLOCKING_LABELS: &[(&str, &str)] = &[
-    ("needs-classify", "needs_classify"),
-    ("groom:proposed", "groom_proposed"),
-    ("autospec:needs-human", "autospec_needs_human"),
-    (
-        "autospec:blocked-prerequisite",
-        "security_prerequisite_blocked",
-    ),
-];
+mod labels;
+use labels::{BLOCKING_LABELS, SERIAL_LABELS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteIssue {
     pub number: u64,
