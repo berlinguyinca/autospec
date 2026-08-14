@@ -95,6 +95,37 @@ mod tests {
 
     #[test]
     fn released_predecessor_without_local_evidence_needs_no_retirement() {
+        const CHILD: &str = "AUTOSPEC_TEST_RELEASED_PREDECESSOR_MISSING_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = std::env::temp_dir().join(format!(
+                "autospec-released-predecessor-missing-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).expect("private heartbeat root");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                    .expect("private heartbeat root permissions");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "commands::claim::heartbeat_predecessor::tests::released_predecessor_without_local_evidence_needs_no_retirement",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("AUTOSPEC_HEARTBEAT_DIR", &root)
+                .output()
+                .expect("isolated predecessor retirement test");
+            std::fs::remove_dir_all(&root).expect("remove heartbeat root");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let prior = predecessor("released");
         retire("owner/repo", 42, Some(&prior)).expect("missing heartbeat is already retired");
     }
