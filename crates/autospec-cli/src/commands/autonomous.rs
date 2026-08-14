@@ -8562,7 +8562,13 @@ mod foreground_tests {
             },
         };
 
-        let receipt = request.run();
+        let layout = RunLayout {
+            state_dir: std::env::temp_dir().join("autospec-missing-operator-state"),
+            log_dir: std::env::temp_dir().join("autospec-missing-operator-logs"),
+            scope: "test_repo".to_string(),
+            repo: "test/repo".to_string(),
+        };
+        let receipt = request.run(&layout, 42);
 
         assert_eq!(
             receipt.outcome,
