@@ -112,7 +112,7 @@ fn labels() -> &'static str {
 
 fn issue(number: u64, state: &str, body: &str) -> String {
     format!(
-        r#"{{"number":{number},"url":"https://github.com/acme/widgets/issues/{number}","state":"{state}","body":{},"labels":{}}}"#,
+        r#"{{"number":{number},"url":"https://api.github.com/repos/acme/widgets/issues/{number}","html_url":"https://github.com/acme/widgets/issues/{number}","state":"{state}","body":{},"labels":{}}}"#,
         serde_json::to_string(body).unwrap(),
         labels()
     )
@@ -193,6 +193,7 @@ fn ambiguous_create_response_never_permits_a_second_create() {
         Ok(String::new()),
         Ok(String::new()),
         Err("connection reset after request body".to_string()),
+        Err("temporary list failure".to_string()),
         Ok("[[]]".to_string()),
         Ok(pages(&[remote])),
         Ok(String::new()),
@@ -200,6 +201,7 @@ fn ambiguous_create_response_never_permits_a_second_create() {
     ]);
 
     bind_epic(&mut store, &mut github, request(), || Ok(())).unwrap();
+    let projected = github.last_edit.clone().unwrap();
     assert_eq!(
         github
             .calls
@@ -209,7 +211,7 @@ fn ambiguous_create_response_never_permits_a_second_create() {
         1
     );
 
-    let mut second = StubGithub::with([Ok(pages(&[issue(43, "OPEN", &marker)]))]);
+    let mut second = StubGithub::with([Ok(pages(&[issue(43, "OPEN", &projected)]))]);
     bind_epic(&mut store, &mut second, request(), || Ok(())).unwrap();
     assert!(second
         .calls
@@ -406,4 +408,14 @@ fn launcher_binds_verified_epic_before_any_conductor_spawn_and_supervisor_reuses
         "supervisor must verify the inherited epic before respawn"
     );
     assert!(source.contains("\\\"accountability\\\":{}"));
+    let foreground = source.find("fn run_foreground(options:").unwrap();
+    let foreground_body = &source[foreground..];
+    let foreground_binding = foreground_body
+        .find("verify_existing_accountability")
+        .unwrap();
+    let foreground_cycles = foreground_body.find("run_foreground_cycles").unwrap();
+    assert!(
+        foreground_binding < foreground_cycles,
+        "inherited foreground workers must verify accountability before work"
+    );
 }

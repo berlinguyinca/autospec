@@ -1266,10 +1266,7 @@ fn bind_accountability_epic(
     let repository = RepositoryIdentity::parse(&layout.repo)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
     let root = accountability_root(layout, options.epic)?;
-    if options.epic.is_none()
-        && root.exists()
-        && (successor || layout.state_dir.join("launch.json").is_file())
-    {
+    if options.epic.is_none() && root.exists() && successor {
         archive_accountability_root(layout, &root)?;
     }
     let mut store = AccountabilityStore::open(&root)
@@ -2491,8 +2488,8 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
     let inherited_lease = inherited_foreground_lease(&layout.repo)?;
-    let continuous =
-        inherited_lease.is_some() || (options.subcommand == "start" && options.foreground);
+    let inherited = inherited_lease.is_some();
+    let continuous = inherited || (options.subcommand == "start" && options.foreground);
     let config = match load_autonomous_config(&options.repo_dir) {
         Ok(config) => config,
         Err(error) => {
@@ -2537,6 +2534,14 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
 
     let (lease, admission) =
         acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
+    let accountability = if inherited {
+        verify_existing_accountability(&layout, &lease).map_err(CommandFailure::diagnostic)
+    } else {
+        bind_accountability_epic(&layout, &options, &lease, false).map(|_| ())
+    };
+    if let Err(error) = accountability {
+        return finish_with_launch_lease(&layout.repo, &lease, || Err(error));
+    }
     let result = run_foreground_cycles(
         &layout, &options, &config, scope, &lease, admission, continuous,
     );

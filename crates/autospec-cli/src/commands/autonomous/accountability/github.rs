@@ -149,6 +149,7 @@ where
             ));
         }
         validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
+        validate_remote_manifest(&issue, &request.repository, identity.run_id())?;
         if store.status().pending_projection_count > 0 {
             project_and_ack(
                 store,
@@ -194,8 +195,20 @@ where
             });
         }
         let mut found = None;
+        let mut last_error = None;
         for attempt in 0..RECONCILE_ATTEMPTS {
-            let mut reconciled = reconcile(github, &request.repository, &marker, renew_lease)?;
+            let mut reconciled = match reconcile(github, &request.repository, &marker, renew_lease)
+            {
+                Ok(reconciled) => reconciled,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if attempt + 1 < RECONCILE_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(25));
+                        continue;
+                    }
+                    Vec::new()
+                }
+            };
             if reconciled.len() > 1 {
                 return Err(AccountabilityError::new(
                     "multiple accountability epics carry the exact run marker",
@@ -210,9 +223,10 @@ where
             }
         }
         found.ok_or_else(|| {
-            AccountabilityError::new(
-                "accountability epic creation visibility is unresolved; refusing duplicate create",
-            )
+            AccountabilityError::new(format!(
+                "accountability epic creation visibility is unresolved; refusing duplicate create{}",
+                last_error.map_or_else(String::new, |error| format!(": {error}"))
+            ))
         })?
     };
     validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
@@ -474,6 +488,24 @@ fn validate_issue(
     Ok(())
 }
 
+fn validate_remote_manifest(
+    issue: &RemoteIssue,
+    repository: &RepositoryIdentity,
+    run_id: &str,
+) -> Result<(), AccountabilityError> {
+    let manifest =
+        RecoveryManifest::parse_for_repository(&extract_manifest(&issue.body)?, repository)?;
+    if manifest.identity.run_id() != run_id
+        || manifest.epic_number != issue.number
+        || manifest.epic_url != issue.url
+    {
+        return Err(AccountabilityError::new(
+            "bound epic recovery manifest does not match its marker and identity",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_single_marker(body: &str) -> Result<(&str, &str), AccountabilityError> {
     let markers = body
         .lines()
@@ -590,8 +622,8 @@ fn parse_issue(value: &Value) -> Result<RemoteIssue, AccountabilityError> {
         .and_then(Value::as_u64)
         .ok_or_else(|| AccountabilityError::new("GitHub issue number is missing"))?;
     let url = object
-        .get("url")
-        .or_else(|| object.get("html_url"))
+        .get("html_url")
+        .or_else(|| object.get("url"))
         .and_then(Value::as_str)
         .ok_or_else(|| AccountabilityError::new("GitHub issue URL is missing"))?
         .to_owned();
