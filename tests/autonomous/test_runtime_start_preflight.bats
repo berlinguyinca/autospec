@@ -54,11 +54,10 @@ case "$1" in
   source)
     printf '%s\n' "$AUTOSPEC_TEST_SOURCE_REPO"
     ;;
-  check)
-    printf '%s\n' "$1" >> "$AUTOSPEC_TEST_HELPER_CALLS"
-    if [ "${AUTOSPEC_TEST_REQUIRE_SOURCE:-0}" = 1 ] &&
-       [ "${3-}" != "$AUTOSPEC_TEST_SOURCE_REPO" ]; then
-      printf 'wrong runtime source: %s\n' "${3-}" >&2
+  check-target)
+    printf '%s\n' check >> "$AUTOSPEC_TEST_HELPER_CALLS"
+    if [ "${3-}" != "$AUTOSPEC_TEST_REPO" ]; then
+      printf 'wrong target repo: %s\n' "${3-}" >&2
       exit 2
     fi
     if [ "${AUTOSPEC_TEST_STALE:-0}" = 1 ]; then

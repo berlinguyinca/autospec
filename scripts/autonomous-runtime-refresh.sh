@@ -130,12 +130,8 @@ autospec_runtime_identity_tuple() {
 }
 
 autospec_runtime_source_checkout() {
-    local target state_root generations target_digest generation source
-    target=$(autospec_runtime_repo_dir "${1-}") || return 2
-    if [ -f "$target/Cargo.toml" ] && [ -f "$target/crates/autospec-cli/Cargo.toml" ]; then
-        printf '%s\n' "$target"
-        return 0
-    fi
+    local state_root generations target_digest generation source
+    autospec_runtime_repo_dir "${1-}" >/dev/null || return 2
 
     state_root=${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}
     generations=${AUTOSPEC_RUNTIME_ROOT:-$state_root/runtime-generations}
@@ -150,8 +146,42 @@ autospec_runtime_source_checkout() {
     source=$(autospec_runtime_repo_dir "$receipt_repo") || { autospec_runtime_error source-checkout-unavailable; return 2; }
     [ -f "$source/Cargo.toml" ] && [ -f "$source/crates/autospec-cli/Cargo.toml" ] \
         || { autospec_runtime_error source-checkout-invalid; return 2; }
-    autospec_runtime_verify_generation "$source" "$target_digest" "$generation" \
+    autospec_runtime_verify_recorded_generation \
+        "$generation" "$target_digest" "$source" "$receipt_head" "$receipt_source" \
         || { autospec_runtime_error source-receipt-invalid; return 2; }
+    printf '%s\n' "$source"
+}
+
+# Resolve only enough receipt state to feed the all-in-one warm verifier. The
+# verifier in autospec-runtime-install.sh rechecks the receipt, generation,
+# binary digest, source HEAD, and source snapshot before returning a path.
+autospec_runtime_source_candidate() {
+    local state_root generations target_digest generation source line1 line2
+    [ -d "${1-}" ] || { autospec_runtime_error repo-dir-invalid; return 2; }
+    state_root=${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}
+    generations=${AUTOSPEC_RUNTIME_ROOT:-$state_root/runtime-generations}
+    [ -L "$generations/current" ] || { autospec_runtime_error source-receipt-unavailable; return 2; }
+    target_digest=$(readlink "$generations/current") || return 2
+    autospec_runtime_valid_sha256 "$target_digest" || { autospec_runtime_error source-receipt-invalid; return 2; }
+    [ "$target_digest" = "${target_digest##*/}" ] || { autospec_runtime_error source-receipt-invalid; return 2; }
+    generation="$generations/$target_digest"
+    [ -f "$generation/receipt" ] && [ ! -L "$generation/receipt" ] \
+        || { autospec_runtime_error source-receipt-invalid; return 2; }
+    exec 3<"$generation/receipt" || return 2
+    if ! IFS= read -r line1 <&3 || ! IFS= read -r line2 <&3; then
+        exec 3<&-
+        autospec_runtime_error source-receipt-invalid
+        return 2
+    fi
+    exec 3<&-
+    [ "$line1" = "schema=$autospec_runtime_receipt_schema" ] \
+        || { autospec_runtime_error source-receipt-invalid; return 2; }
+    case "$line2" in repo_dir=*) receipt_repo=${line2#repo_dir=} ;; *) autospec_runtime_error source-receipt-invalid; return 2 ;; esac
+    case "$receipt_repo" in ''|*$'\n'*|*$'\r'*|*$'\t'*) autospec_runtime_error source-receipt-invalid; return 2 ;; esac
+    source=$(CDPATH='' cd -P -- "$receipt_repo" 2>/dev/null && pwd -P) \
+        || { autospec_runtime_error source-checkout-unavailable; return 2; }
+    [ -f "$source/Cargo.toml" ] && [ -f "$source/crates/autospec-cli/Cargo.toml" ] \
+        || { autospec_runtime_error source-checkout-invalid; return 2; }
     printf '%s\n' "$source"
 }
 
@@ -311,8 +341,17 @@ autospec_runtime_check() {
     exec bash "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/autospec-runtime-install.sh" --check-only --repo-dir "$1"
 }
 
+autospec_runtime_check_target() {
+    local source script_dir
+    source=$(autospec_runtime_source_candidate "$1") || return 2
+    script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 2
+    # shellcheck source=scripts/autospec-runtime-install.sh
+    . "$script_dir/autospec-runtime-install.sh"
+    runtime_install_main --check-only --repo-dir "$source"
+}
+
 autospec_runtime_usage() {
-    printf 'usage: %s {source|identity|check|ensure} --repo-dir DIR\n' "${0##*/}" >&2
+    printf 'usage: %s {source|identity|check|check-target|ensure} --repo-dir DIR\n' "${0##*/}" >&2
     return 2
 }
 
@@ -329,6 +368,7 @@ autospec_runtime_main() {
         source) autospec_runtime_source_checkout "$repo" ;;
         identity) autospec_runtime_identity_tuple "$repo" | sed -n '4p' ;;
         check) autospec_runtime_check "$repo" ;;
+        check-target) autospec_runtime_check_target "$repo" ;;
         ensure) exec bash "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/autospec-runtime-install.sh" --repo-dir "$repo" ;;
         *) autospec_runtime_usage; return 2 ;;
     esac

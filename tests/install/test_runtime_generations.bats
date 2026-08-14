@@ -26,7 +26,11 @@ setup() {
 set -eu
 printf 'build %s\n' "$PWD" >>"$AUTOSPEC_TEST_BUILD_LOG"
 mkdir -p "$CARGO_TARGET_DIR/release"
-cp "$PWD/crates/demo/src/lib.rs" "$CARGO_TARGET_DIR/release/autospec"
+cat >"$CARGO_TARGET_DIR/release/autospec" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"${AUTOSPEC_TEST_LAUNCH_ARGS:?}"
+EOF
+sed 's/^/# source: /' "$PWD/crates/demo/src/lib.rs" >>"$CARGO_TARGET_DIR/release/autospec"
 chmod +x "$CARGO_TARGET_DIR/release/autospec"
 if [ -n "${AUTOSPEC_TEST_BUILD_ENTERED:-}" ]; then
   : >"$AUTOSPEC_TEST_BUILD_ENTERED"
@@ -43,6 +47,26 @@ SH
   install_runtime
   [ "$status" -eq 0 ]
   target="$TEST_ROOT/target"
+  mkdir -p "$target/crates/autospec-cli"
+  printf '[workspace]\n' >"$target/Cargo.toml"
+  printf '[package]\nname="autospec-cli"\nversion="9.9.9"\n' \
+    >"$target/crates/autospec-cli/Cargo.toml"
+  git -C "$target" init -q
+
+  run env HOME="$TEST_HOME" bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" \
+    source --repo-dir "$target"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(cd -P "$FIXTURE_REPO" && pwd -P)" ]
+}
+
+@test "runtime source resolution accepts a verified checkout that advanced" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  printf '// next source revision\n' >>"$FIXTURE_REPO/crates/demo/src/lib.rs"
+  git -C "$FIXTURE_REPO" add crates/demo/src/lib.rs
+  git -C "$FIXTURE_REPO" commit -qm 'advance source'
+  target="$TEST_ROOT/target"
   mkdir -p "$target"
   git -C "$target" init -q
 
@@ -51,6 +75,56 @@ SH
 
   [ "$status" -eq 0 ]
   [ "$output" = "$(cd -P "$FIXTURE_REPO" && pwd -P)" ]
+  run env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" \
+    bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" check --repo-dir "$FIXTURE_REPO"
+  [ "$status" -eq 10 ]
+}
+
+@test "generic-target launcher fails before execution when the source receipt is missing" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  generation="$(dirname "$output")"
+  chmod 700 "$generation"
+  rm "$generation/receipt"
+  chmod 500 "$generation"
+  target="$TEST_ROOT/target"
+  mkdir -p "$target"
+  git -C "$target" init -q
+  install_launcher_runtime_fixture
+
+  run env HOME="$TEST_HOME" PATH="$TEST_HOME/.autospec/bin:$FAKE_BIN:$PATH" \
+    "$LAUNCHER" start --repo-dir "$target"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot resolve the installed Autospec source checkout"* ]]
+  [ ! -e "$AUTOSPEC_TEST_LAUNCH_ARGS" ]
+}
+
+@test "warm generic-target launcher stays bounded and preserves target arguments" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  target="$TEST_ROOT/target"
+  mkdir -p "$target"
+  git -C "$target" init -q
+  install_launcher_runtime_fixture
+
+  env HOME="$TEST_HOME" PATH="$TEST_HOME/.autospec/bin:$FAKE_BIN:$PATH" \
+    "$LAUNCHER" start --repo-dir "$target" --json
+  rm -f "$AUTOSPEC_TEST_LAUNCH_ARGS"
+  { /usr/bin/time -p env HOME="$TEST_HOME" \
+    PATH="$TEST_HOME/.autospec/bin:$FAKE_BIN:$PATH" \
+    "$LAUNCHER" start --repo-dir "$target" --json >"$TEST_ROOT/launcher.out"; } \
+    2>"$TEST_ROOT/launcher.time"
+  launcher_status=$?
+  elapsed_seconds="$(awk '/^real / { print $2 }' "$TEST_ROOT/launcher.time")"
+  echo "generic-target launcher elapsed: ${elapsed_seconds}s" >&3
+
+  [ "$launcher_status" -eq 0 ]
+  awk -v elapsed="$elapsed_seconds" 'BEGIN { exit !(elapsed <= 0.20) }'
+  [ "$(sed -n '1p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = autonomous ]
+  [ "$(sed -n '2p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = start ]
+  [ "$(sed -n '3p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = --repo-dir ]
+  [ "$(sed -n '4p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = "$target" ]
 }
 
 teardown() {
@@ -61,6 +135,16 @@ teardown() {
 install_runtime() {
   run env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
     bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO"
+}
+
+install_launcher_runtime_fixture() {
+  mkdir -p "$TEST_ROOT/scripts"
+  cp "$REPO_ROOT/scripts/autospec-autonomous-launcher.sh" \
+    "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" \
+    "$REPO_ROOT/scripts/autospec-runtime-install.sh" "$TEST_ROOT/scripts/"
+  chmod +x "$TEST_ROOT/scripts/"*.sh
+  LAUNCHER="$TEST_ROOT/scripts/autospec-autonomous-launcher.sh"
+  export AUTOSPEC_TEST_LAUNCH_ARGS="$TEST_ROOT/launch.args"
 }
 
 mode_of() {

@@ -472,4 +472,6 @@ runtime_install_main() {
     printf '%s/autospec\n' "$generation"
 }
 
-runtime_install_main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    runtime_install_main "$@"
+fi

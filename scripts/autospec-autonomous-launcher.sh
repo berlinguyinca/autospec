@@ -123,12 +123,7 @@ launcher_main() {
         launcher_error 'cannot resolve --repo-dir or the caller git root'
         return 2
     }
-    runtime_repo_dir=$(bash "$helper" source --repo-dir "$repo_dir") || {
-        launcher_error 'cannot resolve the installed Autospec source checkout'
-        return 2
-    }
-
-    if runtime_path=$(bash "$helper" check --repo-dir "$runtime_repo_dir"); then
+    if runtime_path=$(bash "$helper" check-target --repo-dir "$repo_dir"); then
         launcher_runtime_path "$runtime_path" || {
             launcher_error 'runtime freshness check returned an invalid executable path'
             return 2
@@ -136,7 +131,11 @@ launcher_main() {
     else
         check_status=$?
         [ "$check_status" -eq 10 ] || {
-            launcher_error 'runtime freshness check failed'
+            launcher_error 'cannot resolve or verify the installed Autospec source checkout'
+            return 2
+        }
+        runtime_repo_dir=$(bash "$helper" source --repo-dir "$repo_dir") || {
+            launcher_error 'cannot resolve the installed Autospec source checkout'
             return 2
         }
         launcher_drain_if_live "$repo_dir" || return $?
