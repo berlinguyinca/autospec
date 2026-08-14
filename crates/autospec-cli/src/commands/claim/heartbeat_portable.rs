@@ -189,7 +189,6 @@ fn private_directory_metadata(metadata: &fs::Metadata) -> bool {
 
 struct PrivateDirectory {
     path: PathBuf,
-    #[cfg(unix)]
     file: fs::File,
 }
 
@@ -228,7 +227,10 @@ fn open_existing_private_directory(
     #[cfg(windows)]
     {
         validate_windows_path_components(path)?;
-        let metadata = fs::symlink_metadata(path).map_err(|error| {
+        let file = open_windows_directory(path).map_err(|error| {
+            CommandFailure::diagnostic(format!("heartbeat directory secure open: {error}"))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
             CommandFailure::diagnostic(format!("could not inspect heartbeat directory: {error}"))
         })?;
         if !metadata.file_type().is_dir() || !private_directory_metadata(&metadata) {
@@ -238,6 +240,7 @@ fn open_existing_private_directory(
         }
         Ok(Some(PrivateDirectory {
             path: path.to_path_buf(),
+            file,
         }))
     }
 }
@@ -252,22 +255,253 @@ fn open_existing_private_child(
         ));
     }
     let path = parent.path.join(name);
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(CommandFailure::diagnostic(format!(
-                "could not inspect heartbeat directory: {error}"
-            )))
-        }
-        Ok(_) => {}
-    }
     #[cfg(unix)]
     {
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "could not inspect heartbeat directory: {error}"
+                )))
+            }
+            Ok(_) => {}
+        }
         let file = super::open_heartbeat_directory_beneath(&parent.file, Path::new(name))?;
         Ok(Some(PrivateDirectory { path, file }))
     }
     #[cfg(windows)]
-    open_existing_private_directory(&path)
+    {
+        let file = match open_windows_relative(
+            &parent.file,
+            name,
+            WINDOWS_FILE_LIST_DIRECTORY | WINDOWS_FILE_READ_ATTRIBUTES | WINDOWS_SYNCHRONIZE,
+            WINDOWS_FILE_OPEN,
+            WINDOWS_FILE_DIRECTORY_FILE
+                | WINDOWS_FILE_OPEN_REPARSE_POINT
+                | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "heartbeat directory secure open: {error}"
+                )))
+            }
+        };
+        let metadata = file.metadata().map_err(|error| {
+            CommandFailure::diagnostic(format!("could not inspect heartbeat directory: {error}"))
+        })?;
+        if !metadata.file_type().is_dir() || !private_directory_metadata(&metadata) {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat publication directory is not private",
+            ));
+        }
+        Ok(Some(PrivateDirectory { path, file }))
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_DELETE: u32 = 0x0001_0000;
+#[cfg(windows)]
+const WINDOWS_FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
+#[cfg(windows)]
+const WINDOWS_FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+#[cfg(windows)]
+const WINDOWS_GENERIC_READ: u32 = 0x8000_0000;
+#[cfg(windows)]
+const WINDOWS_GENERIC_WRITE: u32 = 0x4000_0000;
+#[cfg(windows)]
+const WINDOWS_SYNCHRONIZE: u32 = 0x0010_0000;
+#[cfg(windows)]
+const WINDOWS_FILE_OPEN: u32 = 0x0000_0001;
+#[cfg(windows)]
+const WINDOWS_FILE_OPEN_IF: u32 = 0x0000_0003;
+#[cfg(windows)]
+const WINDOWS_FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+#[cfg(windows)]
+const WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+#[cfg(windows)]
+const WINDOWS_FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+#[cfg(windows)]
+const WINDOWS_FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[cfg(windows)]
+fn open_windows_directory(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    const FILE_SHARE_ALL: u32 = 0x0000_0007;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: path is NUL-terminated and all optional pointers are null.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            WINDOWS_FILE_LIST_DIRECTORY | WINDOWS_FILE_READ_ATTRIBUTES | WINDOWS_SYNCHRONIZE,
+            FILE_SHARE_ALL,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == windows_invalid_handle_value() {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: CreateFileW returned a new owned handle.
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_relative(
+    directory: &fs::File,
+    name: &str,
+    desired_access: u32,
+    disposition: u32,
+    options: u32,
+) -> std::io::Result<fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    if name.is_empty() || Path::new(name).components().count() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "heartbeat name must be one normal component",
+        ));
+    }
+    let mut name = Path::new(name)
+        .as_os_str()
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let byte_length = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "heartbeat name is too long",
+            )
+        })?;
+    let mut unicode = WindowsUnicodeString {
+        length: byte_length,
+        maximum_length: byte_length,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = WindowsObjectAttributes {
+        length: std::mem::size_of::<WindowsObjectAttributes>() as u32,
+        root_directory: directory.as_raw_handle(),
+        object_name: &mut unicode,
+        attributes: 0x0000_0040,
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut status_block = WindowsIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = windows_invalid_handle_value();
+    // SAFETY: every pointer refers to initialized storage for the duration of the call;
+    // the object name is relative to the live directory handle.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attributes,
+            &mut status_block,
+            std::ptr::null_mut(),
+            0x0000_0080,
+            0x0000_0007,
+            disposition,
+            options,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: conversion is a pure mapping from the returned NTSTATUS.
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        Err(std::io::Error::from_raw_os_error(error as i32))
+    } else {
+        // SAFETY: NtCreateFile returned a new owned handle on success.
+        Ok(unsafe { fs::File::from_raw_handle(handle) })
+    }
+}
+
+#[cfg(windows)]
+fn windows_invalid_handle_value() -> std::os::windows::io::RawHandle {
+    (-1_isize) as std::os::windows::io::RawHandle
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsObjectAttributes {
+    length: u32,
+    root_directory: std::os::windows::io::RawHandle,
+    object_name: *mut WindowsUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsIoStatusBlock {
+    status: usize,
+    information: usize,
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<WindowsUnicodeString>() == 16);
+    assert!(std::mem::size_of::<WindowsObjectAttributes>() == 48);
+    assert!(std::mem::size_of::<WindowsIoStatusBlock>() == 16);
+};
+
+#[cfg(windows)]
+#[link(name = "Kernel32")]
+unsafe extern "system" {
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *const std::ffi::c_void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: std::os::windows::io::RawHandle,
+    ) -> std::os::windows::io::RawHandle;
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut std::os::windows::io::RawHandle,
+        desired_access: u32,
+        object_attributes: *mut WindowsObjectAttributes,
+        io_status_block: *mut WindowsIoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
 struct RepositoryLock {
@@ -322,19 +556,19 @@ impl RepositoryLock {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::OpenOptionsExt;
             use std::os::windows::io::AsRawHandle;
-            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-            let path = directory.path.join(".portable-heartbeat.lock");
-            let file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(&path)
-                .map_err(|error| {
-                    CommandFailure::diagnostic(format!("heartbeat repository lock open: {error}"))
-                })?;
+            let file = open_windows_relative(
+                &directory.file,
+                ".portable-heartbeat.lock",
+                WINDOWS_GENERIC_READ | WINDOWS_GENERIC_WRITE | WINDOWS_SYNCHRONIZE,
+                WINDOWS_FILE_OPEN_IF,
+                WINDOWS_FILE_NON_DIRECTORY_FILE
+                    | WINDOWS_FILE_OPEN_REPARSE_POINT
+                    | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+            )
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("heartbeat repository lock open: {error}"))
+            })?;
             let metadata = file.metadata().map_err(|error| {
                 CommandFailure::diagnostic(format!("heartbeat repository lock inspect: {error}"))
             })?;
@@ -694,6 +928,22 @@ fn retire_released_at_with_hook(
     identity: ClaimMutationIdentity<'_>,
     after_issue_detach: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
+    retire_released_at_with_boundary_hooks(
+        root,
+        identity,
+        &mut |_| Ok(()),
+        after_issue_detach,
+        &mut |_| Ok(()),
+    )
+}
+
+fn retire_released_at_with_boundary_hooks(
+    root: &Path,
+    identity: ClaimMutationIdentity<'_>,
+    after_repo_open: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
+    after_issue_detach: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
+    after_sessions_open: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
     let Some(root) = open_existing_private_directory(root)? else {
         return Ok(());
     };
@@ -701,6 +951,7 @@ fn retire_released_at_with_hook(
     let Some(repo) = open_existing_private_child(&root, &repo_name)? else {
         return Ok(());
     };
+    after_repo_open(&repo.path)?;
     let _lock = RepositoryLock::acquire(&repo)?;
     let issue_name = format!("{}.json", identity.issue);
     let Some(issue_stage) = detach_heartbeat(&repo, &issue_name)? else {
@@ -722,7 +973,7 @@ fn retire_released_at_with_hook(
         }
     };
     if let Some(session_id) = evidence.session_id.as_deref() {
-        match retire_matching_session(&repo, session_id, identity) {
+        match retire_matching_session(&repo, session_id, identity, after_sessions_open) {
             Ok(true) => {}
             Ok(false) => {
                 restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
@@ -742,10 +993,12 @@ fn retire_matching_session(
     repo: &PrivateDirectory,
     session_id: &str,
     identity: ClaimMutationIdentity<'_>,
+    after_sessions_open: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
 ) -> Result<bool, CommandFailure> {
     let Some(sessions) = open_existing_private_child(repo, "sessions")? else {
         return Ok(true);
     };
+    after_sessions_open(&sessions.path)?;
     let session_name = format!("{}.json", heartbeat_session_key(session_id));
     let Some(session_stage) = detach_heartbeat(&sessions, &session_name)? else {
         return Ok(true);
@@ -771,10 +1024,10 @@ fn retire_matching_session(
 
 fn detached_retirement_evidence(
     directory: &PrivateDirectory,
-    name: &str,
+    detached: &DetachedHeartbeat,
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<Option<StartupHeartbeatEvidence>, CommandFailure> {
-    let document = read_private_file_in(directory, name)
+    let document = read_detached_private_file(directory, detached)
         .map_err(|error| CommandFailure::diagnostic(format!("read released heartbeat: {error}")))?;
     let Some(evidence) = parse_startup_heartbeat(&document) else {
         return Ok(None);
@@ -793,10 +1046,16 @@ fn exact_retirement_identity(
         && evidence.claim_id == identity.claim_id
 }
 
+struct DetachedHeartbeat {
+    name: String,
+    #[cfg(windows)]
+    file: fs::File,
+}
+
 fn detach_heartbeat(
     directory: &PrivateDirectory,
     live_name: &str,
-) -> Result<Option<String>, CommandFailure> {
+) -> Result<Option<DetachedHeartbeat>, CommandFailure> {
     let staged_name = format!(
         ".autospec-retiring-{}-{}",
         std::process::id(),
@@ -831,25 +1090,55 @@ fn detach_heartbeat(
     }
     #[cfg(windows)]
     {
-        let source = directory.path.join(live_name);
-        let staged = directory.path.join(&staged_name);
-        match move_file_exclusive(&source, &staged) {
-            Ok(()) => {}
+        let file = match open_windows_relative(
+            &directory.file,
+            live_name,
+            WINDOWS_GENERIC_READ | WINDOWS_DELETE | WINDOWS_SYNCHRONIZE,
+            WINDOWS_FILE_OPEN,
+            WINDOWS_FILE_NON_DIRECTORY_FILE
+                | WINDOWS_FILE_OPEN_REPARSE_POINT
+                | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "open released heartbeat: {error}"
+                )))
+            }
+        };
+        let metadata = file.metadata().map_err(|error| {
+            CommandFailure::diagnostic(format!("inspect released heartbeat: {error}"))
+        })?;
+        if !metadata.file_type().is_file() || !private_file_metadata(&metadata) {
+            return Err(CommandFailure::diagnostic(
+                "released heartbeat is not a private regular file",
+            ));
+        }
+        match rename_windows_file_handle(&file, &directory.file, &staged_name) {
+            Ok(()) => {}
             Err(error) => {
                 return Err(CommandFailure::diagnostic(format!(
                     "detach released heartbeat: {error}"
                 )))
             }
         }
+        sync_private_directory(directory)?;
+        return Ok(Some(DetachedHeartbeat {
+            name: staged_name,
+            file,
+        }));
     }
-    sync_private_directory(directory)?;
-    Ok(Some(staged_name))
+    #[cfg(unix)]
+    {
+        sync_private_directory(directory)?;
+        Ok(Some(DetachedHeartbeat { name: staged_name }))
+    }
 }
 
 fn restore_detached_heartbeat(
     directory: &PrivateDirectory,
-    staged_name: &str,
+    detached: &DetachedHeartbeat,
     live_name: &str,
 ) -> Result<(), CommandFailure> {
     #[cfg(unix)]
@@ -858,19 +1147,22 @@ fn restore_detached_heartbeat(
         use nix::unistd::{linkat, unlinkat, UnlinkatFlags};
         match linkat(
             &directory.file,
-            staged_name,
+            detached.name.as_str(),
             &directory.file,
             live_name,
             AtFlags::empty(),
         ) {
             Ok(()) => {
-                unlinkat(&directory.file, staged_name, UnlinkatFlags::NoRemoveDir).map_err(
-                    |error| {
-                        CommandFailure::diagnostic(format!(
-                            "remove restored heartbeat staging: {error}"
-                        ))
-                    },
-                )?;
+                unlinkat(
+                    &directory.file,
+                    detached.name.as_str(),
+                    UnlinkatFlags::NoRemoveDir,
+                )
+                .map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "remove restored heartbeat staging: {error}"
+                    ))
+                })?;
             }
             Err(nix::errno::Errno::EEXIST) => return Ok(()),
             Err(error) => {
@@ -882,12 +1174,27 @@ fn restore_detached_heartbeat(
     }
     #[cfg(windows)]
     {
-        let staged = directory.path.join(staged_name);
-        let live = directory.path.join(live_name);
-        match atomic_rename_exclusive(&staged, &live) {
+        match rename_windows_file_handle(&detached.file, &directory.file, live_name) {
             Ok(()) => {}
-            Err(_) if fs::symlink_metadata(&live).is_ok() => return Ok(()),
-            Err(error) => return Err(error),
+            Err(_)
+                if open_windows_relative(
+                    &directory.file,
+                    live_name,
+                    WINDOWS_FILE_READ_ATTRIBUTES | WINDOWS_SYNCHRONIZE,
+                    WINDOWS_FILE_OPEN,
+                    WINDOWS_FILE_NON_DIRECTORY_FILE
+                        | WINDOWS_FILE_OPEN_REPARSE_POINT
+                        | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+                )
+                .is_ok() =>
+            {
+                return Ok(())
+            }
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "restore detached heartbeat: {error}"
+                )))
+            }
         }
     }
     sync_private_directory(directory)
@@ -895,30 +1202,35 @@ fn restore_detached_heartbeat(
 
 fn remove_detached_heartbeat(
     directory: &PrivateDirectory,
-    staged_name: &str,
+    detached: &DetachedHeartbeat,
 ) -> Result<(), CommandFailure> {
+    #[cfg(windows)]
+    let _ = directory;
     #[cfg(unix)]
     nix::unistd::unlinkat(
         &directory.file,
-        staged_name,
+        detached.name.as_str(),
         nix::unistd::UnlinkatFlags::NoRemoveDir,
     )
     .map_err(|error| CommandFailure::diagnostic(format!("remove detached heartbeat: {error}")))?;
     #[cfg(windows)]
-    fs::remove_file(directory.path.join(staged_name)).map_err(|error| {
+    delete_windows_file_handle(&detached.file).map_err(|error| {
         CommandFailure::diagnostic(format!("remove detached heartbeat: {error}"))
     })?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn read_private_file_in(directory: &PrivateDirectory, name: &str) -> std::io::Result<Vec<u8>> {
+fn read_detached_private_file(
+    directory: &PrivateDirectory,
+    detached: &DetachedHeartbeat,
+) -> std::io::Result<Vec<u8>> {
     use nix::fcntl::{openat, OFlag};
     use nix::sys::stat::Mode;
     let mut file = fs::File::from(
         openat(
             &directory.file,
-            Path::new(name),
+            Path::new(&detached.name),
             OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
             Mode::empty(),
         )
@@ -937,16 +1249,21 @@ fn read_private_file_in(directory: &PrivateDirectory, name: &str) -> std::io::Re
 }
 
 #[cfg(windows)]
-fn read_private_file_in(directory: &PrivateDirectory, name: &str) -> std::io::Result<Vec<u8>> {
-    let path = directory.path.join(name);
-    let metadata = fs::symlink_metadata(&path)?;
+fn read_detached_private_file(
+    _directory: &PrivateDirectory,
+    detached: &DetachedHeartbeat,
+) -> std::io::Result<Vec<u8>> {
+    let metadata = detached.file.metadata()?;
     if !metadata.file_type().is_file() || !private_file_metadata(&metadata) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "released heartbeat is not a private regular file",
         ));
     }
-    read_file_no_follow(&path)
+    let mut file = &detached.file;
+    let mut document = Vec::new();
+    file.read_to_end(&mut document)?;
+    Ok(document)
 }
 
 fn sync_private_directory(directory: &PrivateDirectory) -> Result<(), CommandFailure> {
@@ -955,33 +1272,71 @@ fn sync_private_directory(directory: &PrivateDirectory) -> Result<(), CommandFai
         CommandFailure::diagnostic(format!("heartbeat directory fsync: {error}"))
     });
     #[cfg(windows)]
-    sync_directory(&directory.path)
+    match directory.file.sync_all() {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "heartbeat directory flush: {error}"
+        ))),
+    }
 }
 
 #[cfg(windows)]
-fn move_file_exclusive(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn rename_windows_file_handle(
+    file: &fs::File,
+    directory: &fs::File,
+    destination_name: &str,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    #[link(name = "Kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
+    use std::os::windows::io::AsRawHandle;
+    if destination_name.is_empty() || Path::new(destination_name).components().count() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "heartbeat destination must be one normal component",
+        ));
     }
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-    let source = source
+    let destination = Path::new(destination_name)
         .as_os_str()
         .encode_wide()
-        .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are NUL-terminated and REPLACE_EXISTING is intentionally absent.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
+    let name_bytes = destination
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "heartbeat destination is too long",
+            )
+        })?;
+    let header_size = std::mem::offset_of!(WindowsFileRenameInfo, file_name);
+    let mut buffer = vec![0_u8; header_size + name_bytes as usize];
+    let info = buffer.as_mut_ptr().cast::<WindowsFileRenameInfo>();
+    // SAFETY: buffer is sized for the fixed header plus the complete UTF-16 name.
+    unsafe {
+        (*info).flags = 0;
+        (*info).root_directory = directory.as_raw_handle();
+        (*info).file_name_length = name_bytes;
+        std::ptr::copy_nonoverlapping(
             destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
+            (*info).file_name.as_mut_ptr(),
+            destination.len(),
+        );
+    }
+    // SAFETY: file and directory are live handles and buffer contains FILE_RENAME_INFO.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
         )
     } == 0
     {
@@ -989,6 +1344,52 @@ fn move_file_exclusive(source: &Path, destination: &Path) -> std::io::Result<()>
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn delete_windows_file_handle(file: &fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let mut delete_file: u8 = 1;
+    // SAFETY: file is a live DELETE-capable handle and delete_file is FILE_DISPOSITION_INFO.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            4,
+            (&mut delete_file as *mut u8).cast(),
+            std::mem::size_of_val(&delete_file) as u32,
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileRenameInfo {
+    flags: u32,
+    root_directory: std::os::windows::io::RawHandle,
+    file_name_length: u32,
+    file_name: [u16; 1],
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<WindowsFileRenameInfo>() == 24);
+    assert!(std::mem::offset_of!(WindowsFileRenameInfo, file_name) == 20);
+};
+
+#[cfg(windows)]
+#[link(name = "Kernel32")]
+unsafe extern "system" {
+    fn SetFileInformationByHandle(
+        file: std::os::windows::io::RawHandle,
+        information_class: i32,
+        information: *mut std::ffi::c_void,
+        buffer_size: u32,
+    ) -> i32;
 }
 
 #[cfg(test)]
@@ -1035,6 +1436,11 @@ mod tests {
                     "owner/repo",
                 ))
                 .join("42.json")
+        }
+
+        #[cfg(windows)]
+        fn repo_path(&self) -> std::path::PathBuf {
+            self.issue_path().parent().expect("repo path").to_path_buf()
         }
     }
 
@@ -1423,5 +1829,112 @@ mod tests {
         let winner =
             std::fs::read_to_string(fixture.root.join("42.json")).expect("winning heartbeat");
         assert!(winner == "claim-a" || winner == "claim-b");
+    }
+
+    #[cfg(windows)]
+    fn replace_directory_with_junction(path: &Path, replacement: &Path, backup: &Path) {
+        std::fs::rename(path, backup).expect("move validated directory aside");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(path)
+            .arg(replacement)
+            .output()
+            .expect("create replacement junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_retirement_stays_bound_when_repository_component_is_replaced() {
+        let fixture = Fixture::new("windows-retirement-repo-reparse-race");
+        let document = fixture.document("claim-a", None);
+        publish(&fixture.root, "owner/repo", 42, None, &document).expect("heartbeat");
+        let repo = fixture.repo_path();
+        let original_repo = fixture.root.join("original-repo");
+        let outside = fixture.root.join("outside-repo");
+        std::fs::create_dir(&outside).expect("outside repo");
+        std::fs::write(outside.join("42.json"), &document).expect("outside heartbeat");
+
+        retire_released_at_with_boundary_hooks(
+            &fixture.root,
+            ClaimMutationIdentity {
+                repo: "owner/repo",
+                issue: 42,
+                worker_id: "worker-a",
+                branch: "feat/worker",
+                claim_id: "claim-a",
+            },
+            &mut |_| {
+                replace_directory_with_junction(&repo, &outside, &original_repo);
+                Ok(())
+            },
+            &mut |_| Ok(()),
+            &mut |_| Ok(()),
+        )
+        .expect("handle-bound repository retirement");
+
+        assert!(
+            outside.join("42.json").exists(),
+            "replacement target heartbeat was deleted"
+        );
+        assert!(
+            !original_repo.join("42.json").exists(),
+            "validated repository heartbeat was not retired"
+        );
+        std::fs::remove_dir(&repo).expect("remove repository junction");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_retirement_stays_bound_when_sessions_component_is_replaced() {
+        let fixture = Fixture::new("windows-retirement-session-reparse-race");
+        let document = fixture.document("claim-a", Some("session-a"));
+        publish(
+            &fixture.root,
+            "owner/repo",
+            42,
+            Some("session-a"),
+            &document,
+        )
+        .expect("heartbeat");
+        let sessions = fixture.repo_path().join("sessions");
+        let original_sessions = fixture.repo_path().join("original-sessions");
+        let outside = fixture.root.join("outside-sessions");
+        std::fs::create_dir(&outside).expect("outside sessions");
+        let session_name = format!("{}.json", heartbeat_session_key("session-a"));
+        std::fs::write(outside.join(&session_name), &document).expect("outside heartbeat");
+
+        retire_released_at_with_boundary_hooks(
+            &fixture.root,
+            ClaimMutationIdentity {
+                repo: "owner/repo",
+                issue: 42,
+                worker_id: "worker-a",
+                branch: "feat/worker",
+                claim_id: "claim-a",
+            },
+            &mut |_| Ok(()),
+            &mut |_| Ok(()),
+            &mut |_| {
+                replace_directory_with_junction(&sessions, &outside, &original_sessions);
+                Ok(())
+            },
+        )
+        .expect("handle-bound sessions retirement");
+
+        assert!(
+            outside.join(&session_name).exists(),
+            "replacement target session heartbeat was deleted"
+        );
+        assert!(
+            !original_sessions.join(&session_name).exists(),
+            "validated session heartbeat was not retired"
+        );
+        assert!(!fixture.issue_path().exists(), "issue heartbeat remained");
+        std::fs::remove_dir(&sessions).expect("remove sessions junction");
     }
 }
