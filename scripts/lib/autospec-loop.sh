@@ -453,9 +453,13 @@ _autospec_conductor_accountability_event() {
     local kind="$1" what="$2" why="$3" evidence="$4" project="${5:-0}"
     local repo="${_AUTOSPEC_CONDUCTOR_REPO:-}"
     local bin="${_AUTOSPEC_CONDUCTOR_ACCOUNTABILITY_BIN:-}"
-    [ -n "$repo" ] || return 0
-    [ -n "$bin" ] || return 0
+    local required="${AUTOSPEC_ACCOUNTABILITY_REQUIRED:-0}"
+    if [ -z "$repo" ] || [ -z "$bin" ]; then
+        [ "$required" = "1" ] && printf '[conductor] accountability binding prerequisites are missing\n' >&2 && return 1
+        return 0
+    fi
     if [ ! -x "$bin" ] && ! command -v "$bin" >/dev/null 2>&1; then
+        [ "$required" = "1" ] && printf '[conductor] accountability binary is unavailable: %s\n' "$bin" >&2 && return 1
         return 0
     fi
     local slug state_root launch
@@ -464,6 +468,7 @@ _autospec_conductor_accountability_event() {
     launch="$state_root/$slug/launch.json"
     if [ ! -f "$launch" ] || ! command -v jq >/dev/null 2>&1 \
         || ! jq -e '.accountability.run_id | strings | length > 0' "$launch" >/dev/null 2>&1; then
+        [ "$required" = "1" ] && printf '[conductor] verified accountability launch binding is unavailable\n' >&2 && return 1
         return 0
     fi
     local args=(autonomous accountability-event --repo "$repo" --kind "$kind" \
@@ -488,10 +493,11 @@ _autospec_conductor_record_stop() {
         *park*) accountability_kind="parked" ;;
         all-done|completed) accountability_kind="completed" ;;
     esac
+    local accountability_status=0
     _autospec_conductor_accountability_event "$accountability_kind" \
         "Conductor stopped after ${cycle} cycle(s)" \
         "The terminal boundary records why autonomous mutation ended" \
-        "$reason" 1 || printf '[conductor] WARN: accountability terminal event journal failed\n' >&2
+        "$reason" 1 || accountability_status=$?
     if [ "$shape" = "signal" ]; then
         printf '[conductor] stopped: %s (cycle=%s)\n' "$reason" "$cycle" >&2
     else
@@ -505,6 +511,10 @@ _autospec_conductor_record_stop() {
             --status "stopped:${reason}:cycle-${cycle}" \
             --session "${_AUTOSPEC_CONDUCTOR_SESSION:-}" \
             2>/dev/null || true
+    fi
+    if [ "$accountability_status" -ne 0 ]; then
+        printf '[conductor] accountability terminal event journal failed; conductor halted\n' >&2
+        return "$accountability_status"
     fi
 }
 

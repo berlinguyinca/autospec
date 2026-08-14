@@ -79,6 +79,13 @@ printf '"'"'{"ready":[{"number":42}],"batch":[],"blocked":[],"worker_cap":{"reac
   [[ "$output" == *"accountability selection event journal failed"* ]]
 }
 
+@test "conductor: a bound run fails closed when its accountability binary disappears" {
+  run bash -c ". '$LOOP_LIB'; AUTOSPEC_ACCOUNTABILITY_REQUIRED=1 _AUTOSPEC_CONDUCTOR_REPO='test-owner/test-repo' _AUTOSPEC_CONDUCTOR_ACCOUNTABILITY_BIN='$TEST_TMP/missing-autospec' _autospec_conductor_accountability_event stopped what why evidence 1" 2>&1
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"accountability binary is unavailable"* ]]
+}
+
 # ── Helper: install a stub script in FAKE_SCRIPTS ────────────────────────────
 _install_stub() {
   local name="$1"

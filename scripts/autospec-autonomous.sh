@@ -370,6 +370,8 @@ conductor_row_load() {
     _accountability_url="$(json_from_file "$_launch" '.accountability.epic_url // empty' "")"
     _accountability_events="$(json_from_file "$_accountability_state" '.event_count // 0' "0")"
     _accountability_pending="$(json_from_file "$_accountability_state" '.pending_projection_count // 0' "0")"
+    _accountability_lifecycle="$(json_from_file "$_accountability_state" '.lifecycle_phase // empty' "")"
+    _accountability_last_projected="$(json_from_file "$_accountability_state" '.last_projected_at // empty' "")"
     _accountability_projection="current"
     [ -n "$_accountability_run_id" ] || _accountability_projection="unbound"
     [ "${_accountability_pending:-0}" = "0" ] || _accountability_projection="degraded"
@@ -401,12 +403,14 @@ print_conductor_json_row() {
     printf ',"session_id":%s' "$(json_escape "$_session_id")"
     printf ',"repo_dir":%s' "$(json_escape "$_repo_dir")"
     printf ',"argv":%s' "$_argv"
-    printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"event_count":%s,"pending_projection_count":%s,"projection_state":%s}' \
+    printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"accountability_state":%s,"event_count":%s,"pending_projection_count":%s,"last_projected_at":%s,"projection_state":%s}' \
         "$(json_escape "$_accountability_run_id")" \
         "${_accountability_epic:-null}" \
         "$(json_escape "$_accountability_url")" \
+        "$(json_escape "$_accountability_lifecycle")" \
         "${_accountability_events:-0}" \
         "${_accountability_pending:-0}" \
+        "${_accountability_last_projected:-null}" \
         "$(json_escape "$_accountability_projection")"
     printf '}'
 }
@@ -473,6 +477,8 @@ print_status() {
     _accountability_url="$(json_from_file "$_launch" '.accountability.epic_url // empty' "")"
     _accountability_events="$(json_from_file "$_accountability_state" '.event_count // 0' "0")"
     _accountability_pending="$(json_from_file "$_accountability_state" '.pending_projection_count // 0' "0")"
+    _accountability_lifecycle="$(json_from_file "$_accountability_state" '.lifecycle_phase // empty' "")"
+    _accountability_last_projected="$(json_from_file "$_accountability_state" '.last_projected_at // empty' "")"
     _accountability_projection="current"
     [ -n "$_accountability_run_id" ] || _accountability_projection="unbound"
     [ "${_accountability_pending:-0}" = "0" ] || _accountability_projection="degraded"
@@ -494,10 +500,11 @@ print_status() {
         printf ',"ledger_file":%s' "$(json_escape "$_ledger")"
         printf ',"issues":%s' "$(json_escape "$_issues")"
         printf ',"tokens":%s' "$(json_escape "$_tokens")"
-        printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"event_count":%s,"pending_projection_count":%s,"projection_state":%s}' \
+        printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"accountability_state":%s,"event_count":%s,"pending_projection_count":%s,"last_projected_at":%s,"projection_state":%s}' \
             "$(json_escape "$_accountability_run_id")" "${_accountability_epic:-null}" \
-            "$(json_escape "$_accountability_url")" "${_accountability_events:-0}" \
-            "${_accountability_pending:-0}" "$(json_escape "$_accountability_projection")"
+            "$(json_escape "$_accountability_url")" "$(json_escape "$_accountability_lifecycle")" \
+            "${_accountability_events:-0}" "${_accountability_pending:-0}" \
+            "${_accountability_last_projected:-null}" "$(json_escape "$_accountability_projection")"
         printf '}\n'
         return 0
     fi

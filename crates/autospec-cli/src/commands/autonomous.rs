@@ -1333,8 +1333,8 @@ fn start_after_lease(
         .map_err(CommandFailure::diagnostic)?;
     resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
         .map_err(resilience_lease_error)?;
-    mark_accountability_spawned(layout)?;
     let units = launch_units(layout, options, &foreground, &commands, lease)?;
+    mark_accountability_spawned(layout)?;
     Ok(units)
 }
 
@@ -1355,9 +1355,9 @@ fn restart_after_lease(
         .map_err(CommandFailure::diagnostic)?;
     resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
         .map_err(resilience_lease_error)?;
-    mark_accountability_spawned(layout)?;
     let (conductor, monitor, supervisor) =
         launch_units(layout, options, &foreground, &commands, lease)?;
+    mark_accountability_spawned(layout)?;
     Ok((stopped, conductor, monitor, supervisor))
 }
 
@@ -1504,15 +1504,39 @@ fn record_accountability_event(
             project_number: None,
         };
         let mut github = accountability::github::GhCli;
-        if let Err(error) =
-            accountability::github::bind_epic(&mut store, &mut github, request, || Ok(()))
-        {
-            eprintln!(
-                "autospec autonomous accountability projection degraded: {error}; local event remains durable"
-            );
+        if let Err(error) = accountability::github::bind_epic(
+            &mut store,
+            &mut github,
+            request,
+            || Ok(()),
+        ) {
+            if error.projection_disposition()
+                == Some(accountability::ProjectionDisposition::DegradableTransport)
+            {
+                eprintln!(
+                    "autospec autonomous accountability projection degraded: {error}; local event remains durable"
+                );
+            } else {
+                return Err(CommandFailure::diagnostic(format!(
+                    "accountability integrity check blocked autonomous mutation: {error}"
+                )));
+            }
         }
     }
     Ok(())
+}
+
+fn record_accountability_event_once(
+    layout: &RunLayout,
+    event: accountability::AccountabilityEvent,
+    project: bool,
+) -> Result<(), CommandFailure> {
+    let store = open_bound_accountability(layout)?;
+    if store.has_event(&event.kind) {
+        return Ok(());
+    }
+    drop(store);
+    record_accountability_event(layout, event, project)
 }
 
 fn mark_accountability_spawned(layout: &RunLayout) -> Result<(), CommandFailure> {
@@ -1535,6 +1559,46 @@ fn accountability_event(
         vec![accountability::Evidence::outcome(evidence)],
     )
     .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn record_bridge_accountability_boundary(
+    layout: &RunLayout,
+    issue: u64,
+    boundary: executor_bridge::BridgeLifecycleBoundary,
+) -> Result<(), String> {
+    let (kind, what, why, evidence) = match boundary {
+        executor_bridge::BridgeLifecycleBoundary::PullRequestOpened { pull_request } => (
+            accountability::EventKind::PullRequestOpened { pull_request },
+            format!("Opened PR {pull_request} for issue {issue}"),
+            "The implementation needs a reviewable branch and durable merge boundary".to_owned(),
+            format!("PR {pull_request} linked to issue {issue}"),
+        ),
+        executor_bridge::BridgeLifecycleBoundary::ReviewStarted { pull_request } => (
+            accountability::EventKind::ReviewStarted { pull_request },
+            format!("Started guarded review for PR {pull_request}"),
+            "Autonomous changes require review evidence before merge".to_owned(),
+            format!("PR {pull_request} entered the guarded review path"),
+        ),
+        executor_bridge::BridgeLifecycleBoundary::Verified { pull_request } => (
+            accountability::EventKind::PullRequestVerified { pull_request },
+            format!("Verified PR {pull_request} against its merge gates"),
+            "Only verified changes may advance to the merge mutation".to_owned(),
+            format!("PR {pull_request} passed the executor merge gates"),
+        ),
+        executor_bridge::BridgeLifecycleBoundary::Merged { pull_request } => (
+            accountability::EventKind::Merged { pull_request },
+            format!("Merged PR {pull_request} into the target branch"),
+            "A merged commit is the only lifecycle boundary counted as implemented".to_owned(),
+            format!("terminal merged receipt recorded for PR {pull_request}"),
+        ),
+    };
+    record_accountability_event_once(
+        layout,
+        accountability_event(kind, what, why, evidence).map_err(|error| error.to_string())?,
+        true,
+    )
+    .map_err(|error| error.message)
 }
 
 fn record_executor_accountability(
@@ -1562,7 +1626,7 @@ fn record_executor_accountability(
                     false,
                 ),
                 (
-                    accountability::EventKind::Verified,
+                    accountability::EventKind::PullRequestVerified { pull_request },
                     format!("Verified PR {pull_request} against its merge gates"),
                     "Only verified changes may be represented as ready to land".to_string(),
                     format!("PR {pull_request} passed the executor merge gates"),
@@ -1577,7 +1641,7 @@ fn record_executor_accountability(
                     true,
                 ),
             ] {
-                record_accountability_event(
+                record_accountability_event_once(
                     layout,
                     accountability_event(kind, what, why, evidence)?,
                     project,
@@ -2465,6 +2529,8 @@ struct AccountabilityView {
     pending_projection_count: u64,
     desired_high_watermark: u64,
     acknowledged_high_watermark: u64,
+    accountability_state: Option<String>,
+    last_projected_at: Option<u64>,
     error: Option<String>,
 }
 
@@ -2481,12 +2547,14 @@ impl AccountabilityView {
 
     fn json(&self) -> String {
         format!(
-            "{{\"run_id\":{},\"epic_number\":{},\"epic_url\":{},\"event_count\":{},\"pending_projection_count\":{},\"desired_high_watermark\":{},\"acknowledged_high_watermark\":{},\"projection_state\":\"{}\",\"error\":{}}}",
+            "{{\"run_id\":{},\"epic_number\":{},\"epic_url\":{},\"accountability_state\":{},\"event_count\":{},\"pending_projection_count\":{},\"last_projected_at\":{},\"desired_high_watermark\":{},\"acknowledged_high_watermark\":{},\"projection_state\":\"{}\",\"error\":{}}}",
             optional_json_string(self.run_id.as_deref()),
             self.epic_number.map_or_else(|| "null".to_string(), |value| value.to_string()),
             optional_json_string(self.epic_url.as_deref()),
+            optional_json_string(self.accountability_state.as_deref()),
             self.event_count,
             self.pending_projection_count,
+            self.last_projected_at.map_or_else(|| "null".to_string(), |value| value.to_string()),
             self.desired_high_watermark,
             self.acknowledged_high_watermark,
             self.projection_state(),
@@ -2527,6 +2595,8 @@ fn accountability_view(layout: &RunLayout) -> AccountabilityView {
                 pending_projection_count: status.pending_projection_count,
                 desired_high_watermark: status.desired_high_watermark,
                 acknowledged_high_watermark: status.acknowledged_high_watermark,
+                accountability_state: Some(status.lifecycle_phase),
+                last_projected_at: status.last_projected_at,
                 error: None,
             }
         }
@@ -3808,14 +3878,6 @@ fn select_foreground(
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundSelectionResult::Lifecycle(lifecycle));
     }
-    let state = state
-        .transition(ConductorEvent::Selected {
-            issue: selection.issue,
-            serialization_reasons: selection.serialization_reasons.clone(),
-        })
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
-        })?;
     record_accountability_event(
         layout,
         accountability_event(
@@ -3831,6 +3893,14 @@ fn select_foreground(
         )?,
         false,
     )?;
+    let state = state
+        .transition(ConductorEvent::Selected {
+            issue: selection.issue,
+            serialization_reasons: selection.serialization_reasons.clone(),
+        })
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
+        })?;
     Ok(ForegroundSelectionResult::State(
         Box::new(state),
         Some(selection),
@@ -3914,6 +3984,18 @@ fn execute_foreground_dispatch(
             None => {
                 let branch = format!("feat/autonomous-issue-{}", selection.issue);
                 let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
+                record_accountability_event(
+                    layout,
+                    accountability_event(
+                        accountability::EventKind::ClaimStarted {
+                            issue: selection.issue,
+                        },
+                        format!("Started claim acquisition for issue {}", selection.issue),
+                        "The claim intent must be durable before remote ownership changes",
+                        format!("issue {} claim mutation is next", selection.issue),
+                    )?,
+                    false,
+                )?;
                 let lease = claim::acquire_for_conductor(
                     &layout.repo,
                     selection.issue,
@@ -3921,11 +4003,6 @@ fn execute_foreground_dispatch(
                     &branch,
                     base_branch,
                 )?;
-                persist_claim_acquisition_receipt(state_path, &lease)
-                    .map_err(CommandFailure::diagnostic)?;
-                state = state.transition(ConductorEvent::Claimed).map_err(|error| {
-                    CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
-                })?;
                 record_accountability_event(
                     layout,
                     accountability_event(
@@ -3941,11 +4018,28 @@ fn execute_foreground_dispatch(
                     )?,
                     false,
                 )?;
+                persist_claim_acquisition_receipt(state_path, &lease)
+                    .map_err(CommandFailure::diagnostic)?;
+                state = state.transition(ConductorEvent::Claimed).map_err(|error| {
+                    CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
+                })?;
                 persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
                 lease
             }
         };
 
+        record_accountability_event(
+            layout,
+            accountability_event(
+                accountability::EventKind::ImplementationStarted {
+                    issue: selection.issue,
+                },
+                format!("Started isolated implementation for issue {}", selection.issue),
+                "Implementation intent must be durable before the executor mutates its worktree",
+                format!("issue {} executor invocation is next", selection.issue),
+            )?,
+            false,
+        )?;
         let receipt = ExecutorRequest::for_selected(
             layout,
             &options.repo_dir,
@@ -3959,7 +4053,7 @@ fn execute_foreground_dispatch(
         )
         .map_or_else(
             |error| ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::from(error)),
-            |request| request.run(),
+            |request| request.run(layout, selection.issue),
         );
         if receipt.ownership_lost {
             state = retire_foreground_ownership(state_path, state)
@@ -4721,11 +4815,20 @@ impl ExecutorRequest {
         })
     }
 
-    fn run(&self) -> ExecutorReceipt {
+    fn run(&self, layout: &RunLayout, issue: u64) -> ExecutorReceipt {
+        #[cfg(not(target_os = "linux"))]
+        let _ = (layout, issue);
         let receipt = {
             let mut attempts = 0;
             loop {
-                match executor_bridge::run_executor_bridge(&self.bridge) {
+                #[cfg(target_os = "linux")]
+                let result = executor_bridge::run_executor_bridge_observed(
+                    &self.bridge,
+                    |boundary| record_bridge_accountability_boundary(layout, issue, boundary),
+                );
+                #[cfg(not(target_os = "linux"))]
+                let result = executor_bridge::run_executor_bridge(&self.bridge);
+                match result {
                     Ok(receipt) => break receipt,
                     Err(error)
                         if error.kind == executor_bridge::BridgeFailureKind::Transient
@@ -5920,7 +6023,9 @@ fn spawn_unit(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err_log));
     if let Some(token) = lease_token {
-        process.env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", token);
+        process
+            .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", token)
+            .env("AUTOSPEC_ACCOUNTABILITY_REQUIRED", "1");
     }
     #[cfg(unix)]
     process.process_group(0);
@@ -5983,6 +6088,24 @@ fn launch_units(
     commands: &LaunchCommands,
     lease: &resilience::ConductorLease,
 ) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
+    let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
+    let launch_result = launch_units_with_lease_checks(layout, options, foreground, commands, lease);
+    let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
+    let units = launch_result?;
+    heartbeat_result?;
+    Ok(units)
+}
+
+fn launch_units_with_lease_checks(
+    layout: &RunLayout,
+    options: &Options,
+    foreground: &ForegroundCommand,
+    commands: &LaunchCommands,
+    lease: &resilience::ConductorLease,
+) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
+    resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
     let conductor = spawn_unit(
         "conductor",
         foreground,
@@ -6001,6 +6124,10 @@ fn launch_units(
         ));
     }
 
+    if let Err(error) = resilience::assert_lifecycle_before_spawn(&layout.repo, lease) {
+        let _ = terminate_process_group(&conductor.pid);
+        return Err(resilience_lease_error(error));
+    }
     let monitor = match spawn_unit(
         "monitor",
         &commands.monitor,
@@ -6016,6 +6143,11 @@ fn launch_units(
             return Err(CommandFailure::diagnostic(error));
         }
     };
+    if let Err(error) = resilience::assert_lifecycle_before_spawn(&layout.repo, lease) {
+        let _ = terminate_process_group(&monitor.pid);
+        let _ = terminate_process_group(&conductor.pid);
+        return Err(resilience_lease_error(error));
+    }
     let supervisor = match spawn_unit(
         "supervisor",
         &commands.supervisor,

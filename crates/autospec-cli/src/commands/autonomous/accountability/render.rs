@@ -28,9 +28,12 @@ fn build_flow(events: &[EventRecord]) -> String {
             matches!(
                 record.kind,
                 EventKind::WorkSelected { .. }
+                    | EventKind::ClaimStarted { .. }
                     | EventKind::IssueClaimed { .. }
+                    | EventKind::ImplementationStarted { .. }
                     | EventKind::PullRequestOpened { .. }
                     | EventKind::ReviewStarted { .. }
+                    | EventKind::PullRequestVerified { .. }
                     | EventKind::Merged { .. }
                     | EventKind::Quarantined { .. }
                     | EventKind::Failed

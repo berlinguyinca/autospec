@@ -29,7 +29,7 @@ teardown() {
 {"argv":["start","--repo","berlinguyinca/autospec"],"started_at":"2026-07-08T12:00:00Z","tty":"/dev/ttys001","session_id":"abc123","repo":"berlinguyinca/autospec","repo_dir":"$REPO_ROOT","accountability":{"run_id":"abc123","epic_number":3135,"epic_url":"https://github.com/berlinguyinca/autospec/issues/3135"}}
 EOF_JSON
   mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/accountability"
-  printf '%s\n' '{"event_count":9,"pending_projection_count":1}' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/accountability/accountability.json"
+  printf '%s\n' '{"event_count":9,"pending_projection_count":1,"lifecycle_phase":"spawned","last_projected_at":1783526300}' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/accountability/accountability.json"
   cat > "$HOME/.autospec/autonomous/berlinguyinca_autospec/state.json" <<'EOF_STATE'
 {"status":"parked:usage-limit","heartbeat_at":1783526400,"cycle":42}
 EOF_STATE
@@ -47,6 +47,8 @@ EOF_STATE
   [[ "$output" == *'"argv":["start","--repo","berlinguyinca/autospec"]'* ]]
   [[ "$output" == *'"epic_number":3135'* ]]
   [[ "$output" == *'"event_count":9'* ]]
+  [[ "$output" == *'"accountability_state":"spawned"'* ]]
+  [[ "$output" == *'"last_projected_at":1783526300'* ]]
   [[ "$output" == *'"projection_state":"degraded"'* ]]
   [[ "$output" == *'"slug":"metabolomics-us_go-modules"'* ]]
   [[ "$output" == *'"alive":false'* ]]

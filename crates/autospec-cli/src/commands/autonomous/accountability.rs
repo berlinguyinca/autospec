@@ -180,10 +180,13 @@ impl LaunchDescriptor {
 pub enum EventKind {
     RunStarted,
     WorkSelected { issue: Option<u64> },
+    ClaimStarted { issue: u64 },
     IssueClaimed { issue: u64 },
+    ImplementationStarted { issue: u64 },
     PullRequestOpened { pull_request: u64 },
     ReviewStarted { pull_request: u64 },
     Verified,
+    PullRequestVerified { pull_request: u64 },
     Merged { pull_request: u64 },
     Blocked,
     Failed,
@@ -199,11 +202,18 @@ impl EventKind {
         match self {
             Self::RunStarted => json!({"type":"run_started"}),
             Self::WorkSelected { issue } => json!({"type":"work_selected","issue":issue}),
+            Self::ClaimStarted { issue } => json!({"type":"claim_started","issue":issue}),
             Self::IssueClaimed { issue } => json!({"type":"issue_claimed","issue":issue}),
+            Self::ImplementationStarted { issue } => {
+                json!({"type":"implementation_started","issue":issue})
+            }
             Self::PullRequestOpened { pull_request } => {
                 json!({"type":"pull_request_opened","pull_request":pull_request})
             }
             Self::Verified => json!({"type":"verified"}),
+            Self::PullRequestVerified { pull_request } => {
+                json!({"type":"pull_request_verified","pull_request":pull_request})
+            }
             Self::ReviewStarted { pull_request } => {
                 json!({"type":"review_started","pull_request":pull_request})
             }
@@ -225,13 +235,22 @@ impl EventKind {
             "work_selected" => Self::WorkSelected {
                 issue: object.get("issue").and_then(Value::as_u64),
             },
+            "claim_started" => Self::ClaimStarted {
+                issue: unsigned(object, "issue")?,
+            },
             "issue_claimed" => Self::IssueClaimed {
+                issue: unsigned(object, "issue")?,
+            },
+            "implementation_started" => Self::ImplementationStarted {
                 issue: unsigned(object, "issue")?,
             },
             "pull_request_opened" => Self::PullRequestOpened {
                 pull_request: unsigned(object, "pull_request")?,
             },
             "verified" => Self::Verified,
+            "pull_request_verified" => Self::PullRequestVerified {
+                pull_request: unsigned(object, "pull_request")?,
+            },
             "review_started" => Self::ReviewStarted {
                 pull_request: unsigned(object, "pull_request")?,
             },
@@ -505,18 +524,48 @@ pub struct RenderedProjection {
     pub markdown: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionDisposition {
+    DegradableTransport,
+    IntegrityBlock,
+}
+
 #[derive(Debug)]
-pub struct AccountabilityError(String);
+pub struct AccountabilityError {
+    message: String,
+    projection_disposition: Option<ProjectionDisposition>,
+}
 
 impl AccountabilityError {
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            projection_disposition: None,
+        }
+    }
+
+    fn projection(message: impl Into<String>, disposition: ProjectionDisposition) -> Self {
+        Self {
+            message: message.into(),
+            projection_disposition: Some(disposition),
+        }
+    }
+
+    pub fn projection_disposition(&self) -> Option<ProjectionDisposition> {
+        self.projection_disposition
+    }
+
+    fn into_projection(mut self, disposition: ProjectionDisposition) -> Self {
+        if self.projection_disposition.is_none() {
+            self.projection_disposition = Some(disposition);
+        }
+        self
     }
 }
 
 impl fmt::Display for AccountabilityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -533,8 +582,12 @@ fn validate_summary(value: String, field: &str) -> Result<String, Accountability
 fn sanitize_text(value: &str, limit: usize) -> String {
     let mut output = String::with_capacity(value.len().min(limit));
     let mut redact_next = false;
+    let mut pem_block = false;
     for token in value.split_whitespace() {
         let lower = token.to_ascii_lowercase();
+        if lower.contains("-----begin") {
+            pem_block = true;
+        }
         let credential_assignment = [
             "github_token=",
             "token=",
@@ -545,7 +598,14 @@ fn sanitize_text(value: &str, limit: usize) -> String {
         ]
         .iter()
         .any(|key| lower.starts_with(key));
-        let secret = redact_next
+        let embedded_absolute_path = token.split_once('=').is_some_and(|(_, value)| {
+            value.starts_with('/')
+                || value.starts_with('~')
+                || value.starts_with("\\\\")
+                || value.as_bytes().get(1) == Some(&b':')
+        });
+        let secret = pem_block
+            || redact_next
             || lower == "bearer"
             || token.starts_with("ghp_")
             || token.starts_with("github_pat_")
@@ -564,6 +624,10 @@ fn sanitize_text(value: &str, limit: usize) -> String {
             || token.starts_with('~')
             || token.starts_with("\\\\")
             || token.as_bytes().get(1) == Some(&b':')
+            || token.contains("=/")
+            || token.contains("=~/")
+            || token.contains("=\\\\")
+            || embedded_absolute_path
             || token.contains("%%{")
             || token.contains("<!--")
             || token.contains("-->")
