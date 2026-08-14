@@ -396,12 +396,16 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
         1,
         "foreground must reuse its captured ready-queue snapshot"
     );
-    for forbidden in ["issue\nedit", "issue\ncomment", "executor_pending"] {
+    for forbidden in ["issue\nedit\n42", "issue\ncomment\n42", "executor_pending"] {
         assert!(
             !calls.contains(forbidden),
-            "empty Tier 1 must not invoke remote mutation: {forbidden}"
+            "empty Tier 1 must not mutate implementation work: {forbidden}"
         );
     }
+    assert!(
+        calls.contains("issue\nedit\n999"),
+        "the mandatory run epic remains the only permitted empty-queue mutation"
+    );
     assert!(
         !fixture.operator.join("test_repo/why-no-work.json").exists(),
         "later waterfall tiers remain pending"
@@ -4966,8 +4970,18 @@ fn autonomous_health_config_is_isolated_to_its_repository() {
         .output()
         .expect("run default repository");
 
-    assert!(configured_output.status.success());
-    assert!(defaulted_output.status.success());
+    assert!(
+        configured_output.status.success(),
+        "configured code={:?} stdout={} stderr={}",
+        configured_output.status.code(),
+        String::from_utf8_lossy(&configured_output.stdout),
+        String::from_utf8_lossy(&configured_output.stderr)
+    );
+    assert!(
+        defaulted_output.status.success(),
+        "defaulted stderr={}",
+        String::from_utf8_lossy(&defaulted_output.stderr)
+    );
     assert!(fs::read_to_string(&configured.calls)
         .expect("read configured calls")
         .contains("repos/test/repo/branches/master_ai"));
