@@ -385,7 +385,7 @@ pub(super) fn installed_aliases() -> &'static str {
      opencode\tfalse\t\tOpenCode\n"
 }
 
-pub(super) struct GitFixture {
+pub(crate) struct GitFixture {
     pub(super) root: PathBuf,
     pub(super) repo: PathBuf,
     pub(super) executor_scope_roots: Vec<PathBuf>,

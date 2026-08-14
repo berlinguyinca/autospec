@@ -2,8 +2,14 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+#[cfg(target_os = "macos")]
+use super::super::tests::support_invocation::{
+    implementation_proof_fixture, shell_invocation, supervision_config,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::super::BridgePhase;
 #[cfg(target_os = "linux")]
-use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
+use super::super::{MutationSnapshot, SupervisionOutcome};
 #[cfg(target_os = "linux")]
 use super::support_base::{test_environment, DetachedForkedCleanup, GitFixture};
 #[cfg(target_os = "linux")]
@@ -117,6 +123,84 @@ fn darwin_cleanup_uncertainty_persists_interrupted_exact_identity_and_event() {
         "{event}"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_actual_stall_cleanup_uncertainty_retains_recovery_evidence() {
+    use super::super::darwin_supervisor::{
+        force_next_termination_uncertainty_for_test, group_is_empty,
+    };
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+    use std::time::{Duration, Instant};
+
+    let (_fixture, mut state, snapshot, _closeout) =
+        implementation_proof_fixture("darwin-actual-stall-cleanup-uncertain");
+    state.phase = BridgePhase::Implementing;
+    state.process = None;
+    let state_path = state.identity.worktree.join(".autospec/invocation.json");
+    let event_log = state.identity.worktree.join(".autospec/events.jsonl");
+    bridge::ensure_private_directory(state_path.parent().expect("state parent"))
+        .expect("private state parent");
+    bridge::write_invocation_atomic(&state_path, &state).expect("initial invocation state");
+    let harness = shell_invocation(
+        &state.identity.worktree,
+        "trap '' TERM; while :; do :; done",
+    );
+    let _uncertainty = force_next_termination_uncertainty_for_test();
+
+    let error = bridge::supervise_harness(
+        &state_path,
+        &event_log,
+        &mut state,
+        &harness,
+        &snapshot,
+        supervision_config(25),
+    )
+    .expect_err("actual stall cleanup must retain uncertain ownership");
+
+    assert!(
+        error.contains("injected Darwin termination uncertainty"),
+        "{error}"
+    );
+    let durable = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("durable invocation"),
+    )
+    .expect("parse durable invocation");
+    assert_eq!(durable.phase, BridgePhase::Interrupted);
+    let retained = durable.process.as_ref().expect("retained exact identity");
+    let event = fs::read_to_string(&event_log).expect("recovery-required event");
+    assert!(
+        event.contains("\"child_stall_cleanup_uncertain\""),
+        "{event}"
+    );
+    assert!(event.contains("\"recovery_required\":true"), "{event}");
+    assert!(
+        event.contains("\"exact_process_identity_retained\":true"),
+        "{event}"
+    );
+
+    let pid = Pid::from_raw(retained.pid as i32);
+    let process_group = Pid::from_raw(retained.process_group as i32);
+    if !group_is_empty(retained.process_group).expect("inspect quarantined exact group") {
+        killpg(process_group, Signal::SIGKILL).expect("clean quarantined test group");
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+            | Err(Errno::ECHILD)
+            | Err(Errno::ESRCH) => break,
+            Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            status => panic!("quarantined Darwin test group was not reaped: {status:?}"),
+        }
+    }
+    assert!(group_is_empty(retained.process_group).expect("prove test group empty"));
 }
 
 #[cfg(target_os = "linux")]

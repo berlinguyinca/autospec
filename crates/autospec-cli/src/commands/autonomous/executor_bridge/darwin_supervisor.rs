@@ -13,12 +13,32 @@ use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const TERM_GRACE: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(5);
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(test)]
+static FORCE_NEXT_TERMINATION_UNCERTAINTY: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) struct TerminationUncertaintyGuard;
+
+#[cfg(test)]
+impl Drop for TerminationUncertaintyGuard {
+    fn drop(&mut self) {
+        FORCE_NEXT_TERMINATION_UNCERTAINTY.store(false, AtomicOrdering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn force_next_termination_uncertainty_for_test() -> TerminationUncertaintyGuard {
+    FORCE_NEXT_TERMINATION_UNCERTAINTY.store(true, AtomicOrdering::SeqCst);
+    TerminationUncertaintyGuard
+}
 
 fn cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
     let mut descriptors = [-1_i32; 2];
@@ -248,6 +268,11 @@ impl DarwinOwnedGroup {
             Err(error) => {
                 drop(barrier_write);
                 reap_exact_child(supervisor)?;
+                if !group_is_empty(pid)? {
+                    return Err("cancelled Darwin launch retained process-group membership"
+                        .to_string()
+                        .into());
+                }
                 return Err(error.into());
             }
         };
@@ -302,16 +327,42 @@ impl DarwinOwnedGroup {
     pub(super) fn release(&mut self) -> Result<(), String> {
         let barrier = self
             .barrier
-            .take()
+            .as_ref()
             .ok_or_else(|| "Darwin launch barrier was already released".to_string())?;
-        fd_write(&barrier, b"\n")
+        fd_write(barrier, b"\n")
             .map_err(|error| format!("release Darwin launch barrier: {error}"))?;
-        drop(barrier);
+        drop(self.barrier.take());
         let status = self
             .exec_status
             .take()
             .ok_or_else(|| "Darwin exec-status pipe is missing".to_string())?;
         read_exec_status(status.as_raw_fd())
+    }
+
+    pub(super) fn cancel_unreleased(mut self) -> Result<(), String> {
+        let barrier = self
+            .barrier
+            .take()
+            .ok_or_else(|| "Darwin launch was already released".to_string())?;
+        drop(barrier);
+        self.exec_status.take();
+        let pid = self
+            .supervisor_pid
+            .take()
+            .ok_or_else(|| "blocked Darwin launch has no reapable child".to_string())?;
+        reap_exact_child(pid)?;
+        if !group_is_empty(self.leader.process_group)? {
+            return Err("cancelled Darwin launch retained process-group membership".to_string());
+        }
+        Ok(())
+    }
+
+    pub(super) fn abort_failed_release(self) -> Result<(), String> {
+        if self.barrier.is_some() {
+            self.cancel_unreleased()
+        } else {
+            self.terminate()
+        }
     }
 
     pub(super) fn poll(&mut self) -> Result<Option<i32>, String> {
@@ -347,7 +398,9 @@ impl DarwinOwnedGroup {
     }
 
     pub(super) fn terminate(mut self) -> Result<(), String> {
-        self.barrier.take();
+        if self.barrier.is_some() {
+            return self.cancel_unreleased();
+        }
         match platform_process::observe_expected(
             self.leader.pid,
             &self.leader.boot_id,
@@ -603,6 +656,10 @@ fn prove_exact_group(expected: &ProcessIdentity) -> Result<(), String> {
 
 fn signal_exact_group(expected: &ProcessIdentity, signal: Signal) -> Result<(), String> {
     prove_exact_group(expected)?;
+    #[cfg(test)]
+    if FORCE_NEXT_TERMINATION_UNCERTAINTY.swap(false, AtomicOrdering::SeqCst) {
+        return Err("injected Darwin termination uncertainty after exact proof".to_string());
+    }
     let group = Pid::from_raw(
         i32::try_from(expected.process_group)
             .map_err(|_| "executor process group is out of range".to_string())?,
@@ -731,6 +788,74 @@ mod tests {
     }
 
     #[test]
+    fn darwin_unreleased_cancellation_reaps_blocked_child_without_signaling() {
+        let marker = "cancelled-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let pid = Pid::from_raw(group.identity().pid as i32);
+        let process_group = group.identity().process_group;
+
+        group
+            .cancel_unreleased()
+            .expect("cancel blocked Darwin launch");
+
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
+        assert_eq!(
+            waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD),
+            "blocked child must already be reaped"
+        );
+        assert!(group_is_empty(process_group).expect("prove cancelled group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_cancellation_race_never_signals_reused_pgid() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let marker = "raced-cancel-user-code-ran";
+        let (mut group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let owned_pid = Pid::from_raw(group.identity().pid as i32);
+        let owned_group = group.identity().process_group;
+        let mut unrelated = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn reused-PGID cancellation target");
+        group.leader.process_group = unrelated.id();
+
+        let error = group
+            .cancel_unreleased()
+            .expect_err("reused PGID must remain uncertain after blocked-child reap");
+
+        assert!(
+            error.contains("retained process-group membership"),
+            "{error}"
+        );
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
+        assert_eq!(
+            waitpid(owned_pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD),
+            "blocked child must already be reaped"
+        );
+        assert!(group_is_empty(owned_group).expect("prove actual blocked group ESRCH"));
+        assert!(
+            unrelated
+                .try_wait()
+                .expect("observe reused-PGID cancellation target")
+                .is_none(),
+            "blocked cancellation signaled unrelated process group"
+        );
+        unrelated
+            .kill()
+            .expect("stop reused-PGID cancellation target");
+        unrelated
+            .wait()
+            .expect("reap reused-PGID cancellation target");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn darwin_output_ring_is_bounded_and_restart_preserves_overflow_evidence() {
         let (group, root) = fixture("yes x | head -c 1100000");
         let identity = group.identity().clone();
@@ -810,6 +935,44 @@ mod tests {
     }
 
     #[test]
+    fn darwin_forged_reused_pgid_never_signals_unrelated_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let (owned, owned_root) = fixture("trap '' TERM; while :; do sleep 1; done");
+        let mut unrelated = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated reused-PGID target");
+        let mut forged = owned.identity().clone();
+        forged.process_group = unrelated.id();
+        let forged = DarwinOwnedGroup {
+            leader: forged,
+            supervisor_pid: None,
+            barrier: None,
+            exec_status: None,
+            sinks: owned.sinks.clone(),
+        };
+
+        assert_eq!(
+            forged.terminate().unwrap_err(),
+            "executor process group ownership is unverified"
+        );
+        assert!(
+            unrelated
+                .try_wait()
+                .expect("observe unrelated reused-PGID target")
+                .is_none(),
+            "forged ownership signaled unrelated process group"
+        );
+        unrelated.kill().expect("stop unrelated reused-PGID target");
+        unrelated.wait().expect("reap unrelated reused-PGID target");
+        owned.terminate().expect("clean owned group");
+        let _ = std::fs::remove_dir_all(owned_root);
+    }
+
+    #[test]
     fn darwin_cleanup_never_signals_an_unrelated_exact_group() {
         use std::os::unix::process::CommandExt;
         use std::process::Command;
@@ -875,7 +1038,7 @@ mod tests {
             let invocation = ValidatedInvocation {
                 program: Path::new("/bin/sh").to_path_buf(),
                 argv_zero: None::<OsString>,
-                args: vec!["-c".into(), "sleep 0.05; exit 7".into()],
+                args: vec!["-c".into(), "yes x | head -c 1100000; exit 7".into()],
                 current_dir: root.clone(),
                 environment_overrides: Vec::new(),
             };
@@ -937,6 +1100,21 @@ mod tests {
                 None => panic!("adopted Darwin group never recovered its durable exit"),
             }
         }
+        let cursor = super::super::read_output_cursor(
+            &OpenOptions::new()
+                .read(true)
+                .open(&sinks.stdout_writer_cursor)
+                .expect("crash-parent output cursor"),
+        )
+        .expect("read crash-parent output cursor");
+        assert!(cursor.total > super::super::MAX_DIRECT_OUTPUT_BYTES);
+        assert!(cursor.dropped > 0);
+        assert_eq!(
+            std::fs::metadata(&sinks.stdout)
+                .expect("crash-parent bounded ring")
+                .len(),
+            super::super::MAX_DIRECT_OUTPUT_BYTES
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

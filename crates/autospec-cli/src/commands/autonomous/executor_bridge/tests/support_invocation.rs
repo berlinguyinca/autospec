@@ -188,7 +188,7 @@ pub(super) fn supervision_state(fixture: &GitFixture) -> PersistedInvocation {
     state
 }
 
-pub(super) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocation {
+pub(crate) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocation {
     HarnessInvocation {
         program: PathBuf::from("/bin/sh"),
         args: vec!["-c".to_string(), script.to_string()],
@@ -197,7 +197,7 @@ pub(super) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocat
     }
 }
 
-pub(super) fn supervision_config(stall_millis: u64) -> SupervisionConfig {
+pub(crate) fn supervision_config(stall_millis: u64) -> SupervisionConfig {
     SupervisionConfig {
         stall_timeout: Duration::from_millis(stall_millis),
         poll_interval: Duration::from_millis(10),
@@ -398,7 +398,7 @@ impl NonDescendantDirectFixture {
     }
 }
 
-pub(super) fn implementation_proof_fixture(
+pub(crate) fn implementation_proof_fixture(
     label: &str,
 ) -> (GitFixture, PersistedInvocation, MutationSnapshot, PathBuf) {
     let fixture = GitFixture::new(label);

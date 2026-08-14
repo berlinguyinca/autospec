@@ -6828,13 +6828,13 @@ fn execute_supervised_direct_attempt(
         launch.as_bytes(),
         "Darwin direct command launch identity",
     ) {
-        return match group.terminate() {
+        return match group.cancel_unreleased() {
             Ok(()) => AttemptTerminal::InfrastructureFailed(error),
             Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
         };
     }
     if let Err(error) = group.release() {
-        return match group.terminate() {
+        return match group.abort_failed_release() {
             Ok(()) => AttemptTerminal::InfrastructureFailed(error),
             Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
         };
@@ -17060,7 +17060,7 @@ fn supervise_validated_harness_with_claim_renewal(
         state.process = Some(group.identity().clone());
         state.progress_at = unix_now()?;
         if let Err(error) = write_invocation_atomic(state_path, state) {
-            return match group.terminate() {
+            return match group.cancel_unreleased() {
                 Ok(()) => {
                     state.phase = BridgePhase::Interrupted;
                     state.process = None;
@@ -17091,7 +17091,7 @@ fn supervise_validated_harness_with_claim_renewal(
                 "darwin_process_group": true
             })),
         ) {
-            return match group.terminate() {
+            return match group.cancel_unreleased() {
                 Ok(()) => {
                     state.phase = BridgePhase::Interrupted;
                     state.process = None;
@@ -17113,7 +17113,7 @@ fn supervise_validated_harness_with_claim_renewal(
             };
         }
         if let Err(error) = group.release() {
-            let cleanup = group.terminate();
+            let cleanup = group.abort_failed_release();
             state.phase = BridgePhase::Interrupted;
             if cleanup.is_ok() {
                 state.process = None;

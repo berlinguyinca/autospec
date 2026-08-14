@@ -64,6 +64,7 @@ pub(super) fn reconcile_direct_launch(
     }
     let attempt_id = direct_intent_attempt_id(&paths.intent)?
         .ok_or_else(|| "direct command intent disappeared during reconciliation".to_string())?;
+    validate_direct_attempt_id_reservation(paths, &attempt_id)?;
     let intent_digest = sha256_hex(intent.as_bytes());
     let Some((leader, process)) = read_direct_launch(&paths.launch, &attempt_id, &intent_digest)?
     else {
@@ -208,6 +209,8 @@ pub(super) fn resolve_executor_supervisor_executable(
 #[cfg(all(test, target_os = "macos"))]
 mod darwin_reconciliation_tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command};
 
     fn root(name: &str) -> PathBuf {
         let path = std::env::current_dir()
@@ -219,6 +222,70 @@ mod darwin_reconciliation_tests {
         path
     }
 
+    fn live_launch_fixture(name: &str) -> (PathBuf, DirectAttemptPaths, String, String, Child) {
+        let root = root(name);
+        let paths = direct_attempt_paths(&root, 0);
+        let attempt = reserve_direct_attempt_id(&paths).expect("attempt id");
+        let intent = direct_intent_document(
+            &attempt,
+            &"a".repeat(40),
+            None,
+            Path::new("/bin/sleep"),
+            &["sleep".to_string(), "30".to_string()],
+        );
+        write_private_create_once(&paths.intent, intent.as_bytes(), "Darwin direct intent")
+            .expect("intent");
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated reconciliation target");
+        let birth = crate::commands::autonomous::platform_process::observe_birth(child.id())
+            .expect("observe unrelated target")
+            .expect("unrelated target live");
+        let leader = ProcessIdentity {
+            pid: child.id(),
+            process_group: birth.process_group,
+            executable: PathBuf::from("/bin/sleep"),
+            argv_digest: argv_digest(&[]),
+            boot_id: birth.boot_id,
+            start_identity: birth.start_identity,
+        };
+        let launch =
+            direct_launch_document(&attempt, &sha256_hex(intent.as_bytes()), &leader, None);
+        write_private_create_once(&paths.launch, launch.as_bytes(), "Darwin direct launch")
+            .expect("launch");
+        (root, paths, attempt, intent, child)
+    }
+
+    fn assert_reservation_failure_preserves_target(
+        root: PathBuf,
+        paths: DirectAttemptPaths,
+        intent: String,
+        mut child: Child,
+    ) {
+        let result = reconcile_direct_launch(&paths, Some(&intent));
+        let target_survived = child
+            .try_wait()
+            .expect("observe reservation target")
+            .is_none();
+        if target_survived {
+            child.kill().expect("stop reservation target");
+            child.wait().expect("reap reservation target");
+        }
+        let error = result.expect_err("unsafe reservation must fail before launch action");
+        assert!(error.contains("attempt identity reservation"), "{error}");
+        assert!(
+            target_survived,
+            "unsafe reservation allowed group signaling"
+        );
+        assert!(
+            paths.launch.is_file(),
+            "unsafe reservation retired launch evidence"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn darwin_reconciliation_rejects_launch_without_private_intent() {
         let root = root("missing-intent");
@@ -228,6 +295,25 @@ mod darwin_reconciliation_tests {
         let error = reconcile_direct_launch(&paths, None).expect_err("orphan launch rejected");
         assert!(error.contains("without their private intent"), "{error}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_reconciliation_rejects_missing_attempt_reservation_before_signal() {
+        let (root, paths, attempt, intent, child) = live_launch_fixture("missing-reservation");
+        fs::remove_file(direct_attempt_reservation_directory(&paths).join(attempt))
+            .expect("remove reservation");
+        assert_reservation_failure_preserves_target(root, paths, intent, child);
+    }
+
+    #[test]
+    fn darwin_reconciliation_rejects_tampered_attempt_reservation_before_signal() {
+        let (root, paths, attempt, intent, child) = live_launch_fixture("tampered-reservation");
+        fs::write(
+            direct_attempt_reservation_directory(&paths).join(attempt),
+            "attempt_id=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
+        )
+        .expect("tamper reservation");
+        assert_reservation_failure_preserves_target(root, paths, intent, child);
     }
 
     #[test]

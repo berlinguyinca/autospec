@@ -114,3 +114,60 @@ round; it reports no error in the new Darwin supervisor, portability reconciliat
 draft release tests, or retained-predecessor proof. The workspace run likewise reached the existing
 macOS fixture failures described above (missing inherited Git hook paths, Linux sandbox assumptions,
 and a fixed-port collision) while every new Darwin/draft/predecessor test passed.
+
+## Review fix round 2
+
+### RED evidence
+
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` failed to
+  compile because `DarwinOwnedGroup::cancel_unreleased` and the termination-uncertainty
+  fault boundary did not exist. This reproduced the blocked-child cancellation gap before
+  production changes.
+- The new missing/tampered reservation fixtures target a live unrelated process group. Before
+  the reconciliation fix, the existing code path could reach launch action without validating
+  the attempt-ID reservation; the regression requires failure while the target and launch
+  evidence remain untouched.
+- The first actual-stall ambiguity run reached 18 passed / 1 failed because its nested `sleep`
+  fixture allowed the test-owned sidecar leader to exit before test cleanup. Replacing it with a
+  single-process inert loop isolated the intended proof-to-signal uncertainty boundary.
+
+### Implementation
+
+- An unreleased Darwin group now has a dedicated cancellation path: close the barrier, close the
+  unused exec-status reader, reap the exact blocked supervisor, and require whole-group `ESRCH`.
+  Persistence and event failures call this path directly. A failed release dispatches by retained
+  barrier state, so a still-blocked launch is never sent through released-group signaling.
+- Cancellation also fails closed across the former proof-to-signal race. A regression rewrites the
+  persisted PGID to a live unrelated group, proves the actual blocked child is already reaped and
+  its true group absent, and proves the unrelated reused PGID was never signaled.
+- Darwin direct reconciliation validates the exact private attempt-ID reservation immediately
+  after parsing the intent attempt ID and before reading or acting on the launch record.
+- The crash-parent adoption test now emits 1,100,000 bytes, exits the original parent without
+  destructors, adopts after restart, and verifies total/dropped cursor evidence plus a one-MiB ring.
+- The cleanup ambiguity test now runs the real harness stall supervision path. A one-shot test fault
+  fires after exact termination proof but before the signal; durable state is asserted
+  `Interrupted` with exact identity retained and a `recovery_required` event.
+- A separate forged identity points an exact owned leader at an unrelated reused PGID and proves
+  termination rejects the mismatch while the unrelated group remains live.
+
+### GREEN evidence
+
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 20 passed.
+- `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
+- `cargo test -p autospec-cli --bin autospec darwin_reconciliation -- --test-threads=1` -> 4 passed.
+- Task 5 filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`, `heartbeat_prior`,
+  `heartbeat_quarantine`, `heartbeat_classify`, `conductor_lease_takeover`) -> all six commands
+  exited 0.
+- `cargo check -p autospec-cli --all-targets` -> exit 0 with pre-existing warnings.
+- `cargo check -p autospec-cli --all-targets --target x86_64-unknown-linux-gnu` -> exit 0 with
+  pre-existing warnings.
+- `git diff --check` -> exit 0.
+
+The older generic direct-runner test remains non-runnable on Darwin because its fixture hardcodes
+`/usr/bin/sleep`, which does not exist on macOS. Its failure occurs during executable
+canonicalization before Task 6 direct supervision; the native Darwin direct reconciliation suite
+above is green and owns the changed behavior.
+
+The strict clippy rerun remains blocked by the same pre-existing unused/dead test helpers and
+production lints in executor bridge, platform process, supervisor, autonomous, claim, and launch;
+it reports no finding in the new Darwin cancellation, reservation, or round-2 regression code.
