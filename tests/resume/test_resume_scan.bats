@@ -266,6 +266,54 @@ register_command() {
     [[ "$output" == *"resuming o/n"* ]]
 }
 
+@test "heartbeat-pending:none on in-progress retains ordinary relaunch without recovery" {
+    export GH_IN_PROGRESS="42"
+    export GH_OPEN_AUTO=""
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="11000"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RELAUNCH" ]
+    [[ "$output" == *"resuming o/n"* ]]
+}
+
+@test "terminal local heartbeat cannot block Rust startup recovery" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    write_heartbeat 42 merged host-A
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = $'RECOVER\nRELAUNCH' ]
+    [[ "$output" == *"resuming o/n"* ]]
+}
+
+@test "terminal local heartbeat cannot override Rust recovery refusal" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_RECOVERED="false"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    write_heartbeat 42 failed host-A
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RECOVER" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
 @test "dry-run reports stale startup recovery and relaunch without mutation" {
     export GH_IN_PROGRESS=""
     export GH_OPEN_AUTO="42"

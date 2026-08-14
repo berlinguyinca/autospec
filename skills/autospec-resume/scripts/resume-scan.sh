@@ -129,10 +129,10 @@ in_progress="$(gh issue list --repo "$REPO" --label in-progress-by-bot \
 # paused-by-user issues (pre-condition c):
 paused="$(gh issue list --repo "$REPO" --label paused-by-user \
     --state all --json number --jq '.[].number' 2>/dev/null || true)"
-# open auto-implement OR in-progress issues (pre-condition d):
-open_any="$(gh issue list --repo "$REPO" --state open \
+# open auto-implement issues (startup-recovery candidates and pre-condition d):
+auto_implement="$(gh issue list --repo "$REPO" --state open \
     --label auto-implement --json number --jq '.[].number' 2>/dev/null || true)"
-open_any="$(printf '%s\n%s\n' "$open_any" "$in_progress" | sed '/^$/d' | sort -u)"
+open_any="$(printf '%s\n%s\n' "$auto_implement" "$in_progress" | sed '/^$/d' | sort -u)"
 
 # ── Pre-condition (c): a paused-by-user issue -> exit 0. ──────────────────────
 if [ -n "$paused" ]; then
@@ -157,7 +157,7 @@ recovery_issues=""
 partial_branch=""
 saw_in_progress_nonterminal=0
 
-scan_issues="$(printf '%s\n%s\n' "$in_progress" "$open_any" | sed '/^$/d' | sort -u)"
+scan_issues="$(printf '%s\n%s\n' "$in_progress" "$auto_implement" | sed '/^$/d' | sort -u)"
 for issue in $scan_issues; do
     [ -n "$issue" ] || continue
 
@@ -169,23 +169,13 @@ for issue in $scan_issues; do
         fi
     done
 
-    # Heartbeat (machine-local): determine terminal step + host.
-    hb=""
-    if [ -n "$HEARTBEAT_READ_SH" ]; then
-        hb="$(bash "$HEARTBEAT_READ_SH" --issue "$issue" --repo "$REPO" 2>/dev/null || true)"
-    fi
-    hb_step=""
-    hb_host=""
-    hb_branch=""
-    if [ -n "$hb" ]; then
-        hb_step="$(printf '%s' "$hb" | jq -r '.step // empty' 2>/dev/null || true)"
-        # Missing host -> empty -> treated as unknown (never partial-eligible).
-        hb_host="$(printf '%s' "$hb" | jq -r '.host // empty' 2>/dev/null || true)"
-        hb_branch="$(printf '%s' "$hb" | jq -r '.branch // empty' 2>/dev/null || true)"
-    fi
-    case "$hb_step" in
-        merged|failed) continue ;;   # terminal heartbeat -> not a crash to resume
-    esac
+    is_auto_implement=0
+    for queued_issue in $auto_implement; do
+        if [ "$queued_issue" = "$issue" ]; then
+            is_auto_implement=1
+            break
+        fi
+    done
 
     # Run-state (durable, cross-machine): must exist; gives SERVER updated_at.
     rs=""
@@ -196,14 +186,14 @@ for issue in $scan_issues; do
     rs_step="$(printf '%s' "$rs" | jq -r '.step // .state // empty' 2>/dev/null || true)"
     rs_updated="$(printf '%s' "$rs" | jq -r '.updated_at // empty' 2>/dev/null || true)"
     rs_branch="$(printf '%s' "$rs" | jq -r '.branch // empty' 2>/dev/null || true)"
-    [ -n "$rs_branch" ] || rs_branch="$hb_branch"
 
     # A claim can fail after the authoritative ref is created but before the
     # label changes from auto-implement to in-progress-by-bot. Detect only the
     # exact startup sentinel and exact issue/repository identity. Recovery is
     # deferred until the relaunch gates pass so a missing registry or attempt
     # cap cannot mutate queue state without starting the monitor.
-    if [ "$rs_step" = "heartbeat-pending:none" ]; then
+    if [ "$is_in_progress" -eq 0 ] && [ "$is_auto_implement" -eq 1 ] \
+            && [ "$rs_step" = "heartbeat-pending:none" ]; then
         printf '%s' "$rs" | jq -e \
             --arg repo "$REPO" --argjson issue "$issue" \
             'type == "object" and
@@ -226,6 +216,26 @@ for issue in $scan_issues; do
     # Ordinary interrupted work remains label-gated as before. Auto-implement
     # issues enter this scan only for the exact stale-startup recovery above.
     [ "$is_in_progress" -eq 1 ] || continue
+
+    # Heartbeat is machine-local evidence for ordinary in-progress work only.
+    # Startup recovery is adjudicated exclusively by the Rust CAS operation.
+    hb=""
+    if [ -n "$HEARTBEAT_READ_SH" ]; then
+        hb="$(bash "$HEARTBEAT_READ_SH" --issue "$issue" --repo "$REPO" 2>/dev/null || true)"
+    fi
+    hb_step=""
+    hb_host=""
+    hb_branch=""
+    if [ -n "$hb" ]; then
+        hb_step="$(printf '%s' "$hb" | jq -r '.step // empty' 2>/dev/null || true)"
+        # Missing host -> empty -> treated as unknown (never partial-eligible).
+        hb_host="$(printf '%s' "$hb" | jq -r '.host // empty' 2>/dev/null || true)"
+        hb_branch="$(printf '%s' "$hb" | jq -r '.branch // empty' 2>/dev/null || true)"
+    fi
+    case "$hb_step" in
+        merged|failed) continue ;;   # terminal heartbeat -> not a crash to resume
+    esac
+    [ -n "$rs_branch" ] || rs_branch="$hb_branch"
     saw_in_progress_nonterminal=1
 
     # Crash-vs-live off SERVER updated_at (never local clock).
