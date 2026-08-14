@@ -1,4 +1,9 @@
-use std::process::{Command, ExitStatus};
+use std::ffi::OsString;
+use std::fs::File;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 mod unix_group;
@@ -32,65 +37,139 @@ enum PlatformOwnedChild {
     Windows(windows_job::WindowsJobChild),
 }
 
+pub(super) struct PreparedEnvironment {
+    pub variables: Vec<(OsString, OsString)>,
+}
+
+pub(super) struct PreparedLaunchSpec {
+    pub program: PathBuf,
+    pub argv: Vec<OsString>,
+    pub current_dir: Option<PathBuf>,
+    pub environment: PreparedEnvironment,
+    pub stdin: Option<File>,
+    pub stdout: Option<File>,
+    pub stderr: Option<File>,
+}
+
+impl PreparedLaunchSpec {
+    pub(super) fn inherited(
+        program: PathBuf,
+        argv: Vec<OsString>,
+        current_dir: Option<PathBuf>,
+        overrides: Vec<(OsString, OsString)>,
+        stdin: Option<File>,
+        stdout: Option<File>,
+        stderr: Option<File>,
+    ) -> Self {
+        let mut variables: Vec<_> = std::env::vars_os().collect();
+        for (key, value) in overrides {
+            #[cfg(windows)]
+            let matches = |candidate: &OsString| {
+                candidate
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&key.to_string_lossy())
+            };
+            #[cfg(not(windows))]
+            let matches = |candidate: &OsString| candidate == &key;
+            variables.retain(|(candidate, _)| !matches(candidate));
+            variables.push((key, value));
+        }
+        Self {
+            program,
+            argv,
+            current_dir,
+            environment: PreparedEnvironment { variables },
+            stdin,
+            stdout,
+            stderr,
+        }
+    }
+}
+
 impl OwnedChildTree {
+    #[cfg(unix)]
     pub(super) fn spawn(command: &mut Command, launch_nonce: String) -> Result<Self, String> {
+        let inner = unix_group::UnixOwnedChild::spawn(command)?;
+        Self::from_unix(inner, launch_nonce)
+    }
+
+    pub(super) fn spawn_prepared(
+        spec: PreparedLaunchSpec,
+        launch_nonce: String,
+    ) -> Result<Self, String> {
+        if spec.argv.is_empty() {
+            return Err("prepared autonomous launch argv is empty".to_string());
+        }
         #[cfg(unix)]
         {
-            let mut inner = unix_group::UnixOwnedChild::spawn(command)?;
-            let pid = inner.id();
-            let (boot_id, process_start) = match super::process_birth_identity(pid) {
-                Ok(Some(identity)) => identity,
-                Ok(None) => {
-                    let reason = "spawned process exited before its creation identity was captured"
-                        .to_string();
-                    return match inner.terminate() {
-                        Ok(_) => Err(reason),
-                        Err(cleanup) => Err(format!("{reason}; cleanup failed: {cleanup}")),
-                    };
-                }
-                Err(reason) => {
-                    return match inner.terminate() {
-                        Ok(_) => Err(reason),
-                        Err(cleanup) => Err(format!("{reason}; cleanup failed: {cleanup}")),
-                    };
-                }
-            };
-            Ok(Self {
-                inner: PlatformOwnedChild::Unix(inner),
-                identity: DurableProcessOwner {
-                    pid,
-                    container_id: pid.to_string(),
-                    process_start: format!("{boot_id}:{process_start}"),
-                    launch_nonce,
-                },
-            })
+            use std::os::unix::process::CommandExt;
+            let mut command = Command::new(&spec.program);
+            command
+                .arg0(&spec.argv[0])
+                .args(&spec.argv[1..])
+                .env_clear();
+            command.envs(spec.environment.variables);
+            if let Some(current_dir) = spec.current_dir {
+                command.current_dir(current_dir);
+            }
+            if let Some(stdin) = spec.stdin {
+                command.stdin(Stdio::from(stdin));
+            }
+            if let Some(stdout) = spec.stdout {
+                command.stdout(Stdio::from(stdout));
+            }
+            if let Some(stderr) = spec.stderr {
+                command.stderr(Stdio::from(stderr));
+            }
+            let inner = unix_group::UnixOwnedChild::spawn(&mut command)?;
+            Self::from_unix(inner, launch_nonce)
         }
         #[cfg(windows)]
         {
-            let inner = windows_job::WindowsJobChild::spawn(command)?;
-            let pid = inner.id();
-            let process_start = inner.creation_filetime().to_string();
-            Ok(Self {
-                inner: PlatformOwnedChild::Windows(inner),
-                identity: DurableProcessOwner {
-                    pid,
-                    container_id: format!("windows-job:{pid}"),
-                    process_start: format!("{}:{process_start}", super::current_boot_identity()?),
-                    launch_nonce,
-                },
-            })
+            let inner = windows_job::WindowsJobChild::spawn(spec)?;
+            Self::from_windows(inner, launch_nonce)
         }
     }
 
-    #[cfg(windows)]
-    pub(super) fn spawn_with_stdio(
-        command: &mut Command,
+    #[cfg(unix)]
+    fn from_unix(
+        mut inner: unix_group::UnixOwnedChild,
         launch_nonce: String,
-        stdin: Option<std::os::windows::io::RawHandle>,
-        stdout: Option<std::os::windows::io::RawHandle>,
-        stderr: Option<std::os::windows::io::RawHandle>,
     ) -> Result<Self, String> {
-        let inner = windows_job::WindowsJobChild::spawn_with_stdio(command, stdin, stdout, stderr)?;
+        let pid = inner.id();
+        let (boot_id, process_start) = match super::process_birth_identity(pid) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                let reason =
+                    "spawned process exited before its creation identity was captured".to_string();
+                return match inner.terminate() {
+                    Ok(_) => Err(reason),
+                    Err(cleanup) => Err(format!("{reason}; cleanup failed: {cleanup}")),
+                };
+            }
+            Err(reason) => {
+                return match inner.terminate() {
+                    Ok(_) => Err(reason),
+                    Err(cleanup) => Err(format!("{reason}; cleanup failed: {cleanup}")),
+                };
+            }
+        };
+        Ok(Self {
+            inner: PlatformOwnedChild::Unix(inner),
+            identity: DurableProcessOwner {
+                pid,
+                container_id: pid.to_string(),
+                process_start: format!("{boot_id}:{process_start}"),
+                launch_nonce,
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    fn from_windows(
+        inner: windows_job::WindowsJobChild,
+        launch_nonce: String,
+    ) -> Result<Self, String> {
         let pid = inner.id();
         let process_start = inner.creation_filetime().to_string();
         Ok(Self {
@@ -247,6 +326,24 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[cfg(windows)]
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
+    }
+
+    #[cfg(windows)]
+    fn current_handle_count() -> u32 {
+        let mut count = 0;
+        // SAFETY: GetCurrentProcess returns the current-process pseudo handle and count is writable.
+        assert_ne!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
+            0
+        );
+        count
+    }
+
+    #[cfg(windows)]
     fn helper_command(mode: &str, marker: &Path) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("current test binary"));
         command
@@ -258,6 +355,32 @@ mod tests {
             .env("AUTOSPEC_WINDOWS_CHILD_MODE", mode)
             .env("AUTOSPEC_WINDOWS_CHILD_MARKER", marker);
         command
+    }
+
+    #[cfg(windows)]
+    fn helper_spec(mode: &str, marker: &Path) -> PreparedLaunchSpec {
+        let executable = std::env::current_exe().expect("current test binary");
+        PreparedLaunchSpec::inherited(
+            executable.clone(),
+            vec![
+                executable.into_os_string(),
+                "--exact".into(),
+                "commands::autonomous::executor_bridge::process_owner::tests::windows_child_helper"
+                    .into(),
+                "--nocapture".into(),
+            ],
+            None,
+            vec![
+                ("AUTOSPEC_WINDOWS_CHILD_MODE".into(), mode.into()),
+                (
+                    "AUTOSPEC_WINDOWS_CHILD_MARKER".into(),
+                    marker.as_os_str().to_os_string(),
+                ),
+            ],
+            None,
+            None,
+            None,
+        )
     }
 
     #[cfg(windows)]
@@ -319,9 +442,27 @@ mod tests {
                 let mut descendant = helper_command("mark-after-delay", &marker);
                 descendant.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
                 let Ok(mut descendant) = descendant.spawn() else {
+                    std::fs::write(marker, b"blocked").expect("write breakaway handshake");
                     return;
                 };
                 let _ = descendant.wait();
+            }
+            "spawn-normal-descendant-and-exit" => {
+                helper_command("mark-after-delay", &marker)
+                    .spawn()
+                    .expect("spawn normal descendant");
+            }
+            "environment-is-cleared" => {
+                assert!(std::env::var_os("AUTOSPEC_FORBIDDEN_PARENT_ENV").is_none());
+                assert_eq!(
+                    std::env::var("AUTOSPEC_EXPECTED_ENV").as_deref(),
+                    Ok("present")
+                );
+                std::fs::write(marker, b"environment-ok").expect("write environment marker");
+            }
+            "print-stdio" => {
+                println!("prepared-stdout");
+                eprintln!("prepared-stderr");
             }
             unknown => panic!("unknown Windows child helper mode: {unknown}"),
         }
@@ -387,6 +528,15 @@ mod tests {
         }
         assert!(marker.exists(), "descendant did not publish readiness");
         let _ = owned.terminate().expect("terminate owned descendant tree");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !matches!(
+            std::fs::read_to_string(&marker),
+            Ok(ref body) if body == "readyterm"
+        )
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(
             std::fs::read_to_string(&marker).expect("descendant signal marker"),
             "readyterm"
@@ -402,20 +552,40 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn breakaway_helper_succeeds_without_job_containment() {
+        let marker = TempPath::new("windows-breakaway-control");
+        assert!(helper_command("spawn-descendant-and-wait", marker.path())
+            .status()
+            .expect("run breakaway control")
+            .success());
+        assert_eq!(std::fs::read(marker.path()).unwrap(), b"descendant escaped");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn job_owns_descendant_before_primary_thread_runs() {
         let marker = TempPath::new("windows-owned-child-marker");
-        let mut command = helper_command("spawn-descendant-and-wait", marker.path());
-        let mut owned = OwnedChildTree::spawn(&mut command, "nonce-win".into()).unwrap();
-        thread::sleep(Duration::from_millis(250));
+        let mut owned = OwnedChildTree::spawn_prepared(
+            helper_spec("spawn-descendant-and-wait", marker.path()),
+            "nonce-win".into(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !marker.path().exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(marker.path()).unwrap(), b"blocked");
         owned.terminate().expect("terminate job");
-        assert!(!marker.descendant_survived());
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_creation_filetime_is_part_of_durable_identity() {
-        let mut command = helper_command("exit-zero", Path::new("."));
-        let mut owned = OwnedChildTree::spawn(&mut command, "nonce-win".into()).unwrap();
+        let mut owned = OwnedChildTree::spawn_prepared(
+            helper_spec("exit-zero", Path::new(".")),
+            "nonce-win".into(),
+        )
+        .unwrap();
         let identity = owned.identity();
         assert!(!identity.process_start.is_empty());
         let document = identity.document("nonce-win", "intent-win");
@@ -428,9 +598,108 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_wait_preserves_nonzero_exit_and_cleanup_is_idempotent() {
-        let mut command = helper_command("exit-nonzero", Path::new("."));
-        let mut owned = OwnedChildTree::spawn(&mut command, "nonce-win".into()).unwrap();
+        let mut owned = OwnedChildTree::spawn_prepared(
+            helper_spec("exit-nonzero", Path::new(".")),
+            "nonce-win".into(),
+        )
+        .unwrap();
         assert_eq!(owned.wait().expect("wait for child").code(), Some(17));
         assert_eq!(owned.terminate().expect("repeat cleanup").code(), Some(17));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repeated_job_launches_release_process_thread_and_job_handles() {
+        let before = current_handle_count();
+        for sequence in 0..24 {
+            let mut owned = OwnedChildTree::spawn_prepared(
+                helper_spec("exit-zero", Path::new(".")),
+                format!("nonce-handle-{sequence}"),
+            )
+            .unwrap();
+            assert!(owned.wait().unwrap().success());
+            drop(owned);
+        }
+        let after = current_handle_count();
+        assert!(
+            after <= before.saturating_add(12),
+            "repeated job launches leaked handles: before={before}, after={after}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminate_kills_normal_descendant_after_primary_exits() {
+        let marker = TempPath::new("windows-normal-descendant");
+        let mut owned = OwnedChildTree::spawn_prepared(
+            helper_spec("spawn-normal-descendant-and-exit", marker.path()),
+            "nonce-win".into(),
+        )
+        .unwrap();
+        assert!(owned.wait().expect("wait for primary").success());
+        owned
+            .terminate()
+            .expect("terminate descendants after primary exit");
+        assert!(!marker.descendant_survived());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_launch_honors_clear_environment_and_stdio() {
+        use std::io::Read;
+        let marker = TempPath::new("windows-prepared-environment");
+        let stdout_path = TempPath::new("windows-prepared-stdout");
+        let stderr_path = TempPath::new("windows-prepared-stderr");
+        struct RemoveForbiddenEnvironment;
+        impl Drop for RemoveForbiddenEnvironment {
+            fn drop(&mut self) {
+                std::env::remove_var("AUTOSPEC_FORBIDDEN_PARENT_ENV");
+            }
+        }
+        std::env::set_var("AUTOSPEC_FORBIDDEN_PARENT_ENV", "secret");
+        let _environment_guard = RemoveForbiddenEnvironment;
+        let executable = std::env::current_exe().unwrap();
+        let mut spec = helper_spec("environment-is-cleared", marker.path());
+        let mut exact_environment = vec![
+            (
+                "AUTOSPEC_WINDOWS_CHILD_MODE".into(),
+                "environment-is-cleared".into(),
+            ),
+            (
+                "AUTOSPEC_WINDOWS_CHILD_MARKER".into(),
+                marker.path().as_os_str().to_os_string(),
+            ),
+            ("AUTOSPEC_EXPECTED_ENV".into(), "present".into()),
+        ];
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            exact_environment.push(("SystemRoot".into(), system_root));
+        }
+        spec.environment = PreparedEnvironment {
+            variables: exact_environment,
+        };
+        spec.program = executable;
+        spec.stdout = Some(File::create(stdout_path.path()).unwrap());
+        spec.stderr = Some(File::create(stderr_path.path()).unwrap());
+        let mut owned = OwnedChildTree::spawn_prepared(spec, "nonce-win".into()).unwrap();
+        assert!(owned.wait().unwrap().success());
+        assert_eq!(std::fs::read(marker.path()).unwrap(), b"environment-ok");
+
+        let mut spec = helper_spec("print-stdio", Path::new("."));
+        spec.stdout = Some(File::create(stdout_path.path()).unwrap());
+        spec.stderr = Some(File::create(stderr_path.path()).unwrap());
+        let mut owned = OwnedChildTree::spawn_prepared(spec, "nonce-win-stdio".into()).unwrap();
+        assert!(owned.wait().unwrap().success());
+        let mut stdout = String::new();
+        File::open(stdout_path.path())
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        let mut stderr = String::new();
+        File::open(stderr_path.path())
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(stdout.contains("prepared-stdout"));
+        assert!(stderr.contains("prepared-stderr"));
     }
 }

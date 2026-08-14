@@ -8,6 +8,128 @@ fn require_linux_executor_supervision() -> Result<(), String> {
     Err(LINUX_EXECUTOR_REQUIRED.to_string())
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    struct DirectFixture {
+        root: PathBuf,
+        worktree: PathBuf,
+        artifacts: PathBuf,
+    }
+
+    impl DirectFixture {
+        fn new() -> Self {
+            let root = fs::canonicalize(std::env::temp_dir())
+                .expect("canonicalize fixture temp directory")
+                .join(format!(
+                    "autospec-windows-direct-{}-{}",
+                    std::process::id(),
+                    DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+            let worktree = root.join("worktree");
+            let artifacts = root.join("artifacts");
+            fs::create_dir_all(&worktree).expect("create direct fixture");
+            for args in [
+                &["init", "--quiet"][..],
+                &["config", "user.email", "autospec@example.invalid"][..],
+                &["config", "user.name", "Autospec Test"][..],
+                &["commit", "--quiet", "--allow-empty", "-m", "fixture"][..],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&worktree)
+                    .status()
+                    .expect("run fixture git command")
+                    .success());
+            }
+            Self {
+                root,
+                worktree,
+                artifacts,
+            }
+        }
+    }
+
+    impl Drop for DirectFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct RestoreEnvironment {
+        path: Option<OsString>,
+        pathext: Option<OsString>,
+    }
+
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            match self.path.take() {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match self.pathext.take() {
+                Some(value) => std::env::set_var("PATHEXT", value),
+                None => std::env::remove_var("PATHEXT"),
+            }
+        }
+    }
+
+    #[test]
+    fn direct_plan_resolves_pathext_wrapper_through_canonical_cmd() {
+        let fixture = DirectFixture::new();
+        let wrapper = fixture.worktree.join("autospec-fixture-tool.CMD");
+        fs::write(&wrapper, "@echo wrapper-output\r\n").expect("write command wrapper");
+        let restore = RestoreEnvironment {
+            path: std::env::var_os("PATH"),
+            pathext: std::env::var_os("PATHEXT"),
+        };
+        let mut search = vec![fixture.worktree.clone()];
+        search.extend(std::env::split_paths(
+            &restore.path.clone().unwrap_or_default(),
+        ));
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(search).expect("join fixture PATH"),
+        );
+        std::env::set_var("PATHEXT", ".CMD;.EXE");
+
+        let plan = DirectCommandPlan {
+            commands: vec![DirectCommand::success(vec![
+                "autospec-fixture-tool".to_string()
+            ])],
+        };
+        let observed = execute_direct_plan(
+            &fixture.worktree,
+            &plan,
+            &fixture.artifacts,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("execute Windows direct wrapper plan");
+        drop(restore);
+
+        assert_eq!(observed[0].terminal, AttemptTerminal::Exited(0));
+        assert!(fs::read_to_string(&observed[0].stdout_path)
+            .expect("read wrapper stdout")
+            .contains("wrapper-output"));
+        assert_eq!(
+            observed[0]
+                .process_executable
+                .file_name()
+                .and_then(OsStr::to_str),
+            Some("cmd.exe")
+        );
+        assert_eq!(&observed[0].process_argv[1..4], ["/d", "/s", "/c"]);
+        assert!(observed[0].process_argv[4].contains(
+            fs::canonicalize(wrapper)
+                .expect("canonicalize wrapper")
+                .to_str()
+                .expect("UTF-8 wrapper path")
+        ));
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn run_executor_bridge(
     _request: &ExecutorBridgeRequest,
@@ -347,9 +469,6 @@ pub(super) fn execute_supervised_direct_attempt(
     intent_digest: &str,
     stall_timeout: Duration,
 ) -> AttemptTerminal {
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt;
-
     let reviewer_capture = match direct
         .review_capture
         .as_ref()
@@ -359,14 +478,6 @@ pub(super) fn execute_supervised_direct_attempt(
         Ok(capture) => capture,
         Err(error) => return AttemptTerminal::InfrastructureFailed(error),
     };
-    let mut command = Command::new(program);
-    #[cfg(unix)]
-    command.arg0(&direct.argv[0]);
-    command
-        .args(&direct.argv[1..])
-        .current_dir(worktree)
-        .envs(environment_overrides)
-        .stdin(Stdio::null());
     let stdout = match stdout.try_clone() {
         Ok(stdout) => stdout,
         Err(error) => {
@@ -379,27 +490,26 @@ pub(super) fn execute_supervised_direct_attempt(
             return AttemptTerminal::InfrastructureFailed(format!("clone direct stderr: {error}"))
         }
     };
-    #[cfg(unix)]
-    command
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    #[cfg(unix)]
-    let spawn = process_owner::OwnedChildTree::spawn(&mut command, attempt_id.to_string());
     #[cfg(windows)]
-    let spawn = {
-        use std::os::windows::io::AsRawHandle;
-        let stdin = File::open("NUL").map_err(|error| format!("open Windows null input: {error}"));
-        match stdin {
-            Ok(stdin) => process_owner::OwnedChildTree::spawn_with_stdio(
-                &mut command,
+    let null_input = "NUL";
+    #[cfg(unix)]
+    let null_input = "/dev/null";
+    let spawn = File::open(null_input)
+        .map_err(|error| format!("open null input: {error}"))
+        .and_then(|stdin| {
+            process_owner::OwnedChildTree::spawn_prepared(
+                process_owner::PreparedLaunchSpec::inherited(
+                    program.to_path_buf(),
+                    direct.argv.iter().map(OsString::from).collect(),
+                    Some(worktree.to_path_buf()),
+                    environment_overrides,
+                    Some(stdin),
+                    Some(stdout),
+                    Some(stderr),
+                ),
                 attempt_id.to_string(),
-                Some(stdin.as_raw_handle()),
-                Some(stdout.as_raw_handle()),
-                Some(stderr.as_raw_handle()),
-            ),
-            Err(error) => Err(error),
-        }
-    };
+            )
+        });
     let mut owned = match spawn {
         Ok(owned) => owned,
         Err(error) => return AttemptTerminal::SpawnFailed(error),

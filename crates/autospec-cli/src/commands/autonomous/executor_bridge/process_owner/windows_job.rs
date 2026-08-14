@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
-use std::ffi::{c_void, OsStr, OsString};
+use super::PreparedLaunchSpec;
+use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::os::windows::process::ExitStatusExt;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 
 type Handle = *mut c_void;
 
@@ -249,28 +249,11 @@ pub(super) struct WindowsJobChild {
     pid: u32,
     creation_filetime: u64,
     terminal: Option<ExitStatus>,
+    job_terminated: bool,
 }
 
 impl WindowsJobChild {
-    pub(super) fn spawn(command: &Command) -> Result<Self, String> {
-        Self::spawn_with_handles(command, None, None, None)
-    }
-
-    pub(super) fn spawn_with_stdio(
-        command: &Command,
-        stdin: Option<RawHandle>,
-        stdout: Option<RawHandle>,
-        stderr: Option<RawHandle>,
-    ) -> Result<Self, String> {
-        Self::spawn_with_handles(command, stdin, stdout, stderr)
-    }
-
-    fn spawn_with_handles(
-        command: &Command,
-        stdin: Option<RawHandle>,
-        stdout: Option<RawHandle>,
-        stderr: Option<RawHandle>,
-    ) -> Result<Self, String> {
+    pub(super) fn spawn(spec: PreparedLaunchSpec) -> Result<Self, String> {
         let job = OwnedHandle::new(
             // SAFETY: null attributes and name request an unnamed Job Object.
             unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) },
@@ -314,15 +297,18 @@ impl WindowsJobChild {
             return Err(last_error("configure autonomous Job Object"));
         }
 
-        let stdin = duplicate_inheritable(
-            stdin.unwrap_or_else(|| unsafe { GetStdHandle(STD_INPUT_HANDLE) }),
-        )?;
-        let stdout = duplicate_inheritable(
-            stdout.unwrap_or_else(|| unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }),
-        )?;
-        let stderr = duplicate_inheritable(
-            stderr.unwrap_or_else(|| unsafe { GetStdHandle(STD_ERROR_HANDLE) }),
-        )?;
+        let stdin = duplicate_inheritable(spec.stdin.as_ref().map_or_else(
+            || unsafe { GetStdHandle(STD_INPUT_HANDLE) },
+            AsRawHandle::as_raw_handle,
+        ))?;
+        let stdout = duplicate_inheritable(spec.stdout.as_ref().map_or_else(
+            || unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+            AsRawHandle::as_raw_handle,
+        ))?;
+        let stderr = duplicate_inheritable(spec.stderr.as_ref().map_or_else(
+            || unsafe { GetStdHandle(STD_ERROR_HANDLE) },
+            AsRawHandle::as_raw_handle,
+        ))?;
         let inherited = [stdin.raw(), stdout.raw(), stderr.raw()];
         let mut attributes = OwnedAttributeList::for_handles(&inherited)?;
         let mut startup = StartupInfoExW {
@@ -354,17 +340,19 @@ impl WindowsJobChild {
             process_id: 0,
             thread_id: 0,
         };
-        let mut command_line = command_line(command)?;
-        let environment = environment_block(command)?;
-        let current_directory = command
-            .get_current_dir()
+        let application_name = wide_nul(spec.program.as_os_str(), "autonomous child program")?;
+        let mut command_line = command_line(&spec.argv)?;
+        let environment = environment_block(&spec.environment.variables)?;
+        let current_directory = spec
+            .current_dir
+            .as_ref()
             .map(|path| wide_nul(path.as_os_str(), "autonomous child current directory"))
             .transpose()?
             .unwrap_or_default();
         // SAFETY: every pointer is null or points to a live, correctly terminated buffer.
         if unsafe {
             CreateProcessW(
-                std::ptr::null(),
+                application_name.as_ptr(),
                 command_line.as_mut_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
@@ -388,10 +376,24 @@ impl WindowsJobChild {
 
         // SAFETY: both handles are live and owned throughout assignment.
         if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+            let assignment = std::io::Error::last_os_error();
             // SAFETY: the suspended process is still exclusively owned by this launch transaction.
-            unsafe { TerminateProcess(process.raw(), 1) };
-            return Err(last_error(
-                "assign suspended autonomous child to Job Object",
+            let terminated = unsafe { TerminateProcess(process.raw(), 1) };
+            let cleanup = if terminated == 0 {
+                format!(
+                    "terminate suspended child failed: {}",
+                    std::io::Error::last_os_error()
+                )
+            } else if unsafe { WaitForSingleObject(process.raw(), INFINITE) } != WAIT_OBJECT_0 {
+                format!(
+                    "wait for terminated suspended child failed: {}",
+                    std::io::Error::last_os_error()
+                )
+            } else {
+                "suspended child terminated and reaped".to_string()
+            };
+            return Err(format!(
+                "assign suspended autonomous child to Job Object: {assignment}; cleanup: {cleanup}"
             ));
         }
         let creation_filetime = process_creation_filetime(process.raw()).inspect_err(|_| {
@@ -412,6 +414,7 @@ impl WindowsJobChild {
             pid: process_info.process_id,
             creation_filetime,
             terminal: None,
+            job_terminated: false,
         })
     }
 
@@ -447,14 +450,13 @@ impl WindowsJobChild {
     }
 
     pub(super) fn terminate(&mut self) -> Result<ExitStatus, String> {
-        if self.terminal.is_some() || self.try_wait()?.is_some() {
-            return self.wait();
-        }
-        // SAFETY: job is the retained authority for this exact live child tree.
-        if unsafe { TerminateJobObject(self.job.raw(), 1) } == 0 {
-            if self.try_wait()?.is_none() {
+        if !self.job_terminated {
+            // SAFETY: job is the retained authority for this exact child tree, even after its
+            // primary process exits while a descendant remains live.
+            if unsafe { TerminateJobObject(self.job.raw(), 1) } == 0 {
                 return Err(last_error("terminate autonomous Job Object"));
             }
+            self.job_terminated = true;
         }
         self.wait()
     }
@@ -513,10 +515,13 @@ fn process_creation_filetime(process: Handle) -> Result<u64, String> {
     }
 }
 
-fn command_line(command: &Command) -> Result<Vec<u16>, String> {
+fn command_line(argv: &[std::ffi::OsString]) -> Result<Vec<u16>, String> {
+    let Some((argv_zero, arguments)) = argv.split_first() else {
+        return Err("autonomous child argv is empty".to_string());
+    };
     let mut encoded = Vec::new();
-    push_quoted(&mut encoded, command.get_program())?;
-    for argument in command.get_args() {
+    push_quoted(&mut encoded, argv_zero)?;
+    for argument in arguments {
         encoded.push(b' ' as u16);
         push_quoted(&mut encoded, argument)?;
     }
@@ -557,20 +562,13 @@ fn push_quoted(output: &mut Vec<u16>, value: &OsStr) -> Result<(), String> {
     Ok(())
 }
 
-fn environment_block(command: &Command) -> Result<Vec<u16>, String> {
-    let mut environment: BTreeMap<String, (OsString, OsString)> = std::env::vars_os()
-        .map(|(key, value)| (key.to_string_lossy().to_uppercase(), (key, value)))
-        .collect();
-    for (key, value) in command.get_envs() {
-        let normalized = key.to_string_lossy().to_uppercase();
-        if let Some(value) = value {
-            environment.insert(normalized, (key.to_os_string(), value.to_os_string()));
-        } else {
-            environment.remove(&normalized);
-        }
-    }
+fn environment_block(
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<Vec<u16>, String> {
+    let mut environment = environment.to_vec();
+    environment.sort_by_key(|(key, _)| key.to_string_lossy().to_uppercase());
     let mut block = Vec::new();
-    for (_, (key, value)) in environment {
+    for (key, value) in environment {
         block.extend(wide(&key, "autonomous child environment key")?);
         block.push(b'=' as u16);
         block.extend(wide(&value, "autonomous child environment value")?);
@@ -602,14 +600,35 @@ fn last_error(operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
+
+    fn rendered(argv: &[&str]) -> String {
+        let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
+        let encoded = command_line(&argv).expect("encode Windows command line");
+        String::from_utf16(&encoded[..encoded.len() - 1]).expect("decode command line")
+    }
+
+    #[test]
+    fn command_line_quotes_windows_argv_edge_cases() {
+        let cases = [
+            (vec![""], "\"\""),
+            (vec!["a b"], "\"a b\""),
+            (vec!["a\\b"], "a\\b"),
+            (vec!["a\"b"], "\"a\\\"b\""),
+            (vec!["a b\\"], "\"a b\\\\\""),
+            (vec!["a\\\"b"], "\"a\\\\\\\"b\""),
+        ];
+        for (argv, expected) in cases {
+            assert_eq!(rendered(&argv), expected, "argv: {argv:?}");
+        }
+    }
 
     #[test]
     fn command_line_rejects_embedded_nul() {
         let program = OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]);
-        let command = Command::new(program);
         assert_eq!(
-            command_line(&command).unwrap_err(),
+            command_line(&[program]).unwrap_err(),
             "autonomous child command contains an embedded NUL"
         );
     }
