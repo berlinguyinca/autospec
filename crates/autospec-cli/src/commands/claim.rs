@@ -736,20 +736,35 @@ pub(crate) fn acquire_for_conductor(
     worker_id: &str,
     branch: &str,
     base_branch: &str,
-) -> Result<ClaimLease, ConductorClaimError> {
-    let recovered = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
-    if !recovered {
+) -> Result<ConductorClaimAcquisition, ConductorClaimError> {
+    let recovery_outcome = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
+    if !recovery_outcome.recovered {
         if let Some(owner) = lease::active_contesting_owner(repo, issue, worker_id, branch)? {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
     }
-    acquire_record(AcquireOptions {
+    let lease = acquire_record(AcquireOptions {
         issue,
         repo: Some(repo.to_string()),
         worker_id: Some(worker_id.to_string()),
         branch: branch.to_string(),
         session_id: None,
-    })
+    })?;
+    let recovery = startup_recovery_evidence(&recovery_outcome, &lease);
+    Ok(ConductorClaimAcquisition { lease, recovery })
+}
+
+fn startup_recovery_evidence(
+    outcome: &RecoveryOutcome,
+    lease: &ClaimLease,
+) -> Option<StartupRecoveryEvidence> {
+    outcome
+        .previous_claim_id
+        .as_ref()
+        .map(|previous_claim_id| StartupRecoveryEvidence {
+            previous_claim_id: previous_claim_id.clone(),
+            next_claim_id: lease.claim_id.clone(),
+        })
 }
 
 pub(crate) fn recover_for_conductor(
@@ -920,6 +935,15 @@ fn lifecycle_claim_evidence_from_record(
     record.claim_id.as_deref().ok_or_else(|| {
         CommandFailure::diagnostic("recorded lifecycle claim has no generation identity")
     })?;
+    if record.state == "claimed" && record.step == "heartbeat-pending:none" {
+        return Ok(ClaimEvidence::Observed(ClaimContext::active(
+            scope,
+            issue,
+            requested_worker,
+            requested_branch,
+            LeaseFreshness::Fresh,
+        )));
+    }
     if matches!(record.state.as_str(), "released" | "retryable") {
         return Ok(ClaimEvidence::Observed(ClaimContext::active(
             scope,
@@ -1711,6 +1735,7 @@ fn recover_stale_startup(args: &[String]) -> Result<(), CommandFailure> {
 struct RecoveryOutcome {
     recovered: bool,
     reason: String,
+    previous_claim_id: Option<String>,
 }
 
 pub(crate) fn recover_active_issue(
@@ -1719,6 +1744,7 @@ pub(crate) fn recover_active_issue(
     timeout_seconds: u64,
 ) -> Result<bool, CommandFailure> {
     recover_active_issue_against(repo, issue, timeout_seconds, None)
+        .map(|outcome| outcome.recovered)
 }
 
 fn recover_active_issue_against(
@@ -1726,12 +1752,15 @@ fn recover_active_issue_against(
     issue: u64,
     timeout_seconds: u64,
     base_branch: Option<&str>,
-) -> Result<bool, CommandFailure> {
+) -> Result<RecoveryOutcome, CommandFailure> {
     let Some(selected) = read_claim_ref(repo, issue)? else {
-        return Ok(false);
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "missing_run_state".to_string(),
+            previous_claim_id: None,
+        });
     };
     recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected, base_branch)
-        .map(|outcome| outcome.recovered)
 }
 
 /// A newly-created claim without a heartbeat, branch, or PR is kept during its
@@ -1793,12 +1822,14 @@ fn recover_stale_startup_record(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "missing_run_state".to_string(),
+            previous_claim_id: None,
         });
     };
     if !selected.record.pr.is_empty() {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_has_pr".to_string(),
+            previous_claim_id: None,
         });
     }
     if startup_heartbeat_exists(repo, issue)
@@ -1809,6 +1840,7 @@ fn recover_stale_startup_record(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     release_stale_startup_labels(repo, issue)?;
@@ -1834,6 +1866,7 @@ fn recover_stale_startup_record(
     Ok(RecoveryOutcome {
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: None,
     })
 }
 
@@ -1845,11 +1878,13 @@ fn recover_authoritative_stale_startup(
     base_branch: Option<&str>,
 ) -> Result<RecoveryOutcome, CommandFailure> {
     if selected.record.state == "available" && selected.record.step == "stale_startup_recovered" {
+        let previous_claim_id = selected.record.claim_id.clone();
         release_stale_startup_labels(repo, issue)?;
         emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
         return Ok(RecoveryOutcome {
             recovered: true,
             reason: "released_stale_startup_claim".to_string(),
+            previous_claim_id,
         });
     }
     if selected.record.state != "claimed"
@@ -1861,6 +1896,7 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     let branch_blocked = branch_blocks_stale_recovery(&selected.record.branch, base_branch);
@@ -1873,6 +1909,7 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     if !quarantine_authoritative_stale_heartbeat(
@@ -1885,6 +1922,7 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     let mut available = selected.record.clone();
@@ -1897,6 +1935,7 @@ fn recover_authoritative_stale_startup(
             return Ok(RecoveryOutcome {
                 recovered: false,
                 reason: "ownership_lost".to_string(),
+                previous_claim_id: None,
             })
         }
     };
@@ -1906,6 +1945,7 @@ fn recover_authoritative_stale_startup(
     Ok(RecoveryOutcome {
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: selected.record.claim_id.clone(),
     })
 }
 
@@ -3258,6 +3298,18 @@ pub(crate) struct ClaimLease {
     pub branch: String,
     pub claim_id: String,
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupRecoveryEvidence {
+    pub(crate) previous_claim_id: String,
+    pub(crate) next_claim_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConductorClaimAcquisition {
+    pub(crate) lease: ClaimLease,
+    pub(crate) recovery: Option<StartupRecoveryEvidence>,
 }
 
 fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {

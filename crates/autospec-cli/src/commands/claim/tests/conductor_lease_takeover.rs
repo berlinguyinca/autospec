@@ -3,6 +3,7 @@
 //! A dead worker cannot release its own claim, and `claim release` validates the
 //! caller's identity, so an unconditional refusal wedged the issue permanently.
 use super::super::lease::conductor_claim_owner_holds_lease;
+use super::super::{startup_recovery_evidence, ClaimLease, RecoveryOutcome};
 use autospec_core::claim::RunStateRecord;
 
 pub(super) fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> RunStateRecord {
@@ -65,6 +66,30 @@ fn an_unparseable_timestamp_keeps_the_lease() {
         conductor_claim_owner_holds_lease(&record),
         "an unreadable record must fail closed and keep the owner"
     );
+}
+
+#[test]
+fn conductor_acquisition_reports_recovered_prior_and_new_claim_generations() {
+    // Break caught: authoritative recovery succeeded but acquisition discarded
+    // the prior generation needed for later accountability evidence.
+    let outcome = RecoveryOutcome {
+        recovered: true,
+        reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: Some("claim-prior".to_string()),
+    };
+    let lease = ClaimLease {
+        issue: 42,
+        repo: "owner/repo".to_string(),
+        worker_id: "worker-next".to_string(),
+        branch: "feat/next".to_string(),
+        claim_id: "claim-next".to_string(),
+        session_id: None,
+    };
+
+    let evidence = startup_recovery_evidence(&outcome, &lease).expect("recovery metadata");
+
+    assert_eq!(evidence.previous_claim_id, "claim-prior");
+    assert_eq!(evidence.next_claim_id, "claim-next");
 }
 
 mod requeue {

@@ -3791,7 +3791,7 @@ fn foreground_rejects_unsafe_released_predecessor_heartbeat_root_before_acquire(
 
 #[cfg(target_os = "linux")]
 #[test]
-fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
+fn foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire() {
     // Break caught: foreground acquisition skipped stale-startup recovery, replaced the
     // stranded claim generation, and then failed to publish over its expired heartbeat.
     let fixture = ForegroundFixture::new();
@@ -3815,7 +3815,6 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     .with_claim_id("successor-claim");
     fixture.transition_claim_ref(&stale);
     fixture.seed_expired_claim_heartbeat("prior-worker", branch, "prior-claim");
-    seed_foreground_state(&fixture, &selected_foreground_state());
     fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
 
     let output = fixture.run_foreground();
@@ -3832,6 +3831,29 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("heartbeat_write_failed"),
         "foreground attempted acquisition before stale-startup recovery"
+    );
+    let claim_history = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "log",
+            "--format=%B",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    assert_eq!(
+        claim_history
+            .matches("\"step\":\"stale_startup_recovered\"")
+            .count(),
+        1,
+        "stale startup must advance through recovery exactly once"
+    );
+    assert!(
+        fs::read_to_string(&fixture.accountability)
+            .expect("accountability evidence")
+            .contains("Claimed issue 42"),
+        "Scan path must reach IssueClaimed after recovery"
     );
     let acquired = fixture.claim_record();
     assert!(acquired.worker_id.starts_with("rust-foreground-conductor-"));
@@ -3919,11 +3941,21 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
                 heartbeat_claim,
             );
         }
-        seed_foreground_state(&fixture, &selected_foreground_state());
         fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
         let heartbeat_path = fixture.heartbeats.join("o4_test_r4_repo/42.json");
         let heartbeat_before = fs::read_to_string(&heartbeat_path).expect("blocked heartbeat");
         let claim_before = fixture.claim_record();
+        let claim_document_before = git_fixture(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.claim_remote.to_str().expect("claim remote"),
+                "show",
+                "-s",
+                "--format=%B",
+                "refs/autospec/claims/issue-42",
+            ],
+        );
 
         let output = fixture.run_foreground();
 
@@ -3941,6 +3973,21 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
             fixture.claim_record(),
             claim_before,
             "{case}: claim mutated"
+        );
+        assert_eq!(
+            git_fixture(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.claim_remote.to_str().expect("claim remote"),
+                    "show",
+                    "-s",
+                    "--format=%B",
+                    "refs/autospec/claims/issue-42",
+                ],
+            ),
+            claim_document_before,
+            "{case}: claim document mutated"
         );
         assert_eq!(
             fs::read_to_string(&heartbeat_path).expect("preserved blocked heartbeat"),

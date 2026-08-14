@@ -3273,13 +3273,15 @@ fn execute_foreground_dispatch(
                     )?,
                     false,
                 )?;
-                let lease = claim::acquire_for_conductor(
+                let acquisition = claim::acquire_for_conductor(
                     &layout.repo,
                     selection.issue,
                     &worker_id,
                     &branch,
                     base_branch,
                 )?;
+                let _startup_recovery = acquisition.recovery;
+                let lease = acquisition.lease;
                 record_accountability_event(
                     layout,
                     accountability_event(
