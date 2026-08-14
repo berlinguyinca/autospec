@@ -5,6 +5,8 @@
 use super::super::{
     supervise_harness, HarnessKind, MutationSnapshot, SupervisionConfig, SupervisionOutcome,
 };
+#[cfg(not(target_os = "linux"))]
+use super::support_base::test_environment;
 use super::support_base::GitFixture;
 use super::support_invocation::{shell_invocation, supervision_config, supervision_state};
 use crate::commands::autonomous::executor_bridge as bridge;
@@ -157,6 +159,67 @@ fn autonomous_executor_bridge_stall_reports_actual_durable_progress_timestamp() 
         .and_then(|event| event["last_progress_at"].as_u64())
         .expect("stall last progress");
     assert_eq!(stalled_at, started_at, "{events}");
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn autonomous_executor_bridge_retains_owner_journal_until_terminal_receipt_is_durable() {
+    let _environment = test_environment();
+    let fixture = GitFixture::new("supervise-cleanup-proof-failure");
+    let mut state = supervision_state(&fixture);
+    let snapshot =
+        MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+    let state_path = fixture.root.join("state/invocation.json");
+    let event_log = fixture.root.join("log/executor.jsonl");
+    let harness = shell_invocation(&fixture.repo, "printf 'tail-before-receipt\\n'");
+
+    super::super::portability::set_portable_after_cleanup_proof_failpoint(true);
+    let error = supervise_harness(
+        &state_path,
+        &event_log,
+        &mut state,
+        &harness,
+        &snapshot,
+        supervision_config(2_000),
+    )
+    .expect_err("failure after cleanup proof must retain recovery authority");
+    assert!(error.contains("after cleanup proof"), "{error}");
+
+    let sinks =
+        bridge::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
+    assert!(
+        sinks.supervisor_identity.is_file(),
+        "owner journal retired before the terminal receipt was durable"
+    );
+    assert!(
+        sinks
+            .supervisor_identity
+            .with_extension("cleanup.json")
+            .is_file(),
+        "cleanup proof was not durable at the injected boundary"
+    );
+    let events = fs::read_to_string(&event_log).expect("events");
+    assert!(events.contains("\"event\":\"child_cleanup_complete\""));
+    assert!(!events.contains("\"event\":\"child_exited\""));
+
+    let restart = supervise_harness(
+        &state_path,
+        &event_log,
+        &mut state,
+        &harness,
+        &snapshot,
+        supervision_config(2_000),
+    )
+    .expect_err("retained journal must quarantine restart instead of replaying the child");
+    assert!(restart.contains("recovery"), "{restart}");
+    assert_eq!(
+        fs::read_to_string(&event_log)
+            .expect("restart events")
+            .matches("\"event\":\"child_started\"")
+            .count(),
+        1,
+        "recovery quarantine replayed the harness"
+    );
 }
 
 #[test]

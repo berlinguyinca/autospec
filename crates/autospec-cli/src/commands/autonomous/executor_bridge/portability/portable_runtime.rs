@@ -1,6 +1,23 @@
 use super::*;
 
 #[cfg(not(target_os = "linux"))]
+#[path = "portable_output.rs"]
+mod portable_output;
+#[cfg(not(target_os = "linux"))]
+use portable_output::PortableOutputReaders;
+
+#[cfg(all(test, not(target_os = "linux")))]
+static PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(test, not(target_os = "linux")))]
+pub(in crate::commands::autonomous::executor_bridge) fn set_portable_after_cleanup_proof_failpoint(
+    enabled: bool,
+) {
+    PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.store(enabled, Ordering::SeqCst);
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(in crate::commands::autonomous::executor_bridge) fn create_draft_pull_request<Refresh>(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -248,10 +265,8 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
     state.process = None;
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
-    let stdout =
-        File::create(&sinks.stdout).map_err(|error| format!("create executor stdout: {error}"))?;
-    let stderr =
-        File::create(&sinks.stderr).map_err(|error| format!("create executor stderr: {error}"))?;
+    let stdout = open_private_file(&sinks.stdout, true)?;
+    let stderr = open_private_file(&sinks.stderr, true)?;
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut argv = Vec::with_capacity(harness.args.len() + 1);
     argv.push(
@@ -261,19 +276,32 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
             .unwrap_or_else(|| harness.program.clone().into_os_string()),
     );
     argv.extend(harness.args.iter().map(OsString::from));
+    let credentialless_config = sinks
+        .stdout
+        .parent()
+        .ok_or_else(|| "executor output sink has no parent".to_string())?
+        .join("credentialless-config");
+    let preserve_codex_host_auth = harness.args.first().is_some_and(|arg| arg == "exec")
+        && harness
+            .args
+            .iter()
+            .any(|arg| arg == "--output-last-message");
     let owned = process_owner::OwnedChildTree::spawn_prepared(
-        process_owner::PreparedLaunchSpec::inherited(
+        process_owner::PreparedLaunchSpec::credentialless(
             harness.program.clone(),
             argv,
             Some(harness.current_dir.clone()),
             harness.environment_overrides.clone(),
+            credentialless_config,
+            preserve_codex_host_auth,
             Some(File::open(null).map_err(|error| format!("open executor null input: {error}"))?),
             Some(stdout),
             Some(stderr),
-        ),
+        )?,
         state.identity.invocation_id.clone(),
     )?;
     let mut owned = PortableOwnedChildGuard::new(owned);
+    let mut readers = PortableOutputReaders::open(&sinks)?;
     let owner = owned.identity();
     #[cfg(test)]
     LAST_SPAWN_HARNESS.store(owner.pid, Ordering::SeqCst);
@@ -289,7 +317,7 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
         Exited(i32),
         OwnershipLost,
         Transient(BridgeRunFailure),
-        Stalled,
+        Stalled { last_progress_at: u64 },
     }
 
     let operation = journal.and_then(|()| {
@@ -300,24 +328,22 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
             write_invocation_atomic(state_path, state)?;
             fail_launch_at("log")?;
             append_executor_event(event_log, state, "child_started", None)?;
-            let mut observed = (0, 0);
             let mut last_progress = Instant::now();
+            let mut last_progress_at = state.progress_at;
             loop {
                 thread::sleep(config.poll_interval);
                 fail_launch_at("direct-poll")?;
+                let consumed = readers.poll()?;
+                if consumed > 0 {
+                    fail_launch_at("adopt-flush")?;
+                    last_progress = Instant::now();
+                }
+                if readers.flush_if_due(state_path, event_log, state, false)? {
+                    last_progress = Instant::now();
+                    last_progress_at = state.progress_at;
+                }
                 if let Some(status) = owned.try_wait()? {
                     return Ok(PortableTerminal::Exited(status.code().unwrap_or(1)));
-                }
-                let sizes = (
-                    fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
-                    fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
-                );
-                if sizes != observed {
-                    observed = sizes;
-                    last_progress = Instant::now();
-                    state.progress_at = unix_now()?;
-                    fail_launch_at("adopt-flush")?;
-                    write_invocation_atomic(state_path, state)?;
                 }
                 if renewal.is_due() {
                     match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
@@ -331,7 +357,7 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
                     }
                 }
                 if last_progress.elapsed() >= config.stall_timeout {
-                    return Ok(PortableTerminal::Stalled);
+                    return Ok(PortableTerminal::Stalled { last_progress_at });
                 }
             }
         })()
@@ -376,13 +402,30 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
         "portable executor cleanup evidence",
     )?;
     append_executor_event(event_log, state, "child_cleanup_complete", None)?;
-    if sinks.supervisor_identity.exists() {
-        fs::remove_file(&sinks.supervisor_identity)
-            .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+    #[cfg(test)]
+    if PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.swap(false, Ordering::SeqCst) {
+        return Err("injected portable failure after cleanup proof".to_string());
     }
 
     let terminal = operation?;
-    match terminal {
+    if matches!(
+        &terminal,
+        PortableTerminal::Exited(_) | PortableTerminal::Stalled { .. }
+    ) {
+        match readers.drain_after_exit(state_path, event_log, state, &mut renewal)? {
+            CompletionDrainOutcome::Drained => {}
+            CompletionDrainOutcome::OwnershipLost => {
+                record_claim_ownership_loss(state_path, event_log, state)?;
+                fs::remove_file(&sinks.supervisor_identity)
+                    .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+                return Ok(SupervisionOutcome::OwnershipLost);
+            }
+            CompletionDrainOutcome::TransientFailure(error) => {
+                return Ok(SupervisionOutcome::TransientFailure(error));
+            }
+        }
+    }
+    let outcome = match terminal {
         PortableTerminal::Exited(exit_code) => {
             fail_launch_at("pre-verify")?;
             snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
@@ -399,21 +442,34 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
                 "child_exited",
                 Some(serde_json::json!({"exit_code": exit_code, "adopted": false})),
             )?;
-            Ok(SupervisionOutcome::Exited { exit_code })
+            SupervisionOutcome::Exited { exit_code }
         }
         PortableTerminal::OwnershipLost => {
             record_claim_ownership_loss(state_path, event_log, state)?;
-            Ok(SupervisionOutcome::OwnershipLost)
+            SupervisionOutcome::OwnershipLost
         }
-        PortableTerminal::Transient(error) => Ok(SupervisionOutcome::TransientFailure(error)),
-        PortableTerminal::Stalled => {
+        PortableTerminal::Transient(error) => {
+            return Ok(SupervisionOutcome::TransientFailure(error));
+        }
+        PortableTerminal::Stalled { last_progress_at } => {
             state.phase = BridgePhase::Interrupted;
             state.progress_at = unix_now()?;
             write_invocation_atomic(state_path, state)?;
-            append_executor_event(event_log, state, "child_stalled", None)?;
-            Ok(SupervisionOutcome::Stalled)
+            append_executor_event(
+                event_log,
+                state,
+                "child_stalled",
+                Some(serde_json::json!({
+                    "stall_timeout_ms": config.stall_timeout.as_millis(),
+                    "last_progress_at": last_progress_at,
+                })),
+            )?;
+            SupervisionOutcome::Stalled
         }
-    }
+    };
+    fs::remove_file(&sinks.supervisor_identity)
+        .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+    Ok(outcome)
 }
 
 pub(in crate::commands::autonomous::executor_bridge) fn resolve_executor_supervisor_executable(
