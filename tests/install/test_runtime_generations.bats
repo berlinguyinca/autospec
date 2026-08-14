@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   TEST_ROOT="$(mktemp -d "${BATS_TMPDIR:-/tmp}/runtime-generations.XXXXXX")"
@@ -109,7 +111,8 @@ SH
   install_launcher_runtime_fixture
 
   env HOME="$TEST_HOME" PATH="$TEST_HOME/.autospec/bin:$FAKE_BIN:$PATH" \
-    "$LAUNCHER" start --repo-dir "$target" --json
+    "$LAUNCHER" start --repo-dir "$target" --json 2>"$TEST_ROOT/prime.err"
+  [ ! -s "$TEST_ROOT/prime.err" ]
   rm -f "$AUTOSPEC_TEST_LAUNCH_ARGS"
   { /usr/bin/time -p env HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.autospec/bin:$FAKE_BIN:$PATH" \
@@ -120,11 +123,33 @@ SH
   echo "generic-target launcher elapsed: ${elapsed_seconds}s" >&3
 
   [ "$launcher_status" -eq 0 ]
+  [ "$(grep -vc '^real \|^user \|^sys ' "$TEST_ROOT/launcher.time" || true)" -eq 0 ]
   awk -v elapsed="$elapsed_seconds" 'BEGIN { exit !(elapsed <= 0.20) }'
   [ "$(sed -n '1p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = autonomous ]
   [ "$(sed -n '2p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = start ]
   [ "$(sed -n '3p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = --repo-dir ]
   [ "$(sed -n '4p' "$AUTOSPEC_TEST_LAUNCH_ARGS")" = "$target" ]
+}
+
+@test "canonical check-target keeps warm and stale diagnostics clean" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  target="$TEST_ROOT/target"
+  mkdir -p "$target"
+  git -C "$target" init -q
+  install_launcher_runtime_fixture
+
+  run --separate-stderr env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" \
+    bash "$TEST_ROOT/scripts/autonomous-runtime-refresh.sh" check-target --repo-dir "$target"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+
+  printf '// stale source\n' >>"$FIXTURE_REPO/crates/demo/src/lib.rs"
+  run --separate-stderr env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" \
+    bash "$TEST_ROOT/scripts/autonomous-runtime-refresh.sh" check-target --repo-dir "$target"
+  [ "$status" -eq 10 ]
+  [ "$output" = stale:generation-invalid ]
+  [ -z "$stderr" ]
 }
 
 teardown() {
