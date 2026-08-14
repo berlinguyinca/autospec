@@ -10,6 +10,34 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_EXECUTOR_HARNESS_EXACT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestExecutorHarnessGuard(Option<String>);
+
+#[cfg(test)]
+impl Drop for TestExecutorHarnessGuard {
+    fn drop(&mut self) {
+        TEST_EXECUTOR_HARNESS_EXACT.with(|exact| {
+            exact.replace(self.0.take());
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_executor_harness_exact(exact: &str) -> TestExecutorHarnessGuard {
+    let previous = TEST_EXECUTOR_HARNESS_EXACT.with(|value| value.replace(Some(exact.into())));
+    TestExecutorHarnessGuard(previous)
+}
+
+#[cfg(test)]
+fn test_executor_harness_exact() -> Option<String> {
+    TEST_EXECUTOR_HARNESS_EXACT.with(|exact| exact.borrow().clone())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HarnessKind {
     Claude,
@@ -258,6 +286,20 @@ impl ResolvedHarness {
         artifact: &Path,
         prompt: &str,
     ) -> Result<HarnessInvocation, String> {
+        #[cfg(test)]
+        if let Some(exact_test) = test_executor_harness_exact() {
+            return Ok(HarnessInvocation {
+                program: self.executable.clone(),
+                args: vec![
+                    "--exact".into(),
+                    exact_test,
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                current_dir: worktree.to_path_buf(),
+                requires_mutation_snapshots: false,
+            });
+        }
         let (program, args, requires_mutation_snapshots) = match self.kind {
             HarnessKind::Codex => {
                 let mut args = vec!["exec".into(), "-C".into(), worktree.display().to_string()];
@@ -349,7 +391,15 @@ pub(super) fn safe_executable(
             .find(|candidate| candidate.is_file())
             .ok_or_else(|| format!("executor harness not found on PATH: {}", path.display()))?
     };
-    if temporary_path(&candidate, env) {
+    #[cfg(test)]
+    let allow_current_test_executable = test_executor_harness_exact().is_some()
+        && fs::canonicalize(&candidate).ok()
+            == std::env::current_exe()
+                .ok()
+                .and_then(|path| fs::canonicalize(path).ok());
+    #[cfg(not(test))]
+    let allow_current_test_executable = false;
+    if temporary_path(&candidate, env) && !allow_current_test_executable {
         return Err(format!(
             "executor harness is configured through temporary storage: {}",
             candidate.display()
@@ -361,7 +411,7 @@ pub(super) fn safe_executable(
             candidate.display()
         )
     })?;
-    if temporary_path(&canonical, env) {
+    if temporary_path(&canonical, env) && !allow_current_test_executable {
         return Err(format!(
             "executor harness resolves through temporary storage: {}",
             canonical.display()

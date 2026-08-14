@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(all(test, not(target_os = "linux")))]
+static PORTABLE_LIFECYCLE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
@@ -245,8 +248,13 @@ mod windows_tests {
 mod supported_host_tests {
     use super::*;
 
-    static ADMISSION_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    const CHILD_ENV: &str = "AUTOSPEC_TEST_SUPPORTED_HOST_NOOP_CHILD";
+    const HARNESS_HELPER: &str = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_noop_harness_helper";
+
+    #[test]
+    #[ignore = "launched as the production harness child by the supported-host admission test"]
+    fn supported_host_noop_harness_helper() {
+        std::process::exit(17);
+    }
 
     struct RestoreEnvironment(Vec<(&'static str, Option<OsString>)>);
 
@@ -275,14 +283,10 @@ mod supported_host_tests {
 
     #[test]
     fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt() {
-        if std::env::var_os(CHILD_ENV).is_some() {
-            thread::sleep(Duration::from_millis(100));
-            return;
-        }
         // Break caught: a supported non-Linux host compiling the bridge while skipping released
         // predecessor retirement, successor heartbeat ownership, real OS child ownership, or
         // terminal receipt publication.
-        let _serial = ADMISSION_TEST
+        let _serial = PORTABLE_LIFECYCLE_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sequence = DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -362,6 +366,17 @@ mod supported_host_tests {
             "@echo off\r\nif \"%1\"==\"api\" echo []\r\nif \"%1 %2\"==\"issue edit\" (\r\n  echo %* | findstr /c:\"--add-label in-progress-by-bot\" >nul && echo claimed>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n  echo %* | findstr /c:\"--add-label auto-implement\" >nul && echo released>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n)\r\nif \"%1 %2\"==\"issue view\" (\r\n  echo %* | findstr /c:\"labels,body,title,author\" >nul\r\n  if errorlevel 1 (\r\n    echo {\"labels\":[{\"name\":\"auto-implement\"},{\"name\":\"safety:reviewed\"}]}\r\n  ) else (\r\n    findstr /x claimed \"%AUTOSPEC_TEST_GH_STATE%\" >nul 2>nul && (echo {\"labels\":[\"in-progress-by-bot\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}) || (echo {\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"})\r\n  )\r\n)\r\nif \"%1 %2\"==\"pr list\" echo []\r\nexit /b 0\r\n",
         )
         .expect("write admission gh shim");
+        let harness_aliases = root.join("harness-runtime-aliases.tsv");
+        fs::write(
+            &harness_aliases,
+            format!(
+                "claude\t{}\tclaude\tPortable admission helper\n",
+                std::env::current_exe()
+                    .expect("resolve admission harness executable")
+                    .display()
+            ),
+        )
+        .expect("write admission harness alias table");
 
         let keys = [
             "AUTOSPEC_HEARTBEAT_DIR",
@@ -369,6 +384,8 @@ mod supported_host_tests {
             "AUTOSPEC_CLAIM_GIT_STATE_DIR",
             "AUTOSPEC_CLAIM_CONFIRM_READS",
             "AUTOSPEC_TEST_GH_STATE",
+            "AUTOSPEC_HARNESS_RUNTIME_ALIASES",
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND",
             "PATH",
         ];
         let _restore = RestoreEnvironment(
@@ -382,6 +399,8 @@ mod supported_host_tests {
             std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claim_state);
             std::env::set_var("AUTOSPEC_CLAIM_CONFIRM_READS", "1");
             std::env::set_var("AUTOSPEC_TEST_GH_STATE", root.join("gh-state"));
+            std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &harness_aliases);
+            std::env::set_var("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "claude");
             let mut path = vec![bin.clone()];
             path.extend(std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),
@@ -463,172 +482,69 @@ mod supported_host_tests {
         assert!(!heartbeat_body.contains("claim-predecessor"));
         assert!(heartbeat_body.contains(&lease.claim_id));
 
-        let executable = std::env::current_exe().expect("resolve admission no-op executable");
-        let test_name = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt";
-        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        let mut child = process_owner::OwnedChildTree::spawn_prepared(
-            process_owner::PreparedLaunchSpec::inherited(
-                executable.clone(),
-                vec![
-                    executable.into_os_string(),
-                    "--exact".into(),
-                    test_name.into(),
-                    "--nocapture".into(),
-                ],
-                Some(repo.clone()),
-                vec![(CHILD_ENV.into(), "1".into())],
-                None,
-                Some(File::create(null).expect("open admission null stdout")),
-                Some(File::create(null).expect("open admission null stderr")),
-            ),
-            "supported-host-noop".into(),
-        )
-        .expect("launch supported-host no-op child");
-        let status = child.wait().expect("wait for supported-host no-op child");
-        child.terminate().expect("reap supported-host no-op child");
-        assert!(status.success(), "supported-host no-op child failed");
-
-        let base = resolve_base(&repo, &BTreeMap::new()).expect("resolve admission base");
-        let admission_scope = executor_worktree_root()
-            .expect("canonical admission executor root")
-            .join(safe_scope(&repository).expect("safe admission scope"));
-        if admission_scope.exists() {
-            fs::remove_dir_all(&admission_scope).expect("remove stale admission scope");
-        }
-        let issue = provision_issue_worktree_for_claim(
-            &repo,
-            &repository,
-            42,
-            &base,
-            Some((&lease.claim_id, "42-supported-host")),
-        )
-        .expect("provision admission executor worktree");
         let state_path = root.join("state/invocation.json");
-        let mut state = PersistedInvocation {
-            schema: INVOCATION_SCHEMA,
-            identity: BridgeIdentity {
-                repository: repository.clone(),
-                repository_path: fs::canonicalize(&repo).expect("canonical admission repo"),
-                issue: 42,
-                worker_id: lease.worker_id.clone(),
-                branch: lease.branch.clone(),
-                claim_id: lease.claim_id.clone(),
-                invocation_id: "42-supported-host".into(),
-                base_ref: issue.base_ref,
-                base_oid: issue.base_oid,
-                worktree: fs::canonicalize(issue.path).expect("canonical admission worktree"),
-                runtime_environment_dir: None,
-                runtime_session_id: None,
-            },
-            harness: HarnessKind::Codex,
-            phase: BridgePhase::Complete,
-            supervisor: None,
-            process: None,
-            progress_at: unix_now().expect("admission timestamp"),
-            pr: None,
-            head_oid: None,
-            closeout_path: None,
-            closeout_digest: None,
-            remote_snapshot_digest: None,
-            draft_process: None,
-            terminal_result: Some("retryable:executor_zero_effect_completion".into()),
-            umbrella: None,
-            current_child: None,
-            implementation_repair_attempt: 0,
-        };
-        let snapshot = format!(
-            "{}\n",
-            serde_json::json!({
-                "schema": 1,
-                "identity": {
-                    "repository": state.identity.repository,
-                    "repository_path": state.identity.repository_path,
-                    "issue": state.identity.issue,
-                    "worker_id": state.identity.worker_id,
-                    "branch": state.identity.branch,
-                    "claim_id": state.identity.claim_id,
-                    "invocation_id": state.identity.invocation_id,
-                    "base_ref": state.identity.base_ref,
-                    "base_oid": state.identity.base_oid,
-                    "worktree": state.identity.worktree,
-                    "local_head": state.identity.base_oid,
-                    "dirty_wip": false,
-                },
-                "refs": {"refs/heads/main": state.identity.base_oid},
-                "pull_requests": [],
-            })
-        );
-        let snapshot_path = remote_snapshot_path(&state_path);
-        fs::create_dir_all(snapshot_path.parent().expect("admission snapshot parent"))
-            .expect("create admission snapshot parent");
-        fs::write(&snapshot_path, &snapshot).expect("write admission prelaunch snapshot");
-        #[cfg(unix)]
-        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
-            .expect("secure admission prelaunch snapshot");
-        state.remote_snapshot_digest = Some(sha256_hex(snapshot.as_bytes()));
-        write_invocation_atomic(&state_path, &state).expect("persist admission Complete state");
-        let sinks = output_sink_paths(&state_path, &state.identity.invocation_id)
-            .expect("admission output sinks");
-        fs::create_dir_all(sinks.exit_status.parent().expect("admission exit parent"))
-            .expect("create admission exit parent");
-        let mut exit = [0_u8; 16];
-        exit[..4].copy_from_slice(&0_i32.to_ne_bytes());
-        exit[4..8].copy_from_slice(b"EXIT");
-        exit[8..12].copy_from_slice(&0_i32.to_ne_bytes());
-        exit[12..].copy_from_slice(b"DONE");
-        fs::write(&sinks.exit_status, exit).expect("write admission synced exit");
-        #[cfg(unix)]
-        fs::set_permissions(&sinks.exit_status, fs::Permissions::from_mode(0o600))
-            .expect("secure admission synced exit");
-        ensure_zero_effect_recovery_marker(&state_path, &state)
-            .expect("persist admission zero-effect marker");
-        assert_eq!(
-            crate::commands::claim::transition_bridge_claim(
-                crate::commands::claim::ClaimMutationIdentity {
-                    repo: &state.identity.repository,
-                    issue: state.identity.issue,
-                    worker_id: &state.identity.worker_id,
-                    branch: &state.identity.branch,
-                    claim_id: &state.identity.claim_id,
-                },
-                None,
-                crate::commands::claim::BridgeClaimDisposition::Retryable,
-            )
-            .expect("publish admission terminal claim"),
-            crate::commands::claim::BridgeClaimTransition::Transitioned
-        );
+        let invocation_id = format!("42-{}", lease.claim_id);
+        let _harness_adapter = set_test_executor_harness_exact(HARNESS_HELPER);
         let request = ExecutorBridgeRequest {
-            repository: state.identity.repository.clone(),
-            repository_path: state.identity.repository_path.clone(),
+            repository: repository.clone(),
+            repository_path: fs::canonicalize(&repo).expect("canonical admission repo"),
             issue: 42,
             issue_title: "Portable admission".into(),
             issue_body: "No-op admission run".into(),
             serialization_reasons: Vec::new(),
             worker_id: lease.worker_id,
             claim_id: lease.claim_id,
-            invocation_id: state.identity.invocation_id.clone(),
+            invocation_id,
             state_path: state_path.clone(),
             event_log: root.join("state/events.jsonl"),
         };
         let result =
-            run_executor_bridge(&request).expect("production bridge terminal reconciliation");
+            run_executor_bridge(&request).expect("production bridge launch and reconciliation");
 
         assert_eq!(result.claim_id, request.claim_id);
+        assert!(matches!(
+            result.status,
+            BridgeRunStatus::Retryable { ref reason }
+                if reason == "executor_harness_exit_17"
+        ));
         let terminal_path = state_path.with_extension("terminal.json");
         assert!(
             terminal_path.is_file(),
             "terminal receipt was not published"
         );
-        assert!(Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&state.identity.worktree)
-            .current_dir(&repo)
-            .status()
-            .expect("remove admission executor worktree")
-            .success());
-        if let Some(scope) = state.identity.worktree.parent() {
-            fs::remove_dir_all(scope).expect("remove admission executor scope");
+        let events = fs::read_to_string(&request.event_log).expect("read admission events");
+        for event in ["child_started", "child_cleanup_complete", "child_exited"] {
+            assert!(
+                events.contains(&format!("\"event\":\"{event}\"")),
+                "{events}"
+            );
         }
+        for forbidden in [
+            "requires Linux executor supervision",
+            "unsupported on non-Linux",
+            "require_linux_executor_supervision",
+        ] {
+            assert!(!events.contains(forbidden), "{events}");
+        }
+        let persisted = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read terminal admission state"),
+        )
+        .expect("parse terminal admission state");
+        assert_eq!(persisted.phase, BridgePhase::Complete);
+        assert!(persisted.supervisor.is_none() && persisted.process.is_none());
+        let sinks = output_sink_paths(&state_path, &request.invocation_id)
+            .expect("resolve production admission ownership sinks");
+        assert!(
+            sinks
+                .supervisor_identity
+                .with_extension("cleanup.json")
+                .is_file(),
+            "production supervision omitted durable cleanup evidence"
+        );
+        assert!(
+            !sinks.supervisor_identity.exists(),
+            "production supervision retained an owner journal after proven cleanup"
+        );
         fs::remove_dir_all(root).expect("remove supported-host fixture");
     }
 }
@@ -1493,8 +1409,6 @@ pub(super) fn resolve_executor_supervisor_executable(
 mod tests {
     use super::*;
 
-    static PORTABLE_SUPERVISION_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct DirectFixture {
         root: PathBuf,
         worktree: PathBuf,
@@ -1594,7 +1508,7 @@ mod tests {
     fn portable_supervision_failures_cleanup_before_retiring_owner_journal() {
         // Break caught: any post-spawn `?` returning while the harness or its descendants remain
         // live, or removing ownership without durable cleanup evidence.
-        let _serial = PORTABLE_SUPERVISION_TEST
+        let _serial = PORTABLE_LIFECYCLE_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (name, failpoint, script) in [
@@ -1668,7 +1582,7 @@ mod tests {
     fn portable_supervision_retains_owner_when_cleanup_evidence_is_ambiguous() {
         // Break caught: deleting the only ownership journal when cleanup evidence cannot be
         // published, making restart treat an unproven tree as safe.
-        let _serial = PORTABLE_SUPERVISION_TEST
+        let _serial = PORTABLE_LIFECYCLE_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = DirectFixture::new("supervision-cleanup-evidence");
