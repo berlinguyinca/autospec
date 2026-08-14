@@ -210,6 +210,7 @@ pub(super) fn recover_events(
     launch: Option<&LaunchDescriptor>,
     segment_chain_digest: &str,
     segment_base: u64,
+    resume_event_pending: bool,
 ) -> Result<Vec<EventRecord>, AccountabilityError> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -243,6 +244,7 @@ pub(super) fn recover_events(
     };
     let mut records = Vec::new();
     let mut prior = segment_base;
+    let mut prior_chain: Option<String> = None;
     for line in bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -250,8 +252,7 @@ pub(super) fn recover_events(
         let value: Value = serde_json::from_slice(line).map_err(|error| {
             AccountabilityError::new(format!("invalid completed event line: {error}"))
         })?;
-        let record =
-            EventRecord::from_value(launch.identity.run_id(), segment_chain_digest, &value)?;
+        let record = EventRecord::from_journal_value(launch.identity.run_id(), &value)?;
         if record.seq
             != prior
                 .checked_add(1)
@@ -261,8 +262,26 @@ pub(super) fn recover_events(
                 "event journal sequence is not monotonic",
             ));
         }
+        if prior_chain.as_deref().is_some_and(|chain| {
+            chain != record.segment_chain_digest
+                && !matches!(record.kind, EventKind::ResumedFromEpic { .. })
+        }) {
+            return Err(AccountabilityError::new(
+                "event journal segment changed without a resume boundary",
+            ));
+        }
         prior = record.seq;
+        prior_chain = Some(record.segment_chain_digest.clone());
         records.push(record);
+    }
+    if !resume_event_pending
+        && prior_chain
+            .as_deref()
+            .is_some_and(|chain| chain != segment_chain_digest)
+    {
+        return Err(AccountabilityError::new(
+            "event journal current segment chain mismatch",
+        ));
     }
     Ok(records)
 }

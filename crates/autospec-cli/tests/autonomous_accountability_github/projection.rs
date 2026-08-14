@@ -204,7 +204,10 @@ fn ambiguous_edit_persists_a_degradable_retry_schedule() {
     let current = initial.last_edit.unwrap();
     let mut github = StubGithub::with([
         Ok(pages(&[issue(100, "OPEN", &current)])),
-        Err(GithubFailure::Ambiguous("HTTP 502 after edit".to_string())),
+        Err(GithubFailure::RetryAfter {
+            message: "HTTP 502 after edit".to_string(),
+            delay: Duration::from_secs(3_600),
+        }),
     ]);
 
     let error = bind_epic(&mut store, &mut github, request(), || Ok(())).unwrap_err();
@@ -213,7 +216,84 @@ fn ambiguous_edit_persists_a_degradable_retry_schedule() {
         error.projection_disposition(),
         Some(ProjectionDisposition::DegradableTransport)
     );
-    assert!(store.status().next_projection_retry_at.is_some());
+    let retry_at = store.status().next_projection_retry_at.unwrap();
+    let mut early = StubGithub::default();
+    let binding = bind_epic_at(&mut store, &mut early, request(), retry_at - 1, || Ok(())).unwrap();
+    assert_eq!(binding.number, 100);
+    assert!(early.calls.is_empty());
+    let mut due = StubGithub::with([
+        Ok(pages(&[issue(100, "OPEN", &current)])),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+    ]);
+    bind_epic_at(&mut store, &mut due, request(), retry_at, || Ok(())).unwrap();
+    assert!(due
+        .calls
+        .iter()
+        .any(|call| matches!(call, GithubCommand::EditIssue { number: 100, .. })));
+    assert_eq!(store.status().pending_projection_count, 0);
+}
+
+#[test]
+fn terminal_projection_retries_and_closes_at_due_time_without_a_new_event() {
+    let fixture = Fixture::new("terminal-retry-close");
+    let mut store = store(&fixture);
+    let marker = format!(
+        "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+        run().run_id()
+    );
+    let mut initial = StubGithub::with([
+        Ok(pages(&[issue(101, "OPEN", &marker)])),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+    ]);
+    bind_epic(&mut store, &mut initial, request(), || Ok(())).unwrap();
+    store
+        .append_event(
+            AccountabilityEvent::new(
+                EventKind::Completed,
+                "Run completed",
+                "The terminal epic must close durably",
+                vec![Evidence::outcome("terminal boundary persisted")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store.render().unwrap();
+    let event_count = store.status().event_count;
+    let current = initial.last_edit.unwrap();
+    let mut transient = StubGithub::with([
+        Ok(pages(&[issue(101, "OPEN", &current)])),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+        Err(GithubFailure::RetryAfter {
+            message: "HTTP 503 while closing".to_string(),
+            delay: Duration::ZERO,
+        }),
+    ]);
+
+    let error = bind_epic(&mut store, &mut transient, request(), || Ok(())).unwrap_err();
+    assert_eq!(
+        error.projection_disposition(),
+        Some(ProjectionDisposition::DegradableTransport)
+    );
+    let retry_at = store.status().next_projection_retry_at.unwrap();
+    let managed = transient.last_edit.unwrap();
+    let mut due = StubGithub::with([
+        Ok(pages(&[issue(101, "OPEN", &managed)])),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+        Ok(String::new()),
+    ]);
+
+    bind_epic_at(&mut store, &mut due, request(), retry_at, || Ok(())).unwrap();
+
+    assert_eq!(store.status().event_count, event_count);
+    assert_eq!(store.status().pending_projection_count, 0);
+    assert!(due
+        .calls
+        .iter()
+        .any(|call| matches!(call, GithubCommand::CloseIssue { number: 101, .. })));
 }
 
 #[test]

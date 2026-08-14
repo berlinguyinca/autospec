@@ -21,6 +21,8 @@ const STATE_FILE: &str = "accountability.json";
 const EVENTS_FILE: &str = "accountability-events.jsonl";
 const OUTBOX_FILE: &str = "accountability-outbox.jsonl";
 
+#[path = "store/accessors.rs"]
+mod accessors;
 #[path = "store/fs.rs"]
 mod fs_support;
 #[path = "store/journal.rs"]
@@ -119,6 +121,7 @@ impl AccountabilityStore {
             state.launch.as_ref(),
             &state.segment_chain_digest,
             segment_base,
+            state.resume_event_pending,
         )?;
         if let Some(last) = events.last() {
             state.last_seq = last.seq;
@@ -243,10 +246,21 @@ impl AccountabilityStore {
             .journal_segment
             .checked_add(1)
             .ok_or_else(|| AccountabilityError::new("journal segment overflow"))?;
-        atomic_write(&self.path(EVENTS_FILE), b"")?;
-        atomic_write(&self.path(OUTBOX_FILE), b"")?;
-        self.events.clear();
-        self.state.event_count = 0;
+        if self.state.resume_event_pending
+            && self.state.journal_segment == journal_segment
+            && self.state.last_seq == manifest.high_watermark
+            && self.state.prior_remote_digest.as_deref() == Some(&manifest.remote_digest)
+            && self.state.recovery_state == RecoveryState::Active
+        {
+            return self.ensure_resume_event();
+        }
+        if self.state.last_seq != manifest.high_watermark
+            || self.state.journal_segment != manifest.journal_segment
+        {
+            return Err(AccountabilityError::new(
+                "local journal does not match the epic recovery boundary",
+            ));
+        }
         self.state.last_seq = manifest.high_watermark;
         self.state.projection_revision = manifest.projection_revision;
         self.state.desired_digest = Some(manifest.remote_digest.clone());
@@ -284,7 +298,8 @@ impl AccountabilityStore {
             .epic_number
             .ok_or_else(|| AccountabilityError::new("pending resume event has no bound epic"))?;
         if !self.events.iter().any(|record| {
-            matches!(record.kind, EventKind::ResumedFromEpic { epic: found } if found == epic)
+            record.segment_chain_digest == self.state.segment_chain_digest
+                && matches!(record.kind, EventKind::ResumedFromEpic { epic: found } if found == epic)
         }) {
             let url = self.state.epic_url.clone().ok_or_else(|| {
                 AccountabilityError::new("pending resume event has no epic URL")
@@ -481,26 +496,6 @@ impl AccountabilityStore {
 
     pub fn identity(&self) -> Option<&RunIdentity> {
         self.state.launch.as_ref().map(|launch| &launch.identity)
-    }
-
-    pub fn has_event(&self, kind: &EventKind) -> bool {
-        self.events.iter().any(|record| &record.kind == kind)
-    }
-
-    pub fn create_attempted(&self) -> bool {
-        self.state.create_attempted
-    }
-
-    pub fn desired_projection_digest(&self) -> Option<&str> {
-        self.state.desired_digest.as_deref()
-    }
-
-    pub fn recovery_projection(&self) -> (RecoveryState, Vec<u64>, Vec<u64>) {
-        (
-            self.state.recovery_state,
-            self.state.linked_issues.clone(),
-            self.state.linked_pull_requests.clone(),
-        )
     }
 
     pub fn mark_create_attempted(&mut self) -> Result<(), AccountabilityError> {

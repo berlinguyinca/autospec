@@ -510,15 +510,23 @@ impl EventRecord {
         expected_chain: &str,
         value: &Value,
     ) -> Result<Self, AccountabilityError> {
-        let object = object(value, "event record")?;
-        let seq = unsigned(object, "seq")?;
-        let event = AccountabilityEvent::from_value(required(object, "event")?)?;
-        let chain = string(object, "segment_chain_digest")?;
-        if chain != expected_chain {
+        let record = Self::from_journal_value(run_id, value)?;
+        if record.segment_chain_digest != expected_chain {
             return Err(AccountabilityError::new(
                 "event journal segment chain mismatch",
             ));
         }
+        Ok(record)
+    }
+
+    pub(super) fn from_journal_value(
+        run_id: &str,
+        value: &Value,
+    ) -> Result<Self, AccountabilityError> {
+        let object = object(value, "event record")?;
+        let seq = unsigned(object, "seq")?;
+        let event = AccountabilityEvent::from_value(required(object, "event")?)?;
+        let chain = string(object, "segment_chain_digest")?;
         let record = Self::create(run_id, chain, seq, event);
         if string(object, "event_id")? != record.event_id {
             return Err(AccountabilityError::new("event ID digest mismatch"));

@@ -67,12 +67,35 @@ pub fn bind_epic<T, R>(
     store: &mut AccountabilityStore,
     github: &mut T,
     request: EpicBindingRequest,
+    renew_lease: R,
+) -> Result<EpicBinding, AccountabilityError>
+where
+    T: GithubTransport,
+    R: FnMut() -> Result<(), String>,
+{
+    bind_epic_at(
+        store,
+        github,
+        request,
+        AccountabilityStore::projection_clock_now()?,
+        renew_lease,
+    )
+}
+
+pub fn bind_epic_at<T, R>(
+    store: &mut AccountabilityStore,
+    github: &mut T,
+    request: EpicBindingRequest,
+    now: u64,
     mut renew_lease: R,
 ) -> Result<EpicBinding, AccountabilityError>
 where
     T: GithubTransport,
     R: FnMut() -> Result<(), String>,
 {
+    if store.status().pending_projection_count > 0 && !store.projection_retry_due_at(now) {
+        return local_binding(store);
+    }
     let result = if let Some(number) = request.explicit_epic {
         bind_explicit(store, github, request, number, &mut renew_lease)
     } else {
@@ -82,12 +105,28 @@ where
         let error = error.into_projection(ProjectionDisposition::IntegrityBlock);
         if error.projection_disposition() == Some(ProjectionDisposition::DegradableTransport) {
             if let Err(schedule_error) =
-                store.schedule_projection_retry(error.retry_after_seconds())
+                store.schedule_projection_retry_at(error.retry_after_seconds(), now)
             {
                 return schedule_error.into_projection(ProjectionDisposition::IntegrityBlock);
             }
         }
         error
+    })
+}
+
+fn local_binding(store: &AccountabilityStore) -> Result<EpicBinding, AccountabilityError> {
+    let status = store.status();
+    Ok(EpicBinding {
+        number: status
+            .epic_number
+            .ok_or_else(|| AccountabilityError::new("deferred projection has no bound epic"))?,
+        url: status
+            .epic_url
+            .ok_or_else(|| AccountabilityError::new("deferred projection has no epic URL"))?,
+        run_id: status
+            .run_id
+            .ok_or_else(|| AccountabilityError::new("deferred projection has no run identity"))?,
+        project_warning: None,
     })
 }
 

@@ -278,7 +278,7 @@ fn local_parked_and_terminal_runs_resume_into_a_new_active_segment() {
         store
             .append_event(
                 AccountabilityEvent::new(
-                    kind,
+                    kind.clone(),
                     "Run boundary recorded",
                     "The run must remain resumable",
                     vec![Evidence::outcome("boundary persisted")],
@@ -299,6 +299,10 @@ fn local_parked_and_terminal_runs_resume_into_a_new_active_segment() {
         .unwrap()
         .with_recovery_state(recovery_state, vec![], vec![])
         .unwrap();
+        let journal_path = fixture.path().join("accountability-events.jsonl");
+        let outbox_path = fixture.path().join("accountability-outbox.jsonl");
+        let journal_before = fs::read_to_string(&journal_path).unwrap();
+        let outbox_before = fs::read_to_string(&outbox_path).unwrap();
 
         store.resume_bound_from_manifest(manifest).unwrap();
 
@@ -309,8 +313,112 @@ fn local_parked_and_terminal_runs_resume_into_a_new_active_segment() {
             store.recovery_projection().0,
             accountability::RecoveryState::Active
         );
+        let journal_after = fs::read_to_string(&journal_path).unwrap();
+        assert!(journal_after.starts_with(&journal_before));
+        assert_eq!(
+            journal_after.lines().count(),
+            journal_before.lines().count() + 1
+        );
+        assert_eq!(fs::read_to_string(&outbox_path).unwrap(), outbox_before);
+        drop(store);
+        let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+        assert!(store.has_event(&kind));
+        assert!(store.has_event(&EventKind::ResumedFromEpic { epic: 97 }));
         store.mark_spawned().unwrap();
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn interrupted_local_resume_completes_the_pending_segment_without_advancing_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("interrupted-local-resume");
+    let mut store = store(&fixture);
+    store
+        .bind_epic(97, "https://github.com/acme/widgets/issues/97")
+        .unwrap();
+    store
+        .append_event(
+            AccountabilityEvent::new(
+                EventKind::Parked,
+                "Run parked",
+                "The run must remain resumable",
+                vec![Evidence::outcome("parked boundary persisted")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let projection = store.render().unwrap();
+    let manifest = accountability::RecoveryManifest::new(
+        run(),
+        97,
+        "https://github.com/acme/widgets/issues/97",
+        projection.revision,
+        &projection.digest,
+        projection.desired_high_watermark,
+        store.status().journal_segment,
+    )
+    .unwrap()
+    .with_recovery_state(accountability::RecoveryState::Parked, vec![], vec![])
+    .unwrap();
+    let journal = fixture.path().join("accountability-events.jsonl");
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o400)).unwrap();
+
+    assert!(store.resume_bound_from_manifest(manifest.clone()).is_err());
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(store);
+
+    let mut reopened = AccountabilityStore::open(fixture.path()).unwrap();
+    reopened.resume_bound_from_manifest(manifest).unwrap();
+
+    assert_eq!(reopened.status().journal_segment, 2);
+    assert!(reopened.has_event(&EventKind::Parked));
+    assert!(reopened.has_event(&EventKind::ResumedFromEpic { epic: 97 }));
+}
+
+#[test]
+fn repeated_resume_of_the_same_epic_records_each_segment_boundary() {
+    let fixture = Fixture::new("repeated-local-resume");
+    let mut store = store(&fixture);
+    store
+        .bind_epic(97, "https://github.com/acme/widgets/issues/97")
+        .unwrap();
+
+    for expected_segment in [2, 3] {
+        store
+            .append_event(
+                AccountabilityEvent::new(
+                    EventKind::Parked,
+                    "Run parked",
+                    "Each resumed segment needs its own audit boundary",
+                    vec![Evidence::outcome("parked boundary persisted")],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let projection = store.render().unwrap();
+        let manifest = accountability::RecoveryManifest::new(
+            run(),
+            97,
+            "https://github.com/acme/widgets/issues/97",
+            projection.revision,
+            &projection.digest,
+            projection.desired_high_watermark,
+            store.status().journal_segment,
+        )
+        .unwrap()
+        .with_recovery_state(accountability::RecoveryState::Parked, vec![], vec![])
+        .unwrap();
+
+        store.resume_bound_from_manifest(manifest).unwrap();
+        assert_eq!(store.status().journal_segment, expected_segment);
+    }
+
+    let journal = fs::read_to_string(fixture.path().join("accountability-events.jsonl")).unwrap();
+    assert_eq!(journal.matches("\"type\":\"resumed_from_epic\"").count(), 2);
+    drop(store);
+    AccountabilityStore::open(fixture.path()).unwrap();
 }
 
 #[test]

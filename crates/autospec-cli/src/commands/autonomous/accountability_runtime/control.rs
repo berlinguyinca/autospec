@@ -1,5 +1,43 @@
 use super::*;
 
+pub(crate) fn retry_pending_accountability_projection(
+    layout: &RunLayout,
+    lease: &resilience::ConductorLease,
+) -> Result<(), CommandFailure> {
+    let mut store = open_bound_accountability(layout)?;
+    let status = store.status();
+    if status.pending_projection_count == 0 || status.next_projection_retry_at.is_none() {
+        return Ok(());
+    }
+    let request = accountability::github::EpicBindingRequest {
+        repository: accountability::RepositoryIdentity::parse(&layout.repo)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?,
+        explicit_epic: None,
+        resume_policy: accountability::github::ResumePolicy::ActiveOnly,
+        project_number: None,
+        adopted_lease_generation: Some(lease.generation()),
+    };
+    let mut github = accountability::github::GhCli;
+    match accountability::github::bind_epic(&mut store, &mut github, request, || {
+        resilience::renew_lifecycle(&layout.repo, lease)
+            .map_err(|_| "lifecycle lease renewal rejected".to_string())
+    }) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error.projection_disposition()
+                == Some(accountability::ProjectionDisposition::DegradableTransport) =>
+        {
+            eprintln!(
+                "autospec autonomous accountability retry degraded: {error}; next retry remains durable"
+            );
+            Ok(())
+        }
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "accountability retry integrity check failed: {error}"
+        ))),
+    }
+}
+
 pub(crate) fn repair_stopped_conductor(
     layout: &RunLayout,
     options: &Options,
@@ -32,6 +70,14 @@ pub(crate) fn repair_stopped_conductor(
         create_launch_directories(layout).map_err(|error| error.message)?;
         persist_lifecycle_decision(layout, &lifecycle)?;
         verify_existing_accountability(layout, &lease)?;
+        if !accountability_allows_relaunch(
+            open_bound_accountability(layout)
+                .map_err(|error| error.message)?
+                .status()
+                .recovery_state,
+        ) {
+            return Ok(None);
+        }
         let command = foreground_command(options)?;
         resilience::assert_lifecycle_before_spawn(&layout.repo, &lease)
             .map_err(|error| resilience_lease_error(error).message)?;
@@ -44,22 +90,34 @@ pub(crate) fn repair_stopped_conductor(
             log_override_for("conductor", options),
             Some(lease.token()),
         )
+        .map(Some)
     })();
     let heartbeat_result = heartbeat
         .finish()
         .map_err(|error| resilience_lease_error(error).message);
     match (repaired, heartbeat_result) {
-        (Ok(unit), Ok(())) => Ok(RepairOutcome::Restarted(unit)),
-        (Ok(unit), Err(error)) => {
+        (Ok(Some(unit)), Ok(())) => Ok(RepairOutcome::Restarted(unit)),
+        (Ok(Some(unit)), Err(error)) => {
             let _ = terminate_process_group(&unit.pid);
             release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
             Err(error)
+        }
+        (Ok(None), heartbeat_result) => {
+            heartbeat_result?;
+            release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
+            Ok(RepairOutcome::TerminalAccountability)
         }
         (Err(error), _) => {
             release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
             Err(error)
         }
     }
+}
+
+pub(super) fn accountability_allows_relaunch(
+    recovery_state: accountability::RecoveryState,
+) -> bool {
+    recovery_state == accountability::RecoveryState::Active
 }
 
 pub(crate) fn verify_existing_accountability(

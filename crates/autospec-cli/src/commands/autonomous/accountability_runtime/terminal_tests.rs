@@ -49,6 +49,27 @@ fn terminal_record_failure_retains_lease_and_suppresses_output() {
 }
 
 #[test]
+fn terminal_projection_must_ack_before_lifecycle_release() {
+    assert!(require_terminal_projection_ack(0, None).is_ok());
+    let error = require_terminal_projection_ack(1, Some(1234)).unwrap_err();
+    assert!(error.message.contains("retained lifecycle ownership"));
+    assert!(error.message.contains("1234"));
+}
+
+#[test]
+fn supervisor_relaunch_requires_active_accountability() {
+    assert!(accountability_allows_relaunch(
+        accountability::RecoveryState::Active
+    ));
+    assert!(!accountability_allows_relaunch(
+        accountability::RecoveryState::Parked
+    ));
+    assert!(!accountability_allows_relaunch(
+        accountability::RecoveryState::Terminal
+    ));
+}
+
+#[test]
 fn inherited_foreground_early_exits_use_the_accountable_terminal_path() {
     let source = include_str!("../../autonomous.rs");
     let foreground = source

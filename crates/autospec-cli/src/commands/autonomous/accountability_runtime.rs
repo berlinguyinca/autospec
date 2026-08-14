@@ -207,7 +207,27 @@ pub(super) fn record_foreground_terminal(
             "terminal accountability event persisted before lifecycle lease release",
         )?,
         true,
+    )?;
+    let status = open_bound_accountability(layout)?.status();
+    require_terminal_projection_ack(
+        status.pending_projection_count,
+        status.next_projection_retry_at,
     )
+}
+
+fn require_terminal_projection_ack(
+    pending_projection_count: u64,
+    next_projection_retry_at: Option<u64>,
+) -> Result<(), CommandFailure> {
+    if pending_projection_count == 0 {
+        return Ok(());
+    }
+    Err(CommandFailure::diagnostic(format!(
+        "terminal accountability projection remains pending; retained lifecycle ownership for retry at {}",
+        next_projection_retry_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "the next conductor tick".to_owned())
+    )))
 }
 
 pub(super) fn finish_accountability_boundary<T, R>(

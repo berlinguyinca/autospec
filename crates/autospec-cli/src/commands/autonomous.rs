@@ -1607,6 +1607,7 @@ enum RepairOutcome {
     Restarted(UnitRecord),
     AlreadyRunning(String),
     StopRequested,
+    TerminalAccountability,
 }
 
 fn status(options: Options) -> Result<(), CommandFailure> {
@@ -2299,8 +2300,11 @@ fn run_foreground_cycles(
     loop {
         let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
             .map_err(resilience_lease_error)?;
-        let cycle =
-            run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission);
+        let cycle = retry_pending_accountability_projection(layout, lease)
+            .map_err(ForegroundFailure::from)
+            .and_then(|_| {
+                run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission)
+            });
         let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
         let mut completion = match cycle {
             Ok(completion) => completion,
