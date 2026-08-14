@@ -161,6 +161,71 @@ enum OwnedAttemptResult {
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+enum OwnedAttemptFailure {
+    BeforeCleanup(String),
+    ArtifactAfterCleanup(String),
+    Cleanup(String),
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+trait AttemptLifecycle {
+    fn reviewer_at_limit(&self, capture: &ActiveReviewerCapture) -> Result<bool, String>;
+    fn finalize_reviewer(&self, capture: &ActiveReviewerCapture) -> Result<bool, String>;
+    fn bound_output(&self, paths: &DirectAttemptPaths) -> Result<(), String>;
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+struct SystemAttemptLifecycle;
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+impl AttemptLifecycle for SystemAttemptLifecycle {
+    fn reviewer_at_limit(&self, capture: &ActiveReviewerCapture) -> Result<bool, String> {
+        capture.at_limit()
+    }
+
+    fn finalize_reviewer(&self, capture: &ActiveReviewerCapture) -> Result<bool, String> {
+        capture.finalize()
+    }
+
+    fn bound_output(&self, paths: &DirectAttemptPaths) -> Result<(), String> {
+        bound_direct_output(paths)
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "freebsd")))]
+struct InjectedAttemptLifecycle {
+    fail_finalize: bool,
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "freebsd")))]
+impl InjectedAttemptLifecycle {
+    fn fail_finalize() -> Self {
+        Self {
+            fail_finalize: true,
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "freebsd")))]
+impl AttemptLifecycle for InjectedAttemptLifecycle {
+    fn reviewer_at_limit(&self, _capture: &ActiveReviewerCapture) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn finalize_reviewer(&self, _capture: &ActiveReviewerCapture) -> Result<bool, String> {
+        if self.fail_finalize {
+            Err("injected finalize failure".to_string())
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn bound_output(&self, paths: &DirectAttemptPaths) -> Result<(), String> {
+        bound_direct_output(paths)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn output_sizes(paths: &DirectAttemptPaths) -> Result<(u64, u64), String> {
     Ok((
         fs::metadata(&paths.stdout)
@@ -198,39 +263,94 @@ fn run_owned_attempt(
     paths: &DirectAttemptPaths,
     stall_timeout: Duration,
     reviewer_capture: Option<&ActiveReviewerCapture>,
-) -> Result<OwnedAttemptResult, String> {
+) -> Result<OwnedAttemptResult, OwnedAttemptFailure> {
+    run_owned_attempt_with_lifecycle(
+        owned,
+        paths,
+        stall_timeout,
+        reviewer_capture,
+        &SystemAttemptLifecycle,
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn run_owned_attempt_with_lifecycle(
+    owned: &mut process_owner::OwnedChildTree,
+    paths: &DirectAttemptPaths,
+    stall_timeout: Duration,
+    reviewer_capture: Option<&ActiveReviewerCapture>,
+    lifecycle: &impl AttemptLifecycle,
+) -> Result<OwnedAttemptResult, OwnedAttemptFailure> {
     let mut last_progress = Instant::now();
-    let mut observed = output_sizes(paths)?;
+    let mut observed = output_sizes(paths).map_err(OwnedAttemptFailure::BeforeCleanup)?;
     loop {
         if let Some(capture) = reviewer_capture {
-            if capture.at_limit()? {
-                let status = owned.terminate()?;
-                capture.finalize()?;
+            if lifecycle
+                .reviewer_at_limit(capture)
+                .map_err(OwnedAttemptFailure::BeforeCleanup)?
+            {
+                let status = owned.terminate().map_err(OwnedAttemptFailure::Cleanup)?;
+                lifecycle
+                    .finalize_reviewer(capture)
+                    .map_err(OwnedAttemptFailure::ArtifactAfterCleanup)?;
                 return Ok(OwnedAttemptResult::ReviewerLimit(status));
             }
         }
-        if let Some(status) = owned.try_wait()? {
-            owned.terminate()?;
+        if let Some(status) = owned
+            .try_wait()
+            .map_err(OwnedAttemptFailure::BeforeCleanup)?
+        {
             if let Some(capture) = reviewer_capture {
-                if capture.finalize()? {
+                if lifecycle
+                    .finalize_reviewer(capture)
+                    .map_err(OwnedAttemptFailure::ArtifactAfterCleanup)?
+                {
                     return Ok(OwnedAttemptResult::ReviewerLimit(status));
                 }
             }
             return Ok(OwnedAttemptResult::Exited(status));
         }
-        let sizes = output_sizes(paths)?;
+        let sizes = output_sizes(paths).map_err(OwnedAttemptFailure::BeforeCleanup)?;
         if sizes.0 > MAX_DIRECT_OUTPUT_BYTES || sizes.1 > MAX_DIRECT_OUTPUT_BYTES {
-            let status = owned.terminate()?;
-            bound_direct_output(paths)?;
+            let status = owned.terminate().map_err(OwnedAttemptFailure::Cleanup)?;
+            lifecycle
+                .bound_output(paths)
+                .map_err(OwnedAttemptFailure::ArtifactAfterCleanup)?;
             return Ok(OwnedAttemptResult::OutputOverflow(status));
         }
         if sizes != observed {
             observed = sizes;
             last_progress = Instant::now();
         } else if last_progress.elapsed() >= stall_timeout {
-            return Ok(OwnedAttemptResult::TimedOut(owned.terminate()?));
+            return owned
+                .terminate()
+                .map(OwnedAttemptResult::TimedOut)
+                .map_err(OwnedAttemptFailure::Cleanup);
         }
         thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn finish_owned_attempt(
+    owned: &mut process_owner::OwnedChildTree,
+    result: Result<OwnedAttemptResult, OwnedAttemptFailure>,
+) -> AttemptTerminal {
+    match result {
+        Ok(OwnedAttemptResult::Exited(status)) => {
+            AttemptTerminal::Exited(status.code().unwrap_or(1))
+        }
+        Ok(OwnedAttemptResult::TimedOut(_status)) => AttemptTerminal::TimedOut,
+        Ok(OwnedAttemptResult::OutputOverflow(_status)) => AttemptTerminal::OutputOverflow,
+        Ok(OwnedAttemptResult::ReviewerLimit(_status)) => AttemptTerminal::Exited(70),
+        Err(OwnedAttemptFailure::ArtifactAfterCleanup(error)) => {
+            AttemptTerminal::InfrastructureFailed(error)
+        }
+        Err(OwnedAttemptFailure::Cleanup(error)) => AttemptTerminal::CleanupFailed(error),
+        Err(OwnedAttemptFailure::BeforeCleanup(error)) => match owned.terminate() {
+            Ok(_) => AttemptTerminal::InfrastructureFailed(error),
+            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+        },
     }
 }
 
@@ -297,18 +417,8 @@ pub(super) fn execute_supervised_direct_attempt(
             Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
         };
     }
-    match run_owned_attempt(&mut owned, paths, stall_timeout, reviewer_capture.as_ref()) {
-        Ok(OwnedAttemptResult::Exited(status)) => {
-            AttemptTerminal::Exited(status.code().unwrap_or(1))
-        }
-        Ok(OwnedAttemptResult::TimedOut(_status)) => AttemptTerminal::TimedOut,
-        Ok(OwnedAttemptResult::OutputOverflow(_status)) => AttemptTerminal::OutputOverflow,
-        Ok(OwnedAttemptResult::ReviewerLimit(_status)) => AttemptTerminal::Exited(70),
-        Err(error) => match owned.terminate() {
-            Ok(_) => AttemptTerminal::InfrastructureFailed(error),
-            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
-        },
-    }
+    let result = run_owned_attempt(&mut owned, paths, stall_timeout, reviewer_capture.as_ref());
+    finish_owned_attempt(&mut owned, result)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -544,6 +654,43 @@ mod tests {
                 .is_file(),
             "durable quarantine marker was not published"
         );
+    }
+
+    #[test]
+    fn finalize_failure_after_termination_does_not_cleanup_twice() {
+        let fixture = DirectFixture::new("finalize-failure");
+        ensure_private_directory(&fixture.artifacts).expect("create artifact root");
+        let paths = direct_attempt_paths(&fixture.artifacts, 0);
+        File::create(&paths.stdout).expect("create stdout");
+        File::create(&paths.stderr).expect("create stderr");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let mut owned = process_owner::OwnedChildTree::spawn(&mut command, "finalize".into())
+            .expect("spawn finalize fixture");
+        let capture = ActiveReviewerCapture {
+            artifacts: Vec::new(),
+        };
+        let result = run_owned_attempt_with_lifecycle(
+            &mut owned,
+            &paths,
+            Duration::from_secs(1),
+            Some(&capture),
+            &InjectedAttemptLifecycle::fail_finalize(),
+        );
+        assert_eq!(
+            finish_owned_attempt(&mut owned, result),
+            AttemptTerminal::InfrastructureFailed("injected finalize failure".to_string())
+        );
+        assert!(
+            owned
+                .try_wait()
+                .expect("read cached terminal state")
+                .is_some(),
+            "post-cleanup failure lost the reaped terminal state"
+        );
+        owned
+            .terminate()
+            .expect("idempotent cleanup must not signal after terminal state");
     }
 
     #[test]
