@@ -16,7 +16,7 @@ pub(crate) fn run_executor_bridge(
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
 pub(super) fn reconcile_direct_launch(
     _paths: &DirectAttemptPaths,
     _expected_intent_body: Option<&str>,
@@ -25,7 +25,7 @@ pub(super) fn reconcile_direct_launch(
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
 pub(crate) fn execute_direct_plan(
     _worktree: &Path,
     _plan: &DirectCommandPlan,
@@ -34,7 +34,281 @@ pub(crate) fn execute_direct_plan(
     _stall_timeout: Duration,
 ) -> Result<Vec<ObservedDirectCommand>, String> {
     require_linux_executor_supervision()?;
-    unreachable!("non-Linux executor admission always fails")
+    unreachable!("Windows direct command ownership is not part of the BSD process-group slice")
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(super) fn interrupted_direct_terminal() -> AttemptTerminal {
+    AttemptTerminal::CleanupFailed(
+        "interrupted attempt was quarantined before terminal publication".to_string(),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(super) fn validate_platform_direct_quarantine(
+    paths: &DirectAttemptPaths,
+) -> Result<(), String> {
+    let parent = paths
+        .record
+        .parent()
+        .ok_or_else(|| "direct command record has no parent".to_string())?;
+    let command = paths
+        .record
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "direct command record name is malformed".to_string())?;
+    let prefix = format!("{command}.ownership-disproven-");
+    for entry in fs::read_dir(parent)
+        .map_err(|error| format!("inventory portable ownership quarantines: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("read portable ownership quarantine: {error}"))?;
+        let name = entry.file_name();
+        let Some(attempt_id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !valid_direct_attempt_id(attempt_id) {
+            return Err("portable ownership quarantine filename is malformed".to_string());
+        }
+        validate_private_state_file(&entry.path())
+            .map_err(|error| format!("portable ownership quarantine is unsafe: {error}"))?;
+        let body = fs::read_to_string(entry.path())
+            .map_err(|error| format!("read portable ownership quarantine: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("parse portable ownership quarantine: {error}"))?;
+        let intent_digest = value
+            .get("intent_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|digest| valid_direct_attempt_id(digest))
+            .ok_or_else(|| {
+                "portable ownership quarantine intent digest is malformed".to_string()
+            })?;
+        if value.get("attempt_id").and_then(serde_json::Value::as_str) != Some(attempt_id) {
+            return Err(
+                "portable ownership quarantine attempt identity differs from its filename"
+                    .to_string(),
+            );
+        }
+        process_owner::DurableProcessOwner::from_document(&body, attempt_id, intent_digest)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(super) fn reconcile_direct_launch(
+    paths: &DirectAttemptPaths,
+    expected_intent_body: Option<&str>,
+) -> Result<bool, String> {
+    if resume_direct_retirement(paths)? {
+        return Ok(true);
+    }
+    let intent_body = match fs::read_to_string(&paths.intent) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if paths.launch.exists() {
+                return Err("direct launch exists without its durable intent".to_string());
+            }
+            return Ok(false);
+        }
+        Err(error) => return Err(format!("read direct command intent: {error}")),
+    };
+    validate_private_state_file(&paths.intent)
+        .map_err(|error| format!("direct command intent is unsafe: {error}"))?;
+    if expected_intent_body.is_some_and(|expected| expected != intent_body) {
+        return Err("direct command intent differs from the requested argv".to_string());
+    }
+    let attempt_id = direct_intent_attempt_id(&paths.intent)?
+        .ok_or_else(|| "direct command intent disappeared during reconciliation".to_string())?;
+    validate_direct_attempt_id_reservation(paths, &attempt_id)?;
+    if paths.launch.is_file() {
+        validate_private_state_file(&paths.launch)
+            .map_err(|error| format!("direct launch record is unsafe: {error}"))?;
+        let launch = fs::read_to_string(&paths.launch)
+            .map_err(|error| format!("read direct launch record: {error}"))?;
+        let owner = process_owner::DurableProcessOwner::from_document(
+            &launch,
+            &attempt_id,
+            &sha256_hex(intent_body.as_bytes()),
+        )?;
+        if process_owner::recover_owner(&owner) != process_owner::RecoveryDisposition::Quarantine {
+            return Err("reconstructed direct owner was not quarantined".to_string());
+        }
+        let marker = paths
+            .record
+            .with_extension(format!("ownership-disproven-{attempt_id}.json"));
+        if !marker.exists() {
+            write_private_create_once(
+                &marker,
+                launch.as_bytes(),
+                "portable direct ownership quarantine",
+            )?;
+        }
+        retire_direct_launch(paths, &attempt_id)?;
+    }
+    Ok(true)
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+enum OwnedAttemptResult {
+    Exited(std::process::ExitStatus),
+    TimedOut(std::process::ExitStatus),
+    OutputOverflow(std::process::ExitStatus),
+    ReviewerLimit(std::process::ExitStatus),
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn output_sizes(paths: &DirectAttemptPaths) -> Result<(u64, u64), String> {
+    Ok((
+        fs::metadata(&paths.stdout)
+            .map_err(|error| format!("inspect direct stdout: {error}"))?
+            .len(),
+        fs::metadata(&paths.stderr)
+            .map_err(|error| format!("inspect direct stderr: {error}"))?
+            .len(),
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn bound_direct_output(paths: &DirectAttemptPaths) -> Result<(), String> {
+    for path in [&paths.stdout, &paths.stderr] {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("open oversized direct output: {error}"))?;
+        if file
+            .metadata()
+            .map_err(|error| format!("inspect oversized direct output: {error}"))?
+            .len()
+            > MAX_DIRECT_OUTPUT_BYTES
+        {
+            file.set_len(MAX_DIRECT_OUTPUT_BYTES)
+                .map_err(|error| format!("bound direct output artifact: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn run_owned_attempt(
+    owned: &mut process_owner::OwnedChildTree,
+    paths: &DirectAttemptPaths,
+    stall_timeout: Duration,
+    reviewer_capture: Option<&ActiveReviewerCapture>,
+) -> Result<OwnedAttemptResult, String> {
+    let mut last_progress = Instant::now();
+    let mut observed = output_sizes(paths)?;
+    loop {
+        if let Some(capture) = reviewer_capture {
+            if capture.at_limit()? {
+                let status = owned.terminate()?;
+                capture.finalize()?;
+                return Ok(OwnedAttemptResult::ReviewerLimit(status));
+            }
+        }
+        if let Some(status) = owned.try_wait()? {
+            owned.terminate()?;
+            if let Some(capture) = reviewer_capture {
+                if capture.finalize()? {
+                    return Ok(OwnedAttemptResult::ReviewerLimit(status));
+                }
+            }
+            return Ok(OwnedAttemptResult::Exited(status));
+        }
+        let sizes = output_sizes(paths)?;
+        if sizes.0 > MAX_DIRECT_OUTPUT_BYTES || sizes.1 > MAX_DIRECT_OUTPUT_BYTES {
+            let status = owned.terminate()?;
+            bound_direct_output(paths)?;
+            return Ok(OwnedAttemptResult::OutputOverflow(status));
+        }
+        if sizes != observed {
+            observed = sizes;
+            last_progress = Instant::now();
+        } else if last_progress.elapsed() >= stall_timeout {
+            return Ok(OwnedAttemptResult::TimedOut(owned.terminate()?));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(super) fn execute_supervised_direct_attempt(
+    attempt_id: &str,
+    worktree: &Path,
+    program: &Path,
+    direct: &DirectCommand,
+    paths: &DirectAttemptPaths,
+    stdout: &File,
+    stderr: &File,
+    environment_overrides: Vec<(OsString, OsString)>,
+    intent_digest: &str,
+    stall_timeout: Duration,
+) -> AttemptTerminal {
+    use std::os::unix::process::CommandExt;
+
+    let reviewer_capture = match direct
+        .review_capture
+        .as_ref()
+        .map(ActiveReviewerCapture::open)
+        .transpose()
+    {
+        Ok(capture) => capture,
+        Err(error) => return AttemptTerminal::InfrastructureFailed(error),
+    };
+    let mut command = Command::new(program);
+    command
+        .arg0(&direct.argv[0])
+        .args(&direct.argv[1..])
+        .current_dir(worktree)
+        .envs(environment_overrides)
+        .stdin(Stdio::null());
+    let stdout = match stdout.try_clone() {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return AttemptTerminal::InfrastructureFailed(format!("clone direct stdout: {error}"))
+        }
+    };
+    let stderr = match stderr.try_clone() {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            return AttemptTerminal::InfrastructureFailed(format!("clone direct stderr: {error}"))
+        }
+    };
+    command
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    let mut owned = match process_owner::OwnedChildTree::spawn(&mut command, attempt_id.to_string())
+    {
+        Ok(owned) => owned,
+        Err(error) => return AttemptTerminal::SpawnFailed(error),
+    };
+    let launch = owned.identity().document(attempt_id, intent_digest);
+    if let Err(error) = write_private_create_once(
+        &paths.launch,
+        launch.as_bytes(),
+        "portable direct command launch identity",
+    ) {
+        return match owned.terminate() {
+            Ok(_) => AttemptTerminal::InfrastructureFailed(error),
+            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+        };
+    }
+    match run_owned_attempt(&mut owned, paths, stall_timeout, reviewer_capture.as_ref()) {
+        Ok(OwnedAttemptResult::Exited(status)) => {
+            AttemptTerminal::Exited(status.code().unwrap_or(1))
+        }
+        Ok(OwnedAttemptResult::TimedOut(_status)) => AttemptTerminal::TimedOut,
+        Ok(OwnedAttemptResult::OutputOverflow(_status)) => AttemptTerminal::OutputOverflow,
+        Ok(OwnedAttemptResult::ReviewerLimit(_status)) => AttemptTerminal::Exited(70),
+        Err(error) => match owned.terminate() {
+            Ok(_) => AttemptTerminal::InfrastructureFailed(error),
+            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+        },
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -117,9 +391,160 @@ pub(super) fn resolve_executor_supervisor_executable(
     ))
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, any(target_os = "macos", target_os = "freebsd")))]
 mod tests {
     use super::*;
+
+    struct DirectFixture {
+        root: PathBuf,
+        worktree: PathBuf,
+        artifacts: PathBuf,
+    }
+
+    impl DirectFixture {
+        fn new(name: &str) -> Self {
+            let root = fs::canonicalize(std::env::temp_dir())
+                .expect("canonicalize fixture temp directory")
+                .join(format!(
+                    "autospec-portable-direct-{name}-{}-{}",
+                    std::process::id(),
+                    DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+            let worktree = root.join("worktree");
+            let artifacts = root.join("artifacts");
+            fs::create_dir_all(&worktree).expect("create direct fixture");
+            for args in [
+                &["init", "--quiet"][..],
+                &["config", "user.email", "autospec@example.invalid"][..],
+                &["config", "user.name", "Autospec Test"][..],
+                &["commit", "--quiet", "--allow-empty", "-m", "fixture"][..],
+            ] {
+                let status = Command::new("git")
+                    .args(args)
+                    .current_dir(&worktree)
+                    .status()
+                    .expect("run fixture git command");
+                assert!(status.success(), "fixture git command failed: {args:?}");
+            }
+            Self {
+                root,
+                worktree,
+                artifacts,
+            }
+        }
+    }
+
+    impl Drop for DirectFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn execute_direct_plan_uses_owned_process_group() {
+        let fixture = DirectFixture::new("success");
+        let plan = DirectCommandPlan {
+            commands: vec![DirectCommand::success(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf portable-output".to_string(),
+            ])],
+        };
+        let observed = execute_direct_plan(
+            &fixture.worktree,
+            &plan,
+            &fixture.artifacts,
+            None,
+            Duration::from_secs(2),
+        )
+        .expect("execute portable direct plan");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].terminal, AttemptTerminal::Exited(0));
+        assert_eq!(
+            fs::read_to_string(&observed[0].stdout_path).expect("read portable stdout"),
+            "portable-output"
+        );
+    }
+
+    #[test]
+    fn execute_direct_plan_terminates_stalled_process_group() {
+        let fixture = DirectFixture::new("stall");
+        let plan = DirectCommandPlan {
+            commands: vec![DirectCommand::success(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30 & wait".to_string(),
+            ])],
+        };
+        let error = execute_direct_plan(
+            &fixture.worktree,
+            &plan,
+            &fixture.artifacts,
+            None,
+            Duration::from_millis(100),
+        )
+        .expect_err("stalled portable direct plan must fail");
+        assert!(error.contains("stalled"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn reconcile_direct_launch_quarantines_without_signalling_recorded_pid() {
+        let fixture = DirectFixture::new("reconcile");
+        ensure_private_directory(&fixture.artifacts).expect("create artifact root");
+        let artifacts = fs::canonicalize(&fixture.artifacts).expect("canonicalize artifact root");
+        let paths = direct_attempt_paths(&artifacts, 0);
+        let attempt_id = reserve_direct_attempt_id(&paths).expect("reserve attempt identity");
+        let commit_oid = git_stdout(
+            &fixture.worktree,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )
+        .expect("read fixture commit");
+        let executable = Path::new("/bin/true");
+        let argv = vec!["/bin/true".to_string()];
+        let intent = direct_intent_document(&attempt_id, &commit_oid, None, executable, &argv);
+        write_private_create_once(
+            &paths.intent,
+            intent.as_bytes(),
+            "portable reconciliation fixture intent",
+        )
+        .expect("write fixture intent");
+        let (boot_id, process_start) = process_birth_identity(std::process::id())
+            .expect("observe current process")
+            .expect("current process is live");
+        let owner = process_owner::DurableProcessOwner {
+            pid: std::process::id(),
+            container_id: std::process::id().to_string(),
+            process_start: format!("{boot_id}:{process_start}"),
+            launch_nonce: attempt_id.clone(),
+        };
+        write_private_create_once(
+            &paths.launch,
+            owner
+                .document(&attempt_id, &sha256_hex(intent.as_bytes()))
+                .as_bytes(),
+            "portable reconciliation fixture launch",
+        )
+        .expect("write fixture launch");
+
+        assert!(reconcile_direct_launch(&paths, None).expect("reconcile portable launch"));
+        assert!(
+            process_birth_identity(std::process::id())
+                .expect("re-observe current process")
+                .is_some(),
+            "reconciliation must not signal the recorded PID"
+        );
+        assert!(
+            !paths.launch.exists(),
+            "live-authority launch was not retired"
+        );
+        assert!(
+            paths
+                .record
+                .with_extension(format!("ownership-disproven-{attempt_id}.json"))
+                .is_file(),
+            "durable quarantine marker was not published"
+        );
+    }
 
     #[test]
     fn executor_bridge_fails_closed_before_state_mutation_without_linux_pidfds() {

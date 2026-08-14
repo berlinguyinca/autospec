@@ -109,6 +109,8 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod review_evidence;
 use review_evidence::*;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+mod process_owner;
 mod review_provider;
 use review_provider::*;
 mod review_receipt;
@@ -6775,6 +6777,18 @@ fn execute_supervised_direct_attempt(
 }
 
 #[cfg(target_os = "linux")]
+fn interrupted_direct_terminal() -> AttemptTerminal {
+    AttemptTerminal::CleanupFailed(
+        "interrupted attempt was cleaned before terminal publication".to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn validate_platform_direct_quarantine(paths: &DirectAttemptPaths) -> Result<(), String> {
+    direct_ownership_disproven_markers(paths).map(|_| ())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 pub(crate) fn execute_direct_plan(
     worktree: &Path,
     plan: &DirectCommandPlan,
@@ -6789,7 +6803,7 @@ pub(crate) fn execute_direct_plan(
     attempt_indices.extend(0..plan.commands.len());
     for &index in &attempt_indices {
         let paths = direct_attempt_paths(&artifact_root, index);
-        direct_ownership_disproven_markers(&paths)?;
+        validate_platform_direct_quarantine(&paths)?;
     }
     let mut reconciled_launches = BTreeMap::new();
     for index in attempt_indices {
@@ -6850,9 +6864,7 @@ pub(crate) fn execute_direct_plan(
                 argv: &interrupted_argv,
                 process_executable: &interrupted_executable,
                 process_argv: &interrupted_argv,
-                terminal: AttemptTerminal::CleanupFailed(
-                    "interrupted attempt was cleaned before terminal publication".to_string(),
-                ),
+                terminal: interrupted_direct_terminal(),
                 stdout_path: &paths.stdout,
                 stderr_path: &paths.stderr,
                 record_path: &paths.record,
@@ -23213,11 +23225,18 @@ use continuation_children::*;
 // Cross-platform executable identity plus the fail-closed non-Linux executor boundary.
 mod portability;
 #[cfg(not(target_os = "linux"))]
-pub(crate) use portability::{execute_direct_plan, run_executor_bridge};
+pub(crate) use portability::run_executor_bridge;
+#[cfg(windows)]
+pub(crate) use portability::execute_direct_plan;
 #[cfg(not(target_os = "linux"))]
 use portability::{
     create_draft_pull_request, reconcile_direct_launch,
     supervise_validated_harness_with_claim_renewal,
+};
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+use portability::{
+    execute_supervised_direct_attempt, interrupted_direct_terminal,
+    validate_platform_direct_quarantine,
 };
 use portability::resolve_executor_supervisor_executable;
 
