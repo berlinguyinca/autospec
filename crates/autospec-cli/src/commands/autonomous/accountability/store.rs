@@ -1,7 +1,8 @@
 use super::render;
 use super::{
-    AccountabilityError, AccountabilityEvent, EventKind, EventRecord, Evidence, LaunchDescriptor,
-    RenderedProjection, RepositoryIdentity, RunIdentity, ACCOUNTABILITY_SCHEMA,
+    object, required, string, unsigned, AccountabilityError, AccountabilityEvent, EventKind,
+    EventRecord, Evidence, LaunchDescriptor, RenderedProjection, RepositoryIdentity, RunIdentity,
+    ACCOUNTABILITY_SCHEMA,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use serde_json::{json, Value};
@@ -20,173 +21,18 @@ const STATE_FILE: &str = "accountability.json";
 const EVENTS_FILE: &str = "accountability-events.jsonl";
 const OUTBOX_FILE: &str = "accountability-outbox.jsonl";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum RecoveryState {
-    #[default]
-    Active,
-    Parked,
-    Terminal,
-}
-
-impl RecoveryState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Parked => "parked",
-            Self::Terminal => "terminal",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, AccountabilityError> {
-        match value {
-            "active" => Ok(Self::Active),
-            "parked" => Ok(Self::Parked),
-            "terminal" => Ok(Self::Terminal),
-            _ => Err(AccountabilityError::new("invalid recovery state")),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecoveryManifest {
-    pub identity: RunIdentity,
-    pub epic_number: u64,
-    pub epic_url: String,
-    pub projection_revision: u64,
-    pub remote_digest: String,
-    pub high_watermark: u64,
-    pub journal_segment: u64,
-    pub recovery_state: RecoveryState,
-    pub linked_issues: Vec<u64>,
-    pub linked_pull_requests: Vec<u64>,
-}
-
-impl RecoveryManifest {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        identity: RunIdentity,
-        epic_number: u64,
-        epic_url: impl AsRef<str>,
-        projection_revision: u64,
-        remote_digest: impl Into<String>,
-        high_watermark: u64,
-        journal_segment: u64,
-    ) -> Result<Self, AccountabilityError> {
-        let remote_digest = remote_digest.into();
-        if epic_number == 0 || projection_revision == 0 || journal_segment == 0 {
-            return Err(AccountabilityError::new(
-                "recovery manifest counters must be positive",
-            ));
-        }
-        if remote_digest.len() != 64 || !remote_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(AccountabilityError::new(
-                "recovery manifest digest must be SHA-256",
-            ));
-        }
-        let epic_url = validate_epic_url(&identity, epic_number, epic_url.as_ref())?;
-        Ok(Self {
-            identity,
-            epic_number,
-            epic_url,
-            projection_revision,
-            remote_digest: remote_digest.to_ascii_lowercase(),
-            high_watermark,
-            journal_segment,
-            recovery_state: RecoveryState::Active,
-            linked_issues: Vec::new(),
-            linked_pull_requests: Vec::new(),
-        })
-    }
-
-    pub fn with_recovery_state(
-        mut self,
-        recovery_state: RecoveryState,
-        linked_issues: Vec<u64>,
-        linked_pull_requests: Vec<u64>,
-    ) -> Result<Self, AccountabilityError> {
-        validate_links(&linked_issues)?;
-        validate_links(&linked_pull_requests)?;
-        self.recovery_state = recovery_state;
-        self.linked_issues = linked_issues;
-        self.linked_pull_requests = linked_pull_requests;
-        Ok(self)
-    }
-
-    fn unsigned_value(&self) -> Value {
-        json!({
-            "schema":ACCOUNTABILITY_SCHEMA, "identity":self.identity.to_value(),
-            "epic_number":self.epic_number, "epic_url":self.epic_url,
-            "projection_revision":self.projection_revision, "remote_digest":self.remote_digest,
-            "high_watermark":self.high_watermark, "journal_segment":self.journal_segment,
-            "recovery_state":self.recovery_state.as_str(), "linked_issues":self.linked_issues,
-            "linked_pull_requests":self.linked_pull_requests,
-        })
-    }
-
-    pub fn to_json(&self) -> String {
-        let value = self.unsigned_value();
-        let digest = sha256_hex(
-            serde_json::to_string(&value)
-                .expect("JSON value serializes")
-                .as_bytes(),
-        );
-        let mut object = value.as_object().expect("manifest is object").clone();
-        object.insert("manifest_digest".to_owned(), json!(digest));
-        serde_json::to_string(&object).expect("JSON value serializes")
-    }
-
-    pub fn parse(document: &str) -> Result<Self, AccountabilityError> {
-        let value: Value = serde_json::from_str(document).map_err(|error| {
-            AccountabilityError::new(format!("invalid recovery manifest: {error}"))
-        })?;
-        let object = super::object(&value, "recovery manifest")?;
-        if super::unsigned(object, "schema")? != ACCOUNTABILITY_SCHEMA {
-            return Err(AccountabilityError::new(
-                "unsupported recovery manifest schema",
-            ));
-        }
-        let manifest = Self::new(
-            RunIdentity::from_value(super::required(object, "identity")?)?,
-            super::unsigned(object, "epic_number")?,
-            super::string(object, "epic_url")?,
-            super::unsigned(object, "projection_revision")?,
-            super::string(object, "remote_digest")?,
-            super::unsigned(object, "high_watermark")?,
-            super::unsigned(object, "journal_segment")?,
-        )?
-        .with_recovery_state(
-            RecoveryState::parse(super::string(object, "recovery_state")?)?,
-            parse_links(super::required(object, "linked_issues")?)?,
-            parse_links(super::required(object, "linked_pull_requests")?)?,
-        )?;
-        let expected = sha256_hex(
-            serde_json::to_string(&manifest.unsigned_value())
-                .expect("JSON value serializes")
-                .as_bytes(),
-        );
-        if super::string(object, "manifest_digest")? != expected {
-            return Err(AccountabilityError::new(
-                "recovery manifest integrity digest mismatch",
-            ));
-        }
-        Ok(manifest)
-    }
-
-    pub fn parse_for_repository(
-        document: &str,
-        repository: &RepositoryIdentity,
-    ) -> Result<Self, AccountabilityError> {
-        let manifest = Self::parse(document)?;
-        if manifest.identity.repository() != repository {
-            return Err(AccountabilityError::new(
-                "recovery manifest repository mismatch",
-            ));
-        }
-        Ok(manifest)
-    }
-}
-
+#[path = "store/fs.rs"]
+mod fs_support;
+#[path = "store/journal.rs"]
+mod journal;
+#[path = "store/manifest.rs"]
+mod manifest;
+#[path = "store/retry.rs"]
+mod retry;
+use fs_support::*;
+use journal::*;
+pub use manifest::{RecoveryManifest, RecoveryState};
+use retry::unix_timestamp;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountabilityStatus {
     pub run_id: Option<String>,
@@ -202,6 +48,11 @@ pub struct AccountabilityStatus {
     pub segment_chain_digest: String,
     pub lifecycle_phase: String,
     pub last_projected_at: Option<u64>,
+    pub next_projection_retry_at: Option<u64>,
+    pub recovery_state: RecoveryState,
+    pub accountability_state: String,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Default)]
@@ -226,6 +77,10 @@ struct State {
     linked_issues: Vec<u64>,
     linked_pull_requests: Vec<u64>,
     last_projected_at: Option<u64>,
+    next_projection_retry_at: Option<u64>,
+    projection_retry_attempt: u32,
+    created_at: u64,
+    updated_at: u64,
 }
 
 pub struct AccountabilityStore {
@@ -246,6 +101,16 @@ impl AccountabilityStore {
         } else {
             State::default()
         };
+        if state.launch.is_some() && state.created_at == 0 {
+            let now = unix_timestamp()?;
+            state.created_at = now;
+            state.updated_at = now;
+        }
+        if state.updated_at < state.created_at {
+            return Err(AccountabilityError::new(
+                "accountability state updated_at precedes created_at",
+            ));
+        }
         enforce_cross_file_invariants(&root, &state)?;
         reconcile_outbox(&root, &mut state)?;
         let segment_base = state.last_seq.saturating_sub(state.event_count);
@@ -262,7 +127,7 @@ impl AccountabilityStore {
             state.last_seq = state.acknowledged_high_watermark;
             state.event_count = 0;
         }
-        let store = Self {
+        let mut store = Self {
             root,
             state,
             events,
@@ -354,6 +219,60 @@ impl AccountabilityStore {
         self.state.resume_event_pending = false;
         self.persist_state()?;
         Ok(record)
+    }
+
+    pub fn resume_bound_from_manifest(
+        &mut self,
+        manifest: RecoveryManifest,
+    ) -> Result<(), AccountabilityError> {
+        let identity = self.identity().cloned().ok_or_else(|| {
+            AccountabilityError::new("local resume requires an existing run identity")
+        })?;
+        if identity.run_id() != manifest.identity.run_id()
+            || self.state.epic_number != Some(manifest.epic_number)
+            || self.state.epic_url.as_deref() != Some(&manifest.epic_url)
+        {
+            return Err(AccountabilityError::new(
+                "local accountability state does not own the selected epic",
+            ));
+        }
+        if manifest.recovery_state == RecoveryState::Active {
+            return self.ensure_resume_event();
+        }
+        let journal_segment = manifest
+            .journal_segment
+            .checked_add(1)
+            .ok_or_else(|| AccountabilityError::new("journal segment overflow"))?;
+        atomic_write(&self.path(EVENTS_FILE), b"")?;
+        atomic_write(&self.path(OUTBOX_FILE), b"")?;
+        self.events.clear();
+        self.state.event_count = 0;
+        self.state.last_seq = manifest.high_watermark;
+        self.state.projection_revision = manifest.projection_revision;
+        self.state.desired_digest = Some(manifest.remote_digest.clone());
+        self.state.desired_high_watermark = manifest.high_watermark;
+        self.state.acknowledged_high_watermark = manifest.high_watermark;
+        self.state.pending_projection_count = 0;
+        self.state.journal_segment = journal_segment;
+        self.state.prior_remote_digest = Some(manifest.remote_digest.clone());
+        self.state.segment_chain_digest = sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}",
+                identity.run_id(),
+                manifest.remote_digest,
+                manifest.high_watermark,
+                journal_segment
+            )
+            .as_bytes(),
+        );
+        self.state.create_attempted = true;
+        self.state.resume_event_pending = true;
+        self.state.lifecycle_phase = "bound_not_spawned".to_owned();
+        self.state.recovery_state = RecoveryState::Active;
+        self.state.linked_issues = manifest.linked_issues;
+        self.state.linked_pull_requests = manifest.linked_pull_requests;
+        self.persist_state()?;
+        self.ensure_resume_event()
     }
 
     pub fn ensure_resume_event(&mut self) -> Result<(), AccountabilityError> {
@@ -522,11 +441,18 @@ impl AccountabilityStore {
                 .map_err(|_| AccountabilityError::new("system clock precedes Unix epoch"))?
                 .as_secs(),
         );
+        self.state.next_projection_retry_at = None;
+        self.state.projection_retry_attempt = 0;
         self.persist_state()?;
         atomic_write(&self.path(OUTBOX_FILE), b"")
     }
 
     pub fn status(&self) -> AccountabilityStatus {
+        let accountability_state = match self.state.recovery_state {
+            RecoveryState::Parked => "parked".to_owned(),
+            RecoveryState::Terminal => "terminal".to_owned(),
+            RecoveryState::Active => self.state.lifecycle_phase.clone(),
+        };
         AccountabilityStatus {
             run_id: self
                 .state
@@ -545,6 +471,11 @@ impl AccountabilityStore {
             segment_chain_digest: self.state.segment_chain_digest.clone(),
             lifecycle_phase: self.state.lifecycle_phase.clone(),
             last_projected_at: self.state.last_projected_at,
+            next_projection_retry_at: self.state.next_projection_retry_at,
+            recovery_state: self.state.recovery_state,
+            accountability_state,
+            created_at: self.state.created_at,
+            updated_at: self.state.updated_at,
         }
     }
 
@@ -628,7 +559,12 @@ impl AccountabilityStore {
         self.root.join(name)
     }
 
-    fn persist_state(&self) -> Result<(), AccountabilityError> {
+    fn persist_state(&mut self) -> Result<(), AccountabilityError> {
+        let now = unix_timestamp()?;
+        if self.state.created_at == 0 {
+            self.state.created_at = now;
+        }
+        self.state.updated_at = now.max(self.state.created_at);
         let launch = self.state.launch.as_ref().map(LaunchDescriptor::to_value);
         let document = serde_json::to_vec(&json!({
             "schema":ACCOUNTABILITY_SCHEMA, "launch":launch,
@@ -649,403 +585,12 @@ impl AccountabilityStore {
             "linked_issues":self.state.linked_issues,
             "linked_pull_requests":self.state.linked_pull_requests,
             "last_projected_at":self.state.last_projected_at,
+            "next_projection_retry_at":self.state.next_projection_retry_at,
+            "projection_retry_attempt":self.state.projection_retry_attempt,
+            "created_at":self.state.created_at,
+            "updated_at":self.state.updated_at,
         }))
         .expect("JSON value serializes");
         atomic_write(&self.path(STATE_FILE), &document)
     }
-}
-
-fn parse_state(document: &str) -> Result<State, AccountabilityError> {
-    let value: Value = serde_json::from_str(document).map_err(|error| {
-        AccountabilityError::new(format!("invalid accountability state: {error}"))
-    })?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| AccountabilityError::new("accountability state must be an object"))?;
-    let number = |name: &str| {
-        object
-            .get(name)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| AccountabilityError::new(format!("invalid state field {name}")))
-    };
-    if number("schema")? != ACCOUNTABILITY_SCHEMA {
-        return Err(AccountabilityError::new(
-            "unsupported accountability state schema",
-        ));
-    }
-    let launch = match object.get("launch") {
-        Some(Value::Null) | None => None,
-        Some(value) => Some(LaunchDescriptor::from_value(value)?),
-    };
-    let optional_string = |name: &str| object.get(name).and_then(Value::as_str).map(str::to_owned);
-    let has_launch = launch.is_some();
-    Ok(State {
-        launch,
-        epic_number: object.get("epic_number").and_then(Value::as_u64),
-        epic_url: optional_string("epic_url"),
-        event_count: number("event_count")?,
-        last_seq: number("last_seq")?,
-        projection_revision: number("projection_revision")?,
-        desired_digest: optional_string("desired_digest"),
-        desired_high_watermark: number("desired_high_watermark")?,
-        acknowledged_high_watermark: number("acknowledged_high_watermark")?,
-        pending_projection_count: number("pending_projection_count")?,
-        journal_segment: number("journal_segment")?,
-        prior_remote_digest: optional_string("prior_remote_digest"),
-        segment_chain_digest: optional_string("segment_chain_digest").unwrap_or_default(),
-        create_attempted: object
-            .get("create_attempted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        resume_event_pending: object
-            .get("resume_event_pending")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        lifecycle_phase: optional_string("lifecycle_phase").unwrap_or_else(|| {
-            if has_launch {
-                "bound_not_spawned".to_owned()
-            } else {
-                String::new()
-            }
-        }),
-        recovery_state: object
-            .get("recovery_state")
-            .and_then(Value::as_str)
-            .map(RecoveryState::parse)
-            .transpose()?
-            .unwrap_or_default(),
-        linked_issues: object
-            .get("linked_issues")
-            .map(parse_links)
-            .transpose()?
-            .unwrap_or_default(),
-        linked_pull_requests: object
-            .get("linked_pull_requests")
-            .map(parse_links)
-            .transpose()?
-            .unwrap_or_default(),
-        last_projected_at: object.get("last_projected_at").and_then(Value::as_u64),
-    })
-}
-
-fn insert_link(links: &mut Vec<u64>, value: u64) {
-    if let Err(index) = links.binary_search(&value) {
-        links.insert(index, value);
-    }
-}
-
-fn validate_links(values: &[u64]) -> Result<(), AccountabilityError> {
-    if values.contains(&0) || values.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(AccountabilityError::new(
-            "linked identifiers must be positive, sorted, and unique",
-        ));
-    }
-    Ok(())
-}
-
-fn parse_links(value: &Value) -> Result<Vec<u64>, AccountabilityError> {
-    let values = value
-        .as_array()
-        .ok_or_else(|| AccountabilityError::new("linked identifiers must be an array"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .ok_or_else(|| AccountabilityError::new("linked identifier must be unsigned"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    validate_links(&values)?;
-    Ok(values)
-}
-
-fn validate_epic_url(
-    identity: &RunIdentity,
-    epic_number: u64,
-    value: &str,
-) -> Result<String, AccountabilityError> {
-    let expected = format!(
-        "https://github.com/{}/issues/{epic_number}",
-        identity.repository().as_str()
-    );
-    if value != expected {
-        return Err(AccountabilityError::new(
-            "epic URL must exactly match the manifest repository and issue number",
-        ));
-    }
-    Ok(expected)
-}
-
-fn enforce_cross_file_invariants(root: &Path, state: &State) -> Result<(), AccountabilityError> {
-    if state.launch.is_some() {
-        if !root.join(EVENTS_FILE).is_file() || !root.join(OUTBOX_FILE).is_file() {
-            return Err(AccountabilityError::new(
-                "accountability metadata requires both journal and outbox files",
-            ));
-        }
-        if state.journal_segment == 0 || state.segment_chain_digest.len() != 64 {
-            return Err(AccountabilityError::new(
-                "invalid journal segment chain metadata",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn reconcile_outbox(root: &Path, state: &mut State) -> Result<(), AccountabilityError> {
-    if state.launch.is_none() {
-        return Ok(());
-    }
-    let path = root.join(OUTBOX_FILE);
-    let document = read_private_file(&path)?;
-    if document.is_empty() {
-        if state.pending_projection_count > 0 {
-            return Err(AccountabilityError::new(
-                "pending projection metadata has no durable outbox record",
-            ));
-        }
-        return Ok(());
-    }
-    let value: Value = serde_json::from_str(document.trim_end())
-        .map_err(|error| AccountabilityError::new(format!("invalid projection outbox: {error}")))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| AccountabilityError::new("projection outbox must be an object"))?;
-    let revision = super::unsigned(object, "revision")?;
-    let digest = super::string(object, "digest")?;
-    let high_watermark = super::unsigned(object, "desired_high_watermark")?;
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AccountabilityError::new(
-            "projection outbox digest is invalid",
-        ));
-    }
-    if state.pending_projection_count == 0
-        && state.projection_revision == revision
-        && state.acknowledged_high_watermark >= high_watermark
-    {
-        atomic_write(&path, b"")?;
-    } else if revision > state.projection_revision && high_watermark >= state.desired_high_watermark
-    {
-        state.projection_revision = revision;
-        state.desired_digest = Some(digest.to_owned());
-        state.desired_high_watermark = high_watermark;
-        state.pending_projection_count = 1;
-    } else if state.pending_projection_count != 1
-        || state.projection_revision != revision
-        || state.desired_digest.as_deref() != Some(digest)
-        || state.desired_high_watermark != high_watermark
-    {
-        return Err(AccountabilityError::new(
-            "projection outbox and metadata disagree",
-        ));
-    }
-    Ok(())
-}
-
-fn recover_events(
-    path: &Path,
-    launch: Option<&LaunchDescriptor>,
-    segment_chain_digest: &str,
-    segment_base: u64,
-) -> Result<Vec<EventRecord>, AccountabilityError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let mut file = private_options()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(io_error)?;
-    validate_open_file(&file)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(io_error)?;
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        let complete = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
-        file.set_len(complete as u64).map_err(io_error)?;
-        file.seek(SeekFrom::Start(complete as u64))
-            .map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        bytes.truncate(complete);
-    }
-    let Some(launch) = launch else {
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-        return Err(AccountabilityError::new(
-            "event journal exists without launch identity",
-        ));
-    };
-    let mut records = Vec::new();
-    let mut prior = segment_base;
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let value: Value = serde_json::from_slice(line).map_err(|error| {
-            AccountabilityError::new(format!("invalid completed event line: {error}"))
-        })?;
-        let record =
-            EventRecord::from_value(launch.identity.run_id(), segment_chain_digest, &value)?;
-        if record.seq
-            != prior
-                .checked_add(1)
-                .ok_or_else(|| AccountabilityError::new("event sequence overflow"))?
-        {
-            return Err(AccountabilityError::new(
-                "event journal sequence is not monotonic",
-            ));
-        }
-        prior = record.seq;
-        records.push(record);
-    }
-    Ok(records)
-}
-
-fn append_synced_line(path: &Path, value: &Value) -> Result<(), AccountabilityError> {
-    reject_unsafe_file(path)?;
-    let mut file = private_options()
-        .append(true)
-        .create(true)
-        .open(path)
-        .map_err(io_error)?;
-    validate_open_file(&file)?;
-    serde_json::to_writer(&mut file, value)
-        .map_err(|error| AccountabilityError::new(error.to_string()))?;
-    file.write_all(b"\n").map_err(io_error)?;
-    file.sync_all().map_err(io_error)
-}
-
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), AccountabilityError> {
-    reject_unsafe_file(path)?;
-    let serial = TEMP_SERIAL.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_extension(format!("tmp-{}-{serial}", std::process::id()));
-    let mut file = private_options()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(io_error)?;
-    validate_open_file(&file)?;
-    if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error(error));
-    }
-    fs::rename(&temporary, path).map_err(io_error)?;
-    File::open(path.parent().expect("state file has parent"))
-        .and_then(|directory| directory.sync_all())
-        .map_err(io_error)
-}
-
-fn ensure_private_directory(path: &Path) -> Result<(), AccountabilityError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(AccountabilityError::new(
-                "accountability root is not a safe directory",
-            ));
-        }
-        validate_owner(&metadata)?;
-        #[cfg(unix)]
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(AccountabilityError::new(
-                "accountability root permissions must be private",
-            ));
-        }
-    } else {
-        #[cfg(unix)]
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(io_error)?;
-        #[cfg(not(unix))]
-        fs::create_dir_all(path).map_err(io_error)?;
-    }
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-    Ok(())
-}
-
-fn ensure_private_file(path: &Path) -> Result<(), AccountabilityError> {
-    reject_unsafe_file(path)?;
-    let file = private_options()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(io_error)?;
-    validate_open_file(&file)?;
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
-    Ok(())
-}
-
-fn reject_unsafe_file(path: &Path) -> Result<(), AccountabilityError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(AccountabilityError::new(
-                "accountability file is not a safe regular file",
-            ));
-        }
-        validate_owner(&metadata)?;
-        #[cfg(unix)]
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(AccountabilityError::new(
-                "accountability file permissions must be 0600",
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn validate_owner(metadata: &fs::Metadata) -> Result<(), AccountabilityError> {
-    if metadata.uid() != nix::unistd::geteuid().as_raw() {
-        return Err(AccountabilityError::new(
-            "accountability state ownership mismatch",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn validate_owner(_metadata: &fs::Metadata) -> Result<(), AccountabilityError> {
-    Ok(())
-}
-
-fn private_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    #[cfg(unix)]
-    options
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-    options
-}
-
-fn read_private_file(path: &Path) -> Result<String, AccountabilityError> {
-    let mut file = private_options().read(true).open(path).map_err(io_error)?;
-    validate_open_file(&file)?;
-    let mut document = String::new();
-    file.read_to_string(&mut document).map_err(io_error)?;
-    Ok(document)
-}
-
-fn validate_open_file(file: &File) -> Result<(), AccountabilityError> {
-    let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() {
-        return Err(AccountabilityError::new(
-            "accountability descriptor is not a regular file",
-        ));
-    }
-    validate_owner(&metadata)?;
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o777 != 0o600 {
-        return Err(AccountabilityError::new(
-            "accountability descriptor permissions must be 0600",
-        ));
-    }
-    Ok(())
-}
-
-fn io_error(error: std::io::Error) -> AccountabilityError {
-    AccountabilityError::new(error.to_string())
 }

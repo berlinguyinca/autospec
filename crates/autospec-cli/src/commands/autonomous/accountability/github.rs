@@ -3,11 +3,7 @@ use super::{
     RecoveryState, RenderedProjection, RepositoryIdentity,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
-use serde_json::Value;
 use std::collections::BTreeSet;
-use std::fmt;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -32,6 +28,7 @@ pub struct EpicBindingRequest {
     pub explicit_epic: Option<u64>,
     pub resume_policy: ResumePolicy,
     pub project_number: Option<u64>,
+    pub adopted_lease_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,92 +39,15 @@ pub struct EpicBinding {
     pub project_warning: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GithubCommand {
-    EnsureLabel {
-        repository: String,
-        name: String,
-    },
-    ListAccountabilityIssues {
-        repository: String,
-    },
-    ViewIssue {
-        repository: String,
-        number: u64,
-    },
-    CreateIssue {
-        repository: String,
-        title: String,
-        body: String,
-        labels: Vec<String>,
-    },
-    EditIssue {
-        repository: String,
-        number: u64,
-        body: String,
-    },
-    ReopenIssue {
-        repository: String,
-        number: u64,
-    },
-    CloseIssue {
-        repository: String,
-        number: u64,
-    },
-    AddToProject {
-        repository: String,
-        project_number: u64,
-        issue_url: String,
-    },
-}
-
-pub trait GithubTransport {
-    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GithubFailure {
-    Retryable(String),
-    RetryAfter { message: String, delay: Duration },
-    Ambiguous(String),
-    Definitive(String),
-}
-
-impl GithubFailure {
-    fn retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Retryable(_) | Self::RetryAfter { .. } | Self::Ambiguous(_)
-        )
-    }
-
-    fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::RetryAfter { delay, .. } => Some(*delay),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for GithubFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Retryable(message) | Self::Ambiguous(message) | Self::Definitive(message) => {
-                formatter.write_str(message)
-            }
-            Self::RetryAfter { message, .. } => formatter.write_str(message),
-        }
-    }
-}
-
-pub struct GhCli;
-
-impl GithubTransport for GhCli {
-    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure> {
-        execute_gh(command)
-    }
-}
-
+#[path = "github/managed.rs"]
+mod managed;
+#[path = "github/transport.rs"]
+mod transport;
+pub use managed::compose_managed_body;
+use managed::*;
+use transport::json_error;
+#[allow(unused_imports)]
+pub use transport::{GhCli, GithubCommand, GithubFailure, GithubTransport};
 #[derive(Clone, Debug)]
 struct RemoteIssue {
     number: u64,
@@ -158,7 +78,17 @@ where
     } else {
         bind_generated(store, github, request, &mut renew_lease)
     };
-    result.map_err(|error| error.into_projection(ProjectionDisposition::IntegrityBlock))
+    result.map_err(|error| {
+        let error = error.into_projection(ProjectionDisposition::IntegrityBlock);
+        if error.projection_disposition() == Some(ProjectionDisposition::DegradableTransport) {
+            if let Err(schedule_error) =
+                store.schedule_projection_retry(error.retry_after_seconds())
+            {
+                return schedule_error.into_projection(ProjectionDisposition::IntegrityBlock);
+            }
+        }
+        error
+    })
 }
 
 fn bind_generated<T, R>(
@@ -200,6 +130,14 @@ where
         }
         validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
         if store.status().pending_projection_count > 0 {
+            validate_pending_remote_body(
+                &issue,
+                &request.repository,
+                identity.run_id(),
+                store.desired_projection_digest().ok_or_else(|| {
+                    AccountabilityError::new("pending projection is missing its durable digest")
+                })?,
+            )?;
             project_and_ack(
                 store,
                 github,
@@ -349,6 +287,7 @@ where
         &manifest,
         request.resume_policy,
         store.identity().is_some(),
+        request.adopted_lease_generation,
     )?;
     if issue.state.eq_ignore_ascii_case("closed") {
         if request.resume_policy != ResumePolicy::ReopenClosed {
@@ -373,14 +312,14 @@ where
     match store.identity() {
         None => {
             store.resume_from_manifest(
-                manifest,
+                manifest.clone(),
                 "Resume the managed autonomous run",
                 "The operator explicitly selected its verified accountability epic",
             )?;
         }
         Some(identity) if identity.run_id() == marker_run_id => {
             store.bind_epic(issue.number, &issue.url)?;
-            store.ensure_resume_event()?;
+            store.resume_bound_from_manifest(manifest.clone())?;
         }
         Some(_) => {
             return Err(AccountabilityError::new(
@@ -565,471 +504,3 @@ fn renew<R: FnMut() -> Result<(), String>>(renew_lease: &mut R) -> Result<(), Ac
         AccountabilityError::new(format!("lifecycle lease lost during epic binding: {error}"))
     })
 }
-
-fn validate_issue(
-    issue: &RemoteIssue,
-    repository: &RepositoryIdentity,
-    expected_run_id: Option<&str>,
-) -> Result<(), AccountabilityError> {
-    let expected_url = format!("https://github.com/{}/issues/", repository.as_str());
-    if !issue.url.starts_with(&expected_url) {
-        return Err(AccountabilityError::new(
-            "epic belongs to a different repository",
-        ));
-    }
-    if !REQUIRED_LABELS
-        .iter()
-        .all(|required| issue.labels.contains(*required))
-    {
-        return Err(AccountabilityError::new(
-            "accountability epic is missing mandatory labels",
-        ));
-    }
-    let (marker_repo, run_id) = parse_single_marker(&issue.body)?;
-    if marker_repo != repository.as_str() {
-        return Err(AccountabilityError::new("epic marker repository mismatch"));
-    }
-    if expected_run_id.is_some_and(|expected| expected != run_id) {
-        return Err(AccountabilityError::new(
-            "epic marker run identity mismatch",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_remote_manifest(
-    issue: &RemoteIssue,
-    repository: &RepositoryIdentity,
-    run_id: &str,
-) -> Result<RecoveryManifest, AccountabilityError> {
-    let manifest = verified_manifest(&issue.body, repository)?;
-    if manifest.identity.run_id() != run_id
-        || manifest.epic_number != issue.number
-        || manifest.epic_url != issue.url
-    {
-        return Err(AccountabilityError::new(
-            "bound epic recovery manifest does not match its marker and identity",
-        ));
-    }
-    validate_resume_policy(issue, &manifest, ResumePolicy::ActiveOnly, true)?;
-    Ok(manifest)
-}
-
-fn verified_manifest(
-    body: &str,
-    repository: &RepositoryIdentity,
-) -> Result<RecoveryManifest, AccountabilityError> {
-    let (projection, document) = extract_managed_projection(body)?;
-    let manifest = RecoveryManifest::parse_for_repository(&document, repository)?;
-    let digest = sha256_hex(format!("{}\n", projection.trim_end()).as_bytes());
-    if manifest.remote_digest != digest {
-        return Err(AccountabilityError::new(
-            "managed accountability projection digest mismatch",
-        ));
-    }
-    Ok(manifest)
-}
-
-fn validate_resume_policy(
-    issue: &RemoteIssue,
-    manifest: &RecoveryManifest,
-    policy: ResumePolicy,
-    has_local_identity: bool,
-) -> Result<(), AccountabilityError> {
-    let open = issue.state.eq_ignore_ascii_case("open");
-    let allowed = open && manifest.recovery_state == RecoveryState::Active && has_local_identity
-        || !open
-            && matches!(
-                manifest.recovery_state,
-                RecoveryState::Parked | RecoveryState::Terminal
-            )
-            && policy == ResumePolicy::ReopenClosed;
-    if allowed {
-        Ok(())
-    } else {
-        Err(AccountabilityError::new(
-            "accountability epic open/closed state and recovery ownership policy disagree",
-        ))
-    }
-}
-
-fn github_projection_error(context: impl AsRef<str>, error: GithubFailure) -> AccountabilityError {
-    let disposition = if error.retryable() {
-        ProjectionDisposition::DegradableTransport
-    } else {
-        ProjectionDisposition::IntegrityBlock
-    };
-    AccountabilityError::projection(format!("{}: {error}", context.as_ref()), disposition)
-}
-
-fn parse_single_marker(body: &str) -> Result<(&str, &str), AccountabilityError> {
-    let markers = body
-        .lines()
-        .filter(|line| line.trim_start().starts_with(MARKER_PREFIX))
-        .collect::<Vec<_>>();
-    if markers.len() != 1 {
-        return Err(AccountabilityError::new(
-            "accountability epic must contain exactly one immutable run marker",
-        ));
-    }
-    let marker = markers[0].trim();
-    let content = marker
-        .strip_prefix(MARKER_PREFIX)
-        .and_then(|value| value.strip_suffix(" -->"))
-        .ok_or_else(|| AccountabilityError::new("accountability epic marker is malformed"))?;
-    let (repo, run_id) = content
-        .split_once(" run_id=")
-        .ok_or_else(|| AccountabilityError::new("accountability epic marker is malformed"))?;
-    if run_id.len() != 64 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AccountabilityError::new(
-            "accountability epic run ID is malformed",
-        ));
-    }
-    Ok((repo, run_id))
-}
-
-pub fn compose_managed_body(
-    marker: &str,
-    projection: &str,
-    manifest: &RecoveryManifest,
-    existing_body: &str,
-) -> String {
-    let human = strip_managed_content(existing_body);
-    let managed = format!(
-        "{marker}\n{MANAGED_START}\n{projection}\n\n{MANIFEST_START}\n{}\n{MANIFEST_END}\n{MANAGED_END}",
-        manifest.to_json()
-    );
-    if human.is_empty() {
-        format!("{managed}\n")
-    } else {
-        format!("{managed}\n\n{human}\n")
-    }
-}
-
-fn strip_managed_content(body: &str) -> String {
-    let mut kept = Vec::new();
-    let mut managed = false;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed == MANAGED_START {
-            managed = true;
-            continue;
-        }
-        if trimmed == MANAGED_END {
-            managed = false;
-            continue;
-        }
-        if managed || trimmed.starts_with(MARKER_PREFIX) {
-            continue;
-        }
-        kept.push(line);
-    }
-    kept.join("\n").trim().to_owned()
-}
-
-fn extract_managed_projection(body: &str) -> Result<(String, String), AccountabilityError> {
-    if body.matches(MANAGED_START).count() != 1
-        || body.matches(MANAGED_END).count() != 1
-        || body.matches(MANIFEST_START).count() != 1
-        || body.matches(MANIFEST_END).count() != 1
-    {
-        return Err(AccountabilityError::new(
-            "accountability epic must contain exactly one managed block and recovery manifest",
-        ));
-    }
-    let managed_start = body.find(MANAGED_START).unwrap() + MANAGED_START.len();
-    let managed_end = body.find(MANAGED_END).unwrap();
-    if managed_start >= managed_end {
-        return Err(AccountabilityError::new(
-            "managed accountability block is malformed",
-        ));
-    }
-    let managed = &body[managed_start..managed_end];
-    let start = body
-        .find(MANIFEST_START)
-        .ok_or_else(|| AccountabilityError::new("managed recovery manifest is missing"))?
-        + MANIFEST_START.len();
-    let suffix = &body[start..];
-    let end = suffix
-        .find(MANIFEST_END)
-        .ok_or_else(|| AccountabilityError::new("managed recovery manifest is unterminated"))?;
-    let manifest = suffix[..end].trim();
-    if manifest.is_empty() || manifest.contains(MANIFEST_START) {
-        return Err(AccountabilityError::new(
-            "managed recovery manifest is ambiguous",
-        ));
-    }
-    let projection_end = managed.find(MANIFEST_START).ok_or_else(|| {
-        AccountabilityError::new("managed recovery manifest is outside its managed block")
-    })?;
-    let projection = managed[..projection_end].trim();
-    if projection.is_empty() {
-        return Err(AccountabilityError::new(
-            "managed accountability projection is missing",
-        ));
-    }
-    Ok((projection.to_owned(), manifest.to_owned()))
-}
-
-fn run_marker(repository: &RepositoryIdentity, run_id: &str) -> String {
-    format!(
-        "<!-- autospec:run-epic repo={} run_id={} -->",
-        repository.as_str(),
-        run_id
-    )
-}
-
-fn parse_issue_pages(output: &str) -> Result<Vec<RemoteIssue>, AccountabilityError> {
-    let value: Value = serde_json::from_str(output).map_err(json_error)?;
-    let pages = value
-        .as_array()
-        .ok_or_else(|| AccountabilityError::new("GitHub issue pages must be an array"))?;
-    let values: Vec<&Value> = if pages.iter().all(Value::is_array) {
-        pages
-            .iter()
-            .flat_map(|page| page.as_array().expect("checked array"))
-            .collect()
-    } else {
-        pages.iter().collect()
-    };
-    values.into_iter().map(parse_issue).collect()
-}
-
-fn parse_issue(value: &Value) -> Result<RemoteIssue, AccountabilityError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| AccountabilityError::new("GitHub issue must be an object"))?;
-    let number = object
-        .get("number")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| AccountabilityError::new("GitHub issue number is missing"))?;
-    let url = object
-        .get("html_url")
-        .or_else(|| object.get("url"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| AccountabilityError::new("GitHub issue URL is missing"))?
-        .to_owned();
-    let state = object
-        .get("state")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AccountabilityError::new("GitHub issue state is missing"))?
-        .to_owned();
-    let body = object
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let labels = object
-        .get("labels")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AccountabilityError::new("GitHub issue labels are missing"))?
-        .iter()
-        .filter_map(|label| {
-            label
-                .as_str()
-                .or_else(|| label.get("name").and_then(Value::as_str))
-        })
-        .map(str::to_owned)
-        .collect();
-    Ok(RemoteIssue {
-        number,
-        url,
-        state,
-        body,
-        labels,
-    })
-}
-
-fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
-    let create_issue = matches!(&command, GithubCommand::CreateIssue { .. });
-    let mutating = !matches!(
-        command,
-        GithubCommand::ListAccountabilityIssues { .. } | GithubCommand::ViewIssue { .. }
-    );
-    let (args, stdin) = match command {
-        GithubCommand::EnsureLabel { repository, name } => (
-            vec![
-                "label".to_string(),
-                "create".to_string(),
-                name,
-                "--repo".to_string(),
-                repository,
-                "--color".to_string(),
-                "5319e7".to_string(),
-                "--force".to_string(),
-            ],
-            None,
-        ),
-        GithubCommand::ListAccountabilityIssues { repository } => (
-            vec![
-                "api".to_string(),
-                "--paginate".to_string(),
-                "--slurp".to_string(),
-                format!(
-                    "repos/{repository}/issues?state=all&labels=autospec%3Arun-accountability&per_page=100"
-                ),
-            ],
-            None,
-        ),
-        GithubCommand::ViewIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "view".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-                "--json".to_string(),
-                "number,url,state,body,labels".to_string(),
-            ],
-            None,
-        ),
-        GithubCommand::CreateIssue {
-            repository,
-            title,
-            body,
-            labels,
-        } => {
-            let mut args = vec![
-                "issue".to_string(),
-                "create".to_string(),
-                "--repo".to_string(),
-                repository,
-                "--title".to_string(),
-                title,
-                "--body-file".to_string(),
-                "-".to_string(),
-            ];
-            for label in labels {
-                args.push("--label".to_string());
-                args.push(label);
-            }
-            (args, Some(body))
-        }
-        GithubCommand::EditIssue {
-            repository,
-            number,
-            body,
-        } => (
-            vec![
-                "issue".to_string(),
-                "edit".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-                "--body-file".to_string(),
-                "-".to_string(),
-            ],
-            Some(body),
-        ),
-        GithubCommand::ReopenIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "reopen".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-            ],
-            None,
-        ),
-        GithubCommand::CloseIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "close".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-            ],
-            None,
-        ),
-        GithubCommand::AddToProject {
-            repository,
-            project_number,
-            issue_url,
-        } => {
-            let owner = repository.split('/').next().unwrap_or_default().to_owned();
-            (
-                vec![
-                    "project".to_string(),
-                    "item-add".to_string(),
-                    project_number.to_string(),
-                    "--owner".to_string(),
-                    owner,
-                    "--url".to_string(),
-                    issue_url,
-                ],
-                None,
-            )
-        }
-    };
-    let mut process = Command::new("gh");
-    process
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if stdin.is_some() {
-        process.stdin(Stdio::piped());
-    }
-    let mut child = process
-        .spawn()
-        .map_err(|error| GithubFailure::Retryable(format!("cannot execute gh: {error}")))?;
-    if let Some(input) = stdin {
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| GithubFailure::Ambiguous("cannot open gh stdin".to_string()))?
-            .write_all(input.as_bytes())
-            .map_err(|error| GithubFailure::Ambiguous(format!("cannot write gh stdin: {error}")))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| GithubFailure::Ambiguous(format!("cannot wait for gh: {error}")))?;
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if let Some(delay) = parse_retry_after(&message) {
-            return Err(GithubFailure::RetryAfter { message, delay });
-        }
-        return Err(if mutating {
-            if create_issue && !definitive_gh_failure(&message) {
-                GithubFailure::Ambiguous(message)
-            } else {
-                GithubFailure::Definitive(message)
-            }
-        } else {
-            GithubFailure::Retryable(message)
-        });
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| GithubFailure::Definitive(format!("gh returned invalid UTF-8: {error}")))
-}
-
-fn parse_retry_after(message: &str) -> Option<Duration> {
-    message.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.trim()
-            .eq_ignore_ascii_case("retry-after")
-            .then(|| value.trim().parse::<u64>().ok().map(Duration::from_secs))?
-    })
-}
-
-fn definitive_gh_failure(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    [
-        "validation failed",
-        "authentication",
-        "forbidden",
-        "http 400",
-        "http 401",
-        "http 403",
-        "http 404",
-        "unprocessable entity",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-fn json_error(error: serde_json::Error) -> AccountabilityError {
-    AccountabilityError::new(format!("invalid GitHub response: {error}"))
-}
-
-#[allow(dead_code)]
-fn _projection_type_anchor(_: &RenderedProjection) {}
