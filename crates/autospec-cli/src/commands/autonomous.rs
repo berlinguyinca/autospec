@@ -244,7 +244,7 @@ impl StopMode {
 
 type EarlyRouteHandler = fn(&[String]) -> Result<(), CommandFailure>;
 
-const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
+const EARLY_ROUTES: [(&str, EarlyRouteHandler); 8] = [
     ("premerge", |args| premerge::run(&args[1..])),
     ("implementer-wait-failed", |args| {
         implementer_wait_failed(&args[1..])
@@ -254,12 +254,103 @@ const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
     ("executor-result", executor_result),
     ("executor-child", executor_child),
     ("lifecycle", lifecycle),
+    ("accountability-event", record_accountability_event_command),
 ];
 
 fn dispatch_early_route(args: &[String]) -> Option<Result<(), CommandFailure>> {
     let route_name = args.first()?.as_str();
     let (_, handler) = EARLY_ROUTES.iter().find(|(name, _)| *name == route_name)?;
     Some(handler(args))
+}
+
+fn record_accountability_event_command(args: &[String]) -> Result<(), CommandFailure> {
+    let mut repo = None;
+    let mut kind = None;
+    let mut issue = None;
+    let mut pull_request = None;
+    let mut what = None;
+    let mut why = None;
+    let mut evidence = None;
+    let mut project = false;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        if flag == "--project" {
+            project = true;
+            index += 1;
+            continue;
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CommandFailure::diagnostic(format!("{flag} requires a value")))?
+            .clone();
+        match flag {
+            "--repo" => repo = Some(value),
+            "--kind" => kind = Some(value),
+            "--issue" => issue = value.parse::<u64>().ok(),
+            "--pr" => pull_request = value.parse::<u64>().ok(),
+            "--what" => what = Some(value),
+            "--why" => why = Some(value),
+            "--evidence" => evidence = Some(value),
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown accountability-event option: {flag}"
+                )))
+            }
+        }
+        index += 2;
+    }
+    let repo = repo.ok_or_else(|| CommandFailure::diagnostic("--repo is required"))?;
+    let kind_name = kind.ok_or_else(|| CommandFailure::diagnostic("--kind is required"))?;
+    let kind = match kind_name.as_str() {
+        "selected" => accountability::EventKind::WorkSelected { issue },
+        "claimed" => accountability::EventKind::IssueClaimed {
+            issue: issue.ok_or_else(|| CommandFailure::diagnostic("claimed requires --issue"))?,
+        },
+        "pr-opened" => accountability::EventKind::PullRequestOpened {
+            pull_request: pull_request
+                .ok_or_else(|| CommandFailure::diagnostic("pr-opened requires --pr"))?,
+        },
+        "review" => accountability::EventKind::ReviewStarted {
+            pull_request: pull_request
+                .ok_or_else(|| CommandFailure::diagnostic("review requires --pr"))?,
+        },
+        "verified" => accountability::EventKind::Verified,
+        "merged" => accountability::EventKind::Merged {
+            pull_request: pull_request
+                .ok_or_else(|| CommandFailure::diagnostic("merged requires --pr"))?,
+        },
+        "failed" => accountability::EventKind::Failed,
+        "quarantined" => accountability::EventKind::Quarantined {
+            issue: issue
+                .ok_or_else(|| CommandFailure::diagnostic("quarantined requires --issue"))?,
+        },
+        "parked" => accountability::EventKind::Parked,
+        "stopped" => accountability::EventKind::Stopped,
+        "completed" => accountability::EventKind::Completed,
+        _ => {
+            return Err(CommandFailure::diagnostic(format!(
+                "unknown accountability event kind: {kind_name}"
+            )))
+        }
+    };
+    let layout = RunLayout::new(&Options {
+        repo,
+        ..Options::default()
+    })
+    .map_err(CommandFailure::diagnostic)?;
+    record_accountability_event(
+        &layout,
+        accountability_event(
+            kind,
+            what.ok_or_else(|| CommandFailure::diagnostic("--what is required"))?,
+            why.ok_or_else(|| CommandFailure::diagnostic("--why is required"))?,
+            evidence.ok_or_else(|| CommandFailure::diagnostic("--evidence is required"))?,
+        )?,
+        project,
+    )?;
+    println!("{{\"event\":\"accountability_recorded\",\"projection_requested\":{project}}}");
+    Ok(())
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -1094,6 +1185,8 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
     let options = options_with_resolved_repo(options, &layout);
     if launch_mode == LaunchMode::Follow {
         if let Some(conductor) = live_follow_target(&layout).map_err(CommandFailure::diagnostic)? {
+            verify_follow_accountability(&layout, options.epic)
+                .map_err(CommandFailure::diagnostic)?;
             print_follow_attach_summary(&options, &layout, &conductor);
             return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
         }
@@ -1105,6 +1198,8 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
                 if let Some(conductor) = wait_for_follow_target_after_held(&layout)
                     .map_err(CommandFailure::diagnostic)?
                 {
+                    verify_follow_accountability(&layout, options.epic)
+                        .map_err(CommandFailure::diagnostic)?;
                     print_follow_attach_summary(&options, &layout, &conductor);
                     return follow_scoped_conductor(&layout, &options)
                         .map_err(CommandFailure::diagnostic);
@@ -1183,6 +1278,31 @@ fn wait_for_follow_target_after_held(layout: &RunLayout) -> Result<Option<UnitSt
     Ok(None)
 }
 
+fn verify_follow_accountability(
+    layout: &RunLayout,
+    requested_epic: Option<u64>,
+) -> Result<(), String> {
+    let launch = read_launch_json(&layout.state_dir);
+    let run_id = extract_json_string(&launch, "run_id")
+        .ok_or_else(|| "live conductor launch has no accountability run_id".to_string())?;
+    let launch_epic = extract_json_number(&launch, "epic_number")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "live conductor launch has no accountability epic".to_string())?;
+    if requested_epic.is_some_and(|requested| requested != launch_epic) {
+        return Err(format!(
+            "live conductor is bound to epic {launch_epic}, not requested epic {}",
+            requested_epic.unwrap()
+        ));
+    }
+    let root = find_accountability_root(layout, &run_id)?;
+    let store =
+        accountability::AccountabilityStore::open(root).map_err(|error| error.to_string())?;
+    if store.status().epic_number != Some(launch_epic) {
+        return Err("live conductor launch and local accountability binding disagree".to_string());
+    }
+    Ok(())
+}
+
 fn print_follow_attach_summary(options: &Options, layout: &RunLayout, conductor: &UnitStatus) {
     if options.json {
         println!(
@@ -1211,7 +1331,11 @@ fn start_after_lease(
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
     write_launch_json(layout, options, &foreground, &commands, Some(binding))
         .map_err(CommandFailure::diagnostic)?;
-    launch_units(layout, options, &foreground, &commands, lease)
+    resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
+    mark_accountability_spawned(layout)?;
+    let units = launch_units(layout, options, &foreground, &commands, lease)?;
+    Ok(units)
 }
 
 fn restart_after_lease(
@@ -1229,6 +1353,9 @@ fn restart_after_lease(
     clear_stop_flag(layout).map_err(CommandFailure::diagnostic)?;
     write_launch_json(layout, options, &foreground, &commands, Some(binding))
         .map_err(CommandFailure::diagnostic)?;
+    resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
+    mark_accountability_spawned(layout)?;
     let (conductor, monitor, supervisor) =
         launch_units(layout, options, &foreground, &commands, lease)?;
     Ok((stopped, conductor, monitor, supervisor))
@@ -1266,8 +1393,18 @@ fn bind_accountability_epic(
     let repository = RepositoryIdentity::parse(&layout.repo)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
     let root = accountability_root(layout, options.epic)?;
-    if options.epic.is_none() && root.exists() && successor {
-        archive_accountability_root(layout, &root)?;
+    if options.epic.is_none() && root.exists() {
+        let existing = AccountabilityStore::open(&root)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        if successor
+            || matches!(
+                existing.status().lifecycle_phase.as_str(),
+                "spawned" | "terminal"
+            )
+        {
+            drop(existing);
+            archive_accountability_root(layout, &root)?;
+        }
     }
     let mut store = AccountabilityStore::open(&root)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
@@ -1313,18 +1450,182 @@ fn bind_accountability_epic(
         },
         project_number: accountability_project_number(),
     };
+    let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
     let mut github = GhCli;
-    let binding = accountability::github::bind_epic(&mut store, &mut github, request, || {
-        resilience::renew_lifecycle(&layout.repo, lease)
-            .map_err(|_| "lifecycle lease renewal rejected".to_string())
-    })
-    .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    let binding_result =
+        accountability::github::bind_epic(&mut store, &mut github, request, || {
+            resilience::renew_lifecycle(&layout.repo, lease)
+                .map_err(|_| "lifecycle lease renewal rejected".to_string())
+        });
+    let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
+    let binding = binding_result.map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    heartbeat_result?;
     if let Some(warning) = binding.project_warning.as_deref() {
         eprintln!(
             "autospec autonomous accountability: optional Project assignment failed: {warning}"
         );
     }
     Ok(binding)
+}
+
+fn open_bound_accountability(
+    layout: &RunLayout,
+) -> Result<accountability::AccountabilityStore, CommandFailure> {
+    let launch = read_launch_json(&layout.state_dir);
+    let run_id = extract_json_string(&launch, "run_id").ok_or_else(|| {
+        CommandFailure::diagnostic("launch metadata has no accountability run_id")
+    })?;
+    let root = find_accountability_root(layout, &run_id).map_err(CommandFailure::diagnostic)?;
+    accountability::AccountabilityStore::open(root)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn record_accountability_event(
+    layout: &RunLayout,
+    event: accountability::AccountabilityEvent,
+    project: bool,
+) -> Result<(), CommandFailure> {
+    let mut store = open_bound_accountability(layout)?;
+    store
+        .append_event(event)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    if project {
+        let status = store.status();
+        let epic = status.epic_number.ok_or_else(|| {
+            CommandFailure::diagnostic("accountability journal has no verified epic binding")
+        })?;
+        let repository = accountability::RepositoryIdentity::parse(&layout.repo)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        let request = accountability::github::EpicBindingRequest {
+            repository,
+            explicit_epic: Some(epic),
+            resume_policy: accountability::github::ResumePolicy::ActiveOnly,
+            project_number: None,
+        };
+        let mut github = accountability::github::GhCli;
+        if let Err(error) =
+            accountability::github::bind_epic(&mut store, &mut github, request, || Ok(()))
+        {
+            eprintln!(
+                "autospec autonomous accountability projection degraded: {error}; local event remains durable"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn mark_accountability_spawned(layout: &RunLayout) -> Result<(), CommandFailure> {
+    let mut store = open_bound_accountability(layout)?;
+    store
+        .mark_spawned()
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn accountability_event(
+    kind: accountability::EventKind,
+    what: impl Into<String>,
+    why: impl Into<String>,
+    evidence: impl Into<String>,
+) -> Result<accountability::AccountabilityEvent, CommandFailure> {
+    accountability::AccountabilityEvent::new(
+        kind,
+        what,
+        why,
+        vec![accountability::Evidence::outcome(evidence)],
+    )
+    .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn record_executor_accountability(
+    layout: &RunLayout,
+    issue: u64,
+    receipt: &ExecutorReceipt,
+) -> Result<(), CommandFailure> {
+    match (&receipt.outcome, receipt.pull_request) {
+        (ConductorOutcome::Succeeded, Some(pull_request)) => {
+            for (kind, what, why, evidence, project) in [
+                (
+                    accountability::EventKind::PullRequestOpened { pull_request },
+                    format!("Opened PR {pull_request} for issue {issue}"),
+                    "The implementation needs a reviewable branch and durable merge boundary"
+                        .to_string(),
+                    format!("PR {pull_request} linked to issue {issue}"),
+                    false,
+                ),
+                (
+                    accountability::EventKind::ReviewStarted { pull_request },
+                    format!("Reviewed PR {pull_request} before merge"),
+                    "Autonomous changes require review and verification evidence before landing"
+                        .to_string(),
+                    format!("PR {pull_request} entered the guarded review path"),
+                    false,
+                ),
+                (
+                    accountability::EventKind::Verified,
+                    format!("Verified PR {pull_request} against its merge gates"),
+                    "Only verified changes may be represented as ready to land".to_string(),
+                    format!("PR {pull_request} passed the executor merge gates"),
+                    false,
+                ),
+                (
+                    accountability::EventKind::Merged { pull_request },
+                    format!("Merged PR {pull_request} into the target branch"),
+                    "A merged commit is the only lifecycle boundary counted as implemented"
+                        .to_string(),
+                    format!("terminal merged receipt recorded for PR {pull_request}"),
+                    true,
+                ),
+            ] {
+                record_accountability_event(
+                    layout,
+                    accountability_event(kind, what, why, evidence)?,
+                    project,
+                )?;
+            }
+        }
+        (ConductorOutcome::Retryable(reason), _) => record_accountability_event(
+            layout,
+            accountability_event(
+                accountability::EventKind::Failed,
+                format!("Issue {issue} failed with a retryable executor outcome"),
+                "The failure is recorded before the conductor schedules another attempt",
+                reason.clone(),
+            )?,
+            true,
+        )?,
+        (ConductorOutcome::Blocked(reason), _)
+        | (ConductorOutcome::AllBlocked { reason, .. }, _)
+        | (ConductorOutcome::VerifierUnavailable { reason }, _)
+        | (ConductorOutcome::ResourcePark { reason }, _)
+        | (ConductorOutcome::OperatorStop { reason }, _) => {
+            let kind = if reason.contains("quarantin") {
+                accountability::EventKind::Quarantined { issue }
+            } else if matches!(&receipt.outcome, ConductorOutcome::ResourcePark { .. }) {
+                accountability::EventKind::Parked
+            } else if matches!(&receipt.outcome, ConductorOutcome::OperatorStop { .. }) {
+                accountability::EventKind::Stopped
+            } else {
+                accountability::EventKind::Failed
+            };
+            record_accountability_event(
+                layout,
+                accountability_event(
+                    kind,
+                    format!("Issue {issue} stopped before merge"),
+                    "Non-merged outcomes remain visible without being counted as implemented",
+                    reason.clone(),
+                )?,
+                true,
+            )?;
+        }
+        (ConductorOutcome::Succeeded, None) => {
+            return Err(CommandFailure::diagnostic(
+                "merged executor receipt has no pull request for accountability",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn accountability_root(
@@ -1923,9 +2224,10 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     let toolchain = toolchain_freshness::ToolchainFreshness::load();
+    let accountability = accountability_view(&layout);
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"accountability\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1947,6 +2249,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             spend.filed_issues,
             spend.budget_issues,
             toolchain.to_json(),
+            accountability.json(),
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
@@ -1954,6 +2257,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     } else {
         println!("autospec autonomous status: ok");
         toolchain.print_human();
+        accountability.print_human();
     }
     Ok(())
 }
@@ -2116,14 +2420,16 @@ fn list(options: Options) -> Result<(), String> {
             let monitor = read_unit("monitor", &layout);
             let supervisor = read_unit("supervisor", &layout);
             let state = read_state_metadata(&layout);
+            let accountability = accountability_view(&layout);
             rows.push(format!(
-                "{{\"scope\":\"{}\",\"slug\":\"{}\",\"repo\":\"{}\",\"alive\":{},\"last_cycle\":\"{}\",\"park_state\":\"{}\",\"launch\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+                "{{\"scope\":\"{}\",\"slug\":\"{}\",\"repo\":\"{}\",\"alive\":{},\"last_cycle\":\"{}\",\"park_state\":\"{}\",\"accountability\":{},\"launch\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
                 json_escape(&scope),
                 json_escape(&scope),
                 json_escape(&layout.repo),
                 conductor.running,
                 json_escape(&state.last_cycle),
                 json_escape(state.status.as_deref().unwrap_or_default()),
+                accountability.json(),
                 launch,
                 unit_status_json(&conductor),
                 unit_status_json(&monitor),
@@ -2148,6 +2454,88 @@ fn list(options: Options) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct AccountabilityView {
+    run_id: Option<String>,
+    epic_number: Option<u64>,
+    epic_url: Option<String>,
+    event_count: u64,
+    pending_projection_count: u64,
+    desired_high_watermark: u64,
+    acknowledged_high_watermark: u64,
+    error: Option<String>,
+}
+
+impl AccountabilityView {
+    fn projection_state(&self) -> &'static str {
+        if self.error.is_some() || self.pending_projection_count > 0 {
+            "degraded"
+        } else if self.run_id.is_some() {
+            "current"
+        } else {
+            "unbound"
+        }
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"run_id\":{},\"epic_number\":{},\"epic_url\":{},\"event_count\":{},\"pending_projection_count\":{},\"desired_high_watermark\":{},\"acknowledged_high_watermark\":{},\"projection_state\":\"{}\",\"error\":{}}}",
+            optional_json_string(self.run_id.as_deref()),
+            self.epic_number.map_or_else(|| "null".to_string(), |value| value.to_string()),
+            optional_json_string(self.epic_url.as_deref()),
+            self.event_count,
+            self.pending_projection_count,
+            self.desired_high_watermark,
+            self.acknowledged_high_watermark,
+            self.projection_state(),
+            optional_json_string(self.error.as_deref())
+        )
+    }
+
+    fn print_human(&self) {
+        println!("accountability: {}", self.projection_state());
+        if let Some(epic_url) = &self.epic_url {
+            println!("accountability epic: {epic_url}");
+        }
+        println!(
+            "accountability events: {} (projected {}/{})",
+            self.event_count, self.acknowledged_high_watermark, self.desired_high_watermark
+        );
+        if let Some(error) = &self.error {
+            println!("accountability error: {error}");
+        }
+    }
+}
+
+fn accountability_view(layout: &RunLayout) -> AccountabilityView {
+    let launch = read_launch_json(&layout.state_dir);
+    let Some(run_id) = extract_json_string(&launch, "run_id") else {
+        return AccountabilityView::default();
+    };
+    match find_accountability_root(layout, &run_id)
+        .and_then(|root| accountability::AccountabilityStore::open(root).map_err(|e| e.to_string()))
+    {
+        Ok(store) => {
+            let status = store.status();
+            AccountabilityView {
+                run_id: status.run_id,
+                epic_number: status.epic_number,
+                epic_url: status.epic_url,
+                event_count: status.event_count,
+                pending_projection_count: status.pending_projection_count,
+                desired_high_watermark: status.desired_high_watermark,
+                acknowledged_high_watermark: status.acknowledged_high_watermark,
+                error: None,
+            }
+        }
+        Err(error) => AccountabilityView {
+            run_id: Some(run_id),
+            error: Some(error),
+            ..AccountabilityView::default()
+        },
+    }
 }
 
 fn logs(options: Options) -> Result<(), String> {
@@ -2537,7 +2925,13 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
     let accountability = if inherited {
         verify_existing_accountability(&layout, &lease).map_err(CommandFailure::diagnostic)
     } else {
-        bind_accountability_epic(&layout, &options, &lease, false).map(|_| ())
+        bind_accountability_epic(&layout, &options, &lease, false).and_then(|binding| {
+            let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
+            let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
+            write_launch_json(&layout, &options, &foreground, &commands, Some(&binding))
+                .map_err(CommandFailure::diagnostic)?;
+            mark_accountability_spawned(&layout)
+        })
     };
     if let Err(error) = accountability {
         return finish_with_launch_lease(&layout.repo, &lease, || Err(error));
@@ -3357,6 +3751,18 @@ fn scan_foreground(
 
 fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<ConductorState, String> {
     queue::review_safety_for_repo(&layout.repo, 1, None).map_err(command_error)?;
+    record_accountability_event(
+        layout,
+        accountability_event(
+            accountability::EventKind::Verified,
+            "Verified the next queue candidate against the autonomous safety contract",
+            "Unsafe or incomplete issues must not advance to claim acquisition",
+            "queue safety review completed",
+        )
+        .map_err(|error| error.to_string())?,
+        false,
+    )
+    .map_err(|error| error.to_string())?;
     let state = state
         .transition(ConductorEvent::SafetyReviewed)
         .map_err(|error| format!("cannot record foreground safety review: {error}"))?;
@@ -3410,6 +3816,21 @@ fn select_foreground(
         .map_err(|error| {
             CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
         })?;
+    record_accountability_event(
+        layout,
+        accountability_event(
+            accountability::EventKind::WorkSelected {
+                issue: Some(selection.issue),
+            },
+            format!(
+                "Selected issue {} for autonomous implementation",
+                selection.issue
+            ),
+            "The dependency-aware queue chose the next safe unit of work",
+            format!("issue {} selected by the ready queue", selection.issue),
+        )?,
+        false,
+    )?;
     Ok(ForegroundSelectionResult::State(
         Box::new(state),
         Some(selection),
@@ -3505,6 +3926,21 @@ fn execute_foreground_dispatch(
                 state = state.transition(ConductorEvent::Claimed).map_err(|error| {
                     CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
                 })?;
+                record_accountability_event(
+                    layout,
+                    accountability_event(
+                        accountability::EventKind::IssueClaimed {
+                            issue: selection.issue,
+                        },
+                        format!(
+                            "Claimed issue {} for its isolated executor",
+                            selection.issue
+                        ),
+                        "Claim ownership prevents concurrent implementations from racing",
+                        format!("authoritative claim acquired for issue {}", selection.issue),
+                    )?,
+                    false,
+                )?;
                 persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
                 lease
             }
@@ -3534,6 +3970,7 @@ fn execute_foreground_dispatch(
             persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
             return Ok(ForegroundDispatchResult::State(Box::new(state)));
         }
+        record_executor_accountability(layout, selection.issue, &receipt)?;
         let retryable_released =
             !receipt.bridge_finalized && matches!(receipt.outcome, ConductorOutcome::Retryable(_));
         if retryable_released {
@@ -4237,6 +4674,7 @@ struct ExecutorRequest {
 #[derive(Debug, Clone)]
 struct ExecutorReceipt {
     outcome: ConductorOutcome,
+    pull_request: Option<u64>,
     bridge_finalized: bool,
     pending: bool,
     ownership_lost: bool,
@@ -4368,6 +4806,7 @@ impl ExecutorReceipt {
         };
         Self {
             outcome,
+            pull_request: None,
             bridge_finalized: false,
             pending: false,
             ownership_lost,
@@ -4395,27 +4834,37 @@ impl ExecutorReceipt {
             return Err("executor bridge receipt identity does not match request".to_string());
         }
         Ok(match receipt.status {
-            executor_bridge::BridgeRunStatus::Pending
-            | executor_bridge::BridgeRunStatus::Accepted { .. } => Self {
+            executor_bridge::BridgeRunStatus::Pending => Self {
                 outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
+                pull_request: None,
                 bridge_finalized: false,
                 pending: true,
                 ownership_lost: false,
             },
-            executor_bridge::BridgeRunStatus::Merged { .. } => Self {
+            executor_bridge::BridgeRunStatus::Accepted { pull_request, .. } => Self {
+                outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
+                pull_request: Some(pull_request),
+                bridge_finalized: false,
+                pending: true,
+                ownership_lost: false,
+            },
+            executor_bridge::BridgeRunStatus::Merged { pull_request, .. } => Self {
                 outcome: ConductorOutcome::Succeeded,
+                pull_request: Some(pull_request),
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Retryable { reason } => Self {
                 outcome: ConductorOutcome::Retryable(reason),
+                pull_request: None,
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Blocked { reason } => Self {
                 outcome: ConductorOutcome::Blocked(reason),
+                pull_request: None,
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,

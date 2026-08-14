@@ -252,6 +252,7 @@ fn reviewable_issue(issue: &RemoteIssue) -> bool {
         && !issue_has_label(issue, "needs-classify")
         && !issue_has_label(issue, "autospec:needs-human")
         && !issue_has_label(issue, "security:quarantined")
+        && !issue_has_label(issue, "autospec:run-accountability")
 }
 
 fn issue_has_label(issue: &RemoteIssue, label: &str) -> bool {
@@ -307,6 +308,7 @@ fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, 
 fn reviewable_pass(issue: &RemoteIssue) -> Result<bool, CommandFailure> {
     Ok(!issue.closed
         && issue_has_label(issue, "auto-implement")
+        && !issue_has_label(issue, "autospec:run-accountability")
         && confirm_issue_safety_for_queue(&issue_safety_input(issue))?)
 }
 
@@ -482,7 +484,10 @@ pub(crate) fn ready_plan_for(
         let _ = recover_active_issue(repo, issue.number, 300);
         let _ = requeue_abandoned_active_issue(repo, issue.number);
     }
-    let candidates = list_issues(repo, "auto-implement")?;
+    let candidates = list_issues(repo, "auto-implement")?
+        .into_iter()
+        .filter(|issue| !issue_has_label(issue, "autospec:run-accountability"))
+        .collect::<Vec<_>>();
     active = list_issues(repo, "in-progress-by-bot")?
         .into_iter()
         .filter(|issue| {
@@ -1198,7 +1203,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::fetch_issue_page_with_retries;
+    use super::{fetch_issue_page_with_retries, reviewable_issue};
     use autospec_core::coordination::parse_remote_issue_page_json;
 
     #[test]
@@ -1227,5 +1232,14 @@ mod tests {
         .expect_err("retry budget is bounded");
         assert_eq!(calls, 3);
         assert_eq!(error, "still invalid");
+    }
+
+    #[test]
+    fn accountability_epic_never_enters_the_implementation_review_queue() {
+        let page = parse_remote_issue_page_json(
+            r#"{"raw_count":1,"items":[{"number":3135,"title":"Run epic","body":"managed","labels":["auto-implement","autospec:run-accountability"],"author":{"login":"autospec"}}]}"#,
+        )
+        .expect("parse issue page");
+        assert!(!reviewable_issue(&page.issues[0]));
     }
 }

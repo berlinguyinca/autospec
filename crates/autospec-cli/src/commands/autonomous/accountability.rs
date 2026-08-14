@@ -179,13 +179,17 @@ impl LaunchDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventKind {
     RunStarted,
+    WorkSelected { issue: Option<u64> },
     IssueClaimed { issue: u64 },
     PullRequestOpened { pull_request: u64 },
+    ReviewStarted { pull_request: u64 },
     Verified,
     Merged { pull_request: u64 },
     Blocked,
     Failed,
+    Quarantined { issue: u64 },
     Parked,
+    Stopped,
     Completed,
     ResumedFromEpic { epic: u64 },
 }
@@ -194,15 +198,21 @@ impl EventKind {
     fn to_value(&self) -> Value {
         match self {
             Self::RunStarted => json!({"type":"run_started"}),
+            Self::WorkSelected { issue } => json!({"type":"work_selected","issue":issue}),
             Self::IssueClaimed { issue } => json!({"type":"issue_claimed","issue":issue}),
             Self::PullRequestOpened { pull_request } => {
                 json!({"type":"pull_request_opened","pull_request":pull_request})
             }
             Self::Verified => json!({"type":"verified"}),
+            Self::ReviewStarted { pull_request } => {
+                json!({"type":"review_started","pull_request":pull_request})
+            }
             Self::Merged { pull_request } => json!({"type":"merged","pull_request":pull_request}),
             Self::Blocked => json!({"type":"blocked"}),
             Self::Failed => json!({"type":"failed"}),
+            Self::Quarantined { issue } => json!({"type":"quarantined","issue":issue}),
             Self::Parked => json!({"type":"parked"}),
+            Self::Stopped => json!({"type":"stopped"}),
             Self::Completed => json!({"type":"completed"}),
             Self::ResumedFromEpic { epic } => json!({"type":"resumed_from_epic","epic":epic}),
         }
@@ -212,6 +222,9 @@ impl EventKind {
         let object = object(value, "event kind")?;
         Ok(match string(object, "type")? {
             "run_started" => Self::RunStarted,
+            "work_selected" => Self::WorkSelected {
+                issue: object.get("issue").and_then(Value::as_u64),
+            },
             "issue_claimed" => Self::IssueClaimed {
                 issue: unsigned(object, "issue")?,
             },
@@ -219,12 +232,19 @@ impl EventKind {
                 pull_request: unsigned(object, "pull_request")?,
             },
             "verified" => Self::Verified,
+            "review_started" => Self::ReviewStarted {
+                pull_request: unsigned(object, "pull_request")?,
+            },
             "merged" => Self::Merged {
                 pull_request: unsigned(object, "pull_request")?,
             },
             "blocked" => Self::Blocked,
             "failed" => Self::Failed,
+            "quarantined" => Self::Quarantined {
+                issue: unsigned(object, "issue")?,
+            },
             "parked" => Self::Parked,
+            "stopped" => Self::Stopped,
             "completed" => Self::Completed,
             "resumed_from_epic" => Self::ResumedFromEpic {
                 epic: unsigned(object, "epic")?,
@@ -257,6 +277,9 @@ impl Evidence {
     pub fn repository_path(value: &str) -> Result<Self, AccountabilityError> {
         if value.is_empty()
             || value.starts_with('/')
+            || value.starts_with('~')
+            || value.starts_with("\\\\")
+            || value.as_bytes().get(1) == Some(&b':')
             || value.split('/').any(|part| matches!(part, "" | "." | ".."))
             || value.chars().any(char::is_control)
         {
@@ -538,6 +561,9 @@ fn sanitize_text(value: &str, limit: usize) -> String {
             || lower.contains("-----end")
             || (token.starts_with("AKIA") && token.len() >= 20)
             || token.starts_with('/')
+            || token.starts_with('~')
+            || token.starts_with("\\\\")
+            || token.as_bytes().get(1) == Some(&b':')
             || token.contains("%%{")
             || token.contains("<!--")
             || token.contains("-->")

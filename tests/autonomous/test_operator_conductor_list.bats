@@ -26,8 +26,10 @@ teardown() {
   printf '999999\n' > "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid"
   printf '%s\n' "$TEST_TMP/go-modules.log" > "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.logpath"
   cat > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/launch.json" <<EOF_JSON
-{"argv":["start","--repo","berlinguyinca/autospec"],"started_at":"2026-07-08T12:00:00Z","tty":"/dev/ttys001","session_id":"abc123","repo":"berlinguyinca/autospec","repo_dir":"$REPO_ROOT"}
+{"argv":["start","--repo","berlinguyinca/autospec"],"started_at":"2026-07-08T12:00:00Z","tty":"/dev/ttys001","session_id":"abc123","repo":"berlinguyinca/autospec","repo_dir":"$REPO_ROOT","accountability":{"run_id":"abc123","epic_number":3135,"epic_url":"https://github.com/berlinguyinca/autospec/issues/3135"}}
 EOF_JSON
+  mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/accountability"
+  printf '%s\n' '{"event_count":9,"pending_projection_count":1}' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/accountability/accountability.json"
   cat > "$HOME/.autospec/autonomous/berlinguyinca_autospec/state.json" <<'EOF_STATE'
 {"status":"parked:usage-limit","heartbeat_at":1783526400,"cycle":42}
 EOF_STATE
@@ -43,6 +45,9 @@ EOF_STATE
   [[ "$output" == *'"park_state":"parked:usage-limit"'* ]]
   [[ "$output" == *'"started_at":"2026-07-08T12:00:00Z"'* ]]
   [[ "$output" == *'"argv":["start","--repo","berlinguyinca/autospec"]'* ]]
+  [[ "$output" == *'"epic_number":3135'* ]]
+  [[ "$output" == *'"event_count":9'* ]]
+  [[ "$output" == *'"projection_state":"degraded"'* ]]
   [[ "$output" == *'"slug":"metabolomics-us_go-modules"'* ]]
   [[ "$output" == *'"alive":false'* ]]
 }

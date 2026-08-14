@@ -266,6 +266,25 @@ launch_file_for_state_dir() {
     printf '%s/launch.json\n' "$1"
 }
 
+accountability_state_for_dir() {
+    _accountability_dir="$1"
+    _accountability_launch="$_accountability_dir/launch.json"
+    _accountability_wanted="$(json_from_file "$_accountability_launch" '.accountability.run_id // empty' "")"
+    if [ -f "$_accountability_dir/accountability/accountability.json" ]; then
+        printf '%s\n' "$_accountability_dir/accountability/accountability.json"
+        return 0
+    fi
+    for _accountability_candidate in "$_accountability_dir"/accountability-resumes/*/accountability.json; do
+        [ -f "$_accountability_candidate" ] || continue
+        _accountability_found="$(json_from_file "$_accountability_candidate" '.launch.identity.run_id // empty' "")"
+        if [ -n "$_accountability_wanted" ] && [ "$_accountability_found" = "$_accountability_wanted" ]; then
+            printf '%s\n' "$_accountability_candidate"
+            return 0
+        fi
+    done
+    printf '%s\n' "$_accountability_dir/accountability/accountability.json"
+}
+
 write_launch_provenance() {
     _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
     _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
@@ -345,6 +364,15 @@ conductor_row_load() {
     _tty="$(json_from_file "$_launch" '.tty // empty' "")"
     _session_id="$(json_from_file "$_launch" '.session_id // empty' "")"
     _argv="$(json_compact_from_file "$_launch" '.argv // []' '[]')"
+    _accountability_state="$(accountability_state_for_dir "$_dir")"
+    _accountability_run_id="$(json_from_file "$_launch" '.accountability.run_id // empty' "")"
+    _accountability_epic="$(json_from_file "$_launch" '.accountability.epic_number // empty' "")"
+    _accountability_url="$(json_from_file "$_launch" '.accountability.epic_url // empty' "")"
+    _accountability_events="$(json_from_file "$_accountability_state" '.event_count // 0' "0")"
+    _accountability_pending="$(json_from_file "$_accountability_state" '.pending_projection_count // 0' "0")"
+    _accountability_projection="current"
+    [ -n "$_accountability_run_id" ] || _accountability_projection="unbound"
+    [ "${_accountability_pending:-0}" = "0" ] || _accountability_projection="degraded"
     _state_file="$HOME/.autospec/autonomous/$_slug/state.json"
     _state_status="$(json_from_file "$_state_file" '.status // empty' "")"
     _last_cycle="$(json_from_file "$_state_file" '(.cycle // .last_cycle // "")' "")"
@@ -373,6 +401,13 @@ print_conductor_json_row() {
     printf ',"session_id":%s' "$(json_escape "$_session_id")"
     printf ',"repo_dir":%s' "$(json_escape "$_repo_dir")"
     printf ',"argv":%s' "$_argv"
+    printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"event_count":%s,"pending_projection_count":%s,"projection_state":%s}' \
+        "$(json_escape "$_accountability_run_id")" \
+        "${_accountability_epic:-null}" \
+        "$(json_escape "$_accountability_url")" \
+        "${_accountability_events:-0}" \
+        "${_accountability_pending:-0}" \
+        "$(json_escape "$_accountability_projection")"
     printf '}'
 }
 
@@ -384,6 +419,8 @@ print_conductor_text_row() {
         info "    state: ${_state_status:-n/a} cycle=${_last_cycle:-n/a} heartbeat_age_seconds=${_heartbeat_age:-n/a}"
     [ -n "$_started_at$_tty$_session_id" ] && \
         info "    launch: started_at=${_started_at:-n/a} tty=${_tty:-n/a} session=${_session_id:-n/a}"
+    [ -n "$_accountability_run_id" ] && \
+        info "    accountability: $_accountability_projection epic=${_accountability_url:-n/a} events=${_accountability_events:-0}"
 }
 
 print_conductor_list() {
@@ -429,6 +466,16 @@ print_status() {
     fi
     _issues=""
     _tokens=""
+    _launch="$STATE_DIR/launch.json"
+    _accountability_state="$(accountability_state_for_dir "$STATE_DIR")"
+    _accountability_run_id="$(json_from_file "$_launch" '.accountability.run_id // empty' "")"
+    _accountability_epic="$(json_from_file "$_launch" '.accountability.epic_number // empty' "")"
+    _accountability_url="$(json_from_file "$_launch" '.accountability.epic_url // empty' "")"
+    _accountability_events="$(json_from_file "$_accountability_state" '.event_count // 0' "0")"
+    _accountability_pending="$(json_from_file "$_accountability_state" '.pending_projection_count // 0' "0")"
+    _accountability_projection="current"
+    [ -n "$_accountability_run_id" ] || _accountability_projection="unbound"
+    [ "${_accountability_pending:-0}" = "0" ] || _accountability_projection="degraded"
     if [ -f "$_ledger" ] && command -v jq >/dev/null 2>&1; then
         _issues="$(jq -r '.issues // empty' "$_ledger" 2>/dev/null || true)"
         _tokens="$(jq -r '.tokens // empty' "$_ledger" 2>/dev/null || true)"
@@ -447,6 +494,10 @@ print_status() {
         printf ',"ledger_file":%s' "$(json_escape "$_ledger")"
         printf ',"issues":%s' "$(json_escape "$_issues")"
         printf ',"tokens":%s' "$(json_escape "$_tokens")"
+        printf ',"accountability":{"run_id":%s,"epic_number":%s,"epic_url":%s,"event_count":%s,"pending_projection_count":%s,"projection_state":%s}' \
+            "$(json_escape "$_accountability_run_id")" "${_accountability_epic:-null}" \
+            "$(json_escape "$_accountability_url")" "${_accountability_events:-0}" \
+            "${_accountability_pending:-0}" "$(json_escape "$_accountability_projection")"
         printf '}\n'
         return 0
     fi
@@ -462,6 +513,7 @@ print_status() {
         info "  status:  $_state_status"
     fi
     info "  ledger:  ${_ledger:-n/a}"
+    info "  accountability: $_accountability_projection epic=${_accountability_url:-n/a} events=${_accountability_events:-0}"
     if [ -n "$_issues$_tokens" ]; then
         info "  spend:   issues=${_issues:-n/a} tokens=${_tokens:-n/a}"
     fi

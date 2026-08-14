@@ -197,8 +197,8 @@ else
             --label auto-implement \
             --state open \
             --limit 1000 \
-            --json number \
-            --jq 'length' 2>/dev/null)" || raw=""
+            --json number,labels \
+            --jq '[.[] | select([.labels[].name] | index("autospec:run-accountability") | not)] | length' 2>/dev/null)" || raw=""
         backlog_count="${raw:-0}"
     fi
     backlog_count="${backlog_count:-0}"
@@ -228,7 +228,7 @@ elif [ -n "$REPO" ]; then
         --state open \
         --limit 1000 \
         --json number,labels \
-        --jq '[.[] | select(([.labels[].name] | index("auto-implement") | not) and ([.labels[].name] | index("paused-by-user") | not) and ([.labels[].name] | index("locked-by-autospec-processor") | not))] | length' \
+        --jq '[.[] | select(([.labels[].name] | index("auto-implement") | not) and ([.labels[].name] | index("paused-by-user") | not) and ([.labels[].name] | index("locked-by-autospec-processor") | not) and ([.labels[].name] | index("autospec:run-accountability") | not))] | length' \
         2>/dev/null)" || raw=""
     open_issue_count="${raw:-0}"
 fi

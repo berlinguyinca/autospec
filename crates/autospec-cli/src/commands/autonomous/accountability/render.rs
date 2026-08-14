@@ -27,9 +27,12 @@ fn build_flow(events: &[EventRecord]) -> String {
         .filter(|record| {
             matches!(
                 record.kind,
-                EventKind::IssueClaimed { .. }
+                EventKind::WorkSelected { .. }
+                    | EventKind::IssueClaimed { .. }
                     | EventKind::PullRequestOpened { .. }
+                    | EventKind::ReviewStarted { .. }
                     | EventKind::Merged { .. }
+                    | EventKind::Quarantined { .. }
                     | EventKind::Failed
                     | EventKind::Blocked
             )
@@ -159,6 +162,7 @@ fn current_state(events: &[EventRecord]) -> &'static str {
             EventKind::Failed => "failed",
             EventKind::Blocked => "blocked",
             EventKind::Parked => "parked",
+            EventKind::Stopped => "stopped",
             _ => "active",
         })
 }

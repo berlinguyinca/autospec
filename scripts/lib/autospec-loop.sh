@@ -446,6 +446,32 @@ PY
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
 #   jq: use capture()/== never interpolated test() for dynamic values.
 
+# _autospec_conductor_accountability_event: append through the Rust-owned private journal.
+# A journal failure is returned to the caller; remote projection failures are degraded
+# inside the Rust command after the local append succeeds.
+_autospec_conductor_accountability_event() {
+    local kind="$1" what="$2" why="$3" evidence="$4" project="${5:-0}"
+    local repo="${_AUTOSPEC_CONDUCTOR_REPO:-}"
+    local bin="${_AUTOSPEC_CONDUCTOR_ACCOUNTABILITY_BIN:-}"
+    [ -n "$repo" ] || return 0
+    [ -n "$bin" ] || return 0
+    if [ ! -x "$bin" ] && ! command -v "$bin" >/dev/null 2>&1; then
+        return 0
+    fi
+    local slug state_root launch
+    slug="$(printf '%s' "$repo" | tr '/:' '__')"
+    state_root="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$HOME/.autospec/autonomous-operator}"
+    launch="$state_root/$slug/launch.json"
+    if [ ! -f "$launch" ] || ! command -v jq >/dev/null 2>&1 \
+        || ! jq -e '.accountability.run_id | strings | length > 0' "$launch" >/dev/null 2>&1; then
+        return 0
+    fi
+    local args=(autonomous accountability-event --repo "$repo" --kind "$kind" \
+        --what "$what" --why "$why" --evidence "$evidence")
+    [ "$project" = "1" ] && args+=(--project)
+    "$bin" "${args[@]}" >/dev/null
+}
+
 # _autospec_conductor_record_stop: emit one terminal marker and persist terminal
 # state.  Uses globals because POSIX signal traps cannot receive Bash locals
 # safely while the conductor may be interrupted inside a child command.
@@ -457,6 +483,15 @@ _autospec_conductor_record_stop() {
         return 0
     fi
     _AUTOSPEC_CONDUCTOR_STOP_RECORDED=1
+    local accountability_kind="stopped"
+    case "$reason" in
+        *park*) accountability_kind="parked" ;;
+        all-done|completed) accountability_kind="completed" ;;
+    esac
+    _autospec_conductor_accountability_event "$accountability_kind" \
+        "Conductor stopped after ${cycle} cycle(s)" \
+        "The terminal boundary records why autonomous mutation ended" \
+        "$reason" 1 || printf '[conductor] WARN: accountability terminal event journal failed\n' >&2
     if [ "$shape" = "signal" ]; then
         printf '[conductor] stopped: %s (cycle=%s)\n' "$reason" "$cycle" >&2
     else
@@ -1400,6 +1435,7 @@ autospec_conductor_run() {
     if [ -z "$_queue_bin" ]; then
         _queue_bin="$(command -v autospec 2>/dev/null || true)"
     fi
+    _AUTOSPEC_CONDUCTOR_ACCOUNTABILITY_BIN="$_queue_bin"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -2032,6 +2068,15 @@ fi'
         local _reason
         _reason="$(printf '%s' "$_tier_json" \
             | jq -r '.reason // ""' 2>/dev/null || echo "")"
+
+        if ! _autospec_conductor_accountability_event selected \
+            "Selected Tier ${_tier} action ${_action}" \
+            "The waterfall chose the highest-priority runnable workstream" \
+            "${_reason:-waterfall selection}" 0; then
+            printf '[conductor] HALT: accountability selection event journal failed\n' >&2
+            _stop_reason="accountability:journal-failed"
+            break
+        fi
 
         if { [ "$_action" = "run-explore-once" ] \
                 || [ "$_action" = "run-architecture-improvement" ] \
