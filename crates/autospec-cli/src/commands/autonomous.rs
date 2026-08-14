@@ -63,7 +63,9 @@ use one_shot_selector::{
 };
 #[allow(dead_code)]
 mod executor_bridge;
-pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
+pub(crate) mod platform_process;
+#[allow(unused_imports)]
+pub(crate) use platform_process::{current_boot_identity, observe_birth};
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
@@ -284,6 +286,13 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         )
     {
         return preview_launch(&options, launch_mode);
+    }
+    if matches!(
+        options.subcommand.as_str(),
+        "start" | "restart" | "resume"
+    ) {
+        platform_process::ensure_autonomous_runtime_supported()
+            .map_err(CommandFailure::diagnostic)?;
     }
     if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
         return run_foreground(options);
@@ -5739,60 +5748,32 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
 }
 
 fn process_identity(pid: &str) -> Option<ProcessIdentity> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let (_, fields) = stat.rsplit_once(") ")?;
-        let fields = fields.split_whitespace().collect::<Vec<_>>();
-        Some(ProcessIdentity {
-            pgid: fields.get(2)?.parse().ok()?,
-            start_time_ticks: fields.get(19)?.parse().ok()?,
-        })
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
-        let mut process = unsafe { std::mem::zeroed::<nix::libc::proc_bsdinfo>() };
-        let process_size = std::mem::size_of::<nix::libc::proc_bsdinfo>();
-        if unsafe {
-            nix::libc::proc_pidinfo(
-                pid,
-                nix::libc::PROC_PIDTBSDINFO,
-                0,
-                &mut process as *mut _ as *mut _,
-                i32::try_from(process_size).ok()?,
-            )
-        } != i32::try_from(process_size).ok()?
-        {
-            return None;
-        }
-        let seconds = process.pbi_start_tvsec.checked_mul(1_000_000)?;
-        let start_time_ticks = seconds.checked_add(process.pbi_start_tvusec)?;
-        return (start_time_ticks > 0).then_some(ProcessIdentity {
-            pgid: i32::try_from(process.pbi_pgid).ok()?,
+        let birth = platform_process::observe_birth(pid.parse().ok()?)
+            .ok()
+            .flatten()?;
+        #[cfg(target_os = "linux")]
+        let start_time_ticks = birth.start_identity.parse().ok()?;
+        #[cfg(target_os = "macos")]
+        let start_time_ticks = {
+            let (seconds, micros) = birth.start_identity.split_once('.')?;
+            seconds
+                .parse::<u64>()
+                .ok()?
+                .checked_mul(1_000_000)?
+                .checked_add(micros.parse().ok()?)?
+        };
+        return Some(ProcessIdentity {
+            pgid: i32::try_from(birth.process_group).ok()?,
             start_time_ticks,
         });
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let output = Command::new("ps")
-            .args(["-o", "pgid=,lstart=", "-p", pid])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let line = String::from_utf8(output.stdout).ok()?;
-        let mut fields = line.split_whitespace();
-        let pgid = fields.next()?.parse().ok()?;
-        let started = fields.collect::<Vec<_>>().join(" ");
-        let digest = sha256_hex(started.as_bytes());
-        Some(ProcessIdentity {
-            pgid,
-            start_time_ticks: u64::from_str_radix(digest.get(..16)?, 16).ok()?,
-        })
+        let _ = pid;
+        None
     }
 }
 
@@ -5825,21 +5806,11 @@ fn read_process_argv(path: &Path) -> Option<Vec<String>> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
-    let Ok(expected_pgid) = pid.parse::<i32>() else {
-        return false;
-    };
-    let Ok(output) = Command::new("ps").args(["-eo", "pgid=,args="]).output() else {
-        return false;
-    };
-    output.status.success()
-        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            fields.next().and_then(|value| value.parse::<i32>().ok()) == Some(expected_pgid)
-                && legacy_unit_argv_matches(name, &fields.map(str::to_string).collect::<Vec<_>>())
-        })
+fn legacy_process_group_matches(_name: &str, _pid: &str) -> bool {
+    false
 }
 
+#[cfg(target_os = "linux")]
 fn legacy_unit_argv_matches(name: &str, argv: &[String]) -> bool {
     let autospec_program = argv.iter().any(|argument| {
         Path::new(argument)

@@ -354,7 +354,17 @@ fn classify_startup_heartbeat_returns_snapshot_only_for_expired_dead_local_pid()
     std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn startup_heartbeat_process_identity_is_native_and_complete() {
+    let identity = claim::startup_process_identity(std::process::id())
+        .expect("observe startup heartbeat process identity");
+    assert!(!identity.0.is_empty(), "host identity must be present");
+    assert!(!identity.1.is_empty(), "boot identity must be present");
+    assert!(!identity.2.is_empty(), "start identity must be present");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live() {
     use claim::StartupHeartbeatClassification::Blocking;

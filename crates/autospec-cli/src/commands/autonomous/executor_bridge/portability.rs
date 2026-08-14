@@ -148,3 +148,24 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+mod autonomous_runtime_support_tests {
+    use crate::commands::autonomous::platform_process::ensure_autonomous_runtime_supported;
+
+    #[test]
+    fn unsupported_platform_rejects_autonomous_runtime_before_fixture_creation() {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-unsupported-runtime-{}",
+            std::process::id()
+        ));
+        let fixtures = [
+            root.join("layout"),
+            root.join("claim"),
+            root.join("accountability"),
+        ];
+        assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+        assert!(ensure_autonomous_runtime_supported().is_err());
+        assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+    }
+}

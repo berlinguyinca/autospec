@@ -1,7 +1,7 @@
 mod support;
 #[cfg(target_os = "linux")]
 mod heartbeat_startup;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod heartbeat_liveness;
 mod heartbeat_prior;
 mod heartbeat_classify;

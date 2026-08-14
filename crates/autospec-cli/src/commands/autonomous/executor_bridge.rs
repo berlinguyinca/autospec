@@ -25,6 +25,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::autonomous::gh_read::run_gh_read_with_retry_in;
+#[cfg(target_os = "linux")]
+use crate::commands::autonomous::platform_process::current_boot_identity;
+#[cfg(all(test, target_os = "linux"))]
+use crate::commands::autonomous::platform_process::observe_process_group;
+use crate::commands::autonomous::platform_process::{
+    observe_birth as observe_process_birth, ProcessBirth,
+};
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
@@ -63,7 +70,7 @@ use nix::sys::signal::Signal;
 #[cfg(target_os = "linux")]
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(target_os = "linux")]
-use nix::unistd::{fork, getpgid, pipe2, write as fd_write, ForkResult, Pid};
+use nix::unistd::{fork, pipe2, write as fd_write, ForkResult, Pid};
 use yaml_edit::Document;
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
@@ -8890,14 +8897,6 @@ impl ProcessIdentity {
             start_identity: self.start_identity.clone(),
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ProcessBirth {
-    pid: u32,
-    process_group: u32,
-    boot_id: String,
-    start_identity: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20013,67 +20012,6 @@ fn observe_process_identity_once(
     }
 }
 
-pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
-    observe_process_birth(pid).map(|birth| birth.map(|birth| (birth.boot_id, birth.start_identity)))
-}
-
-pub(crate) fn current_boot_identity() -> Result<String, String> {
-    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map_err(|error| format!("read executor boot identity: {error}"))?
-        .trim()
-        .to_string();
-    (!boot_id.is_empty())
-        .then_some(boot_id)
-        .ok_or_else(|| "executor boot identity is empty".to_string())
-}
-
-fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        return Err("executor process birth observation requires Linux /proc".to_string());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("read executor process stat: {error}")),
-        };
-        let close = stat
-            .rfind(')')
-            .ok_or_else(|| "executor process stat is malformed".to_string())?;
-        let fields: Vec<_> = stat[close + 1..].split_whitespace().collect();
-        let start_identity = fields
-            .get(19)
-            .ok_or_else(|| "executor process stat lacks start identity".to_string())?
-            .to_string();
-        let Some(process_group) = observe_process_group(pid)? else {
-            return Ok(None);
-        };
-        let boot_id = current_boot_identity()?;
-        Ok(Some(ProcessBirth {
-            pid,
-            process_group,
-            boot_id,
-            start_identity,
-        }))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn observe_process_group(pid: u32) -> Result<Option<u32>, String> {
-    let pid =
-        Pid::from_raw(i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?);
-    match getpgid(Some(pid)) {
-        Ok(group) => u32::try_from(group.as_raw())
-            .map(Some)
-            .map_err(|_| "executor process group is negative".to_string()),
-        Err(nix::errno::Errno::ESRCH) => Ok(None),
-        Err(error) => Err(format!("observe executor process group: {error}")),
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn terminate_exact_process_group(
     expected: &ProcessIdentity,
@@ -20103,10 +20041,7 @@ fn terminate_owned_forked_process_group(
 
 #[cfg(target_os = "linux")]
 fn process_table_entries() -> Result<Vec<(u32, ProcessBirth)>, String> {
-    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map_err(|error| format!("read executor boot identity: {error}"))?
-        .trim()
-        .to_string();
+    let boot_id = current_boot_identity()?;
     let mut entries = Vec::new();
     for entry in fs::read_dir("/proc").map_err(|error| format!("scan process table: {error}"))? {
         let entry = entry.map_err(|error| format!("scan process table entry: {error}"))?;

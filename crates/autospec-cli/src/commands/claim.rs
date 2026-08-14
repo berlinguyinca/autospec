@@ -4432,15 +4432,15 @@ fn startup_heartbeat_nonce(repo: &str, issue: u64, claim_id: &str) -> String {
     autospec_core::autonomous::waterfall::sha256_hex(&identity)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
-    let host = fs::read_to_string("/proc/sys/kernel/hostname")
-        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?
-        .trim()
-        .to_string();
-    let (boot_id, process_start) = super::autonomous::process_birth_identity(pid)
+    let host = local_host_identity()
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?;
+    let birth = super::autonomous::observe_birth(pid)
         .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat process: {error}")))?
         .ok_or_else(|| CommandFailure::diagnostic("heartbeat process identity disappeared"))?;
+    let boot_id = birth.boot_id;
+    let process_start = birth.start_identity;
     if host.is_empty() || boot_id.is_empty() || process_start.is_empty() {
         return Err(CommandFailure::diagnostic(
             "heartbeat process identity is incomplete",
@@ -4449,11 +4449,36 @@ fn startup_process_identity(pid: u32) -> Result<(String, String, String), Comman
     Ok((host, boot_id, process_start))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn startup_process_identity(_pid: u32) -> Result<(String, String, String), CommandFailure> {
     Err(CommandFailure::diagnostic(
-        "heartbeat process identity requires Linux /proc",
+        "heartbeat process identity requires Linux or macOS native process APIs",
     ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_host_identity() -> Result<String, String> {
+    let mut hostname = [0_u8; 256];
+    // SAFETY: `hostname` is a valid writable buffer and its exact length is supplied.
+    if unsafe {
+        nix::libc::gethostname(
+            hostname.as_mut_ptr().cast::<nix::libc::c_char>(),
+            hostname.len(),
+        )
+    } != 0
+    {
+        return Err(nix::errno::Errno::last().to_string());
+    }
+    let end = hostname
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| "hostname was truncated".to_string())?;
+    let hostname = std::str::from_utf8(&hostname[..end])
+        .map_err(|error| format!("hostname is not UTF-8: {error}"))?
+        .to_string();
+    (!hostname.is_empty())
+        .then_some(hostname)
+        .ok_or_else(|| "hostname is empty".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7014,7 +7039,7 @@ fn handoff_stale_heartbeat_path_with_hooks(
     Ok(copy)
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,
@@ -7023,27 +7048,25 @@ fn observe_local_startup_pid(
     boot_id: &str,
     process_start: &str,
 ) -> StartupPidLiveness {
-    let current_host = fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|host| host.trim().to_string());
-    let current_boot = super::autonomous::current_boot_identity().ok();
-    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
+    let current_host = local_host_identity().ok();
+    if current_host.as_deref() != Some(host) {
         return StartupPidLiveness::Unknown;
     }
-    match super::autonomous::process_birth_identity(pid) {
-        Ok(None) => return StartupPidLiveness::Dead,
-        Ok(Some((observed_boot, observed_start)))
-            if observed_boot == boot_id && observed_start == process_start => {}
-        Ok(Some(_)) | Err(_) => return StartupPidLiveness::Unknown,
-    }
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
-        Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
-        Err(nix::errno::Errno::ESRCH) => StartupPidLiveness::Dead,
-        Err(_) => StartupPidLiveness::Unknown,
+    match super::autonomous::platform_process::observe_expected(pid, boot_id, process_start) {
+        super::autonomous::platform_process::ProcessObservation::Dead => {
+            StartupPidLiveness::Dead
+        }
+        super::autonomous::platform_process::ProcessObservation::Exact(_) => {
+            StartupPidLiveness::Live
+        }
+        super::autonomous::platform_process::ProcessObservation::Mismatch
+        | super::autonomous::platform_process::ProcessObservation::Unknown(_) => {
+            StartupPidLiveness::Unknown
+        }
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,

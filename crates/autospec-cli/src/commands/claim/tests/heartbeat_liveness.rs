@@ -46,15 +46,15 @@ fn this_boot() -> String {
     super::super::super::autonomous::current_boot_identity().expect("boot identity")
 }
 
-/// The start identity /proc reports for a live pid — what a genuine heartbeat would record.
+/// The native start identity for a live pid — what a genuine heartbeat would record.
 fn start_identity_of(pid: u32) -> String {
-    super::super::super::autonomous::process_birth_identity(pid)
+    super::super::super::autonomous::observe_birth(pid)
         .expect("observe process")
         .expect("process is live")
-        .1
+        .start_identity
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_heartbeat_owned_by_a_live_process_is_not_gone() {
     let directory = sandbox("live");
@@ -67,7 +67,7 @@ fn a_heartbeat_owned_by_a_live_process_is_not_gone() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_heartbeat_owned_by_a_dead_process_is_gone() {
     let directory = sandbox("dead");
@@ -79,7 +79,7 @@ fn a_heartbeat_owned_by_a_dead_process_is_gone() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_dead_pid_from_another_boot_fails_closed() {
     let directory = sandbox("foreign-boot");
@@ -96,7 +96,7 @@ fn a_dead_pid_from_another_boot_fails_closed() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn an_unparseable_heartbeat_fails_closed() {
     let directory = sandbox("garbage");
@@ -108,7 +108,7 @@ fn an_unparseable_heartbeat_fails_closed() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_missing_heartbeat_fails_closed() {
     let directory = sandbox("absent");
@@ -118,13 +118,12 @@ fn a_missing_heartbeat_fails_closed() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn a_recycled_pid_within_this_boot_is_gone() {
+fn a_mismatched_pid_identity_fails_closed() {
     let directory = sandbox("recycled");
-    // The pid is live, but it belongs to a process born at a different moment than the one that
-    // wrote the heartbeat -- so the recorded owner exited and the number was reused. Without the
-    // start-identity comparison this would read as a live owner and wedge the claim just the same.
+    // The pid is live, but its immutable start identity does not match the heartbeat. That could
+    // be PID reuse or corrupt evidence, so the cleanup path must not guess which occurred.
     let pid = std::process::id();
     let path = heartbeat_with_start(&directory, pid, &this_boot(), "1");
     assert_ne!(
@@ -133,7 +132,7 @@ fn a_recycled_pid_within_this_boot_is_gone() {
         "fixture assumes a real start identity"
     );
     assert!(
-        claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
-        "a recycled pid is not the original owner"
+        !claim::heartbeat_liveness::startup_heartbeat_owner_is_gone(&path),
+        "identity mismatch is ambiguous and must not transfer cleanup authority"
     );
 }
