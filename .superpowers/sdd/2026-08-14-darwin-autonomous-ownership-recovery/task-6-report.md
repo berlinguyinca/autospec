@@ -229,3 +229,49 @@ it reports no finding in the new Darwin cancellation, reservation, or round-2 re
 - `cargo check -p autospec-cli --all-targets --target x86_64-unknown-linux-gnu` -> exit 0 with
   pre-existing warnings.
 - Targeted `rustfmt --check` and `git diff --check` -> exit 0.
+
+## Review fix round 4
+
+### RED evidence
+
+- With the blocked supervisor's barrier read side closed, the cancellation marker returned
+  `EPIPE` and the old early-return path left the exact child unreaped; `waitpid(WNOHANG)` still
+  observed its `SIGKILL` status instead of `ECHILD`.
+- Dropping an unreleased group while a cloned barrier writer remained open timed out after 250 ms,
+  proving `Drop` still depended on EOF and could hang behind a descriptor inherited by another
+  fork.
+- The EINTR regression initially failed compilation because cancellation had no retryable marker
+  boundary. The test retains a cloned writer, injects one `EINTR`, and therefore completes only if
+  the same thread retries the explicit `C` marker rather than falling back to EOF.
+- The first parallel EPIPE fixture exposed real fork semantics: a sibling supervisor inherited the
+  original pipe reader, so that pipe could not deterministically produce EPIPE. The final fixture
+  sends `C` to the real blocked supervisor, swaps in a separate pipe whose reader is explicitly
+  closed, and then exercises the production EPIPE cleanup path without cross-test dependence.
+
+### Implementation
+
+- Unreleased cancellation now retries its one-byte `C` marker on `EINTR`. Every terminal marker
+  outcome, including success, `EPIPE`, short write, and other errors, is retained while the local
+  writer is closed and bounded cleanup reaps the exact child and requires group `ESRCH`.
+- Marker failures are returned only after cleanup completes. If cleanup also fails, the result
+  contains both the original marker diagnostic and the cleanup diagnostic; neither is discarded.
+- Unreleased `Drop` uses the same explicit marker and bounded exact cleanup helper, so inherited
+  writer descriptors cannot hold it in an unbounded EOF wait and user code is never released.
+- The one-shot EINTR injection is thread-local, preserving the parallel-test isolation established
+  in round 3.
+
+### GREEN evidence
+
+- Normal parallel `cargo test -p autospec-cli --bin autospec darwin_` -> 10 consecutive clean
+  runs, 29 passed per run.
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 29 passed.
+- EPIPE cleanup, inherited-writer Drop, and EINTR retry exact tests -> 20/20 passes each.
+- `cargo test -p autospec-cli --bin autospec darwin_unreleased_ -- --test-threads=1` -> 7 passed.
+- `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
+- `cargo test -p autospec-cli --bin autospec darwin_reconciliation -- --test-threads=1` -> 4 passed.
+- Task 5 filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`, `heartbeat_prior`,
+  `heartbeat_quarantine`, `heartbeat_classify`, `conductor_lease_takeover`) -> 4, 1, 3, 6, 9,
+  and 13 tests passed respectively.
+- `cargo check -p autospec-cli --all-targets` and the `x86_64-unknown-linux-gnu` cross-target
+  variant -> exit 0 with pre-existing warnings.
+- Targeted `rustfmt --check` and `git diff --check` -> exit 0.

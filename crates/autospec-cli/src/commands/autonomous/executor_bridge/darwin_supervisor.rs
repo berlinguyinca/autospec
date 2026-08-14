@@ -25,6 +25,7 @@ const OBSERVATION_INTERVAL: Duration = Duration::from_millis(10);
 thread_local! {
     static FORCE_NEXT_TERMINATION_UNCERTAINTY: Cell<bool> = const { Cell::new(false) };
     static POLL_DEATH_RACE: Cell<Option<(u32, PollDeathRaceFence)>> = const { Cell::new(None) };
+    static CANCEL_MARKER_EINTR_ONCE: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -68,6 +69,22 @@ fn force_poll_death_after_initial_exit_read_for_test(
 ) -> PollDeathRaceGuard {
     POLL_DEATH_RACE.with(|race| race.set(Some((expected_pid, fence))));
     PollDeathRaceGuard
+}
+
+#[cfg(test)]
+struct CancelMarkerEintrGuard;
+
+#[cfg(test)]
+impl Drop for CancelMarkerEintrGuard {
+    fn drop(&mut self) {
+        CANCEL_MARKER_EINTR_ONCE.with(|fault| fault.set(false));
+    }
+}
+
+#[cfg(test)]
+fn force_cancel_marker_eintr_once_for_test() -> CancelMarkerEintrGuard {
+    CANCEL_MARKER_EINTR_ONCE.with(|fault| fault.set(true));
+    CancelMarkerEintrGuard
 }
 
 fn cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
@@ -374,21 +391,12 @@ impl DarwinOwnedGroup {
             .barrier
             .take()
             .ok_or_else(|| "Darwin launch was already released".to_string())?;
-        // An explicit non-release marker cannot be held open by writer descriptors inherited by
-        // concurrent forks, unlike cancellation that depends on observing pipe EOF.
-        fd_write(&barrier, b"C")
-            .map_err(|error| format!("cancel persisted Darwin launch barrier: {error}"))?;
-        drop(barrier);
         self.exec_status.take();
         let pid = self
             .supervisor_pid
             .take()
             .ok_or_else(|| "blocked Darwin launch has no reapable child".to_string())?;
-        reap_exact_child(pid)?;
-        if !group_is_empty(self.leader.process_group)? {
-            return Err("cancelled Darwin launch retained process-group membership".to_string());
-        }
-        Ok(())
+        cancel_blocked_group(barrier, pid, self.leader.process_group)
     }
 
     pub(super) fn abort_failed_release(self) -> Result<(), String> {
@@ -539,14 +547,68 @@ impl DarwinOwnedGroup {
 impl Drop for DarwinOwnedGroup {
     fn drop(&mut self) {
         // A still-owned barrier means the harness never received launch authority. Closing the
-        // barrier makes the blocked supervisor exit without executing user code; reap it so a
-        // persistence failure cannot leak a zombie or a runnable child. Released/adopted groups
-        // deliberately survive a parent crash for durable recovery.
-        if self.barrier.take().is_some() {
+        // barrier after an explicit cancellation marker makes the blocked supervisor exit without
+        // executing user code even when another fork inherited a writer. Reap it so a persistence
+        // failure cannot leak a zombie or runnable child. Released/adopted groups deliberately
+        // survive a parent crash for durable recovery.
+        if let Some(barrier) = self.barrier.take() {
+            self.exec_status.take();
             if let Some(pid) = self.supervisor_pid.take() {
-                let _ = reap_exact_child(pid);
+                let _ = cancel_blocked_group(barrier, pid, self.leader.process_group);
+            } else {
+                let _ = write_cancel_marker(&barrier);
             }
         }
+    }
+}
+
+fn write_cancel_marker(barrier: &OwnedFd) -> Result<(), String> {
+    loop {
+        #[cfg(test)]
+        let written = if CANCEL_MARKER_EINTR_ONCE.with(|fault| fault.replace(false)) {
+            Err(Errno::EINTR)
+        } else {
+            fd_write(barrier, b"C")
+        };
+        #[cfg(not(test))]
+        let written = fd_write(barrier, b"C");
+        match written {
+            Ok(1) => return Ok(()),
+            Ok(count) => {
+                return Err(format!(
+                    "cancel persisted Darwin launch barrier: wrote {count} of 1 bytes"
+                ))
+            }
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(format!("cancel persisted Darwin launch barrier: {error}")),
+        }
+    }
+}
+
+fn cancel_blocked_group(barrier: OwnedFd, pid: Pid, process_group: u32) -> Result<(), String> {
+    // An explicit non-release marker cannot be held open by writer descriptors inherited by
+    // concurrent forks, unlike cancellation that depends on observing pipe EOF.
+    let marker = write_cancel_marker(&barrier);
+    drop(barrier);
+    let cleanup = match wait_for_empty_group(process_group, Some(pid), KILL_GRACE) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("cancelled Darwin launch retained process-group membership".to_string()),
+        Err(error) => Err(error),
+    };
+    combine_cancel_results(marker, cleanup)
+}
+
+fn combine_cancel_results(
+    marker: Result<(), String>,
+    cleanup: Result<(), String>,
+) -> Result<(), String> {
+    match (marker, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(marker), Ok(())) => Err(marker),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(marker), Err(cleanup)) => Err(format!(
+            "{marker}; cancellation cleanup also failed: {cleanup}"
+        )),
     }
 }
 
@@ -951,6 +1013,114 @@ mod tests {
         );
         assert!(!root.join(marker).exists(), "cancelled user code executed");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_cancellation_epipe_still_reaps_and_proves_group_empty() {
+        let (mut group, root) = blocked_fixture("printf unexpected-user-code");
+        let identity = group.identity().clone();
+        let (closed_reader, closed_writer) = cloexec_pipe("closed cancellation test barrier")
+            .expect("create closed cancellation pipe");
+        drop(closed_reader);
+        let actual_writer = group
+            .barrier
+            .replace(closed_writer)
+            .expect("actual blocked launch barrier");
+        write_cancel_marker(&actual_writer).expect("cancel actual blocked supervisor");
+        drop(actual_writer);
+
+        let error = group
+            .cancel_unreleased()
+            .expect_err("closed barrier read side must preserve marker failure");
+        assert!(error.contains("Broken pipe"), "{error}");
+        assert_eq!(
+            waitpid(
+                Pid::from_raw(identity.pid as i32),
+                Some(WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD),
+            "cancel must reap the exact blocked supervisor after EPIPE"
+        );
+        assert!(group_is_empty(identity.process_group).expect("prove cancelled group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_drop_does_not_depend_on_barrier_writer_eof() {
+        let marker = "inherited-drop-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let identity = group.identity().clone();
+        let inherited_writer = group
+            .barrier
+            .as_ref()
+            .expect("blocked launch barrier")
+            .try_clone()
+            .expect("simulate inherited barrier writer");
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let dropped = thread::spawn(move || {
+            drop(group);
+            let _ = finished_tx.send(());
+        });
+
+        let prompt_result = finished_rx.recv_timeout(Duration::from_millis(250));
+        drop(inherited_writer);
+        dropped.join().expect("join blocked group drop");
+
+        prompt_result.expect("Drop waited for inherited barrier writer EOF");
+        assert!(!root.join(marker).exists(), "dropped user code executed");
+        assert_eq!(
+            waitpid(
+                Pid::from_raw(identity.pid as i32),
+                Some(WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD),
+            "Drop must reap the exact blocked supervisor"
+        );
+        assert!(group_is_empty(identity.process_group).expect("prove dropped group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_cancellation_retries_eintr_without_releasing_user_code() {
+        let marker = "eintr-cancel-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let identity = group.identity().clone();
+        let inherited_writer = group
+            .barrier
+            .as_ref()
+            .expect("blocked launch barrier")
+            .try_clone()
+            .expect("retain writer past cancellation");
+        let _eintr = force_cancel_marker_eintr_once_for_test();
+
+        group
+            .cancel_unreleased()
+            .expect("retry interrupted cancellation marker");
+
+        drop(inherited_writer);
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
+        assert_eq!(
+            waitpid(
+                Pid::from_raw(identity.pid as i32),
+                Some(WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD),
+            "cancel must reap exact supervisor after retried marker"
+        );
+        assert!(group_is_empty(identity.process_group).expect("prove cancelled group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_cancellation_combines_marker_and_cleanup_failures() {
+        assert_eq!(
+            combine_cancel_results(
+                Err("marker failed".to_string()),
+                Err("cleanup failed".to_string())
+            )
+            .unwrap_err(),
+            "marker failed; cancellation cleanup also failed: cleanup failed"
+        );
     }
 
     #[test]
