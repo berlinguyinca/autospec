@@ -5417,7 +5417,145 @@ fn prepare_heartbeat_root_parent_with_hook(
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn prepare_heartbeat_root_parent_with_hook(
+    root: &Path,
+    mut after_sync: impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmod, fstatat, mkdirat, Mode};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let invalid = || CommandFailure::diagnostic("heartbeat root must have a named parent");
+    let parent_path = root.parent().ok_or_else(&invalid)?;
+    let ancestor_path = parent_path.parent().ok_or_else(&invalid)?;
+    let component = parent_path.file_name().ok_or_else(invalid)?;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let ancestor = open(ancestor_path, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat parent ancestor: {error}"))
+    })?;
+    match openat(&ancestor, component, flags, Mode::empty()) {
+        Ok(parent) => {
+            let opened =
+                private_heartbeat_directory_identity(&parent, "root parent").or_else(|_| {
+                    after_sync("chmod")?;
+                    fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
+                        CommandFailure::diagnostic(format!(
+                            "could not protect heartbeat root parent: {error}"
+                        ))
+                    })?;
+                    nix::unistd::fsync(&parent).map_err(|error| {
+                        CommandFailure::diagnostic(format!(
+                            "could not sync heartbeat root parent: {error}"
+                        ))
+                    })?;
+                    after_sync("parent")?;
+                    private_heartbeat_directory_identity(&parent, "root parent")
+                })?;
+            sync_heartbeat_parent_ancestor(&ancestor, &mut after_sync)?;
+            let current =
+                fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "could not revalidate heartbeat root parent: {error}"
+                    ))
+                })?;
+            if (
+                current.st_dev as u64,
+                current.st_ino as u64,
+                current.st_uid as u32,
+                current.st_mode as u32 & 0o7777,
+            ) != (opened.device, opened.inode, opened.owner, opened.mode)
+            {
+                return Err(CommandFailure::diagnostic(
+                    "heartbeat root parent identity changed during preparation",
+                ));
+            }
+            return Ok(());
+        }
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open heartbeat root parent: {error}"
+            )))
+        }
+    }
+
+    let staging = format!(
+        ".autospec-heartbeat-stage-{}-{}",
+        std::process::id(),
+        UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    mkdirat(&ancestor, staging.as_str(), Mode::from_bits_truncate(0o700)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not stage heartbeat root parent: {error}"))
+    })?;
+    let mut published = false;
+    let prepared = (|| {
+        let expected =
+            normalize_staged_heartbeat_root_parent_macos(&ancestor, &staging, &mut after_sync)?;
+        after_sync("before-publish")?;
+        let staging_c = std::ffi::CString::new(staging.as_bytes()).map_err(|_| {
+            CommandFailure::diagnostic("staged heartbeat parent name contains a NUL byte")
+        })?;
+        let component_c = std::ffi::CString::new(component.as_bytes()).map_err(|_| {
+            CommandFailure::diagnostic("heartbeat root parent name contains a NUL byte")
+        })?;
+        // SAFETY: both names are single-component C strings and the bound ancestor stays open.
+        let result = unsafe {
+            nix::libc::renameatx_np(
+                ancestor.as_raw_fd(),
+                staging_c.as_ptr(),
+                ancestor.as_raw_fd(),
+                component_c.as_ptr(),
+                nix::libc::RENAME_EXCL,
+            )
+        };
+        if result != 0 {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not publish heartbeat root parent: {}",
+                nix::errno::Errno::last()
+            )));
+        }
+        published = true;
+        sync_heartbeat_parent_ancestor(&ancestor, &mut after_sync)?;
+        let current =
+            fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not revalidate heartbeat root parent: {error}"
+                ))
+            })?;
+        if (
+            current.st_dev as u64,
+            current.st_ino as u64,
+            current.st_uid as u32,
+            current.st_mode as u32 & 0o7777,
+        ) != (
+            expected.device,
+            expected.inode,
+            expected.owner,
+            expected.mode,
+        ) {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat root parent identity changed during publication",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        if published {
+            return Err(error);
+        }
+        return Err(cleanup_staged_heartbeat_parent(
+            &ancestor,
+            &staging,
+            error,
+            &mut after_sync,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn prepare_heartbeat_root_parent_with_hook(
     root: &Path,
     mut after_sync: impl FnMut(&'static str) -> Result<(), CommandFailure>,
@@ -5507,7 +5645,7 @@ fn prepare_heartbeat_root_parent_with_hook(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sync_heartbeat_parent_ancestor(
     ancestor: &impl std::os::fd::AsFd,
     boundary: &mut impl FnMut(&'static str) -> Result<(), CommandFailure>,
@@ -5519,7 +5657,7 @@ fn sync_heartbeat_parent_ancestor(
     boundary("ancestor")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cleanup_staged_heartbeat_parent(
     ancestor: &impl std::os::fd::AsFd,
     staging: &str,
@@ -5544,6 +5682,76 @@ fn cleanup_staged_heartbeat_parent(
         ));
     }
     original
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_staged_heartbeat_root_parent_macos(
+    ancestor: &impl std::os::fd::AsFd,
+    staging: &str,
+    boundary: &mut impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
+    use nix::fcntl::{openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmodat, fstatat, FchmodatFlags, Mode, SFlag};
+
+    let before = fstatat(ancestor, staging, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not inspect staged heartbeat root parent: {error}"
+        ))
+    })?;
+    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR)
+        || before.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent must be owned by the effective user",
+        ));
+    }
+    boundary("chmod")?;
+    fchmodat(
+        ancestor,
+        staging,
+        Mode::from_bits_truncate(0o700),
+        FchmodatFlags::NoFollowSymlink,
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not make staged heartbeat root parent accessible: {error}"
+        ))
+    })?;
+    let normalized = fstatat(ancestor, staging, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not revalidate staged heartbeat root parent: {error}"
+        ))
+    })?;
+    if (normalized.st_dev, normalized.st_ino) != (before.st_dev, before.st_ino)
+        || normalized.st_uid != before.st_uid
+        || normalized.st_mode & 0o7777 != 0o700
+    {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent identity changed during normalization",
+        ));
+    }
+    let parent = openat(
+        ancestor,
+        staging,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not open staged heartbeat root parent: {error}"
+        ))
+    })?;
+    let opened = private_heartbeat_directory_identity(&parent, "root parent")?;
+    if (opened.device, opened.inode) != (before.st_dev as u64, before.st_ino as u64) {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent identity changed before descriptor binding",
+        ));
+    }
+    nix::unistd::fsync(&parent).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
+    })?;
+    boundary("parent")?;
+    Ok(opened)
 }
 
 #[cfg(target_os = "linux")]
@@ -6646,18 +6854,35 @@ fn rename_heartbeat_no_clobber(
     target: &impl std::os::fd::AsFd,
     target_name: &str,
 ) -> Result<(), CommandFailure> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(target_os = "linux")]
     {
-        nix::fcntl::renameat2(
-            source,
-            source_name,
-            target,
-            target_name,
-            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-        )
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not hand off startup heartbeat: {error}"))
-        })
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source_name = std::ffi::CString::new(source_name.as_bytes())
+            .map_err(|_| CommandFailure::diagnostic("heartbeat source name contains a NUL byte"))?;
+        let target_name = std::ffi::CString::new(target_name)
+            .map_err(|_| CommandFailure::diagnostic("heartbeat target name contains a NUL byte"))?;
+        // SAFETY: Linux exposes renameat2 as a syscall on both GNU and musl targets; names and
+        // descriptors remain valid for the call and RENAME_NOREPLACE preserves no-clobber.
+        let result = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_renameat2,
+                source.as_fd().as_raw_fd(),
+                source_name.as_ptr(),
+                target.as_fd().as_raw_fd(),
+                target_name.as_ptr(),
+                nix::libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(CommandFailure::diagnostic(format!(
+                "could not hand off startup heartbeat: {}",
+                nix::errno::Errno::last()
+            )))
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -6687,7 +6912,7 @@ fn rename_heartbeat_no_clobber(
             )))
         }
     }
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (source, source_name, target, target_name);
         Err(CommandFailure::diagnostic(

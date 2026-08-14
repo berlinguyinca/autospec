@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use super::support::inject_heartbeat_boundary;
 use super::support::{startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV};
 use crate::commands::claim;
@@ -246,7 +246,7 @@ fn startup_heartbeat_atomic_publication() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn heartbeat_root_parent_bootstrap_and_migration_are_durable() {
     use std::os::unix::fs::symlink;
@@ -300,7 +300,7 @@ fn heartbeat_root_parent_bootstrap_and_migration_are_durable() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn startup_heartbeat_restrictive_umask() {
     use nix::sys::stat::{umask, Mode};
@@ -311,7 +311,7 @@ fn startup_heartbeat_restrictive_umask() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "commands::claim::tests::startup_heartbeat_restrictive_umask",
+                "commands::claim::tests::heartbeat_startup::startup_heartbeat_restrictive_umask",
                 "--nocapture",
             ])
             .env(CHILD, "1")
