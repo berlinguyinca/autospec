@@ -2,20 +2,20 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
-#[cfg(target_os = "linux")]
-use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
 use super::super::{
     build_implementer_prompt, write_invocation_atomic, PersistedInvocation, ProcessIdentity,
 };
 #[cfg(target_os = "linux")]
+use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
+#[cfg(target_os = "linux")]
 use super::support_base::test_environment;
-use super::support_base::{GitFixture, test_root};
+use super::support_base::{test_root, GitFixture};
+use super::support_invocation::persisted_invocation;
 #[cfg(target_os = "linux")]
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state,
 };
-use super::support_invocation::persisted_invocation;
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

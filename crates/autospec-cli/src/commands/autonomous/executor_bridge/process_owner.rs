@@ -514,8 +514,11 @@ mod tests {
                 .map(|argument| argument.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
         });
-        std::fs::write("empty-environment-observation.json", observation.to_string())
-            .expect("write empty-environment child observation");
+        std::fs::write(
+            "empty-environment-observation.json",
+            observation.to_string(),
+        )
+        .expect("write empty-environment child observation");
     }
 
     #[cfg(unix)]
@@ -582,8 +585,7 @@ mod tests {
         while !matches!(
             std::fs::read_to_string(&marker),
             Ok(ref body) if body == "readyterm"
-        )
-            && std::time::Instant::now() < deadline
+        ) && std::time::Instant::now() < deadline
         {
             thread::sleep(Duration::from_millis(10));
         }

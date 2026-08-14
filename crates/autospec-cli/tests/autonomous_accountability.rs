@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 #[path = "../src/commands/autonomous/accountability.rs"]
 #[allow(dead_code)]
 mod accountability;

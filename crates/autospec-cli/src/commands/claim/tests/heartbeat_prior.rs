@@ -2,13 +2,13 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+use super::support::STARTUP_HEARTBEAT_ENV;
+use super::support::{expected_startup_heartbeat, startup_heartbeat_fixture};
+use crate::commands::claim;
 use autospec_core::claim::RunStateRecord;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use crate::commands::claim;
-use super::support::STARTUP_HEARTBEAT_ENV;
-use super::support::{expected_startup_heartbeat, startup_heartbeat_fixture};
 
 #[cfg(not(target_os = "linux"))]
 #[test]
@@ -204,11 +204,10 @@ fn heartbeat_directory_openat2() {
     let (outside, _) = startup_heartbeat_fixture("openat2-outside");
     make_child(&outside);
     symlink(&outside, trusted.join("parent-link")).expect("descendant parent symlink");
-    assert!(claim::open_heartbeat_directory_beneath(
-        &parent,
-        Path::new("parent-link/heartbeat")
-    )
-    .is_err());
+    assert!(
+        claim::open_heartbeat_directory_beneath(&parent, Path::new("parent-link/heartbeat"))
+            .is_err()
+    );
     assert!(claim::open_heartbeat_directory_beneath(&parent, Path::new("")).is_err());
     assert!(claim::open_heartbeat_directory_beneath(&parent, &trusted_child).is_err());
     assert!(claim::open_heartbeat_directory_beneath(&parent, Path::new("../escape")).is_err());
@@ -261,8 +260,7 @@ fn heartbeat_directory_openat2() {
         &anchored_parent,
         Path::new("heartbeat"),
         || {
-            std::fs::rename(&replaceable_child, &displaced_child)
-                .expect("displace trusted child");
+            std::fs::rename(&replaceable_child, &displaced_child).expect("displace trusted child");
             std::fs::rename(&replacement_child, &replaceable_child)
                 .expect("install replacement child");
         },
@@ -327,8 +325,7 @@ fn startup_heartbeat_portable_unix() {
         Path::new("heartbeat"),
         || {
             std::fs::rename(&trusted_child, &displaced).expect("displace trusted child");
-            std::fs::rename(&replacement_child, &trusted_child)
-                .expect("install replacement child");
+            std::fs::rename(&replacement_child, &trusted_child).expect("install replacement child");
         },
     );
     assert!(swapped.is_err(), "changed name binding was accepted");
@@ -383,9 +380,7 @@ fn startup_heartbeat_process_identity() {
     std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
     std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "0");
     let path = root
-        .join(super::super::super::autonomous::drain::repository_progress_key(
-            "owner/repo",
-        ))
+        .join(super::super::super::autonomous::drain::repository_progress_key("owner/repo"))
         .join("42.json");
     let publish = |claim_id, session_id| {
         claim::write_startup_heartbeat(
@@ -409,15 +404,8 @@ fn startup_heartbeat_process_identity() {
     let mut last = None;
     for worker in ["worker-a", "opaque worker:with/slash"] {
         std::fs::remove_file(&path).unwrap();
-        claim::write_startup_heartbeat(
-            "owner/repo",
-            42,
-            worker,
-            "feat/worker",
-            "claim-a",
-            None,
-        )
-        .unwrap();
+        claim::write_startup_heartbeat("owner/repo", 42, worker, "feat/worker", "claim-a", None)
+            .unwrap();
         let document = std::fs::read(&path).unwrap();
         let evidence = claim::parse_startup_heartbeat(&document).unwrap();
         assert_eq!(evidence.worker_id, worker);

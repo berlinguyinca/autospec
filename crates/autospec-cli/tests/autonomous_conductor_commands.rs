@@ -1,3 +1,6 @@
+#![cfg(unix)]
+#![allow(dead_code)]
+
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
@@ -15,14 +18,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[path = "support/autonomous_accountability_acquisition.rs"] mod autonomous_accountability_acquisition;
+#[path = "support/autonomous_accountability_acquisition.rs"]
+mod autonomous_accountability_acquisition;
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 
-#[cfg(target_os = "linux")] #[path = "support/foreground_fixture_git.rs"] mod foreground_fixture_git;
-#[cfg(target_os = "linux")] use foreground_fixture_git::seed_preserved_issue_branch;
+#[cfg(target_os = "linux")]
+#[path = "support/foreground_fixture_git.rs"]
+mod foreground_fixture_git;
+#[cfg(target_os = "linux")]
+use foreground_fixture_git::seed_preserved_issue_branch;
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -6646,7 +6653,13 @@ printf '%s\n' '[]' > "$report"
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
-            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/foreground_accountability_gh.sh"))
+            .env(
+                "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/foreground_accountability_gh.sh"
+                ),
+            )
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))

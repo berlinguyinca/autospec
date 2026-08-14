@@ -92,7 +92,9 @@ fn issue_lint_still_reports_body_too_long_when_non_ui_prose_exceeds_400_words() 
         "expected BODY_TOO_LONG at {non_ui_word_count} words, got {rows:?}"
     );
     assert!(
-        !rows.iter().any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
+        !rows
+            .iter()
+            .any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
         "all five UI sections are present; UI_SECTIONS_INCOMPLETE should not fire: {rows:?}"
     );
 }
@@ -177,7 +179,6 @@ fn issue_lint_preserves_ui_missing_section_order() {
     );
 }
 
-
 /// A UI heading carrying trailing whitespace is still excluded from the word count.
 /// `has_heading` accepts trailing whitespace when deciding the section is present, so
 /// the exclusion has to accept it too; if the two disagree the section counts against
@@ -211,7 +212,9 @@ fn issue_lint_excludes_ui_sections_whose_headings_have_trailing_whitespace() {
     // And the headings must still register as present, or this would pass because the
     // sections went invisible to both checks rather than because they are exempt.
     assert!(
-        !found.iter().any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
+        !found
+            .iter()
+            .any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
         "the same headings must satisfy the section-presence check: {found:?}"
     );
 }

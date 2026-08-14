@@ -2,12 +2,12 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::super::premerge;
 use super::super::HarnessInvocation;
-use super::support_base::{GitFixture, git, git_stdout, test_environment};
+use super::support_base::{git, git_stdout, test_environment, GitFixture};
 use super::support_invocation::shell_invocation;
 use super::support_launch::{completed_generation_bundle, run_process_generation_producer};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

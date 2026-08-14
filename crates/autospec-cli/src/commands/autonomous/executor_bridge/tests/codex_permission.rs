@@ -2,9 +2,12 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, HarnessConfig, HarnessKind};
-use super::support_base::{environment, git, installed_aliases, test_environment, test_root, write_alias_table, write_executable};
+use super::support_base::{
+    environment, git, installed_aliases, test_environment, test_root, write_alias_table,
+    write_executable,
+};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -114,7 +117,8 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
         executable: codex,
         opencode_adapter: None,
         codex_sandbox: policy,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
     let invocation = harness
         .invocation(
@@ -430,7 +434,8 @@ fn autonomous_executor_bridge_codex_sandbox_cleanup_skips_failing_probe() {
         executable: PathBuf::from("/missing/codex"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
     let called = std::cell::Cell::new(false);
     bridge::configure_codex_sandbox_for_phase(&mut harness, BridgePhase::CleanupPending, |_| {

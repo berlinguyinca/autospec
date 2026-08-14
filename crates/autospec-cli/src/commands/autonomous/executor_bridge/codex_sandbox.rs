@@ -8,7 +8,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CodexSandboxPolicy {
+pub(crate) enum CodexSandboxPolicy {
     Default,
     NetworkPermissionProfile,
 }

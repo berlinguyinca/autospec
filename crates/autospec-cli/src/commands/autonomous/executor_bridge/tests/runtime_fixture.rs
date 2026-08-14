@@ -2,14 +2,16 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     provision_issue_worktree, recover_invocation, resolve_base, runtime_session_adapter,
     validate_trusted_ownership, write_invocation_atomic, BridgeIdentity, BridgePhase, HarnessKind,
     PersistedInvocation,
 };
-use super::support_base::{GitFixture, TEST_SEQUENCE, git, observe_spawned_identity, test_environment};
+use super::support_base::{
+    git, observe_spawned_identity, test_environment, GitFixture, TEST_SEQUENCE,
+};
 use super::support_invocation::{persisted_invocation, session_record_ids};
+use crate::commands::autonomous::executor_bridge as bridge;
 use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,7 +40,7 @@ fn autonomous_executor_bridge_rejects_foreign_symlink_and_detached_reuse() {
     let fixture = GitFixture::new("unsafe-reuse");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let foreign_scope = format!("foreign_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let scope_path = PathBuf::from("/tmp/autospec-executor")
+    let scope_path = bridge::executor_worktree_root()
         .join(bridge::safe_scope(&foreign_scope).expect("safe scope"));
     fs::create_dir_all(&scope_path).expect("create scope");
     fs::create_dir_all(fixture.root.join("foreign")).expect("create foreign directory");

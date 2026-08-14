@@ -240,9 +240,7 @@ fn startup_heartbeat_atomic_publication() {
         )
     };
     assert!(attempt(43, "session-b", prepared, ("session", "before-link")).is_err());
-    assert!(
-        !repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists()
-    );
+    assert!(!repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists());
 
     std::fs::remove_file(&issue).unwrap();
     let transaction_umask = umask(Mode::from_bits_truncate(0o777));
@@ -430,9 +428,7 @@ fn startup_heartbeat_restrictive_umask() {
         }
         Ok(())
     };
-    assert!(
-        claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err()
-    );
+    assert!(claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err());
     assert!(
         parent.is_dir(),
         "published parent remains pending durability"

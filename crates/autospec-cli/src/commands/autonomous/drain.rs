@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
@@ -398,10 +399,13 @@ fn termination_attempt_end(
 fn spawn_child(options: &Options) -> Result<Child, CommandFailure> {
     let input = DrainExecutorInput::omx_autospec_run(&options.repo_dir)
         .map_err(CommandFailure::diagnostic)?;
-    Command::new(input.program())
+    let mut command = Command::new(input.program());
+    command
         .args(input.arguments())
-        .current_dir(&options.repo_dir)
-        .process_group(0)
+        .current_dir(&options.repo_dir);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1075,13 +1079,11 @@ fn gh_output<const N: usize>(
     arguments: [&str; N],
     watched_child: &mut Child,
 ) -> Result<GithubOutput, CommandFailure> {
-    let mut observer = match Command::new("gh")
-        .args(arguments)
-        .process_group(0)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    let mut command = Command::new("gh");
+    command.args(arguments);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut observer = match command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
         Ok(child) => child,
         Err(_) => return Ok(GithubOutput::Unavailable),
     };
@@ -1123,10 +1125,13 @@ fn gh_output<const N: usize>(
 }
 
 fn stop_observer(observer: &mut Child) {
-    let process_group = format!("-{}", observer.id());
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &process_group])
-        .status();
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", observer.id());
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &process_group])
+            .status();
+    }
     let _ = observer.kill();
     let _ = observer.wait();
 }
@@ -1199,7 +1204,7 @@ fn child_exit_code_json(decision: DrainDecision) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::time::{Duration, Instant};

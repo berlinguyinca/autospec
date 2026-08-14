@@ -2,13 +2,13 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::claim;
+#[cfg(target_os = "linux")]
+use super::support::STARTUP_HEARTBEAT_ENV;
 use super::support::{
     assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
     startup_heartbeat_fixture,
 };
-#[cfg(target_os = "linux")]
-use super::support::STARTUP_HEARTBEAT_ENV;
+use crate::commands::claim;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
@@ -314,7 +314,10 @@ fn a_fresh_heartbeat_whose_owner_is_dead_is_taken_over() {
     );
 
     assert!(
-        matches!(classified, claim::StartupHeartbeatClassification::ExpiredDead(_)),
+        matches!(
+            classified,
+            claim::StartupHeartbeatClassification::ExpiredDead(_)
+        ),
         "a dead owner inside its TTL must still yield the claim: {classified:?}"
     );
     assert!(

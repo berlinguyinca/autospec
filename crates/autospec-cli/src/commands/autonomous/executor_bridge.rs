@@ -13,6 +13,8 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as WindowsFileExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Child;
@@ -25,15 +27,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::autonomous::gh_read::run_gh_read_with_retry_in;
+use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
     transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
-    ClaimRefreshResult,
-    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
+    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
+    ExecutorSuccessBinding,
 };
-#[cfg(target_os = "linux")]
-use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
@@ -46,7 +47,6 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
-#[cfg(target_os = "linux")]
 use autospec_core::lint::implementation::parse_blocking_hook_failure;
 use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
 use autospec_core::lint::{
@@ -1000,7 +1000,6 @@ pub(crate) fn legacy_bridge_proves_claim(
     Ok(proven)
 }
 
-#[cfg(target_os = "linux")]
 fn run_executor_bridge_with_codex_probe_observed(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
@@ -1861,8 +1860,10 @@ fn ensure_premerge_and_review(
             40,
         )?;
     }
-    if matches!(state.phase, BridgePhase::CiPassed | BridgePhase::ReviewPassed)
-        && review_receipt_path(&request.state_path, state)?.exists()
+    if matches!(
+        state.phase,
+        BridgePhase::CiPassed | BridgePhase::ReviewPassed
+    ) && review_receipt_path(&request.state_path, state)?.exists()
     {
         let snapshot = state.clone();
         if refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Review)? == BridgeClaimOwnership::Lost
@@ -4569,12 +4570,8 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
             request.stall_timeout,
         )?;
-        let integration = produce_integration_smoke_evidence(
-            &request,
-            &smoke,
-            &observations,
-            &attempt_root,
-        )?;
+        let integration =
+            produce_integration_smoke_evidence(&request, &smoke, &observations, &attempt_root)?;
         observations.extend(integration.observations);
         verify_exact_evidence_lane(
             request.state,
@@ -5135,10 +5132,10 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
                 "executor package full suite is incomplete: scripts missing".to_string()
             })?;
         for required in ["lint", "typecheck", "test", "build"] {
-            if !scripts
+            if scripts
                 .get(required)
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|script| !script.trim().is_empty())
+                .is_none_or(|script| script.trim().is_empty())
             {
                 return Err(format!(
                     "executor package full suite is incomplete: script {required} missing"
@@ -6459,6 +6456,51 @@ fn archive_reconciled_direct_failure(paths: &DirectAttemptPaths) -> Result<(), S
     finish_direct_failure_archive(paths, &archive)
 }
 
+fn read_exact_at_portable(
+    file: &File,
+    mut buffer: &mut [u8],
+    mut offset: u64,
+) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        #[cfg(unix)]
+        let count = file.read_at(buffer, offset)?;
+        #[cfg(windows)]
+        let count = file.seek_read(buffer, offset)?;
+        if count == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        offset += count as u64;
+        buffer = &mut buffer[count..];
+    }
+    Ok(())
+}
+
+fn read_at_portable(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        file.read_at(buffer, offset)
+    }
+    #[cfg(windows)]
+    {
+        file.seek_read(buffer, offset)
+    }
+}
+
+fn write_all_at_portable(file: &File, mut buffer: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        #[cfg(unix)]
+        let count = file.write_at(buffer, offset)?;
+        #[cfg(windows)]
+        let count = file.seek_write(buffer, offset)?;
+        if count == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
+        offset += count as u64;
+        buffer = &buffer[count..];
+    }
+    Ok(())
+}
+
 fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Result<u64, String> {
     let cursor = read_output_cursor(
         &OpenOptions::new()
@@ -6471,11 +6513,11 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
     }
     let mut bytes = vec![0_u8; cursor.total as usize];
     File::open(ring_path)
-        .and_then(|file| file.read_exact_at(&mut bytes, 0))
+        .and_then(|file| read_exact_at_portable(&file, &mut bytes, 0))
         .map_err(|error| format!("read direct output ring: {error}"))?;
     output
         .set_len(0)
-        .and_then(|_| output.write_all_at(&bytes, 0))
+        .and_then(|_| write_all_at_portable(output, &bytes, 0))
         .and_then(|_| output.sync_all())
         .map_err(|error| format!("persist direct output artifact: {error}"))?;
     Ok(cursor.total)
@@ -6838,7 +6880,12 @@ fn validate_platform_direct_quarantine(paths: &DirectAttemptPaths) -> Result<(),
     direct_ownership_disproven_markers(paths).map(|_| ())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    windows
+))]
 pub(crate) fn execute_direct_plan(
     worktree: &Path,
     plan: &DirectCommandPlan,
@@ -9669,7 +9716,7 @@ where
         {
             continue;
         }
-        let expected_path = PathBuf::from("/tmp/autospec-executor")
+        let expected_path = executor_worktree_root()
             .join(safe_scope(&state.identity.repository)?)
             .join(format!("issue-{}", state.identity.issue));
         if state.identity.worktree != expected_path || !claim_is_active(&state)? {
@@ -11148,10 +11195,11 @@ fn write_draft_release_intent(
         .parent()
         .ok_or_else(|| "executor draft release intent requires a parent".to_string())?;
     ensure_private_directory(parent)?;
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&path)
         .map_err(|error| format!("create executor draft release intent: {error}"))?;
     file.write_all(draft_release_digest(state, process).as_bytes())
@@ -12453,7 +12501,6 @@ fn revalidate_merge_admission(
                         .base_ref
                         .strip_prefix("origin/")
                         .unwrap_or_default()
-                && candidate.head_ref_name == state.identity.branch
                 && pull_request_body_matches_state(&candidate.body, state)
         })
         .collect::<Vec<_>>();
@@ -15961,12 +16008,11 @@ fn decode_output_cursor(record: &[u8; OUTPUT_CURSOR_SLOT_BYTES as usize]) -> Opt
     .then_some(cursor)
 }
 
-#[cfg(unix)]
 fn read_output_cursor(file: &File) -> Result<OutputCursor, String> {
     let mut newest = None;
     for slot in 0..2_u64 {
         let mut record = [0_u8; OUTPUT_CURSOR_SLOT_BYTES as usize];
-        match file.read_exact_at(&mut record, slot * OUTPUT_CURSOR_SLOT_BYTES) {
+        match read_exact_at_portable(file, &mut record, slot * OUTPUT_CURSOR_SLOT_BYTES) {
             Ok(()) => {
                 if let Some(cursor) = decode_output_cursor(&record) {
                     if newest
@@ -15984,12 +16030,11 @@ fn read_output_cursor(file: &File) -> Result<OutputCursor, String> {
     newest.ok_or_else(|| "executor output cursor has no valid durable slot".to_string())
 }
 
-#[cfg(unix)]
 fn write_output_cursor(file: &File, mut cursor: OutputCursor) -> Result<OutputCursor, String> {
     cursor.generation = cursor.generation.saturating_add(1);
     let record = encode_output_cursor(cursor);
     let slot = cursor.generation % 2;
-    file.write_all_at(&record, slot * OUTPUT_CURSOR_SLOT_BYTES)
+    write_all_at_portable(file, &record, slot * OUTPUT_CURSOR_SLOT_BYTES)
         .map_err(|error| format!("write executor output cursor: {error}"))?;
     file.sync_data()
         .map_err(|error| format!("sync executor output cursor: {error}"))?;
@@ -18365,24 +18410,25 @@ fn read_supervisor_journal(
     Ok(Some((attempt_id, identity)))
 }
 
-#[cfg(unix)]
 fn open_private_file(path: &Path, truncate: bool) -> Result<File, String> {
     reject_symlink_path(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| "executor output sink requires a parent".to_string())?;
     ensure_private_directory(parent)?;
-    OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .create(true)
         .read(true)
         .write(true)
-        .truncate(truncate)
-        .mode(0o600)
+        .truncate(truncate);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
         .open(path)
         .map_err(|error| format!("open private executor file {}: {error}", path.display()))
 }
 
-#[cfg(unix)]
 struct OutputPumpFiles {
     stdout: File,
     stderr: File,
@@ -18391,7 +18437,6 @@ struct OutputPumpFiles {
     exit_status: File,
 }
 
-#[cfg(unix)]
 fn prepare_output_pump(paths: &OutputSinkPaths) -> Result<OutputPumpFiles, String> {
     let stdout = open_private_file(&paths.stdout, true)?;
     let stderr = open_private_file(&paths.stderr, true)?;
@@ -19617,7 +19662,7 @@ fn read_executor_exit_status_record(
         .map_err(|error| format!("open executor exit record: {error}"))?;
     let read_record = || {
         let mut record = [0_u8; 16];
-        file.read_exact_at(&mut record, 0).map(|()| record)
+        read_exact_at_portable(&file, &mut record, 0).map(|()| record)
     };
     let candidate = match read_record() {
         Ok(record) => record,
@@ -19793,31 +19838,33 @@ impl DurableOutputReaders {
                     .min(buffer.len())
                     .min((writer.total - stream.offset) as usize)
                     .min((OUTPUT_SINK_LIMIT - ring_position) as usize);
-                let count = match stream.file.read_at(&mut buffer[..requested], ring_position) {
-                    Ok(0) => {
-                        self.io_failed = true;
-                        self.pending.push(OutputEvent {
-                            stream: stream.name,
-                            line: "executor output ring ended before durable cursor".to_string(),
-                            truncated: false,
-                            io_error: true,
-                            dropped: 0,
-                        });
-                        break;
-                    }
-                    Ok(count) => count,
-                    Err(error) => {
-                        self.io_failed = true;
-                        self.pending.push(OutputEvent {
-                            stream: stream.name,
-                            line: format!("executor output read failed: {error}"),
-                            truncated: false,
-                            io_error: true,
-                            dropped: 0,
-                        });
-                        break;
-                    }
-                };
+                let count =
+                    match read_at_portable(&stream.file, &mut buffer[..requested], ring_position) {
+                        Ok(0) => {
+                            self.io_failed = true;
+                            self.pending.push(OutputEvent {
+                                stream: stream.name,
+                                line: "executor output ring ended before durable cursor"
+                                    .to_string(),
+                                truncated: false,
+                                io_error: true,
+                                dropped: 0,
+                            });
+                            break;
+                        }
+                        Ok(count) => count,
+                        Err(error) => {
+                            self.io_failed = true;
+                            self.pending.push(OutputEvent {
+                                stream: stream.name,
+                                line: format!("executor output read failed: {error}"),
+                                truncated: false,
+                                io_error: true,
+                                dropped: 0,
+                            });
+                            break;
+                        }
+                    };
                 let consumed = frame_output_bytes(stream, &buffer[..count], &mut self.pending);
                 stream.offset += consumed as u64;
                 remaining -= consumed;
@@ -20130,10 +20177,11 @@ fn append_executor_event(
                 .map_err(|error| format!("rotate executor event log: {error}"))?;
         }
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(path)
         .map_err(|error| format!("open executor event log: {error}"))?;
     file.write_all(&record)
@@ -20171,7 +20219,7 @@ fn observe_process_identity_once(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (pid, _expected_argv_digest);
-        return Err("executor process identity observation requires Linux /proc".to_string());
+        Err("executor process identity observation requires Linux /proc".to_string())
     }
     #[cfg(target_os = "linux")]
     {
@@ -20283,7 +20331,12 @@ pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)
 #[cfg(target_os = "freebsd")]
 pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
     let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;
-    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_PROC, nix::libc::KERN_PROC_PID, pid];
+    let mut mib = [
+        nix::libc::CTL_KERN,
+        nix::libc::KERN_PROC,
+        nix::libc::KERN_PROC_PID,
+        pid,
+    ];
     let mut info = std::mem::MaybeUninit::<nix::libc::kinfo_proc>::zeroed();
     let mut length = std::mem::size_of::<nix::libc::kinfo_proc>();
     // SAFETY: sysctl receives a valid MIB and correctly sized writable output buffer.
@@ -20396,9 +20449,8 @@ pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)
     let mut kernel = FileTime { low: 0, high: 0 };
     let mut user = FileTime { low: 0, high: 0 };
     // SAFETY: process is an owned valid handle and all FILETIME pointers are writable.
-    let result = unsafe {
-        GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user)
-    };
+    let result =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
     // SAFETY: process was returned by OpenProcess and is closed exactly once.
     unsafe { CloseHandle(process) };
     if result == 0 {
@@ -20435,7 +20487,7 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
-        return Err("executor process birth observation requires Linux /proc".to_string());
+        Err("executor process birth observation requires Linux /proc".to_string())
     }
     #[cfg(target_os = "linux")]
     {
@@ -20850,7 +20902,7 @@ fn provision_issue_worktree_for_claim(
         fs::canonicalize(repo).map_err(|error| format!("canonicalize repository: {error}"))?;
     let scope = safe_scope(repository_scope)?;
     let branch = format!("feat/autonomous-issue-{issue}");
-    let executor_root = PathBuf::from("/tmp/autospec-executor");
+    let executor_root = executor_worktree_root();
     harden_executor_worktree_root(&canonical_repo, &executor_root)?;
     let scope_root = executor_root.join(scope);
     ensure_private_directory(&scope_root)?;
@@ -21521,8 +21573,7 @@ fn adopted_transfer_reaches_recovered_head(
 }
 
 fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
-    let expected_scope =
-        PathBuf::from("/tmp/autospec-executor").join(safe_scope(&state.identity.repository)?);
+    let expected_scope = executor_worktree_root().join(safe_scope(&state.identity.repository)?);
     let expected_worktree = expected_scope.join(format!("issue-{}", state.identity.issue));
     if state.identity.worktree != expected_worktree {
         return Err(
@@ -22420,6 +22471,15 @@ fn safe_scope(scope: &str) -> Result<String, String> {
     Ok(format!("{sanitized}-{}", &digest[..12]))
 }
 
+pub(crate) fn executor_worktree_root() -> PathBuf {
+    let root = PathBuf::from("/tmp/autospec-executor");
+    #[cfg(target_os = "macos")]
+    if let Ok(canonical_tmp) = fs::canonicalize("/tmp") {
+        return canonical_tmp.join("autospec-executor");
+    }
+    root
+}
+
 fn ensure_private_directory(path: &Path) -> Result<(), String> {
     reject_symlink_path(path)?;
     #[cfg(unix)]
@@ -22545,6 +22605,13 @@ fn reject_symlink_path(path: &Path) -> Result<(), String> {
         current.push(component);
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
+                #[cfg(target_os = "macos")]
+                if current == Path::new("/tmp")
+                    && fs::canonicalize(&current)
+                        .is_ok_and(|target| target == Path::new("/private/tmp"))
+                {
+                    continue;
+                }
                 return Err(format!(
                     "executor path contains a symlink: {}",
                     current.display()
@@ -23411,7 +23478,7 @@ mod trusted_git;
 use trusted_git::*;
 
 mod accountability_lifecycle;
-#[cfg(target_os = "linux")] pub(crate) use accountability_lifecycle::*;
+pub(crate) use accountability_lifecycle::*;
 
 // The continuation checkpoint: preserving a run that outgrew the patch-size gate or met only
 // some of its criteria, and carrying the rest forward as child issues. `use continuation::*`
@@ -23419,13 +23486,11 @@ mod accountability_lifecycle;
 mod continuation;
 use continuation::*;
 mod continuation_children;
-#[cfg(any(test, target_os = "linux"))]
 use continuation_children::*;
 
 // Cross-platform executable identity plus the fail-closed non-Linux executor boundary.
 mod portability;
-#[cfg(not(target_os = "linux"))]
-pub(crate) use portability::run_executor_bridge;
+use portability::resolve_executor_supervisor_executable;
 #[cfg(not(target_os = "linux"))]
 use portability::{
     create_draft_pull_request, reconcile_direct_launch,
@@ -23436,7 +23501,6 @@ use portability::{
     execute_supervised_direct_attempt, interrupted_direct_terminal,
     validate_platform_direct_quarantine,
 };
-use portability::resolve_executor_supervisor_executable;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

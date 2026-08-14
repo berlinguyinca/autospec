@@ -2,12 +2,12 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     supervise_harness, HarnessKind, MutationSnapshot, SupervisionConfig, SupervisionOutcome,
 };
 use super::support_base::GitFixture;
 use super::support_invocation::{shell_invocation, supervision_config, supervision_state};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -294,7 +294,8 @@ fn autonomous_executor_bridge_production_entry_rejects_foreign_worktree() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
 
     let error = bridge::supervise_resolved_harness(
@@ -329,7 +330,8 @@ fn autonomous_executor_bridge_production_entry_rejects_foreign_artifact() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
 
     let error = bridge::supervise_resolved_harness(
@@ -369,7 +371,8 @@ fn autonomous_executor_bridge_production_entry_rejects_symlinked_artifact() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
 
     let error = bridge::supervise_resolved_harness(

@@ -2,18 +2,20 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     provision_issue_worktree, recover_invocation, resolve_base, write_invocation_atomic,
     BridgeIdentity, BridgePhase, HarnessKind, PersistedInvocation,
 };
-use super::support_base::{GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment, test_root, write_executable};
+use super::support_base::{
+    git, git_stdout, test_environment, test_root, write_executable, GitFixture, TEST_SEQUENCE,
+};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, persisted_invocation, supervision_state,
 };
 use super::support_launch::{
     automatic_review_command, direct_failure_archive_count, rewrite_direct_terminal_as_signal,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::Ordering;

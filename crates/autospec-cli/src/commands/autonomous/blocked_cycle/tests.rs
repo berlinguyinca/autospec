@@ -3,8 +3,6 @@
 // Split out of blocked_cycle.rs to keep that file inside the size ratchet.
 
 use super::*;
-
-use super::*;
 use autospec_core::coordination::{ConductorScope, BLOCKED_BACKLOG_THRESHOLD};
 
 fn blocked_foreground_state(issue: u64, reason: &str) -> ConductorState {

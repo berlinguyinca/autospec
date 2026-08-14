@@ -2,9 +2,9 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::{test_environment, write_executable, zero_effect_classifier_fixture};
 use super::support_invocation::implementation_proof_fixture;
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 use std::path::PathBuf;
 
@@ -69,9 +69,7 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
         !bridge::recovery_needs_runtime(&runtime_state, true),
         "marked zero-effect recovery must not reattach a released runtime"
     );
-    environment.zero_effect_recovery(
-        bridge::ZeroEffectRecoveryFailpoint::AfterRuntimeClose,
-    );
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterRuntimeClose);
     let runtime_crash =
         bridge::prepare_zero_effect_retry(&runtime_state_path, &runtime_state, None)
             .expect_err("interrupt after durable runtime close");
@@ -255,6 +253,26 @@ fn autonomous_executor_bridge_terminal_label_projects_real_github_metadata() {
             "issue\nview\n42\n--repo\n{repository}\n--json\nlabels\n--jq\n\
              {{labels: [.labels[] | {{name: .name}}]}}\n"
         )
+    );
+}
+
+#[cfg(all(not(target_os = "linux"), unix))]
+#[test]
+fn released_predecessor_advances_through_executor_on_supported_host() {
+    // Break caught: restoring the non-Linux admission stub rejects an exact released
+    // predecessor before its already-complete invocation can publish a terminal receipt.
+    let (result, receipt_exists, _, _) =
+        run_complete_terminal_label_fixture("portable-released-predecessor", "metadata");
+
+    let outcome = result.expect("portable autonomous run");
+    assert!(matches!(
+        outcome.status,
+        bridge::BridgeRunStatus::Retryable { ref reason }
+            if reason == "executor_zero_effect_completion"
+    ));
+    assert!(
+        receipt_exists,
+        "portable terminal receipt was not published"
     );
 }
 
@@ -468,9 +486,7 @@ fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_cr
     )
     .expect("seed active worktree ownership");
 
-    environment.zero_effect_recovery(
-        bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
-    );
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition);
     let interrupted = bridge::finalize_failed_executor_with_transition(
         &state_path,
         &mut state,

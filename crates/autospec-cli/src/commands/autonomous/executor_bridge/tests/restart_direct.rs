@@ -2,8 +2,10 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+use super::support_base::{
+    test_environment, write_executable, DirectCrashFixtureCleanup, GitFixture,
+};
 use crate::commands::autonomous::executor_bridge as bridge;
-use super::support_base::{DirectCrashFixtureCleanup, GitFixture, test_environment, write_executable};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::collections::BTreeMap;

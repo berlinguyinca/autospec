@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use autospec_core::autonomous::no_work::NoWorkTier;
 
 #[path = "support/foreground_waterfall_fixture.rs"]

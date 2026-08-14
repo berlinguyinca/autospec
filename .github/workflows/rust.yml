@@ -38,14 +38,19 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
-        run: cargo test -p autospec-core --lib
+        run: |
+          cargo test -p autospec-core --lib
+          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
+          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
+          cargo test -p autospec-cli --bin autospec portability -- --nocapture
+          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
         # Deterministic inline unit tests only. Integration tests under
         # tests/*.rs and the executor_bridge inline suite invoke shell
         # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
         # bubblewrap) that are absent or flaky on a bare GitHub runner; the
         # full suite runs in the local target-repo validation gate.
 
-  macos-build:
+  macos-test:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -67,8 +72,68 @@ jobs:
       - name: Check autospec CLI
         run: cargo check -p autospec-cli
 
+      - name: Test portable autonomous ownership
+        run: |
+          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
+          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
+          cargo test -p autospec-cli --bin autospec portability -- --nocapture
+          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
+
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check autospec CLI and tests
+        run: cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc
+
+      - name: Test portable autonomous ownership
+        run: |
+          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
+          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
+          cargo test -p autospec-cli --bin autospec portability -- --nocapture
+          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+
+      - name: Build release autospec CLI
+        run: cargo build --release -p autospec-cli
+
+  freebsd-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test autospec CLI inside FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          prepare: |
+            pkg install -y curl git
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            cargo check -p autospec-cli
+            cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
+            cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
+            cargo test -p autospec-cli --bin autospec portability -- --nocapture
+            cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+            cargo build --release -p autospec-cli
 
   audit:
     runs-on: ubuntu-latest

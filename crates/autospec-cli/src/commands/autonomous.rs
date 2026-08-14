@@ -49,10 +49,10 @@ mod accountability_runtime;
 use accountability_runtime::*;
 mod blocked_cycle;
 mod foreground_failure;
-mod lifecycle_stop_notice;
 mod launch;
-use launch::*;
+mod lifecycle_stop_notice;
 use foreground_failure::ForegroundFailure;
+use launch::*;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
 mod main_health_output;
@@ -785,7 +785,10 @@ fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
         );
     }
     if options.follow && options.json {
-        return Err("--json is not supported with --follow; use autospec autonomous status --json".to_string());
+        return Err(
+            "--json is not supported with --follow; use autospec autonomous status --json"
+                .to_string(),
+        );
     }
     if options.subcommand == "resume" && options.epic.is_none() {
         return Err("autospec autonomous resume requires --epic N".to_string());
@@ -2213,7 +2216,9 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 Some(lease) => finish_foreground_with_lease(
                     &layout,
                     lease,
-                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(
+                        error,
+                    ))),
                 ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
@@ -2226,7 +2231,9 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 Some(lease) => finish_foreground_with_lease(
                     &layout,
                     lease,
-                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(
+                        error,
+                    ))),
                 ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
@@ -3302,7 +3309,10 @@ fn execute_foreground_dispatch(
                 accountability::EventKind::ImplementationStarted {
                     issue: selection.issue,
                 },
-                format!("Started isolated implementation for issue {}", selection.issue),
+                format!(
+                    "Started isolated implementation for issue {}",
+                    selection.issue
+                ),
                 "Implementation intent must be durable before the executor mutates its worktree",
                 format!("issue {} executor invocation is next", selection.issue),
             )?,
@@ -4090,10 +4100,10 @@ impl ExecutorRequest {
             let mut attempts = 0;
             loop {
                 #[cfg(target_os = "linux")]
-                let result = executor_bridge::run_executor_bridge_observed(
-                    &self.bridge,
-                    |boundary| record_bridge_accountability_boundary(layout, issue, boundary),
-                );
+                let result =
+                    executor_bridge::run_executor_bridge_observed(&self.bridge, |boundary| {
+                        record_bridge_accountability_boundary(layout, issue, boundary)
+                    });
                 #[cfg(not(target_os = "linux"))]
                 let result = executor_bridge::run_executor_bridge(&self.bridge);
                 match result {

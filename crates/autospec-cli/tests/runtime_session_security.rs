@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};

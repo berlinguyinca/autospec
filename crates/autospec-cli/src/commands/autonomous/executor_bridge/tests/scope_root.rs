@@ -2,9 +2,11 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::resolve_base;
-use super::support_base::{GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment, zero_effect_classifier_fixture};
+use super::support_base::{
+    git, git_stdout, test_environment, zero_effect_classifier_fixture, GitFixture, TEST_SEQUENCE,
+};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
@@ -267,9 +269,7 @@ fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker(
         "read-only classification must not persist the recovery marker"
     );
 
-    environment.zero_effect_recovery(
-        bridge::ZeroEffectRecoveryFailpoint::AfterScopeCreate,
-    );
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterScopeCreate);
     let interrupted = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("interrupt after exact scope recreation");
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
@@ -444,7 +444,7 @@ fn autonomous_executor_bridge_provisioning_hardens_root_before_scope_creation() 
         "provision-root-hardening-{}",
         TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
-    let scope_root = PathBuf::from("/tmp/autospec-executor")
+    let scope_root = bridge::executor_worktree_root()
         .join(bridge::safe_scope(&repository_scope).expect("safe scope"));
 
     bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.store(1, Ordering::SeqCst);

@@ -2,12 +2,12 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::{git_stdout, test_root, write_executable, GitFixture};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, supervision_state,
 };
 use super::support_launch::{adapter_path, prepared_draft_transaction};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;

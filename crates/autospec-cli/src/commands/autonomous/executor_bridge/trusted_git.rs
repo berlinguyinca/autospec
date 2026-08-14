@@ -34,7 +34,9 @@ impl TrustedWorktreeGit {
     }
 }
 
-pub(super) fn trusted_worktree_git(state: &PersistedInvocation) -> Result<TrustedWorktreeGit, String> {
+pub(super) fn trusted_worktree_git(
+    state: &PersistedInvocation,
+) -> Result<TrustedWorktreeGit, String> {
     trusted_worktree_git_paths(&state.identity.repository_path, &state.identity.worktree)
 }
 
@@ -476,7 +478,9 @@ pub(super) fn sandboxed_executor_diff(state: &PersistedInvocation) -> Result<Vec
     sandboxed_executor_diff_with_binding(&binding)
 }
 
-pub(super) fn sandboxed_executor_diff_with_binding(binding: &TrustedWorktreeGit) -> Result<Vec<u8>, String> {
+pub(super) fn sandboxed_executor_diff_with_binding(
+    binding: &TrustedWorktreeGit,
+) -> Result<Vec<u8>, String> {
     let output = binding
         .command()
         .args([
@@ -600,7 +604,10 @@ pub(super) fn reject_external_filters(binding: &TrustedWorktreeGit) -> Result<()
     Ok(())
 }
 
-pub(super) fn resolve_signing_program(binding: &TrustedWorktreeGit, program: &str) -> Result<PathBuf, String> {
+pub(super) fn resolve_signing_program(
+    binding: &TrustedWorktreeGit,
+    program: &str,
+) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(program);
     let resolved = if candidate.components().count() > 1 {
         let candidate = if candidate.is_absolute() {

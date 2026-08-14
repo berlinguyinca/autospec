@@ -765,7 +765,13 @@ pub(crate) fn recover_for_conductor(
         || record.issue != issue
         || !matches!(
             record.state.as_str(),
-            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human" | "available"
+            "claimed"
+                | "merged"
+                | "released"
+                | "failed"
+                | "retryable"
+                | "needs-human"
+                | "available"
         )
     {
         return Err(CommandFailure::diagnostic(
@@ -1066,7 +1072,10 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
         if let Err(error) = heartbeat_predecessor::retire(&repo, options.issue, prior.as_ref()) {
-            eprintln!("WARN: predecessor heartbeat retirement deferred: {}", error.message);
+            eprintln!(
+                "WARN: predecessor heartbeat retirement deferred: {}",
+                error.message
+            );
             return unavailable_claim(
                 options.issue,
                 &repo,
@@ -2541,7 +2550,20 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     )
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn with_released_bridge_predecessor_authority<T>(
+    identity: ClaimMutationIdentity<'_>,
+    operation: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<Option<T>, CommandFailure> {
+    if recover_released_bridge_claim(identity)? {
+        operation().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
 fn with_retained_bridge_predecessor_authority<T>(
     _identity: ClaimMutationIdentity<'_>,
     _observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -4174,13 +4196,7 @@ fn write_startup_heartbeat(
         &mut |_, _| Ok(()),
     );
     #[cfg(not(target_os = "linux"))]
-    heartbeat_portable::publish(
-        &_root,
-        repo,
-        issue,
-        session_id,
-        _body.as_bytes(),
-    )
+    heartbeat_portable::publish(&_root, repo, issue, session_id, _body.as_bytes())
 }
 
 #[cfg(target_os = "linux")]
@@ -5682,7 +5698,10 @@ fn classify_startup_heartbeat_snapshot(
     {
         return StartupHeartbeatClassification::Blocking;
     }
-    StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot { file, evidence }))
+    StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot {
+        file,
+        evidence,
+    }))
 }
 
 // These descriptor-only primitives remain inert until guarded recovery integrates them.

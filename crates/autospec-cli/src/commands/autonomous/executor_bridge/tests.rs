@@ -1,4 +1,5 @@
 // executor_bridge tests.
+#![allow(dead_code, unused_imports)]
 //
 // This was one 23,719-line file. The size gate had been telling us to split it for a long
 // time and finally made it unavoidable: an oversized file may not grow, so a verified

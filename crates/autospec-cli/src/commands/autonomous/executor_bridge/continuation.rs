@@ -98,7 +98,10 @@ impl ContinuationReceipt {
     }
 }
 
-pub(super) fn continuation_receipt_path(state_path: &Path, head_oid: &str) -> Result<PathBuf, String> {
+pub(super) fn continuation_receipt_path(
+    state_path: &Path,
+    head_oid: &str,
+) -> Result<PathBuf, String> {
     if !canonical_git_oid(head_oid) {
         return Err("executor continuation receipt path requires a canonical head OID".to_string());
     }
@@ -196,7 +199,11 @@ pub(super) fn prepare_continuation_checkpoint(
     }))
 }
 
-pub(super) fn continuation_event_marker_path(state_path: &Path, binding: &str, stage: &str) -> PathBuf {
+pub(super) fn continuation_event_marker_path(
+    state_path: &Path,
+    binding: &str,
+    stage: &str,
+) -> PathBuf {
     state_path.with_extension(format!("continuation-event.{binding}.{stage}.json"))
 }
 

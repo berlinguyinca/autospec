@@ -2,8 +2,18 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super::{SessionBindingIdentity, claim_settle_millis, publish_session_binding};
-use autospec_core::autonomous_lifecycle::{ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope, WorkerId};
+use super::super::{claim_settle_millis, publish_session_binding, SessionBindingIdentity};
+#[cfg(target_os = "linux")]
+use super::support::{
+    anchored_startup_heartbeat_fixture, expected_startup_heartbeat, expired_heartbeat_snapshot,
+    mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+};
+use super::support::{claim_record, lifecycle_evidence};
+use crate::commands::claim;
+use autospec_core::autonomous_lifecycle::{
+    ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope,
+    WorkerId,
+};
 use autospec_core::claim::RemoteComment;
 #[cfg(unix)]
 use std::io::Write;
@@ -11,14 +21,6 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use crate::commands::claim;
-#[cfg(target_os = "linux")]
-use super::support::{
-    anchored_startup_heartbeat_fixture, expected_startup_heartbeat,
-    expired_heartbeat_snapshot, mutate_retained, startup_heartbeat_document,
-    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
-};
-use super::support::{claim_record, lifecycle_evidence};
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -27,8 +29,7 @@ fn startup_heartbeat_retained_handoff() {
     for race in
         "before-check before-rename after-rename collision malformed fifo hardlink".split(' ')
     {
-        let (parent, repo_path, source, repo, snapshot) =
-            anchored_startup_heartbeat_fixture(race);
+        let (parent, repo_path, source, repo, snapshot) = anchored_startup_heartbeat_fixture(race);
         let replacement = repo_path.join("replacement");
         std::fs::write(&replacement, b"foreign").unwrap();
         std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -62,11 +63,8 @@ fn startup_heartbeat_retained_handoff() {
                 } else if boundary == race {
                     if race == "after-rename" {
                         std::fs::write(&source, b"foreign").unwrap();
-                        std::fs::set_permissions(
-                            &source,
-                            std::fs::Permissions::from_mode(0o600),
-                        )
-                        .unwrap();
+                        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
                     } else {
                         std::fs::rename(&replacement, &source).unwrap();
                     }
@@ -193,8 +191,7 @@ fn retained_bridge_predecessor_authority_is_exact_and_boundary_bound() {
         )
         .unwrap(),
     );
-    let repo =
-        claim::open_heartbeat_directory_beneath(&root_fd, Path::new(&repo_name)).unwrap();
+    let repo = claim::open_heartbeat_directory_beneath(&root_fd, Path::new(&repo_name)).unwrap();
     let archive = claim::handoff_retained_heartbeat(
         &repo_path,
         &repo,

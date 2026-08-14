@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use autospec_core::coordination::{ConductorEvent, ConductorPhase, ConductorScope, ConductorState};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

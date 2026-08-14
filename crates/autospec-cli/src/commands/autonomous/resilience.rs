@@ -1565,6 +1565,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[allow(dead_code)]
     fn acquisition_does_not_claim_when_core_policy_parks_or_rejects() {
         let capacity_root = test_root("capacity");
         let capacity = test_store(&capacity_root);

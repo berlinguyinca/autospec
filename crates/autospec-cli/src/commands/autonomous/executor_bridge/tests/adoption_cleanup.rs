@@ -2,12 +2,15 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome};
-use super::support_base::{DetachedForkedCleanup, DetachedSupervisorCleanup, GitFixture, observe_spawned_identity, test_environment, test_root};
+use super::support_base::{
+    observe_spawned_identity, test_environment, test_root, DetachedForkedCleanup,
+    DetachedSupervisorCleanup, GitFixture,
+};
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state, NonDescendantDirectFixture,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::collections::BTreeMap;

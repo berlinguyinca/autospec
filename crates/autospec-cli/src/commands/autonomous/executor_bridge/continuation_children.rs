@@ -287,7 +287,9 @@ pub(super) fn publish_continuation_children(
     Ok((umbrella, parent.map_or(children[0], |_| receipt.issue)))
 }
 
-pub(super) fn recover_bound_continuation(state: &PersistedInvocation) -> Result<Option<(u64, u64)>, String> {
+pub(super) fn recover_bound_continuation(
+    state: &PersistedInvocation,
+) -> Result<Option<(u64, u64)>, String> {
     let (Some(umbrella), Some(current_child)) = (state.umbrella, state.current_child) else {
         return Ok(None);
     };

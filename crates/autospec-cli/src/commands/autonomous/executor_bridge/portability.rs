@@ -1,16 +1,10 @@
 use super::*;
 
-#[cfg(not(target_os = "linux"))]
-const LINUX_EXECUTOR_REQUIRED: &str = "executor supervision requires Linux pidfd ownership";
-
-#[cfg(not(target_os = "linux"))]
-fn require_linux_executor_supervision() -> Result<(), String> {
-    Err(LINUX_EXECUTOR_REQUIRED.to_string())
-}
-
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+
+    static TEST_ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct DirectFixture {
         root: PathBuf,
@@ -77,7 +71,7 @@ mod windows_tests {
 
     #[test]
     fn direct_plan_resolves_pathext_wrapper_through_canonical_cmd() {
-        let _environment = super::super::tests::TEST_ENVIRONMENT
+        let _environment = TEST_ENVIRONMENT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = DirectFixture::new();
@@ -131,14 +125,6 @@ mod windows_tests {
                 .expect("UTF-8 wrapper path")
         ));
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn run_executor_bridge(
-    _request: &ExecutorBridgeRequest,
-) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
-    unreachable!("non-Linux executor admission always fails")
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
@@ -534,33 +520,238 @@ pub(super) fn execute_supervised_direct_attempt(
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn create_draft_pull_request<Refresh>(
-    _state_path: &Path,
-    _state: &mut PersistedInvocation,
-    _body: &str,
-    _issue_title: &str,
-    _base: &str,
-    _adapter: &DraftPrAdapter,
-    _refresh: &mut Refresh,
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    body: &str,
+    issue_title: &str,
+    base: &str,
+    adapter: &DraftPrAdapter,
+    refresh: &mut Refresh,
 ) -> Result<(), BridgeRunFailure>
 where
     Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
 {
-    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
-    unreachable!("non-Linux executor admission always fails")
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err(BridgeRunFailure::ownership_lost(
+            "executor draft creation lost exact claim ownership",
+        ));
+    }
+    let body_path = state_path.with_file_name(format!(
+        "draft-body-{}-{}.md",
+        state.identity.invocation_id,
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_private_create_once(&body_path, body.as_bytes(), "executor draft body")?;
+    let executable = resolve_draft_executable(adapter)?;
+    let args = vec![
+        "pr".into(),
+        "create".into(),
+        "--repo".into(),
+        state.identity.repository.clone(),
+        "--draft".into(),
+        "--head".into(),
+        state.identity.branch.clone(),
+        "--base".into(),
+        base.into(),
+        "--title".into(),
+        issue_title.into(),
+        "--body-file".into(),
+        body_path.to_string_lossy().into_owned(),
+    ];
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let stderr_path = state_path.with_extension("draft.stderr");
+    let spawn = process_owner::OwnedChildTree::spawn_prepared(
+        process_owner::PreparedLaunchSpec::inherited(
+            executable.clone(),
+            std::iter::once(executable.into_os_string())
+                .chain(args.iter().map(OsString::from))
+                .collect(),
+            Some(state.identity.worktree.clone()),
+            adapter.environment.clone().into_iter().collect(),
+            Some(File::open(null).map_err(|error| format!("open draft null input: {error}"))?),
+            Some(
+                File::create(state_path.with_extension("draft.stdout"))
+                    .map_err(|error| format!("create draft stdout: {error}"))?,
+            ),
+            Some(
+                File::create(&stderr_path)
+                    .map_err(|error| format!("create draft stderr: {error}"))?,
+            ),
+        ),
+        format!("draft-{}", state.identity.invocation_id),
+    );
+    let mut owned = match spawn {
+        Ok(owned) => owned,
+        Err(error) => {
+            let _ = fs::remove_file(&body_path);
+            return Err(BridgeRunFailure::transient(format!(
+                "launch executor draft pull request: {error}"
+            )));
+        }
+    };
+    let status = owned.wait();
+    let _ = fs::remove_file(&body_path);
+    let status = status.map_err(|error| {
+        BridgeRunFailure::transient(format!("wait for executor draft pull request: {error}"))
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+        Err(BridgeRunFailure::transient(format!(
+            "create executor draft pull request failed: {}",
+            stderr.trim()
+        )))
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn supervise_validated_harness_with_claim_renewal(
-    _state_path: &Path,
-    _event_log: &Path,
-    _state: &mut PersistedInvocation,
-    _harness: Option<&ValidatedInvocation>,
-    _snapshot: &MutationSnapshot,
-    _config: SupervisionConfig,
-    _renewal: ClaimRenewalSchedule,
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: Option<&ValidatedInvocation>,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    mut renewal: ClaimRenewalSchedule,
 ) -> Result<SupervisionOutcome, String> {
-    require_linux_executor_supervision()?;
-    unreachable!("non-Linux executor admission always fails")
+    if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
+        return Err("executor supervision intervals must be non-zero".to_string());
+    }
+    let sinks = output_sink_paths_for_state(state_path, state)?;
+    if state.supervisor.is_some() || state.process.is_some() || sinks.supervisor_identity.exists() {
+        state.phase = BridgePhase::Interrupted;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        append_executor_event(
+            event_log,
+            state,
+            "child_recovery_required",
+            Some(serde_json::json!({
+                "reason": "durable process identity has no live in-process owner; ownership quarantined without signalling"
+            })),
+        )?;
+        return Err(
+            "executor ownership is quarantined; portable recovery cannot adopt a PID".to_string(),
+        );
+    }
+    if renewal.is_enabled() {
+        match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+            Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                renewal.mark_refreshed(ttl_seconds)
+            }
+            Ok(BridgeClaimOwnership::Lost) => {
+                record_claim_ownership_loss(state_path, event_log, state)?;
+                return Ok(SupervisionOutcome::OwnershipLost);
+            }
+            Err(error) => return Ok(SupervisionOutcome::TransientFailure(error)),
+        }
+    }
+    let harness = harness.ok_or_else(|| {
+        "executor recovery exhausted durable identities before fresh harness resolution".to_string()
+    })?;
+    state.phase = BridgePhase::Pending;
+    state.supervisor = None;
+    state.process = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    let stdout =
+        File::create(&sinks.stdout).map_err(|error| format!("create executor stdout: {error}"))?;
+    let stderr =
+        File::create(&sinks.stderr).map_err(|error| format!("create executor stderr: {error}"))?;
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut argv = Vec::with_capacity(harness.args.len() + 1);
+    argv.push(
+        harness
+            .argv_zero
+            .clone()
+            .unwrap_or_else(|| harness.program.clone().into_os_string()),
+    );
+    argv.extend(harness.args.iter().map(OsString::from));
+    let mut owned = process_owner::OwnedChildTree::spawn_prepared(
+        process_owner::PreparedLaunchSpec::inherited(
+            harness.program.clone(),
+            argv,
+            Some(harness.current_dir.clone()),
+            harness.environment_overrides.clone(),
+            Some(File::open(null).map_err(|error| format!("open executor null input: {error}"))?),
+            Some(stdout),
+            Some(stderr),
+        ),
+        state.identity.invocation_id.clone(),
+    )?;
+    let owner = owned.identity();
+    write_private_create_once(
+        &sinks.supervisor_identity,
+        owner
+            .document(&state.identity.invocation_id, &argv_digest(&harness.args))
+            .as_bytes(),
+        "portable executor owner",
+    )?;
+    state.phase = BridgePhase::Implementing;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    append_executor_event(event_log, state, "child_started", None)?;
+    let mut observed = (0, 0);
+    let mut last_progress = Instant::now();
+    loop {
+        thread::sleep(config.poll_interval);
+        if let Some(status) = owned.try_wait()? {
+            let _ = fs::remove_file(&sinks.supervisor_identity);
+            snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+            let exit_code = status.code().unwrap_or(1);
+            state.phase = if exit_code == 0 {
+                BridgePhase::ImplementationComplete
+            } else {
+                BridgePhase::Interrupted
+            };
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            append_executor_event(
+                event_log,
+                state,
+                "child_exited",
+                Some(serde_json::json!({"exit_code": exit_code, "adopted": false})),
+            )?;
+            return Ok(SupervisionOutcome::Exited { exit_code });
+        }
+        let sizes = (
+            fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
+            fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
+        );
+        if sizes != observed {
+            observed = sizes;
+            last_progress = Instant::now();
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+        }
+        if renewal.is_due() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+                Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                    renewal.mark_refreshed(ttl_seconds)
+                }
+                Ok(BridgeClaimOwnership::Lost) => {
+                    owned.terminate()?;
+                    let _ = fs::remove_file(&sinks.supervisor_identity);
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+                Err(error) => {
+                    owned.terminate()?;
+                    return Ok(SupervisionOutcome::TransientFailure(error));
+                }
+            }
+        }
+        if last_progress.elapsed() >= config.stall_timeout {
+            owned.terminate()?;
+            let _ = fs::remove_file(&sinks.supervisor_identity);
+            state.phase = BridgePhase::Interrupted;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            append_executor_event(event_log, state, "child_stalled", None)?;
+            return Ok(SupervisionOutcome::Stalled);
+        }
+    }
 }
 
 pub(super) fn resolve_executor_supervisor_executable(
@@ -802,14 +993,6 @@ mod tests {
         owned
             .terminate()
             .expect("idempotent cleanup must not signal after terminal state");
-    }
-
-    #[test]
-    fn executor_bridge_fails_closed_before_state_mutation_without_linux_pidfds() {
-        assert_eq!(
-            require_linux_executor_supervision().unwrap_err(),
-            "executor supervision requires Linux pidfd ownership"
-        );
     }
 
     #[test]

@@ -257,6 +257,7 @@ static CLEANUP_FAILURE_TEST_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn install_cleanup_failure_test_hook() -> CleanupFailureTestHook {
     let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
     let release = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -284,6 +285,7 @@ fn wait_for_cleanup_failure_test_hook() {
 fn wait_for_cleanup_failure_test_hook() {}
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn try_transition_environment_lifecycle_for_test(
     environment_dir: &Path,
     lifecycle: EnvironmentLifecycle,
@@ -296,6 +298,7 @@ pub(crate) fn try_transition_environment_lifecycle_for_test(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn transition_environment_lifecycle_for_test(
     environment_dir: &Path,
     lifecycle: EnvironmentLifecycle,
@@ -305,6 +308,7 @@ pub(crate) fn transition_environment_lifecycle_for_test(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn transition_environment_lifecycle_locked_for_test(
     environment_dir: &Path,
     lifecycle: EnvironmentLifecycle,
