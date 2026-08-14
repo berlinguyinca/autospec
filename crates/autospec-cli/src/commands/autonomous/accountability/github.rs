@@ -204,6 +204,7 @@ where
     let issue = if let Some(issue) = matches.pop() {
         issue
     } else {
+        let mut created_issue = None;
         if !store.create_attempted() {
             for label in REQUIRED_LABELS {
                 renew(renew_lease)?;
@@ -232,42 +233,55 @@ where
                     .map(|label| (*label).to_owned())
                     .collect(),
             });
-            if let Err(error @ GithubFailure::Definitive(_)) = create_result {
-                return Err(github_projection_error(
-                    "cannot create accountability epic",
-                    error,
-                ));
-            }
-        }
-        let mut found = None;
-        let mut last_error = None;
-        for attempt in 0..RECONCILE_ATTEMPTS {
-            let mut reconciled = match reconcile(github, &request.repository, &marker, renew_lease)
-            {
-                Ok(reconciled) => reconciled,
-                Err(failure) => {
-                    last_error = Some(failure.error.to_string());
-                    if failure.retryable && attempt + 1 < RECONCILE_ATTEMPTS {
-                        thread::sleep(failure.retry_after.unwrap_or(Duration::from_millis(25)));
-                        continue;
-                    }
-                    return Err(failure.error);
+            match create_result {
+                Ok(output) => {
+                    created_issue = Some(parse_issue(
+                        &serde_json::from_str(&output).map_err(json_error)?,
+                    )?);
                 }
-            };
-            if reconciled.len() > 1 {
-                return Err(AccountabilityError::new(
-                    "multiple accountability epics carry the exact run marker",
-                ));
-            }
-            if let Some(issue) = reconciled.pop() {
-                found = Some(issue);
-                break;
-            }
-            if attempt + 1 < RECONCILE_ATTEMPTS {
-                thread::sleep(Duration::from_millis(25));
+                Err(error @ GithubFailure::Definitive(_)) => {
+                    return Err(github_projection_error(
+                        "cannot create accountability epic",
+                        error,
+                    ));
+                }
+                Err(_) => {}
             }
         }
-        found.ok_or_else(|| {
+        if let Some(issue) = created_issue {
+            issue
+        } else {
+            let mut found = None;
+            let mut last_error = None;
+            for attempt in 0..RECONCILE_ATTEMPTS {
+                let mut reconciled =
+                    match reconcile(github, &request.repository, &marker, renew_lease) {
+                        Ok(reconciled) => reconciled,
+                        Err(failure) => {
+                            last_error = Some(failure.error.to_string());
+                            if failure.retryable && attempt + 1 < RECONCILE_ATTEMPTS {
+                                thread::sleep(
+                                    failure.retry_after.unwrap_or(Duration::from_millis(25)),
+                                );
+                                continue;
+                            }
+                            return Err(failure.error);
+                        }
+                    };
+                if reconciled.len() > 1 {
+                    return Err(AccountabilityError::new(
+                        "multiple accountability epics carry the exact run marker",
+                    ));
+                }
+                if let Some(issue) = reconciled.pop() {
+                    found = Some(issue);
+                    break;
+                }
+                if attempt + 1 < RECONCILE_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(25));
+                }
+            }
+            found.ok_or_else(|| {
             AccountabilityError::projection(
                 format!(
                 "accountability epic creation visibility is unresolved; refusing duplicate create{}",
@@ -276,6 +290,7 @@ where
                 ProjectionDisposition::DegradableTransport,
             )
         })?
+        }
     };
     validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
     store.bind_epic(issue.number, &issue.url)?;
