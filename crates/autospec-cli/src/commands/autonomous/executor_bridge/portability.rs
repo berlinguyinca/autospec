@@ -668,20 +668,20 @@ pub(super) fn reconcile_direct_launch(
             &attempt_id,
             &sha256_hex(intent_body.as_bytes()),
         )?;
-        if process_owner::recover_owner(&owner) != process_owner::RecoveryDisposition::Quarantine {
-            return Err("reconstructed direct owner was not quarantined".to_string());
+        match process_owner::recover_owner(&owner) {
+            process_owner::RecoveryDisposition::Completed => {
+                retire_direct_launch(paths, &attempt_id)?;
+            }
+            process_owner::RecoveryDisposition::SidecarOwns => {
+                return Err("reconstructed direct owner remains sidecar-owned".to_string());
+            }
+            process_owner::RecoveryDisposition::Quarantine => {
+                return Err(
+                    "reconstructed direct owner is quarantined; portable recovery cannot prove cleanup"
+                        .to_string(),
+                );
+            }
         }
-        let marker = paths
-            .record
-            .with_extension(format!("ownership-disproven-{attempt_id}.json"));
-        if !marker.exists() {
-            write_private_create_once(
-                &marker,
-                launch.as_bytes(),
-                "portable direct ownership quarantine",
-            )?;
-        }
-        retire_direct_launch(paths, &attempt_id)?;
     }
     Ok(true)
 }
@@ -1734,8 +1734,10 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_direct_launch_quarantines_without_signalling_recorded_pid() {
-        let fixture = DirectFixture::new("reconcile");
+    fn quarantined_direct_recovery_preserves_launch_and_never_replays_command() {
+        // Break caught: treating portable quarantine as cleanup proof, retiring the exact launch
+        // evidence, and replaying the mutation command on every recovery attempt.
+        let fixture = DirectFixture::new("reconcile-quarantine");
         ensure_private_directory(&fixture.artifacts).expect("create artifact root");
         let artifacts = fs::canonicalize(&fixture.artifacts).expect("canonicalize artifact root");
         let paths = direct_attempt_paths(&artifacts, 0);
@@ -1745,9 +1747,15 @@ mod tests {
             &["rev-parse", "--verify", "HEAD^{commit}"],
         )
         .expect("read fixture commit");
-        let executable = Path::new("/bin/true");
-        let argv = vec!["/bin/true".to_string()];
-        let intent = direct_intent_document(&attempt_id, &commit_oid, None, executable, &argv);
+        let side_effect = fixture.worktree.join("mutation-ran");
+        let executable = fs::canonicalize("/bin/sh").expect("canonical shell");
+        let script = format!("printf mutation > '{}'", side_effect.display());
+        let argv = vec![
+            executable.display().to_string(),
+            "-c".to_string(),
+            script.clone(),
+        ];
+        let intent = direct_intent_document(&attempt_id, &commit_oid, None, &executable, &argv);
         write_private_create_once(
             &paths.intent,
             intent.as_bytes(),
@@ -1763,33 +1771,43 @@ mod tests {
             process_start: format!("{boot_id}:{process_start}"),
             launch_nonce: attempt_id.clone(),
         };
+        let launch = owner.document(&attempt_id, &sha256_hex(intent.as_bytes()));
         write_private_create_once(
             &paths.launch,
-            owner
-                .document(&attempt_id, &sha256_hex(intent.as_bytes()))
-                .as_bytes(),
+            launch.as_bytes(),
             "portable reconciliation fixture launch",
         )
         .expect("write fixture launch");
+        let plan = DirectCommandPlan {
+            commands: vec![DirectCommand::success(argv)],
+        };
 
-        assert!(reconcile_direct_launch(&paths, None).expect("reconcile portable launch"));
-        assert!(
-            process_birth_identity(std::process::id())
-                .expect("re-observe current process")
-                .is_some(),
-            "reconciliation must not signal the recorded PID"
-        );
-        assert!(
-            !paths.launch.exists(),
-            "live-authority launch was not retired"
-        );
-        assert!(
-            paths
-                .record
-                .with_extension(format!("ownership-disproven-{attempt_id}.json"))
-                .is_file(),
-            "durable quarantine marker was not published"
-        );
+        for _ in 0..2 {
+            let error = execute_direct_plan(
+                &fixture.worktree,
+                &plan,
+                &artifacts,
+                None,
+                Duration::from_secs(2),
+            )
+            .expect_err("quarantined portable owner must block command replay");
+            assert!(error.contains("quarantin"), "unexpected error: {error}");
+            assert_eq!(
+                fs::read(&paths.launch).expect("retained exact launch evidence"),
+                launch.as_bytes(),
+                "quarantine mutated the exact launch evidence"
+            );
+            assert!(
+                !side_effect.exists(),
+                "quarantined recovery replayed a side-effecting command"
+            );
+            assert!(
+                process_birth_identity(std::process::id())
+                    .expect("re-observe current process")
+                    .is_some(),
+                "reconciliation signalled the recorded PID"
+            );
+        }
     }
 
     #[test]
