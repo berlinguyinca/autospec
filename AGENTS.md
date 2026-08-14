@@ -146,6 +146,14 @@ token cap (`AUTOSPEC_AUTONOMOUS_TOKEN_CAP`), and
 genuine no-clear-winner forks. Full policy and rationale (mined from session
 transcripts): [`docs/AUTONOMY-CHARTER.md`](docs/AUTONOMY-CHARTER.md).
 
+## Autonomous run accountability
+
+Every live `autospec autonomous` launch creates or adopts exactly one verified managed GitHub epic before conductor spawn. There is no bypass for the epic or its private local journal. A normal start generates its own epic; `start --epic N` adopts an active managed epic, and `resume --epic N` may reconstruct and reopen a verified closed or parked epic for the same repository. Explicit adoption must validate the immutable run marker, recovery manifest, and the `epic`, `type:tracker`, `no-auto`, and `autospec:run-accountability` labels; it never converts an arbitrary issue.
+
+The epic is the concise human accountability projection for one conductor generation. It preserves human text outside managed markers and records short What, Why, and Evidence entries, linked issues and PRs, verification, blockers, next steps, one Mermaid dependency/deliverable flowchart, and one Mermaid run-state diagram. Local typed events are durable before projection. Later GitHub edit failure remains retryable and visible in local `status --json` / `list --json` fields without creating a replacement epic. GitHub Project assignment is optional; the issue epic and private journal are mandatory.
+
+Start-family commands also refresh the requested checkout before acquiring the lifecycle lease. A stale or missing runtime must rebuild an immutable source-digest generation and execute that exact verified generation path. Read-only and stop commands may bypass runtime rebuilding, but no live conductor may knowingly continue on an outdated generation.
+
 ## Startup self-update
 
 Every multi-harness skill runs a preflight at startup that updates the installed copy

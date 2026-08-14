@@ -56,6 +56,30 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
 2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/autonomous-operator/<repo-scope>/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop differs only through the persisted mode the conductor consumes at that boundary. **Neither mode kills the conductor process.** It owns durable direct-command supervisors, and terminating it can strand a completed child before the EXIT/DONE fence is published, which makes safe recovery impossible — so both modes drain it at its next observed boundary. An operator who needs the process gone right now must wait for the boundary or kill it deliberately, accepting that risk.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
+## Mandatory runtime freshness and run accountability
+
+Every live autonomous launch creates or adopts exactly one verified managed GitHub epic before spawning the conductor. This epic and its private local journal are core autonomous-mode state, not optional reporting. There is no CLI flag, environment variable, degraded mode, or fallback that bypasses the epic or private journal. Read-only and stop commands remain available when startup cannot establish that invariant.
+
+Before a start-family command acquires the lifecycle lease, the launcher checks the requested checkout's complete runtime identity. A stale or missing runtime always rebuilds an immutable source-digest generation, verifies that the source identity stayed stable through the build, and executes that exact verified generation path. A live conductor may be drained at its safe boundary for this refresh; it must never continue under a known-outdated runtime.
+
+The two supported epic paths are:
+
+- A normal `start` generates its own epic. It reconciles the immutable run marker across open and closed issues, creates at most once, verifies the returned issue and marker, persists the binding, and only then permits spawn.
+- `start --epic N` adopts an active managed epic and `resume --epic N` may reopen a closed or parked managed epic. Adoption verifies the requested repository, the `epic`, `type:tracker`, `no-auto`, and `autospec:run-accountability` labels, exactly one immutable run marker, and a matching managed recovery manifest. Arbitrary issues are never converted into run epics.
+
+If private state is missing during explicit adoption, reconstruct only the acknowledged intent and high watermark from the sanitized recovery manifest. Start a new local journal segment chained to the remote projection digest and append `resumed_from_epic` before any work mutation. Never claim that unprojected history was recovered. A malformed, ambiguous, wrong-repository, or active-elsewhere epic fails closed.
+
+Autospec owns marker-bounded sections in the epic while preserving human-authored text outside them. The managed projection contains:
+
+- a short overview plus concise `What`, `Why`, and `Evidence` entries for implementation decisions and lifecycle outcomes;
+- one Mermaid dependency and deliverable flowchart, and one Mermaid run-state diagram;
+- linked issue and pull-request identifiers, current work, recent decisions, verification evidence, blockers, and the next step;
+- a bounded recovery manifest used for verified resumption, without secrets, local paths, raw arguments, prompts, or logs.
+
+Each event is appended and synced locally before projection. Later GitHub edit failures leave durable retryable outbox state and make projection health visible; they do not create a replacement epic. A removed marker, duplicate marker match, closed active epic, local journal failure, or lost lifecycle lease blocks the next mutation. Optional GitHub Project assignment may add the epic to a configured Project, but Project failure never replaces or disables the required issue epic.
+
+`status --json` and `list --json` read local state without a GitHub request and expose `run_id`, `epic_number`, `epic_url`, `event_count`, `pending_projection_count`, high-watermark fields, and projection health. Follow attachment and supervisor observation reuse the live epic. An explicit restart or a start after terminal stop creates a successor run identity and epic unless the operator explicitly supplies a verified epic as described above.
+
 ## Direct interactive session launch
 
 For direct invocations from Codex, Claude, or OpenCode, treat `"$@"` in the
@@ -121,6 +145,8 @@ or after `. "$HOME/.autospec/env"`:
 | `autospec-autonomous start --follow` | Start a detached conductor, follow its scoped log, and remain attached until the conductor exits. |
 | `autospec-autonomous start --detach` | Explicitly start detached and return after launch. |
 | `autospec-autonomous start --foreground` | Run the conductor in the current process instead of detaching. |
+| `autospec-autonomous start --epic N` | Adopt only a verified active managed run epic, reconstructing local state when required. |
+| `autospec-autonomous resume --epic N` | Verify and resume a managed run epic, reopening a closed or parked epic when safe. |
 | `autospec-autonomous-start` | Start the Rust lifecycle launcher directly. |
 | `autospec-autonomous-list` | Enumerate repo-scoped conductors with PID, liveness, log path, and companion metadata. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail; pass `--all --json` to enumerate all conductors. |

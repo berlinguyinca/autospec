@@ -32,7 +32,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
 | `autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]` | yes | classifies changed paths against configured fenced surfaces; fenced matches exit non-zero and report quarantine evidence |
 | `autospec autonomous main-health --repo OWNER/REPO --repo-dir DIR [--branch BRANCH] [--json]` | yes | runs the Rust repository-local mainline-health probe without dispatching work |
-| `autospec autonomous start --repo OWNER/REPO --repo-dir DIR [--max-cycles N] [--poll-interval-sec N]` | no | launches a lease-owned Rust conductor that repeats native foreground cycles until stop, park, failure, or the optional cycle cap |
+| `autospec autonomous start --repo OWNER/REPO --repo-dir DIR [--epic N] [--max-cycles N] [--poll-interval-sec N]` | no | refreshes to the checkout's exact immutable runtime, creates or adopts one verified run epic, then launches a lease-owned conductor |
+| `autospec autonomous resume --epic N --repo OWNER/REPO --repo-dir DIR` | no | verifies and reconstructs a managed accountability epic, reopening a closed or parked epic when safe, before conductor spawn |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | runs one native foreground cycle when invoked directly; a child launched by `start` inherits lifecycle ownership and repeats cycles |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
@@ -168,6 +169,33 @@ Detached `autonomous start` and `restart` launch it as a direct Rust child with 
 lifecycle ownership; that child repeats cycles, emits each completed cycle to its scoped log,
 re-checks stop and budget admission before the next cycle, and exits only for a named terminal
 condition or `--max-cycles`. Monitor and supervisor remain separate compatibility observers.
+
+Every start-family launch refreshes the requested checkout before lifecycle acquisition. A stale
+or missing runtime is rebuilt into an immutable source-digest generation, the build is rejected
+if its source identity moves, and the launcher executes the exact verified generation path.
+Read-only and stop commands do not require a rebuild.
+
+Autonomous accountability is mandatory: every live launch creates or adopts exactly one verified managed run epic before conductor spawn.
+A normal `start` creates its own epic. `start --epic N`
+adopts only an active issue in the requested repository with the managed marker, recovery manifest,
+and `epic`, `type:tracker`, `no-auto`, and `autospec:run-accountability` labels. `autospec autonomous
+resume --epic N` may reopen a verified closed or parked epic and reconstruct a chained local journal
+segment from its acknowledged recovery manifest. It records `resumed_from_epic` before work and
+never attaches to an arbitrary issue. There is no bypass flag or environment variable for the epic
+or private journal.
+
+Autospec's marker-bounded epic projection preserves human text and contains short What, Why, and
+Evidence paragraphs, linked issues and pull requests, a Mermaid dependency/deliverable flowchart,
+a Mermaid run-state diagram, current work, blockers, verification, and next steps. Events are
+durable locally before projection; later GitHub edit failures remain visible and retryable without
+creating a replacement epic. Optional GitHub Project assignment may organize the issue but never
+replaces it or blocks launch after the epic itself is verified.
+
+`autospec autonomous status --json` and `autospec autonomous list --json` read accountability
+health locally. Their accountability object includes `run_id`, `epic_number`, `epic_url`, `event_count`,
+`pending_projection_count`, desired and acknowledged high watermarks, projection state, and any
+local error. A missing or ambiguous marker, invalid recovery manifest, lost lifecycle lease, or
+local journal failure blocks spawn or the next work mutation rather than silently replacing state.
 
 `autospec autonomous main-health` and `run-foreground` read the strict
 repository-local Rust health policy at `<repo-dir>/.autospec/autonomous.yml`.
