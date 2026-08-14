@@ -301,9 +301,19 @@ fn finish_owned_attempt(
     result: Result<OwnedAttemptResult, OwnedAttemptFailure>,
 ) -> AttemptTerminal {
     match result {
-        Ok(OwnedAttemptResult::Exited(status)) => {
-            AttemptTerminal::Exited(status.code().unwrap_or(1))
-        }
+        Ok(OwnedAttemptResult::Exited(status)) => match status.code() {
+            Some(code) => AttemptTerminal::Exited(code),
+            #[cfg(unix)]
+            None => {
+                use std::os::unix::process::ExitStatusExt;
+
+                status
+                    .signal()
+                    .map_or(AttemptTerminal::Exited(1), AttemptTerminal::Signaled)
+            }
+            #[cfg(not(unix))]
+            None => AttemptTerminal::Exited(1),
+        },
         Ok(OwnedAttemptResult::TimedOut(_status)) => AttemptTerminal::TimedOut,
         Ok(OwnedAttemptResult::OutputOverflow(_status)) => AttemptTerminal::OutputOverflow,
         Ok(OwnedAttemptResult::ReviewerLimit(_status)) => AttemptTerminal::Exited(70),
@@ -360,18 +370,24 @@ pub(in crate::commands::autonomous::executor_bridge) fn execute_supervised_direc
     let spawn = File::open(null_input)
         .map_err(|error| format!("open null input: {error}"))
         .and_then(|stdin| {
-            process_owner::OwnedChildTree::spawn_prepared(
-                process_owner::PreparedLaunchSpec::inherited(
-                    program.to_path_buf(),
-                    direct.argv.iter().map(OsString::from).collect(),
-                    Some(worktree.to_path_buf()),
-                    environment_overrides,
-                    Some(stdin),
-                    Some(stdout),
-                    Some(stderr),
-                ),
-                attempt_id.to_string(),
+            process_owner::PreparedLaunchSpec::credentialless(
+                program.to_path_buf(),
+                direct.argv.iter().map(OsString::from).collect(),
+                Some(worktree.to_path_buf()),
+                environment_overrides,
+                paths
+                    .stdout
+                    .parent()
+                    .ok_or_else(|| "direct command stdout has no parent".to_string())?
+                    .join("credentialless-config"),
+                false,
+                Some(stdin),
+                Some(stdout),
+                Some(stderr),
             )
+            .and_then(|spec| {
+                process_owner::OwnedChildTree::spawn_prepared(spec, attempt_id.to_string())
+            })
         });
     let mut owned = match spawn {
         Ok(owned) => owned,

@@ -63,16 +63,7 @@ impl PreparedLaunchSpec {
     ) -> Self {
         let mut variables: Vec<_> = std::env::vars_os().collect();
         for (key, value) in overrides {
-            #[cfg(windows)]
-            let matches = |candidate: &OsString| {
-                candidate
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&key.to_string_lossy())
-            };
-            #[cfg(not(windows))]
-            let matches = |candidate: &OsString| candidate == &key;
-            variables.retain(|(candidate, _)| !matches(candidate));
-            variables.push((key, value));
+            replace_environment_variable(&mut variables, key, value);
         }
         Self {
             program,
@@ -84,6 +75,77 @@ impl PreparedLaunchSpec {
             stderr,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn credentialless(
+        program: PathBuf,
+        argv: Vec<OsString>,
+        current_dir: Option<PathBuf>,
+        overrides: Vec<(OsString, OsString)>,
+        credentialless_config: PathBuf,
+        preserve_codex_host_auth: bool,
+        stdin: Option<File>,
+        stdout: Option<File>,
+        stderr: Option<File>,
+    ) -> Result<Self, String> {
+        let compose_project_name = OsString::from("COMPOSE_PROJECT_NAME");
+        let mut variables = std::env::vars_os()
+            .filter(|(key, _)| {
+                (!super::sensitive_executor_environment_key(key)
+                    || (preserve_codex_host_auth && super::codex_host_auth_environment_key(key)))
+                    && !environment_keys_match(key, &compose_project_name)
+            })
+            .collect::<Vec<_>>();
+        for (key, value) in overrides {
+            if super::sensitive_executor_environment_key(&key) {
+                return Err(format!(
+                    "executor harness override may not restore credential authority: {}",
+                    key.to_string_lossy()
+                ));
+            }
+            replace_environment_variable(&mut variables, key, value);
+        }
+        super::ensure_private_directory(&credentialless_config)?;
+        for (key, value) in [
+            ("GH_CONFIG_DIR".into(), credentialless_config.into_os_string()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            (
+                "GIT_SSH_COMMAND".into(),
+                "/usr/bin/ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes".into(),
+            ),
+        ] {
+            replace_environment_variable(&mut variables, key, value);
+        }
+        Ok(Self {
+            program,
+            argv,
+            current_dir,
+            environment: PreparedEnvironment { variables },
+            stdin,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+fn environment_keys_match(candidate: &OsString, key: &OsString) -> bool {
+    #[cfg(windows)]
+    return candidate
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&key.to_string_lossy());
+    #[cfg(not(windows))]
+    return candidate == key;
+}
+
+fn replace_environment_variable(
+    variables: &mut Vec<(OsString, OsString)>,
+    key: OsString,
+    value: OsString,
+) {
+    variables.retain(|(candidate, _)| !environment_keys_match(candidate, &key));
+    variables.push((key, value));
 }
 
 impl OwnedChildTree {

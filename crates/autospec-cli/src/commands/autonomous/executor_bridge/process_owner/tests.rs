@@ -6,6 +6,8 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 
+mod environment;
+
 #[cfg(windows)]
 #[link(name = "Kernel32")]
 unsafe extern "system" {
