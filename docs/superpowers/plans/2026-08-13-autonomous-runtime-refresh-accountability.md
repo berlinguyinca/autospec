@@ -35,7 +35,7 @@
 - Produces: `autonomous-runtime-refresh.sh check|ensure|identity --repo-dir DIR`; `autospec-runtime-install.sh --repo-dir DIR` prints the exact executable path.
 - Produces: immutable `$HOME/.autospec/runtime-generations/<source-digest>/autospec` plus private receipt and atomic `current` pointer.
 
-- [ ] Write failing tests for deterministic complete/batched identity, warm current fast path, immutable generation publication, moving-source rejection, concurrent repositories, signals/SIGKILL, lock identity, and exact-generation output.
+- [ ] Write failing tests for deterministic complete/batched identity, correctness-preserving warm reuse (≤200ms steady-state at current repository scale), immutable generation publication, moving-source rejection, concurrent repositories, signals/SIGKILL, lock identity, and exact-generation output.
 - [ ] Run focused Bats and confirm failures are due to missing helpers/generation behavior.
 - [ ] Port the reviewed strict receipt parser, then implement batched complete input hashing and pre/post-build identity equality.
 - [ ] Implement private staged generation directories, verified sync, atomic pointer publication, process-identity lock, and narrow runtime-only installation.

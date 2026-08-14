@@ -104,7 +104,7 @@ SH
   [ "$warm_status" -eq 0 ]
   [ "$(cat "$TEST_ROOT/warm.path")" = "$output" ]
   [ ! -e "$TEST_ROOT/inventory.log" ]
-  awk -v elapsed="$elapsed_seconds" 'BEGIN { exit !(elapsed < 0.05) }'
+  awk -v elapsed="$elapsed_seconds" 'BEGIN { exit !(elapsed <= 0.20) }'
 }
 
 @test "a generation built from a dirty snapshot is never reused after the checkout becomes clean" {
@@ -297,7 +297,7 @@ SH
   [ ! -e "$journal" ]
 }
 
-@test "launcher check uses the sub-50ms receipt path without source inventory" {
+@test "launcher check stays within the 200ms correctness-first warm target" {
   install_runtime
   [ "$status" -eq 0 ]
   real_git="$(command -v git)"
@@ -313,7 +313,28 @@ SH
   echo "launcher check elapsed: ${elapsed}s" >&3
   [ "$(cat "$TEST_ROOT/check.path")" = "$output" ]
   [ ! -e "$TEST_ROOT/check-inventory" ]
-  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 0.05) }'
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed <= 0.20) }'
+}
+
+@test "batched warm snapshot remains bounded across a representative large tree" {
+  asset_root="$FIXTURE_REPO/crates/demo/generated-assets"
+  mkdir -p "$asset_root"
+  index=1
+  while [ "$index" -le 1500 ]; do
+    printf 'asset-%s\n' "$index" >"$asset_root/asset-$index.txt"
+    index=$((index + 1))
+  done
+  git -C "$FIXTURE_REPO" add crates/demo/generated-assets
+  git -C "$FIXTURE_REPO" commit -qm 'large asset fixture'
+  install_runtime
+  [ "$status" -eq 0 ]
+  expected="$output"
+  { /usr/bin/time -p env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" \
+    bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" check --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/large-check.path"; } 2>"$TEST_ROOT/large-check.time"
+  elapsed="$(awk '/^real / { print $2 }' "$TEST_ROOT/large-check.time")"
+  echo "large-tree launcher check elapsed: ${elapsed}s" >&3
+  [ "$(cat "$TEST_ROOT/large-check.path")" = "$expected" ]
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed <= 0.20) }'
 }
 
 @test "partial lock acquisition is never exposed and stale ownerless legacy locks recover" {

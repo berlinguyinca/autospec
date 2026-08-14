@@ -6,7 +6,11 @@ TEST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 TEST_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 TEST_HOME="$(mktemp -d -t autospec-install-path.XXXXXX)"
 TEMP_SCRIPTS_DIR="$(mktemp -d -t autospec-ephemeral-scripts.XXXXXX)"
-trap 'rm -rf "$TEST_HOME" "$TEMP_SCRIPTS_DIR"' EXIT INT TERM
+cleanup() {
+    find "$TEST_HOME" -type d -exec chmod u+w {} + 2>/dev/null || true
+    rm -rf "$TEST_HOME" "$TEMP_SCRIPTS_DIR"
+}
+trap cleanup EXIT INT TERM
 
 HOME="$TEST_HOME" \
 CARGO_HOME="$TEST_CARGO_HOME" \

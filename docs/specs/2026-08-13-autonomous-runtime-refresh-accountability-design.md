@@ -49,7 +49,7 @@ Installation writes an immutable generation directory keyed by source digest. Th
 
 Publication serializes through a private global generation lock containing independently validated canonical positive PID, process-start identity, and timestamp fields. Before pointer publication, it writes a private transaction journal naming the phase and artifacts. Recovery distinguishes an abandoned clean lock from an interrupted publication. Signals may interrupt any external command without exposing a partial generation or losing recovery evidence. Recovery defers further signals until journal cleanup and lock release complete. There is no production fault-injection hook; tests inject failures through PATH shims.
 
-Build identity is computed through batched hashing rather than one process per file. It includes non-Rust crate assets reachable by build scripts, `include_bytes!`, and `include_str!`. A matching checkout fast path has a sub-50ms target after filesystem cache warmup.
+Build identity is computed through batched hashing rather than one process per file. It includes non-Rust crate assets reachable by build scripts, `include_bytes!`, and `include_str!`. The matching-checkout path favors content correctness over an unsafe metadata-only cache and targets at most 200ms steady-state after filesystem cache warmup at the current repository scale (about 6,250 entries). Cold-cache latency is reported separately and is not represented as steady-state performance.
 
 ## Start-boundary refresh
 
