@@ -13285,13 +13285,10 @@ fn remove_exact_owned_worktree(
                     "missing executor worktree registration is not exact and prunable".to_string(),
                 );
             }
+            let worktree_path = state.identity.worktree.to_string_lossy();
+            let worktree = normalize_git_argument(worktree_path.as_ref());
             let output = Command::new("git")
-                .args([
-                    "worktree",
-                    "remove",
-                    "--force",
-                    state.identity.worktree.to_string_lossy().as_ref(),
-                ])
+                .args(["worktree", "remove", "--force", worktree.as_ref()])
                 .current_dir(&state.identity.repository_path)
                 .output()
                 .map_err(|error| format!("remove prunable executor worktree: {error}"))?;
@@ -13338,8 +13335,10 @@ fn remove_exact_owned_worktree(
     if matches != 1 {
         return Err("executor cleanup requires one exact owned worktree".to_string());
     }
+    let worktree_path = canonical.to_string_lossy();
+    let worktree = normalize_git_argument(worktree_path.as_ref());
     let output = Command::new("git")
-        .args(["worktree", "remove", canonical.to_string_lossy().as_ref()])
+        .args(["worktree", "remove", worktree.as_ref()])
         .current_dir(&state.identity.repository_path)
         .output()
         .map_err(|error| format!("remove completed executor worktree: {error}"))?;
@@ -22926,8 +22925,12 @@ fn validate_recovery_creation_identity(
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let args = args
+        .iter()
+        .map(|argument| normalize_git_argument(argument))
+        .collect::<Vec<_>>();
     let output = Command::new("git")
-        .args(args)
+        .args(args.iter().map(|argument| argument.as_ref()))
         .current_dir(repo)
         .output()
         .map_err(|error| format!("run git {args:?}: {error}"))?;
@@ -22949,8 +22952,12 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let args = args
+        .iter()
+        .map(|argument| normalize_git_argument(argument))
+        .collect::<Vec<_>>();
     let output = Command::new("git")
-        .args(args)
+        .args(args.iter().map(|argument| argument.as_ref()))
         .current_dir(repo)
         .output()
         .map_err(|error| format!("run git {args:?}: {error}"))?;
@@ -22961,6 +22968,19 @@ fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(output.stdout)
+}
+
+fn normalize_git_argument(argument: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = argument.strip_prefix(r"\\?\UNC\") {
+            return std::borrow::Cow::Owned(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = argument.strip_prefix(r"\\?\") {
+            return std::borrow::Cow::Borrowed(rest);
+        }
+    }
+    std::borrow::Cow::Borrowed(argument)
 }
 
 // Harness selection, configuration and invocation. Extracted so this file has one fewer
