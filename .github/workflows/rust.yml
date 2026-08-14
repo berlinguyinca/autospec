@@ -77,7 +77,10 @@ jobs:
           cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
           cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
           cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
+          admission_test='commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
+          admission_output="$(cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture 2>&1)"
+          printf '%s\n' "$admission_output"
+          test "$(printf '%s\n' "$admission_output" | grep -F -c "test $admission_test ... ok")" -eq 1
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -105,11 +108,17 @@ jobs:
         run: cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc
 
       - name: Test portable autonomous ownership
+        shell: pwsh
         run: |
           cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
           cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
           cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
+          $admissionTest = 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
+          $admissionOutput = cargo test -p autospec-cli --bin autospec $admissionTest -- --exact --nocapture 2>&1 | Out-String
+          $admissionExit = $LASTEXITCODE
+          Write-Output $admissionOutput
+          if ($admissionExit -ne 0) { exit $admissionExit }
+          if ([regex]::Matches($admissionOutput, [regex]::Escape("test $admissionTest ... ok")).Count -ne 1) { throw 'portable admission test did not pass exactly once' }
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -134,7 +143,10 @@ jobs:
             cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
             cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
             cargo test -p autospec-cli --bin autospec portability -- --nocapture
-            cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
+            admission_test='commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
+            admission_output="$(cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture 2>&1)"
+            printf '%s\n' "$admission_output"
+            test "$(printf '%s\n' "$admission_output" | grep -F -c "test $admission_test ... ok")" -eq 1
             cargo build --release -p autospec-cli
 
   audit:

@@ -263,6 +263,7 @@ fn autonomous_executor_bridge_allows_only_active_attributed_sibling_worktrees() 
         .expect("bind sibling state directory");
 
     let sibling_scope = bridge::executor_worktree_root()
+        .expect("canonical executor root")
         .join(bridge::safe_scope(&repository_scope).expect("safe sibling scope"));
     bridge::ensure_private_directory(&sibling_scope).expect("private sibling scope");
     let sibling_path = sibling_scope.join("issue-43");

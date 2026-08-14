@@ -69,6 +69,46 @@ mod windows_tests {
         }
     }
 
+    struct ProvisionedWorktreeCleanup {
+        repository: PathBuf,
+        worktree: PathBuf,
+        scope_root: PathBuf,
+    }
+
+    impl Drop for ProvisionedWorktreeCleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&self.worktree)
+                .current_dir(&self.repository)
+                .status();
+            let _ = fs::remove_dir_all(&self.scope_root);
+        }
+    }
+
+    #[test]
+    fn windows_executor_worktree_root_rejects_canonicalization_failure() {
+        let error = resolve_executor_worktree_root_with(PathBuf::from(r"C:\Temp"), |_| {
+            Err(std::io::Error::other("injected resolver failure"))
+        })
+        .expect_err("canonicalization failure must fail closed");
+        assert!(error.contains("injected resolver failure"), "{error}");
+    }
+
+    #[test]
+    fn windows_executor_worktree_root_rejects_non_drive_paths() {
+        for rejected in [PathBuf::from(r"\Temp"), PathBuf::from(r"C:Temp")] {
+            let error = resolve_executor_worktree_root_with(PathBuf::from(r"C:\Temp"), |_| {
+                Ok(rejected.clone())
+            })
+            .expect_err("root-relative and drive-relative paths must fail closed");
+            assert!(
+                error.contains("not absolute") || error.contains("not drive-qualified"),
+                "{error}"
+            );
+        }
+    }
+
     #[test]
     fn direct_plan_resolves_pathext_wrapper_through_canonical_cmd() {
         let _environment = TEST_ENVIRONMENT
@@ -157,7 +197,7 @@ mod windows_tests {
                 .expect("prepare Windows worktree fixture")
                 .success());
         }
-        let root = executor_worktree_root();
+        let root = executor_worktree_root().expect("canonical Windows executor root");
         assert!(root.is_absolute(), "executor root must be drive-qualified");
         assert!(root.starts_with(
             fs::canonicalize(std::env::temp_dir()).expect("canonical Windows temp directory")
@@ -183,6 +223,15 @@ mod windows_tests {
             Some(("claim-windows", "invocation-windows")),
         )
         .expect("provision issue worktree through the Windows bridge path");
+        let _cleanup = ProvisionedWorktreeCleanup {
+            repository: fixture.worktree.clone(),
+            worktree: issue.path.clone(),
+            scope_root: issue
+                .path
+                .parent()
+                .expect("provisioned worktree scope")
+                .to_path_buf(),
+        };
         assert!(issue.path.is_absolute());
         assert!(issue.path.starts_with(&root));
         assert_eq!(
@@ -236,19 +285,23 @@ mod supported_host_tests {
         let _serial = ADMISSION_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sequence = DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let repository = format!("owner/portable-admission-{}-{sequence}", std::process::id());
         let root = fs::canonicalize(std::env::temp_dir())
             .expect("canonical temp directory")
             .join(format!(
                 "autospec-supported-host-admission-{}-{}",
                 std::process::id(),
-                DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                sequence
             ));
         let repo = root.join("repo");
         let remote = root.join("remote.git");
         let heartbeat = root.join("heartbeats");
         let claim_state = root.join("claim-state");
+        let bin = root.join("bin");
         fs::create_dir_all(&repo).expect("create admission repo");
         fs::create_dir_all(&heartbeat).expect("create heartbeat root");
+        fs::create_dir_all(&bin).expect("create admission bin");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -278,11 +331,45 @@ mod supported_host_tests {
             ],
         );
         git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+        assert!(Command::new("git")
+            .args([
+                "--git-dir",
+                remote.to_str().expect("UTF-8 remote"),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .status()
+            .expect("set admission remote HEAD")
+            .success());
+        git(&repo, &["remote", "set-head", "origin", "main"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let gh = bin.join("gh");
+            fs::write(
+                &gh,
+                "#!/bin/sh\nset -eu\ncase \"$1 $2\" in\n  'issue view')\n    mode=initial; [ ! -f \"$AUTOSPEC_TEST_GH_STATE\" ] || mode=$(cat \"$AUTOSPEC_TEST_GH_STATE\")\n    case \" $* \" in\n      *' labels,body,title,author '*)\n        if [ \"$mode\" = claimed ]; then\n          printf '%s\\n' '{\"labels\":[\"in-progress-by-bot\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** `SAFETY_PASS`\\n<!-- autospec-safety:end -->\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}'\n        else\n          printf '%s\\n' '{\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** `SAFETY_PASS`\\n<!-- autospec-safety:end -->\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}'\n        fi ;;\n      *) printf '%s\\n' '{\"labels\":[{\"name\":\"auto-implement\"},{\"name\":\"safety:reviewed\"}]}' ;;\n    esac ;;\n  'issue edit')\n    case \" $* \" in *' --add-label in-progress-by-bot '*) printf claimed > \"$AUTOSPEC_TEST_GH_STATE\" ;; *' --add-label auto-implement '*) printf released > \"$AUTOSPEC_TEST_GH_STATE\" ;; esac ;;\n  'pr list') printf '%s\\n' '[]' ;;\n  api*) printf '%s\\n' '[]' ;;\n  *) : ;;\nesac\n",
+            )
+            .expect("write admission gh shim");
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))
+                .expect("make admission gh shim executable");
+        }
+        #[cfg(windows)]
+        fs::write(
+            bin.join("gh.cmd"),
+            "@echo off\r\nif \"%1\"==\"api\" echo []\r\nif \"%1 %2\"==\"issue edit\" (\r\n  echo %* | findstr /c:\"--add-label in-progress-by-bot\" >nul && echo claimed>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n  echo %* | findstr /c:\"--add-label auto-implement\" >nul && echo released>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n)\r\nif \"%1 %2\"==\"issue view\" (\r\n  echo %* | findstr /c:\"labels,body,title,author\" >nul\r\n  if errorlevel 1 (\r\n    echo {\"labels\":[{\"name\":\"auto-implement\"},{\"name\":\"safety:reviewed\"}]}\r\n  ) else (\r\n    findstr /x claimed \"%AUTOSPEC_TEST_GH_STATE%\" >nul 2>nul && (echo {\"labels\":[\"in-progress-by-bot\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}) || (echo {\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"})\r\n  )\r\n)\r\nif \"%1 %2\"==\"pr list\" echo []\r\nexit /b 0\r\n",
+        )
+        .expect("write admission gh shim");
 
         let keys = [
             "AUTOSPEC_HEARTBEAT_DIR",
             "AUTOSPEC_CLAIM_GIT_REMOTE",
             "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            "AUTOSPEC_CLAIM_CONFIRM_READS",
+            "AUTOSPEC_TEST_GH_STATE",
+            "PATH",
         ];
         let _restore = RestoreEnvironment(
             keys.into_iter()
@@ -293,10 +380,20 @@ mod supported_host_tests {
             std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat);
             std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", &remote);
             std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claim_state);
+            std::env::set_var("AUTOSPEC_CLAIM_CONFIRM_READS", "1");
+            std::env::set_var("AUTOSPEC_TEST_GH_STATE", root.join("gh-state"));
+            let mut path = vec![bin.clone()];
+            path.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            std::env::set_var(
+                "PATH",
+                std::env::join_paths(path).expect("join admission PATH"),
+            );
         }
 
         let predecessor_claimed = autospec_core::claim::RunStateRecord::new(
-            "owner/repo",
+            &repository,
             42,
             "worker-predecessor",
             "claimed",
@@ -310,7 +407,7 @@ mod supported_host_tests {
         )
         .with_claim_id("claim-predecessor");
         let predecessor = autospec_core::claim::RunStateRecord::new(
-            "owner/repo",
+            &repository,
             42,
             "worker-predecessor",
             "released",
@@ -324,7 +421,7 @@ mod supported_host_tests {
         )
         .with_claim_id("claim-predecessor");
         crate::commands::claim::write_startup_heartbeat_for_test(
-            "owner/repo",
+            &repository,
             42,
             "worker-predecessor",
             "feat/autonomous-issue-42",
@@ -341,120 +438,197 @@ mod supported_host_tests {
                 .expect("publish released predecessor claim")
         );
 
-        let identity = crate::commands::claim::ClaimMutationIdentity {
-            repo: "owner/repo",
-            issue: 42,
-            worker_id: "worker-predecessor",
-            branch: "feat/autonomous-issue-42",
-            claim_id: "claim-predecessor",
-        };
-        let terminal_path = root.join("terminal.json");
-        let result = crate::commands::claim::with_released_bridge_predecessor_authority(
-            identity,
-            || {
-                let issue_heartbeat = heartbeat
-                    .join(crate::commands::autonomous::drain::repository_progress_key(
-                        "owner/repo",
-                    ))
-                    .join("42.json");
-                assert!(
-                    !issue_heartbeat.exists(),
-                    "released predecessor heartbeat survived retirement"
-                );
-                let successor = autospec_core::claim::RunStateRecord::new(
-                    "owner/repo",
-                    42,
-                    "worker-successor",
-                    "claimed",
-                    "feat/autonomous-issue-42",
-                    "",
-                    "claimed",
-                    Vec::new(),
-                    "2026-08-14T00:00:02Z",
-                    "2026-08-14T00:00:02Z",
-                    300,
-                )
-                .with_claim_id("claim-successor");
-                assert!(crate::commands::claim::advance_claim_ref_for_test(&repo, &successor)?);
-                crate::commands::claim::write_startup_heartbeat_for_test(
-                    "owner/repo",
-                    42,
-                    "worker-successor",
-                    "feat/autonomous-issue-42",
-                    "claim-successor",
-                    Some("session-successor"),
-                )?;
-
-                let executable = std::env::current_exe().map_err(|error| {
-                    crate::commands::CommandFailure::diagnostic(format!(
-                        "resolve admission no-op executable: {error}"
-                    ))
-                })?;
-                let test_name = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt";
-                let mut child = process_owner::OwnedChildTree::spawn_prepared(
-                    process_owner::PreparedLaunchSpec::inherited(
-                        executable.clone(),
-                        vec![
-                            executable.into_os_string(),
-                            "--exact".into(),
-                            test_name.into(),
-                            "--nocapture".into(),
-                        ],
-                        Some(repo.clone()),
-                        vec![(CHILD_ENV.into(), "1".into())],
-                        None,
-                        None,
-                        None,
-                    ),
-                    "supported-host-noop".into(),
-                )
-                .map_err(crate::commands::CommandFailure::diagnostic)?;
-                let status = child
-                    .wait()
-                    .and_then(|status| child.terminate().map(|_| status))
-                    .map_err(crate::commands::CommandFailure::diagnostic)?;
-                if !status.success() {
-                    return Err(crate::commands::CommandFailure::diagnostic(
-                        "supported-host no-op child failed",
-                    ));
-                }
-                let receipt = BridgeRunReceipt {
-                    repository: "owner/repo".into(),
-                    issue: 42,
-                    worker_id: "worker-successor".into(),
-                    branch: "feat/autonomous-issue-42".into(),
-                    claim_id: "claim-successor".into(),
-                    invocation_id: "invocation-successor".into(),
-                    status: BridgeRunStatus::Retryable {
-                        reason: "supported-host-noop".into(),
-                    },
-                };
-                write_private_create_once(
-                    &terminal_path,
-                    format!("{}\n", receipt.to_json()).as_bytes(),
-                    "supported-host terminal receipt",
-                )
-                .map_err(crate::commands::CommandFailure::diagnostic)?;
-                Ok(receipt)
-            },
+        let lease = crate::commands::claim::acquire_for_conductor(
+            &repository,
+            42,
+            "worker-successor",
+            "feat/autonomous-issue-42",
+            "main",
         )
-        .expect("retire predecessor and admit successor")
-        .expect("released predecessor authority");
+        .unwrap_or_else(|error| match error {
+            crate::commands::claim::ConductorClaimError::Diagnostic(error) => {
+                panic!("production successor acquisition: {}", error.message)
+            }
+            crate::commands::claim::ConductorClaimError::Deferred { json, exit_code } => {
+                panic!("production successor acquisition deferred ({exit_code}): {json}")
+            }
+        });
+        let issue_heartbeat = heartbeat
+            .join(crate::commands::autonomous::drain::repository_progress_key(
+                &repository,
+            ))
+            .join("42.json");
+        let heartbeat_body =
+            fs::read_to_string(&issue_heartbeat).expect("read successor heartbeat");
+        assert!(!heartbeat_body.contains("claim-predecessor"));
+        assert!(heartbeat_body.contains(&lease.claim_id));
 
-        assert_eq!(result.claim_id, "claim-successor");
+        let executable = std::env::current_exe().expect("resolve admission no-op executable");
+        let test_name = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt";
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut child = process_owner::OwnedChildTree::spawn_prepared(
+            process_owner::PreparedLaunchSpec::inherited(
+                executable.clone(),
+                vec![
+                    executable.into_os_string(),
+                    "--exact".into(),
+                    test_name.into(),
+                    "--nocapture".into(),
+                ],
+                Some(repo.clone()),
+                vec![(CHILD_ENV.into(), "1".into())],
+                None,
+                Some(File::create(null).expect("open admission null stdout")),
+                Some(File::create(null).expect("open admission null stderr")),
+            ),
+            "supported-host-noop".into(),
+        )
+        .expect("launch supported-host no-op child");
+        let status = child.wait().expect("wait for supported-host no-op child");
+        child.terminate().expect("reap supported-host no-op child");
+        assert!(status.success(), "supported-host no-op child failed");
+
+        let base = resolve_base(&repo, &BTreeMap::new()).expect("resolve admission base");
+        let admission_scope = executor_worktree_root()
+            .expect("canonical admission executor root")
+            .join(safe_scope(&repository).expect("safe admission scope"));
+        if admission_scope.exists() {
+            fs::remove_dir_all(&admission_scope).expect("remove stale admission scope");
+        }
+        let issue = provision_issue_worktree_for_claim(
+            &repo,
+            &repository,
+            42,
+            &base,
+            Some((&lease.claim_id, "42-supported-host")),
+        )
+        .expect("provision admission executor worktree");
+        let state_path = root.join("state/invocation.json");
+        let mut state = PersistedInvocation {
+            schema: INVOCATION_SCHEMA,
+            identity: BridgeIdentity {
+                repository: repository.clone(),
+                repository_path: fs::canonicalize(&repo).expect("canonical admission repo"),
+                issue: 42,
+                worker_id: lease.worker_id.clone(),
+                branch: lease.branch.clone(),
+                claim_id: lease.claim_id.clone(),
+                invocation_id: "42-supported-host".into(),
+                base_ref: issue.base_ref,
+                base_oid: issue.base_oid,
+                worktree: fs::canonicalize(issue.path).expect("canonical admission worktree"),
+                runtime_environment_dir: None,
+                runtime_session_id: None,
+            },
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::Complete,
+            supervisor: None,
+            process: None,
+            progress_at: unix_now().expect("admission timestamp"),
+            pr: None,
+            head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
+            terminal_result: Some("retryable:executor_zero_effect_completion".into()),
+            umbrella: None,
+            current_child: None,
+            implementation_repair_attempt: 0,
+        };
+        let snapshot = format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": 1,
+                "identity": {
+                    "repository": state.identity.repository,
+                    "repository_path": state.identity.repository_path,
+                    "issue": state.identity.issue,
+                    "worker_id": state.identity.worker_id,
+                    "branch": state.identity.branch,
+                    "claim_id": state.identity.claim_id,
+                    "invocation_id": state.identity.invocation_id,
+                    "base_ref": state.identity.base_ref,
+                    "base_oid": state.identity.base_oid,
+                    "worktree": state.identity.worktree,
+                    "local_head": state.identity.base_oid,
+                    "dirty_wip": false,
+                },
+                "refs": {"refs/heads/main": state.identity.base_oid},
+                "pull_requests": [],
+            })
+        );
+        let snapshot_path = remote_snapshot_path(&state_path);
+        fs::create_dir_all(snapshot_path.parent().expect("admission snapshot parent"))
+            .expect("create admission snapshot parent");
+        fs::write(&snapshot_path, &snapshot).expect("write admission prelaunch snapshot");
+        #[cfg(unix)]
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure admission prelaunch snapshot");
+        state.remote_snapshot_digest = Some(sha256_hex(snapshot.as_bytes()));
+        write_invocation_atomic(&state_path, &state).expect("persist admission Complete state");
+        let sinks = output_sink_paths(&state_path, &state.identity.invocation_id)
+            .expect("admission output sinks");
+        fs::create_dir_all(sinks.exit_status.parent().expect("admission exit parent"))
+            .expect("create admission exit parent");
+        let mut exit = [0_u8; 16];
+        exit[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[4..8].copy_from_slice(b"EXIT");
+        exit[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[12..].copy_from_slice(b"DONE");
+        fs::write(&sinks.exit_status, exit).expect("write admission synced exit");
+        #[cfg(unix)]
+        fs::set_permissions(&sinks.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("secure admission synced exit");
+        ensure_zero_effect_recovery_marker(&state_path, &state)
+            .expect("persist admission zero-effect marker");
+        assert_eq!(
+            crate::commands::claim::transition_bridge_claim(
+                crate::commands::claim::ClaimMutationIdentity {
+                    repo: &state.identity.repository,
+                    issue: state.identity.issue,
+                    worker_id: &state.identity.worker_id,
+                    branch: &state.identity.branch,
+                    claim_id: &state.identity.claim_id,
+                },
+                None,
+                crate::commands::claim::BridgeClaimDisposition::Retryable,
+            )
+            .expect("publish admission terminal claim"),
+            crate::commands::claim::BridgeClaimTransition::Transitioned
+        );
+        let request = ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: 42,
+            issue_title: "Portable admission".into(),
+            issue_body: "No-op admission run".into(),
+            serialization_reasons: Vec::new(),
+            worker_id: lease.worker_id,
+            claim_id: lease.claim_id,
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: root.join("state/events.jsonl"),
+        };
+        let result =
+            run_executor_bridge(&request).expect("production bridge terminal reconciliation");
+
+        assert_eq!(result.claim_id, request.claim_id);
+        let terminal_path = state_path.with_extension("terminal.json");
         assert!(
             terminal_path.is_file(),
             "terminal receipt was not published"
         );
-        let heartbeat_body = fs::read_to_string(
-            heartbeat
-                .join(crate::commands::autonomous::drain::repository_progress_key(
-                    "owner/repo",
-                ))
-                .join("42.json"),
-        )
-        .expect("read successor heartbeat");
-        assert!(heartbeat_body.contains("claim-successor"));
+        assert!(Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&state.identity.worktree)
+            .current_dir(&repo)
+            .status()
+            .expect("remove admission executor worktree")
+            .success());
+        if let Some(scope) = state.identity.worktree.parent() {
+            fs::remove_dir_all(scope).expect("remove admission executor scope");
+        }
         fs::remove_dir_all(root).expect("remove supported-host fixture");
     }
 }
@@ -1013,6 +1187,42 @@ where
 }
 
 #[cfg(not(target_os = "linux"))]
+struct PortableOwnedChildGuard {
+    owned: process_owner::OwnedChildTree,
+    armed: bool,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl PortableOwnedChildGuard {
+    fn new(owned: process_owner::OwnedChildTree) -> Self {
+        Self { owned, armed: true }
+    }
+
+    fn identity(&self) -> process_owner::DurableProcessOwner {
+        self.owned.identity()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, String> {
+        self.owned.try_wait()
+    }
+
+    fn terminate(&mut self) -> Result<std::process::ExitStatus, String> {
+        let status = self.owned.terminate()?;
+        self.armed = false;
+        Ok(status)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Drop for PortableOwnedChildGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.owned.terminate();
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(super) fn supervise_validated_harness_with_claim_renewal(
     state_path: &Path,
     event_log: &Path,
@@ -1075,7 +1285,7 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
             .unwrap_or_else(|| harness.program.clone().into_os_string()),
     );
     argv.extend(harness.args.iter().map(OsString::from));
-    let mut owned = process_owner::OwnedChildTree::spawn_prepared(
+    let owned = process_owner::OwnedChildTree::spawn_prepared(
         process_owner::PreparedLaunchSpec::inherited(
             harness.program.clone(),
             argv,
@@ -1087,14 +1297,18 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
         ),
         state.identity.invocation_id.clone(),
     )?;
+    let mut owned = PortableOwnedChildGuard::new(owned);
     let owner = owned.identity();
-    write_private_create_once(
-        &sinks.supervisor_identity,
-        owner
-            .document(&state.identity.invocation_id, &argv_digest(&harness.args))
-            .as_bytes(),
-        "portable executor owner",
-    )?;
+    #[cfg(test)]
+    LAST_SPAWN_HARNESS.store(owner.pid, Ordering::SeqCst);
+    let owner_document = owner.document(&state.identity.invocation_id, &argv_digest(&harness.args));
+    let journal = fail_launch_at("journal-write").and_then(|()| {
+        write_private_create_once(
+            &sinks.supervisor_identity,
+            owner_document.as_bytes(),
+            "portable executor owner",
+        )
+    });
     enum PortableTerminal {
         Exited(i32),
         OwnershipLost,
@@ -1102,46 +1316,50 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
         Stalled,
     }
 
-    let operation = (|| -> Result<PortableTerminal, String> {
-        fail_launch_at("persist")?;
-        state.phase = BridgePhase::Implementing;
-        state.progress_at = unix_now()?;
-        write_invocation_atomic(state_path, state)?;
-        fail_launch_at("log")?;
-        append_executor_event(event_log, state, "child_started", None)?;
-        let mut observed = (0, 0);
-        let mut last_progress = Instant::now();
-        loop {
-            thread::sleep(config.poll_interval);
-            fail_launch_at("direct-poll")?;
-            if let Some(status) = owned.try_wait()? {
-                return Ok(PortableTerminal::Exited(status.code().unwrap_or(1)));
-            }
-            let sizes = (
-                fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
-                fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
-            );
-            if sizes != observed {
-                observed = sizes;
-                last_progress = Instant::now();
-                state.progress_at = unix_now()?;
-                fail_launch_at("adopt-flush")?;
-                write_invocation_atomic(state_path, state)?;
-            }
-            if renewal.is_due() {
-                match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
-                    Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
-                        renewal.mark_refreshed(ttl_seconds)
+    let operation = journal.and_then(|()| {
+        (|| -> Result<PortableTerminal, String> {
+            fail_launch_at("persist")?;
+            state.phase = BridgePhase::Implementing;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            fail_launch_at("log")?;
+            append_executor_event(event_log, state, "child_started", None)?;
+            let mut observed = (0, 0);
+            let mut last_progress = Instant::now();
+            loop {
+                thread::sleep(config.poll_interval);
+                fail_launch_at("direct-poll")?;
+                if let Some(status) = owned.try_wait()? {
+                    return Ok(PortableTerminal::Exited(status.code().unwrap_or(1)));
+                }
+                let sizes = (
+                    fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
+                    fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
+                );
+                if sizes != observed {
+                    observed = sizes;
+                    last_progress = Instant::now();
+                    state.progress_at = unix_now()?;
+                    fail_launch_at("adopt-flush")?;
+                    write_invocation_atomic(state_path, state)?;
+                }
+                if renewal.is_due() {
+                    match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+                        Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                            renewal.mark_refreshed(ttl_seconds)
+                        }
+                        Ok(BridgeClaimOwnership::Lost) => {
+                            return Ok(PortableTerminal::OwnershipLost)
+                        }
+                        Err(error) => return Ok(PortableTerminal::Transient(error)),
                     }
-                    Ok(BridgeClaimOwnership::Lost) => return Ok(PortableTerminal::OwnershipLost),
-                    Err(error) => return Ok(PortableTerminal::Transient(error)),
+                }
+                if last_progress.elapsed() >= config.stall_timeout {
+                    return Ok(PortableTerminal::Stalled);
                 }
             }
-            if last_progress.elapsed() >= config.stall_timeout {
-                return Ok(PortableTerminal::Stalled);
-            }
-        }
-    })();
+        })()
+    });
 
     // This is the single post-spawn finalizer. It consumes the live OS ownership authority on
     // every branch, including a leader that already exited while descendants remain. The durable
@@ -1171,7 +1389,7 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
     let cleanup_document = serde_json::json!({
         "schema": 1,
         "invocation_id": state.identity.invocation_id,
-        "owner": owner.document(&state.identity.invocation_id, &argv_digest(&harness.args)),
+        "owner": owner_document,
         "exit_code": cleanup_status.code(),
         "tree_cleanup": "proven",
     })
@@ -1182,8 +1400,10 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
         "portable executor cleanup evidence",
     )?;
     append_executor_event(event_log, state, "child_cleanup_complete", None)?;
-    fs::remove_file(&sinks.supervisor_identity)
-        .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+    if sinks.supervisor_identity.exists() {
+        fs::remove_file(&sinks.supervisor_identity)
+            .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+    }
 
     let terminal = operation?;
     match terminal {
@@ -1378,6 +1598,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (name, failpoint, script) in [
+            ("journal", LaunchFailpoint::JournalWrite, "sleep 30"),
             ("persist", LaunchFailpoint::PersistAfterSpawn, "sleep 30"),
             ("event", LaunchFailpoint::LogAfterSpawn, "sleep 30"),
             ("poll", LaunchFailpoint::DirectPoll, "sleep 30"),
@@ -1400,6 +1621,7 @@ mod tests {
                 MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
                     .expect("capture supervision snapshot");
             set_launch_failpoint(failpoint);
+            LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
             let error = supervise_validated_harness_with_claim_renewal(
                 &state_path,
                 &event_log,
@@ -1417,6 +1639,14 @@ mod tests {
             assert!(
                 error.contains("injected"),
                 "unexpected {name} error: {error}"
+            );
+            let spawned_pid = LAST_SPAWN_HARNESS.load(Ordering::SeqCst);
+            assert_ne!(spawned_pid, 0, "{name} did not launch the real child");
+            assert!(
+                process_birth_identity(spawned_pid)
+                    .expect("inspect cleaned portable child")
+                    .is_none(),
+                "{name} left the real child alive after cleanup"
             );
             let sinks = output_sink_paths_for_state(&state_path, &state)
                 .expect("resolve portable supervision sinks");

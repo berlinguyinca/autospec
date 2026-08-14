@@ -61,7 +61,12 @@ for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
         assert f"cargo test -p autospec-cli --bin autospec {behavior}" in job_commands
 
 assert "cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host" in linux_commands
-portable_admission = "cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
+portable_admission = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
+for job_commands in (macos_commands, freebsd_commands):
+    assert job_commands.count(f'cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture') == 1
+    assert job_commands.count('grep -F -c "test $admission_test ... ok"') == 1
+assert windows_commands.count('cargo test -p autospec-cli --bin autospec $admissionTest -- --exact --nocapture') == 1
+assert windows_commands.count('[regex]::Matches($admissionOutput') == 1
 for job_commands in (macos_commands, windows_commands, freebsd_commands):
     assert job_commands.count(portable_admission) == 1
 

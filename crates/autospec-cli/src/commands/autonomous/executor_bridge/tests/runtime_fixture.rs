@@ -41,6 +41,7 @@ fn autonomous_executor_bridge_rejects_foreign_symlink_and_detached_reuse() {
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let foreign_scope = format!("foreign_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let scope_path = bridge::executor_worktree_root()
+        .expect("canonical executor root")
         .join(bridge::safe_scope(&foreign_scope).expect("safe scope"));
     fs::create_dir_all(&scope_path).expect("create scope");
     fs::create_dir_all(fixture.root.join("foreign")).expect("create foreign directory");

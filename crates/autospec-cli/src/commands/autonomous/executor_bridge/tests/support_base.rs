@@ -510,6 +510,7 @@ pub(super) fn zero_effect_classifier_fixture(
         TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let scope_root = bridge::executor_worktree_root()
+        .expect("canonical executor root")
         .join(bridge::safe_scope(&repository_scope).expect("safe repository scope"));
     bridge::ensure_private_directory(&scope_root).expect("private executor scope");
     fixture.executor_scope_roots.push(scope_root.clone());

@@ -9717,7 +9717,7 @@ where
         {
             continue;
         }
-        let expected_path = executor_worktree_root()
+        let expected_path = executor_worktree_root()?
             .join(safe_scope(&state.identity.repository)?)
             .join(format!("issue-{}", state.identity.issue));
         if state.identity.worktree != expected_path || !claim_is_active(&state)? {
@@ -20914,7 +20914,7 @@ fn provision_issue_worktree_for_claim(
         fs::canonicalize(repo).map_err(|error| format!("canonicalize repository: {error}"))?;
     let scope = safe_scope(repository_scope)?;
     let branch = format!("feat/autonomous-issue-{issue}");
-    let executor_root = executor_worktree_root();
+    let executor_root = executor_worktree_root()?;
     harden_executor_worktree_root(&canonical_repo, &executor_root)?;
     let scope_root = executor_root.join(scope);
     ensure_private_directory(&scope_root)?;
@@ -21585,7 +21585,7 @@ fn adopted_transfer_reaches_recovered_head(
 }
 
 fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
-    let expected_scope = executor_worktree_root().join(safe_scope(&state.identity.repository)?);
+    let expected_scope = executor_worktree_root()?.join(safe_scope(&state.identity.repository)?);
     let expected_worktree = expected_scope.join(format!("issue-{}", state.identity.issue));
     if state.identity.worktree != expected_worktree {
         return Err(
@@ -22483,16 +22483,40 @@ fn safe_scope(scope: &str) -> Result<String, String> {
     Ok(format!("{sanitized}-{}", &digest[..12]))
 }
 
-pub(crate) fn executor_worktree_root() -> PathBuf {
-    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+fn resolve_executor_worktree_root_with(
+    temporary: PathBuf,
+    canonicalize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
+) -> Result<PathBuf, String> {
+    let canonical = canonicalize(&temporary).map_err(|error| {
+        format!(
+            "canonicalize executor temporary directory {}: {error}",
+            temporary.display()
+        )
+    })?;
+    if !canonical.is_absolute() {
+        return Err(format!(
+            "canonical executor temporary directory is not absolute: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(windows)]
+    if !matches!(canonical.components().next(), Some(Component::Prefix(_))) {
+        return Err(format!(
+            "canonical executor temporary directory is not drive-qualified: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical.join("autospec-executor"))
+}
+
+pub(crate) fn executor_worktree_root() -> Result<PathBuf, String> {
+    static ROOT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         #[cfg(windows)]
         let temporary = std::env::temp_dir();
         #[cfg(not(windows))]
         let temporary = PathBuf::from("/tmp");
-        fs::canonicalize(&temporary)
-            .unwrap_or(temporary)
-            .join("autospec-executor")
+        resolve_executor_worktree_root_with(temporary, |path| fs::canonicalize(path))
     })
     .clone()
 }
