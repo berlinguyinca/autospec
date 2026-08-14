@@ -5,6 +5,19 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
+pub(super) fn normalize_git_argument(argument: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = argument.strip_prefix(r"\\?\UNC\") {
+            return std::borrow::Cow::Owned(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = argument.strip_prefix(r"\\?\") {
+            return std::borrow::Cow::Borrowed(rest);
+        }
+    }
+    std::borrow::Cow::Borrowed(argument)
+}
+
 pub(super) fn read_exact_at_portable(
     file: &File,
     mut buffer: &mut [u8],

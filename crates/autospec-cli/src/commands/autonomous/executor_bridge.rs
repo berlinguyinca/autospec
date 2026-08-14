@@ -22970,19 +22970,6 @@ fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-fn normalize_git_argument(argument: &str) -> std::borrow::Cow<'_, str> {
-    #[cfg(windows)]
-    {
-        if let Some(rest) = argument.strip_prefix(r"\\?\UNC\") {
-            return std::borrow::Cow::Owned(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = argument.strip_prefix(r"\\?\") {
-            return std::borrow::Cow::Borrowed(rest);
-        }
-    }
-    std::borrow::Cow::Borrowed(argument)
-}
-
 // Harness selection, configuration and invocation. Extracted so this file has one fewer
 // concern in it; `use harness::*` keeps every call site in the parent unchanged.
 mod harness;
