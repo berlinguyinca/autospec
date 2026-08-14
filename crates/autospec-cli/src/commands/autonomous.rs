@@ -5755,7 +5755,7 @@ fn terminate_unit_with_process_observer(
                 .recorded_identity
                 .ok_or_else(|| {
                     format!(
-                        "refusing to terminate {name} pid {}: exact process identity is unavailable",
+                        "refusing to terminate {name} pid {}: process group ownership is unverified: exact process identity is unavailable",
                         unit.pid
                     )
                 })?;
