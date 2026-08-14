@@ -26,6 +26,7 @@ thread_local! {
     static FORCE_NEXT_TERMINATION_UNCERTAINTY: Cell<bool> = const { Cell::new(false) };
     static POLL_DEATH_RACE: Cell<Option<(u32, PollDeathRaceFence)>> = const { Cell::new(None) };
     static CANCEL_MARKER_EINTR_ONCE: Cell<bool> = const { Cell::new(false) };
+    static CANCEL_MARKER_EPIPE_ONCE: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -85,6 +86,22 @@ impl Drop for CancelMarkerEintrGuard {
 fn force_cancel_marker_eintr_once_for_test() -> CancelMarkerEintrGuard {
     CANCEL_MARKER_EINTR_ONCE.with(|fault| fault.set(true));
     CancelMarkerEintrGuard
+}
+
+#[cfg(test)]
+struct CancelMarkerEpipeGuard;
+
+#[cfg(test)]
+impl Drop for CancelMarkerEpipeGuard {
+    fn drop(&mut self) {
+        CANCEL_MARKER_EPIPE_ONCE.with(|fault| fault.set(None));
+    }
+}
+
+#[cfg(test)]
+fn force_cancel_marker_epipe_once_for_test(expected_pid: u32) -> CancelMarkerEpipeGuard {
+    CANCEL_MARKER_EPIPE_ONCE.with(|fault| fault.set(Some(expected_pid)));
+    CancelMarkerEpipeGuard
 }
 
 fn cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
@@ -556,13 +573,13 @@ impl Drop for DarwinOwnedGroup {
             if let Some(pid) = self.supervisor_pid.take() {
                 let _ = cancel_blocked_group(barrier, pid, self.leader.process_group);
             } else {
-                let _ = write_cancel_marker(&barrier);
+                let _ = write_cancel_marker(&barrier, None);
             }
         }
     }
 }
 
-fn write_cancel_marker(barrier: &OwnedFd) -> Result<(), String> {
+fn write_cancel_marker(barrier: &OwnedFd, _expected_pid: Option<u32>) -> Result<(), String> {
     loop {
         #[cfg(test)]
         let written = if CANCEL_MARKER_EINTR_ONCE.with(|fault| fault.replace(false)) {
@@ -573,7 +590,24 @@ fn write_cancel_marker(barrier: &OwnedFd) -> Result<(), String> {
         #[cfg(not(test))]
         let written = fd_write(barrier, b"C");
         match written {
-            Ok(1) => return Ok(()),
+            Ok(1) => {
+                #[cfg(test)]
+                if _expected_pid.is_some_and(|expected_pid| {
+                    CANCEL_MARKER_EPIPE_ONCE.with(|fault| match fault.get() {
+                        Some(armed_pid) if armed_pid == expected_pid => {
+                            fault.set(None);
+                            true
+                        }
+                        _ => false,
+                    })
+                }) {
+                    return Err(format!(
+                        "cancel persisted Darwin launch barrier: {}",
+                        Errno::EPIPE
+                    ));
+                }
+                return Ok(());
+            }
             Ok(count) => {
                 return Err(format!(
                     "cancel persisted Darwin launch barrier: wrote {count} of 1 bytes"
@@ -588,7 +622,7 @@ fn write_cancel_marker(barrier: &OwnedFd) -> Result<(), String> {
 fn cancel_blocked_group(barrier: OwnedFd, pid: Pid, process_group: u32) -> Result<(), String> {
     // An explicit non-release marker cannot be held open by writer descriptors inherited by
     // concurrent forks, unlike cancellation that depends on observing pipe EOF.
-    let marker = write_cancel_marker(&barrier);
+    let marker = write_cancel_marker(&barrier, u32::try_from(pid.as_raw()).ok());
     drop(barrier);
     let cleanup = match wait_for_empty_group(process_group, Some(pid), KILL_GRACE) {
         Ok(true) => Ok(()),
@@ -1017,22 +1051,16 @@ mod tests {
 
     #[test]
     fn darwin_unreleased_cancellation_epipe_still_reaps_and_proves_group_empty() {
-        let (mut group, root) = blocked_fixture("printf unexpected-user-code");
+        let marker = "epipe-cancel-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
         let identity = group.identity().clone();
-        let (closed_reader, closed_writer) = cloexec_pipe("closed cancellation test barrier")
-            .expect("create closed cancellation pipe");
-        drop(closed_reader);
-        let actual_writer = group
-            .barrier
-            .replace(closed_writer)
-            .expect("actual blocked launch barrier");
-        write_cancel_marker(&actual_writer).expect("cancel actual blocked supervisor");
-        drop(actual_writer);
+        let _epipe = force_cancel_marker_epipe_once_for_test(identity.pid);
 
         let error = group
             .cancel_unreleased()
-            .expect_err("closed barrier read side must preserve marker failure");
+            .expect_err("injected EPIPE must preserve marker failure");
         assert!(error.contains("Broken pipe"), "{error}");
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
         assert_eq!(
             waitpid(
                 Pid::from_raw(identity.pid as i32),
@@ -1040,6 +1068,39 @@ mod tests {
             ),
             Err(Errno::ECHILD),
             "cancel must reap the exact blocked supervisor after EPIPE"
+        );
+        assert!(group_is_empty(identity.process_group).expect("prove cancelled group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_cancellation_epipe_fault_is_pid_bound_across_parallel_fork() {
+        let marker = "pid-bound-epipe-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let identity = group.identity().clone();
+        let _epipe = force_cancel_marker_epipe_once_for_test(identity.pid);
+
+        let peer = thread::spawn(|| blocked_fixture("printf peer-user-code-ran"));
+        let (peer_group, peer_root) = peer.join().expect("parallel fork fixture");
+        assert_eq!(peer_group.cancel_unreleased(), Ok(()));
+        assert!(
+            !peer_root.join("peer-user-code-ran").exists(),
+            "peer cancellation released user code"
+        );
+        let _ = std::fs::remove_dir_all(peer_root);
+
+        let error = group
+            .cancel_unreleased()
+            .expect_err("expected PID must retain injected EPIPE");
+        assert!(error.contains("Broken pipe"), "{error}");
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
+        assert_eq!(
+            waitpid(
+                Pid::from_raw(identity.pid as i32),
+                Some(WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD),
+            "PID-bound EPIPE cancellation must reap exact supervisor"
         );
         assert!(group_is_empty(identity.process_group).expect("prove cancelled group ESRCH"));
         let _ = std::fs::remove_dir_all(root);

@@ -244,9 +244,9 @@ it reports no finding in the new Darwin cancellation, reservation, or round-2 re
   boundary. The test retains a cloned writer, injects one `EINTR`, and therefore completes only if
   the same thread retries the explicit `C` marker rather than falling back to EOF.
 - The first parallel EPIPE fixture exposed real fork semantics: a sibling supervisor inherited the
-  original pipe reader, so that pipe could not deterministically produce EPIPE. The final fixture
-  sends `C` to the real blocked supervisor, swaps in a separate pipe whose reader is explicitly
-  closed, and then exercises the production EPIPE cleanup path without cross-test dependence.
+  original pipe reader, so that pipe could not deterministically produce EPIPE. The interim
+  replacement used a separate closed pipe and passed the round-4 gates, but still created a
+  theoretical fork-inheritance window; round 5 replaces that evidence fixture entirely.
 
 ### Implementation
 
@@ -267,6 +267,41 @@ it reports no finding in the new Darwin cancellation, reservation, or round-2 re
 - `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 29 passed.
 - EPIPE cleanup, inherited-writer Drop, and EINTR retry exact tests -> 20/20 passes each.
 - `cargo test -p autospec-cli --bin autospec darwin_unreleased_ -- --test-threads=1` -> 7 passed.
+- `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
+- `cargo test -p autospec-cli --bin autospec darwin_reconciliation -- --test-threads=1` -> 4 passed.
+- Task 5 filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`, `heartbeat_prior`,
+  `heartbeat_quarantine`, `heartbeat_classify`, `conductor_lease_takeover`) -> 4, 1, 3, 6, 9,
+  and 13 tests passed respectively.
+- `cargo check -p autospec-cli --all-targets` and the `x86_64-unknown-linux-gnu` cross-target
+  variant -> exit 0 with pre-existing warnings.
+- Targeted `rustfmt --check` and `git diff --check` -> exit 0.
+
+## Review fix round 5
+
+Production cancellation behavior from round 4 is unchanged. This final review repair removes the
+remaining EPIPE evidence ambiguity from creating and closing a real pipe in a multithreaded test
+process, where another concurrent fork could inherit the supposedly closed reader.
+
+### Evidence repair
+
+- The cancellation-marker boundary now has a test-only EPIPE injection that is both thread-local
+  and bound to the expected supervisor PID. The real `C` marker is delivered first so the exact
+  blocked supervisor cancels independently of inherited descriptors; that same marker boundary
+  then reports injected `EPIPE` and exercises the production error-after-cleanup result path.
+- The EPIPE regression continues to require the marker error after cleanup, absent user-code
+  marker, exact-child `ECHILD`, and group `ESRCH`.
+- The concurrency regression forks a peer supervisor on another thread, returns it to the armed
+  thread, and cancels that mismatched PID first. The peer succeeds without consuming the fault;
+  only the originally armed PID receives EPIPE. This covers both thread/fork isolation and PID
+  binding without a pipe-reader inheritance window.
+
+### GREEN evidence
+
+- Exact EPIPE cleanup regression -> 20/20 passes.
+- PID-bound concurrent-fork EPIPE regression -> 20/20 passes.
+- Normal parallel `cargo test -p autospec-cli --bin autospec darwin_` -> 10 consecutive clean
+  runs, 30 passed per run.
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 30 passed.
 - `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
 - `cargo test -p autospec-cli --bin autospec darwin_reconciliation -- --test-threads=1` -> 4 passed.
 - Task 5 filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`, `heartbeat_prior`,
