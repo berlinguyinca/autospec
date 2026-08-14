@@ -33,7 +33,7 @@ mod continuation_event;
 #[cfg(target_os = "linux")]
 mod descendant_spawn;
 mod dispatcher_temporary;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod draft_release;
 mod explore_pin_staleness;
 mod full_suite;
@@ -83,7 +83,7 @@ mod structured_review;
 mod structured_review_receipt;
 mod support_base;
 mod support_harness_env;
-mod support_invocation;
+pub(super) mod support_invocation;
 mod support_launch;
 mod support_review;
 mod sync_integration;

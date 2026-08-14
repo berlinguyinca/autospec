@@ -44,7 +44,19 @@ pub(super) fn reconcile_direct_launch(
 ) -> Result<bool, String> {
     let intent = match fs::read_to_string(&paths.intent) {
         Ok(intent) => intent,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if paths.launch.exists()
+                || direct_retirement_artifacts(paths)
+                    .iter()
+                    .any(|artifact| artifact.exists())
+            {
+                return Err(
+                    "Darwin direct ownership artifacts exist without their private intent"
+                        .to_string(),
+                );
+            }
+            return Ok(false);
+        }
         Err(error) => return Err(format!("read direct command intent: {error}")),
     };
     if expected_intent_body.is_some_and(|expected| expected != intent) {
@@ -70,12 +82,20 @@ pub(super) fn reconcile_direct_launch(
         crate::commands::autonomous::platform_process::ProcessObservation::Exact(birth)
             if birth.process_group == leader.process_group =>
         {
-            super::darwin_supervisor::DarwinOwnedGroup::adopt(&leader)?.terminate()?;
+            super::darwin_supervisor::DarwinOwnedGroup::adopt(&leader, &paths.sinks)?
+                .terminate()?;
         }
         crate::commands::autonomous::platform_process::ProcessObservation::Dead => {
-            if !super::darwin_supervisor::group_is_empty(leader.process_group)? {
+            let durable_exit = match fs::metadata(&paths.sinks.exit_status) {
+                Ok(_) => read_executor_exit_status(&paths.sinks.exit_status)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(format!("inspect executor exit record: {error}")),
+            };
+            if durable_exit.is_none()
+                || !super::darwin_supervisor::group_is_empty(leader.process_group)?
+            {
                 return Err(
-                    "direct launch leader exited while process-group membership remains"
+                    "direct launch leader exited without durable whole-group completion"
                         .to_string(),
                 );
             }
@@ -105,102 +125,6 @@ where
 {
     require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
     unreachable!("non-Linux executor admission always fails")
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn create_draft_pull_request<Refresh>(
-    state_path: &Path,
-    state: &mut PersistedInvocation,
-    body: &str,
-    issue_title: &str,
-    base: &str,
-    adapter: &DraftPrAdapter,
-    refresh: &mut Refresh,
-) -> Result<(), BridgeRunFailure>
-where
-    Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
-{
-    let body_path = state_path.with_file_name(format!(
-        "draft-body-{}-{}.md",
-        state.identity.invocation_id,
-        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    write_private_create_once(&body_path, body.as_bytes(), "executor draft body")?;
-    let executable = resolve_draft_executable(adapter)?;
-    let invocation = ValidatedInvocation {
-        program: executable,
-        argv_zero: None,
-        args: vec![
-            "pr".into(),
-            "create".into(),
-            "--repo".into(),
-            state.identity.repository.clone(),
-            "--draft".into(),
-            "--head".into(),
-            state.identity.branch.clone(),
-            "--base".into(),
-            base.into(),
-            "--title".into(),
-            issue_title.into(),
-            "--body-file".into(),
-            body_path
-                .to_str()
-                .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?
-                .into(),
-        ],
-        current_dir: state.identity.worktree.clone(),
-        environment_overrides: adapter.environment.clone().into_iter().collect(),
-    };
-    let sinks = output_sink_paths_for_attempt(
-        state_path,
-        &format!("{}-draft", state.identity.invocation_id),
-        0,
-    )?;
-    let mut group = super::darwin_supervisor::DarwinOwnedGroup::spawn_trusted(&invocation, &sinks)
-        .map_err(|failure| failure.reason)?;
-    state.draft_process = Some(group.identity().clone());
-    state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state)?;
-    if refresh()? == BridgeClaimOwnership::Lost {
-        group.terminate()?;
-        state.draft_process = None;
-        state.progress_at = unix_now()?;
-        write_invocation_atomic(state_path, state)?;
-        let _ = fs::remove_file(&body_path);
-        return Err(BridgeRunFailure::ownership_lost(
-            "executor draft creation lost exact claim ownership",
-        ));
-    }
-    let deadline = Instant::now() + Duration::from_secs(300);
-    let result = loop {
-        super::darwin_supervisor::publish_output_cursors(&sinks)?;
-        match group.poll() {
-            Ok(Some(0)) => break Ok(()),
-            Ok(Some(code)) => {
-                let stderr = fs::read_to_string(&sinks.stderr).unwrap_or_default();
-                break Err(format!(
-                    "create executor draft pull request failed with exit {code}: {}",
-                    stderr.trim()
-                )
-                .into());
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                group.terminate()?;
-                break Err("create executor draft pull request timed out"
-                    .to_string()
-                    .into());
-            }
-            Err(error) => break Err(error.into()),
-        }
-    };
-    state.draft_process = None;
-    state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state)?;
-    let _ = fs::remove_file(&body_path);
-    result
 }
 
 #[cfg(target_os = "macos")]
@@ -279,6 +203,76 @@ pub(super) fn resolve_executor_supervisor_executable(
     Err(format!(
         "{primary_error}; executor supervisor argv-zero fallback cannot prove running-image identity on this platform"
     ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_reconciliation_tests {
+    use super::*;
+
+    fn root(name: &str) -> PathBuf {
+        let path = std::env::current_dir()
+            .expect("current directory")
+            .join("target/executor-bridge-tests")
+            .join(format!("darwin-portability-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        ensure_private_directory(&path).expect("private test root");
+        path
+    }
+
+    #[test]
+    fn darwin_reconciliation_rejects_launch_without_private_intent() {
+        let root = root("missing-intent");
+        let paths = direct_attempt_paths(&root, 0);
+        write_private_create_once(&paths.launch, b"{}", "orphan Darwin launch")
+            .expect("orphan launch");
+        let error = reconcile_direct_launch(&paths, None).expect_err("orphan launch rejected");
+        assert!(error.contains("without their private intent"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_reconciliation_rejects_dead_group_without_fenced_exit() {
+        let root = root("dead-no-exit");
+        let paths = direct_attempt_paths(&root, 0);
+        let attempt = reserve_direct_attempt_id(&paths).expect("attempt id");
+        let intent = direct_intent_document(
+            &attempt,
+            &"a".repeat(40),
+            None,
+            Path::new("/bin/true"),
+            &["true".to_string()],
+        );
+        write_private_create_once(&paths.intent, intent.as_bytes(), "Darwin direct intent")
+            .expect("intent");
+        let dead_pid = i32::MAX as u32;
+        let boot_id =
+            crate::commands::autonomous::platform_process::observe_birth(std::process::id())
+                .expect("observe current boot")
+                .expect("current process")
+                .boot_id;
+        let dead = ProcessIdentity {
+            pid: dead_pid,
+            process_group: dead_pid,
+            executable: PathBuf::from("/bin/true"),
+            argv_digest: argv_digest(&[]),
+            boot_id,
+            start_identity: "missing-start".to_string(),
+        };
+        let launch = direct_launch_document(&attempt, &sha256_hex(intent.as_bytes()), &dead, None);
+        write_private_create_once(&paths.launch, launch.as_bytes(), "Darwin direct launch")
+            .expect("launch");
+        let error = reconcile_direct_launch(&paths, Some(&intent))
+            .expect_err("unfenced dead group rejected");
+        assert!(
+            error.contains("without durable whole-group completion"),
+            "{error}"
+        );
+        assert!(
+            paths.launch.is_file(),
+            "unproven launch must remain quarantined"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]

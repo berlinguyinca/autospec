@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -32,7 +32,7 @@ use crate::commands::autonomous::platform_process::observe_process_group;
 use crate::commands::autonomous::platform_process::{
     observe_birth as observe_process_birth, ProcessBirth,
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
@@ -67,23 +67,16 @@ use nix::fcntl::OFlag;
 use nix::fcntl::{renameat2, RenameFlags};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use nix::sys::wait::{waitpid, WaitStatus};
 #[cfg(target_os = "linux")]
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::sys::wait::WaitPidFlag;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use nix::unistd::{fork, write as fd_write, ForkResult};
 #[cfg(target_os = "linux")]
-use nix::unistd::{fork, pipe2, write as fd_write, ForkResult, Pid};
+use nix::unistd::{pipe2, Pid};
 use yaml_edit::Document;
 
-#[cfg(target_os = "macos")]
-fn with_released_bridge_predecessor_authority<T>(
-    identity: ClaimMutationIdentity<'_>,
-    operation: impl FnOnce() -> Result<T, crate::commands::CommandFailure>,
-) -> Result<Option<T>, crate::commands::CommandFailure> {
-    if recover_released_bridge_claim(identity)? {
-        operation().map(Some)
-    } else {
-        Ok(None)
-    }
-}
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Read,Edit,Write,Glob,Grep,",
@@ -6425,6 +6418,10 @@ fn archive_reconciled_direct_failure(paths: &DirectAttemptPaths) -> Result<(), S
 }
 
 fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Result<u64, String> {
+    validate_private_state_file(cursor_path)
+        .map_err(|error| format!("direct output cursor is unsafe: {error}"))?;
+    validate_private_state_file(ring_path)
+        .map_err(|error| format!("direct output ring is unsafe: {error}"))?;
     let cursor = read_output_cursor(
         &OpenOptions::new()
             .read(true)
@@ -6433,6 +6430,15 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
     )?;
     if cursor.total > MAX_DIRECT_OUTPUT_BYTES || cursor.dropped > 0 {
         return Ok(cursor.total);
+    }
+    let ring_len = fs::metadata(ring_path)
+        .map_err(|error| format!("stat direct output ring: {error}"))?
+        .len();
+    if ring_len < cursor.total {
+        return Err(format!(
+            "direct output ring is shorter than its durable cursor: ring={ring_len} cursor={}",
+            cursor.total
+        ));
     }
     let mut bytes = vec![0_u8; cursor.total as usize];
     File::open(ring_path)
@@ -6827,32 +6833,29 @@ fn execute_supervised_direct_attempt(
             Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
         };
     }
-    let started = Instant::now();
+    if let Err(error) = group.release() {
+        return match group.terminate() {
+            Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+        };
+    }
+    let mut last_progress = Instant::now();
+    let mut observed = (0_u64, 0_u64);
     loop {
-        if let Err(error) = darwin_supervisor::publish_output_cursors(&paths.sinks) {
-            return match group.terminate() {
-                Ok(()) => AttemptTerminal::InfrastructureFailed(error),
-                Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
-            };
-        }
         match group.poll() {
             Ok(Some(code)) => {
-                if let Err(error) = darwin_supervisor::publish_output_cursors(&paths.sinks) {
-                    return AttemptTerminal::InfrastructureFailed(error);
-                }
-                for (source, target) in
-                    [(&paths.sinks.stdout, stdout), (&paths.sinks.stderr, stderr)]
-                {
-                    let copy = fs::read(source).and_then(|bytes| {
-                        target.set_len(0)?;
-                        target.write_all_at(&bytes, 0)?;
-                        target.sync_all()
-                    });
-                    if let Err(error) = copy {
-                        return AttemptTerminal::InfrastructureFailed(format!(
-                            "persist Darwin direct output: {error}"
-                        ));
-                    }
+                let sizes = (
+                    copy_direct_ring(&paths.sinks.stdout, &paths.sinks.stdout_writer_cursor, stdout),
+                    copy_direct_ring(&paths.sinks.stderr, &paths.sinks.stderr_writer_cursor, stderr),
+                );
+                let (Ok(stdout_size), Ok(stderr_size)) = sizes else {
+                    return AttemptTerminal::InfrastructureFailed(format!(
+                        "copy Darwin direct output failed: stdout={:?} stderr={:?}",
+                        sizes.0, sizes.1
+                    ));
+                };
+                if stdout_size > MAX_DIRECT_OUTPUT_BYTES || stderr_size > MAX_DIRECT_OUTPUT_BYTES {
+                    return AttemptTerminal::OutputOverflow;
                 }
                 return if code >= 128 {
                     AttemptTerminal::Signaled(code - 128)
@@ -6863,17 +6866,32 @@ fn execute_supervised_direct_attempt(
             Ok(None) => {}
             Err(error) => return AttemptTerminal::CleanupFailed(error),
         }
-        let output_size = [&paths.sinks.stdout, &paths.sinks.stderr]
-            .into_iter()
-            .filter_map(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
-            .sum::<u64>();
-        if output_size > MAX_DIRECT_OUTPUT_BYTES {
+        let totals = [&paths.sinks.stdout_writer_cursor, &paths.sinks.stderr_writer_cursor]
+            .map(|path| {
+                OpenOptions::new()
+                    .read(true)
+                    .open(path)
+                    .map_err(|error| format!("open Darwin direct progress cursor: {error}"))
+                    .and_then(|file| read_output_cursor(&file))
+                    .map(|cursor| cursor.total)
+            });
+        let (Ok(stdout_total), Ok(stderr_total)) = (&totals[0], &totals[1]) else {
+            let error = format!("poll Darwin direct output failed: {totals:?}");
+            return match group.terminate() {
+                Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+            };
+        };
+        if *stdout_total > MAX_DIRECT_OUTPUT_BYTES || *stderr_total > MAX_DIRECT_OUTPUT_BYTES {
             return match group.terminate() {
                 Ok(()) => AttemptTerminal::OutputOverflow,
                 Err(error) => AttemptTerminal::CleanupFailed(error),
             };
         }
-        if started.elapsed() >= stall_timeout {
+        if (*stdout_total, *stderr_total) != observed {
+            observed = (*stdout_total, *stderr_total);
+            last_progress = Instant::now();
+        } else if last_progress.elapsed() >= stall_timeout {
             return match group.terminate() {
                 Ok(()) => AttemptTerminal::TimedOut,
                 Err(error) => AttemptTerminal::CleanupFailed(error),
@@ -14780,7 +14798,47 @@ fn resolve_draft_executable(adapter: &DraftPrAdapter) -> Result<PathBuf, String>
         .map_err(|error| format!("canonicalize executor draft gh executable: {error}"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn executor_cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
+    #[cfg(target_os = "linux")]
+    {
+        return pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create {label}: {error}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut descriptors = [-1_i32; 2];
+        // SAFETY: descriptors points to exactly two writable integers.
+        if unsafe { nix::libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+            return Err(format!("create {label}: {}", std::io::Error::last_os_error()));
+        }
+        for descriptor in descriptors {
+            // SAFETY: pipe returned this descriptor and F_SETFD changes flags only.
+            if unsafe {
+                nix::libc::fcntl(descriptor, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC)
+            } != 0
+            {
+                // SAFETY: both descriptors remain owned here.
+                unsafe {
+                    nix::libc::close(descriptors[0]);
+                    nix::libc::close(descriptors[1]);
+                }
+                return Err(format!(
+                    "set {label} close-on-exec: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        // SAFETY: successful pipe returned two new uniquely owned descriptors.
+        Ok(unsafe {
+            (
+                OwnedFd::from_raw_fd(descriptors[0]),
+                OwnedFd::from_raw_fd(descriptors[1]),
+            )
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn create_draft_pull_request<Refresh>(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -14862,14 +14920,11 @@ where
         .map_err(|_| "executor draft release temporary path contains NUL".to_string())?;
     let receipt_path_c = CString::new(receipt_path.as_os_str().as_bytes())
         .map_err(|_| "executor draft release path contains NUL".to_string())?;
-    let (release_read, release_write) =
-        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft release pipe: {error}"))?;
-    let (digest_read, digest_write) =
-        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft digest pipe: {error}"))?;
-    let (cleanup_status_read, cleanup_status_write) = pipe2(OFlag::O_CLOEXEC)
-        .map_err(|error| format!("create draft cleanup status pipe: {error}"))?;
-    let (stderr_read, stderr_write) =
-        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft stderr pipe: {error}"))?;
+    let (release_read, release_write) = executor_cloexec_pipe("draft release pipe")?;
+    let (digest_read, digest_write) = executor_cloexec_pipe("draft digest pipe")?;
+    let (cleanup_status_read, cleanup_status_write) =
+        executor_cloexec_pipe("draft cleanup status pipe")?;
+    let (stderr_read, stderr_write) = executor_cloexec_pipe("draft stderr pipe")?;
     let null = OpenOptions::new()
         .write(true)
         .open("/dev/null")
@@ -14951,7 +15006,7 @@ where
             let release_count = loop {
                 let count =
                     nix::libc::read(release_read_fd, std::ptr::addr_of_mut!(release).cast(), 1);
-                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                if count < 0 && executor_errno() == nix::libc::EINTR {
                     continue;
                 }
                 break count;
@@ -14968,7 +15023,7 @@ where
                     digest[offset..].as_mut_ptr().cast(),
                     digest.len() - offset,
                 );
-                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                if count < 0 && executor_errno() == nix::libc::EINTR {
                     continue;
                 }
                 if count <= 0 {
@@ -14984,7 +15039,7 @@ where
                     digest[offset..].as_ptr().cast(),
                     digest.len() - offset,
                 );
-                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                if count < 0 && executor_errno() == nix::libc::EINTR {
                     continue;
                 }
                 if count <= 0 {
@@ -15013,7 +15068,7 @@ where
             } else {
                 let removed = loop {
                     let result = nix::libc::unlink(receipt_path_c.as_ptr());
-                    if result < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                    if result < 0 && executor_errno() == nix::libc::EINTR {
                         continue;
                     }
                     break result;
@@ -15035,7 +15090,7 @@ where
                     std::ptr::addr_of!(cleanup_status).cast(),
                     1,
                 );
-                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                if count < 0 && executor_errno() == nix::libc::EINTR {
                     continue;
                 }
                 if count <= 0 {
@@ -15988,7 +16043,20 @@ fn launch_child_failpoint() -> u8 {
 }
 
 #[cfg(target_os = "linux")]
+unsafe fn executor_errno() -> i32 {
+    // SAFETY: errno is thread-local process state.
+    unsafe { *nix::libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn executor_errno() -> i32 {
+    // SAFETY: __error returns the current thread's errno pointer on Darwin.
+    unsafe { *nix::libc::__error() }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn terminate_post_fork(code: i32) -> ! {
+    #[cfg(target_os = "linux")]
     // SAFETY: exit_group accepts only the current process exit status and is async-signal-safe.
     unsafe {
         nix::libc::syscall(nix::libc::SYS_exit_group, code);
@@ -15996,12 +16064,17 @@ fn terminate_post_fork(code: i32) -> ! {
             nix::libc::pause();
         }
     }
+    #[cfg(target_os = "macos")]
+    // SAFETY: _exit terminates the post-fork process without unwinding or allocator access.
+    unsafe {
+        nix::libc::_exit(code)
+    }
 }
 
 // The forked-child supervisor primitives; see the module header there.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod post_fork;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use post_fork::*;
 
 #[cfg(test)]
@@ -16894,6 +16967,55 @@ fn supervise_validated_harness_with_claim_renewal(
 }
 
 #[cfg(target_os = "macos")]
+fn record_darwin_recovery_required(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    event: &str,
+    reason: &str,
+) -> Result<(), String> {
+    state.phase = BridgePhase::Interrupted;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    append_executor_event(
+        event_log,
+        state,
+        event,
+        Some(serde_json::json!({
+            "reason": reason,
+            "recovery_required": true,
+            "exact_process_identity_retained": state.process.is_some(),
+            "darwin_process_group": true
+        })),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn record_darwin_cleanup_complete(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    event: &str,
+    reason: &str,
+) -> Result<(), String> {
+    state.phase = BridgePhase::Interrupted;
+    state.supervisor = None;
+    state.process = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    append_executor_event(
+        event_log,
+        state,
+        event,
+        Some(serde_json::json!({
+            "reason": reason,
+            "recovery_required": false,
+            "darwin_process_group": true
+        })),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn supervise_validated_harness_with_claim_renewal(
     state_path: &Path,
     event_log: &Path,
@@ -16911,7 +17033,7 @@ fn supervise_validated_harness_with_claim_renewal(
     let sinks = output_sink_paths_for_state(state_path, state)?;
     let adopted = state.process.is_some();
     let mut group = if let Some(expected) = state.process.as_ref() {
-        DarwinOwnedGroup::adopt(expected)?
+        DarwinOwnedGroup::adopt(expected, &sinks)?
     } else {
         if renewal.is_enabled() {
             match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
@@ -16925,7 +17047,7 @@ fn supervise_validated_harness_with_claim_renewal(
                 Err(error) => return Ok(SupervisionOutcome::TransientFailure(error)),
             }
         }
-        let group = DarwinOwnedGroup::spawn(
+        let mut group = DarwinOwnedGroup::spawn(
             harness.ok_or_else(|| {
                 "executor recovery exhausted durable identities before fresh harness resolution"
                     .to_string()
@@ -16937,8 +17059,29 @@ fn supervise_validated_harness_with_claim_renewal(
         state.supervisor = None;
         state.process = Some(group.identity().clone());
         state.progress_at = unix_now()?;
-        write_invocation_atomic(state_path, state)?;
-        append_executor_event(
+        if let Err(error) = write_invocation_atomic(state_path, state) {
+            return match group.terminate() {
+                Ok(()) => {
+                    state.phase = BridgePhase::Interrupted;
+                    state.process = None;
+                    state.progress_at = unix_now()?;
+                    let _ = write_invocation_atomic(state_path, state);
+                    Err(error)
+                }
+                Err(cleanup) => {
+                    let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                    let _ = record_darwin_recovery_required(
+                        state_path,
+                        event_log,
+                        state,
+                        "child_identity_persistence_failed",
+                        &reason,
+                    );
+                    Err(reason)
+                }
+            };
+        }
+        if let Err(error) = append_executor_event(
             event_log,
             state,
             "child_started",
@@ -16947,7 +17090,61 @@ fn supervise_validated_harness_with_claim_renewal(
                 "process_group": group.identity().process_group,
                 "darwin_process_group": true
             })),
-        )?;
+        ) {
+            return match group.terminate() {
+                Ok(()) => {
+                    state.phase = BridgePhase::Interrupted;
+                    state.process = None;
+                    state.progress_at = unix_now()?;
+                    write_invocation_atomic(state_path, state)?;
+                    Err(error)
+                }
+                Err(cleanup) => {
+                    let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                    record_darwin_recovery_required(
+                        state_path,
+                        event_log,
+                        state,
+                        "child_start_persistence_failed",
+                        &reason,
+                    )?;
+                    Err(reason)
+                }
+            };
+        }
+        if let Err(error) = group.release() {
+            let cleanup = group.terminate();
+            state.phase = BridgePhase::Interrupted;
+            if cleanup.is_ok() {
+                state.process = None;
+            }
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            if let Err(cleanup) = cleanup.as_ref() {
+                let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                record_darwin_recovery_required(
+                    state_path,
+                    event_log,
+                    state,
+                    "child_launch_handshake_failed",
+                    &reason,
+                )?;
+            } else {
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_launch_handshake_failed",
+                    Some(serde_json::json!({
+                        "reason": error,
+                        "recovery_required": false
+                    })),
+                )?;
+            }
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup) => format!("{error}; cleanup quarantined: {cleanup}"),
+            });
+        }
         group
     };
     let mut readers = DurableOutputReaders::open(&sinks, adopted)?;
@@ -16959,24 +17156,82 @@ fn supervise_validated_harness_with_claim_renewal(
                     renewal.mark_refreshed(ttl_seconds)
                 }
                 Ok(BridgeClaimOwnership::Lost) => {
-                    group.terminate()?;
+                    if let Err(cleanup) = group.terminate() {
+                        record_darwin_recovery_required(
+                            state_path,
+                            event_log,
+                            state,
+                            "claim_ownership_cleanup_uncertain",
+                            &cleanup,
+                        )?;
+                        return Err(cleanup);
+                    }
                     record_claim_ownership_loss(state_path, event_log, state)?;
                     return Ok(SupervisionOutcome::OwnershipLost);
                 }
                 Err(error) => return Ok(SupervisionOutcome::TransientFailure(error)),
             }
         }
-        let published = darwin_supervisor::publish_output_cursors(&sinks)?;
-        let consumed = readers.poll()?;
-        readers.flush_if_due(state_path, event_log, state, false)?;
-        if published > 0 || consumed > 0 {
+        let consumed = match readers.poll() {
+            Ok(consumed) => consumed,
+            Err(error) => {
+                return match group.terminate() {
+                    Ok(()) => {
+                        record_darwin_cleanup_complete(
+                            state_path,
+                            event_log,
+                            state,
+                            "child_output_error",
+                            &error,
+                        )?;
+                        Err(error)
+                    }
+                    Err(cleanup) => {
+                        let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                        record_darwin_recovery_required(
+                            state_path,
+                            event_log,
+                            state,
+                            "child_output_cleanup_uncertain",
+                            &reason,
+                        )?;
+                        Err(reason)
+                    }
+                };
+            }
+        };
+        if let Err(error) = readers.flush_if_due(state_path, event_log, state, false) {
+            return match group.terminate() {
+                Ok(()) => {
+                    record_darwin_cleanup_complete(
+                        state_path,
+                        event_log,
+                        state,
+                        "child_output_error",
+                        &error,
+                    )?;
+                    Err(error)
+                }
+                Err(cleanup) => {
+                    let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                    record_darwin_recovery_required(
+                        state_path,
+                        event_log,
+                        state,
+                        "child_output_cleanup_uncertain",
+                        &reason,
+                    )?;
+                    Err(reason)
+                }
+            };
+        }
+        if consumed > 0 {
             last_progress = Instant::now();
             state.progress_at = unix_now()?;
             write_invocation_atomic(state_path, state)?;
         }
         match group.poll() {
             Ok(Some(exit_code)) => {
-                darwin_supervisor::publish_output_cursors(&sinks)?;
                 match readers.drain_after_completion(state_path, event_log, state, &mut renewal)? {
                     CompletionDrainOutcome::Drained => {}
                     CompletionDrainOutcome::OwnershipLost => {
@@ -17011,25 +17266,52 @@ fn supervise_validated_harness_with_claim_renewal(
             }
             Ok(None) => {}
             Err(error) => {
-                state.phase = BridgePhase::Interrupted;
-                state.progress_at = unix_now()?;
-                write_invocation_atomic(state_path, state)?;
-                append_executor_event(
-                    event_log,
-                    state,
-                    "child_supervision_error",
-                    Some(serde_json::json!({
-                        "reason": error,
-                        "adopted": harness.is_none(),
-                        "darwin_process_group": true
-                    })),
-                )?;
-                return Err(error);
+                let cleanup = group.terminate();
+                return match cleanup {
+                    Ok(()) => {
+                        state.phase = BridgePhase::Interrupted;
+                        state.process = None;
+                        state.progress_at = unix_now()?;
+                        write_invocation_atomic(state_path, state)?;
+                        append_executor_event(
+                            event_log,
+                            state,
+                            "child_supervision_error",
+                            Some(serde_json::json!({
+                                "reason": error,
+                                "recovery_required": false,
+                                "adopted": harness.is_none(),
+                                "darwin_process_group": true
+                            })),
+                        )?;
+                        Err(error)
+                    }
+                    Err(cleanup) => {
+                        let reason = format!("{error}; cleanup quarantined: {cleanup}");
+                        record_darwin_recovery_required(
+                            state_path,
+                            event_log,
+                            state,
+                            "child_supervision_error",
+                            &reason,
+                        )?;
+                        Err(reason)
+                    }
+                };
             }
         }
         if last_progress.elapsed() >= config.stall_timeout {
             let durable_last_progress_at = state.progress_at;
-            group.terminate()?;
+            if let Err(cleanup) = group.terminate() {
+                record_darwin_recovery_required(
+                    state_path,
+                    event_log,
+                    state,
+                    "child_stall_cleanup_uncertain",
+                    &cleanup,
+                )?;
+                return Err(cleanup);
+            }
             state.phase = BridgePhase::Interrupted;
             state.supervisor = None;
             state.process = None;
@@ -18840,7 +19122,7 @@ fn spawn_blocked_harness(
                             std::ptr::addr_of_mut!(accepted).cast(),
                             1,
                         );
-                        if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                        if count < 0 && executor_errno() == nix::libc::EINTR {
                             continue;
                         }
                         break count;
@@ -18853,7 +19135,7 @@ fn spawn_blocked_harness(
                             let waited = nix::libc::waitpid(harness_pid, &mut status, 0);
                             if waited == harness_pid
                                 || (waited < 0
-                                    && *nix::libc::__errno_location() != nix::libc::EINTR)
+                                    && executor_errno() != nix::libc::EINTR)
                             {
                                 break;
                             }
@@ -23226,7 +23508,7 @@ use portability::resolve_executor_supervisor_executable;
 #[cfg(target_os = "macos")]
 pub(crate) use portability::run_executor_bridge;
 #[cfg(target_os = "macos")]
-use portability::{create_draft_pull_request, reconcile_direct_launch};
+use portability::reconcile_direct_launch;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use portability::{
     create_draft_pull_request, reconcile_direct_launch,

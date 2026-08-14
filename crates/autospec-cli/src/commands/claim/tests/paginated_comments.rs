@@ -5,18 +5,21 @@
 use super::super::{SessionBindingIdentity, claim_settle_millis, publish_session_binding};
 use autospec_core::autonomous_lifecycle::{ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope, WorkerId};
 use autospec_core::claim::RemoteComment;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use crate::commands::claim;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::support::{
+    expired_heartbeat_snapshot, startup_heartbeat_document, startup_heartbeat_fixture,
+    STARTUP_HEARTBEAT_ENV,
+};
 #[cfg(target_os = "linux")]
 use super::support::{
-    anchored_startup_heartbeat_fixture, expected_startup_heartbeat,
-    expired_heartbeat_snapshot, mutate_retained, startup_heartbeat_document,
-    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+    anchored_startup_heartbeat_fixture, expected_startup_heartbeat, mutate_retained,
 };
 use super::support::{claim_record, lifecycle_evidence};
 
@@ -160,7 +163,7 @@ fn startup_heartbeat_retained_handoff() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn retained_bridge_predecessor_authority_is_exact_and_boundary_bound() {
     use nix::fcntl::{open, OFlag};
@@ -185,14 +188,10 @@ fn retained_bridge_predecessor_authority_is_exact_and_boundary_bound() {
     .unwrap();
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
     let snapshot = expired_heartbeat_snapshot(&source);
-    let root_fd = std::fs::File::from(
-        open(
-            &root,
-            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
-            Mode::empty(),
-        )
-        .unwrap(),
-    );
+    let root_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW;
+    #[cfg(target_os = "linux")]
+    let root_flags = root_flags | OFlag::O_PATH;
+    let root_fd = std::fs::File::from(open(&root, root_flags, Mode::empty()).unwrap());
     let repo =
         claim::open_heartbeat_directory_beneath(&root_fd, Path::new(&repo_name)).unwrap();
     let archive = claim::handoff_retained_heartbeat(

@@ -2566,7 +2566,7 @@ pub(crate) fn recover_released_bridge_claim(
     Ok(exact)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn with_released_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     operation: impl FnOnce() -> Result<T, CommandFailure>,
@@ -2591,7 +2591,7 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     )
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(unix)))]
 fn with_retained_bridge_predecessor_authority<T>(
     _identity: ClaimMutationIdentity<'_>,
     _observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -7162,7 +7162,7 @@ fn held_heartbeat_at(
     Ok(Some(file))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn with_retained_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -7173,9 +7173,12 @@ fn with_retained_bridge_predecessor_authority<T>(
     use nix::sys::stat::{fstatat, Mode};
 
     let root_path = heartbeat_root()?;
+    let root_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    #[cfg(target_os = "linux")]
+    let root_flags = root_flags | OFlag::O_PATH;
     let root = match open(
         &root_path,
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        root_flags,
         Mode::empty(),
     ) {
         Err(nix::errno::Errno::ENOENT) => return Ok(None),

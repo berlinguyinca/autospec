@@ -3,7 +3,6 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more than
 // one test module builds on, so they are `pub(super)` rather than private.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     resolve_base, BridgeIdentity, BridgePhase, ExecutorBridgeRequest, HarnessInvocation,
     HarnessKind, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
@@ -12,16 +11,20 @@ use super::super::{
 #[cfg(target_os = "linux")]
 use super::support_base::DetachedForkedCleanup;
 use super::support_base::{git, git_stdout, GitFixture, TEST_SEQUENCE};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 pub(super) fn prunable_zero_effect_branch_fixture(
     label: &str,
@@ -124,7 +127,7 @@ pub(super) fn reviewer_request(
     }
 }
 
-pub(super) fn persisted_invocation() -> PersistedInvocation {
+pub(crate) fn persisted_invocation() -> PersistedInvocation {
     PersistedInvocation {
         schema: 1,
         identity: BridgeIdentity {
@@ -399,6 +402,19 @@ pub(super) fn implementation_proof_fixture(
     label: &str,
 ) -> (GitFixture, PersistedInvocation, MutationSnapshot, PathBuf) {
     let fixture = GitFixture::new(label);
+    #[cfg(target_os = "macos")]
+    {
+        let hooks = fixture.root.join("trusted-hooks");
+        fs::create_dir(&hooks).expect("create deterministic Darwin hook directory");
+        git(
+            &fixture.repo,
+            &[
+                "config",
+                "core.hooksPath",
+                hooks.to_str().expect("hook path"),
+            ],
+        );
+    }
     let worktree = fixture.root.join("issue-worktree");
     git(
         &fixture.repo,

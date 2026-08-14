@@ -67,3 +67,50 @@ The adoption, restart, and sidecar contract tests are colocated in `darwin_super
 - Darwin cannot use Linux subreaper/pidfd semantics. A daemon that deliberately leaves the launched process group is outside the owned group and is not claimed; ambiguity retains evidence rather than authorizing a signal.
 - Repo-wide `cargo fmt --all -- --check` reports unrelated pre-existing formatting drift. Formatting was restricted to the assigned files, and `git diff --check` passes.
 - The 67 broad-suite failures are not release-green, but their exact panic messages are fixture portability/race defects outside Task 6 ownership. Focused Darwin behavior and both native/cross-target compilation are green.
+
+## Review fix round 1
+
+The first review found that the initial direct `Command` implementation could not survive its
+parent to finish output or publish a terminal record, and that Darwin draft creation bypassed the
+Linux release transaction. The repair replaces that launch with a blocked sidecar supervisor which
+owns the bounded output ring and publishes a two-sync `EXIT`/`DONE` terminal fence. User code is
+released only after the exact sidecar birth tuple is durable. A dropped pre-release owner closes the
+barrier and reaps the inert child; a dropped post-release owner leaves the sidecar adoptable.
+
+Direct reconciliation now rejects ownership artifacts without their private intent and refuses to
+retire a dead launch without both the fenced exit and whole-group `ESRCH`. Direct output validates
+and stats its private ring before reading it, and output beyond one MiB remains bounded while its
+cursor records the total and dropped bytes across restart. Cleanup ambiguity writes `Interrupted`,
+retains the exact process identity, and appends a `recovery_required` event; identity is cleared only
+after exact termination proves the group absent. Permission-denied and unknown group observations
+remain blocking, while cleanup never signals an unrelated process group.
+
+Darwin draft publication now uses the same blocked-child transaction as Linux: durable intent,
+exact child identity, refreshed claim, durable release intent and receipt, then credentialed `gh`.
+The Darwin-only predecessor shim was removed. Claim transfer now calls the authoritative retained
+heartbeat receipt proof on Unix, including its descriptor-retained boundary revalidation.
+
+### Fix-round evidence
+
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 14 passed.
+- `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
+- `cargo test -p autospec-cli --bin autospec retained_bridge_predecessor_authority_is_exact_and_boundary_bound -- --test-threads=1` -> 1 passed.
+- Task 5 heartbeat filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`,
+  `heartbeat_prior`, `heartbeat_quarantine`, `heartbeat_classify`, and
+  `conductor_lease_takeover`) -> all commands exited 0.
+- `cargo check -p autospec-cli --all-targets` -> exit 0 with the pre-existing Darwin test warnings.
+- `git diff --check` -> exit 0.
+
+`cargo run -q -p autospec-cli -- validate` completed all 143 repository checks: 132 passed
+and 11 unrelated required checks failed. The Rust output-macro, claim CAS, conductor,
+autonomy-guardrail, generated-YAML, Bash-syntax, and both autonomous contract checks passed.
+The failures are confined to existing skill/install/explore policy suites
+(`check_shared_script_install`, quality/ship/dogfood checks, install/parallel-dispatch,
+explore discovery/contract checks, block expansion, and the autonomous phase-2 shell suite);
+none names or exercises the Task 6 Rust ownership paths.
+
+The strict clippy rerun remains blocked by pre-existing production/test lint debt outside the fix
+round; it reports no error in the new Darwin supervisor, portability reconciliation, post-fork ring,
+draft release tests, or retained-predecessor proof. The workspace run likewise reached the existing
+macOS fixture failures described above (missing inherited Git hook paths, Linux sandbox assumptions,
+and a fixed-port collision) while every new Darwin/draft/predecessor test passed.

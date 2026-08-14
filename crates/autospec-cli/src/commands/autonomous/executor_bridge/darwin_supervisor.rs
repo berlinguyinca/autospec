@@ -1,23 +1,56 @@
 use super::{
-    argv_digest, codex_host_auth_environment_key, open_private_file, read_output_cursor,
-    sensitive_executor_environment_key, write_output_cursor, OutputCursor, OutputSinkPaths,
-    ProcessIdentity, ValidatedInvocation, OUTPUT_CURSOR_FILE_BYTES,
+    argv_digest, codex_host_auth_environment_key, prepare_output_pump, read_executor_exit_status,
+    read_live_executor_exit_status, sensitive_executor_environment_key, OutputSinkPaths,
+    ProcessIdentity, ValidatedInvocation,
 };
 use crate::commands::autonomous::platform_process::{self, ProcessObservation};
 use nix::errno::Errno;
 use nix::sys::signal::{killpg, Signal};
-use nix::unistd::Pid;
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::{fork, write as fd_write, ForkResult, Pid};
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::os::unix::process::CommandExt;
-use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, Stdio};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const TERM_GRACE: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(5);
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(10);
+
+fn cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
+    let mut descriptors = [-1_i32; 2];
+    // SAFETY: descriptors points to exactly two writable integers.
+    if unsafe { nix::libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "create {label}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    for descriptor in descriptors {
+        // SAFETY: pipe returned both descriptors and F_SETFD changes descriptor flags only.
+        if unsafe { nix::libc::fcntl(descriptor, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC) } != 0 {
+            // SAFETY: both descriptors are still owned by this function.
+            unsafe {
+                nix::libc::close(descriptors[0]);
+                nix::libc::close(descriptors[1]);
+            }
+            return Err(format!(
+                "set {label} close-on-exec: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    // SAFETY: the successful pipe returned two new descriptors uniquely owned here.
+    Ok(unsafe {
+        (
+            OwnedFd::from_raw_fd(descriptors[0]),
+            OwnedFd::from_raw_fd(descriptors[1]),
+        )
+    })
+}
 
 #[derive(Debug)]
 pub(super) struct SpawnFailure {
@@ -32,19 +65,14 @@ impl From<String> for SpawnFailure {
 
 pub(super) struct DarwinOwnedGroup {
     leader: ProcessIdentity,
-    child: Option<Child>,
-    terminal: Option<i32>,
+    supervisor_pid: Option<Pid>,
+    barrier: Option<OwnedFd>,
+    exec_status: Option<File>,
+    sinks: OutputSinkPaths,
 }
 
 impl DarwinOwnedGroup {
     pub(super) fn spawn(
-        harness: &ValidatedInvocation,
-        sinks: &OutputSinkPaths,
-    ) -> Result<Self, SpawnFailure> {
-        Self::spawn_with_policy(harness, sinks, false)
-    }
-
-    pub(super) fn spawn_trusted(
         harness: &ValidatedInvocation,
         sinks: &OutputSinkPaths,
     ) -> Result<Self, SpawnFailure> {
@@ -54,13 +82,30 @@ impl DarwinOwnedGroup {
     fn spawn_with_policy(
         harness: &ValidatedInvocation,
         sinks: &OutputSinkPaths,
-        trusted_environment: bool,
+        strip_credentials: bool,
     ) -> Result<Self, SpawnFailure> {
-        let (stdout, stderr) = prepare_durable_sinks(sinks)?;
-        let mut command = Command::new(&harness.program);
-        if let Some(argv_zero) = harness.argv_zero.as_ref() {
-            command.arg0(argv_zero);
+        let pump = prepare_output_pump(sinks)?;
+        let executable = CString::new(harness.program.as_os_str().as_bytes())
+            .map_err(|_| "executor program contains a NUL byte".to_string())?;
+        let mut argv = Vec::with_capacity(harness.args.len() + 1);
+        argv.push(
+            CString::new(
+                harness
+                    .argv_zero
+                    .as_deref()
+                    .unwrap_or(harness.program.as_os_str())
+                    .as_bytes(),
+            )
+            .map_err(|_| "executor argv zero contains a NUL byte".to_string())?,
+        );
+        for arg in &harness.args {
+            argv.push(
+                CString::new(arg.as_bytes())
+                    .map_err(|_| "executor argument contains a NUL byte".to_string())?,
+            );
         }
+        let worktree = CString::new(harness.current_dir.as_os_str().as_bytes())
+            .map_err(|_| "executor worktree contains a NUL byte".to_string())?;
         let preserve_codex_host_auth = harness.args.first().is_some_and(|arg| arg == "exec")
             && harness
                 .args
@@ -68,14 +113,14 @@ impl DarwinOwnedGroup {
                 .any(|arg| arg == "--output-last-message");
         let mut environment = std::env::vars_os()
             .filter(|(key, _)| {
-                trusted_environment
+                !strip_credentials
                     || ((!sensitive_executor_environment_key(key)
                         || (preserve_codex_host_auth && codex_host_auth_environment_key(key)))
                         && key != "COMPOSE_PROJECT_NAME")
             })
             .collect::<BTreeMap<_, _>>();
         for (key, value) in &harness.environment_overrides {
-            if !trusted_environment && sensitive_executor_environment_key(key) {
+            if strip_credentials && sensitive_executor_environment_key(key) {
                 return Err(format!(
                     "executor harness override may not restore credential authority: {}",
                     key.to_string_lossy()
@@ -84,7 +129,7 @@ impl DarwinOwnedGroup {
             }
             environment.insert(key.clone(), value.clone());
         }
-        if !trusted_environment {
+        if strip_credentials {
             let credentialless_config = sinks
                 .stdout
                 .parent()
@@ -103,93 +148,174 @@ impl DarwinOwnedGroup {
                 "/usr/bin/ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes".into(),
             );
         }
-        command
-            .args(&harness.args)
-            .current_dir(&harness.current_dir)
-            .env_clear()
-            .envs(environment)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-        // SAFETY: setpgid is async-signal-safe and the closure performs no allocation or I/O.
-        unsafe {
-            command.pre_exec(|| {
-                if nix::libc::setpgid(0, 0) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
-        let child = command
-            .spawn()
-            .map_err(|error| format!("spawn Darwin executor process group: {error}"))?;
-        let pid = child.id();
-        let before = platform_process::observe_birth(pid)
-            .map_err(|error| format!("observe spawned Darwin executor leader: {error}"))?
-            .ok_or_else(|| {
-                "spawned Darwin executor leader exited before ownership capture".to_string()
+        let environment = environment
+            .into_iter()
+            .map(|(key, value)| {
+                let mut entry = key.as_os_str().as_bytes().to_vec();
+                entry.push(b'=');
+                entry.extend_from_slice(value.as_os_str().as_bytes());
+                CString::new(entry)
+                    .map_err(|_| "executor environment contains a NUL byte".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut argv_pointers = argv.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+        argv_pointers.push(std::ptr::null());
+        let mut environment_pointers = environment
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect::<Vec<_>>();
+        environment_pointers.push(std::ptr::null());
+        let (barrier_read, barrier_write) = cloexec_pipe("Darwin launch barrier")?;
+        let (ready_read, ready_write) = cloexec_pipe("Darwin launch readiness pipe")?;
+        let (status_read, status_write) = cloexec_pipe("Darwin exec-status pipe")?;
+        let (stdout_read, stdout_write) = cloexec_pipe("Darwin stdout pipe")?;
+        let (stderr_read, stderr_write) = cloexec_pipe("Darwin stderr pipe")?;
+        let null = OpenOptions::new()
+            .read(true)
+            .open("/dev/null")
+            .map_err(|error| format!("open Darwin executor null input: {error}"))?;
+        let fds = DarwinForkDescriptors {
+            barrier_read: barrier_read.as_raw_fd(),
+            barrier_write: barrier_write.as_raw_fd(),
+            ready_read: ready_read.as_raw_fd(),
+            ready_write: ready_write.as_raw_fd(),
+            status_read: status_read.as_raw_fd(),
+            status_write: status_write.as_raw_fd(),
+            stdout_read: stdout_read.as_raw_fd(),
+            stdout_write: stdout_write.as_raw_fd(),
+            stderr_read: stderr_read.as_raw_fd(),
+            stderr_write: stderr_write.as_raw_fd(),
+            null: null.as_raw_fd(),
+            stdout_ring: pump.stdout.as_raw_fd(),
+            stderr_ring: pump.stderr.as_raw_fd(),
+            stdout_cursor: pump.stdout_cursor.as_raw_fd(),
+            stderr_cursor: pump.stderr_cursor.as_raw_fd(),
+            exit_status: pump.exit_status.as_raw_fd(),
+        };
+        // SAFETY: all strings, pointer arrays, files, and pipes are prepared before fork. The
+        // child path uses only async-signal-safe libc calls and never returns to Rust.
+        let supervisor = match unsafe { fork() }
+            .map_err(|error| format!("fork Darwin executor supervisor: {error}"))?
+        {
+            ForkResult::Child => unsafe {
+                run_blocked_supervisor(
+                    fds,
+                    executable.as_ptr(),
+                    argv_pointers.as_ptr(),
+                    environment_pointers.as_ptr(),
+                    worktree.as_ptr(),
+                )
+            },
+            ForkResult::Parent { child } => child,
+        };
+        drop(barrier_read);
+        drop(ready_write);
+        drop(status_write);
+        drop(stdout_read);
+        drop(stdout_write);
+        drop(stderr_read);
+        drop(stderr_write);
+        drop(null);
+        drop(pump);
+        let pid = supervisor.as_raw() as u32;
+        let capture = (|| -> Result<ProcessIdentity, String> {
+            read_exact_ready(ready_read.as_raw_fd())?;
+            let before = platform_process::observe_birth(pid)?
+                .ok_or_else(|| "Darwin supervisor exited before ownership capture".to_string())?;
+            let observed_group = platform_process::observe_process_group(pid)?
+                .ok_or_else(|| "Darwin supervisor exited before group verification".to_string())?;
+            let after = platform_process::observe_birth(pid)?.ok_or_else(|| {
+                "Darwin supervisor exited before ownership persistence".to_string()
             })?;
-        let observed_group = platform_process::observe_process_group(pid)
-            .map_err(|error| format!("verify spawned Darwin executor process group: {error}"))?
-            .ok_or_else(|| {
-                "spawned Darwin executor leader exited before group verification".to_string()
-            })?;
-        let after = platform_process::observe_birth(pid)
-            .map_err(|error| format!("re-observe spawned Darwin executor leader: {error}"))?
-            .ok_or_else(|| {
-                "spawned Darwin executor leader exited before ownership persistence".to_string()
-            })?;
-        if before != after || observed_group != pid || after.process_group != pid {
-            return Err("spawned Darwin executor process-group identity is unstable"
-                .to_string()
-                .into());
-        }
-        Ok(Self {
-            leader: ProcessIdentity {
+            if before != after || observed_group != pid || after.process_group != pid {
+                return Err(
+                    "spawned Darwin executor process-group identity is unstable".to_string()
+                );
+            }
+            Ok(ProcessIdentity {
                 pid,
                 process_group: observed_group,
-                executable: harness.program.clone(),
-                argv_digest: argv_digest(&harness.args),
+                executable: std::env::current_exe()
+                    .map_err(|error| format!("resolve Darwin supervisor executable: {error}"))?,
+                argv_digest: argv_digest(&std::env::args().skip(1).collect::<Vec<_>>()),
                 boot_id: after.boot_id,
                 start_identity: after.start_identity,
-            },
-            child: Some(child),
-            terminal: None,
+            })
+        })();
+        drop(ready_read);
+        let leader = match capture {
+            Ok(leader) => leader,
+            Err(error) => {
+                drop(barrier_write);
+                reap_exact_child(supervisor)?;
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            leader,
+            supervisor_pid: Some(supervisor),
+            barrier: Some(barrier_write),
+            exec_status: Some(File::from(status_read)),
+            sinks: sinks.clone(),
         })
     }
 
-    pub(super) fn adopt(expected: &ProcessIdentity) -> Result<Self, String> {
-        prove_exact_group(expected)?;
+    pub(super) fn adopt(
+        expected: &ProcessIdentity,
+        sinks: &OutputSinkPaths,
+    ) -> Result<Self, String> {
+        let supervisor_pid = reapable_child(expected.pid)?;
+        match platform_process::observe_expected(
+            expected.pid,
+            &expected.boot_id,
+            &expected.start_identity,
+        ) {
+            ProcessObservation::Exact(birth) if birth.process_group == expected.process_group => {}
+            ProcessObservation::Dead => {
+                if let Some(pid) = supervisor_pid {
+                    reap_exact_child(pid)?;
+                }
+                if read_executor_exit_status(&sinks.exit_status)?.is_none()
+                    || !group_is_empty(expected.process_group)?
+                {
+                    return Err(
+                        "Darwin executor leader is dead without durable whole-group completion"
+                            .to_string(),
+                    );
+                }
+            }
+            ProcessObservation::Exact(_)
+            | ProcessObservation::Mismatch
+            | ProcessObservation::Unknown(_) => {
+                return Err("executor process group ownership is unverified".to_string())
+            }
+        }
         Ok(Self {
             leader: expected.clone(),
-            child: None,
-            terminal: None,
+            supervisor_pid,
+            barrier: None,
+            exec_status: None,
+            sinks: sinks.clone(),
         })
+    }
+
+    pub(super) fn release(&mut self) -> Result<(), String> {
+        let barrier = self
+            .barrier
+            .take()
+            .ok_or_else(|| "Darwin launch barrier was already released".to_string())?;
+        fd_write(&barrier, b"\n")
+            .map_err(|error| format!("release Darwin launch barrier: {error}"))?;
+        drop(barrier);
+        let status = self
+            .exec_status
+            .take()
+            .ok_or_else(|| "Darwin exec-status pipe is missing".to_string())?;
+        read_exec_status(status.as_raw_fd())
     }
 
     pub(super) fn poll(&mut self) -> Result<Option<i32>, String> {
-        if let Some(code) = self.terminal {
-            return if group_is_empty(self.leader.process_group)? {
-                Ok(Some(code))
-            } else {
-                Ok(None)
-            };
-        }
-        if let Some(child) = self.child.as_mut() {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("poll Darwin executor leader: {error}"))?
-            {
-                self.terminal = Some(
-                    status
-                        .code()
-                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
-                );
-                self.child = None;
-                return self.poll();
-            }
-        }
+        let exit = read_live_executor_exit_status(&self.sinks.exit_status)?;
         match platform_process::observe_expected(
             self.leader.pid,
             &self.leader.boot_id,
@@ -200,11 +326,18 @@ impl DarwinOwnedGroup {
             {
                 Ok(None)
             }
-            ProcessObservation::Dead if group_is_empty(self.leader.process_group)? => Ok(None),
-            ProcessObservation::Dead => Err(
-                "Darwin executor leader exited while process-group membership remains uncertain"
-                    .to_string(),
-            ),
+            ProcessObservation::Dead => {
+                self.reap_if_child()?;
+                if !group_is_empty(self.leader.process_group)? {
+                    return Err(
+                        "Darwin executor leader exited while process-group membership remains uncertain"
+                            .to_string(),
+                    );
+                }
+                exit.map(Some).ok_or_else(|| {
+                    "Darwin executor group exited without a durable terminal record".to_string()
+                })
+            }
             ProcessObservation::Exact(_)
             | ProcessObservation::Mismatch
             | ProcessObservation::Unknown(_) => {
@@ -214,12 +347,39 @@ impl DarwinOwnedGroup {
     }
 
     pub(super) fn terminate(mut self) -> Result<(), String> {
-        signal_exact_group(&self.leader, Signal::SIGTERM)?;
-        if wait_for_empty_group(self.leader.process_group, self.child.as_mut(), TERM_GRACE)? {
+        self.barrier.take();
+        match platform_process::observe_expected(
+            self.leader.pid,
+            &self.leader.boot_id,
+            &self.leader.start_identity,
+        ) {
+            ProcessObservation::Exact(birth)
+                if birth.process_group == self.leader.process_group =>
+            {
+                signal_exact_group(&self.leader, Signal::SIGTERM)?;
+            }
+            ProcessObservation::Dead => {
+                self.reap_if_child()?;
+                return if group_is_empty(self.leader.process_group)? {
+                    Ok(())
+                } else {
+                    Err(
+                        "Darwin executor leader is dead while process-group membership remains"
+                            .to_string(),
+                    )
+                };
+            }
+            ProcessObservation::Exact(_)
+            | ProcessObservation::Mismatch
+            | ProcessObservation::Unknown(_) => {
+                return Err("executor process group ownership is unverified".to_string());
+            }
+        }
+        if wait_for_empty_group(self.leader.process_group, self.supervisor_pid, TERM_GRACE)? {
             return Ok(());
         }
         signal_exact_group(&self.leader, Signal::SIGKILL)?;
-        if !wait_for_empty_group(self.leader.process_group, self.child.as_mut(), KILL_GRACE)? {
+        if !wait_for_empty_group(self.leader.process_group, self.supervisor_pid, KILL_GRACE)? {
             return Err("Darwin executor process group survived SIGKILL".to_string());
         }
         Ok(())
@@ -228,52 +388,201 @@ impl DarwinOwnedGroup {
     pub(super) fn identity(&self) -> &ProcessIdentity {
         &self.leader
     }
+
+    fn reap_if_child(&mut self) -> Result<(), String> {
+        let Some(pid) = self.supervisor_pid.take() else {
+            return Ok(());
+        };
+        reap_exact_child(pid)
+    }
 }
 
-pub(super) fn publish_output_cursors(paths: &OutputSinkPaths) -> Result<u64, String> {
-    let mut published = 0_u64;
-    for (sink, cursor_path, name) in [
-        (&paths.stdout, &paths.stdout_writer_cursor, "stdout"),
-        (&paths.stderr, &paths.stderr_writer_cursor, "stderr"),
-    ] {
-        let total = std::fs::metadata(sink)
-            .map_err(|error| format!("inspect Darwin executor {name} sink: {error}"))?
-            .len();
-        let cursor = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(cursor_path)
-            .map_err(|error| format!("open Darwin executor {name} cursor: {error}"))?;
-        let mut current = read_output_cursor(&cursor)?;
-        if total < current.total {
-            return Err(format!("Darwin executor {name} sink regressed"));
+impl Drop for DarwinOwnedGroup {
+    fn drop(&mut self) {
+        // A still-owned barrier means the harness never received launch authority. Closing the
+        // barrier makes the blocked supervisor exit without executing user code; reap it so a
+        // persistence failure cannot leak a zombie or a runnable child. Released/adopted groups
+        // deliberately survive a parent crash for durable recovery.
+        if self.barrier.take().is_some() {
+            if let Some(pid) = self.supervisor_pid.take() {
+                let _ = reap_exact_child(pid);
+            }
         }
-        published = published.saturating_add(total - current.total);
-        current.total = total;
-        write_output_cursor(&cursor, current)?;
     }
-    Ok(published)
 }
 
-fn prepare_durable_sinks(paths: &OutputSinkPaths) -> Result<(File, File), SpawnFailure> {
-    let stdout = open_private_file(&paths.stdout, true)?;
-    let stderr = open_private_file(&paths.stderr, true)?;
-    for path in [
-        &paths.stdout_writer_cursor,
-        &paths.stderr_writer_cursor,
-        &paths.stdout_reader_cursor,
-        &paths.stderr_reader_cursor,
-    ] {
-        let cursor = open_private_file(path, true)?;
-        cursor
-            .set_len(OUTPUT_CURSOR_FILE_BYTES)
-            .map_err(|error| format!("size Darwin executor output cursor: {error}"))?;
-        write_output_cursor(&cursor, OutputCursor::default())?;
+#[derive(Clone, Copy)]
+struct DarwinForkDescriptors {
+    barrier_read: i32,
+    barrier_write: i32,
+    ready_read: i32,
+    ready_write: i32,
+    status_read: i32,
+    status_write: i32,
+    stdout_read: i32,
+    stdout_write: i32,
+    stderr_read: i32,
+    stderr_write: i32,
+    null: i32,
+    stdout_ring: i32,
+    stderr_ring: i32,
+    stdout_cursor: i32,
+    stderr_cursor: i32,
+    exit_status: i32,
+}
+
+unsafe fn run_blocked_supervisor(
+    fds: DarwinForkDescriptors,
+    executable: *const nix::libc::c_char,
+    argv: *const *const nix::libc::c_char,
+    environment: *const *const nix::libc::c_char,
+    worktree: *const nix::libc::c_char,
+) -> ! {
+    // SAFETY: this is the isolated post-fork child and every descriptor was prepared by parent.
+    unsafe {
+        nix::libc::close(fds.barrier_write);
+        nix::libc::close(fds.ready_read);
+        nix::libc::close(fds.status_read);
+        if nix::libc::setpgid(0, 0) != 0 || !super::raw_write_all(fds.ready_write, b"R") {
+            super::terminate_post_fork(127);
+        }
+        nix::libc::close(fds.ready_write);
+        let mut release = 0_u8;
+        let released = loop {
+            let count =
+                nix::libc::read(fds.barrier_read, std::ptr::addr_of_mut!(release).cast(), 1);
+            if count < 0 && *nix::libc::__error() == nix::libc::EINTR {
+                continue;
+            }
+            break count == 1 && release == b'\n';
+        };
+        nix::libc::close(fds.barrier_read);
+        if !released {
+            super::terminate_post_fork(125);
+        }
+        let harness = nix::libc::fork();
+        if harness < 0 {
+            let _ = super::raw_write_all(fds.status_write, b"!");
+            super::terminate_post_fork(127);
+        }
+        if harness == 0 {
+            nix::libc::close(fds.stdout_read);
+            nix::libc::close(fds.stderr_read);
+            if nix::libc::chdir(worktree) != 0
+                || nix::libc::dup2(fds.null, nix::libc::STDIN_FILENO) < 0
+                || nix::libc::dup2(fds.stdout_write, nix::libc::STDOUT_FILENO) < 0
+                || nix::libc::dup2(fds.stderr_write, nix::libc::STDERR_FILENO) < 0
+            {
+                let _ = super::raw_write_all(fds.status_write, b"!");
+                super::terminate_post_fork(126);
+            }
+            nix::libc::execve(executable, argv, environment);
+            let _ = super::raw_write_all(fds.status_write, b"!");
+            super::terminate_post_fork(127);
+        }
+        nix::libc::close(fds.status_write);
+        nix::libc::close(fds.stdout_write);
+        nix::libc::close(fds.stderr_write);
+        nix::libc::close(fds.null);
+        super::raw_supervisor_loop(
+            harness,
+            fds.stdout_read,
+            fds.stderr_read,
+            fds.stdout_ring,
+            fds.stderr_ring,
+            fds.stdout_cursor,
+            fds.stderr_cursor,
+            fds.exit_status,
+            -1,
+        );
     }
-    let exit = open_private_file(&paths.exit_status, true)?;
-    exit.set_len(16)
-        .map_err(|error| format!("size Darwin executor exit record: {error}"))?;
-    Ok((stdout, stderr))
+}
+
+fn read_exact_ready(descriptor: i32) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut marker = 0_u8;
+    loop {
+        let mut pollfd = nix::libc::pollfd {
+            fd: descriptor,
+            events: nix::libc::POLLIN | nix::libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: pollfd is initialized and points to one live descriptor.
+        let polled = unsafe { nix::libc::poll(&mut pollfd, 1, 10) };
+        if polled > 0 {
+            // SAFETY: marker is one writable byte.
+            let count =
+                unsafe { nix::libc::read(descriptor, std::ptr::addr_of_mut!(marker).cast(), 1) };
+            return if count == 1 && marker == b'R' {
+                Ok(())
+            } else {
+                Err("Darwin supervisor failed before launch readiness".to_string())
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err("Darwin supervisor launch readiness timed out".to_string());
+        }
+    }
+}
+
+fn read_exec_status(descriptor: i32) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut pollfd = nix::libc::pollfd {
+            fd: descriptor,
+            events: nix::libc::POLLIN | nix::libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: pollfd is initialized and points to one live descriptor.
+        let polled = unsafe { nix::libc::poll(&mut pollfd, 1, 10) };
+        if polled > 0 {
+            let mut marker = 0_u8;
+            // SAFETY: marker is one writable byte.
+            let count =
+                unsafe { nix::libc::read(descriptor, std::ptr::addr_of_mut!(marker).cast(), 1) };
+            return if count == 0 {
+                Ok(())
+            } else {
+                Err("Darwin harness failed before exact exec".to_string())
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err("Darwin harness exec-status timed out".to_string());
+        }
+    }
+}
+
+fn reap_exact_child(pid: Pid) -> Result<(), String> {
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+            | Err(Errno::ECHILD)
+            | Err(Errno::ESRCH) => return Ok(()),
+            Ok(WaitStatus::StillAlive) => {
+                thread::sleep(OBSERVATION_INTERVAL);
+            }
+            Err(Errno::EINTR) => continue,
+            Ok(status) => return Err(format!("reap Darwin supervisor: {status:?}")),
+            Err(error) => return Err(format!("reap Darwin supervisor: {error}")),
+        }
+    }
+}
+
+fn reapable_child(pid: u32) -> Result<Option<Pid>, String> {
+    let pid = Pid::from_raw(
+        i32::try_from(pid).map_err(|_| "Darwin supervisor PID is out of range".to_string())?,
+    );
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => return Ok(Some(pid)),
+            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+            | Err(Errno::ECHILD)
+            | Err(Errno::ESRCH) => return Ok(None),
+            Err(Errno::EINTR) => continue,
+            Ok(status) => return Err(format!("inspect Darwin supervisor child: {status:?}")),
+            Err(error) => return Err(format!("inspect Darwin supervisor child: {error}")),
+        }
+    }
 }
 
 fn prove_exact_group(expected: &ProcessIdentity) -> Result<(), String> {
@@ -306,7 +615,11 @@ pub(super) fn group_is_empty(process_group: u32) -> Result<bool, String> {
         i32::try_from(process_group)
             .map_err(|_| "executor process group is out of range".to_string())?,
     );
-    match killpg(group, None) {
+    classify_group_probe(killpg(group, None))
+}
+
+fn classify_group_probe(observation: Result<(), Errno>) -> Result<bool, String> {
+    match observation {
         Ok(()) => Ok(false),
         Err(Errno::ESRCH) => Ok(true),
         Err(Errno::EPERM) => {
@@ -320,15 +633,17 @@ pub(super) fn group_is_empty(process_group: u32) -> Result<bool, String> {
 
 fn wait_for_empty_group(
     process_group: u32,
-    mut child: Option<&mut Child>,
+    child: Option<Pid>,
     grace: Duration,
 ) -> Result<bool, String> {
     let deadline = Instant::now() + grace;
     loop {
-        if let Some(child) = child.as_deref_mut() {
-            child
-                .try_wait()
-                .map_err(|error| format!("reap Darwin executor leader: {error}"))?;
+        if let Some(child) = child {
+            match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+                Ok(_) | Err(Errno::ECHILD) | Err(Errno::ESRCH) => {}
+                Err(Errno::EINTR) => continue,
+                Err(error) => return Err(format!("reap Darwin executor leader: {error}")),
+            }
         }
         match group_is_empty(process_group) {
             Ok(true) => return Ok(true),
@@ -348,15 +663,18 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn fixture(script: &str) -> (DarwinOwnedGroup, PathBuf) {
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn blocked_fixture(script: &str) -> (DarwinOwnedGroup, PathBuf) {
         let root = std::env::current_dir()
             .expect("current Darwin fixture directory")
             .join("target/executor-bridge-tests")
             .join(format!(
                 "autospec-darwin-owned-{}-{}",
                 std::process::id(),
-                super::super::unix_now().expect("clock")
+                FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir_all(&root).expect("create Darwin group fixture");
         let sinks = OutputSinkPaths {
@@ -376,16 +694,76 @@ mod tests {
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
         };
-        (
-            DarwinOwnedGroup::spawn(&invocation, &sinks).expect("spawn Darwin group fixture"),
-            root,
+        let group =
+            DarwinOwnedGroup::spawn(&invocation, &sinks).expect("spawn Darwin group fixture");
+        (group, root)
+    }
+
+    fn fixture(script: &str) -> (DarwinOwnedGroup, PathBuf) {
+        let (mut group, root) = blocked_fixture(script);
+        group.release().expect("release Darwin group fixture");
+        (group, root)
+    }
+
+    #[test]
+    fn darwin_launch_barrier_prevents_user_code_before_release() {
+        let marker = "user-code-ran";
+        let (mut group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !root.join(marker).exists(),
+            "blocked harness executed user code"
+        );
+        group.release().expect("release persisted Darwin launch");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while group.poll().expect("poll released Darwin group").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "released Darwin group did not exit"
+            );
+            thread::sleep(OBSERVATION_INTERVAL);
+        }
+        assert!(
+            root.join(marker).is_file(),
+            "released harness did not execute"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_output_ring_is_bounded_and_restart_preserves_overflow_evidence() {
+        let (group, root) = fixture("yes x | head -c 1100000");
+        let identity = group.identity().clone();
+        let sinks = group.sinks.clone();
+        drop(group);
+        let mut adopted = DarwinOwnedGroup::adopt(&identity, &sinks).expect("adopt output group");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while adopted.poll().expect("poll adopted output group").is_none() {
+            assert!(Instant::now() < deadline, "output group did not exit");
+            thread::sleep(OBSERVATION_INTERVAL);
+        }
+        let cursor = super::super::read_output_cursor(
+            &OpenOptions::new()
+                .read(true)
+                .open(&sinks.stdout_writer_cursor)
+                .expect("cursor"),
         )
+        .expect("read cursor");
+        assert!(cursor.total > super::super::MAX_DIRECT_OUTPUT_BYTES);
+        assert!(cursor.dropped > 0);
+        assert_eq!(
+            std::fs::metadata(&sinks.stdout)
+                .expect("ring metadata")
+                .len(),
+            super::super::MAX_DIRECT_OUTPUT_BYTES
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn darwin_adoption_cleanup_requires_exact_boot_start_and_process_group() {
         let (group, root) = fixture("trap '' TERM; while :; do sleep 1; done");
-        DarwinOwnedGroup::adopt(group.identity()).expect("adopt exact group");
+        DarwinOwnedGroup::adopt(group.identity(), &group.sinks).expect("adopt exact group");
         for field in ["boot", "start", "group"] {
             let mut mismatched = group.identity().clone();
             match field {
@@ -395,7 +773,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                DarwinOwnedGroup::adopt(&mismatched).is_err(),
+                DarwinOwnedGroup::adopt(&mismatched, &group.sinks).is_err(),
                 "{field} mismatch was accepted"
             );
         }
@@ -410,8 +788,10 @@ mod tests {
         mismatched.start_identity.push_str("-wrong");
         let forged = DarwinOwnedGroup {
             leader: mismatched,
-            child: None,
-            terminal: None,
+            supervisor_pid: None,
+            barrier: None,
+            exec_status: None,
+            sinks: group.sinks.clone(),
         };
         assert_eq!(
             forged.terminate().unwrap_err(),
@@ -430,6 +810,39 @@ mod tests {
     }
 
     #[test]
+    fn darwin_cleanup_never_signals_an_unrelated_exact_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let (owned, owned_root) = fixture("trap '' TERM; while :; do sleep 1; done");
+        let mut unrelated = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn unrelated process group");
+        owned.terminate().expect("clean owned group");
+        assert!(unrelated
+            .try_wait()
+            .expect("observe unrelated group")
+            .is_none());
+        unrelated.kill().expect("stop unrelated group");
+        unrelated.wait().expect("reap unrelated group");
+        let _ = std::fs::remove_dir_all(owned_root);
+    }
+
+    #[test]
+    fn darwin_group_probe_fails_closed_on_permission_and_unknown_errors() {
+        assert_eq!(
+            classify_group_probe(Err(Errno::EPERM)).unwrap_err(),
+            "Darwin executor process-group membership is permission-denied"
+        );
+        assert!(classify_group_probe(Err(Errno::EIO))
+            .unwrap_err()
+            .contains("observe Darwin executor process-group membership"));
+        assert!(classify_group_probe(Err(Errno::ESRCH)).expect("ESRCH is empty"));
+    }
+
+    #[test]
     fn darwin_restart_direct_completes_only_after_leader_and_group_exit() {
         let (mut group, root) = fixture("sleep 0.05 & exit 0");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -439,6 +852,89 @@ mod tests {
                 Some(code) => panic!("unexpected Darwin exit code {code}"),
                 None if Instant::now() < deadline => thread::sleep(OBSERVATION_INTERVAL),
                 None => panic!("Darwin group did not reach empty completion"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_restart_adopts_durable_exit_after_original_parent_crash() {
+        const CHILD_ENV: &str = "AUTOSPEC_TEST_DARWIN_CRASH_PARENT_ROOT";
+        let child_root = std::env::var_os(CHILD_ENV).map(PathBuf::from);
+        if let Some(root) = child_root {
+            let sinks = OutputSinkPaths {
+                stdout: root.join("stdout"),
+                stderr: root.join("stderr"),
+                stdout_writer_cursor: root.join("stdout.writer"),
+                stderr_writer_cursor: root.join("stderr.writer"),
+                stdout_reader_cursor: root.join("stdout.reader"),
+                stderr_reader_cursor: root.join("stderr.reader"),
+                exit_status: root.join("exit"),
+                supervisor_identity: root.join("supervisor.json"),
+            };
+            let invocation = ValidatedInvocation {
+                program: Path::new("/bin/sh").to_path_buf(),
+                argv_zero: None::<OsString>,
+                args: vec!["-c".into(), "sleep 0.05; exit 7".into()],
+                current_dir: root.clone(),
+                environment_overrides: Vec::new(),
+            };
+            let mut group = DarwinOwnedGroup::spawn(&invocation, &sinks)
+                .expect("spawn crash-parent Darwin group");
+            let identity = super::super::process_identity_value(group.identity()).to_string();
+            super::super::write_private_create_once(
+                &root.join("identity.json"),
+                identity.as_bytes(),
+                "crash-parent Darwin identity",
+            )
+            .expect("persist crash-parent identity");
+            group.release().expect("release crash-parent Darwin group");
+            std::process::exit(0);
+        }
+
+        let root = std::env::current_dir()
+            .expect("current Darwin fixture directory")
+            .join("target/executor-bridge-tests")
+            .join(format!(
+                "autospec-darwin-crash-parent-{}-{}",
+                std::process::id(),
+                FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir_all(&root).expect("create crash-parent root");
+        let test_name = "commands::autonomous::executor_bridge::darwin_supervisor::tests::darwin_restart_adopts_durable_exit_after_original_parent_crash";
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", test_name, "--test-threads=1"])
+            .env(CHILD_ENV, &root)
+            .status()
+            .expect("run crash-parent subprocess");
+        assert!(status.success(), "crash-parent subprocess failed: {status}");
+        let identity = super::super::parse_process_identity(
+            serde_json::from_str(
+                &std::fs::read_to_string(root.join("identity.json"))
+                    .expect("read crash-parent identity"),
+            )
+            .expect("parse crash-parent identity JSON"),
+            "crash-parent Darwin identity",
+        )
+        .expect("validate crash-parent identity");
+        let sinks = OutputSinkPaths {
+            stdout: root.join("stdout"),
+            stderr: root.join("stderr"),
+            stdout_writer_cursor: root.join("stdout.writer"),
+            stderr_writer_cursor: root.join("stderr.writer"),
+            stdout_reader_cursor: root.join("stdout.reader"),
+            stderr_reader_cursor: root.join("stderr.reader"),
+            exit_status: root.join("exit"),
+            supervisor_identity: root.join("supervisor.json"),
+        };
+        let mut adopted = DarwinOwnedGroup::adopt(&identity, &sinks).expect("adopt exact group");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match adopted.poll().expect("poll adopted Darwin group") {
+                Some(7) => break,
+                Some(code) => panic!("unexpected adopted Darwin exit {code}"),
+                None if Instant::now() < deadline => thread::sleep(OBSERVATION_INTERVAL),
+                None => panic!("adopted Darwin group never recovered its durable exit"),
             }
         }
         let _ = std::fs::remove_dir_all(root);

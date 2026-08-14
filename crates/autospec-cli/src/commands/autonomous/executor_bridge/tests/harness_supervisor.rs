@@ -59,7 +59,7 @@ fn darwin_owned_group_spawns_in_an_exact_dedicated_process_group() {
         environment_overrides: Vec::new(),
     };
 
-    let group = DarwinOwnedGroup::spawn(&invocation, &sinks).expect("spawn owned Darwin group");
+    let mut group = DarwinOwnedGroup::spawn(&invocation, &sinks).expect("spawn owned Darwin group");
     assert_eq!(group.identity().pid, group.identity().process_group);
     assert_eq!(
         bridge::observe_process_birth(group.identity().pid)
@@ -68,7 +68,54 @@ fn darwin_owned_group_spawns_in_an_exact_dedicated_process_group() {
             .process_group,
         group.identity().process_group
     );
+    group.release().expect("release persisted Darwin group");
     group.terminate().expect("terminate exact Darwin group");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_cleanup_uncertainty_persists_interrupted_exact_identity_and_event() {
+    use super::super::tests::support_invocation::persisted_invocation;
+
+    let root = std::env::current_dir()
+        .expect("current Darwin fixture directory")
+        .join("target/executor-bridge-tests")
+        .join(format!(
+            "autospec-darwin-recovery-required-{}",
+            std::process::id()
+        ));
+    let _ = fs::remove_dir_all(&root);
+    bridge::ensure_private_directory(&root).expect("private recovery fixture");
+    let state_path = root.join("invocation.json");
+    let event_log = root.join("events.jsonl");
+    let mut state = persisted_invocation();
+    let expected = state.process.clone().expect("exact process identity");
+
+    bridge::record_darwin_recovery_required(
+        &state_path,
+        &event_log,
+        &mut state,
+        "child_stall_cleanup_uncertain",
+        "permission denied",
+    )
+    .expect("persist recovery-required state");
+
+    let durable = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("durable invocation"),
+    )
+    .expect("parse durable invocation");
+    assert_eq!(durable.phase, bridge::BridgePhase::Interrupted);
+    assert_eq!(
+        durable.process.as_ref().expect("retained identity").pid,
+        expected.pid
+    );
+    let event = fs::read_to_string(&event_log).expect("recovery event");
+    assert!(event.contains("\"recovery_required\":true"), "{event}");
+    assert!(
+        event.contains("\"exact_process_identity_retained\":true"),
+        "{event}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
