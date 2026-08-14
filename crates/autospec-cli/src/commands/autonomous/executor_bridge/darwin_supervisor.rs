@@ -8,13 +8,13 @@ use nix::errno::Errno;
 use nix::sys::signal::{killpg, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, write as fd_write, ForkResult, Pid};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,18 @@ const TERM_GRACE: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(5);
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(test)]
-static FORCE_NEXT_TERMINATION_UNCERTAINTY: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static FORCE_NEXT_TERMINATION_UNCERTAINTY: Cell<bool> = const { Cell::new(false) };
+    static POLL_DEATH_RACE: Cell<Option<(u32, PollDeathRaceFence)>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum PollDeathRaceFence {
+    Valid(i32),
+    Missing,
+    Malformed(i32),
+}
 
 #[cfg(test)]
 pub(super) struct TerminationUncertaintyGuard;
@@ -30,14 +41,33 @@ pub(super) struct TerminationUncertaintyGuard;
 #[cfg(test)]
 impl Drop for TerminationUncertaintyGuard {
     fn drop(&mut self) {
-        FORCE_NEXT_TERMINATION_UNCERTAINTY.store(false, AtomicOrdering::SeqCst);
+        FORCE_NEXT_TERMINATION_UNCERTAINTY.with(|fault| fault.set(false));
     }
 }
 
 #[cfg(test)]
 pub(super) fn force_next_termination_uncertainty_for_test() -> TerminationUncertaintyGuard {
-    FORCE_NEXT_TERMINATION_UNCERTAINTY.store(true, AtomicOrdering::SeqCst);
+    FORCE_NEXT_TERMINATION_UNCERTAINTY.with(|fault| fault.set(true));
     TerminationUncertaintyGuard
+}
+
+#[cfg(test)]
+struct PollDeathRaceGuard;
+
+#[cfg(test)]
+impl Drop for PollDeathRaceGuard {
+    fn drop(&mut self) {
+        POLL_DEATH_RACE.with(|race| race.set(None));
+    }
+}
+
+#[cfg(test)]
+fn force_poll_death_after_initial_exit_read_for_test(
+    expected_pid: u32,
+    fence: PollDeathRaceFence,
+) -> PollDeathRaceGuard {
+    POLL_DEATH_RACE.with(|race| race.set(Some((expected_pid, fence))));
+    PollDeathRaceGuard
 }
 
 fn cloexec_pipe(label: &str) -> Result<(OwnedFd, OwnedFd), String> {
@@ -344,6 +374,10 @@ impl DarwinOwnedGroup {
             .barrier
             .take()
             .ok_or_else(|| "Darwin launch was already released".to_string())?;
+        // An explicit non-release marker cannot be held open by writer descriptors inherited by
+        // concurrent forks, unlike cancellation that depends on observing pipe EOF.
+        fd_write(&barrier, b"C")
+            .map_err(|error| format!("cancel persisted Darwin launch barrier: {error}"))?;
         drop(barrier);
         self.exec_status.take();
         let pid = self
@@ -366,7 +400,9 @@ impl DarwinOwnedGroup {
     }
 
     pub(super) fn poll(&mut self) -> Result<Option<i32>, String> {
-        let exit = read_live_executor_exit_status(&self.sinks.exit_status)?;
+        let _initial_exit = read_live_executor_exit_status(&self.sinks.exit_status)?;
+        #[cfg(test)]
+        self.publish_test_exit_between_read_and_death()?;
         match platform_process::observe_expected(
             self.leader.pid,
             &self.leader.boot_id,
@@ -379,15 +415,21 @@ impl DarwinOwnedGroup {
             }
             ProcessObservation::Dead => {
                 self.reap_if_child()?;
-                if !group_is_empty(self.leader.process_group)? {
+                if !wait_for_empty_group(
+                    self.leader.process_group,
+                    self.supervisor_pid,
+                    KILL_GRACE,
+                )? {
                     return Err(
                         "Darwin executor leader exited while process-group membership remains uncertain"
                             .to_string(),
                     );
                 }
-                exit.map(Some).ok_or_else(|| {
-                    "Darwin executor group exited without a durable terminal record".to_string()
-                })
+                read_live_executor_exit_status(&self.sinks.exit_status)?
+                    .map(Some)
+                    .ok_or_else(|| {
+                        "Darwin executor group exited without a durable terminal record".to_string()
+                    })
             }
             ProcessObservation::Exact(_)
             | ProcessObservation::Mismatch
@@ -448,6 +490,50 @@ impl DarwinOwnedGroup {
         };
         reap_exact_child(pid)
     }
+
+    #[cfg(test)]
+    fn publish_test_exit_between_read_and_death(&mut self) -> Result<(), String> {
+        let fence = POLL_DEATH_RACE.with(|race| match race.get() {
+            Some((expected_pid, fence)) if expected_pid == self.leader.pid => {
+                race.set(None);
+                Some(fence)
+            }
+            _ => None,
+        });
+        let Some(fence) = fence else {
+            return Ok(());
+        };
+        match fence {
+            PollDeathRaceFence::Valid(code) => {
+                let mut record = [0_u8; 16];
+                record[..4].copy_from_slice(&code.to_ne_bytes());
+                record[4..8].copy_from_slice(b"EXIT");
+                record[8..12].copy_from_slice(&code.to_ne_bytes());
+                record[12..].copy_from_slice(b"DONE");
+                std::fs::write(&self.sinks.exit_status, record)
+                    .map_err(|error| format!("publish test executor exit fence: {error}"))?;
+            }
+            PollDeathRaceFence::Missing => {}
+            PollDeathRaceFence::Malformed(code) => {
+                let mut record = [0_u8; 16];
+                record[..4].copy_from_slice(&code.to_ne_bytes());
+                record[4..8].copy_from_slice(b"EXIT");
+                std::fs::write(&self.sinks.exit_status, record).map_err(|error| {
+                    format!("publish malformed test executor exit fence: {error}")
+                })?;
+            }
+        }
+        OpenOptions::new()
+            .read(true)
+            .open(&self.sinks.exit_status)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync test executor exit fence: {error}"))?;
+        signal_exact_group(&self.leader, Signal::SIGKILL)?;
+        if !wait_for_empty_group(self.leader.process_group, self.supervisor_pid, KILL_GRACE)? {
+            return Err("test executor group survived injected death race".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Drop for DarwinOwnedGroup {
@@ -496,7 +582,12 @@ unsafe fn run_blocked_supervisor(
         nix::libc::close(fds.barrier_write);
         nix::libc::close(fds.ready_read);
         nix::libc::close(fds.status_read);
-        if nix::libc::setpgid(0, 0) != 0 || !super::raw_write_all(fds.ready_write, b"R") {
+        // Preserve the exact group leader across graceful termination so a stubborn descendant
+        // can still be escalated only after a second exact-identity proof.
+        if nix::libc::signal(nix::libc::SIGTERM, nix::libc::SIG_IGN) == nix::libc::SIG_ERR
+            || nix::libc::setpgid(0, 0) != 0
+            || !super::raw_write_all(fds.ready_write, b"R")
+        {
             super::terminate_post_fork(127);
         }
         nix::libc::close(fds.ready_write);
@@ -521,7 +612,9 @@ unsafe fn run_blocked_supervisor(
         if harness == 0 {
             nix::libc::close(fds.stdout_read);
             nix::libc::close(fds.stderr_read);
-            if nix::libc::chdir(worktree) != 0
+            // Ignored dispositions survive exec, so restore ordinary user-process TERM behavior.
+            if nix::libc::signal(nix::libc::SIGTERM, nix::libc::SIG_DFL) == nix::libc::SIG_ERR
+                || nix::libc::chdir(worktree) != 0
                 || nix::libc::dup2(fds.null, nix::libc::STDIN_FILENO) < 0
                 || nix::libc::dup2(fds.stdout_write, nix::libc::STDOUT_FILENO) < 0
                 || nix::libc::dup2(fds.stderr_write, nix::libc::STDERR_FILENO) < 0
@@ -657,7 +750,7 @@ fn prove_exact_group(expected: &ProcessIdentity) -> Result<(), String> {
 fn signal_exact_group(expected: &ProcessIdentity, signal: Signal) -> Result<(), String> {
     prove_exact_group(expected)?;
     #[cfg(test)]
-    if FORCE_NEXT_TERMINATION_UNCERTAINTY.swap(false, AtomicOrdering::SeqCst) {
+    if FORCE_NEXT_TERMINATION_UNCERTAINTY.with(|fault| fault.replace(false)) {
         return Err("injected Darwin termination uncertainty after exact proof".to_string());
     }
     let group = Pid::from_raw(
@@ -762,6 +855,30 @@ mod tests {
         (group, root)
     }
 
+    fn cleanup_test_group(identity: &ProcessIdentity) {
+        let pid = Pid::from_raw(identity.pid as i32);
+        let process_group = Pid::from_raw(identity.process_group as i32);
+        if !group_is_empty(identity.process_group).expect("inspect test group") {
+            killpg(process_group, Signal::SIGKILL).expect("kill test group");
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+                | Err(Errno::ECHILD)
+                | Err(Errno::ESRCH) => break,
+                Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) if Instant::now() < deadline => {
+                    thread::sleep(OBSERVATION_INTERVAL);
+                }
+                status => panic!("test group was not reaped: {status:?}"),
+            }
+        }
+        while !group_is_empty(identity.process_group).expect("prove test group empty") {
+            assert!(Instant::now() < deadline, "test group retained membership");
+            thread::sleep(OBSERVATION_INTERVAL);
+        }
+    }
+
     #[test]
     fn darwin_launch_barrier_prevents_user_code_before_release() {
         let marker = "user-code-ran";
@@ -805,6 +922,34 @@ mod tests {
             "blocked child must already be reaped"
         );
         assert!(group_is_empty(process_group).expect("prove cancelled group ESRCH"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_unreleased_cancellation_does_not_depend_on_barrier_writer_eof() {
+        let marker = "inherited-barrier-user-code-ran";
+        let (group, root) = blocked_fixture(&format!("printf ran > {marker}"));
+        let inherited_writer = group
+            .barrier
+            .as_ref()
+            .expect("blocked launch barrier")
+            .try_clone()
+            .expect("simulate inherited barrier writer");
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let cancel = thread::spawn(move || {
+            let result = group.cancel_unreleased();
+            let _ = finished_tx.send(result);
+        });
+
+        let prompt_result = finished_rx.recv_timeout(Duration::from_millis(250));
+        drop(inherited_writer);
+        cancel.join().expect("join blocked cancellation");
+
+        assert_eq!(
+            prompt_result.expect("cancellation waited for barrier writer EOF"),
+            Ok(())
+        );
+        assert!(!root.join(marker).exists(), "cancelled user code executed");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -994,6 +1139,37 @@ mod tests {
     }
 
     #[test]
+    fn darwin_term_ignoring_descendant_preserves_leader_for_exact_kill_escalation() {
+        let marker = "term-handler-ready";
+        let (group, root) = fixture(&format!(
+            "trap '' TERM; printf ready > {marker}; while :; do sleep 1; done"
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !root.join(marker).is_file() {
+            assert!(Instant::now() < deadline, "TERM handler was not installed");
+            thread::sleep(OBSERVATION_INTERVAL);
+        }
+
+        signal_exact_group(group.identity(), Signal::SIGTERM).expect("signal exact Darwin group");
+        thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            platform_process::observe_expected(
+                group.identity().pid,
+                &group.identity().boot_id,
+                &group.identity().start_identity
+            ),
+            ProcessObservation::Exact(birth)
+                if birth.process_group == group.identity().process_group
+        ));
+        assert!(!group_is_empty(group.identity().process_group).expect("group remains live"));
+
+        group
+            .terminate()
+            .expect("escalate exact TERM-ignoring Darwin group");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn darwin_group_probe_fails_closed_on_permission_and_unknown_errors() {
         assert_eq!(
             classify_group_probe(Err(Errno::EPERM)).unwrap_err(),
@@ -1003,6 +1179,35 @@ mod tests {
             .unwrap_err()
             .contains("observe Darwin executor process-group membership"));
         assert!(classify_group_probe(Err(Errno::ESRCH)).expect("ESRCH is empty"));
+    }
+
+    #[test]
+    fn darwin_termination_fault_is_thread_local_under_parallel_cleanup() {
+        let (armed, armed_root) = fixture("trap '' TERM; while :; do :; done");
+        let armed_identity = armed.identity().clone();
+        let (other, other_root) = fixture("trap '' TERM; while :; do :; done");
+        let other_identity = other.identity().clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let peer_barrier = barrier.clone();
+        let _uncertainty = force_next_termination_uncertainty_for_test();
+
+        let peer = thread::spawn(move || {
+            peer_barrier.wait();
+            other.terminate()
+        });
+        barrier.wait();
+        let other_result = peer.join().expect("parallel cleanup thread");
+        let armed_result = armed.terminate();
+
+        cleanup_test_group(&armed_identity);
+        cleanup_test_group(&other_identity);
+        assert_eq!(other_result, Ok(()), "parallel thread consumed fault");
+        assert_eq!(
+            armed_result.unwrap_err(),
+            "injected Darwin termination uncertainty after exact proof"
+        );
+        let _ = std::fs::remove_dir_all(armed_root);
+        let _ = std::fs::remove_dir_all(other_root);
     }
 
     #[test]
@@ -1018,6 +1223,42 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_poll_consumes_exit_fence_published_after_initial_read() {
+        let (mut group, root) = fixture("trap '' TERM; while :; do :; done");
+        let _race = force_poll_death_after_initial_exit_read_for_test(
+            group.identity().pid,
+            PollDeathRaceFence::Valid(23),
+        );
+
+        assert_eq!(
+            group.poll().expect("poll post-death durable exit"),
+            Some(23)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn darwin_poll_rejects_missing_or_malformed_post_death_fence() {
+        for fence in [
+            PollDeathRaceFence::Missing,
+            PollDeathRaceFence::Malformed(29),
+        ] {
+            let (mut group, root) = fixture("trap '' TERM; while :; do :; done");
+            let _race =
+                force_poll_death_after_initial_exit_read_for_test(group.identity().pid, fence);
+
+            let error = group
+                .poll()
+                .expect_err("dead group without complete post-death fence must fail closed");
+            assert!(
+                error.contains("without a durable terminal record"),
+                "{error}"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

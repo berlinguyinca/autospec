@@ -171,3 +171,61 @@ above is green and owns the changed behavior.
 The strict clippy rerun remains blocked by the same pre-existing unused/dead test helpers and
 production lints in executor bridge, platform process, supervisor, autonomous, claim, and launch;
 it reports no finding in the new Darwin cancellation, reservation, or round-2 regression code.
+
+## Review fix round 3
+
+### RED evidence
+
+- A deterministic poll boundary published a complete `EXIT`/`DONE` record after the poller's
+  initial exit read and killed the exact group before process observation. The regression did not
+  compile before the boundary hook existed; the old implementation would have reused its stale
+  `None` after observing `Dead` and rejected the completed executor.
+- Missing and malformed post-death records were exercised at the same boundary to lock the
+  fail-closed half of the contract.
+- The process-global termination fault was consumed by a parallel cleanup thread, which failed
+  with `injected Darwin termination uncertainty after exact proof` while the armed test thread did
+  not. This proved cross-test fault injection was not identity-safe.
+- Normal parallel Darwin runs exposed that group `SIGTERM` killed the identity-bearing supervisor
+  before a TERM-ignoring user child exited. The subsequent exact proof for `SIGKILL` failed with
+  `executor process group leader is dead`. A deterministic regression waits for the user child's
+  TERM handler, signals the group, and asserts the exact supervisor remains observable.
+- Parallel crash-adoption reached a transient `EPERM` group probe after the leader's death. A
+  single post-death probe rejected before the required group-`ESRCH` boundary could settle.
+- Parallel blocked-launch cancellation hung because concurrently forked supervisors can inherit
+  another launch's barrier writer. A cloned-writer regression made the EOF-only cancellation path
+  time out after 250 ms.
+
+### Implementation
+
+- `poll` now treats the pre-observation exit read only as live-record validation. After `Dead`, it
+  reaps the exact child when available, waits for whole-group `ESRCH` (retrying transient probe
+  uncertainty within the existing bounded grace), and only then rereads and consumes the durable
+  `EXIT`/`DONE` record. Missing or malformed fences still fail closed.
+- Darwin fault injection is thread-local, so only the test thread that arms the one-shot fault can
+  consume it. The deterministic poll boundary is also thread-local and bound to the expected PID.
+- The Darwin supervisor installs `SIGTERM` ignore before publishing readiness. Its forked user
+  child restores the default `SIGTERM` disposition before `execve`, so user code retains ordinary
+  TERM semantics while the exact group leader survives to authorize a separately re-proven
+  `SIGKILL` escalation.
+- Unreleased cancellation writes an explicit non-release byte before closing its barrier. The
+  blocked supervisor exits immediately even if sibling forks inherited unrelated writer copies;
+  user code is still never released or signaled.
+
+### GREEN evidence
+
+- Normal parallel `cargo test -p autospec-cli --bin autospec darwin_` -> 10 consecutive clean
+  runs, 25 passed per run.
+- `cargo test -p autospec-cli --bin autospec darwin_ -- --test-threads=1` -> 25 passed.
+- `darwin_poll_consumes_exit_fence_published_after_initial_read` -> 20/20 repeated passes.
+- `darwin_restart_adopts_durable_exit_after_original_parent_crash` -> 20/20 repeated passes.
+- `darwin_unreleased_cancellation_` -> 3 passed, including inherited-writer cancellation.
+- `darwin_term_ignoring_descendant_preserves_leader_for_exact_kill_escalation` -> 1 passed.
+- `cargo test -p autospec-cli --bin autospec draft_release -- --test-threads=1` -> 10 passed.
+- `cargo test -p autospec-cli --bin autospec darwin_reconciliation -- --test-threads=1` -> 4 passed.
+- Task 5 filters (`heartbeat_startup`, `startup_heartbeat_portable_unix`, `heartbeat_prior`,
+  `heartbeat_quarantine`, `heartbeat_classify`, `conductor_lease_takeover`) -> 4, 1, 3, 6, 9,
+  and 13 tests passed respectively.
+- `cargo check -p autospec-cli --all-targets` -> exit 0 with pre-existing warnings.
+- `cargo check -p autospec-cli --all-targets --target x86_64-unknown-linux-gnu` -> exit 0 with
+  pre-existing warnings.
+- Targeted `rustfmt --check` and `git diff --check` -> exit 0.
