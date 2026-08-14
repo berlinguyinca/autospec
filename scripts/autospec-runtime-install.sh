@@ -53,7 +53,7 @@ def snapshot(repo):
             path = os.path.join(base, name)
             relative = os.path.normpath(os.path.join(relative_base, name))
             meta = os.lstat(path)
-            digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0".encode())
+            digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0{meta.st_ctime_ns}\0".encode())
     return digest.hexdigest()
 def git_head(repo):
     dotgit = os.path.join(repo, ".git")
@@ -132,7 +132,7 @@ for base, dirs, files in os.walk(repo):
     relative_base = os.path.relpath(base, repo)
     for name in dirs + sorted(files):
         path = os.path.join(base, name); relative = os.path.normpath(os.path.join(relative_base, name)); meta = os.lstat(path)
-        digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0".encode())
+        digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0{meta.st_ctime_ns}\0".encode())
 print(digest.hexdigest())
 PY
 }
@@ -244,7 +244,11 @@ runtime_acquire_lock() {
     runtime_sync_path "$ACQUIRE_DIR" || return 2
     while ! runtime_rename_exclusive "$ACQUIRE_DIR" "$LOCK_DIR" 2>/dev/null; do
         [ -e "$LOCK_DIR" ] || continue
-        autospec_runtime_private_dir "$LOCK_DIR" || { runtime_install_error unsafe-lock; return 2; }
+        if ! autospec_runtime_private_dir "$LOCK_DIR"; then
+            [ -e "$LOCK_DIR" ] || continue
+            runtime_install_error unsafe-lock
+            return 2
+        fi
         if ! runtime_read_lock "$LOCK_DIR/owner"; then
             attempts=$((attempts + 1))
             if [ "$attempts" -lt 20 ]; then sleep 0.05; continue; fi
@@ -313,7 +317,8 @@ runtime_recover_interrupted() {
     case "$line9" in destination=*) destination=${line9#destination=} ;; *) return 2 ;; esac
     [ "$schema" = 1 ] || { runtime_install_error malformed-journal; return 2; }
     case "$phase" in planned|building|sealed|published) ;; *) runtime_install_error malformed-journal; return 2 ;; esac
-    [ "$repo" = "$(autospec_runtime_repo_dir "$repo" 2>/dev/null)" ] || { runtime_install_error malformed-journal; return 2; }
+    case "$repo" in /*) ;; *) runtime_install_error malformed-journal; return 2 ;; esac
+    case "$repo" in *$'\n'*|*$'\r'*|*$'\t'*|*/../*|*/..|*/./*|*/.) runtime_install_error malformed-journal; return 2 ;; esac
     [[ $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { runtime_install_error malformed-journal; return 2; }
     if ! autospec_runtime_valid_sha256 "$source" || ! autospec_runtime_valid_sha256 "$digest"; then
         runtime_install_error malformed-journal
@@ -376,15 +381,17 @@ runtime_warm_generation() {
 }
 
 runtime_install_main() {
-    local repo='' pre_tuple post_tuple post_repo post_head post_source post_digest snapshot built_binary generation receipt
+    local repo='' check_only=0 pre_tuple post_tuple post_repo post_head post_source post_digest snapshot built_binary generation receipt
     while [ "$#" -gt 0 ]; do
         case "$1" in --repo-dir) [ "$#" -ge 2 ] && [ -z "$repo" ] || { runtime_install_error usage; return 2; }; repo=$2; shift 2 ;;
+            --check-only) check_only=1; shift ;;
             *) runtime_install_error usage; return 2 ;;
         esac
     done
     [ -n "$repo" ] || { runtime_install_error usage; return 2; }
     STATE_ROOT="${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}"
     if runtime_fast_warm_generation "$repo" "$STATE_ROOT"; then return 0; fi
+    if [ "$check_only" -eq 1 ]; then printf 'stale:generation-invalid\n'; return 10; fi
     repo=$(autospec_runtime_repo_dir "$repo") || return 2
     umask 077
     GENERATIONS_ROOT="${AUTOSPEC_RUNTIME_ROOT:-$STATE_ROOT/runtime-generations}"

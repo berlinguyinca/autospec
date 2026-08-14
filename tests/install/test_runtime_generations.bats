@@ -154,6 +154,41 @@ SH
   grep -q 'other' "$two_path"
 }
 
+@test "lock disappearance during concurrent publication retries instead of reporting unsafe lock" {
+  for attempt in 1 2 3 4 5 6; do
+    attempt_home="$TEST_ROOT/race-home-$attempt"
+    mkdir "$attempt_home"
+    env HOME="$attempt_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/race-a-$attempt" & a=$!
+    env HOME="$attempt_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/race-b-$attempt" & b=$!
+    wait "$a"
+    wait "$b"
+    [ -x "$(cat "$TEST_ROOT/race-a-$attempt")" ]
+    [ "$(cat "$TEST_ROOT/race-a-$attempt")" = "$(cat "$TEST_ROOT/race-b-$attempt")" ]
+  done
+}
+
+@test "same-size same-mtime tracked source spoof cannot reuse the warm binary" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  prior="$output"
+  source="$FIXTURE_REPO/crates/demo/src/lib.rs"
+  python3 - "$source" <<'PY'
+import os, sys
+path = sys.argv[1]; before = os.stat(path)
+data = open(path, encoding="utf-8").read()
+replacement = data.replace('"one"', '"two"')
+assert len(replacement) == len(data)
+open(path, "w", encoding="utf-8").write(replacement)
+os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+PY
+  install_runtime
+  [ "$status" -eq 0 ]
+  [ "$output" != "$prior" ]
+  grep -q 'two' "$output"
+}
+
 @test "signal cleanup and SIGKILL recovery never expose a partial generation" {
   entered="$TEST_ROOT/entered"
   release="$TEST_ROOT/release"
@@ -238,6 +273,47 @@ SH
       bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO"
     [ "$status" -eq 0 ]
   done
+}
+
+@test "planned journal from a moved checkout recovers without bricking global installation" {
+  mkdir -p "$TEST_HOME/.autospec/runtime-generations"
+  chmod 700 "$TEST_HOME/.autospec" "$TEST_HOME/.autospec/runtime-generations"
+  source_sha="$(bash -c 'source "$1"; autospec_runtime_source_digest "$2"' _ "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" "$FIXTURE_REPO")"
+  head="$(git -C "$FIXTURE_REPO" rev-parse HEAD)"
+  digest="$(bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" identity --repo-dir "$FIXTURE_REPO")"
+  old_repo="$FIXTURE_REPO"
+  moved_repo="$TEST_ROOT/moved-repo"
+  journal="$TEST_HOME/.autospec/runtime-install.transaction"
+  printf 'schema=1\nphase=planned\nrepo=%s\nhead=%s\nsource_sha256=%s\ndigest=%s\nstage=%s\nbuild=%s\ndestination=%s\n' \
+    "$old_repo" "$head" "$source_sha" "$digest" \
+    "$TEST_HOME/.autospec/runtime-generations/.stage.$digest" "$TEST_HOME/.autospec/.runtime-build.$digest" \
+    "$TEST_HOME/.autospec/runtime-generations/$digest" >"$journal"
+  chmod 600 "$journal"
+  mv "$FIXTURE_REPO" "$moved_repo"
+  FIXTURE_REPO="$moved_repo"
+  install_runtime
+  [ "$status" -eq 0 ]
+  [ -x "$output" ]
+  [ ! -e "$journal" ]
+}
+
+@test "launcher check uses the sub-50ms receipt path without source inventory" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  real_git="$(command -v git)"
+  cat >"$FAKE_BIN/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do [ "\$arg" = ls-files ] && printf 'inventory\n' >>'$TEST_ROOT/check-inventory'; done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKE_BIN/git"
+  { /usr/bin/time -p env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" \
+    bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" check --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/check.path"; } 2>"$TEST_ROOT/check.time"
+  elapsed="$(awk '/^real / { print $2 }' "$TEST_ROOT/check.time")"
+  echo "launcher check elapsed: ${elapsed}s" >&3
+  [ "$(cat "$TEST_ROOT/check.path")" = "$output" ]
+  [ ! -e "$TEST_ROOT/check-inventory" ]
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 0.05) }'
 }
 
 @test "partial lock acquisition is never exposed and stale ownerless legacy locks recover" {

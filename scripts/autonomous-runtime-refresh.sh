@@ -282,21 +282,7 @@ autospec_runtime_verify_recorded_generation() {
 }
 
 autospec_runtime_check() {
-    local repo identity root current target generation tuple
-    repo=$(autospec_runtime_repo_dir "$1") || return 2
-    tuple=$(autospec_runtime_identity_tuple "$repo") || return 2
-    identity=$(printf '%s\n' "$tuple" | sed -n '4p')
-    root="${AUTOSPEC_RUNTIME_ROOT:-$HOME/.autospec/runtime-generations}"
-    current="$root/current"
-    [ -L "$current" ] || { printf 'stale:current-missing\n'; return 10; }
-    target=$(readlink "$current") || { autospec_runtime_error current-unreadable; return 2; }
-    [ "$target" = "$identity" ] || { printf 'stale:source-digest\n'; return 10; }
-    generation="$root/$identity"
-    autospec_runtime_verify_generation "$repo" "$identity" "$generation" || {
-        printf 'stale:generation-invalid\n'
-        return 10
-    }
-    printf '%s/autospec\n' "$generation"
+    exec bash "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/autospec-runtime-install.sh" --check-only --repo-dir "$1"
 }
 
 autospec_runtime_usage() {
