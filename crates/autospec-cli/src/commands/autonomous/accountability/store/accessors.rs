@@ -2,7 +2,9 @@ use super::*;
 
 impl AccountabilityStore {
     pub fn has_event(&self, kind: &EventKind) -> bool {
-        self.events.iter().any(|record| &record.kind == kind)
+        self.events.iter().any(|record| {
+            record.segment_chain_digest == self.state.segment_chain_digest && &record.kind == kind
+        })
     }
 
     pub fn create_attempted(&self) -> bool {

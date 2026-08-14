@@ -322,7 +322,15 @@ fn local_parked_and_terminal_runs_resume_into_a_new_active_segment() {
         assert_eq!(fs::read_to_string(&outbox_path).unwrap(), outbox_before);
         drop(store);
         let mut store = AccountabilityStore::open(fixture.path()).unwrap();
-        assert!(store.has_event(&kind));
+        let prior_type = match kind {
+            EventKind::Parked => "parked",
+            EventKind::Completed => "completed",
+            _ => unreachable!(),
+        };
+        assert!(fs::read_to_string(&journal_path)
+            .unwrap()
+            .contains(&format!("\"type\":\"{prior_type}\"")));
+        assert!(!store.has_event(&kind));
         assert!(store.has_event(&EventKind::ResumedFromEpic { epic: 97 }));
         store.mark_spawned().unwrap();
     }
@@ -373,7 +381,10 @@ fn interrupted_local_resume_completes_the_pending_segment_without_advancing_agai
     reopened.resume_bound_from_manifest(manifest).unwrap();
 
     assert_eq!(reopened.status().journal_segment, 2);
-    assert!(reopened.has_event(&EventKind::Parked));
+    assert!(fs::read_to_string(&journal)
+        .unwrap()
+        .contains("\"type\":\"parked\""));
+    assert!(!reopened.has_event(&EventKind::Parked));
     assert!(reopened.has_event(&EventKind::ResumedFromEpic { epic: 97 }));
 }
 
@@ -419,6 +430,57 @@ fn repeated_resume_of_the_same_epic_records_each_segment_boundary() {
     assert_eq!(journal.matches("\"type\":\"resumed_from_epic\"").count(), 2);
     drop(store);
     AccountabilityStore::open(fixture.path()).unwrap();
+}
+
+#[test]
+fn resumed_segment_records_terminal_after_the_prior_segment_completed() {
+    let fixture = Fixture::new("resumed-segment-terminal");
+    let mut store = store(&fixture);
+    store
+        .bind_epic(12, "https://github.com/acme/widgets/issues/12")
+        .unwrap();
+    store
+        .append_event(
+            AccountabilityEvent::new(
+                EventKind::Completed,
+                "Initial segment completed",
+                "Each journal segment needs its own terminal boundary",
+                vec![Evidence::outcome("initial terminal projection persisted")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let projection = store.render().unwrap();
+    let manifest = accountability::RecoveryManifest::new(
+        run(),
+        12,
+        "https://github.com/acme/widgets/issues/12",
+        projection.revision,
+        &projection.digest,
+        projection.desired_high_watermark,
+        store.status().journal_segment,
+    )
+    .unwrap()
+    .with_recovery_state(accountability::RecoveryState::Terminal, vec![], vec![])
+    .unwrap();
+
+    store.resume_bound_from_manifest(manifest).unwrap();
+
+    assert!(!store.has_event(&EventKind::Completed));
+    store
+        .append_event(
+            AccountabilityEvent::new(
+                EventKind::Completed,
+                "Resumed segment completed",
+                "The resumed segment reached its own terminal boundary",
+                vec![Evidence::outcome("resumed terminal projection persisted")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(store.has_event(&EventKind::Completed));
+    let journal = fs::read_to_string(fixture.path().join("accountability-events.jsonl")).unwrap();
+    assert_eq!(journal.matches("\"type\":\"completed\"").count(), 2);
 }
 
 #[test]
