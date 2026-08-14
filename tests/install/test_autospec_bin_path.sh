@@ -2,11 +2,15 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+TEST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+TEST_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 TEST_HOME="$(mktemp -d -t autospec-install-path.XXXXXX)"
 TEMP_SCRIPTS_DIR="$(mktemp -d -t autospec-ephemeral-scripts.XXXXXX)"
 trap 'rm -rf "$TEST_HOME" "$TEMP_SCRIPTS_DIR"' EXIT INT TERM
 
 HOME="$TEST_HOME" \
+CARGO_HOME="$TEST_CARGO_HOME" \
+RUSTUP_HOME="$TEST_RUSTUP_HOME" \
 AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -65,6 +69,15 @@ for command in autospec-autonomous autospec-autonomous-start autospec-autonomous
     }
 done
 
+for helper in autospec-autonomous-launcher.sh autonomous-runtime-refresh.sh autospec-runtime-install.sh; do
+    [ -x "$TEST_HOME/.autospec/scripts/$helper" ] || {
+        echo "FAIL: autonomous runtime helper $helper was not installed"
+        ls -la "$TEST_HOME/.autospec/scripts" || true
+        cat /tmp/autospec-install-path.out
+        exit 1
+    }
+done
+
 if grep -R '/tmp/' "$TEST_HOME/.autospec/bin"/autospec-autonomous*; then
     echo "FAIL: autospec-autonomous wrappers contain a literal /tmp path"
     exit 1
@@ -81,8 +94,8 @@ if grep -R '^export HOME=' "$TEST_HOME/.autospec/bin"/autospec-autonomous*; then
 fi
 
 for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
-    grep -qF 'command -v autospec >/dev/null 2>&1' "$TEST_HOME/.autospec/bin/$command" || {
-        echo "FAIL: $command does not try the Rust autospec launcher first"
+    grep -qF 'autospec-autonomous-launcher.sh' "$TEST_HOME/.autospec/bin/$command" || {
+        echo "FAIL: $command does not delegate to the shared autonomous launcher"
         cat "$TEST_HOME/.autospec/bin/$command"
         exit 1
     }
@@ -139,6 +152,8 @@ STALE
 chmod +x "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
 
 HOME="$TEST_HOME" \
+CARGO_HOME="$TEST_CARGO_HOME" \
+RUSTUP_HOME="$TEST_RUSTUP_HOME" \
 AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -156,8 +171,8 @@ grep -q 'heal_autonomous_operator_wrappers: healed' /tmp/autospec-install-heal.o
     exit 1
 }
 
-grep -qF 'exec autospec autonomous status "$@"' "$TEST_HOME/.autospec/bin/autospec-autonomous-status" || {
-    echo "FAIL: stale autospec-autonomous-status wrapper was not rewritten to Rust-first form"
+grep -qF 'autospec-autonomous-launcher.sh" status "$@"' "$TEST_HOME/.autospec/bin/autospec-autonomous-status" || {
+    echo "FAIL: stale autospec-autonomous-status wrapper was not rewritten to launcher form"
     cat "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
     exit 1
 }
@@ -176,6 +191,8 @@ grep -q '"running":false' /tmp/autospec-autonomous-status-healed.json || {
 }
 
 HOME="$TEST_HOME" \
+CARGO_HOME="$TEST_CARGO_HOME" \
+RUSTUP_HOME="$TEST_RUSTUP_HOME" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
 AUTOSPEC_SKIP_SUPERPOWERS=1 \
