@@ -23007,7 +23007,7 @@ mod trusted_git;
 use trusted_git::*;
 
 mod accountability_lifecycle;
-#[cfg(target_os = "linux")] use accountability_lifecycle::*;
+#[cfg(target_os = "linux")] pub(crate) use accountability_lifecycle::*;
 
 // The continuation checkpoint: preserving a run that outgrew the patch-size gate or met only
 // some of its criteria, and carrying the rest forward as child issues. `use continuation::*`

@@ -2209,9 +2209,11 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         Ok(config) => config,
         Err(error) => {
             return match inherited_lease.as_ref() {
-                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                    Err(CommandFailure::diagnostic(error))
-                }),
+                Some(lease) => finish_foreground_with_lease(
+                    &layout,
+                    lease,
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
         }
@@ -2220,9 +2222,11 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         Ok(mode) => mode,
         Err(error) => {
             return match inherited_lease.as_ref() {
-                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                    Err(CommandFailure::diagnostic(error))
-                }),
+                Some(lease) => finish_foreground_with_lease(
+                    &layout,
+                    lease,
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
         }
@@ -2236,10 +2240,13 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         let persisted =
             persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic);
         return match inherited_lease.as_ref() {
-            Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                persisted?;
-                emit_lifecycle_decision(lifecycle)
-            }),
+            Some(lease) => finish_foreground_with_lease(
+                &layout,
+                lease,
+                persisted
+                    .map(|()| ForegroundCompletion::Lifecycle(lifecycle))
+                    .map_err(ForegroundFailure::Diagnostic),
+            ),
             None => {
                 persisted?;
                 emit_lifecycle_decision(lifecycle)

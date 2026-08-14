@@ -26,7 +26,7 @@ fn terminal_accountability_precedes_release_and_output() {
 }
 
 #[test]
-fn terminal_record_failure_still_releases_but_suppresses_output() {
+fn terminal_record_failure_retains_lease_and_suppresses_output() {
     let order = RefCell::new(Vec::new());
     let result = finish_accountability_boundary(
         (),
@@ -45,5 +45,23 @@ fn terminal_record_failure_still_releases_but_suppresses_output() {
     );
 
     assert!(result.is_err());
-    assert_eq!(*order.borrow(), ["record", "release"]);
+    assert_eq!(*order.borrow(), ["record"]);
+}
+
+#[test]
+fn inherited_foreground_early_exits_use_the_accountable_terminal_path() {
+    let source = include_str!("../../autonomous.rs");
+    let foreground = source
+        .split_once("fn run_foreground(options: Options)")
+        .expect("run_foreground exists")
+        .1
+        .split_once("fn run_foreground_cycles(")
+        .expect("run_foreground boundary exists")
+        .0;
+
+    assert_eq!(
+        foreground.matches("finish_foreground_with_lease(").count(),
+        4
+    );
+    assert_eq!(foreground.matches("finish_with_launch_lease(").count(), 1);
 }

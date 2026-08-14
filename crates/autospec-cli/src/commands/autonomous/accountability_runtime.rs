@@ -216,10 +216,8 @@ pub(super) fn finish_accountability_boundary<T, R>(
     release: impl FnOnce() -> Result<(), CommandFailure>,
     emit: impl FnOnce(T) -> Result<R, CommandFailure>,
 ) -> Result<R, CommandFailure> {
-    let record_result = record(&value);
-    let release_result = release();
-    record_result?;
-    release_result?;
+    record(&value)?;
+    release()?;
     emit(value)
 }
 

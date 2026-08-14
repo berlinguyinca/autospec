@@ -20,6 +20,8 @@ const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 
+#[cfg(target_os = "linux")] #[path = "support/foreground_fixture_git.rs"] mod foreground_fixture_git;
+#[cfg(target_os = "linux")] use foreground_fixture_git::seed_preserved_issue_branch;
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

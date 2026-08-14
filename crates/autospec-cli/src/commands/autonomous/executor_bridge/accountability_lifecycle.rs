@@ -24,14 +24,14 @@ pub(crate) fn run_executor_bridge_observed(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn run_executor_bridge_with_codex_probe(
+pub(crate) fn run_executor_bridge_with_codex_probe(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     run_executor_bridge_with_codex_probe_observed(request, codex_probe, &mut |_| Ok(()))
 }
 
-pub(super) fn observe_pull_request_and_review(
+pub(crate) fn observe_pull_request_and_review(
     state: &PersistedInvocation,
     observe: &mut dyn FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
 ) -> Result<u64, BridgeRunFailure> {
@@ -49,7 +49,7 @@ pub(super) fn observe_pull_request_and_review(
     Ok(pull_request)
 }
 
-pub(super) fn observe_verified(
+pub(crate) fn observe_verified(
     pull_request: u64,
     observe: &mut dyn FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
 ) -> Result<(), BridgeRunFailure> {
@@ -60,7 +60,7 @@ pub(super) fn observe_verified(
     })
 }
 
-pub(super) fn observe_merged(
+pub(crate) fn observe_merged(
     pull_request: u64,
     observe: &mut dyn FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
 ) -> Result<(), BridgeRunFailure> {
