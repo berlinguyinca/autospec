@@ -43,9 +43,15 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let sequence = DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let repository = format!("owner/portable-admission-{}-{sequence}", std::process::id());
-    // Keep the spelling accepted by external tools. On Windows, canonicalizing the
-    // temporary directory adds a verbatim (`\\?\`) prefix that Git rejects for `init`.
-    let root = std::env::temp_dir().join(format!(
+    let temporary_root = std::env::temp_dir();
+    // Keep the spelling accepted by external tools on Windows. Canonicalization adds a
+    // verbatim (`\\?\`) prefix that Git rejects, while Unix needs canonicalization to
+    // remove aliases such as macOS `/var` before secure path validation.
+    #[cfg(windows)]
+    let temporary_root = temporary_root;
+    #[cfg(not(windows))]
+    let temporary_root = fs::canonicalize(temporary_root).expect("canonical temp directory");
+    let root = temporary_root.join(format!(
         "autospec-supported-host-admission-{}-{}",
         std::process::id(),
         sequence
