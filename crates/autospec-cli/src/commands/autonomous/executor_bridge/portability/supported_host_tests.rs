@@ -142,6 +142,7 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         "AUTOSPEC_CLAIM_GIT_STATE_DIR",
         "AUTOSPEC_CLAIM_CONFIRM_READS",
         "AUTOSPEC_TEST_GH_STATE",
+        "AUTOSPEC_GH_PROGRAM",
         "AUTOSPEC_HARNESS_RUNTIME_ALIASES",
         "AUTOSPEC_HANDOFF_DISPATCHER_KIND",
         "PATH",
@@ -157,6 +158,11 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claim_state);
         std::env::set_var("AUTOSPEC_CLAIM_CONFIRM_READS", "1");
         std::env::set_var("AUTOSPEC_TEST_GH_STATE", root.join("gh-state"));
+        #[cfg(windows)]
+        let gh_program = bin.join("gh.cmd");
+        #[cfg(not(windows))]
+        let gh_program = bin.join("gh");
+        std::env::set_var("AUTOSPEC_GH_PROGRAM", gh_program);
         std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &harness_aliases);
         std::env::set_var("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "claude");
         let mut path = vec![bin.clone()];

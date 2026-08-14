@@ -4104,7 +4104,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
     let attempts = claim_retry_attempts();
     let sleep_ms = claim_retry_sleep_ms();
     for attempt in 0..attempts {
-        let output = Command::new("gh")
+        let output = lease::gh_command()
             .args(arguments)
             .output()
             .map_err(|error| CommandFailure::transient(format!("could not {action}: {error}")))?;
