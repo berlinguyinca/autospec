@@ -766,48 +766,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
-fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
-    let selected =
-        usize::from(options.follow) + usize::from(options.detach) + usize::from(options.foreground);
-    if selected > 1 {
-        return Err("--follow, --detach, and --foreground are mutually exclusive".to_string());
-    }
-    if (options.follow || options.detach || options.foreground) && options.subcommand != "start" {
-        return Err(format!(
-            "launch modes are valid only with autospec autonomous start, not {}",
-            options.subcommand
-        ));
-    }
-    if options.follow && options.force {
-        return Err(
-            "--force cannot be combined with --follow; use autospec autonomous restart --force"
-                .to_string(),
-        );
-    }
-    if options.follow && options.json {
-        return Err(
-            "--json is not supported with --follow; use autospec autonomous status --json"
-                .to_string(),
-        );
-    }
-    if options.subcommand == "resume" && options.epic.is_none() {
-        return Err("autospec autonomous resume requires --epic N".to_string());
-    }
-    if options.subcommand == "resume" && options.force {
-        return Err("--force is not valid with resume".to_string());
-    }
-    if options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume") {
-        return Err("--epic is valid only with autospec autonomous start or resume".to_string());
-    }
-    Ok(if options.follow {
-        LaunchMode::Follow
-    } else if options.foreground {
-        LaunchMode::Foreground
-    } else {
-        LaunchMode::Detached
-    })
-}
-
 fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
