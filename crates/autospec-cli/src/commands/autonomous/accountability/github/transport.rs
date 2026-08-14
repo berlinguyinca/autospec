@@ -137,23 +137,20 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
             title,
             body,
             labels,
-        } => {
-            let mut args = vec![
-                "issue".to_string(),
-                "create".to_string(),
-                "--repo".to_string(),
-                repository,
-                "--title".to_string(),
-                title,
-                "--body-file".to_string(),
+        } => (
+            vec![
+                "api".to_string(),
+                "--method".to_string(),
+                "POST".to_string(),
+                format!("repos/{repository}/issues"),
+                "--input".to_string(),
                 "-".to_string(),
-            ];
-            for label in labels {
-                args.push("--label".to_string());
-                args.push(label);
-            }
-            (args, Some(body))
-        }
+            ],
+            Some(
+                serde_json::json!({"title": title, "body": body, "labels": labels})
+                    .to_string(),
+            ),
+        ),
         GithubCommand::EditIssue {
             repository,
             number,

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn zero_matches_creates_once_then_reconciles_exact_marker() {
+fn zero_matches_binds_the_create_response_without_waiting_for_list_visibility() {
     let fixture = Fixture::new("create");
     let mut store = store(&fixture);
     let projection = store.render().unwrap();
@@ -16,8 +16,7 @@ fn zero_matches_creates_once_then_reconciles_exact_marker() {
         Ok(String::new()),
         Ok(String::new()),
         Ok(String::new()),
-        Ok("https://github.com/acme/widgets/issues/42\n".to_string()),
-        Ok(pages(&[remote])),
+        Ok(remote),
         Ok(String::new()),
         Ok("__return_last_edit__".to_string()),
     ]);
@@ -41,6 +40,15 @@ fn zero_matches_creates_once_then_reconciles_exact_marker() {
             .filter(|call| matches!(call, GithubCommand::CreateIssue { .. }))
             .count(),
         1
+    );
+    assert_eq!(
+        github
+            .calls
+            .iter()
+            .filter(|call| matches!(call, GithubCommand::ListAccountabilityIssues { .. }))
+            .count(),
+        1,
+        "the successful create response is authoritative; no read-after-write list is needed"
     );
     assert_eq!(store.status().epic_number, Some(42));
     assert_eq!(store.status().pending_projection_count, 0);
