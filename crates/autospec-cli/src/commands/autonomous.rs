@@ -277,6 +277,14 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
     let launch_mode = validate_launch_mode(&options).map_err(CommandFailure::diagnostic)?;
+    if options.dry_run
+        && matches!(
+            options.subcommand.as_str(),
+            "start" | "restart" | "resume"
+        )
+    {
+        return preview_launch(&options, launch_mode);
+    }
     if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
         return run_foreground(options);
     }
@@ -1062,36 +1070,37 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
-fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
-    if options.dry_run {
-        let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
-        let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
-        if options.json {
-            let mut body = format!(
-                "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
-                json_escape(&options.repo),
-                json_escape(&options.repo_dir),
-                json_escape(&foreground.display()),
-                json_escape(&commands.monitor.display()),
-                json_escape(&commands.supervisor.display())
-            );
-            if launch_mode == LaunchMode::Follow {
-                body.pop();
-                body.push_str(",\"follow\":\"scoped conductor log\"}");
-            }
-            println!("{body}");
-        } else {
-            println!("autospec autonomous start: dry-run");
-            println!("conductor: {}", foreground.display());
-            println!("monitor: {}", commands.monitor.display());
-            println!("supervisor: {}", commands.supervisor.display());
-            if launch_mode == LaunchMode::Follow {
-                println!("follow: scoped conductor log");
-            }
+fn preview_launch(options: &Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
+    let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
+    let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
+    if options.json {
+        let mut body = format!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"{}\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
+            json_escape(&options.subcommand),
+            json_escape(&options.repo),
+            json_escape(&options.repo_dir),
+            json_escape(&foreground.display()),
+            json_escape(&commands.monitor.display()),
+            json_escape(&commands.supervisor.display())
+        );
+        if launch_mode == LaunchMode::Follow {
+            body.pop();
+            body.push_str(",\"follow\":\"scoped conductor log\"}");
         }
-        return Ok(());
+        println!("{body}");
+    } else {
+        println!("autospec autonomous {}: dry-run", options.subcommand);
+        println!("conductor: {}", foreground.display());
+        println!("monitor: {}", commands.monitor.display());
+        println!("supervisor: {}", commands.supervisor.display());
+        if launch_mode == LaunchMode::Follow {
+            println!("follow: scoped conductor log");
+        }
     }
+    Ok(())
+}
 
+fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
     toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;

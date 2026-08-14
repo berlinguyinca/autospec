@@ -5,6 +5,7 @@ use autospec_core::claim::{parse_remote_comments_json, parse_run_state_comment, 
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -181,6 +182,56 @@ fn launch_modes_reject_non_start_subcommands_before_mutation() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("launch modes are valid only with autospec autonomous start, not status"));
     assert!(!fixture.operator.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn restart_dry_run_is_strictly_read_only() {
+    let fixture = ForegroundFixture::new();
+    git_fixture(&fixture.repo_dir, &["init", "-q"]);
+    fs::write(&fixture.accountability, "CLOSED\n").expect("seed closed accountability epic");
+    fs::create_dir_all(fixture.scoped_dir()).expect("create autonomous scope");
+    fs::write(
+        fixture.scoped_stop_sentinel(),
+        "immediate\n2026-08-14T00:00:00Z test@localhost\n",
+    )
+    .expect("seed immediate-stop sentinel");
+    let mut conductor_command = Command::new("sh");
+    conductor_command
+        .args(["-c", "while :; do sleep 1; done"])
+        .process_group(0);
+    let mut conductor = conductor_command.spawn().expect("spawn conductor fixture");
+    fs::write(
+        fixture.scoped_dir().join("conductor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"test/repo\",\"scope\":\"test_repo\"}}\n",
+            conductor.id()
+        ),
+    )
+    .expect("record conductor metadata");
+    let before = snapshot_tree(&fixture.root);
+
+    let output = fixture
+        .detached_command("restart")
+        .args(["--dry-run", "--json"])
+        .output()
+        .expect("preview restart");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(conductor.try_wait().unwrap().is_none());
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.calls.exists());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["subcommand"], "restart");
+    assert_eq!(json["status"], "dry-run");
+
+    terminate_process_group(conductor.id());
+    let _ = conductor.wait();
 }
 
 #[test]
@@ -7441,6 +7492,29 @@ impl Drop for ForegroundFixture {
 }
 
 static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).expect("read fixture tree") {
+            let entry = entry.expect("read fixture entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .expect("fixture entry below root")
+                        .to_path_buf(),
+                    fs::read(path).expect("read fixture file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
 
 fn fresh_iso_timestamp() -> String {
     let seconds = SystemTime::now()

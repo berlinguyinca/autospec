@@ -1,6 +1,7 @@
 use super::*;
+use std::collections::BTreeMap;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -39,6 +40,52 @@ fn resume_rejects_force_before_touching_a_stopped_run() {
     assert_eq!(
         fs::read_to_string(fixture.stop_flag()).unwrap(),
         stop_before
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn autonomous_resume_dry_run_is_strictly_read_only() {
+    let fixture = CliResumeFixture::new("resume-dry-run");
+    fixture.record_immediate_stop();
+    fixture.install_closed_epic();
+    let mut conductor = fixture.install_running_conductor();
+    let stop_before = fs::read_to_string(fixture.stop_flag()).expect("read stop flag");
+    let files_before = snapshot_tree(&fixture.root);
+
+    let output = fixture
+        .command("resume")
+        .args(["--epic", "12", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    let conductor_survived = conductor.try_wait().unwrap().is_none();
+    let files_after = snapshot_tree(&fixture.root);
+    let stop_after = fs::read_to_string(fixture.stop_flag()).ok();
+    let issue_after = fs::read_to_string(fixture.issue_state()).unwrap();
+    let gh_was_called = fixture.gh_calls().exists();
+    let launch_was_written = fixture.scope().join("launch.json").exists();
+
+    fixture.stop_spawned_run();
+    let _ = conductor.kill();
+    let _ = conductor.wait();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["subcommand"], "resume");
+    assert_eq!(result["status"], "dry-run");
+    assert!(
+        conductor_survived,
+        "dry-run must not stop the active conductor"
+    );
+    assert!(!gh_was_called, "dry-run must not invoke gh");
+    assert_eq!(issue_after, "CLOSED\n", "dry-run must not reopen the epic");
+    assert_eq!(stop_after.as_deref(), Some(stop_before.as_str()));
+    assert!(!launch_was_written, "dry-run must not write launch.json");
+    assert_eq!(
+        files_after, files_before,
+        "dry-run must not write run state"
     );
 }
 
@@ -186,6 +233,30 @@ esac
         fs::set_permissions(gh, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
+    fn install_running_conductor(&self) -> std::process::Child {
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let autospec = bin.join("autospec");
+        fs::write(&autospec, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        fs::set_permissions(&autospec, fs::Permissions::from_mode(0o755)).unwrap();
+        let conductor = Command::new(&autospec)
+            .arg("run-foreground")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        fs::create_dir_all(self.scope()).unwrap();
+        fs::write(
+            self.scope().join("conductor.pid"),
+            format!(
+                "{{\"pid\":{},\"repo\":\"acme/widgets\",\"scope\":\"acme_widgets\"}}\n",
+                conductor.id()
+            ),
+        )
+        .unwrap();
+        conductor
+    }
+
     fn stop_spawned_run(&self) {
         let _ = self.command("stop").arg("--immediate").output();
     }
@@ -208,6 +279,27 @@ impl Drop for CliResumeFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn snapshot_tree(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
 }
 
 #[test]
