@@ -77,6 +77,9 @@ mod windows_tests {
 
     #[test]
     fn direct_plan_resolves_pathext_wrapper_through_canonical_cmd() {
+        let _environment = super::super::tests::TEST_ENVIRONMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = DirectFixture::new();
         let wrapper = fixture.worktree.join("autospec-fixture-tool.CMD");
         fs::write(&wrapper, "@echo wrapper-output\r\n").expect("write command wrapper");

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+pub(in super::super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
 /// Restore every injected-fault switch to the value it was declared with.
 ///

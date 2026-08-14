@@ -567,6 +567,9 @@ fn environment_block(
 ) -> Result<Vec<u16>, String> {
     let mut environment = environment.to_vec();
     environment.sort_by_key(|(key, _)| key.to_string_lossy().to_uppercase());
+    if environment.is_empty() {
+        return Ok(vec![0, 0]);
+    }
     let mut block = Vec::new();
     for (key, value) in environment {
         block.extend(wide(&key, "autonomous child environment key")?);
@@ -631,5 +634,10 @@ mod tests {
             command_line(&[program]).unwrap_err(),
             "autonomous child command contains an embedded NUL"
         );
+    }
+
+    #[test]
+    fn empty_environment_block_is_double_nul_terminated() {
+        assert_eq!(environment_block(&[]).unwrap(), [0, 0]);
     }
 }

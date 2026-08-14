@@ -82,6 +82,8 @@ mod snapshot_identity;
 mod structured_review;
 mod structured_review_receipt;
 mod support_base;
+#[cfg(windows)]
+pub(super) use support_base::TEST_ENVIRONMENT;
 mod support_harness_env;
 mod support_invocation;
 mod support_launch;

@@ -421,6 +421,34 @@ mod tests {
     }
 
     #[cfg(windows)]
+    struct TempDirectory(PathBuf);
+
+    #[cfg(windows)]
+    impl TempDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "autospec-{name}-{}-{}",
+                std::process::id(),
+                super::super::DIRECT_TRANSACTION_SEQUENCE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("create Windows launch fixture directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn windows_child_helper() {
         let Ok(mode) = std::env::var("AUTOSPEC_WINDOWS_CHILD_MODE") else {
@@ -466,6 +494,28 @@ mod tests {
             }
             unknown => panic!("unknown Windows child helper mode: {unknown}"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_empty_environment_child() {
+        if !Path::new(".autospec-empty-environment-child").is_file() {
+            return;
+        }
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        assert!(
+            environment.is_empty(),
+            "prepared empty environment inherited variables: {environment:?}"
+        );
+        let observation = serde_json::json!({
+            "cwd": std::fs::canonicalize(std::env::current_dir().expect("read child cwd"))
+                .expect("canonicalize child cwd"),
+            "argv": std::env::args_os()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        });
+        std::fs::write("empty-environment-observation.json", observation.to_string())
+            .expect("write empty-environment child observation");
     }
 
     #[cfg(unix)]
@@ -701,5 +751,46 @@ mod tests {
             .unwrap();
         assert!(stdout.contains("prepared-stdout"));
         assert!(stderr.contains("prepared-stderr"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_launch_preserves_empty_environment_cwd_and_argv() {
+        let fixture = TempDirectory::new("windows-empty-environment");
+        std::fs::write(
+            fixture.path().join(".autospec-empty-environment-child"),
+            b"ready",
+        )
+        .unwrap();
+        let current_dir = std::fs::canonicalize(fixture.path()).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let expected_argv = vec![
+            executable.to_string_lossy().into_owned(),
+            "--exact".to_string(),
+            "commands::autonomous::executor_bridge::process_owner::tests::windows_empty_environment_child"
+                .to_string(),
+            "--nocapture".to_string(),
+        ];
+        let spec = PreparedLaunchSpec {
+            program: executable,
+            argv: expected_argv.iter().map(OsString::from).collect(),
+            current_dir: Some(current_dir.clone()),
+            environment: PreparedEnvironment {
+                variables: Vec::new(),
+            },
+            stdin: None,
+            stdout: None,
+            stderr: None,
+        };
+        let mut owned = OwnedChildTree::spawn_prepared(spec, "nonce-win-empty-env".into()).unwrap();
+        assert!(owned.wait().unwrap().success());
+
+        let observation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(fixture.path().join("empty-environment-observation.json"))
+                .expect("read empty-environment child observation"),
+        )
+        .unwrap();
+        assert_eq!(observation["cwd"], serde_json::json!(current_dir));
+        assert_eq!(observation["argv"], serde_json::json!(expected_argv));
     }
 }
