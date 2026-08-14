@@ -22098,6 +22098,12 @@ fn reject_symlink_path(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component);
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A Windows prefix such as `\\?\C:` is not independently stat-able;
+            // it becomes a filesystem root only after the following RootDir component.
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 #[cfg(target_os = "macos")]
