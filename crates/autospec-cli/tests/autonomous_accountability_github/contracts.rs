@@ -20,6 +20,23 @@ fn autonomous_cli_exposes_explicit_epic_start_and_resume_contract() {
 }
 
 #[test]
+fn resume_uses_restart_lifecycle_recovery_before_reopening_the_epic() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/autonomous.rs"),
+    )
+    .expect("read autonomous command source");
+
+    assert!(source.contains("\"resume\" => restart(options)"));
+    assert!(source.contains("clear_stop_flag(layout)"));
+    let runtime = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/commands/autonomous/accountability_runtime.rs"),
+    )
+    .expect("read accountability runtime source");
+    assert!(runtime.contains("ResumePolicy::ReopenClosed"));
+}
+
+#[test]
 fn launcher_binds_verified_epic_before_any_conductor_spawn_and_supervisor_reuses_it() {
     let source = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/autonomous.rs"),
