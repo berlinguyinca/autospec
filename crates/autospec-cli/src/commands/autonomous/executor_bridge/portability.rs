@@ -512,7 +512,28 @@ mod supported_host_tests {
             terminal_path.is_file(),
             "terminal receipt was not published"
         );
+        let sinks = output_sink_paths(&state_path, &request.invocation_id)
+            .expect("resolve production admission ownership sinks");
+        let cleanup_path = sinks.supervisor_identity.with_extension("cleanup.json");
+        let cleanup_evidence = fs::read(&cleanup_path)
+            .expect("read production admission cleanup evidence before reconciliation");
+        let first_run_events =
+            fs::read_to_string(&request.event_log).expect("read first-run admission events");
+
+        let reconciled =
+            run_executor_bridge(&request).expect("production bridge entry-time reconciliation");
+        assert_eq!(reconciled, result);
+
         let events = fs::read_to_string(&request.event_log).expect("read admission events");
+        assert_eq!(
+            events, first_run_events,
+            "entry-time reconciliation appended lifecycle side effects"
+        );
+        assert_eq!(
+            events.matches("\"event\":\"child_started\"").count(),
+            1,
+            "entry-time reconciliation replayed the harness child: {events}"
+        );
         for event in ["child_started", "child_cleanup_complete", "child_exited"] {
             assert!(
                 events.contains(&format!("\"event\":\"{event}\"")),
@@ -532,18 +553,19 @@ mod supported_host_tests {
         .expect("parse terminal admission state");
         assert_eq!(persisted.phase, BridgePhase::Complete);
         assert!(persisted.supervisor.is_none() && persisted.process.is_none());
-        let sinks = output_sink_paths(&state_path, &request.invocation_id)
-            .expect("resolve production admission ownership sinks");
         assert!(
-            sinks
-                .supervisor_identity
-                .with_extension("cleanup.json")
-                .is_file(),
+            cleanup_path.is_file(),
             "production supervision omitted durable cleanup evidence"
+        );
+        assert_eq!(
+            fs::read(&cleanup_path)
+                .expect("read production admission cleanup evidence after reconciliation"),
+            cleanup_evidence,
+            "entry-time reconciliation rewrote child cleanup evidence"
         );
         assert!(
             !sinks.supervisor_identity.exists(),
-            "production supervision retained an owner journal after proven cleanup"
+            "entry-time reconciliation created or retained an owner journal"
         );
         fs::remove_dir_all(root).expect("remove supported-host fixture");
     }
