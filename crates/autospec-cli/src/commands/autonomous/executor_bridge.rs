@@ -32,15 +32,15 @@ use crate::commands::autonomous::platform_process::observe_process_group;
 use crate::commands::autonomous::platform_process::{
     observe_birth as observe_process_birth, ProcessBirth,
 };
+#[cfg(target_os = "linux")]
+use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
     transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
-    ClaimRefreshResult,
-    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
+    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
+    ExecutorSuccessBinding,
 };
-#[cfg(target_os = "linux")]
-use crate::commands::claim::with_released_bridge_predecessor_authority;
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
@@ -53,7 +53,7 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use autospec_core::lint::implementation::parse_blocking_hook_failure;
 use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
 use autospec_core::lint::{
@@ -72,6 +72,18 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(target_os = "linux")]
 use nix::unistd::{fork, pipe2, write as fd_write, ForkResult, Pid};
 use yaml_edit::Document;
+
+#[cfg(target_os = "macos")]
+fn with_released_bridge_predecessor_authority<T>(
+    identity: ClaimMutationIdentity<'_>,
+    operation: impl FnOnce() -> Result<T, crate::commands::CommandFailure>,
+) -> Result<Option<T>, crate::commands::CommandFailure> {
+    if recover_released_bridge_claim(identity)? {
+        operation().map(Some)
+    } else {
+        Ok(None)
+    }
+}
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Read,Edit,Write,Glob,Grep,",
@@ -1005,7 +1017,7 @@ pub(crate) fn legacy_bridge_proves_claim(
     Ok(proven)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_executor_bridge_with_codex_probe_observed(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
@@ -1866,8 +1878,10 @@ fn ensure_premerge_and_review(
             40,
         )?;
     }
-    if matches!(state.phase, BridgePhase::CiPassed | BridgePhase::ReviewPassed)
-        && review_receipt_path(&request.state_path, state)?.exists()
+    if matches!(
+        state.phase,
+        BridgePhase::CiPassed | BridgePhase::ReviewPassed
+    ) && review_receipt_path(&request.state_path, state)?.exists()
     {
         let snapshot = state.clone();
         if refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Review)? == BridgeClaimOwnership::Lost
@@ -4524,12 +4538,8 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
             request.stall_timeout,
         )?;
-        let integration = produce_integration_smoke_evidence(
-            &request,
-            &smoke,
-            &observations,
-            &attempt_root,
-        )?;
+        let integration =
+            produce_integration_smoke_evidence(&request, &smoke, &observations, &attempt_root)?;
         observations.extend(integration.observations);
         verify_exact_evidence_lane(
             request.state,
@@ -6781,7 +6791,99 @@ fn execute_supervised_direct_attempt(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+fn execute_supervised_direct_attempt(
+    attempt_id: &str,
+    worktree: &Path,
+    program: &Path,
+    command: &DirectCommand,
+    paths: &DirectAttemptPaths,
+    stdout: &File,
+    stderr: &File,
+    environment_overrides: Vec<(OsString, OsString)>,
+    intent_digest: &str,
+    stall_timeout: Duration,
+) -> AttemptTerminal {
+    let invocation = ValidatedInvocation {
+        program: program.to_path_buf(),
+        argv_zero: Some(command.argv[0].clone().into()),
+        args: command.argv[1..].to_vec(),
+        current_dir: worktree.to_path_buf(),
+        environment_overrides,
+    };
+    let mut group = match darwin_supervisor::DarwinOwnedGroup::spawn(&invocation, &paths.sinks) {
+        Ok(group) => group,
+        Err(failure) => return AttemptTerminal::SpawnFailed(failure.reason),
+    };
+    let launch = direct_launch_document(attempt_id, intent_digest, group.identity(), None);
+    if let Err(error) = write_private_create_once(
+        &paths.launch,
+        launch.as_bytes(),
+        "Darwin direct command launch identity",
+    ) {
+        return match group.terminate() {
+            Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+            Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+        };
+    }
+    let started = Instant::now();
+    loop {
+        if let Err(error) = darwin_supervisor::publish_output_cursors(&paths.sinks) {
+            return match group.terminate() {
+                Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
+            };
+        }
+        match group.poll() {
+            Ok(Some(code)) => {
+                if let Err(error) = darwin_supervisor::publish_output_cursors(&paths.sinks) {
+                    return AttemptTerminal::InfrastructureFailed(error);
+                }
+                for (source, target) in
+                    [(&paths.sinks.stdout, stdout), (&paths.sinks.stderr, stderr)]
+                {
+                    let copy = fs::read(source).and_then(|bytes| {
+                        target.set_len(0)?;
+                        target.write_all_at(&bytes, 0)?;
+                        target.sync_all()
+                    });
+                    if let Err(error) = copy {
+                        return AttemptTerminal::InfrastructureFailed(format!(
+                            "persist Darwin direct output: {error}"
+                        ));
+                    }
+                }
+                return if code >= 128 {
+                    AttemptTerminal::Signaled(code - 128)
+                } else {
+                    AttemptTerminal::Exited(code)
+                };
+            }
+            Ok(None) => {}
+            Err(error) => return AttemptTerminal::CleanupFailed(error),
+        }
+        let output_size = [&paths.sinks.stdout, &paths.sinks.stderr]
+            .into_iter()
+            .filter_map(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum::<u64>();
+        if output_size > MAX_DIRECT_OUTPUT_BYTES {
+            return match group.terminate() {
+                Ok(()) => AttemptTerminal::OutputOverflow,
+                Err(error) => AttemptTerminal::CleanupFailed(error),
+            };
+        }
+        if started.elapsed() >= stall_timeout {
+            return match group.terminate() {
+                Ok(()) => AttemptTerminal::TimedOut,
+                Err(error) => AttemptTerminal::CleanupFailed(error),
+            };
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn execute_direct_plan(
     worktree: &Path,
     plan: &DirectCommandPlan,
@@ -16791,6 +16893,164 @@ fn supervise_validated_harness_with_claim_renewal(
     )
 }
 
+#[cfg(target_os = "macos")]
+fn supervise_validated_harness_with_claim_renewal(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: Option<&ValidatedInvocation>,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    mut renewal: ClaimRenewalSchedule,
+) -> Result<SupervisionOutcome, String> {
+    use darwin_supervisor::DarwinOwnedGroup;
+
+    if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
+        return Err("executor supervision intervals must be non-zero".to_string());
+    }
+    let sinks = output_sink_paths_for_state(state_path, state)?;
+    let adopted = state.process.is_some();
+    let mut group = if let Some(expected) = state.process.as_ref() {
+        DarwinOwnedGroup::adopt(expected)?
+    } else {
+        if renewal.is_enabled() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+                Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                    renewal.mark_refreshed(ttl_seconds)
+                }
+                Ok(BridgeClaimOwnership::Lost) => {
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+                Err(error) => return Ok(SupervisionOutcome::TransientFailure(error)),
+            }
+        }
+        let group = DarwinOwnedGroup::spawn(
+            harness.ok_or_else(|| {
+                "executor recovery exhausted durable identities before fresh harness resolution"
+                    .to_string()
+            })?,
+            &sinks,
+        )
+        .map_err(|failure| failure.reason)?;
+        state.phase = BridgePhase::Implementing;
+        state.supervisor = None;
+        state.process = Some(group.identity().clone());
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        append_executor_event(
+            event_log,
+            state,
+            "child_started",
+            Some(serde_json::json!({
+                "pid": group.identity().pid,
+                "process_group": group.identity().process_group,
+                "darwin_process_group": true
+            })),
+        )?;
+        group
+    };
+    let mut readers = DurableOutputReaders::open(&sinks, adopted)?;
+    let mut last_progress = Instant::now();
+    loop {
+        if renewal.is_due() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+                Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                    renewal.mark_refreshed(ttl_seconds)
+                }
+                Ok(BridgeClaimOwnership::Lost) => {
+                    group.terminate()?;
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+                Err(error) => return Ok(SupervisionOutcome::TransientFailure(error)),
+            }
+        }
+        let published = darwin_supervisor::publish_output_cursors(&sinks)?;
+        let consumed = readers.poll()?;
+        readers.flush_if_due(state_path, event_log, state, false)?;
+        if published > 0 || consumed > 0 {
+            last_progress = Instant::now();
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+        }
+        match group.poll() {
+            Ok(Some(exit_code)) => {
+                darwin_supervisor::publish_output_cursors(&sinks)?;
+                match readers.drain_after_completion(state_path, event_log, state, &mut renewal)? {
+                    CompletionDrainOutcome::Drained => {}
+                    CompletionDrainOutcome::OwnershipLost => {
+                        record_claim_ownership_loss(state_path, event_log, state)?;
+                        return Ok(SupervisionOutcome::OwnershipLost);
+                    }
+                    CompletionDrainOutcome::TransientFailure(error) => {
+                        return Ok(SupervisionOutcome::TransientFailure(error));
+                    }
+                }
+                snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+                state.supervisor = None;
+                state.process = None;
+                state.phase = if exit_code == 0 {
+                    BridgePhase::ImplementationComplete
+                } else {
+                    BridgePhase::Interrupted
+                };
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_exited",
+                    Some(serde_json::json!({
+                        "exit_code": exit_code,
+                        "adopted": harness.is_none(),
+                        "darwin_process_group": true
+                    })),
+                )?;
+                return Ok(SupervisionOutcome::Exited { exit_code });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                state.phase = BridgePhase::Interrupted;
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_supervision_error",
+                    Some(serde_json::json!({
+                        "reason": error,
+                        "adopted": harness.is_none(),
+                        "darwin_process_group": true
+                    })),
+                )?;
+                return Err(error);
+            }
+        }
+        if last_progress.elapsed() >= config.stall_timeout {
+            let durable_last_progress_at = state.progress_at;
+            group.terminate()?;
+            state.phase = BridgePhase::Interrupted;
+            state.supervisor = None;
+            state.process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            append_executor_event(
+                event_log,
+                state,
+                "child_stalled",
+                Some(serde_json::json!({
+                    "stall_timeout_ms": config.stall_timeout.as_millis(),
+                    "last_progress_at": durable_last_progress_at,
+                    "darwin_process_group": true
+                })),
+            )?;
+            return Ok(SupervisionOutcome::Stalled);
+        }
+        thread::sleep(config.poll_interval);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn process_parent_pid(pid: u32) -> Result<Option<u32>, String> {
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -22942,7 +23202,12 @@ mod trusted_git;
 use trusted_git::*;
 
 mod accountability_lifecycle;
-#[cfg(target_os = "linux")] pub(crate) use accountability_lifecycle::*;
+#[cfg(target_os = "linux")]
+pub(crate) use accountability_lifecycle::*;
+#[cfg(target_os = "macos")]
+use accountability_lifecycle::{
+    observe_merged, observe_pull_request_and_review, observe_verified, BridgeLifecycleBoundary,
+};
 
 // The continuation checkpoint: preserving a run that outgrew the patch-size gate or met only
 // some of its criteria, and carrying the rest forward as child issues. `use continuation::*`
@@ -22950,19 +23215,31 @@ mod accountability_lifecycle;
 mod continuation;
 use continuation::*;
 mod continuation_children;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 use continuation_children::*;
 
 // Cross-platform executable identity plus the fail-closed non-Linux executor boundary.
+#[cfg(target_os = "macos")]
+mod darwin_supervisor;
 mod portability;
-#[cfg(not(target_os = "linux"))]
-pub(crate) use portability::{execute_direct_plan, run_executor_bridge};
-#[cfg(not(target_os = "linux"))]
+use portability::resolve_executor_supervisor_executable;
+#[cfg(target_os = "macos")]
+pub(crate) use portability::run_executor_bridge;
+#[cfg(target_os = "macos")]
+use portability::{create_draft_pull_request, reconcile_direct_launch};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use portability::{
     create_draft_pull_request, reconcile_direct_launch,
     supervise_validated_harness_with_claim_renewal,
 };
-use portability::resolve_executor_supervisor_executable;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) use portability::{execute_direct_plan, run_executor_bridge};
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_contract_tests {
+    mod harness_supervisor {
+        include!("executor_bridge/tests/harness_supervisor.rs");
+    }
+}

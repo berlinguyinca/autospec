@@ -2,20 +2,75 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
+#[cfg(target_os = "linux")]
 use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
-use super::support_base::{DetachedForkedCleanup, GitFixture, test_environment};
+#[cfg(target_os = "linux")]
+use super::support_base::{test_environment, DetachedForkedCleanup, GitFixture};
+#[cfg(target_os = "linux")]
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state, NonDescendantDirectFixture,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::fs;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_owned_group_spawns_in_an_exact_dedicated_process_group() {
+    use super::super::{darwin_supervisor::DarwinOwnedGroup, OutputSinkPaths, ValidatedInvocation};
+    use std::ffi::OsString;
+
+    let root = std::env::current_dir()
+        .expect("current Darwin fixture directory")
+        .join("target/executor-bridge-tests")
+        .join(format!(
+            "autospec-darwin-group-{}-{}",
+            std::process::id(),
+            bridge::unix_now().expect("clock")
+        ));
+    fs::create_dir_all(&root).expect("create Darwin supervisor fixture");
+    let sinks = OutputSinkPaths {
+        stdout: root.join("stdout"),
+        stderr: root.join("stderr"),
+        stdout_writer_cursor: root.join("stdout.writer"),
+        stderr_writer_cursor: root.join("stderr.writer"),
+        stdout_reader_cursor: root.join("stdout.reader"),
+        stderr_reader_cursor: root.join("stderr.reader"),
+        exit_status: root.join("exit"),
+        supervisor_identity: root.join("supervisor.json"),
+    };
+    let invocation = ValidatedInvocation {
+        program: Path::new("/bin/sh").to_path_buf(),
+        argv_zero: None::<OsString>,
+        args: vec![
+            "-c".into(),
+            "trap '' TERM; while :; do sleep 1; done".into(),
+        ],
+        current_dir: root.clone(),
+        environment_overrides: Vec::new(),
+    };
+
+    let group = DarwinOwnedGroup::spawn(&invocation, &sinks).expect("spawn owned Darwin group");
+    assert_eq!(group.identity().pid, group.identity().process_group);
+    assert_eq!(
+        bridge::observe_process_birth(group.identity().pid)
+            .expect("observe leader")
+            .expect("leader remains live")
+            .process_group,
+        group.identity().process_group
+    );
+    group.terminate().expect("terminate exact Darwin group");
+    let _ = fs::remove_dir_all(root);
+}
 
 #[cfg(target_os = "linux")]
 #[test]

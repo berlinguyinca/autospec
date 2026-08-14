@@ -1,14 +1,14 @@
 use super::*;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const LINUX_EXECUTOR_REQUIRED: &str = "executor supervision requires Linux pidfd ownership";
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn require_linux_executor_supervision() -> Result<(), String> {
     Err(LINUX_EXECUTOR_REQUIRED.to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn run_executor_bridge(
     _request: &ExecutorBridgeRequest,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
@@ -16,7 +16,19 @@ pub(crate) fn run_executor_bridge(
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn run_executor_bridge(
+    request: &ExecutorBridgeRequest,
+) -> Result<BridgeRunReceipt, BridgeRunFailure> {
+    let mut observe = |_| Ok(());
+    super::run_executor_bridge_with_codex_probe_observed(
+        request,
+        preflight_codex_sandbox,
+        &mut observe,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn reconcile_direct_launch(
     _paths: &DirectAttemptPaths,
     _expected_intent_body: Option<&str>,
@@ -25,19 +37,60 @@ pub(super) fn reconcile_direct_launch(
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn execute_direct_plan(
-    _worktree: &Path,
-    _plan: &DirectCommandPlan,
-    _artifact_root: &Path,
-    _runtime: Option<&DirectRuntimeAdapter>,
-    _stall_timeout: Duration,
-) -> Result<Vec<ObservedDirectCommand>, String> {
-    require_linux_executor_supervision()?;
-    unreachable!("non-Linux executor admission always fails")
+#[cfg(target_os = "macos")]
+pub(super) fn reconcile_direct_launch(
+    paths: &DirectAttemptPaths,
+    expected_intent_body: Option<&str>,
+) -> Result<bool, String> {
+    let intent = match fs::read_to_string(&paths.intent) {
+        Ok(intent) => intent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read direct command intent: {error}")),
+    };
+    if expected_intent_body.is_some_and(|expected| expected != intent) {
+        return Err("direct command intent differs from the requested argv".to_string());
+    }
+    let attempt_id = direct_intent_attempt_id(&paths.intent)?
+        .ok_or_else(|| "direct command intent disappeared during reconciliation".to_string())?;
+    let intent_digest = sha256_hex(intent.as_bytes());
+    let Some((leader, process)) = read_direct_launch(&paths.launch, &attempt_id, &intent_digest)?
+    else {
+        return Ok(false);
+    };
+    if process.is_some() {
+        return Err(
+            "Darwin direct launch contains an unexpected second process identity".to_string(),
+        );
+    }
+    match crate::commands::autonomous::platform_process::observe_expected(
+        leader.pid,
+        &leader.boot_id,
+        &leader.start_identity,
+    ) {
+        crate::commands::autonomous::platform_process::ProcessObservation::Exact(birth)
+            if birth.process_group == leader.process_group =>
+        {
+            super::darwin_supervisor::DarwinOwnedGroup::adopt(&leader)?.terminate()?;
+        }
+        crate::commands::autonomous::platform_process::ProcessObservation::Dead => {
+            if !super::darwin_supervisor::group_is_empty(leader.process_group)? {
+                return Err(
+                    "direct launch leader exited while process-group membership remains"
+                        .to_string(),
+                );
+            }
+        }
+        crate::commands::autonomous::platform_process::ProcessObservation::Exact(_)
+        | crate::commands::autonomous::platform_process::ProcessObservation::Mismatch
+        | crate::commands::autonomous::platform_process::ProcessObservation::Unknown(_) => {
+            return Err("direct launch ownership is unverified".to_string());
+        }
+    }
+    retire_direct_launch(paths, &attempt_id)?;
+    Ok(true)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn create_draft_pull_request<Refresh>(
     _state_path: &Path,
     _state: &mut PersistedInvocation,
@@ -54,7 +107,118 @@ where
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub(super) fn create_draft_pull_request<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    body: &str,
+    issue_title: &str,
+    base: &str,
+    adapter: &DraftPrAdapter,
+    refresh: &mut Refresh,
+) -> Result<(), BridgeRunFailure>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
+{
+    let body_path = state_path.with_file_name(format!(
+        "draft-body-{}-{}.md",
+        state.identity.invocation_id,
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_private_create_once(&body_path, body.as_bytes(), "executor draft body")?;
+    let executable = resolve_draft_executable(adapter)?;
+    let invocation = ValidatedInvocation {
+        program: executable,
+        argv_zero: None,
+        args: vec![
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            state.identity.repository.clone(),
+            "--draft".into(),
+            "--head".into(),
+            state.identity.branch.clone(),
+            "--base".into(),
+            base.into(),
+            "--title".into(),
+            issue_title.into(),
+            "--body-file".into(),
+            body_path
+                .to_str()
+                .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?
+                .into(),
+        ],
+        current_dir: state.identity.worktree.clone(),
+        environment_overrides: adapter.environment.clone().into_iter().collect(),
+    };
+    let sinks = output_sink_paths_for_attempt(
+        state_path,
+        &format!("{}-draft", state.identity.invocation_id),
+        0,
+    )?;
+    let mut group = super::darwin_supervisor::DarwinOwnedGroup::spawn_trusted(&invocation, &sinks)
+        .map_err(|failure| failure.reason)?;
+    state.draft_process = Some(group.identity().clone());
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    if refresh()? == BridgeClaimOwnership::Lost {
+        group.terminate()?;
+        state.draft_process = None;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        let _ = fs::remove_file(&body_path);
+        return Err(BridgeRunFailure::ownership_lost(
+            "executor draft creation lost exact claim ownership",
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let result = loop {
+        super::darwin_supervisor::publish_output_cursors(&sinks)?;
+        match group.poll() {
+            Ok(Some(0)) => break Ok(()),
+            Ok(Some(code)) => {
+                let stderr = fs::read_to_string(&sinks.stderr).unwrap_or_default();
+                break Err(format!(
+                    "create executor draft pull request failed with exit {code}: {}",
+                    stderr.trim()
+                )
+                .into());
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                group.terminate()?;
+                break Err("create executor draft pull request timed out"
+                    .to_string()
+                    .into());
+            }
+            Err(error) => break Err(error.into()),
+        }
+    };
+    state.draft_process = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    let _ = fs::remove_file(&body_path);
+    result
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn supervise_validated_harness_with_claim_renewal(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: Option<&ValidatedInvocation>,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    renewal: ClaimRenewalSchedule,
+) -> Result<SupervisionOutcome, String> {
+    super::supervise_validated_harness_with_claim_renewal(
+        state_path, event_log, state, harness, snapshot, config, renewal,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn supervise_validated_harness_with_claim_renewal(
     _state_path: &Path,
     _event_log: &Path,
@@ -65,7 +229,7 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
     _renewal: ClaimRenewalSchedule,
 ) -> Result<SupervisionOutcome, String> {
     require_linux_executor_supervision()?;
-    unreachable!("non-Linux executor admission always fails")
+    unreachable!("unsupported executor admission always fails")
 }
 
 pub(super) fn resolve_executor_supervisor_executable(
@@ -117,7 +281,7 @@ pub(super) fn resolve_executor_supervisor_executable(
     ))
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 mod tests {
     use super::*;
 
@@ -146,6 +310,16 @@ mod tests {
             resolved,
             fs::canonicalize(executable).expect("canonical test executable")
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    #[test]
+    fn executor_bridge_portability_admits_native_darwin_supervision() {
+        crate::commands::autonomous::platform_process::ensure_autonomous_runtime_supported()
+            .expect("Darwin native process identity is supported");
+        assert!(!std::env::consts::OS.eq("linux"));
     }
 }
 
