@@ -4199,6 +4199,18 @@ fn write_startup_heartbeat(
     heartbeat_portable::publish(&_root, repo, issue, session_id, _body.as_bytes())
 }
 
+#[cfg(test)]
+pub(crate) fn write_startup_heartbeat_for_test(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    session_id: Option<&str>,
+) -> Result<(), CommandFailure> {
+    write_startup_heartbeat(repo, issue, worker_id, branch, claim_id, session_id)
+}
+
 #[cfg(target_os = "linux")]
 fn open_private_heartbeat_directory(path: &Path) -> Result<fs::File, CommandFailure> {
     use nix::fcntl::{open, OFlag};

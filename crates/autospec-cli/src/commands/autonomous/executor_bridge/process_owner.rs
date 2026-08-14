@@ -596,6 +596,56 @@ mod tests {
         std::fs::remove_file(marker).expect("remove descendant signal marker");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn terminate_cleans_descendants_after_group_leader_exits() {
+        // Break caught: caching the leader's exit and skipping group cleanup leaves background
+        // harness descendants running after terminal publication.
+        let marker = std::env::temp_dir().join(format!(
+            "autospec-exited-leader-descendant-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("sleep 30 & echo $! > '{}'; exit 0", marker.display());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+        let mut owned = OwnedChildTree::spawn(&mut command, "exited-leader".into())
+            .expect("spawn leader with background descendant");
+
+        let leader = owned.wait().expect("reap exited leader");
+        assert!(leader.success());
+        let descendant = std::fs::read_to_string(&marker)
+            .expect("read descendant PID")
+            .trim()
+            .parse::<u32>()
+            .expect("parse descendant PID");
+        assert!(
+            super::super::process_birth_identity(descendant)
+                .expect("observe descendant before cleanup")
+                .is_some(),
+            "fixture descendant exited before cleanup"
+        );
+
+        owned
+            .terminate()
+            .expect("terminate descendants after leader exit");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline
+            && super::super::process_birth_identity(descendant)
+                .expect("observe descendant after cleanup")
+                .is_some()
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            super::super::process_birth_identity(descendant)
+                .expect("final descendant observation")
+                .is_none(),
+            "owned group cleanup left a background descendant running"
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+
     #[test]
     fn durable_identity_without_live_owner_cannot_signal() {
         let identity = DurableProcessOwner::fixture_for_current_process();

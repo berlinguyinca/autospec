@@ -125,6 +125,338 @@ mod windows_tests {
                 .expect("UTF-8 wrapper path")
         ));
     }
+
+    #[test]
+    fn windows_executor_worktree_root_is_canonical_and_provisionable() {
+        // Break caught: `/tmp/autospec-executor` is root-relative on Windows and cannot match
+        // the canonical drive-qualified path persisted in bridge identity.
+        let _environment = TEST_ENVIRONMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = DirectFixture::new();
+        let remote = fixture.root.join("remote.git");
+        assert!(Command::new("git")
+            .args(["init", "--bare", remote.to_str().expect("UTF-8 remote")])
+            .status()
+            .expect("initialize Windows fixture remote")
+            .success());
+        for args in [
+            vec!["branch", "-M", "main"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("UTF-8 remote"),
+            ],
+            vec!["push", "--quiet", "-u", "origin", "main"],
+        ] {
+            assert!(Command::new("git")
+                .args(&args)
+                .current_dir(&fixture.worktree)
+                .status()
+                .expect("prepare Windows worktree fixture")
+                .success());
+        }
+        let root = executor_worktree_root();
+        assert!(root.is_absolute(), "executor root must be drive-qualified");
+        assert!(root.starts_with(
+            fs::canonicalize(std::env::temp_dir()).expect("canonical Windows temp directory")
+        ));
+        harden_executor_worktree_root(&fixture.worktree, &root)
+            .expect("provision canonical Windows executor root");
+        assert_eq!(
+            fs::canonicalize(&root).expect("canonical provisioned executor root"),
+            root
+        );
+        let base = resolve_base(&fixture.worktree, &BTreeMap::new())
+            .expect("resolve Windows fixture base");
+        let scope = format!(
+            "windows-native-{}-{}",
+            std::process::id(),
+            DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let issue = provision_issue_worktree_for_claim(
+            &fixture.worktree,
+            &scope,
+            42,
+            &base,
+            Some(("claim-windows", "invocation-windows")),
+        )
+        .expect("provision issue worktree through the Windows bridge path");
+        assert!(issue.path.is_absolute());
+        assert!(issue.path.starts_with(&root));
+        assert_eq!(
+            fs::canonicalize(&issue.path).expect("canonical Windows issue worktree"),
+            issue.path
+        );
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod supported_host_tests {
+    use super::*;
+
+    static ADMISSION_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const CHILD_ENV: &str = "AUTOSPEC_TEST_SUPPORTED_HOST_NOOP_CHILD";
+
+    struct RestoreEnvironment(Vec<(&'static str, Option<OsString>)>);
+
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
+    fn git(directory: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(directory)
+                .status()
+                .expect("run admission fixture git")
+                .success(),
+            "git command failed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt() {
+        if std::env::var_os(CHILD_ENV).is_some() {
+            thread::sleep(Duration::from_millis(100));
+            return;
+        }
+        // Break caught: a supported non-Linux host compiling the bridge while skipping released
+        // predecessor retirement, successor heartbeat ownership, real OS child ownership, or
+        // terminal receipt publication.
+        let _serial = ADMISSION_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "autospec-supported-host-admission-{}-{}",
+                std::process::id(),
+                DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+        let repo = root.join("repo");
+        let remote = root.join("remote.git");
+        let heartbeat = root.join("heartbeats");
+        let claim_state = root.join("claim-state");
+        fs::create_dir_all(&repo).expect("create admission repo");
+        fs::create_dir_all(&heartbeat).expect("create heartbeat root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&heartbeat, fs::Permissions::from_mode(0o700))
+                .expect("secure heartbeat root");
+        }
+        assert!(Command::new("git")
+            .args(["init", "--bare", remote.to_str().expect("UTF-8 remote")])
+            .status()
+            .expect("initialize bare claim remote")
+            .success());
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.email", "autospec@example.invalid"]);
+        git(&repo, &["config", "user.name", "Autospec Test"]);
+        git(
+            &repo,
+            &["commit", "--quiet", "--allow-empty", "-m", "fixture"],
+        );
+        git(&repo, &["branch", "-M", "main"]);
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("UTF-8 remote"),
+            ],
+        );
+        git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+
+        let keys = [
+            "AUTOSPEC_HEARTBEAT_DIR",
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+        ];
+        let _restore = RestoreEnvironment(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        unsafe {
+            std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat);
+            std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", &remote);
+            std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claim_state);
+        }
+
+        let predecessor_claimed = autospec_core::claim::RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-predecessor",
+            "claimed",
+            "feat/autonomous-issue-42",
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-08-14T00:00:00Z",
+            "2026-08-14T00:00:00Z",
+            300,
+        )
+        .with_claim_id("claim-predecessor");
+        let predecessor = autospec_core::claim::RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-predecessor",
+            "released",
+            "feat/autonomous-issue-42",
+            "",
+            "released",
+            Vec::new(),
+            "2026-08-14T00:00:00Z",
+            "2026-08-14T00:00:01Z",
+            300,
+        )
+        .with_claim_id("claim-predecessor");
+        crate::commands::claim::write_startup_heartbeat_for_test(
+            "owner/repo",
+            42,
+            "worker-predecessor",
+            "feat/autonomous-issue-42",
+            "claim-predecessor",
+            Some("session-predecessor"),
+        )
+        .expect("publish predecessor heartbeat");
+        assert!(
+            crate::commands::claim::advance_claim_ref_for_test(&repo, &predecessor_claimed)
+                .expect("publish claimed predecessor")
+        );
+        assert!(
+            crate::commands::claim::advance_claim_ref_for_test(&repo, &predecessor)
+                .expect("publish released predecessor claim")
+        );
+
+        let identity = crate::commands::claim::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-predecessor",
+            branch: "feat/autonomous-issue-42",
+            claim_id: "claim-predecessor",
+        };
+        let terminal_path = root.join("terminal.json");
+        let result = crate::commands::claim::with_released_bridge_predecessor_authority(
+            identity,
+            || {
+                let issue_heartbeat = heartbeat
+                    .join(crate::commands::autonomous::drain::repository_progress_key(
+                        "owner/repo",
+                    ))
+                    .join("42.json");
+                assert!(
+                    !issue_heartbeat.exists(),
+                    "released predecessor heartbeat survived retirement"
+                );
+                let successor = autospec_core::claim::RunStateRecord::new(
+                    "owner/repo",
+                    42,
+                    "worker-successor",
+                    "claimed",
+                    "feat/autonomous-issue-42",
+                    "",
+                    "claimed",
+                    Vec::new(),
+                    "2026-08-14T00:00:02Z",
+                    "2026-08-14T00:00:02Z",
+                    300,
+                )
+                .with_claim_id("claim-successor");
+                assert!(crate::commands::claim::advance_claim_ref_for_test(&repo, &successor)?);
+                crate::commands::claim::write_startup_heartbeat_for_test(
+                    "owner/repo",
+                    42,
+                    "worker-successor",
+                    "feat/autonomous-issue-42",
+                    "claim-successor",
+                    Some("session-successor"),
+                )?;
+
+                let executable = std::env::current_exe().map_err(|error| {
+                    crate::commands::CommandFailure::diagnostic(format!(
+                        "resolve admission no-op executable: {error}"
+                    ))
+                })?;
+                let test_name = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt";
+                let mut child = process_owner::OwnedChildTree::spawn_prepared(
+                    process_owner::PreparedLaunchSpec::inherited(
+                        executable.clone(),
+                        vec![
+                            executable.into_os_string(),
+                            "--exact".into(),
+                            test_name.into(),
+                            "--nocapture".into(),
+                        ],
+                        Some(repo.clone()),
+                        vec![(CHILD_ENV.into(), "1".into())],
+                        None,
+                        None,
+                        None,
+                    ),
+                    "supported-host-noop".into(),
+                )
+                .map_err(crate::commands::CommandFailure::diagnostic)?;
+                let status = child
+                    .wait()
+                    .and_then(|status| child.terminate().map(|_| status))
+                    .map_err(crate::commands::CommandFailure::diagnostic)?;
+                if !status.success() {
+                    return Err(crate::commands::CommandFailure::diagnostic(
+                        "supported-host no-op child failed",
+                    ));
+                }
+                let receipt = BridgeRunReceipt {
+                    repository: "owner/repo".into(),
+                    issue: 42,
+                    worker_id: "worker-successor".into(),
+                    branch: "feat/autonomous-issue-42".into(),
+                    claim_id: "claim-successor".into(),
+                    invocation_id: "invocation-successor".into(),
+                    status: BridgeRunStatus::Retryable {
+                        reason: "supported-host-noop".into(),
+                    },
+                };
+                write_private_create_once(
+                    &terminal_path,
+                    format!("{}\n", receipt.to_json()).as_bytes(),
+                    "supported-host terminal receipt",
+                )
+                .map_err(crate::commands::CommandFailure::diagnostic)?;
+                Ok(receipt)
+            },
+        )
+        .expect("retire predecessor and admit successor")
+        .expect("released predecessor authority");
+
+        assert_eq!(result.claim_id, "claim-successor");
+        assert!(
+            terminal_path.is_file(),
+            "terminal receipt was not published"
+        );
+        let heartbeat_body = fs::read_to_string(
+            heartbeat
+                .join(crate::commands::autonomous::drain::repository_progress_key(
+                    "owner/repo",
+                ))
+                .join("42.json"),
+        )
+        .expect("read successor heartbeat");
+        assert!(heartbeat_body.contains("claim-successor"));
+        fs::remove_dir_all(root).expect("remove supported-host fixture");
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
@@ -536,6 +868,12 @@ where
             "executor draft creation lost exact claim ownership",
         ));
     }
+    let failpoint = |stage: &str| {
+        adapter
+            .environment
+            .get(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"))
+            .is_some_and(|value| value == std::ffi::OsStr::new(stage))
+    };
     let body_path = state_path.with_file_name(format!(
         "draft-body-{}-{}.md",
         state.identity.invocation_id,
@@ -558,8 +896,39 @@ where
         "--body-file".into(),
         body_path.to_string_lossy().into_owned(),
     ];
+
+    // Portable process creation cannot use Linux's fork/pipe release barrier. Persist a
+    // transaction identity and release guard before spawning instead: a crash after release may
+    // strand a request, but can never authorize replay. Exact visible PR observation reconciles
+    // it in `push_and_create_draft`; absent/delayed visibility remains quarantined.
+    let process = ProcessIdentity {
+        pid: u32::MAX - 1,
+        process_group: u32::MAX - 1,
+        executable: executable.clone(),
+        argv_digest: argv_digest(&args),
+        boot_id: "portable-draft-release-v1".to_string(),
+        start_identity: state.identity.invocation_id.clone(),
+    };
+    state.draft_process = Some(process.clone());
+    write_invocation_atomic(state_path, state)?;
+    if failpoint("prepare") {
+        let _ = fs::remove_file(&body_path);
+        return Err("injected portable draft prepare failure".to_string().into());
+    }
+    write_draft_release_intent(state_path, state, &process)?;
+    if failpoint("release") {
+        let _ = fs::remove_file(&body_path);
+        return Err("injected portable draft release failure".to_string().into());
+    }
+    write_private_create_once(
+        &draft_release_receipt_path(state_path),
+        draft_release_digest(state, &process).as_bytes(),
+        "portable executor draft release receipt",
+    )?;
+
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let stderr_path = state_path.with_extension("draft.stderr");
+    let stdout_path = state_path.with_extension("draft.stdout");
     let spawn = process_owner::OwnedChildTree::spawn_prepared(
         process_owner::PreparedLaunchSpec::inherited(
             executable.clone(),
@@ -569,14 +938,8 @@ where
             Some(state.identity.worktree.clone()),
             adapter.environment.clone().into_iter().collect(),
             Some(File::open(null).map_err(|error| format!("open draft null input: {error}"))?),
-            Some(
-                File::create(state_path.with_extension("draft.stdout"))
-                    .map_err(|error| format!("create draft stdout: {error}"))?,
-            ),
-            Some(
-                File::create(&stderr_path)
-                    .map_err(|error| format!("create draft stderr: {error}"))?,
-            ),
+            Some(open_private_file(&stdout_path, true)?),
+            Some(open_private_file(&stderr_path, true)?),
         ),
         format!("draft-{}", state.identity.invocation_id),
     );
@@ -589,11 +952,55 @@ where
             )));
         }
     };
+    let owner = owned.identity();
+    let owner_path = state_path.with_extension("draft-owner.json");
+    if let Err(error) = write_private_create_once(
+        &owner_path,
+        owner
+            .document(
+                &format!("draft-{}", state.identity.invocation_id),
+                &draft_release_digest(state, &process),
+            )
+            .as_bytes(),
+        "portable executor draft owner",
+    ) {
+        let cleanup = owned.terminate();
+        let _ = fs::remove_file(&body_path);
+        return Err(match cleanup {
+            Ok(_) => error.into(),
+            Err(cleanup) => format!("{error}; draft cleanup ambiguous: {cleanup}").into(),
+        });
+    }
     let status = owned.wait();
+    let cleanup = owned.terminate();
     let _ = fs::remove_file(&body_path);
+    let cleanup_status = cleanup.map_err(|error| {
+        BridgeRunFailure::transient(format!(
+            "portable executor draft cleanup is ambiguous: {error}"
+        ))
+    })?;
+    write_private_create_once(
+        &owner_path.with_extension("cleanup.json"),
+        serde_json::json!({
+            "schema": 1,
+            "invocation_id": state.identity.invocation_id,
+            "tree_cleanup": "proven",
+            "exit_code": cleanup_status.code(),
+        })
+        .to_string()
+        .as_bytes(),
+        "portable executor draft cleanup evidence",
+    )?;
+    fs::remove_file(&owner_path)
+        .map_err(|error| format!("retire portable executor draft owner: {error}"))?;
     let status = status.map_err(|error| {
         BridgeRunFailure::transient(format!("wait for executor draft pull request: {error}"))
     })?;
+    if failpoint("post-request") {
+        return Err("injected portable draft post-request failure"
+            .to_string()
+            .into());
+    }
     if status.success() {
         Ok(())
     } else {
@@ -688,18 +1095,101 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
             .as_bytes(),
         "portable executor owner",
     )?;
-    state.phase = BridgePhase::Implementing;
-    state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state)?;
-    append_executor_event(event_log, state, "child_started", None)?;
-    let mut observed = (0, 0);
-    let mut last_progress = Instant::now();
-    loop {
-        thread::sleep(config.poll_interval);
-        if let Some(status) = owned.try_wait()? {
-            let _ = fs::remove_file(&sinks.supervisor_identity);
+    enum PortableTerminal {
+        Exited(i32),
+        OwnershipLost,
+        Transient(BridgeRunFailure),
+        Stalled,
+    }
+
+    let operation = (|| -> Result<PortableTerminal, String> {
+        fail_launch_at("persist")?;
+        state.phase = BridgePhase::Implementing;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        fail_launch_at("log")?;
+        append_executor_event(event_log, state, "child_started", None)?;
+        let mut observed = (0, 0);
+        let mut last_progress = Instant::now();
+        loop {
+            thread::sleep(config.poll_interval);
+            fail_launch_at("direct-poll")?;
+            if let Some(status) = owned.try_wait()? {
+                return Ok(PortableTerminal::Exited(status.code().unwrap_or(1)));
+            }
+            let sizes = (
+                fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
+                fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
+            );
+            if sizes != observed {
+                observed = sizes;
+                last_progress = Instant::now();
+                state.progress_at = unix_now()?;
+                fail_launch_at("adopt-flush")?;
+                write_invocation_atomic(state_path, state)?;
+            }
+            if renewal.is_due() {
+                match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
+                    Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
+                        renewal.mark_refreshed(ttl_seconds)
+                    }
+                    Ok(BridgeClaimOwnership::Lost) => return Ok(PortableTerminal::OwnershipLost),
+                    Err(error) => return Ok(PortableTerminal::Transient(error)),
+                }
+            }
+            if last_progress.elapsed() >= config.stall_timeout {
+                return Ok(PortableTerminal::Stalled);
+            }
+        }
+    })();
+
+    // This is the single post-spawn finalizer. It consumes the live OS ownership authority on
+    // every branch, including a leader that already exited while descendants remain. The durable
+    // journal is retained unless tree cleanup, cleanup evidence, and its event are all proven.
+    let cleanup_status = match owned.terminate() {
+        Ok(status) => status,
+        Err(cleanup) => {
+            state.phase = BridgePhase::Interrupted;
+            state.progress_at = unix_now().unwrap_or(state.progress_at);
+            let _ = write_invocation_atomic(state_path, state);
+            let _ = append_executor_event(
+                event_log,
+                state,
+                "child_cleanup_ambiguous",
+                Some(serde_json::json!({"reason": &cleanup})),
+            );
+            let operation = operation
+                .err()
+                .map(|error| format!("; operation failed: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "executor portable child cleanup is ambiguous: {cleanup}{operation}"
+            ));
+        }
+    };
+    let cleanup_path = sinks.supervisor_identity.with_extension("cleanup.json");
+    let cleanup_document = serde_json::json!({
+        "schema": 1,
+        "invocation_id": state.identity.invocation_id,
+        "owner": owner.document(&state.identity.invocation_id, &argv_digest(&harness.args)),
+        "exit_code": cleanup_status.code(),
+        "tree_cleanup": "proven",
+    })
+    .to_string();
+    write_private_create_once(
+        &cleanup_path,
+        cleanup_document.as_bytes(),
+        "portable executor cleanup evidence",
+    )?;
+    append_executor_event(event_log, state, "child_cleanup_complete", None)?;
+    fs::remove_file(&sinks.supervisor_identity)
+        .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
+
+    let terminal = operation?;
+    match terminal {
+        PortableTerminal::Exited(exit_code) => {
+            fail_launch_at("pre-verify")?;
             snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
-            let exit_code = status.code().unwrap_or(1);
             state.phase = if exit_code == 0 {
                 BridgePhase::ImplementationComplete
             } else {
@@ -713,43 +1203,19 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
                 "child_exited",
                 Some(serde_json::json!({"exit_code": exit_code, "adopted": false})),
             )?;
-            return Ok(SupervisionOutcome::Exited { exit_code });
+            Ok(SupervisionOutcome::Exited { exit_code })
         }
-        let sizes = (
-            fs::metadata(&sinks.stdout).map(|m| m.len()).unwrap_or(0),
-            fs::metadata(&sinks.stderr).map(|m| m.len()).unwrap_or(0),
-        );
-        if sizes != observed {
-            observed = sizes;
-            last_progress = Instant::now();
-            state.progress_at = unix_now()?;
-            write_invocation_atomic(state_path, state)?;
+        PortableTerminal::OwnershipLost => {
+            record_claim_ownership_loss(state_path, event_log, state)?;
+            Ok(SupervisionOutcome::OwnershipLost)
         }
-        if renewal.is_due() {
-            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation) {
-                Ok(BridgeClaimOwnership::Refreshed { ttl_seconds }) => {
-                    renewal.mark_refreshed(ttl_seconds)
-                }
-                Ok(BridgeClaimOwnership::Lost) => {
-                    owned.terminate()?;
-                    let _ = fs::remove_file(&sinks.supervisor_identity);
-                    record_claim_ownership_loss(state_path, event_log, state)?;
-                    return Ok(SupervisionOutcome::OwnershipLost);
-                }
-                Err(error) => {
-                    owned.terminate()?;
-                    return Ok(SupervisionOutcome::TransientFailure(error));
-                }
-            }
-        }
-        if last_progress.elapsed() >= config.stall_timeout {
-            owned.terminate()?;
-            let _ = fs::remove_file(&sinks.supervisor_identity);
+        PortableTerminal::Transient(error) => Ok(SupervisionOutcome::TransientFailure(error)),
+        PortableTerminal::Stalled => {
             state.phase = BridgePhase::Interrupted;
             state.progress_at = unix_now()?;
             write_invocation_atomic(state_path, state)?;
             append_executor_event(event_log, state, "child_stalled", None)?;
-            return Ok(SupervisionOutcome::Stalled);
+            Ok(SupervisionOutcome::Stalled)
         }
     }
 }
@@ -807,6 +1273,8 @@ pub(super) fn resolve_executor_supervisor_executable(
 mod tests {
     use super::*;
 
+    static PORTABLE_SUPERVISION_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct DirectFixture {
         root: PathBuf,
         worktree: PathBuf,
@@ -850,6 +1318,166 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn portable_supervision_state(fixture: &DirectFixture) -> PersistedInvocation {
+        let head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+            .expect("read supervision fixture head");
+        PersistedInvocation {
+            schema: 1,
+            identity: BridgeIdentity {
+                repository: "owner/repo".into(),
+                repository_path: fixture.worktree.clone(),
+                issue: 42,
+                worker_id: "worker-portable".into(),
+                branch: "feat/autonomous-issue-42".into(),
+                claim_id: "claim-portable".into(),
+                invocation_id: format!(
+                    "invocation-portable-{}",
+                    DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ),
+                base_ref: "main".into(),
+                base_oid: head,
+                worktree: fixture.worktree.clone(),
+                runtime_environment_dir: None,
+                runtime_session_id: None,
+            },
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::Pending,
+            supervisor: None,
+            process: None,
+            progress_at: unix_now().expect("fixture timestamp"),
+            pr: None,
+            head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
+            terminal_result: None,
+            umbrella: None,
+            current_child: None,
+            implementation_repair_attempt: 0,
+        }
+    }
+
+    fn portable_harness(fixture: &DirectFixture, script: &str) -> ValidatedInvocation {
+        ValidatedInvocation {
+            program: fs::canonicalize("/bin/sh").expect("canonical shell"),
+            argv_zero: None,
+            args: vec!["-c".into(), script.into()],
+            current_dir: fixture.worktree.clone(),
+            environment_overrides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn portable_supervision_failures_cleanup_before_retiring_owner_journal() {
+        // Break caught: any post-spawn `?` returning while the harness or its descendants remain
+        // live, or removing ownership without durable cleanup evidence.
+        let _serial = PORTABLE_SUPERVISION_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (name, failpoint, script) in [
+            ("persist", LaunchFailpoint::PersistAfterSpawn, "sleep 30"),
+            ("event", LaunchFailpoint::LogAfterSpawn, "sleep 30"),
+            ("poll", LaunchFailpoint::DirectPoll, "sleep 30"),
+            (
+                "progress",
+                LaunchFailpoint::AdoptedFlush,
+                "printf progress; sleep 30",
+            ),
+            (
+                "snapshot",
+                LaunchFailpoint::BeforeSnapshotVerification,
+                "exit 0",
+            ),
+        ] {
+            let fixture = DirectFixture::new(&format!("supervision-{name}"));
+            let mut state = portable_supervision_state(&fixture);
+            let state_path = fixture.root.join("state/invocation.json");
+            let event_log = fixture.root.join("state/events.jsonl");
+            let snapshot =
+                MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
+                    .expect("capture supervision snapshot");
+            set_launch_failpoint(failpoint);
+            let error = supervise_validated_harness_with_claim_renewal(
+                &state_path,
+                &event_log,
+                &mut state,
+                Some(&portable_harness(&fixture, script)),
+                &snapshot,
+                SupervisionConfig {
+                    stall_timeout: Duration::from_secs(5),
+                    poll_interval: Duration::from_millis(10),
+                },
+                ClaimRenewalSchedule::Disabled,
+            )
+            .expect_err("injected portable lifecycle failure");
+            set_launch_failpoint(LaunchFailpoint::None);
+            assert!(
+                error.contains("injected"),
+                "unexpected {name} error: {error}"
+            );
+            let sinks = output_sink_paths_for_state(&state_path, &state)
+                .expect("resolve portable supervision sinks");
+            assert!(
+                !sinks.supervisor_identity.exists(),
+                "{name} retained a journal after proven cleanup"
+            );
+            assert!(
+                sinks
+                    .supervisor_identity
+                    .with_extension("cleanup.json")
+                    .is_file(),
+                "{name} omitted durable cleanup evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn portable_supervision_retains_owner_when_cleanup_evidence_is_ambiguous() {
+        // Break caught: deleting the only ownership journal when cleanup evidence cannot be
+        // published, making restart treat an unproven tree as safe.
+        let _serial = PORTABLE_SUPERVISION_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = DirectFixture::new("supervision-cleanup-evidence");
+        let mut state = portable_supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("state/events.jsonl");
+        let snapshot =
+            MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
+                .expect("capture supervision snapshot");
+        let sinks = output_sink_paths_for_state(&state_path, &state)
+            .expect("resolve portable supervision sinks");
+        write_private_create_once(
+            &sinks.supervisor_identity.with_extension("cleanup.json"),
+            b"foreign cleanup evidence",
+            "foreign portable cleanup evidence",
+        )
+        .expect("seed conflicting cleanup evidence");
+
+        let error = supervise_validated_harness_with_claim_renewal(
+            &state_path,
+            &event_log,
+            &mut state,
+            Some(&portable_harness(&fixture, "exit 0")),
+            &snapshot,
+            SupervisionConfig {
+                stall_timeout: Duration::from_secs(5),
+                poll_interval: Duration::from_millis(10),
+            },
+            ClaimRenewalSchedule::Disabled,
+        )
+        .expect_err("conflicting cleanup evidence must fail closed");
+        assert!(
+            error.contains("differs"),
+            "unexpected cleanup error: {error}"
+        );
+        assert!(
+            sinks.supervisor_identity.is_file(),
+            "ambiguous cleanup evidence discarded the ownership journal"
+        );
     }
 
     #[test]

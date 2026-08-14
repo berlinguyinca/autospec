@@ -13,6 +13,7 @@ pub(super) struct UnixOwnedChild {
     child: ChildLifecycle,
     pid: u32,
     pgid: Pid,
+    group_cleaned: bool,
 }
 
 enum ChildLifecycle {
@@ -77,6 +78,7 @@ impl UnixOwnedChild {
             },
             pid,
             pgid,
+            group_cleaned: false,
         })
     }
 
@@ -125,16 +127,18 @@ impl UnixOwnedChild {
         operations: &mut impl GroupOperations,
         grace: Duration,
     ) -> Result<ExitStatus, String> {
-        if matches!(self.child, ChildLifecycle::Reaped(_)) {
+        if self.group_cleaned {
             return self.wait();
         }
-        let ChildLifecycle::Live { may_signal, .. } = &mut self.child else {
-            unreachable!("reaped child returned above")
-        };
-        if !*may_signal {
-            return self.wait();
+        if let ChildLifecycle::Live { may_signal, .. } = &mut self.child {
+            if !*may_signal {
+                return self.wait();
+            }
+            *may_signal = false;
         }
-        *may_signal = false;
+        // The process-group authority remains valid after its leader is reaped. Mark cleanup
+        // consumed before signalling so an error cannot cause a later PID/PGID reuse signal.
+        self.group_cleaned = true;
 
         let mut errors = Vec::new();
         let mut child_fallback = false;

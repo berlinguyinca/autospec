@@ -44,6 +44,12 @@ freebsd_uses = "\n".join(
 )
 freebsd_commands = commands(freebsd)
 assert "vmactions/freebsd-vm@v1" in freebsd_uses
+freebsd_vm = next(
+    step for step in freebsd["steps"]
+    if isinstance(step, dict) and step.get("uses") == "vmactions/freebsd-vm@v1"
+)
+assert freebsd_vm["with"]["usesh"] is True
+assert freebsd_vm["with"]["run"].lstrip().startswith("set -eu\n")
 
 for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
     job_commands = commands(jobs[name])
@@ -51,9 +57,13 @@ for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
         "heartbeat",
         "process_owner",
         "portability",
-        "released_predecessor_advances_through_executor_on_supported_host",
     ):
         assert f"cargo test -p autospec-cli --bin autospec {behavior}" in job_commands
+
+assert "cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host" in linux_commands
+portable_admission = "cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
+for job_commands in (macos_commands, windows_commands, freebsd_commands):
+    assert job_commands.count(portable_admission) == 1
 
 for job_commands in (macos_commands, windows_commands, freebsd_commands):
     assert "cargo build --release -p autospec-cli" in job_commands

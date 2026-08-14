@@ -77,7 +77,7 @@ jobs:
           cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
           cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
           cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+          cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -109,7 +109,7 @@ jobs:
           cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
           cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
           cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+          cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -123,16 +123,18 @@ jobs:
       - name: Test autospec CLI inside FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
+          usesh: true
           prepare: |
             pkg install -y curl git
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           run: |
+            set -eu
             . "$HOME/.cargo/env"
             cargo check -p autospec-cli
             cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
             cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
             cargo test -p autospec-cli --bin autospec portability -- --nocapture
-            cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+            cargo test -p autospec-cli --bin autospec supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt -- --nocapture
             cargo build --release -p autospec-cli
 
   audit:

@@ -34,7 +34,7 @@ mod continuation_event;
 #[cfg(target_os = "linux")]
 mod descendant_spawn;
 mod dispatcher_temporary;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod draft_release;
 mod explore_pin_staleness;
 mod full_suite;

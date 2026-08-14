@@ -5132,10 +5132,11 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
                 "executor package full suite is incomplete: scripts missing".to_string()
             })?;
         for required in ["lint", "typecheck", "test", "build"] {
-            if scripts
+            #[allow(clippy::nonminimal_bool)] // Preserve the pre-task validation condition exactly.
+            if !scripts
                 .get(required)
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(|script| script.trim().is_empty())
+                .is_some_and(|script| !script.trim().is_empty())
             {
                 return Err(format!(
                     "executor package full suite is incomplete: script {required} missing"
@@ -11718,6 +11719,7 @@ where
         if state.phase == BridgePhase::DraftCreating {
             let released = draft_release_was_recorded(state_path, state)?;
             let release_intended = draft_release_intent_was_recorded(state_path, state)?;
+            #[cfg(target_os = "linux")]
             if let Some(expected) = &state.draft_process {
                 if let Some(observed) = observe_process_birth(expected.pid)? {
                     if expected.owns_birth(&observed) {
@@ -11770,6 +11772,16 @@ where
             adapter,
             &mut refresh,
         );
+        #[cfg(test)]
+        if adapter
+            .environment
+            .get(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"))
+            .is_some_and(|value| value == std::ffi::OsStr::new("post-request"))
+        {
+            return Err("injected portable draft post-request failure"
+                .to_string()
+                .into());
+        }
         let authoritative = RemoteMutationSnapshot::capture(state, adapter)
             .and_then(|observed| {
                 normalize_authorized_sibling_remote_deltas(state_path, state, &prelaunch, observed)
@@ -22472,12 +22484,17 @@ fn safe_scope(scope: &str) -> Result<String, String> {
 }
 
 pub(crate) fn executor_worktree_root() -> PathBuf {
-    let root = PathBuf::from("/tmp/autospec-executor");
-    #[cfg(target_os = "macos")]
-    if let Ok(canonical_tmp) = fs::canonicalize("/tmp") {
-        return canonical_tmp.join("autospec-executor");
-    }
-    root
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        #[cfg(windows)]
+        let temporary = std::env::temp_dir();
+        #[cfg(not(windows))]
+        let temporary = PathBuf::from("/tmp");
+        fs::canonicalize(&temporary)
+            .unwrap_or(temporary)
+            .join("autospec-executor")
+    })
+    .clone()
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), String> {

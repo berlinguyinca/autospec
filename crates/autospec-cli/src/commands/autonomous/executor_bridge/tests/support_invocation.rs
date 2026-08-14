@@ -413,6 +413,16 @@ pub(super) fn implementation_proof_fixture(
     );
     let mut state = supervision_state(&fixture);
     state.identity.worktree = worktree.canonicalize().expect("canonical worktree");
+    let common_dir = PathBuf::from(git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--git-common-dir"],
+    ));
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        state.identity.worktree.join(common_dir)
+    };
+    fs::create_dir_all(common_dir.join("hooks")).expect("create fixture Git hook directory");
     state.phase = BridgePhase::ImplementationComplete;
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
