@@ -1722,7 +1722,6 @@ fn stop(options: Options) -> Result<(), String> {
 }
 
 fn restart(options: Options) -> Result<(), CommandFailure> {
-    let operation = options.subcommand.clone();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let stop_options = options.clone();
@@ -1785,8 +1784,7 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     };
     if stop_options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"{}\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
-            json_escape(&operation),
+            "{{\"command\":\"autonomous\",\"subcommand\":\"restart\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&options.repo),
             stopped,
             json_escape(&binding.run_id),
@@ -1797,11 +1795,7 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
             unit_json(&supervisor)
         );
     } else {
-        if operation == "resume" {
-            println!("autospec autonomous resumed");
-        } else {
-            println!("autospec autonomous restarted");
-        }
+        println!("autospec autonomous restarted");
         println!("accountability epic: {}", binding.url);
     }
     Ok(())
