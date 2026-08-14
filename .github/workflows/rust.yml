@@ -162,6 +162,8 @@ jobs:
             }
             cargo check -p autospec-cli
             run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+            run_exact 'commands::claim::heartbeat_portable::tests::freebsd_atomic_publication_rejects_destination_collision'
+            run_exact 'commands::claim::heartbeat_portable::tests::freebsd_publication_resumes_after_crash_between_link_and_stage_cleanup'
             run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
             run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
             cargo build --release -p autospec-cli

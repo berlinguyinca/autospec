@@ -52,6 +52,8 @@ assert freebsd_vm["with"]["usesh"] is True
 assert freebsd_vm["with"]["run"].lstrip().startswith("set -eu\n")
 
 heartbeat = "commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation"
+freebsd_collision = "commands::claim::heartbeat_portable::tests::freebsd_atomic_publication_rejects_destination_collision"
+freebsd_crash_recovery = "commands::claim::heartbeat_portable::tests::freebsd_publication_resumes_after_crash_between_link_and_stage_cleanup"
 portable_admission = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
 for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
     job_commands = commands(jobs[name])
@@ -65,6 +67,9 @@ for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
         assert "process_owner::tests::windows_creation_filetime_is_part_of_durable_identity" in job_commands
     else:
         assert 'grep -F -c "test $behavior_test ... ok"' in job_commands
+
+assert freebsd_commands.count(freebsd_collision) == 1
+assert freebsd_commands.count(freebsd_crash_recovery) == 1
 
 assert "autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity" in linux_commands
 for job_commands in (macos_commands, freebsd_commands):

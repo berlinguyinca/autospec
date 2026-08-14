@@ -304,16 +304,23 @@ fn open_existing_private_child(
     let path = parent.path.join(name);
     #[cfg(unix)]
     {
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        use nix::fcntl::{openat, OFlag};
+        use nix::sys::stat::Mode;
+        let file = match openat(
+            &parent.file,
+            Path::new(name),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => fs::File::from(file),
+            Err(nix::errno::Errno::ENOENT) => return Ok(None),
             Err(error) => {
                 return Err(CommandFailure::diagnostic(format!(
-                    "could not inspect heartbeat directory: {error}"
+                    "heartbeat directory secure open: {error}"
                 )))
             }
-            Ok(_) => {}
-        }
-        let file = super::open_heartbeat_directory_beneath(&parent.file, Path::new(name))?;
+        };
+        super::private_heartbeat_directory_identity(&file, "portable child directory")?;
         Ok(Some(PrivateDirectory { path, file }))
     }
     #[cfg(windows)]
@@ -693,10 +700,14 @@ fn publish_exact(
     document: &[u8],
     before_rename: &mut impl FnMut(&Path),
 ) -> Result<(), CommandFailure> {
+    let temporary_name = format!(".autospec-heartbeat-{name}.stage");
+    #[cfg(target_os = "freebsd")]
+    if recover_freebsd_linked_publication(directory, &temporary_name, name, expected)? {
+        return Ok(());
+    }
     if existing_generation(directory, name, expected)? {
         return Ok(());
     }
-    let temporary_name = format!(".autospec-heartbeat-{name}.stage");
     let temporary_path = directory.path.join(&temporary_name);
     let file = match create_private_file_relative(directory, &temporary_name) {
         Ok(mut file) => {
@@ -895,10 +906,15 @@ fn open_staged_file_relative(
 
 #[cfg(unix)]
 fn private_file_metadata(metadata: &fs::Metadata) -> bool {
+    private_file_metadata_with_links(metadata, 1)
+}
+
+#[cfg(unix)]
+fn private_file_metadata_with_links(metadata: &fs::Metadata, links: u64) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     metadata.uid() == unsafe { nix::libc::geteuid() }
         && metadata.permissions().mode() & 0o7777 == 0o600
-        && metadata.nlink() == 1
+        && metadata.nlink() == links
 }
 
 #[cfg(unix)]
@@ -990,7 +1006,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(target_os = "macos")]
 fn atomic_rename_exclusive(
     directory: &PrivateDirectory,
     source: &str,
@@ -1031,6 +1047,130 @@ fn atomic_rename_exclusive(
             std::io::Error::last_os_error()
         )))
     }
+}
+
+#[cfg(all(test, target_os = "freebsd"))]
+static FREEBSD_CRASH_AFTER_LINK: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "freebsd")]
+fn recover_freebsd_linked_publication(
+    directory: &PrivateDirectory,
+    source: &str,
+    destination: &str,
+    expected: &StartupHeartbeatEvidence,
+) -> Result<bool, CommandFailure> {
+    use nix::unistd::{unlinkat, UnlinkatFlags};
+    use std::io::Seek;
+
+    let mut source_file = match open_private_file_relative(directory, source) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat publication target conflicts",
+            ))
+        }
+    };
+    let destination_file = match open_private_file_relative(directory, destination) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat publication target conflicts",
+            ))
+        }
+    };
+    let source_metadata = source_file
+        .metadata()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
+    let destination_metadata = destination_file
+        .metadata()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
+    if !source_metadata.file_type().is_file()
+        || !destination_metadata.file_type().is_file()
+        || !private_file_metadata_with_links(&source_metadata, 2)
+        || !private_file_metadata_with_links(&destination_metadata, 2)
+        || !same_file_identity(&source_file, &destination_file)?
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    }
+    source_file
+        .rewind()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
+    let mut document = Vec::new();
+    source_file
+        .read_to_end(&mut document)
+        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
+    let Some(observed) = parse_startup_heartbeat(&document) else {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    };
+    if !same_generation(&observed, expected) {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    }
+    unlinkat(&directory.file, source, UnlinkatFlags::NoRemoveDir)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage cleanup: {error}")))?;
+    sync_private_directory(directory)?;
+    let final_file = open_private_file_relative(directory, destination).map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat published target reopen: {error}"))
+    })?;
+    let final_metadata = final_file.metadata().map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat published identity: {error}"))
+    })?;
+    if !private_file_metadata(&final_metadata)
+        || !same_file_identity(&source_file, &final_file)?
+        || !existing_generation(directory, destination, expected)?
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "freebsd")]
+fn atomic_rename_exclusive(
+    directory: &PrivateDirectory,
+    source: &str,
+    destination: &str,
+    _file: &fs::File,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::unistd::{linkat, unlinkat, UnlinkatFlags};
+
+    linkat(
+        &directory.file,
+        source,
+        &directory.file,
+        destination,
+        AtFlags::empty(),
+    )
+    .map_err(|error| CommandFailure::diagnostic(format!("heartbeat atomic publish: {error}")))?;
+    sync_private_directory(directory)?;
+    #[cfg(test)]
+    let crash_after_link = {
+        let mut target = FREEBSD_CRASH_AFTER_LINK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if target.as_ref() == Some(&directory.path.join(destination)) {
+            target.take();
+            true
+        } else {
+            false
+        }
+    };
+    #[cfg(test)]
+    if crash_after_link {
+        panic!("simulated publication crash after link");
+    }
+    unlinkat(&directory.file, source, UnlinkatFlags::NoRemoveDir)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage cleanup: {error}")))?;
+    sync_private_directory(directory)
 }
 
 #[cfg(target_os = "linux")]
@@ -1863,13 +2003,13 @@ mod tests {
         std::fs::create_dir(&replacement).expect("replacement repository");
         std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700))
             .expect("replacement permissions");
-        let document = fixture.document("claim-a", None);
+        let document = fixture.document("claim-a", Some("session-a"));
 
         publish_with_hooks(
             &fixture.root,
             "owner/repo",
             42,
-            None,
+            Some("session-a"),
             &document,
             &mut |_| {
                 std::fs::rename(&repo, &retained).expect("retain opened repository");
@@ -1880,7 +2020,80 @@ mod tests {
         .expect("handle-bound publication");
 
         assert!(retained.join("42.json").is_file());
+        assert!(retained
+            .join("sessions")
+            .join(format!("{}.json", heartbeat_session_key("session-a")))
+            .is_file());
         assert!(!repo.join("42.json").exists());
+        assert!(!repo.join("sessions").exists());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_atomic_publication_rejects_destination_collision() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("freebsd-publication-collision");
+        let repo = fixture.repo_path();
+        std::fs::create_dir(&repo).expect("repository directory");
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700))
+            .expect("repository permissions");
+        let directory = open_existing_private_directory(&repo)
+            .expect("open repository")
+            .expect("repository exists");
+        let source =
+            create_private_file_relative(&directory, ".source.stage").expect("create source stage");
+        std::fs::write(repo.join("42.json"), b"destination").expect("destination");
+        std::fs::set_permissions(repo.join("42.json"), std::fs::Permissions::from_mode(0o600))
+            .expect("destination permissions");
+
+        let error = atomic_rename_exclusive(&directory, ".source.stage", "42.json", &source)
+            .expect_err("destination collision");
+
+        assert!(error.message.contains("heartbeat atomic publish"));
+        assert_eq!(std::fs::read(repo.join("42.json")).unwrap(), b"destination");
+        assert!(repo.join(".source.stage").is_file());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_publication_resumes_after_crash_between_link_and_stage_cleanup() {
+        let fixture = Fixture::new("freebsd-publication-crash-after-link");
+        let document = fixture.document("claim-a", None);
+        *FREEBSD_CRASH_AFTER_LINK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fixture.issue_path());
+
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publish(&fixture.root, "owner/repo", 42, None, &document);
+        }));
+        assert!(interrupted.is_err(), "publication did not stop after link");
+        assert!(fixture.issue_path().is_file(), "destination was not linked");
+        assert!(
+            fixture
+                .repo_path()
+                .join(".autospec-heartbeat-42.json.stage")
+                .is_file(),
+            "stage was unexpectedly removed"
+        );
+
+        publish(&fixture.root, "owner/repo", 42, None, &document)
+            .expect("resume exact publication");
+
+        assert_eq!(std::fs::read(&fixture.issue_path()).unwrap(), document);
+        assert!(
+            !fixture
+                .repo_path()
+                .join(".autospec-heartbeat-42.json.stage")
+                .exists(),
+            "resumed publication left staging alias"
+        );
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(fixture.issue_path()).unwrap().nlink(),
+            1,
+            "published heartbeat retained an alias"
+        );
     }
 
     #[cfg(unix)]
