@@ -612,23 +612,18 @@ mod tests {
         let mut owned = OwnedChildTree::spawn(&mut command, "exited-leader".into())
             .expect("spawn leader with background descendant");
 
-        let leader = owned.wait().expect("reap exited leader");
+        let leader = owned
+            .wait()
+            .expect("drain owned group before reaping exited leader");
         assert!(leader.success());
         let descendant = std::fs::read_to_string(&marker)
             .expect("read descendant PID")
             .trim()
             .parse::<u32>()
             .expect("parse descendant PID");
-        assert!(
-            super::super::process_birth_identity(descendant)
-                .expect("observe descendant before cleanup")
-                .is_some(),
-            "fixture descendant exited before cleanup"
-        );
-
         owned
             .terminate()
-            .expect("terminate descendants after leader exit");
+            .expect("completed ownership is consumed exactly once");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline
             && super::super::process_birth_identity(descendant)

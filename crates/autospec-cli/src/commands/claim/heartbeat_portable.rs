@@ -4,12 +4,9 @@ use super::{
 };
 use crate::commands::autonomous::drain::repository_progress_key;
 use crate::commands::CommandFailure;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
     let host = hostname()
@@ -61,45 +58,95 @@ pub(super) fn publish(
     session_id: Option<&str>,
     document: &[u8],
 ) -> Result<(), CommandFailure> {
+    publish_with_hooks(
+        root,
+        repo,
+        issue,
+        session_id,
+        document,
+        &mut |_| {},
+        &mut |_| {},
+    )
+}
+
+fn publish_with_hooks(
+    root: &Path,
+    repo: &str,
+    issue: u64,
+    session_id: Option<&str>,
+    document: &[u8],
+    after_repo_open: &mut impl FnMut(&Path),
+    before_rename: &mut impl FnMut(&Path),
+) -> Result<(), CommandFailure> {
     let expected = parse_startup_heartbeat(document)
         .ok_or_else(|| CommandFailure::diagnostic("startup heartbeat document is malformed"))?;
     ensure_private_directory(root)?;
-    let repo_path = open_or_create_private_directory(root, &repository_progress_key(repo))?;
-    let repo_dir = open_existing_private_directory(&repo_path)?
-        .ok_or_else(|| CommandFailure::diagnostic("heartbeat repository directory disappeared"))?;
+    let root = open_existing_private_directory(root)?
+        .ok_or_else(|| CommandFailure::diagnostic("heartbeat root directory disappeared"))?;
+    let repo_dir = open_or_create_private_child(&root, &repository_progress_key(repo))?;
     let _lock = RepositoryLock::acquire(&repo_dir)?;
+    after_repo_open(&repo_dir.path);
     publish_exact(
-        &repo_dir.path,
+        &repo_dir,
         &format!("{issue}.json"),
         &expected,
         document,
+        before_rename,
     )?;
     if let Some(session_id) = session_id {
-        let sessions = open_or_create_private_directory(&repo_dir.path, "sessions")?;
+        let sessions = open_or_create_private_child(&repo_dir, "sessions")?;
         publish_exact(
             &sessions,
             &format!("{}.json", heartbeat_session_key(session_id)),
             &expected,
             document,
+            &mut |_| {},
         )?;
     }
     Ok(())
 }
 
-fn open_or_create_private_directory(
-    parent: &Path,
+fn open_or_create_private_child(
+    parent: &PrivateDirectory,
     name: &str,
-) -> Result<std::path::PathBuf, CommandFailure> {
+) -> Result<PrivateDirectory, CommandFailure> {
     if name.is_empty() || Path::new(name).is_absolute() || Path::new(name).components().count() != 1
     {
         return Err(CommandFailure::diagnostic(
             "heartbeat directory name must be one normal component",
         ));
     }
-    ensure_private_directory(parent)?;
-    let path = parent.join(name);
-    ensure_private_directory(&path)?;
-    Ok(path)
+    #[cfg(unix)]
+    match nix::sys::stat::mkdirat(
+        &parent.file,
+        name,
+        nix::sys::stat::Mode::from_bits_truncate(0o700),
+    ) {
+        Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create heartbeat directory: {error}"
+            )))
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = open_windows_relative(
+            &parent.file,
+            name,
+            WINDOWS_FILE_LIST_DIRECTORY | WINDOWS_FILE_READ_ATTRIBUTES | WINDOWS_SYNCHRONIZE,
+            WINDOWS_FILE_OPEN_IF,
+            WINDOWS_FILE_DIRECTORY_FILE
+                | WINDOWS_FILE_OPEN_REPARSE_POINT
+                | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not create heartbeat directory: {error}"))
+        })?;
+    }
+    open_existing_private_child(parent, name)?.ok_or_else(|| {
+        CommandFailure::diagnostic("heartbeat child directory disappeared after creation")
+    })
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), CommandFailure> {
@@ -640,54 +687,72 @@ unsafe extern "system" {
 }
 
 fn publish_exact(
-    directory: &Path,
+    directory: &PrivateDirectory,
     name: &str,
     expected: &StartupHeartbeatEvidence,
     document: &[u8],
+    before_rename: &mut impl FnMut(&Path),
 ) -> Result<(), CommandFailure> {
-    ensure_private_directory(directory)?;
-    let destination = directory.join(name);
-    if existing_generation(&destination, expected)? {
+    if existing_generation(directory, name, expected)? {
         return Ok(());
     }
-
-    let temporary = directory.join(format!(
-        ".autospec-heartbeat-{}-{}",
-        std::process::id(),
-        TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let mut file = create_private_file(&temporary)?;
-        file.write_all(document)
-            .map_err(|error| CommandFailure::diagnostic(format!("heartbeat write: {error}")))?;
-        file.sync_all()
-            .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fsync: {error}")))?;
-        drop(file);
-        atomic_rename_exclusive(&temporary, &destination).or_else(|error| {
-            if existing_generation(&destination, expected)? {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        })?;
-        sync_directory(directory)?;
-        if !existing_generation(&destination, expected)? {
-            return Err(CommandFailure::diagnostic(
-                "heartbeat publication target conflicts",
-            ));
+    let temporary_name = format!(".autospec-heartbeat-{name}.stage");
+    let temporary_path = directory.path.join(&temporary_name);
+    let file = match create_private_file_relative(directory, &temporary_name) {
+        Ok(mut file) => {
+            file.write_all(document)
+                .map_err(|error| CommandFailure::diagnostic(format!("heartbeat write: {error}")))?;
+            file.sync_all()
+                .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fsync: {error}")))?;
+            file
         }
-        Ok(())
-    })();
-    let _ = fs::remove_file(&temporary);
-    result
+        Err(error) if existing_generation(directory, &temporary_name, expected)? => {
+            open_staged_file_relative(directory, &temporary_name).map_err(|open_error| {
+                CommandFailure::diagnostic(format!(
+                    "heartbeat stage reopen after {error}: {open_error}"
+                ))
+            })?
+        }
+        Err(error) => return Err(error),
+    };
+    before_rename(&temporary_path);
+    atomic_rename_exclusive(directory, &temporary_name, name, &file).or_else(|error| {
+        if existing_generation(directory, name, expected)? {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })?;
+    sync_private_directory(directory)?;
+    if !existing_generation(directory, name, expected)? {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    }
+    let metadata = file.metadata().map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat published identity: {error}"))
+    })?;
+    let destination = open_private_file_relative(directory, name).map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat published target reopen: {error}"))
+    })?;
+    if !private_file_metadata(&metadata)
+        || !private_file_handle(&file)?
+        || !same_file_identity(&file, &destination)?
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts",
+        ));
+    }
+    Ok(())
 }
 
 fn existing_generation(
-    path: &Path,
+    directory: &PrivateDirectory,
+    name: &str,
     expected: &StartupHeartbeatEvidence,
 ) -> Result<bool, CommandFailure> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    let mut file = match open_private_file_relative(directory, name) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(_) => {
             return Err(CommandFailure::diagnostic(
@@ -695,12 +760,19 @@ fn existing_generation(
             ))
         }
     };
-    if !metadata.file_type().is_file() || !private_file_metadata(&metadata) {
+    let metadata = file
+        .metadata()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
+    if !metadata.file_type().is_file()
+        || !private_file_metadata(&metadata)
+        || !private_file_handle(&file)?
+    {
         return Err(CommandFailure::diagnostic(
             "heartbeat publication target conflicts",
         ));
     }
-    let document = read_file_no_follow(path)
+    let mut document = Vec::new();
+    file.read_to_end(&mut document)
         .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
     let Some(observed) = parse_startup_heartbeat(&document) else {
         return Err(CommandFailure::diagnostic(
@@ -728,56 +800,97 @@ fn same_generation(left: &StartupHeartbeatEvidence, right: &StartupHeartbeatEvid
 }
 
 #[cfg(unix)]
-fn create_private_file(path: &Path) -> Result<fs::File, CommandFailure> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::fs::PermissionsExt;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage create: {error}")))?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage chmod: {error}")))?;
-    Ok(file)
+fn create_private_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> Result<fs::File, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::Mode;
+    let descriptor = openat(
+        &directory.file,
+        Path::new(name),
+        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(std::io::Error::from)
+    .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage create: {error}")))?;
+    Ok(fs::File::from(descriptor))
 }
 
 #[cfg(windows)]
-fn create_private_file(path: &Path) -> Result<fs::File, CommandFailure> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage create: {error}")))
+fn create_private_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> Result<fs::File, CommandFailure> {
+    const WINDOWS_FILE_CREATE: u32 = 0x0000_0002;
+    open_windows_relative(
+        &directory.file,
+        name,
+        WINDOWS_GENERIC_READ | WINDOWS_GENERIC_WRITE | WINDOWS_DELETE | WINDOWS_SYNCHRONIZE,
+        WINDOWS_FILE_CREATE,
+        WINDOWS_FILE_NON_DIRECTORY_FILE
+            | WINDOWS_FILE_OPEN_REPARSE_POINT
+            | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+    )
+    .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage create: {error}")))
 }
 
 #[cfg(unix)]
-fn read_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK)
-        .open(path)?;
-    let mut document = Vec::new();
-    file.read_to_end(&mut document)?;
-    Ok(document)
+fn open_private_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> std::io::Result<fs::File> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::Mode;
+    Ok(fs::File::from(
+        openat(
+            &directory.file,
+            Path::new(name),
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    ))
+}
+
+#[cfg(unix)]
+fn open_staged_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> std::io::Result<fs::File> {
+    open_private_file_relative(directory, name)
 }
 
 #[cfg(windows)]
-fn read_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let mut document = Vec::new();
-    file.read_to_end(&mut document)?;
-    Ok(document)
+fn open_private_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> std::io::Result<fs::File> {
+    open_windows_relative(
+        &directory.file,
+        name,
+        WINDOWS_GENERIC_READ | WINDOWS_SYNCHRONIZE,
+        WINDOWS_FILE_OPEN,
+        WINDOWS_FILE_NON_DIRECTORY_FILE
+            | WINDOWS_FILE_OPEN_REPARSE_POINT
+            | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+    )
+}
+
+#[cfg(windows)]
+fn open_staged_file_relative(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> std::io::Result<fs::File> {
+    open_windows_relative(
+        &directory.file,
+        name,
+        WINDOWS_GENERIC_READ | WINDOWS_GENERIC_WRITE | WINDOWS_DELETE | WINDOWS_SYNCHRONIZE,
+        WINDOWS_FILE_OPEN,
+        WINDOWS_FILE_NON_DIRECTORY_FILE
+            | WINDOWS_FILE_OPEN_REPARSE_POINT
+            | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+    )
 }
 
 #[cfg(unix)]
@@ -788,6 +901,23 @@ fn private_file_metadata(metadata: &fs::Metadata) -> bool {
         && metadata.nlink() == 1
 }
 
+#[cfg(unix)]
+fn private_file_handle(_file: &fs::File) -> Result<bool, CommandFailure> {
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::File, right: &fs::File) -> Result<bool, CommandFailure> {
+    use std::os::unix::fs::MetadataExt;
+    let left = left.metadata().map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat source identity: {error}"))
+    })?;
+    let right = right.metadata().map_err(|error| {
+        CommandFailure::diagnostic(format!("heartbeat target identity: {error}"))
+    })?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
 #[cfg(windows)]
 fn private_file_metadata(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -795,24 +925,105 @@ fn private_file_metadata(metadata: &fs::Metadata) -> bool {
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
 
-#[cfg(target_os = "macos")]
-fn atomic_rename_exclusive(source: &Path, destination: &Path) -> Result<(), CommandFailure> {
+#[cfg(windows)]
+fn private_file_handle(file: &fs::File) -> Result<bool, CommandFailure> {
+    Ok(windows_file_identity(file)?.2 == 1)
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &fs::File, right: &fs::File) -> Result<bool, CommandFailure> {
+    let left = windows_file_identity(left)?;
+    let right = windows_file_identity(right)?;
+    Ok(left.0 == right.0 && left.1 == right.1)
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &fs::File) -> Result<(u32, u64, u32), CommandFailure> {
+    use std::os::windows::io::AsRawHandle;
+    let mut information = WindowsByHandleFileInformation::zeroed();
+    // SAFETY: file is a live handle and information is writable for the declared structure.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(CommandFailure::diagnostic(format!(
+            "heartbeat file identity: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok((
+        information.volume_serial_number,
+        ((information.file_index_high as u64) << 32) | information.file_index_low as u64,
+        information.number_of_links,
+    ))
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsByHandleFileInformation {
+    file_attributes: u32,
+    creation_time_low: u32,
+    creation_time_high: u32,
+    access_time_low: u32,
+    access_time_high: u32,
+    write_time_low: u32,
+    write_time_high: u32,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+impl WindowsByHandleFileInformation {
+    fn zeroed() -> Self {
+        // SAFETY: this C information structure is valid when initialized to all zeroes.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "Kernel32")]
+unsafe extern "system" {
+    fn GetFileInformationByHandle(
+        file: std::os::windows::io::RawHandle,
+        information: *mut WindowsByHandleFileInformation,
+    ) -> i32;
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn atomic_rename_exclusive(
+    directory: &PrivateDirectory,
+    source: &str,
+    destination: &str,
+    _file: &fs::File,
+) -> Result<(), CommandFailure> {
     use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::AsRawFd;
     unsafe extern "C" {
-        fn renamex_np(
+        fn renameatx_np(
+            source_fd: nix::libc::c_int,
             source: *const nix::libc::c_char,
+            destination_fd: nix::libc::c_int,
             destination: *const nix::libc::c_char,
             flags: u32,
         ) -> i32;
     }
     const RENAME_EXCL: u32 = 0x0000_0004;
-    let source = CString::new(source.as_os_str().as_bytes())
+    let source = CString::new(source)
         .map_err(|_| CommandFailure::diagnostic("heartbeat stage path contains NUL"))?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
+    let destination = CString::new(destination)
         .map_err(|_| CommandFailure::diagnostic("heartbeat destination path contains NUL"))?;
-    // SAFETY: both strings are NUL-terminated and remain alive for the call.
-    if unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), RENAME_EXCL) } == 0 {
+    // SAFETY: both names are single components beneath the retained directory descriptor.
+    if unsafe {
+        renameatx_np(
+            directory.file.as_raw_fd(),
+            source.as_ptr(),
+            directory.file.as_raw_fd(),
+            destination.as_ptr(),
+            RENAME_EXCL,
+        )
+    } == 0
+    {
         Ok(())
     } else {
         Err(CommandFailure::diagnostic(format!(
@@ -822,93 +1033,32 @@ fn atomic_rename_exclusive(source: &Path, destination: &Path) -> Result<(), Comm
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-fn atomic_rename_exclusive(source: &Path, destination: &Path) -> Result<(), CommandFailure> {
-    fs::hard_link(source, destination)
-        .and_then(|()| fs::remove_file(source))
+#[cfg(target_os = "linux")]
+fn atomic_rename_exclusive(
+    directory: &PrivateDirectory,
+    source: &str,
+    destination: &str,
+    _file: &fs::File,
+) -> Result<(), CommandFailure> {
+    nix::fcntl::renameat2(
+        &directory.file,
+        source,
+        &directory.file,
+        destination,
+        nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+    )
+    .map_err(|error| CommandFailure::diagnostic(format!("heartbeat atomic publish: {error}")))
+}
+
+#[cfg(windows)]
+fn atomic_rename_exclusive(
+    directory: &PrivateDirectory,
+    _source: &str,
+    destination: &str,
+    file: &fs::File,
+) -> Result<(), CommandFailure> {
+    rename_windows_file_handle(file, &directory.file, destination)
         .map_err(|error| CommandFailure::diagnostic(format!("heartbeat atomic publish: {error}")))
-}
-
-#[cfg(windows)]
-fn atomic_rename_exclusive(source: &Path, destination: &Path) -> Result<(), CommandFailure> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "Kernel32")]
-    unsafe extern "system" {
-        fn CreateHardLinkW(
-            new_file_name: *const u16,
-            existing_file_name: *const u16,
-            security_attributes: *const std::ffi::c_void,
-        ) -> i32;
-        fn DeleteFileW(file_name: *const u16) -> i32;
-    }
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are NUL-terminated and the destination link is created only if absent.
-    if unsafe { CreateHardLinkW(destination.as_ptr(), source.as_ptr(), std::ptr::null()) } == 0 {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat atomic publish: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    // SAFETY: source is a NUL-terminated path owned by this publication attempt.
-    if unsafe { DeleteFileW(source.as_ptr()) } == 0 {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat stage cleanup: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), CommandFailure> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("heartbeat directory open: {error}"))
-        })?;
-    directory
-        .sync_all()
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat directory fsync: {error}")))
-}
-
-#[cfg(windows)]
-fn sync_directory(path: &Path) -> Result<(), CommandFailure> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("heartbeat directory open: {error}"))
-        })?;
-    match directory.sync_all() {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(CommandFailure::diagnostic(format!(
-            "heartbeat directory flush: {error}"
-        ))),
-    }
 }
 
 pub(super) fn retire_released(identity: ClaimMutationIdentity<'_>) -> Result<(), CommandFailure> {
@@ -954,8 +1104,13 @@ fn retire_released_at_with_boundary_hooks(
     after_repo_open(&repo.path)?;
     let _lock = RepositoryLock::acquire(&repo)?;
     let issue_name = format!("{}.json", identity.issue);
-    let Some(issue_stage) = detach_heartbeat(&repo, &issue_name)? else {
-        return Ok(());
+    let issue_stage_name = retirement_stage_name(&issue_name, identity);
+    let issue_stage = match open_detached_heartbeat(&repo, &issue_stage_name)? {
+        Some(stage) => stage,
+        None => match detach_heartbeat(&repo, &issue_name, &issue_stage_name)? {
+            Some(stage) => stage,
+            None => return Ok(()),
+        },
     };
     if let Err(error) = after_issue_detach(&repo.path.join(&issue_name)) {
         restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
@@ -1000,8 +1155,13 @@ fn retire_matching_session(
     };
     after_sessions_open(&sessions.path)?;
     let session_name = format!("{}.json", heartbeat_session_key(session_id));
-    let Some(session_stage) = detach_heartbeat(&sessions, &session_name)? else {
-        return Ok(true);
+    let session_stage_name = retirement_stage_name(&session_name, identity);
+    let session_stage = match open_detached_heartbeat(&sessions, &session_stage_name)? {
+        Some(stage) => stage,
+        None => match detach_heartbeat(&sessions, &session_name, &session_stage_name)? {
+            Some(stage) => stage,
+            None => return Ok(true),
+        },
     };
     match detached_retirement_evidence(&sessions, &session_stage, identity) {
         Ok(Some(_)) => {}
@@ -1052,22 +1212,34 @@ struct DetachedHeartbeat {
     file: fs::File,
 }
 
+fn retirement_stage_name(live_name: &str, identity: ClaimMutationIdentity<'_>) -> String {
+    let digest = autospec_core::autonomous::waterfall::sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            identity.repo,
+            identity.issue,
+            identity.worker_id,
+            identity.branch,
+            identity.claim_id,
+            live_name
+        )
+        .as_bytes(),
+    );
+    format!(".autospec-retiring-{}", &digest[..24])
+}
+
 fn detach_heartbeat(
     directory: &PrivateDirectory,
     live_name: &str,
+    staged_name: &str,
 ) -> Result<Option<DetachedHeartbeat>, CommandFailure> {
-    let staged_name = format!(
-        ".autospec-retiring-{}-{}",
-        std::process::id(),
-        TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    );
     #[cfg(unix)]
     {
         use std::ffi::CString;
         use std::os::fd::AsRawFd;
         let live = CString::new(live_name)
             .map_err(|_| CommandFailure::diagnostic("heartbeat live name contains NUL"))?;
-        let staged = CString::new(staged_name.as_str())
+        let staged = CString::new(staged_name)
             .map_err(|_| CommandFailure::diagnostic("heartbeat staged name contains NUL"))?;
         // SAFETY: both names are NUL-terminated single components beneath the same live fd.
         if unsafe {
@@ -1125,14 +1297,58 @@ fn detach_heartbeat(
         }
         sync_private_directory(directory)?;
         return Ok(Some(DetachedHeartbeat {
-            name: staged_name,
+            name: staged_name.to_string(),
             file,
         }));
     }
     #[cfg(unix)]
     {
         sync_private_directory(directory)?;
-        Ok(Some(DetachedHeartbeat { name: staged_name }))
+        Ok(Some(DetachedHeartbeat {
+            name: staged_name.to_string(),
+        }))
+    }
+}
+
+fn open_detached_heartbeat(
+    directory: &PrivateDirectory,
+    staged_name: &str,
+) -> Result<Option<DetachedHeartbeat>, CommandFailure> {
+    #[cfg(unix)]
+    {
+        match open_private_file_relative(directory, staged_name) {
+            Ok(_) => Ok(Some(DetachedHeartbeat {
+                name: staged_name.to_string(),
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(CommandFailure::diagnostic(format!(
+                "open detached released heartbeat: {error}"
+            ))),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let file = match open_windows_relative(
+            &directory.file,
+            staged_name,
+            WINDOWS_GENERIC_READ | WINDOWS_DELETE | WINDOWS_SYNCHRONIZE,
+            WINDOWS_FILE_OPEN,
+            WINDOWS_FILE_NON_DIRECTORY_FILE
+                | WINDOWS_FILE_OPEN_REPARSE_POINT
+                | WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "open detached released heartbeat: {error}"
+                )))
+            }
+        };
+        Ok(Some(DetachedHeartbeat {
+            name: staged_name.to_string(),
+            file,
+        }))
     }
 }
 
@@ -1438,9 +1654,8 @@ mod tests {
                 .join("42.json")
         }
 
-        #[cfg(windows)]
         fn repo_path(&self) -> std::path::PathBuf {
-            self.issue_path().parent().expect("repo path").to_path_buf()
+            self.root.join(repository_progress_key("owner/repo"))
         }
     }
 
@@ -1573,6 +1788,131 @@ mod tests {
         .expect("exact issue retirement");
 
         assert!(!fixture.issue_path().exists());
+    }
+
+    #[test]
+    fn retirement_resumes_after_crash_between_issue_and_session_detachment() {
+        let fixture = Fixture::new("retirement-resume-after-issue-detach");
+        let document = fixture.document("claim-a", Some("session-a"));
+        publish(
+            &fixture.root,
+            "owner/repo",
+            42,
+            Some("session-a"),
+            &document,
+        )
+        .expect("heartbeat");
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = retire_released_at_with_hook(
+                &fixture.root,
+                ClaimMutationIdentity {
+                    repo: "owner/repo",
+                    issue: 42,
+                    worker_id: "worker-a",
+                    branch: "feat/worker",
+                    claim_id: "claim-a",
+                },
+                &mut |_| panic!("simulated retirement crash after issue detachment"),
+            );
+        }));
+        assert!(interrupted.is_err());
+        assert!(!fixture.issue_path().exists(), "issue was not detached");
+
+        retire_released_at(
+            &fixture.root,
+            ClaimMutationIdentity {
+                repo: "owner/repo",
+                issue: 42,
+                worker_id: "worker-a",
+                branch: "feat/worker",
+                claim_id: "claim-a",
+            },
+        )
+        .expect("resume exact retirement");
+
+        let session = fixture
+            .repo_path()
+            .join("sessions")
+            .join(format!("{}.json", heartbeat_session_key("session-a")));
+        assert!(!session.exists(), "resumed retirement left stale session");
+        let successor = fixture.document("claim-b", Some("session-b"));
+        publish(
+            &fixture.root,
+            "owner/repo",
+            42,
+            Some("session-b"),
+            &successor,
+        )
+        .expect("publish successor after resumed retirement");
+        assert!(fixture.issue_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_remains_bound_to_open_repository_after_parent_swap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("publication-parent-swap");
+        let repo_name = repository_progress_key("owner/repo");
+        let repo = fixture.root.join(&repo_name);
+        std::fs::create_dir(&repo).expect("repository directory");
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700))
+            .expect("repository permissions");
+        let retained = fixture.root.join("retained-repository");
+        let replacement = fixture.root.join("replacement-repository");
+        std::fs::create_dir(&replacement).expect("replacement repository");
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700))
+            .expect("replacement permissions");
+        let document = fixture.document("claim-a", None);
+
+        publish_with_hooks(
+            &fixture.root,
+            "owner/repo",
+            42,
+            None,
+            &document,
+            &mut |_| {
+                std::fs::rename(&repo, &retained).expect("retain opened repository");
+                std::fs::rename(&replacement, &repo).expect("swap repository path");
+            },
+            &mut |_| {},
+        )
+        .expect("handle-bound publication");
+
+        assert!(retained.join("42.json").is_file());
+        assert!(!repo.join("42.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_retry_cleans_crash_staging_aliases() {
+        let fixture = Fixture::new("publication-crash-staging");
+        let document = fixture.document("claim-a", None);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publish_with_hooks(
+                &fixture.root,
+                "owner/repo",
+                42,
+                None,
+                &document,
+                &mut |_| {},
+                &mut |_| panic!("simulated publication crash before rename"),
+            );
+        }));
+        assert!(interrupted.is_err());
+
+        publish(&fixture.root, "owner/repo", 42, None, &document).expect("restart publication");
+        let aliases = std::fs::read_dir(fixture.repo_path())
+            .expect("repository entries")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".autospec-heartbeat-")
+            })
+            .count();
+        assert_eq!(aliases, 0, "publication left staging aliases");
     }
 
     #[cfg(unix)]
@@ -1812,11 +2152,9 @@ mod tests {
             let fixture = std::sync::Arc::clone(&fixture);
             let barrier = std::sync::Arc::clone(&barrier);
             publishers.push(std::thread::spawn(move || {
-                let source = fixture.root.join(format!("{claim_id}.stage"));
-                std::fs::write(&source, claim_id).expect("stage heartbeat");
-                let destination = fixture.root.join("42.json");
+                let document = fixture.document(claim_id, None);
                 barrier.wait();
-                atomic_rename_exclusive(&source, &destination)
+                publish(&fixture.root, "owner/repo", 42, None, &document)
             }));
         }
         barrier.wait();
@@ -1826,9 +2164,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        let winner =
-            std::fs::read_to_string(fixture.root.join("42.json")).expect("winning heartbeat");
-        assert!(winner == "claim-a" || winner == "claim-b");
+        let winner = std::fs::read_to_string(fixture.issue_path()).expect("winning heartbeat");
+        assert!(winner.contains("claim-a") || winner.contains("claim-b"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_rejects_multi_link_target() {
+        let fixture = Fixture::new("windows-multi-link-target");
+        let document = fixture.document("claim-a", None);
+        publish(&fixture.root, "owner/repo", 42, None, &document).expect("initial heartbeat");
+        std::fs::hard_link(fixture.issue_path(), fixture.repo_path().join("alias.json"))
+            .expect("create second link");
+
+        let error = publish(&fixture.root, "owner/repo", 42, None, &document)
+            .expect_err("multi-link target must be rejected");
+
+        assert_eq!(error.message, "heartbeat publication target conflicts");
     }
 
     #[cfg(windows)]

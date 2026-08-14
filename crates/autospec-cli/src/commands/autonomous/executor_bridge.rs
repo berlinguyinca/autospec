@@ -11845,12 +11845,70 @@ where
         return Err("executor remote refs changed during authoritative draft creation".into());
     }
     let number = candidates[0].number;
+    #[cfg(not(target_os = "linux"))]
+    if state.draft_process.is_some() {
+        verify_portable_draft_cleanup(state_path, state)?;
+        state.draft_process = None;
+    }
     state.phase = BridgePhase::DraftCreated;
     state.pr = Some(number);
     state.head_oid = Some(proof.head_oid.clone());
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
     Ok(number)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_portable_draft_cleanup(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), BridgeRunFailure> {
+    let cleanup_path = state_path
+        .with_extension("draft-owner.json")
+        .with_extension("cleanup.json");
+    validate_private_state_file(&cleanup_path).map_err(|error| {
+        BridgeRunFailure::transient(format!(
+            "portable executor draft cleanup is not proven: {error}"
+        ))
+    })?;
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cleanup_path).map_err(|error| {
+            BridgeRunFailure::transient(format!(
+                "read portable executor draft cleanup evidence: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            BridgeRunFailure::invariant(format!(
+                "parse portable executor draft cleanup evidence: {error}"
+            ))
+        })?;
+    let exit_code = match document.get("exit_code") {
+        Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(value)
+            if value
+                .as_i64()
+                .is_some_and(|code| i32::try_from(code).is_ok()) =>
+        {
+            value.clone()
+        }
+        _ => {
+            return Err(BridgeRunFailure::invariant(
+                "portable executor draft cleanup exit code is malformed",
+            ))
+        }
+    };
+    let expected = serde_json::json!({
+        "schema": 1,
+        "invocation_id": state.identity.invocation_id,
+        "tree_cleanup": "proven",
+        "exit_code": exit_code,
+    });
+    if document != expected {
+        return Err(BridgeRunFailure::invariant(
+            "portable executor draft cleanup evidence differs from the exact invocation",
+        ));
+    }
+    Ok(())
 }
 
 fn exact_ready_merge_pull_request<'a>(

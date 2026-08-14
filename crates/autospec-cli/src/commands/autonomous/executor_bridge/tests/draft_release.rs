@@ -290,6 +290,15 @@ fn portable_draft_post_request_crash_reconciles_without_replay() {
         .environment
         .remove(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"));
     assert_eq!(prepared.publish().expect("reconcile visible draft"), 17);
+    assert!(
+        prepared.state.draft_process.is_none(),
+        "authoritative portable PR reconciliation retained the synthetic draft process"
+    );
+    let durable = PersistedInvocation::from_json(
+        &fs::read_to_string(&prepared.state_path).expect("read reconciled draft state"),
+    )
+    .expect("parse reconciled draft state");
+    assert!(durable.draft_process.is_none());
     assert_eq!(
         fs::read_to_string(prepared.fixture.root.join("gh-calls"))
             .expect("gh calls")

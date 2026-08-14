@@ -87,33 +87,78 @@ impl UnixOwnedChild {
     }
 
     pub(super) fn try_wait(&mut self) -> Result<Option<ExitStatus>, String> {
-        match &mut self.child {
+        match &self.child {
             ChildLifecycle::Reaped(status) => Ok(Some(*status)),
-            ChildLifecycle::Live { child, .. } => match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.child = ChildLifecycle::Reaped(status);
-                    Ok(Some(status))
+            ChildLifecycle::Live { .. } => {
+                if !leader_exited_without_reap(self.pid)? {
+                    return Ok(None);
                 }
-                Ok(None) => Ok(None),
-                Err(error) => Err(format!("poll owned process group leader: {error}")),
-            },
+                self.drain_completed_group(&mut SystemGroupOperations)
+                    .map(Some)
+            }
         }
     }
 
     pub(super) fn wait(&mut self) -> Result<ExitStatus, String> {
+        match &self.child {
+            ChildLifecycle::Reaped(status) => Ok(*status),
+            ChildLifecycle::Live { .. } => {
+                wait_for_leader_without_reap(self.pid)?;
+                self.drain_completed_group(&mut SystemGroupOperations)
+            }
+        }
+    }
+
+    fn drain_completed_group(
+        &mut self,
+        operations: &mut impl GroupOperations,
+    ) -> Result<ExitStatus, String> {
+        if self.group_cleaned {
+            return self.reap_leader();
+        }
+        if let ChildLifecycle::Live { may_signal, .. } = &mut self.child {
+            *may_signal = false;
+        }
+        // The unreaped leader pins the numeric PGID, so descendants can be drained without a
+        // PID-reuse window. Consume signalling authority before the final wait/reap.
+        self.group_cleaned = true;
+        let mut errors = Vec::new();
+        if let Err(error) = operations.signal(self.pgid, Signal::SIGTERM) {
+            if !error.ignorable_if_reaped {
+                errors.push(format!(
+                    "signal completed owned process group {}: {}",
+                    self.pgid, error.message
+                ));
+            }
+        }
+        if let Err(error) = operations.signal(self.pgid, Signal::SIGKILL) {
+            if !error.ignorable_if_reaped {
+                errors.push(format!(
+                    "kill completed owned process group {}: {}",
+                    self.pgid, error.message
+                ));
+            }
+        }
+        let status = self.reap_leader();
+        match (errors.is_empty(), status) {
+            (true, result) => result,
+            (false, Ok(_)) => Err(errors.join("; ")),
+            (false, Err(error)) => {
+                errors.push(error);
+                Err(errors.join("; "))
+            }
+        }
+    }
+
+    fn reap_leader(&mut self) -> Result<ExitStatus, String> {
         match &mut self.child {
             ChildLifecycle::Reaped(status) => Ok(*status),
             ChildLifecycle::Live { child, .. } => {
-                let result = child
+                let status = child
                     .wait()
-                    .map_err(|error| format!("wait for owned process group leader: {error}"));
-                match result {
-                    Ok(status) => {
-                        self.child = ChildLifecycle::Reaped(status);
-                        Ok(status)
-                    }
-                    Err(error) => Err(error),
-                }
+                    .map_err(|error| format!("wait for owned process group leader: {error}"))?;
+                self.child = ChildLifecycle::Reaped(status);
+                Ok(status)
             }
         }
     }
@@ -128,11 +173,11 @@ impl UnixOwnedChild {
         grace: Duration,
     ) -> Result<ExitStatus, String> {
         if self.group_cleaned {
-            return self.wait();
+            return self.reap_leader();
         }
         if let ChildLifecycle::Live { may_signal, .. } = &mut self.child {
             if !*may_signal {
-                return self.wait();
+                return self.reap_leader();
             }
             *may_signal = false;
         }
@@ -211,7 +256,7 @@ impl UnixOwnedChild {
             }
         }
 
-        let reaped = self.wait();
+        let reaped = self.reap_leader();
         match (errors.is_empty(), reaped) {
             (true, result) => result,
             (false, Ok(_)) => Err(errors.join("; ")),
@@ -219,6 +264,60 @@ impl UnixOwnedChild {
                 errors.push(error);
                 Err(errors.join("; "))
             }
+        }
+    }
+}
+
+fn leader_exited_without_reap(pid: u32) -> Result<bool, String> {
+    let mut information = std::mem::MaybeUninit::<nix::libc::siginfo_t>::zeroed();
+    // SAFETY: information points to writable siginfo storage and P_PID names the retained child.
+    let result = unsafe {
+        nix::libc::waitid(
+            nix::libc::P_PID,
+            pid as nix::libc::id_t,
+            information.as_mut_ptr(),
+            nix::libc::WEXITED | nix::libc::WNOWAIT | nix::libc::WNOHANG,
+        )
+    };
+    if result != 0 {
+        return Err(format!(
+            "poll owned process group leader without reaping: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: waitid succeeded and initialized the siginfo storage.
+    let information = unsafe { information.assume_init() };
+    Ok(information.si_signo == nix::libc::SIGCHLD)
+}
+
+fn wait_for_leader_without_reap(pid: u32) -> Result<(), String> {
+    loop {
+        let mut information = std::mem::MaybeUninit::<nix::libc::siginfo_t>::zeroed();
+        // SAFETY: information points to writable siginfo storage and P_PID names the retained child.
+        let result = unsafe {
+            nix::libc::waitid(
+                nix::libc::P_PID,
+                pid as nix::libc::id_t,
+                information.as_mut_ptr(),
+                nix::libc::WEXITED | nix::libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!(
+                "wait for owned process group leader without reaping: {error}"
+            ));
+        }
+    }
+}
+
+impl Drop for UnixOwnedChild {
+    fn drop(&mut self) {
+        if !self.group_cleaned {
+            let _ = self.terminate();
         }
     }
 }
@@ -354,5 +453,27 @@ mod tests {
                 ..InjectedGroupOperations::default()
             },
         );
+    }
+
+    #[test]
+    fn completed_empty_groups_never_signal_after_owner_is_consumed() {
+        for _ in 0..64 {
+            let mut command = Command::new("/usr/bin/true");
+            let mut child = UnixOwnedChild::spawn(&mut command).expect("spawn empty group");
+            while child.try_wait().expect("observe empty group").is_none() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let mut forbidden = InjectedGroupOperations {
+                fail_term: true,
+                fail_probe: true,
+                fail_kill: true,
+                ..InjectedGroupOperations::default()
+            };
+            child
+                .terminate_with_operations(&mut forbidden, Duration::ZERO)
+                .expect("completed owner is consumed exactly once");
+            assert!(forbidden.signals.is_empty(), "re-signalled a retired PGID");
+            assert_eq!(forbidden.probes, 0, "re-probed a retired PGID");
+        }
     }
 }

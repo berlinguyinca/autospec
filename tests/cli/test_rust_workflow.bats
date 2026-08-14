@@ -51,24 +51,24 @@ freebsd_vm = next(
 assert freebsd_vm["with"]["usesh"] is True
 assert freebsd_vm["with"]["run"].lstrip().startswith("set -eu\n")
 
+heartbeat = "commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation"
+portable_admission = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
 for name in ("build-test", "macos-test", "windows-test", "freebsd-test"):
     job_commands = commands(jobs[name])
-    for behavior in (
-        "heartbeat",
-        "process_owner",
-        "portability",
-    ):
-        assert f"cargo test -p autospec-cli --bin autospec {behavior}" in job_commands
-
-assert "cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host" in linux_commands
-portable_admission = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt"
-for job_commands in (macos_commands, freebsd_commands):
-    assert job_commands.count(f'cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture') == 1
-    assert job_commands.count('grep -F -c "test $admission_test ... ok"') == 1
-assert windows_commands.count('cargo test -p autospec-cli --bin autospec $admissionTest -- --exact --nocapture') == 1
-assert windows_commands.count('[regex]::Matches($admissionOutput') == 1
-for job_commands in (macos_commands, windows_commands, freebsd_commands):
+    assert job_commands.count(heartbeat) == 1
     assert job_commands.count(portable_admission) == 1
+    assert "--exact --nocapture" in job_commands
+    if name == "windows-test":
+        assert "$ErrorActionPreference = 'Stop'" in job_commands
+        assert job_commands.count("$LASTEXITCODE") >= 3
+        assert "portable behavior test did not pass exactly once" in job_commands
+        assert "process_owner::tests::windows_creation_filetime_is_part_of_durable_identity" in job_commands
+    else:
+        assert 'grep -F -c "test $behavior_test ... ok"' in job_commands
+
+assert "autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity" in linux_commands
+for job_commands in (macos_commands, freebsd_commands):
+    assert "process_owner::tests::wait_preserves_zero_exit" in job_commands
 
 for job_commands in (macos_commands, windows_commands, freebsd_commands):
     assert "cargo build --release -p autospec-cli" in job_commands

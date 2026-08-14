@@ -39,11 +39,16 @@ jobs:
 
       - name: Test
         run: |
+          run_exact() {
+            behavior_test="$1"
+            behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+            printf '%s\n' "$behavior_output"
+            test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+          }
           cargo test -p autospec-core --lib
-          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
-          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
-          cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          cargo test -p autospec-cli --bin autospec released_predecessor_advances_through_executor_on_supported_host -- --nocapture
+          run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+          run_exact 'commands::autonomous::executor_bridge::tests::adoption_cleanup::autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity'
+          run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
         # Deterministic inline unit tests only. Integration tests under
         # tests/*.rs and the executor_bridge inline suite invoke shell
         # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
@@ -74,13 +79,15 @@ jobs:
 
       - name: Test portable autonomous ownership
         run: |
-          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
-          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
-          cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          admission_test='commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
-          admission_output="$(cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture 2>&1)"
-          printf '%s\n' "$admission_output"
-          test "$(printf '%s\n' "$admission_output" | grep -F -c "test $admission_test ... ok")" -eq 1
+          run_exact() {
+            behavior_test="$1"
+            behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+            printf '%s\n' "$behavior_output"
+            test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+          }
+          run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+          run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
+          run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -105,23 +112,31 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check autospec CLI and tests
-        run: cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: |
+          cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test portable autonomous ownership
         shell: pwsh
         run: |
-          cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
-          cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
-          cargo test -p autospec-cli --bin autospec portability -- --nocapture
-          $admissionTest = 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
-          $admissionOutput = cargo test -p autospec-cli --bin autospec $admissionTest -- --exact --nocapture 2>&1 | Out-String
-          $admissionExit = $LASTEXITCODE
-          Write-Output $admissionOutput
-          if ($admissionExit -ne 0) { exit $admissionExit }
-          if ([regex]::Matches($admissionOutput, [regex]::Escape("test $admissionTest ... ok")).Count -ne 1) { throw 'portable admission test did not pass exactly once' }
+          $ErrorActionPreference = 'Stop'
+          function Invoke-ExactRustTest([string]$BehaviorTest) {
+            $behaviorOutput = cargo test -p autospec-cli --bin autospec $BehaviorTest -- --exact --nocapture 2>&1 | Out-String
+            $behaviorExit = $LASTEXITCODE
+            Write-Output $behaviorOutput
+            if ($behaviorExit -ne 0) { exit $behaviorExit }
+            if ([regex]::Matches($behaviorOutput, [regex]::Escape("test $BehaviorTest ... ok")).Count -ne 1) { throw 'portable behavior test did not pass exactly once' }
+          }
+          Invoke-ExactRustTest 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+          Invoke-ExactRustTest 'commands::autonomous::executor_bridge::process_owner::tests::windows_creation_filetime_is_part_of_durable_identity'
+          Invoke-ExactRustTest 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
 
       - name: Build release autospec CLI
-        run: cargo build --release -p autospec-cli
+        shell: pwsh
+        run: |
+          cargo build --release -p autospec-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   freebsd-test:
     runs-on: ubuntu-latest
@@ -139,14 +154,16 @@ jobs:
           run: |
             set -eu
             . "$HOME/.cargo/env"
+            run_exact() {
+              behavior_test="$1"
+              behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+              printf '%s\n' "$behavior_output"
+              test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+            }
             cargo check -p autospec-cli
-            cargo test -p autospec-cli --bin autospec heartbeat -- --nocapture
-            cargo test -p autospec-cli --bin autospec process_owner -- --nocapture
-            cargo test -p autospec-cli --bin autospec portability -- --nocapture
-            admission_test='commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
-            admission_output="$(cargo test -p autospec-cli --bin autospec "$admission_test" -- --exact --nocapture 2>&1)"
-            printf '%s\n' "$admission_output"
-            test "$(printf '%s\n' "$admission_output" | grep -F -c "test $admission_test ... ok")" -eq 1
+            run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
+            run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
+            run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
             cargo build --release -p autospec-cli
 
   audit:

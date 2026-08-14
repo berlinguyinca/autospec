@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 static PORTABLE_LIFECYCLE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(all(test, windows))]
@@ -244,7 +244,7 @@ mod windows_tests {
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 mod supported_host_tests {
     use super::*;
 
@@ -283,7 +283,7 @@ mod supported_host_tests {
 
     #[test]
     fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt() {
-        // Break caught: a supported non-Linux host compiling the bridge while skipping released
+        // Break caught: a supported host compiling the bridge while skipping released
         // predecessor retirement, successor heartbeat ownership, real OS child ownership, or
         // terminal receipt publication.
         let _serial = PORTABLE_LIFECYCLE_TEST
@@ -1669,6 +1669,46 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&observed[0].stdout_path).expect("read portable stdout"),
             "portable-output"
+        );
+    }
+
+    #[test]
+    fn execute_direct_plan_cleans_descendant_after_successful_leader_exit() {
+        let fixture = DirectFixture::new("success-descendant-cleanup");
+        let descendant = fixture.worktree.join("descendant.pid");
+        let plan = DirectCommandPlan {
+            commands: vec![DirectCommand::success(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "sleep 30 & printf %s $! > '{}'; exit 0",
+                    descendant.display()
+                ),
+            ])],
+        };
+
+        let observed = execute_direct_plan(
+            &fixture.worktree,
+            &plan,
+            &fixture.artifacts,
+            None,
+            Duration::from_secs(2),
+        )
+        .expect("successful leader exit must drain its owned group");
+
+        assert_eq!(observed[0].terminal, AttemptTerminal::Exited(0));
+        let pid = fs::read_to_string(descendant)
+            .expect("descendant pid")
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+        assert_eq!(
+            unsafe { nix::libc::kill(pid, 0) },
+            -1,
+            "successful direct command left descendant {pid} alive"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(nix::libc::ESRCH)
         );
     }
 
