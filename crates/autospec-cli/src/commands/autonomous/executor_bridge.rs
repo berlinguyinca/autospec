@@ -20013,10 +20013,12 @@ fn observe_process_identity_once(
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
     observe_process_birth(pid).map(|birth| birth.map(|birth| (birth.boot_id, birth.start_identity)))
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn current_boot_identity() -> Result<String, String> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(|error| format!("read executor boot identity: {error}"))?
@@ -20025,6 +20027,196 @@ pub(crate) fn current_boot_identity() -> Result<String, String> {
     (!boot_id.is_empty())
         .then_some(boot_id)
         .ok_or_else(|| "executor boot identity is empty".to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
+    let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;
+    let mut info = std::mem::MaybeUninit::<nix::libc::proc_bsdinfo>::zeroed();
+    // SAFETY: proc_pidinfo receives a correctly sized writable proc_bsdinfo buffer.
+    let observed = unsafe {
+        nix::libc::proc_pidinfo(
+            pid,
+            nix::libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<nix::libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if observed == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error
+            .raw_os_error()
+            .is_some_and(|code| code == nix::libc::ESRCH || code == nix::libc::ENOENT)
+        {
+            Ok(None)
+        } else {
+            Err(format!("observe executor process birth: {error}"))
+        };
+    }
+    if observed as usize != std::mem::size_of::<nix::libc::proc_bsdinfo>() {
+        return Err("observe executor process birth returned a partial record".to_string());
+    }
+    // SAFETY: proc_pidinfo filled the complete structure above.
+    let info = unsafe { info.assume_init() };
+    let start_identity = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
+        .filter(|identity| *identity > 0)
+        .ok_or_else(|| "executor process start identity is invalid".to_string())?;
+    Ok(Some((current_boot_identity()?, start_identity.to_string())))
+}
+
+#[cfg(target_os = "freebsd")]
+pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
+    let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;
+    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_PROC, nix::libc::KERN_PROC_PID, pid];
+    let mut info = std::mem::MaybeUninit::<nix::libc::kinfo_proc>::zeroed();
+    let mut length = std::mem::size_of::<nix::libc::kinfo_proc>();
+    // SAFETY: sysctl receives a valid MIB and correctly sized writable output buffer.
+    let result = unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            info.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        return if error
+            .raw_os_error()
+            .is_some_and(|code| code == nix::libc::ESRCH || code == nix::libc::ENOENT)
+        {
+            Ok(None)
+        } else {
+            Err(format!("observe executor process birth: {error}"))
+        };
+    }
+    if length == 0 {
+        return Ok(None);
+    }
+    if length < std::mem::size_of::<nix::libc::kinfo_proc>() {
+        return Err("observe executor process birth returned a partial record".to_string());
+    }
+    // SAFETY: sysctl filled the complete structure above.
+    let info = unsafe { info.assume_init() };
+    let start_identity = (info.ki_start.tv_sec as u64)
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(info.ki_start.tv_usec as u64))
+        .filter(|identity| *identity > 0)
+        .ok_or_else(|| "executor process start identity is invalid".to_string())?;
+    Ok(Some((current_boot_identity()?, start_identity.to_string())))
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(crate) fn current_boot_identity() -> Result<String, String> {
+    use std::ffi::c_void;
+
+    let name = b"kern.boottime\0";
+    let mut boot = std::mem::MaybeUninit::<nix::libc::timeval>::zeroed();
+    let mut length = std::mem::size_of::<nix::libc::timeval>();
+    // SAFETY: sysctlbyname receives a static NUL-terminated name and writable timeval buffer.
+    let result = unsafe {
+        nix::libc::sysctlbyname(
+            name.as_ptr().cast(),
+            boot.as_mut_ptr().cast::<c_void>(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || length < std::mem::size_of::<nix::libc::timeval>() {
+        return Err(format!(
+            "read executor boot identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: sysctlbyname filled the complete timeval above.
+    let boot = unsafe { boot.assume_init() };
+    let identity = (boot.tv_sec as u64)
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(boot.tv_usec as u64))
+        .filter(|identity| *identity > 0)
+        .ok_or_else(|| "executor boot identity is empty".to_string())?;
+    Ok(identity.to_string())
+}
+
+#[cfg(windows)]
+pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
+    type Handle = *mut std::ffi::c_void;
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn GetProcessTimes(
+            process: Handle,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    // SAFETY: OpenProcess has no borrowed pointer arguments.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        return if error
+            .raw_os_error()
+            .is_some_and(|code| code == 87 || code == 1168)
+        {
+            Ok(None)
+        } else {
+            Err(format!("observe executor process birth: {error}"))
+        };
+    }
+    let mut creation = FileTime { low: 0, high: 0 };
+    let mut exit = FileTime { low: 0, high: 0 };
+    let mut kernel = FileTime { low: 0, high: 0 };
+    let mut user = FileTime { low: 0, high: 0 };
+    // SAFETY: process is an owned valid handle and all FILETIME pointers are writable.
+    let result = unsafe {
+        GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user)
+    };
+    // SAFETY: process was returned by OpenProcess and is closed exactly once.
+    unsafe { CloseHandle(process) };
+    if result == 0 {
+        return Err(format!(
+            "observe executor process birth: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let creation = ((creation.high as u64) << 32) | creation.low as u64;
+    if creation == 0 {
+        return Err("executor process start identity is invalid".to_string());
+    }
+    Ok(Some((current_boot_identity()?, creation.to_string())))
+}
+
+#[cfg(windows)]
+pub(crate) fn current_boot_identity() -> Result<String, String> {
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn ProcessIdToSessionId(pid: u32, session_id: *mut u32) -> i32;
+    }
+    let mut session_id = 0_u32;
+    // SAFETY: session_id points to a writable u32 and the current process ID is valid.
+    if unsafe { ProcessIdToSessionId(std::process::id(), &mut session_id) } == 0 {
+        return Err(format!(
+            "read executor session identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(format!("windows-session-{session_id}"))
 }
 
 fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {

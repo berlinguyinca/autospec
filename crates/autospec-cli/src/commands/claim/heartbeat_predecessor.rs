@@ -41,16 +41,26 @@ pub(super) fn retire(
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn retire(
-    _repo: &str,
-    _issue: u64,
+    repo: &str,
+    issue: u64,
     prior: Option<&ClaimRefHead>,
 ) -> Result<(), CommandFailure> {
-    if !prior.is_some_and(|head| head.record.state == "released") {
+    let Some(record) = prior
+        .map(|head| &head.record)
+        .filter(|record| record.state == "released")
+    else {
         return Ok(());
-    }
-    Err(CommandFailure::diagnostic(
-        "predecessor heartbeat retirement requires Linux pidfd ownership",
-    ))
+    };
+    let claim_id = record.claim_id.as_deref().ok_or_else(|| {
+        CommandFailure::diagnostic("released predecessor heartbeat has no claim identity")
+    })?;
+    heartbeat_portable::retire_released(ClaimMutationIdentity {
+        repo,
+        issue,
+        worker_id: &record.worker_id,
+        branch: &record.branch,
+        claim_id,
+    })
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
@@ -84,15 +94,8 @@ mod tests {
     }
 
     #[test]
-    fn released_predecessor_requires_linux_pidfd_retirement() {
+    fn released_predecessor_without_local_evidence_needs_no_retirement() {
         let prior = predecessor("released");
-
-        let error = retire("owner/repo", 42, Some(&prior))
-            .expect_err("released predecessor retirement must fail closed");
-
-        assert_eq!(
-            error.message,
-            "predecessor heartbeat retirement requires Linux pidfd ownership"
-        );
+        retire("owner/repo", 42, Some(&prior)).expect("missing heartbeat is already retired");
     }
 }

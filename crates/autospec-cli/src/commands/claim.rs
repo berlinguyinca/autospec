@@ -4174,9 +4174,13 @@ fn write_startup_heartbeat(
         &mut |_, _| Ok(()),
     );
     #[cfg(not(target_os = "linux"))]
-    Err(CommandFailure::diagnostic(
-        "heartbeat publisher unavailable",
-    ))
+    heartbeat_portable::publish(
+        &_root,
+        repo,
+        issue,
+        session_id,
+        _body.as_bytes(),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -4398,10 +4402,8 @@ fn startup_process_identity(pid: u32) -> Result<(String, String, String), Comman
 }
 
 #[cfg(not(target_os = "linux"))]
-fn startup_process_identity(_pid: u32) -> Result<(String, String, String), CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "heartbeat process identity requires Linux /proc",
-    ))
+fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
+    heartbeat_portable::process_identity(pid)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4994,11 +4996,9 @@ fn retire_released_startup_heartbeat(
 }
 #[cfg(not(target_os = "linux"))]
 fn retire_released_startup_heartbeat(
-    _identity: ClaimMutationIdentity<'_>,
+    identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "predecessor heartbeat retirement requires Linux pidfd ownership",
-    ))
+    heartbeat_portable::retire_released(identity)
 }
 #[cfg(target_os = "linux")]
 fn prepare_heartbeat_root_parent_with_hook(
@@ -6962,7 +6962,7 @@ fn handoff_stale_heartbeat_path_with_hooks(
     Ok(copy)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,
@@ -6991,16 +6991,29 @@ fn observe_local_startup_pid(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,
-    _pid: u32,
-    _host: &str,
-    _boot_id: &str,
-    _process_start: &str,
+    pid: u32,
+    host: &str,
+    boot_id: &str,
+    process_start: &str,
 ) -> StartupPidLiveness {
-    StartupPidLiveness::Unknown
+    let current_host = heartbeat_portable::hostname().ok();
+    let current_boot = super::autonomous::current_boot_identity().ok();
+    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
+        return StartupPidLiveness::Unknown;
+    }
+    match super::autonomous::process_birth_identity(pid) {
+        Ok(None) => StartupPidLiveness::Dead,
+        Ok(Some((observed_boot, observed_start)))
+            if observed_boot == boot_id && observed_start == process_start =>
+        {
+            StartupPidLiveness::Live
+        }
+        Ok(Some(_)) | Err(_) => StartupPidLiveness::Unknown,
+    }
 }
 
 fn branch_ref_exists(branch: &str) -> bool {
@@ -7396,6 +7409,8 @@ fn print_state_help() {
 }
 
 mod heartbeat_liveness;
+#[cfg(any(not(target_os = "linux"), test))]
+mod heartbeat_portable;
 mod heartbeat_predecessor;
 pub(crate) mod lease;
 use heartbeat_liveness::startup_heartbeat_exists;

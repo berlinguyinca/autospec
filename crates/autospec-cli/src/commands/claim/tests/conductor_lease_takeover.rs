@@ -74,7 +74,6 @@ mod requeue {
     };
     use super::super::super::{ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
-    #[cfg(target_os = "linux")]
     use crate::commands::claim::tests::support::{
         startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
     };
@@ -204,6 +203,38 @@ mod requeue {
             !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z")), false),
             "merged work is finished, not abandoned"
         );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn portable_live_owner_heartbeat_still_blocks_takeover() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (sandbox, _) = startup_heartbeat_fixture("portable-live-owner");
+        let root = sandbox.join("heartbeats");
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
+        super::super::super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "rust-foreground-conductor-dead-1785286182924880200",
+            "feat/worker",
+            "claim-a",
+            None,
+        )
+        .expect("publish portable live heartbeat");
+
+        assert!(owner_still_holds(
+            "owner/repo",
+            42,
+            &ready_record(&utc_now_iso().expect("timestamp")),
+        )
+        .expect("portable owner classification"));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value) },
+            None => unsafe { std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR") },
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
     }
 
     #[test]

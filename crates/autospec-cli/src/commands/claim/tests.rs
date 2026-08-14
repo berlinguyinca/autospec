@@ -1,5 +1,4 @@
 mod support;
-#[cfg(target_os = "linux")]
 mod heartbeat_startup;
 #[cfg(target_os = "linux")]
 mod heartbeat_liveness;
