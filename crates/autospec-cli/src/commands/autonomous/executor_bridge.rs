@@ -109,7 +109,7 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod review_evidence;
 use review_evidence::*;
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 mod process_owner;
 mod review_provider;
 use review_provider::*;
@@ -2140,6 +2140,57 @@ impl ActiveReviewerCapture {
             if current.dev() != *device || current.ino() != *inode {
                 return Err("reviewer capture identity changed during execution".to_string());
             }
+            let length = file
+                .metadata()
+                .map_err(|error| format!("inspect reviewer capture length: {error}"))?
+                .len();
+            overflow |= length >= MAX_DIRECT_OUTPUT_BYTES;
+            if length > MAX_DIRECT_OUTPUT_BYTES {
+                file.set_len(MAX_DIRECT_OUTPUT_BYTES)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| format!("bound reviewer capture: {error}"))?;
+            }
+        }
+        Ok(overflow)
+    }
+}
+
+#[cfg(windows)]
+struct ActiveReviewerCapture {
+    artifacts: Vec<(PathBuf, File)>,
+}
+
+#[cfg(windows)]
+impl ActiveReviewerCapture {
+    fn open(policy: &ReviewerCapturePolicy) -> Result<Self, String> {
+        let mut artifacts = Vec::new();
+        for path in &policy.artifacts {
+            reject_symlink_path(path)?;
+            validate_private_state_file(path)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|error| format!("open reviewer capture {}: {error}", path.display()))?;
+            artifacts.push((path.clone(), file));
+        }
+        Ok(Self { artifacts })
+    }
+
+    fn at_limit(&self) -> Result<bool, String> {
+        self.artifacts.iter().try_fold(false, |overflow, item| {
+            item.1
+                .metadata()
+                .map(|metadata| overflow || metadata.len() >= MAX_DIRECT_OUTPUT_BYTES)
+                .map_err(|error| format!("inspect reviewer capture length: {error}"))
+        })
+    }
+
+    fn finalize(&self) -> Result<bool, String> {
+        let mut overflow = false;
+        for (path, file) in &self.artifacts {
+            reject_symlink_path(path)?;
+            validate_private_state_file(path)?;
             let length = file
                 .metadata()
                 .map_err(|error| format!("inspect reviewer capture length: {error}"))?
@@ -6788,7 +6839,7 @@ fn validate_platform_direct_quarantine(paths: &DirectAttemptPaths) -> Result<(),
     direct_ownership_disproven_markers(paths).map(|_| ())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows))]
 pub(crate) fn execute_direct_plan(
     worktree: &Path,
     plan: &DirectCommandPlan,
@@ -23226,14 +23277,12 @@ use continuation_children::*;
 mod portability;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use portability::run_executor_bridge;
-#[cfg(windows)]
-pub(crate) use portability::execute_direct_plan;
 #[cfg(not(target_os = "linux"))]
 use portability::{
     create_draft_pull_request, reconcile_direct_launch,
     supervise_validated_harness_with_claim_renewal,
 };
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 use portability::{
     execute_supervised_direct_attempt, interrupted_direct_terminal,
     validate_platform_direct_quarantine,

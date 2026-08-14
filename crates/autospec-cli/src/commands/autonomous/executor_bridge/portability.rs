@@ -16,35 +16,14 @@ pub(crate) fn run_executor_bridge(
     unreachable!("non-Linux executor admission always fails")
 }
 
-#[cfg(windows)]
-pub(super) fn reconcile_direct_launch(
-    _paths: &DirectAttemptPaths,
-    _expected_intent_body: Option<&str>,
-) -> Result<bool, String> {
-    require_linux_executor_supervision()?;
-    unreachable!("non-Linux executor admission always fails")
-}
-
-#[cfg(windows)]
-pub(crate) fn execute_direct_plan(
-    _worktree: &Path,
-    _plan: &DirectCommandPlan,
-    _artifact_root: &Path,
-    _runtime: Option<&DirectRuntimeAdapter>,
-    _stall_timeout: Duration,
-) -> Result<Vec<ObservedDirectCommand>, String> {
-    require_linux_executor_supervision()?;
-    unreachable!("Windows direct command ownership is not part of the BSD process-group slice")
-}
-
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 pub(super) fn interrupted_direct_terminal() -> AttemptTerminal {
     AttemptTerminal::CleanupFailed(
         "interrupted attempt was quarantined before terminal publication".to_string(),
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 pub(super) fn validate_platform_direct_quarantine(
     paths: &DirectAttemptPaths,
 ) -> Result<(), String> {
@@ -98,7 +77,7 @@ pub(super) fn validate_platform_direct_quarantine(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 pub(super) fn reconcile_direct_launch(
     paths: &DirectAttemptPaths,
     expected_intent_body: Option<&str>,
@@ -152,7 +131,7 @@ pub(super) fn reconcile_direct_launch(
     Ok(true)
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 enum OwnedAttemptResult {
     Exited(std::process::ExitStatus),
     TimedOut(std::process::ExitStatus),
@@ -160,24 +139,24 @@ enum OwnedAttemptResult {
     ReviewerLimit(std::process::ExitStatus),
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 enum OwnedAttemptFailure {
     BeforeCleanup(String),
     ArtifactAfterCleanup(String),
     Cleanup(String),
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 trait AttemptLifecycle {
     fn reviewer_at_limit(&self, capture: &ActiveReviewerCapture) -> Result<bool, String>;
     fn finalize_reviewer(&self, capture: &ActiveReviewerCapture) -> Result<bool, String>;
     fn bound_output(&self, paths: &DirectAttemptPaths) -> Result<(), String>;
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 struct SystemAttemptLifecycle;
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 impl AttemptLifecycle for SystemAttemptLifecycle {
     fn reviewer_at_limit(&self, capture: &ActiveReviewerCapture) -> Result<bool, String> {
         capture.at_limit()
@@ -225,7 +204,7 @@ impl AttemptLifecycle for InjectedAttemptLifecycle {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 fn output_sizes(paths: &DirectAttemptPaths) -> Result<(u64, u64), String> {
     Ok((
         fs::metadata(&paths.stdout)
@@ -237,7 +216,7 @@ fn output_sizes(paths: &DirectAttemptPaths) -> Result<(u64, u64), String> {
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 fn bound_direct_output(paths: &DirectAttemptPaths) -> Result<(), String> {
     for path in [&paths.stdout, &paths.stderr] {
         let file = OpenOptions::new()
@@ -257,7 +236,7 @@ fn bound_direct_output(paths: &DirectAttemptPaths) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 fn run_owned_attempt(
     owned: &mut process_owner::OwnedChildTree,
     paths: &DirectAttemptPaths,
@@ -273,7 +252,7 @@ fn run_owned_attempt(
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 fn run_owned_attempt_with_lifecycle(
     owned: &mut process_owner::OwnedChildTree,
     paths: &DirectAttemptPaths,
@@ -331,7 +310,7 @@ fn run_owned_attempt_with_lifecycle(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 fn finish_owned_attempt(
     owned: &mut process_owner::OwnedChildTree,
     result: Result<OwnedAttemptResult, OwnedAttemptFailure>,
@@ -355,7 +334,7 @@ fn finish_owned_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
 pub(super) fn execute_supervised_direct_attempt(
     attempt_id: &str,
     worktree: &Path,
@@ -368,6 +347,7 @@ pub(super) fn execute_supervised_direct_attempt(
     intent_digest: &str,
     stall_timeout: Duration,
 ) -> AttemptTerminal {
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
     let reviewer_capture = match direct
@@ -380,8 +360,9 @@ pub(super) fn execute_supervised_direct_attempt(
         Err(error) => return AttemptTerminal::InfrastructureFailed(error),
     };
     let mut command = Command::new(program);
+    #[cfg(unix)]
+    command.arg0(&direct.argv[0]);
     command
-        .arg0(&direct.argv[0])
         .args(&direct.argv[1..])
         .current_dir(worktree)
         .envs(environment_overrides)
@@ -398,11 +379,28 @@ pub(super) fn execute_supervised_direct_attempt(
             return AttemptTerminal::InfrastructureFailed(format!("clone direct stderr: {error}"))
         }
     };
+    #[cfg(unix)]
     command
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    let mut owned = match process_owner::OwnedChildTree::spawn(&mut command, attempt_id.to_string())
-    {
+    #[cfg(unix)]
+    let spawn = process_owner::OwnedChildTree::spawn(&mut command, attempt_id.to_string());
+    #[cfg(windows)]
+    let spawn = {
+        use std::os::windows::io::AsRawHandle;
+        let stdin = File::open("NUL").map_err(|error| format!("open Windows null input: {error}"));
+        match stdin {
+            Ok(stdin) => process_owner::OwnedChildTree::spawn_with_stdio(
+                &mut command,
+                attempt_id.to_string(),
+                Some(stdin.as_raw_handle()),
+                Some(stdout.as_raw_handle()),
+                Some(stderr.as_raw_handle()),
+            ),
+            Err(error) => Err(error),
+        }
+    };
+    let mut owned = match spawn {
         Ok(owned) => owned,
         Err(error) => return AttemptTerminal::SpawnFailed(error),
     };
