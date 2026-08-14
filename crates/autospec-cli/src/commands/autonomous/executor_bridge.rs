@@ -18918,6 +18918,20 @@ fn launch_and_supervise(
                             }
                         };
                         guard.terminate()?;
+                        let cleanup_path = sinks.supervisor_identity.with_extension("cleanup.json");
+                        let cleanup_document = serde_json::json!({
+                            "schema": 1,
+                            "invocation_id": state.identity.invocation_id,
+                            "owner": process_identity_value(&process),
+                            "exit_code": status.code,
+                            "tree_cleanup": "proven",
+                        });
+                        write_private_create_once(
+                            &cleanup_path,
+                            cleanup_document.to_string().as_bytes(),
+                            "executor cleanup evidence",
+                        )?;
+                        append_executor_event(event_log, state, "child_cleanup_complete", None)?;
                         match readers.drain_after_completion(
                             state_path,
                             event_log,
