@@ -96,12 +96,27 @@ done
 exec '$real_git' "\$@"
 SH
   chmod +x "$FAKE_BIN/git"
-  started="$(python3 -c 'import time; print(time.monotonic_ns())')"
-  install_runtime
-  elapsed_ms="$(( ($(python3 -c 'import time; print(time.monotonic_ns())') - started) / 1000000 ))"
-  [ "$status" -eq 0 ]
+  { /usr/bin/time -p env HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+    bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >"$TEST_ROOT/warm.path"; } 2>"$TEST_ROOT/warm.time"
+  warm_status=$?
+  elapsed_seconds="$(awk '/^real / { print $2 }' "$TEST_ROOT/warm.time")"
+  echo "warm ensure elapsed: ${elapsed_seconds}s" >&3
+  [ "$warm_status" -eq 0 ]
+  [ "$(cat "$TEST_ROOT/warm.path")" = "$output" ]
   [ ! -e "$TEST_ROOT/inventory.log" ]
-  [ "$elapsed_ms" -lt 1000 ]
+  awk -v elapsed="$elapsed_seconds" 'BEGIN { exit !(elapsed < 0.05) }'
+}
+
+@test "a generation built from a dirty snapshot is never reused after the checkout becomes clean" {
+  printf '// dirty build\n' >>"$FIXTURE_REPO/crates/demo/src/lib.rs"
+  install_runtime
+  [ "$status" -eq 0 ]
+  dirty_path="$output"
+  git -C "$FIXTURE_REPO" restore crates/demo/src/lib.rs
+  install_runtime
+  [ "$status" -eq 0 ]
+  [ "$output" != "$dirty_path" ]
+  [ "$(wc -l <"$BUILD_LOG" | tr -d ' ')" -eq 2 ]
 }
 
 @test "installer rejects a moving source and retains the prior current generation" {
@@ -198,6 +213,55 @@ SH
     [ -x "$output" ]
     [ ! -e "$boundary_home/.autospec/runtime-install.transaction" ]
   done
+}
+
+@test "planned journal survives crashes at stage and build directory creation boundaries" {
+  real_mkdir="$(command -v mkdir)"
+  for boundary in .stage. .runtime-build.; do
+    boundary_home="$TEST_ROOT/mkdir-${boundary//./x}"
+    mkdir "$boundary_home"
+    cat >"$FAKE_BIN/mkdir" <<SH
+#!/usr/bin/env bash
+case "\$*" in *'$boundary'*) kill -KILL "\$PPID"; sleep 1; exit 137 ;; esac
+exec '$real_mkdir' "\$@"
+SH
+    chmod +x "$FAKE_BIN/mkdir"
+    env HOME="$boundary_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >/dev/null &
+    pid=$!
+    wait "$pid" || true
+    journal="$boundary_home/.autospec/runtime-install.transaction"
+    [ -f "$journal" ]
+    grep -q '^phase=planned$' "$journal"
+    rm "$FAKE_BIN/mkdir"
+    run env HOME="$boundary_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+      bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "partial lock acquisition is never exposed and stale ownerless legacy locks recover" {
+  lock="$TEST_HOME/.autospec/runtime-install.lock"
+  mkdir -p "$lock"
+  chmod 700 "$TEST_HOME/.autospec" "$lock"
+  install_runtime
+  [ "$status" -eq 0 ]
+  [ -x "$output" ]
+
+  other_home="$TEST_ROOT/lock-crash-home"
+  mkdir "$other_home"
+  real_mv="$(command -v mv)"
+  cat >"$FAKE_BIN/mv" <<SH
+#!/usr/bin/env bash
+case "\$*" in *runtime-install.lock*) kill -KILL "\$PPID"; sleep 1; exit 137 ;; esac
+exec '$real_mv' "\$@"
+SH
+  chmod +x "$FAKE_BIN/mv"
+  env HOME="$other_home" PATH="$FAKE_BIN:$PATH" AUTOSPEC_TEST_BUILD_LOG="$BUILD_LOG" \
+    bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$FIXTURE_REPO" >/dev/null &
+  pid=$!
+  wait "$pid" || true
+  [ ! -e "$other_home/.autospec/runtime-install.lock" ]
 }
 
 @test "lock metadata rejects ambiguity but reclaims a reused process identity" {

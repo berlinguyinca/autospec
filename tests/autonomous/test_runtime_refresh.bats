@@ -22,6 +22,7 @@ setup() {
 }
 
 teardown() {
+  find "$TEST_ROOT" -type d -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$TEST_ROOT"
 }
 
@@ -49,10 +50,10 @@ identity() {
   identity
   baseline="$output"
 
-  printf 'docs only\n' >>"$FIXTURE_REPO/README.md"
-  printf 'notes\n' >"$FIXTURE_REPO/NOTES.md"
+  printf 'docs may be consumed by include_str\n' >>"$FIXTURE_REPO/README.md"
+  printf 'notes may be a build asset\n' >"$FIXTURE_REPO/NOTES.md"
   identity
-  [ "$output" = "$baseline" ]
+  [ "$output" != "$baseline" ]
 
   git -C "$FIXTURE_REPO" add README.md NOTES.md
   git -C "$FIXTURE_REPO" commit -qm docs
@@ -74,6 +75,15 @@ identity() {
   rm "$FIXTURE_REPO/crates/demo/Cargo.toml"
   identity
   [ "$output" != "$untracked" ]
+}
+
+@test "identity includes documentation assets that Rust may consume with include_str" {
+  printf 'pub const README: &str = include_str!("../../../README.md");\n' >>"$FIXTURE_REPO/crates/demo/src/lib.rs"
+  identity
+  baseline="$output"
+  printf 'referenced content\n' >>"$FIXTURE_REPO/README.md"
+  identity
+  [ "$output" != "$baseline" ]
 }
 
 @test "identity conservatively includes root and build-script reachable non-document assets" {

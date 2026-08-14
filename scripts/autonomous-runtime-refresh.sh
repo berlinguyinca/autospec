@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runtime source identity and immutable-generation freshness checks.
 
-autospec_runtime_receipt_schema=2
+autospec_runtime_receipt_schema=4
 
 autospec_runtime_error() {
     printf 'error:%s\n' "$1" >&2
@@ -51,7 +51,7 @@ autospec_runtime_repo_dir() {
 
 autospec_runtime_path_relevant() {
     case "$1" in
-        target/*|*/target/*|docs/*|*.md|*.mdx|LICENSE*|CHANGELOG*) return 1 ;;
+        target/*|*/target/*) return 1 ;;
         *) return 0 ;;
     esac
 }
@@ -170,13 +170,15 @@ autospec_runtime_valid_timestamp() {
 }
 
 autospec_runtime_write_receipt() {
-    local repo binary output source_digest identity_digest binary_digest head installed_at temporary parent
+    local repo binary output source_digest identity_digest binary_digest head clean_before clean_after snapshot installed_at temporary parent
     repo=$(autospec_runtime_repo_dir "$1") || return 2
-    binary=$2; output=$3; source_digest=$4; identity_digest=$5; head=$6
+    binary=$2; output=$3; source_digest=$4; identity_digest=$5; head=$6; clean_before=$7; clean_after=$8; snapshot=$9
     autospec_runtime_valid_sha256 "$source_digest" || return 2
     autospec_runtime_valid_sha256 "$identity_digest" || return 2
     binary_digest=$(autospec_runtime_file_sha256 "$binary") || return 2
     [[ $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { autospec_runtime_error repo-head-invalid; return 2; }
+    case "$clean_before:$clean_after" in 0:0|0:1|1:0|1:1) ;; *) return 2 ;; esac
+    autospec_runtime_valid_sha256 "$snapshot" || return 2
     case "$repo" in *$'\n'*|*$'\r'*) autospec_runtime_error receipt-repo-path-unsafe; return 2 ;; esac
     installed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 2
     parent=$(dirname "$output")
@@ -194,6 +196,9 @@ autospec_runtime_write_receipt() {
         printf 'head=%s\n' "$head"
         printf 'source_sha256=%s\n' "$source_digest"
         printf 'identity_sha256=%s\n' "$identity_digest"
+        printf 'clean_before=%s\n' "$clean_before"
+        printf 'clean_after=%s\n' "$clean_after"
+        printf 'snapshot_sha256=%s\n' "$snapshot"
         printf 'binary_sha256=%s\n' "$binary_digest"
         printf 'installed_at=%s\n' "$installed_at"
     } >"$temporary" || return 2
@@ -202,7 +207,7 @@ autospec_runtime_write_receipt() {
 }
 
 autospec_runtime_parse_receipt() {
-    local receipt line1 line2 line3 line4 line5 line6 line7 extra mode owner
+    local receipt line1 line2 line3 line4 line5 line6 line7 line8 line9 line10 extra mode owner
     receipt=$1
     [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
     mode=$(autospec_runtime_stat_mode "$receipt") || return 1
@@ -211,7 +216,8 @@ autospec_runtime_parse_receipt() {
     exec 3<"$receipt" || return 1
     if ! IFS= read -r line1 <&3 || ! IFS= read -r line2 <&3 || ! IFS= read -r line3 <&3 \
         || ! IFS= read -r line4 <&3 || ! IFS= read -r line5 <&3 || ! IFS= read -r line6 <&3 \
-        || ! IFS= read -r line7 <&3; then
+        || ! IFS= read -r line7 <&3 || ! IFS= read -r line8 <&3 || ! IFS= read -r line9 <&3 \
+        || ! IFS= read -r line10 <&3; then
         exec 3<&-
         return 1
     fi
@@ -222,13 +228,19 @@ autospec_runtime_parse_receipt() {
     case "$line3" in head=*) receipt_head=${line3#head=} ;; *) return 1 ;; esac
     case "$line4" in source_sha256=*) receipt_source=${line4#source_sha256=} ;; *) return 1 ;; esac
     case "$line5" in identity_sha256=*) receipt_identity=${line5#identity_sha256=} ;; *) return 1 ;; esac
-    case "$line6" in binary_sha256=*) receipt_binary=${line6#binary_sha256=} ;; *) return 1 ;; esac
-    case "$line7" in installed_at=*) receipt_installed=${line7#installed_at=} ;; *) return 1 ;; esac
+    case "$line6" in clean_before=*) receipt_clean_before=${line6#clean_before=} ;; *) return 1 ;; esac
+    case "$line7" in clean_after=*) receipt_clean_after=${line7#clean_after=} ;; *) return 1 ;; esac
+    case "$line8" in snapshot_sha256=*) receipt_snapshot=${line8#snapshot_sha256=} ;; *) return 1 ;; esac
+    case "$line9" in binary_sha256=*) receipt_binary=${line9#binary_sha256=} ;; *) return 1 ;; esac
+    case "$line10" in installed_at=*) receipt_installed=${line10#installed_at=} ;; *) return 1 ;; esac
     case "$receipt_repo" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
     [ "$receipt_schema" = "$autospec_runtime_receipt_schema" ] \
         && autospec_runtime_valid_sha256 "$receipt_source" \
         && autospec_runtime_valid_sha256 "$receipt_identity" \
         && autospec_runtime_valid_sha256 "$receipt_binary" \
+        && autospec_runtime_valid_sha256 "$receipt_snapshot" \
+        && { [ "$receipt_clean_before" = 0 ] || [ "$receipt_clean_before" = 1 ]; } \
+        && { [ "$receipt_clean_after" = 0 ] || [ "$receipt_clean_after" = 1 ]; } \
         && [[ $receipt_head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
         && autospec_runtime_valid_timestamp "$receipt_installed"
 }
@@ -252,6 +264,21 @@ autospec_runtime_verify_generation() {
     mode=$(autospec_runtime_stat_mode "$binary") || return 1
     owner=$(autospec_runtime_stat_owner "$binary") || return 1
     [ "$mode" = 500 ] && [ "$owner" = "$(id -u)" ] && [ "$receipt_binary" = "$actual" ]
+}
+
+autospec_runtime_verify_recorded_generation() {
+    local generation=$1 digest=$2 repo=$3 head=$4 source=$5 expected_mode=${6:-500}
+    local binary="$generation/autospec" receipt="$generation/receipt" expected_identity actual mode owner
+    [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
+    mode=$(autospec_runtime_stat_mode "$generation") || return 1
+    owner=$(autospec_runtime_stat_owner "$generation") || return 1
+    [ "$mode" = "$expected_mode" ] && [ "$owner" = "$(id -u)" ] || return 1
+    autospec_runtime_parse_receipt "$receipt" || return 1
+    expected_identity=$(autospec_runtime_tuple_digest "$repo" "$head" "$source") || return 1
+    [ "$receipt_repo" = "$repo" ] && [ "$receipt_head" = "$head" ] && [ "$receipt_source" = "$source" ] \
+        && [ "$receipt_identity" = "$digest" ] && [ "$expected_identity" = "$digest" ] || return 1
+    actual=$(autospec_runtime_file_sha256 "$binary") || return 1
+    [ "$receipt_binary" = "$actual" ]
 }
 
 autospec_runtime_check() {

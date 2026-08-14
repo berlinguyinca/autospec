@@ -40,6 +40,110 @@ finally:
 PY
 }
 
+runtime_fast_warm_generation() {
+    python3 - "$1" "$2" <<'PY'
+import hashlib, os, re, stat, sys
+repo_arg, state_root = sys.argv[1:]
+def snapshot(repo):
+    digest = hashlib.sha256()
+    for base, dirs, files in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d not in (".git", "target"))
+        relative_base = os.path.relpath(base, repo)
+        for name in dirs + sorted(files):
+            path = os.path.join(base, name)
+            relative = os.path.normpath(os.path.join(relative_base, name))
+            meta = os.lstat(path)
+            digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
+def git_head(repo):
+    dotgit = os.path.join(repo, ".git")
+    if os.path.isfile(dotgit):
+        with open(dotgit, encoding="utf-8") as handle:
+            value = handle.read().strip()
+        if not value.startswith("gitdir: "): raise ValueError("gitdir")
+        gitdir = os.path.realpath(os.path.join(repo, value[8:]))
+    else:
+        gitdir = dotgit
+    with open(os.path.join(gitdir, "HEAD"), encoding="ascii") as handle:
+        value = handle.read().strip()
+    if value.startswith("ref: "):
+        ref = value[5:]
+        ref_path = os.path.join(gitdir, ref)
+        if os.path.isfile(ref_path):
+            with open(ref_path, encoding="ascii") as handle: return handle.read().strip()
+        with open(os.path.join(gitdir, "packed-refs"), encoding="ascii") as handle:
+            for line in handle:
+                if line.rstrip().endswith(" " + ref): return line.split()[0]
+        raise ValueError("ref")
+    return value
+try:
+    repo = os.path.realpath(repo_arg)
+    head = git_head(repo)
+    root = os.path.join(state_root, "runtime-generations")
+    if any(os.path.lexists(os.path.join(state_root, name)) for name in
+           ("runtime-install.lock", "runtime-install.transaction", "runtime-install.recovery")):
+        raise ValueError("recovery pending")
+    current = os.path.join(root, "current")
+    digest = os.readlink(current)
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("bad pointer")
+    generation = os.path.join(root, digest)
+    binary, receipt = os.path.join(generation, "autospec"), os.path.join(generation, "receipt")
+    for path, mode in ((state_root, 0o700), (root, 0o700), (generation, 0o500),
+                       (binary, 0o500), (receipt, 0o400)):
+        meta = os.lstat(path)
+        if stat.S_IMODE(meta.st_mode) != mode or meta.st_uid != os.getuid() or stat.S_ISLNK(meta.st_mode):
+            raise ValueError("unsafe mode")
+    with open(receipt, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+    keys = ("schema", "repo_dir", "head", "source_sha256", "identity_sha256",
+            "clean_before", "clean_after", "snapshot_sha256", "binary_sha256", "installed_at")
+    values = {}
+    if len(lines) != len(keys): raise ValueError("receipt shape")
+    for key, line in zip(keys, lines):
+        prefix = key + "="
+        if not line.startswith(prefix): raise ValueError("receipt order")
+        values[key] = line[len(prefix):]
+    if values["schema"] != "4" or values["repo_dir"] != repo or values["head"] != head:
+        raise ValueError("tuple mismatch")
+    if values["clean_before"] != "1" or values["clean_after"] != "1":
+        raise ValueError("unclean build")
+    if values["snapshot_sha256"] != snapshot(repo):
+        raise ValueError("snapshot changed")
+    identity = hashlib.sha256((f"repo={repo}\0head={head}\0source={values['source_sha256']}\0").encode()).hexdigest()
+    if identity != digest or values["identity_sha256"] != digest:
+        raise ValueError("identity mismatch")
+    with open(binary, "rb") as handle:
+        binary_digest = hashlib.file_digest(handle, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(handle.read()).hexdigest()
+    if binary_digest != values["binary_sha256"]:
+        raise ValueError("binary mismatch")
+    print(binary)
+except (OSError, ValueError):
+    sys.exit(10)
+PY
+}
+
+runtime_snapshot_digest() {
+    python3 - "$1" <<'PY'
+import hashlib, os, sys
+repo = os.path.realpath(sys.argv[1]); digest = hashlib.sha256()
+for base, dirs, files in os.walk(repo):
+    dirs[:] = sorted(d for d in dirs if d not in (".git", "target"))
+    relative_base = os.path.relpath(base, repo)
+    for name in dirs + sorted(files):
+        path = os.path.join(base, name); relative = os.path.normpath(os.path.join(relative_base, name)); meta = os.lstat(path)
+        digest.update(f"{relative}\0{meta.st_mode}\0{meta.st_size}\0{meta.st_mtime_ns}\0".encode())
+print(digest.hexdigest())
+PY
+}
+
+runtime_rename_exclusive() {
+    python3 - "$1" "$2" <<'PY'
+import os, sys
+os.rename(sys.argv[1], sys.argv[2])
+PY
+}
+
 runtime_install_setup_dir() {
     if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
         runtime_install_error unsafe-state-path
@@ -111,7 +215,10 @@ runtime_reclaim_lock() {
     local recovery="$STATE_ROOT/runtime-install.recovery" abandoned
     if ! mkdir "$recovery" 2>/dev/null; then return 1; fi
     chmod 700 "$recovery" || { rmdir "$recovery"; return 1; }
-    if runtime_read_lock "$LOCK_DIR/owner" && ! runtime_lock_is_live; then
+    if [ ! -e "$LOCK_DIR/owner" ]; then
+        abandoned="$STATE_ROOT/.runtime-install.lock.abandoned.$$"
+        if mv "$LOCK_DIR" "$abandoned" 2>/dev/null; then rm -rf "$abandoned"; fi
+    elif runtime_read_lock "$LOCK_DIR/owner" && ! runtime_lock_is_live; then
         abandoned="$STATE_ROOT/.runtime-install.lock.abandoned.$$"
         if mv "$LOCK_DIR" "$abandoned" 2>/dev/null; then rm -rf "$abandoned"; fi
     fi
@@ -120,7 +227,22 @@ runtime_reclaim_lock() {
 
 runtime_acquire_lock() {
     local attempts=0 start temporary
-    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    ACQUIRE_DIR="$STATE_ROOT/.runtime-install.lock.acquire.$$"
+    rm -rf "$ACQUIRE_DIR"
+    mkdir "$ACQUIRE_DIR" || return 2
+    chmod 700 "$ACQUIRE_DIR" || return 2
+    start=$(runtime_process_start "$$") || { runtime_install_error process-identity; return 2; }
+    temporary="$ACQUIRE_DIR/owner"
+    umask 077
+    {
+        printf 'pid=%s\n' "$$"
+        printf 'start=%s\n' "$start"
+        printf 'created_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } >"$temporary" || return 2
+    chmod 600 "$temporary" || return 2
+    runtime_sync_path "$temporary" || return 2
+    runtime_sync_path "$ACQUIRE_DIR" || return 2
+    while ! runtime_rename_exclusive "$ACQUIRE_DIR" "$LOCK_DIR" 2>/dev/null; do
         [ -e "$LOCK_DIR" ] || continue
         autospec_runtime_private_dir "$LOCK_DIR" || { runtime_install_error unsafe-lock; return 2; }
         if ! runtime_read_lock "$LOCK_DIR/owner"; then
@@ -137,17 +259,7 @@ runtime_acquire_lock() {
         fi
         runtime_reclaim_lock || { sleep 0.05; continue; }
     done
-    chmod 700 "$LOCK_DIR" || return 2
-    start=$(runtime_process_start "$$") || { rmdir "$LOCK_DIR"; runtime_install_error process-identity; return 2; }
-    temporary="$LOCK_DIR/.owner.$$"
-    umask 077
-    {
-        printf 'pid=%s\n' "$$"
-        printf 'start=%s\n' "$start"
-        printf 'created_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    } >"$temporary" || return 2
-    chmod 600 "$temporary" || return 2
-    mv "$temporary" "$LOCK_DIR/owner" || return 2
+    ACQUIRE_DIR=''
     LOCK_HELD=1
 }
 
@@ -156,6 +268,7 @@ runtime_cleanup() {
     trap '' HUP INT TERM
     if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then chmod -R u+w "$STAGE_DIR" 2>/dev/null || true; rm -rf "$STAGE_DIR"; fi
     if [ -n "${BUILD_DIR:-}" ] && [ -d "$BUILD_DIR" ]; then rm -rf "$BUILD_DIR"; fi
+    if [ -n "${ACQUIRE_DIR:-}" ] && [ -d "$ACQUIRE_DIR" ]; then rm -rf "$ACQUIRE_DIR"; fi
     if [ "${LOCK_HELD:-0}" -eq 1 ]; then
         if [ "${PRESERVE_JOURNAL:-0}" -eq 0 ]; then rm -f "$JOURNAL"; fi
         rm -rf "$LOCK_DIR"
@@ -199,7 +312,7 @@ runtime_recover_interrupted() {
     case "$line8" in build=*) build=${line8#build=} ;; *) return 2 ;; esac
     case "$line9" in destination=*) destination=${line9#destination=} ;; *) return 2 ;; esac
     [ "$schema" = 1 ] || { runtime_install_error malformed-journal; return 2; }
-    case "$phase" in building|sealed|published) ;; *) runtime_install_error malformed-journal; return 2 ;; esac
+    case "$phase" in planned|building|sealed|published) ;; *) runtime_install_error malformed-journal; return 2 ;; esac
     [ "$repo" = "$(autospec_runtime_repo_dir "$repo" 2>/dev/null)" ] || { runtime_install_error malformed-journal; return 2; }
     [[ $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { runtime_install_error malformed-journal; return 2; }
     if ! autospec_runtime_valid_sha256 "$source" || ! autospec_runtime_valid_sha256 "$digest"; then
@@ -213,8 +326,12 @@ runtime_recover_interrupted() {
     case "$destination" in "$GENERATIONS_ROOT"/*) ;; *) runtime_install_error malformed-journal; return 2 ;; esac
     if [ -e "$stage" ] && [ -e "$destination" ]; then runtime_install_error ambiguous-transaction; return 2; fi
     if [ -e "$destination" ]; then
-        [ "$phase" != building ] || { runtime_install_error ambiguous-transaction; return 2; }
-        autospec_runtime_verify_generation "$repo" "$digest" "$destination" || { runtime_install_error invalid-published-generation; return 2; }
+        case "$phase" in sealed|published) ;; *) runtime_install_error ambiguous-transaction; return 2 ;; esac
+        autospec_runtime_verify_recorded_generation "$destination" "$digest" "$repo" "$head" "$source" \
+            || { runtime_install_error invalid-published-generation; return 2; }
+    elif [ -e "$stage" ] && { [ "$phase" = sealed ] || [ "$phase" = published ]; }; then
+        autospec_runtime_verify_recorded_generation "$stage" "$digest" "$repo" "$head" "$source" \
+            || { runtime_install_error invalid-sealed-generation; return 2; }
     fi
     [ -d "$stage" ] && { chmod -R u+w "$stage" 2>/dev/null || return 2; rm -rf "$stage" || return 2; }
     [ -d "$build" ] && rm -rf "$build"
@@ -234,6 +351,7 @@ runtime_publish_pointer() {
 runtime_publish_bin_link() {
     local bin_dir="$STATE_ROOT/bin" pointer="$STATE_ROOT/bin/autospec" temporary="$STATE_ROOT/bin/.autospec.$$"
     runtime_install_setup_dir "$bin_dir" || return 2
+    if [ -L "$pointer" ] && [ "$(readlink "$pointer" 2>/dev/null)" = '../runtime-generations/current/autospec' ]; then return 0; fi
     if [ -e "$pointer" ] && [ ! -L "$pointer" ] && [ ! -f "$pointer" ]; then runtime_install_error unsafe-bin-target; return 2; fi
     rm -f "$temporary"
     ln -s '../runtime-generations/current/autospec' "$temporary" || return 2
@@ -251,36 +369,41 @@ runtime_warm_generation() {
     generation="$GENERATIONS_ROOT/$target"
     autospec_runtime_parse_receipt "$generation/receipt" || return 1
     [ "$receipt_repo" = "$REPO_CANONICAL" ] && [ "$receipt_head" = "$SOURCE_HEAD" ] \
-        && [ "$receipt_identity" = "$target" ] || return 1
+        && [ "$receipt_identity" = "$target" ] && [ "$receipt_clean_before" = 1 ] \
+        && [ "$receipt_clean_after" = 1 ] || return 1
     autospec_runtime_verify_generation "$REPO_CANONICAL" "$target" "$generation" || return 1
-    runtime_publish_bin_link || return 2
     printf '%s/autospec\n' "$generation"
 }
 
 runtime_install_main() {
-    local repo='' pre_tuple post_tuple post_repo post_head post_source post_digest built_binary generation receipt
+    local repo='' pre_tuple post_tuple post_repo post_head post_source post_digest snapshot built_binary generation receipt
     while [ "$#" -gt 0 ]; do
         case "$1" in --repo-dir) [ "$#" -ge 2 ] && [ -z "$repo" ] || { runtime_install_error usage; return 2; }; repo=$2; shift 2 ;;
             *) runtime_install_error usage; return 2 ;;
         esac
     done
     [ -n "$repo" ] || { runtime_install_error usage; return 2; }
+    STATE_ROOT="${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}"
+    if runtime_fast_warm_generation "$repo" "$STATE_ROOT"; then return 0; fi
     repo=$(autospec_runtime_repo_dir "$repo") || return 2
     umask 077
-    STATE_ROOT="${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}"
     GENERATIONS_ROOT="${AUTOSPEC_RUNTIME_ROOT:-$STATE_ROOT/runtime-generations}"
     LOCK_DIR="$STATE_ROOT/runtime-install.lock"
     JOURNAL="$STATE_ROOT/runtime-install.transaction"
-    LOCK_HELD=0; PRESERVE_JOURNAL=0; STAGE_DIR=''; BUILD_DIR=''; SOURCE_DIGEST=''
+    LOCK_HELD=0; PRESERVE_JOURNAL=0; STAGE_DIR=''; BUILD_DIR=''; ACQUIRE_DIR=''; SOURCE_DIGEST=''
     runtime_install_setup_dir "$STATE_ROOT" || return 2
     runtime_install_setup_dir "$GENERATIONS_ROOT" || return 2
-    runtime_acquire_lock || return 2
+    REPO_CANONICAL=$repo
+    SOURCE_HEAD=$(autospec_runtime_head "$repo") || return 2
+    if [ ! -e "$LOCK_DIR" ] && [ ! -e "$JOURNAL" ] && [ ! -e "$STATE_ROOT/runtime-install.recovery" ]; then
+        if runtime_warm_generation; then return 0; fi
+    fi
     trap runtime_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 129' HUP
     trap 'exit 143' TERM
+    runtime_acquire_lock || return 2
     runtime_recover_interrupted || return 2
-    REPO_CANONICAL=$repo
     SOURCE_HEAD=$(autospec_runtime_head "$repo") || return 2
     if runtime_warm_generation; then return 0; fi
     pre_tuple=$(autospec_runtime_identity_tuple "$repo") || return 2
@@ -288,6 +411,7 @@ runtime_install_main() {
     SOURCE_HEAD=$(printf '%s\n' "$pre_tuple" | sed -n '2p')
     SOURCE_SHA=$(printf '%s\n' "$pre_tuple" | sed -n '3p')
     SOURCE_DIGEST=$(printf '%s\n' "$pre_tuple" | sed -n '4p')
+    if [ -z "$(git -C "$repo" status --porcelain --untracked-files=all 2>/dev/null)" ]; then CLEAN_BEFORE=1; else CLEAN_BEFORE=0; fi
     generation="$GENERATIONS_ROOT/$SOURCE_DIGEST"
     if autospec_runtime_verify_generation "$repo" "$SOURCE_DIGEST" "$generation"; then
         runtime_publish_bin_link || return 2
@@ -298,9 +422,10 @@ runtime_install_main() {
     [ ! -e "$generation" ] && [ ! -L "$generation" ] || { runtime_install_error invalid-existing-generation; return 2; }
     STAGE_DIR="$GENERATIONS_ROOT/.stage.$SOURCE_DIGEST"
     DESTINATION="$generation"
+    BUILD_DIR="$STATE_ROOT/.runtime-build.$SOURCE_DIGEST"
+    runtime_write_journal planned || return 2
     mkdir "$STAGE_DIR" || return 2
     chmod 700 "$STAGE_DIR" || return 2
-    BUILD_DIR="$STATE_ROOT/.runtime-build.$SOURCE_DIGEST"
     mkdir "$BUILD_DIR" || return 2
     chmod 700 "$BUILD_DIR" || return 2
     runtime_write_journal building || return 2
@@ -312,13 +437,15 @@ runtime_install_main() {
     post_tuple=$(autospec_runtime_identity_tuple "$repo") || return 2
     post_repo=$(printf '%s\n' "$post_tuple" | sed -n '1p'); post_head=$(printf '%s\n' "$post_tuple" | sed -n '2p')
     post_source=$(printf '%s\n' "$post_tuple" | sed -n '3p'); post_digest=$(printf '%s\n' "$post_tuple" | sed -n '4p')
+    if [ -z "$(git -C "$repo" status --porcelain --untracked-files=all 2>/dev/null)" ]; then CLEAN_AFTER=1; else CLEAN_AFTER=0; fi
+    if [ "$CLEAN_BEFORE" = 1 ] && [ "$CLEAN_AFTER" = 1 ]; then snapshot=$(runtime_snapshot_digest "$repo") || return 2; else snapshot=$(printf '%064d' 0); fi
     [ "$post_repo" = "$REPO_CANONICAL" ] && [ "$post_head" = "$SOURCE_HEAD" ] \
         && [ "$post_source" = "$SOURCE_SHA" ] && [ "$post_digest" = "$SOURCE_DIGEST" ] \
         || { runtime_install_error source-moved; return 2; }
     cp "$built_binary" "$STAGE_DIR/autospec" || return 2
     chmod 500 "$STAGE_DIR/autospec" || return 2
     receipt="$STAGE_DIR/receipt"
-    autospec_runtime_write_receipt "$repo" "$STAGE_DIR/autospec" "$receipt" "$SOURCE_SHA" "$SOURCE_DIGEST" "$SOURCE_HEAD" || return 2
+    autospec_runtime_write_receipt "$repo" "$STAGE_DIR/autospec" "$receipt" "$SOURCE_SHA" "$SOURCE_DIGEST" "$SOURCE_HEAD" "$CLEAN_BEFORE" "$CLEAN_AFTER" "$snapshot" || return 2
     autospec_runtime_verify_generation "$repo" "$SOURCE_DIGEST" "$STAGE_DIR" 700 || { runtime_install_error verification-failed; return 2; }
     runtime_sync_path "$STAGE_DIR/autospec" || return 2
     runtime_sync_path "$receipt" || return 2
