@@ -176,61 +176,13 @@ EOF
 
 
 install_autospec_runtime_binary() {
-    cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-    runtime_source="$cargo_target_dir/release/autospec"
-    runtime_target="$HOME/.autospec/bin/autospec"
-    autospec_bin_dir="$HOME/.autospec/bin"
-
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
-        info "[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec"
+        info "[dry-run] install_autospec_runtime_binary: $REPO_ROOT/scripts/autospec-runtime-install.sh --repo-dir $REPO_ROOT"
         return 0
     fi
 
-    info "install_autospec_runtime_binary: building autospec-cli release binary"
-    # Test and automation callers often override HOME to isolate install state.
-    # cargo is normally a rustup shim under the invoking user's ~/.cargo, so
-    # preserve that discovered toolchain location when HOME no longer points
-    # to the account that owns it. Explicit CARGO_HOME/RUSTUP_HOME always win.
-    if [ -z "${CARGO_HOME:-}" ] || [ -z "${RUSTUP_HOME:-}" ]; then
-        cargo_bin="$(command -v cargo 2>/dev/null || true)"
-        case "$cargo_bin" in
-            */.cargo/bin/cargo)
-                rustup_owner_home="${cargo_bin%/.cargo/bin/cargo}"
-                if [ -z "${CARGO_HOME:-}" ] && [ -d "$rustup_owner_home/.cargo" ]; then
-                    CARGO_HOME="$rustup_owner_home/.cargo"
-                    export CARGO_HOME
-                fi
-                if [ -z "${RUSTUP_HOME:-}" ] && [ -d "$rustup_owner_home/.rustup" ]; then
-                    RUSTUP_HOME="$rustup_owner_home/.rustup"
-                    export RUSTUP_HOME
-                fi
-                ;;
-        esac
-    fi
-    (
-        cd "$REPO_ROOT"
-        cargo build --release -p autospec-cli
-    )
-    if [ ! -f "$runtime_source" ]; then
-        err "install_autospec_runtime_binary: build did not produce $runtime_source"
-        return 1
-    fi
-
-    mkdir -p "$autospec_bin_dir"
-    runtime_temporary="$(mktemp "$autospec_bin_dir/.autospec.XXXXXX")"
-    if ! cp "$runtime_source" "$runtime_temporary"; then
-        rm -f "$runtime_temporary"
-        return 1
-    fi
-    if ! chmod +x "$runtime_temporary"; then
-        rm -f "$runtime_temporary"
-        return 1
-    fi
-    if ! mv "$runtime_temporary" "$runtime_target"; then
-        rm -f "$runtime_temporary"
-        return 1
-    fi
+    runtime_target="$(bash "$REPO_ROOT/scripts/autospec-runtime-install.sh" --repo-dir "$REPO_ROOT")" || return 1
     info "install_autospec_runtime_binary: installed $runtime_target"
 }
 

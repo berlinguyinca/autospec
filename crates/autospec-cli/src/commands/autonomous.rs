@@ -1,8 +1,4 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use super::{claim, queue, CommandFailure};
 use autospec_core::autonomous::blast_radius::{
     classify_paths_with_registry_name, default_legacy_registry, parse_fenced_surfaces,
 };
@@ -36,16 +32,26 @@ use nix::sys::signal::{kill, killpg, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(unix)]
 use nix::unistd::Pid;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use super::{claim, queue, CommandFailure};
+#[allow(dead_code)]
+pub(crate) mod accountability;
+mod accountability_runtime;
+use accountability_runtime::*;
 mod blocked_cycle;
 mod foreground_failure;
 mod lifecycle_stop_notice;
+mod launch;
+use launch::*;
 use foreground_failure::ForegroundFailure;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
@@ -58,13 +64,18 @@ use one_shot_selector::{
 #[allow(dead_code)]
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
-mod premerge;
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
+mod premerge;
 mod resilience;
-mod toolchain_freshness;
+#[cfg(test)]
+mod restart_policy_tests;
+#[cfg(test)]
+#[path = "autonomous/review_governance_tests.rs"]
+mod review_governance_tests;
+mod supervisor;
 #[allow(dead_code)]
 mod tier15;
 #[allow(dead_code)]
@@ -76,22 +87,19 @@ mod tier2_publisher;
 mod tier2_publisher_tests;
 #[allow(dead_code)]
 mod tier2_receipts;
-mod tier2_runner;
-#[cfg(test)]
-mod tier2_runner_tests;
 #[cfg(test)]
 mod tier2_receipts_failure_prefix_tests;
 #[cfg(test)]
 mod tier2_receipts_recovery_tests;
 #[cfg(test)]
 mod tier2_receipts_tests;
+mod tier2_runner;
+#[cfg(test)]
+mod tier2_runner_tests;
 #[allow(dead_code)]
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
-#[cfg(test)]
-#[path = "autonomous/review_governance_tests.rs"]
-mod review_governance_tests;
 #[cfg(test)]
 mod tier3_receipts_failure_prefix_tests;
 #[cfg(test)]
@@ -110,6 +118,7 @@ mod tier4_receipts_recovery_tests;
 mod tier4_receipts_state_tests;
 #[cfg(test)]
 mod tier4_receipts_tests;
+mod toolchain_freshness;
 mod waterfall;
 mod waterfall_coordinator;
 mod waterfall_policy;
@@ -117,9 +126,6 @@ mod waterfall_policy;
 mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
-mod supervisor;
-#[cfg(test)]
-mod restart_policy_tests;
 
 use supervisor::supervise;
 
@@ -159,6 +165,7 @@ struct Options {
     no_digest: bool,
     health_branch: Option<String>,
     issue: Option<u64>,
+    epic: Option<u64>,
     stop_mode: StopMode,
 }
 
@@ -191,6 +198,7 @@ impl Default for Options {
             no_digest: false,
             health_branch: None,
             issue: None,
+            epic: None,
             stop_mode: StopMode::Graceful,
         }
     }
@@ -240,7 +248,7 @@ impl StopMode {
 
 type EarlyRouteHandler = fn(&[String]) -> Result<(), CommandFailure>;
 
-const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
+const EARLY_ROUTES: [(&str, EarlyRouteHandler); 8] = [
     ("premerge", |args| premerge::run(&args[1..])),
     ("implementer-wait-failed", |args| {
         implementer_wait_failed(&args[1..])
@@ -250,6 +258,7 @@ const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
     ("executor-result", executor_result),
     ("executor-child", executor_child),
     ("lifecycle", lifecycle),
+    ("accountability-event", record_accountability_event_command),
 ];
 
 fn dispatch_early_route(args: &[String]) -> Option<Result<(), CommandFailure>> {
@@ -274,6 +283,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match options.subcommand.as_str() {
         "start" => start(options, launch_mode),
         "restart" => restart(options),
+        "resume" => start(options, LaunchMode::Detached),
         "status" => status(options),
         "monitor" => monitor(options).map_err(CommandFailure::diagnostic),
         "supervise" => supervise(options).map_err(CommandFailure::diagnostic),
@@ -731,6 +741,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     return Err("--issue accepts exactly one issue number".to_string());
                 }
             }
+            "--epic" => {
+                let epic = option_value(args, &mut index, "--epic")?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| "--epic must be a positive integer".to_string())?;
+                if options.epic.replace(epic).is_some() {
+                    return Err("--epic accepts exactly one issue number".to_string());
+                }
+            }
             "--once" => options.once = true,
             "--json" => options.json = true,
             "--follow" => options.follow = true,
@@ -769,6 +789,12 @@ fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
             "--json is not supported with --follow; use autospec autonomous status --json"
                 .to_string(),
         );
+    }
+    if options.subcommand == "resume" && options.epic.is_none() {
+        return Err("autospec autonomous resume requires --epic N".to_string());
+    }
+    if options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume") {
+        return Err("--epic is valid only with autospec autonomous start or resume".to_string());
     }
     Ok(if options.follow {
         LaunchMode::Follow
@@ -1073,6 +1099,8 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
     let options = options_with_resolved_repo(options, &layout);
     if launch_mode == LaunchMode::Follow {
         if let Some(conductor) = live_follow_target(&layout).map_err(CommandFailure::diagnostic)? {
+            verify_follow_accountability(&layout, options.epic)
+                .map_err(CommandFailure::diagnostic)?;
             print_follow_attach_summary(&options, &layout, &conductor);
             return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
         }
@@ -1084,6 +1112,8 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
                 if let Some(conductor) = wait_for_follow_target_after_held(&layout)
                     .map_err(CommandFailure::diagnostic)?
                 {
+                    verify_follow_accountability(&layout, options.epic)
+                        .map_err(CommandFailure::diagnostic)?;
                     print_follow_attach_summary(&options, &layout, &conductor);
                     return follow_scoped_conductor(&layout, &options)
                         .map_err(CommandFailure::diagnostic);
@@ -1092,7 +1122,14 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
             }
             Err(error) => return Err(error.into_command_failure()),
         };
-    let launched = start_after_lease(&layout, &options, &lifecycle, &lease);
+    let binding = match bind_accountability_epic(&layout, &options, &lease, false) {
+        Ok(binding) => binding,
+        Err(error) => {
+            release_launch_lease(&layout.repo, &lease)?;
+            return Err(error);
+        }
+    };
+    let launched = start_after_lease(&layout, &options, &lifecycle, &lease, &binding);
     let (conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
         Err(error) => {
@@ -1103,15 +1140,19 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
 
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"started\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"started\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&options.repo),
             json_escape(&options.repo_dir),
+            json_escape(&binding.run_id),
+            binding.number,
+            json_escape(&binding.url),
             unit_json(&conductor),
             unit_json(&monitor),
             unit_json(&supervisor)
         );
     } else {
         println!("autospec autonomous started");
+        println!("accountability epic: {}", binding.url);
         println!("conductor pid: {}", conductor.pid);
         println!("monitor pid: {}", monitor.pid);
         println!("supervisor pid: {}", supervisor.pid);
@@ -1134,23 +1175,6 @@ fn live_follow_target(layout: &RunLayout) -> Result<Option<UnitStatus>, String> 
     }
 }
 
-fn wait_for_follow_target_after_held(layout: &RunLayout) -> Result<Option<UnitStatus>, String> {
-    const ATTEMPTS: usize = 50;
-    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
-    println!("autospec autonomous follow: waiting for scoped conductor metadata after held lifecycle lease");
-    io::stdout()
-        .flush()
-        .map_err(|error| format!("cannot flush stdout: {error}"))?;
-    for _ in 0..ATTEMPTS {
-        if let Some(conductor) = live_follow_target(layout)? {
-            return Ok(Some(conductor));
-        }
-        thread::sleep(RETRY_INTERVAL);
-    }
-    Ok(None)
-}
-
 fn print_follow_attach_summary(options: &Options, layout: &RunLayout, conductor: &UnitStatus) {
     if options.json {
         println!(
@@ -1170,15 +1194,20 @@ fn start_after_lease(
     options: &Options,
     lifecycle: &LifecycleDecision,
     lease: &resilience::ConductorLease,
+    binding: &accountability::github::EpicBinding,
 ) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
     let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
     let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
     create_launch_directories(layout)?;
     prepare_start_scope(layout, options).map_err(CommandFailure::diagnostic)?;
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
-    write_launch_json(layout, options, &foreground, &commands)
+    write_launch_json(layout, options, &foreground, &commands, Some(binding))
         .map_err(CommandFailure::diagnostic)?;
-    launch_units(layout, options, &foreground, &commands, lease)
+    resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
+    let units = launch_units(layout, options, &foreground, &commands, lease)?;
+    mark_spawned_or_terminate(layout, &units)?;
+    Ok(units)
 }
 
 fn restart_after_lease(
@@ -1187,16 +1216,20 @@ fn restart_after_lease(
     lifecycle: &LifecycleDecision,
     lease: &resilience::ConductorLease,
     stopped: usize,
+    binding: &accountability::github::EpicBinding,
 ) -> Result<(usize, UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
     let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
     let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
     create_launch_directories(layout)?;
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
     clear_stop_flag(layout).map_err(CommandFailure::diagnostic)?;
-    write_launch_json(layout, options, &foreground, &commands)
+    write_launch_json(layout, options, &foreground, &commands, Some(binding))
         .map_err(CommandFailure::diagnostic)?;
-    let (conductor, monitor, supervisor) =
-        launch_units(layout, options, &foreground, &commands, lease)?;
+    resilience::assert_lifecycle_before_spawn(&layout.repo, lease)
+        .map_err(resilience_lease_error)?;
+    let units = launch_units(layout, options, &foreground, &commands, lease)?;
+    mark_spawned_or_terminate(layout, &units)?;
+    let (conductor, monitor, supervisor) = units;
     Ok((stopped, conductor, monitor, supervisor))
 }
 
@@ -1574,84 +1607,7 @@ enum RepairOutcome {
     Restarted(UnitRecord),
     AlreadyRunning(String),
     StopRequested,
-}
-
-fn repair_stopped_conductor(
-    layout: &RunLayout,
-    options: &Options,
-) -> Result<RepairOutcome, String> {
-    let _repair_lock = acquire_supervisor_repair_lock(layout)?;
-    if persisted_stop_mode(layout)?.is_some() {
-        return Ok(RepairOutcome::StopRequested);
-    }
-    let recorded = read_unit("conductor", layout);
-    if recorded.metadata_state == UnitMetadataState::Live {
-        return Ok(RepairOutcome::AlreadyRunning(recorded.pid));
-    }
-    if recorded.metadata_state == UnitMetadataState::Ambiguous {
-        return Err("conductor metadata is ambiguous".to_string());
-    }
-    // Clear stale records while the terminated owner's lease still fences new launches. If the
-    // lease were released first, another supervisor could publish replacement metadata here.
-    remove_stale_unit_metadata(&recorded)?;
-    if !recorded.pid.is_empty() {
-        reap_terminated_child(&recorded.pid)?;
-        release_terminated_owner(layout, &recorded.pid)?;
-    }
-    let (lifecycle, lease) = acquire_lifecycle_start(layout, options, LifecycleTransition::Start)
-        .map_err(|error| error.into_command_failure().message)?;
-    let repaired = (|| {
-        create_launch_directories(layout).map_err(|error| error.message)?;
-        persist_lifecycle_decision(layout, &lifecycle)?;
-        let command = foreground_command(options)?;
-        spawn_unit(
-            "conductor",
-            &command,
-            &options.repo_dir,
-            layout,
-            &layout.log_dir,
-            log_override_for("conductor", options),
-            Some(lease.token()),
-        )
-    })();
-    if repaired.is_err() {
-        release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
-    }
-    repaired.map(RepairOutcome::Restarted)
-}
-
-fn acquire_supervisor_repair_lock(layout: &RunLayout) -> Result<File, String> {
-    fs::create_dir_all(&layout.state_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
-    let path = layout.state_dir.join("supervisor-repair.lock");
-    if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if !metadata.file_type().is_file() {
-            return Err(format!(
-                "supervisor repair lock is not a regular file: {}",
-                path.display()
-            ));
-        }
-    }
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
-    let lock = options.open(&path).map_err(|error| {
-        format!(
-            "cannot open supervisor repair lock {}: {error}",
-            path.display()
-        )
-    })?;
-    if !lock
-        .metadata()
-        .map_err(|error| format!("cannot inspect supervisor repair lock: {error}"))?
-        .is_file()
-    {
-        return Err("supervisor repair lock is not a regular file".to_string());
-    }
-    lock.lock()
-        .map_err(|error| format!("cannot acquire supervisor repair lock: {error}"))?;
-    Ok(lock)
+    TerminalAccountability,
 }
 
 fn status(options: Options) -> Result<(), CommandFailure> {
@@ -1678,9 +1634,10 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     let toolchain = toolchain_freshness::ToolchainFreshness::load();
+    let accountability = accountability_view(&layout);
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"accountability\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1702,6 +1659,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             spend.filed_issues,
             spend.budget_issues,
             toolchain.to_json(),
+            accountability.json(),
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
@@ -1709,6 +1667,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     } else {
         println!("autospec autonomous status: ok");
         toolchain.print_human();
+        accountability.print_human();
     }
     Ok(())
 }
@@ -1751,7 +1710,12 @@ fn stop(options: Options) -> Result<(), String> {
     } else {
         print!(
             "{}",
-            lifecycle_stop_notice::render(options.stop_mode.as_str(), &stop_flag, stopped, draining)
+            lifecycle_stop_notice::render(
+                options.stop_mode.as_str(),
+                &stop_flag,
+                stopped,
+                draining
+            )
         );
     }
     Ok(())
@@ -1803,7 +1767,14 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
         };
         (lifecycle, lease, stopped)
     };
-    let launched = restart_after_lease(&layout, &options, &lifecycle, &lease, stopped);
+    let binding = match bind_accountability_epic(&layout, &options, &lease, true) {
+        Ok(binding) => binding,
+        Err(error) => {
+            release_launch_lease(&layout.repo, &lease)?;
+            return Err(error);
+        }
+    };
+    let launched = restart_after_lease(&layout, &options, &lifecycle, &lease, stopped, &binding);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
         Err(error) => {
@@ -1813,15 +1784,19 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     };
     if stop_options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"restart\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"restart\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&options.repo),
             stopped,
+            json_escape(&binding.run_id),
+            binding.number,
+            json_escape(&binding.url),
             unit_json(&conductor),
             unit_json(&monitor),
             unit_json(&supervisor)
         );
     } else {
         println!("autospec autonomous restarted");
+        println!("accountability epic: {}", binding.url);
     }
     Ok(())
 }
@@ -1855,14 +1830,16 @@ fn list(options: Options) -> Result<(), String> {
             let monitor = read_unit("monitor", &layout);
             let supervisor = read_unit("supervisor", &layout);
             let state = read_state_metadata(&layout);
+            let accountability = accountability_view(&layout);
             rows.push(format!(
-                "{{\"scope\":\"{}\",\"slug\":\"{}\",\"repo\":\"{}\",\"alive\":{},\"last_cycle\":\"{}\",\"park_state\":\"{}\",\"launch\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+                "{{\"scope\":\"{}\",\"slug\":\"{}\",\"repo\":\"{}\",\"alive\":{},\"last_cycle\":\"{}\",\"park_state\":\"{}\",\"accountability\":{},\"launch\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
                 json_escape(&scope),
                 json_escape(&scope),
                 json_escape(&layout.repo),
                 conductor.running,
                 json_escape(&state.last_cycle),
                 json_escape(state.status.as_deref().unwrap_or_default()),
+                accountability.json(),
                 launch,
                 unit_status_json(&conductor),
                 unit_status_json(&monitor),
@@ -2183,7 +2160,7 @@ fn gh_branch_exists(repo: &str, branch: &str) -> bool {
         "check the mainline branch",
     )
     .map(|output| output.status.success())
-        .unwrap_or(false)
+    .unwrap_or(false)
 }
 
 fn gh_api(endpoint: &str) -> Result<String, String> {
@@ -2227,15 +2204,17 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
     let inherited_lease = inherited_foreground_lease(&layout.repo)?;
-    let continuous =
-        inherited_lease.is_some() || (options.subcommand == "start" && options.foreground);
+    let inherited = inherited_lease.is_some();
+    let continuous = inherited || (options.subcommand == "start" && options.foreground);
     let config = match load_autonomous_config(&options.repo_dir) {
         Ok(config) => config,
         Err(error) => {
             return match inherited_lease.as_ref() {
-                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                    Err(CommandFailure::diagnostic(error))
-                }),
+                Some(lease) => finish_foreground_with_lease(
+                    &layout,
+                    lease,
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
         }
@@ -2244,9 +2223,11 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         Ok(mode) => mode,
         Err(error) => {
             return match inherited_lease.as_ref() {
-                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                    Err(CommandFailure::diagnostic(error))
-                }),
+                Some(lease) => finish_foreground_with_lease(
+                    &layout,
+                    lease,
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
         }
@@ -2260,10 +2241,13 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         let persisted =
             persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic);
         return match inherited_lease.as_ref() {
-            Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
-                persisted?;
-                emit_lifecycle_decision(lifecycle)
-            }),
+            Some(lease) => finish_foreground_with_lease(
+                &layout,
+                lease,
+                persisted
+                    .map(|()| ForegroundCompletion::Lifecycle(lifecycle))
+                    .map_err(ForegroundFailure::Diagnostic),
+            ),
             None => {
                 persisted?;
                 emit_lifecycle_decision(lifecycle)
@@ -2273,10 +2257,24 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
 
     let (lease, admission) =
         acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
+    let accountability = if inherited {
+        verify_existing_accountability(&layout, &lease).map_err(CommandFailure::diagnostic)
+    } else {
+        bind_accountability_epic(&layout, &options, &lease, false).and_then(|binding| {
+            let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
+            let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
+            write_launch_json(&layout, &options, &foreground, &commands, Some(&binding))
+                .map_err(CommandFailure::diagnostic)?;
+            mark_accountability_spawned(&layout)
+        })
+    };
+    if let Err(error) = accountability {
+        return finish_with_launch_lease(&layout.repo, &lease, || Err(error));
+    }
     let result = run_foreground_cycles(
         &layout, &options, &config, scope, &lease, admission, continuous,
     );
-    finish_foreground_with_lease(&layout.repo, &lease, result)
+    finish_foreground_with_lease(&layout, &lease, result)
 }
 
 fn run_foreground_cycles(
@@ -2302,8 +2300,11 @@ fn run_foreground_cycles(
     loop {
         let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
             .map_err(resilience_lease_error)?;
-        let cycle =
-            run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission);
+        let cycle = retry_pending_accountability_projection(layout, lease)
+            .map_err(ForegroundFailure::from)
+            .and_then(|_| {
+                run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission)
+            });
         let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
         let mut completion = match cycle {
             Ok(completion) => completion,
@@ -3088,6 +3089,18 @@ fn scan_foreground(
 
 fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<ConductorState, String> {
     queue::review_safety_for_repo(&layout.repo, 1, None).map_err(command_error)?;
+    record_accountability_event(
+        layout,
+        accountability_event(
+            accountability::EventKind::Verified,
+            "Verified the next queue candidate against the autonomous safety contract",
+            "Unsafe or incomplete issues must not advance to claim acquisition",
+            "queue safety review completed",
+        )
+        .map_err(|error| error.to_string())?,
+        false,
+    )
+    .map_err(|error| error.to_string())?;
     let state = state
         .transition(ConductorEvent::SafetyReviewed)
         .map_err(|error| format!("cannot record foreground safety review: {error}"))?;
@@ -3133,6 +3146,21 @@ fn select_foreground(
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundSelectionResult::Lifecycle(lifecycle));
     }
+    record_accountability_event(
+        layout,
+        accountability_event(
+            accountability::EventKind::WorkSelected {
+                issue: Some(selection.issue),
+            },
+            format!(
+                "Selected issue {} for autonomous implementation",
+                selection.issue
+            ),
+            "The dependency-aware queue chose the next safe unit of work",
+            format!("issue {} selected by the ready queue", selection.issue),
+        )?,
+        false,
+    )?;
     let state = state
         .transition(ConductorEvent::Selected {
             issue: selection.issue,
@@ -3224,12 +3252,39 @@ fn execute_foreground_dispatch(
             None => {
                 let branch = format!("feat/autonomous-issue-{}", selection.issue);
                 let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
+                record_accountability_event(
+                    layout,
+                    accountability_event(
+                        accountability::EventKind::ClaimStarted {
+                            issue: selection.issue,
+                        },
+                        format!("Started claim acquisition for issue {}", selection.issue),
+                        "The claim intent must be durable before remote ownership changes",
+                        format!("issue {} claim mutation is next", selection.issue),
+                    )?,
+                    false,
+                )?;
                 let lease = claim::acquire_for_conductor(
                     &layout.repo,
                     selection.issue,
                     &worker_id,
                     &branch,
                     base_branch,
+                )?;
+                record_accountability_event(
+                    layout,
+                    accountability_event(
+                        accountability::EventKind::IssueClaimed {
+                            issue: selection.issue,
+                        },
+                        format!(
+                            "Claimed issue {} for its isolated executor",
+                            selection.issue
+                        ),
+                        "Claim ownership prevents concurrent implementations from racing",
+                        format!("authoritative claim acquired for issue {}", selection.issue),
+                    )?,
+                    false,
                 )?;
                 persist_claim_acquisition_receipt(state_path, &lease)
                     .map_err(CommandFailure::diagnostic)?;
@@ -3241,6 +3296,18 @@ fn execute_foreground_dispatch(
             }
         };
 
+        record_accountability_event(
+            layout,
+            accountability_event(
+                accountability::EventKind::ImplementationStarted {
+                    issue: selection.issue,
+                },
+                format!("Started isolated implementation for issue {}", selection.issue),
+                "Implementation intent must be durable before the executor mutates its worktree",
+                format!("issue {} executor invocation is next", selection.issue),
+            )?,
+            false,
+        )?;
         let receipt = ExecutorRequest::for_selected(
             layout,
             &options.repo_dir,
@@ -3254,7 +3321,7 @@ fn execute_foreground_dispatch(
         )
         .map_or_else(
             |error| ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::from(error)),
-            |request| request.run(),
+            |request| request.run(layout, selection.issue),
         );
         if receipt.ownership_lost {
             state = retire_foreground_ownership(state_path, state)
@@ -3265,6 +3332,7 @@ fn execute_foreground_dispatch(
             persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
             return Ok(ForegroundDispatchResult::State(Box::new(state)));
         }
+        record_executor_accountability(layout, selection.issue, &receipt)?;
         let retryable_released =
             !receipt.bridge_finalized && matches!(receipt.outcome, ConductorOutcome::Retryable(_));
         if retryable_released {
@@ -3968,6 +4036,7 @@ struct ExecutorRequest {
 #[derive(Debug, Clone)]
 struct ExecutorReceipt {
     outcome: ConductorOutcome,
+    pull_request: Option<u64>,
     bridge_finalized: bool,
     pending: bool,
     ownership_lost: bool,
@@ -4014,11 +4083,20 @@ impl ExecutorRequest {
         })
     }
 
-    fn run(&self) -> ExecutorReceipt {
+    fn run(&self, layout: &RunLayout, issue: u64) -> ExecutorReceipt {
+        #[cfg(not(target_os = "linux"))]
+        let _ = (layout, issue);
         let receipt = {
             let mut attempts = 0;
             loop {
-                match executor_bridge::run_executor_bridge(&self.bridge) {
+                #[cfg(target_os = "linux")]
+                let result = executor_bridge::run_executor_bridge_observed(
+                    &self.bridge,
+                    |boundary| record_bridge_accountability_boundary(layout, issue, boundary),
+                );
+                #[cfg(not(target_os = "linux"))]
+                let result = executor_bridge::run_executor_bridge(&self.bridge);
+                match result {
                     Ok(receipt) => break receipt,
                     Err(error)
                         if error.kind == executor_bridge::BridgeFailureKind::Transient
@@ -4099,6 +4177,7 @@ impl ExecutorReceipt {
         };
         Self {
             outcome,
+            pull_request: None,
             bridge_finalized: false,
             pending: false,
             ownership_lost,
@@ -4126,27 +4205,37 @@ impl ExecutorReceipt {
             return Err("executor bridge receipt identity does not match request".to_string());
         }
         Ok(match receipt.status {
-            executor_bridge::BridgeRunStatus::Pending
-            | executor_bridge::BridgeRunStatus::Accepted { .. } => Self {
+            executor_bridge::BridgeRunStatus::Pending => Self {
                 outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
+                pull_request: None,
                 bridge_finalized: false,
                 pending: true,
                 ownership_lost: false,
             },
-            executor_bridge::BridgeRunStatus::Merged { .. } => Self {
+            executor_bridge::BridgeRunStatus::Accepted { pull_request, .. } => Self {
+                outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
+                pull_request: Some(pull_request),
+                bridge_finalized: false,
+                pending: true,
+                ownership_lost: false,
+            },
+            executor_bridge::BridgeRunStatus::Merged { pull_request, .. } => Self {
                 outcome: ConductorOutcome::Succeeded,
+                pull_request: Some(pull_request),
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Retryable { reason } => Self {
                 outcome: ConductorOutcome::Retryable(reason),
+                pull_request: None,
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Blocked { reason } => Self {
                 outcome: ConductorOutcome::Blocked(reason),
+                pull_request: None,
                 bridge_finalized: true,
                 pending: false,
                 ownership_lost: false,
@@ -4754,11 +4843,21 @@ fn finish_with_launch_lease<T>(
 }
 
 fn finish_foreground_with_lease(
-    repo: &str,
+    layout: &RunLayout,
     lease: &resilience::ConductorLease,
     result: Result<ForegroundCompletion, ForegroundFailure>,
 ) -> Result<(), CommandFailure> {
-    release_launch_lease(repo, lease)?;
+    finish_accountability_boundary(
+        result,
+        |result| record_foreground_terminal(layout, result),
+        || release_launch_lease(&layout.repo, lease),
+        emit_foreground_result,
+    )
+}
+
+fn emit_foreground_result(
+    result: Result<ForegroundCompletion, ForegroundFailure>,
+) -> Result<(), CommandFailure> {
     match result {
         Ok(ForegroundCompletion::State(state)) => {
             println!("{}", state.to_json());
@@ -5174,149 +5273,6 @@ fn foreground_command(options: &Options) -> Result<ForegroundCommand, String> {
     })
 }
 
-fn spawn_unit(
-    name: &str,
-    command: &ForegroundCommand,
-    repo_dir: &str,
-    layout: &RunLayout,
-    log_dir: &Path,
-    log_override: Option<&str>,
-    lease_token: Option<&str>,
-) -> Result<UnitRecord, String> {
-    let logpath = log_override
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_unit_logpath(name, log_dir));
-    if let Some(parent) = logpath.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    }
-    let log = File::create(&logpath)
-        .map_err(|error| format!("cannot create {}: {error}", logpath.display()))?;
-    let err_log = log
-        .try_clone()
-        .map_err(|error| format!("cannot clone {}: {error}", logpath.display()))?;
-    let mut process = Command::new(&command.program);
-    process
-        .args(&command.args)
-        .current_dir(repo_dir)
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err_log));
-    if let Some(token) = lease_token {
-        process.env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", token);
-    }
-    #[cfg(unix)]
-    process.process_group(0);
-    let mut child = process
-        .spawn()
-        .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
-    let pid = child.id().to_string();
-    let identity = process_identity(&pid).ok_or_else(|| {
-        let _ = child.kill();
-        let _ = child.wait();
-        format!("cannot verify {name} process identity for pid {pid}")
-    })?;
-    let pid_file = layout.state_dir.join(format!("{name}.pid"));
-    let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
-    let pid_metadata = format!(
-        "{{\"pid\":{},\"repo\":\"{}\",\"scope\":\"{}\",\"pgid\":{},\"start_time_ticks\":{}}}\n",
-        pid,
-        json_escape(&layout.repo),
-        json_escape(&layout.scope),
-        identity.pgid,
-        identity.start_time_ticks
-    );
-    if let Err(error) = fs::write(&pid_file, pid_metadata) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("cannot write {}: {error}", pid_file.display()));
-    }
-    if let Err(error) = fs::write(&logpath_file, format!("{}\n", logpath.display())) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("cannot write {}: {error}", logpath_file.display()));
-    }
-    Ok(UnitRecord {
-        pid,
-        pid_file,
-        logpath,
-        logpath_file,
-    })
-}
-
-fn default_unit_logpath(name: &str, log_dir: &Path) -> PathBuf {
-    if name != "conductor" {
-        return log_dir.join(format!("autospec-autonomous-{name}.log"));
-    }
-    let generation = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    log_dir.join(format!(
-        "autospec-autonomous-conductor-{generation}-{}-{sequence}.log",
-        std::process::id()
-    ))
-}
-
-fn launch_units(
-    layout: &RunLayout,
-    options: &Options,
-    foreground: &ForegroundCommand,
-    commands: &LaunchCommands,
-    lease: &resilience::ConductorLease,
-) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
-    let conductor = spawn_unit(
-        "conductor",
-        foreground,
-        &options.repo_dir,
-        layout,
-        &layout.log_dir,
-        log_override_for("conductor", options),
-        Some(lease.token()),
-    )
-    .map_err(CommandFailure::diagnostic)?;
-    if !companions_enabled() {
-        return Ok((
-            conductor,
-            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
-            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
-        ));
-    }
-
-    let monitor = match spawn_unit(
-        "monitor",
-        &commands.monitor,
-        &options.repo_dir,
-        layout,
-        &layout.log_dir,
-        log_override_for("monitor", options),
-        None,
-    ) {
-        Ok(unit) => unit,
-        Err(error) => {
-            let _ = terminate_process_group(&conductor.pid);
-            return Err(CommandFailure::diagnostic(error));
-        }
-    };
-    let supervisor = match spawn_unit(
-        "supervisor",
-        &commands.supervisor,
-        &options.repo_dir,
-        layout,
-        &layout.log_dir,
-        log_override_for("supervisor", options),
-        None,
-    ) {
-        Ok(unit) => unit,
-        Err(error) => {
-            let _ = terminate_process_group(&monitor.pid);
-            let _ = terminate_process_group(&conductor.pid);
-            return Err(CommandFailure::diagnostic(error));
-        }
-    };
-    Ok((conductor, monitor, supervisor))
-}
-
 fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), String> {
     let live_units = ["conductor", "monitor", "supervisor"]
         .into_iter()
@@ -5403,6 +5359,7 @@ fn write_launch_json(
     options: &Options,
     foreground: &ForegroundCommand,
     commands: &LaunchCommands,
+    accountability: Option<&accountability::github::EpicBinding>,
 ) -> Result<(), String> {
     let path = layout.state_dir.join("launch.json");
     let budget_tokens = options
@@ -5413,8 +5370,19 @@ fn write_launch_json(
         .budget_issues
         .map(|value| value.to_string())
         .unwrap_or_default();
+    let accountability_json = accountability.map_or_else(
+        || "null".to_string(),
+        |binding| {
+            format!(
+                "{{\"run_id\":\"{}\",\"epic_number\":{},\"epic_url\":\"{}\"}}",
+                json_escape(&binding.run_id),
+                binding.number,
+                json_escape(&binding.url)
+            )
+        },
+    );
     let body = format!(
-        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_argv\":{},\"monitor_argv\":{},\"supervisor_argv\":{},\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
+        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_argv\":{},\"monitor_argv\":{},\"supervisor_argv\":{},\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\",\"accountability\":{}}}\n",
         json_string_array(&options.raw_args),
         json_escape(&layout.repo),
         json_escape(&options.repo_dir),
@@ -5426,7 +5394,8 @@ fn write_launch_json(
         json_escape(&budget_tokens),
         json_escape(&budget_issues),
         options.no_digest,
-        options.interval_sec
+        options.interval_sec,
+        accountability_json
     );
     fs::write(&path, body).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
@@ -7303,7 +7272,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|resume|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous start [--epic N] [OPTIONS]\n    autospec autonomous resume --epic N [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --epic N             adopt only a verified managed accountability epic\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
     );
 }
 
@@ -7699,7 +7668,13 @@ mod foreground_tests {
             },
         };
 
-        let receipt = request.run();
+        let layout = RunLayout {
+            state_dir: std::env::temp_dir().join("autospec-missing-operator-state"),
+            log_dir: std::env::temp_dir().join("autospec-missing-operator-logs"),
+            scope: "test_repo".to_string(),
+            repo: "test/repo".to_string(),
+        };
+        let receipt = request.run(&layout, 42);
 
         assert_eq!(
             receipt.outcome,

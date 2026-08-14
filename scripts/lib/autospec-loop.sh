@@ -33,6 +33,7 @@ _AUTOSPEC_LOOP_LIB_LOADED=1
 
 # Source the shared matcher library if not already loaded.
 _AUTOSPEC_LOOP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$_AUTOSPEC_LOOP_LIB_DIR/autospec-accountability.sh"
 if ! declare -F extract_next_prefix_continuations >/dev/null 2>&1; then
     if [ -f "$_AUTOSPEC_LOOP_LIB_DIR/extract-matchers.sh" ]; then
         # shellcheck source=extract-matchers.sh
@@ -445,33 +446,6 @@ PY
 # Safety rules (AGENTS.md):
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
 #   jq: use capture()/== never interpolated test() for dynamic values.
-
-# _autospec_conductor_record_stop: emit one terminal marker and persist terminal
-# state.  Uses globals because POSIX signal traps cannot receive Bash locals
-# safely while the conductor may be interrupted inside a child command.
-_autospec_conductor_record_stop() {
-    local reason="${1:-unknown}"
-    local cycle="${2:-${_AUTOSPEC_CONDUCTOR_CYCLE:-0}}"
-    local shape="${3:-normal}"
-    if [ "${_AUTOSPEC_CONDUCTOR_STOP_RECORDED:-0}" = "1" ]; then
-        return 0
-    fi
-    _AUTOSPEC_CONDUCTOR_STOP_RECORDED=1
-    if [ "$shape" = "signal" ]; then
-        printf '[conductor] stopped: %s (cycle=%s)\n' "$reason" "$cycle" >&2
-    else
-        printf '[conductor] stopped: %s (cycles=%s)\n' "$reason" "$cycle" >&2
-    fi
-    if [ -n "${_AUTOSPEC_CONDUCTOR_RESILIENCE:-}" ] \
-        && [ -f "$_AUTOSPEC_CONDUCTOR_RESILIENCE" ] \
-        && [ -n "${_AUTOSPEC_CONDUCTOR_REPO:-}" ]; then
-        bash "$_AUTOSPEC_CONDUCTOR_RESILIENCE" state write \
-            --repo "$_AUTOSPEC_CONDUCTOR_REPO" \
-            --status "stopped:${reason}:cycle-${cycle}" \
-            --session "${_AUTOSPEC_CONDUCTOR_SESSION:-}" \
-            2>/dev/null || true
-    fi
-}
 
 _autospec_conductor_release_lock() {
     if [ "${_AUTOSPEC_CONDUCTOR_LOCK_HELD:-0}" != "1" ]; then
@@ -1400,6 +1374,7 @@ autospec_conductor_run() {
     if [ -z "$_queue_bin" ]; then
         _queue_bin="$(command -v autospec 2>/dev/null || true)"
     fi
+    _AUTOSPEC_CONDUCTOR_ACCOUNTABILITY_BIN="$_queue_bin"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -2032,6 +2007,15 @@ fi'
         local _reason
         _reason="$(printf '%s' "$_tier_json" \
             | jq -r '.reason // ""' 2>/dev/null || echo "")"
+
+        if ! _autospec_conductor_accountability_event selected \
+            "Selected Tier ${_tier} action ${_action}" \
+            "The waterfall chose the highest-priority runnable workstream" \
+            "${_reason:-waterfall selection}" 0; then
+            printf '[conductor] HALT: accountability selection event journal failed\n' >&2
+            _stop_reason="accountability:journal-failed"
+            break
+        fi
 
         if { [ "$_action" = "run-explore-once" ] \
                 || [ "$_action" = "run-architecture-improvement" ] \

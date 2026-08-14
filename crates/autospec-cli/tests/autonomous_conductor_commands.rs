@@ -15,11 +15,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/autonomous_accountability_acquisition.rs"] mod autonomous_accountability_acquisition;
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 
+#[cfg(target_os = "linux")] #[path = "support/foreground_fixture_git.rs"] mod foreground_fixture_git;
+#[cfg(target_os = "linux")] use foreground_fixture_git::seed_preserved_issue_branch;
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -396,12 +399,16 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
         1,
         "foreground must reuse its captured ready-queue snapshot"
     );
-    for forbidden in ["issue\nedit", "issue\ncomment", "executor_pending"] {
+    for forbidden in ["issue\nedit\n42", "issue\ncomment\n42", "executor_pending"] {
         assert!(
             !calls.contains(forbidden),
-            "empty Tier 1 must not invoke remote mutation: {forbidden}"
+            "empty Tier 1 must not mutate implementation work: {forbidden}"
         );
     }
+    assert!(
+        calls.contains("issue\nedit\n999"),
+        "the mandatory run epic remains the only permitted empty-queue mutation"
+    );
     assert!(
         !fixture.operator.join("test_repo/why-no-work.json").exists(),
         "later waterfall tiers remain pending"
@@ -3703,18 +3710,6 @@ fn foreground_rejects_unsafe_released_predecessor_heartbeat_root_before_acquire(
     assert_eq!(fs::read_dir(&heartbeat_target).unwrap().count(), 0);
 }
 
-fn seed_preserved_issue_branch(fixture: &ForegroundFixture, branch: &str) {
-    git_fixture(
-        &fixture.repo_dir,
-        &["config", "user.email", "test@example.com"],
-    );
-    git_fixture(&fixture.repo_dir, &["config", "user.name", "Autospec Test"]);
-    fs::write(fixture.repo_dir.join("README.md"), "fixture\n").expect("seed repository");
-    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
-    git_fixture(&fixture.repo_dir, &["commit", "-m", "seed repository"]);
-    git_fixture(&fixture.repo_dir, &["branch", branch]);
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
@@ -6095,6 +6090,7 @@ struct ForegroundFixture {
     comments: PathBuf,
     pull_requests: PathBuf,
     calls: PathBuf,
+    accountability: PathBuf,
     operator: PathBuf,
     state: PathBuf,
     health: PathBuf,
@@ -6152,6 +6148,7 @@ impl ForegroundFixture {
         let comments = root.join("comments.json");
         let pull_requests = root.join("pull-requests.json");
         let calls = root.join("gh.log");
+        let accountability = root.join("accountability-epic.md");
         let operator = root.join("operator");
         let state = root.join("state");
         let health = root.join("health");
@@ -6175,6 +6172,7 @@ impl ForegroundFixture {
             r####"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_FOREGROUND_CALLS"
+if [ -n "${AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER:-}" ]; then . "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"; fi
 if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
   while :; do sleep 1; done
 fi
@@ -6423,6 +6421,7 @@ exit 1
             comments,
             pull_requests,
             calls,
+            accountability,
             operator,
             state,
             health,
@@ -6470,8 +6469,7 @@ exit 1
         let remote = self.root.join("bridge-origin.git");
         git_fixture(&self.root, &["init", "--bare", remote.to_str().unwrap()]);
         git_fixture(&self.repo_dir, &["init", "-b", "main"]);
-        fs::write(self.repo_dir.join(".git/info/exclude"), ".autospec/\n")
-            .expect("ignore bridge evidence artifacts");
+        autonomous_accountability_acquisition::write_git_exclude(&self.repo_dir);
         git_fixture(
             &self.repo_dir,
             &["config", "user.name", "Autospec Bridge Test"],
@@ -6647,6 +6645,8 @@ printf '%s\n' '[]' > "$report"
             .env("AUTOSPEC_FOREGROUND_COMMENTS", &self.comments)
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/foreground_accountability_gh.sh"))
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))

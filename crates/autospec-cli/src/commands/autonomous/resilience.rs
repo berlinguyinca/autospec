@@ -17,6 +17,8 @@ use autospec_core::autonomous_lifecycle::{
 };
 
 mod records;
+mod spawn;
+pub(super) use spawn::{assert_lifecycle_before_spawn, renew_lifecycle};
 
 use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
 
@@ -65,6 +67,7 @@ pub(super) enum LifecycleAdmissionError {
 pub(super) struct ConductorLease {
     token: String,
     generation: u64,
+    accountability_predecessor_generation: Option<u64>,
     repo: String,
     state_path: PathBuf,
     lock_path: PathBuf,
@@ -103,10 +106,24 @@ impl ConductorLease {
         &self.token
     }
 
-    fn from_store(store: &ResilienceStore, token: String, generation: u64) -> Self {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) fn accountability_predecessor_generation(&self) -> Option<u64> {
+        self.accountability_predecessor_generation
+    }
+
+    fn from_store(
+        store: &ResilienceStore,
+        token: String,
+        generation: u64,
+        accountability_predecessor_generation: Option<u64>,
+    ) -> Self {
         Self {
             token,
             generation,
+            accountability_predecessor_generation,
             repo: store.scope.as_str(),
             state_path: store.canonical_state_path(),
             lock_path: store.lock_path(),
@@ -321,15 +338,26 @@ impl ResilienceStore {
             return Err(StoreError::Policy(admission));
         }
 
-        let generation = stored_state
+        let previous_generation = stored_state
             .as_ref()
-            .and_then(|(state, _)| state.lease_generation)
+            .and_then(|(state, _)| state.lease_generation);
+        let accountability_predecessor_generation = stored_state.as_ref().and_then(|(state, _)| {
+            (state.status == "released")
+                .then_some(state.lease_generation)
+                .flatten()
+        });
+        let generation = previous_generation
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| {
                 StoreError::Diagnostic("cannot advance resilience lease generation".to_string())
             })?;
-        let lease = ConductorLease::from_store(self, lease_token(), generation);
+        let lease = ConductorLease::from_store(
+            self,
+            lease_token(),
+            generation,
+            accountability_predecessor_generation,
+        );
         self.write_state(&self.claimed_state(&lease))?;
         Ok((admission, lease))
     }
@@ -342,7 +370,9 @@ impl ResilienceStore {
         let Some(generation) = state.lease_generation else {
             return Err(StoreError::TokenMismatch);
         };
-        if state.status != "claimed" || state.lease_token.as_deref() != Some(token) {
+        if !matches!(state.status.as_str(), "claimed" | "running")
+            || state.lease_token.as_deref() != Some(token)
+        {
             return Err(StoreError::TokenMismatch);
         }
 
@@ -359,6 +389,7 @@ impl ResilienceStore {
             self,
             token.to_string(),
             generation,
+            None,
         ))
     }
 
@@ -676,14 +707,6 @@ pub(super) fn admit_owned_lifecycle(
         .map_err(store_error_to_lease_error)
 }
 
-pub(super) fn renew_lifecycle(
-    repo: &str,
-    lease: &ConductorLease,
-) -> Result<(), LifecycleLeaseError> {
-    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
-    renew_lifecycle_store(&store, lease)
-}
-
 pub(super) fn start_lifecycle_heartbeat(
     repo: &str,
     lease: &ConductorLease,
@@ -779,37 +802,9 @@ pub(super) fn with_current_lifecycle_lease<T>(
 }
 
 #[cfg(test)]
-pub(super) fn acquire_test_lifecycle(root: &Path, repo: &str) -> Result<ConductorLease, String> {
-    let store = ResilienceStore {
-        scope: RepositoryScope::try_from(repo).map_err(|error| error.to_string())?,
-        state_root: root.join("state").join("autonomous"),
-        spend_root: root.join("spend"),
-        host: "autospec-test-host".to_string(),
-    };
-    store
-        .acquire(None, 1, 1)
-        .map(|(_, lease)| lease)
-        .map_err(|_| "cannot acquire test lifecycle lease".to_string())
-}
-
+mod test_support;
 #[cfg(test)]
-pub(super) fn replace_test_lifecycle_generation(lease: &ConductorLease) -> Result<(), String> {
-    let raw = fs::read_to_string(&lease.state_path)
-        .map_err(|error| format!("cannot read test lifecycle state: {error}"))?;
-    let mut state = ResilienceState::parse(&raw)
-        .map_err(|_| "test lifecycle state is malformed".to_string())?;
-    state.lease_generation = Some(
-        state
-            .lease_generation
-            .unwrap_or_default()
-            .checked_add(1)
-            .ok_or_else(|| "test lifecycle generation overflow".to_string())?,
-    );
-    state.lease_token = Some("replacement-test-lifecycle-token".to_string());
-    let scope =
-        RepositoryScope::try_from(lease.repo.as_str()).map_err(|error| error.to_string())?;
-    super::atomic_write(&lease.state_path, &state.to_json(&scope.as_str()))
-}
+pub(super) use test_support::{acquire_test_lifecycle, replace_test_lifecycle_generation};
 
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
@@ -1143,6 +1138,8 @@ fn pid_is_dead(_pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
+    include!("resilience/spawn_tests.rs");
+    include!("resilience/predecessor_tests.rs");
     use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
@@ -1568,7 +1565,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
     fn acquisition_does_not_claim_when_core_policy_parks_or_rejects() {
         let capacity_root = test_root("capacity");
         let capacity = test_store(&capacity_root);

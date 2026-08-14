@@ -141,6 +141,9 @@ pub(super) fn supervise(options: Options) -> Result<(), String> {
                     Ok(RepairOutcome::StopRequested) => {
                         action = "stop-requested".to_string();
                     }
+                    Ok(RepairOutcome::TerminalAccountability) => {
+                        action = "terminal-accountability-not-restarted".to_string();
+                    }
                     Err(error) => {
                         eprintln!("autospec-supervise: repair deferred: {error}");
                         action = "repair-deferred".to_string();

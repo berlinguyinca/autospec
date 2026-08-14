@@ -41,7 +41,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
-AUTONOMOUS_SCRIPT_FILES="autospec-autonomous.sh autospec-autonomous-run-drain.sh autonomous-control-channel.sh autonomous-guardrails.sh autonomous-persona-sources.sh autonomous-persona-synth.sh autonomous-persona-mine.sh autonomous-priority-match.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-usage-governor.sh autonomous-waterfall.sh autospec-autonomy-gate.sh usage-observe.sh"
+AUTONOMOUS_SCRIPT_FILES="autospec-autonomous.sh autospec-autonomous-launcher.sh autospec-autonomous-run-drain.sh autonomous-runtime-refresh.sh autospec-runtime-install.sh autonomous-control-channel.sh autonomous-guardrails.sh autonomous-persona-sources.sh autonomous-persona-synth.sh autonomous-persona-mine.sh autonomous-priority-match.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-usage-governor.sh autonomous-waterfall.sh autospec-autonomy-gate.sh usage-observe.sh"
 LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
@@ -222,7 +222,6 @@ EOF
 write_autonomous_operator_wrapper() {
     target="$1"
     subcommand="$2"
-    rust_subcommand="$subcommand"
 
     {
         printf '%s\n' '#!/usr/bin/env bash'
@@ -232,14 +231,10 @@ write_autonomous_operator_wrapper() {
         printf '%s\n' '    *":$AUTOSPEC_WRAPPER_BIN_DIR:"*) ;;'
         printf '%s\n' '    *) PATH="$AUTOSPEC_WRAPPER_BIN_DIR:$PATH"; export PATH ;;'
         printf '%s\n' 'esac'
-        printf '%s\n' 'if ! command -v autospec >/dev/null 2>&1; then'
-        printf '%s\n' '    printf "%s\\n" "autospec Rust binary is required; install it before using autonomous commands" >&2'
-        printf '%s\n' '    exit 127'
-        printf '%s\n' 'fi'
         if [ -n "$subcommand" ]; then
-            printf '%s\n' 'exec autospec autonomous '"$rust_subcommand"' "$@"'
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous-launcher.sh" '"$subcommand"' "$@"'
         else
-            printf '%s\n' 'exec autospec autonomous "$@"'
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous-launcher.sh" "$@"'
         fi
     } > "$target"
     chmod +x "$target"

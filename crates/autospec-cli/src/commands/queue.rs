@@ -21,6 +21,8 @@ use super::lint::{
 };
 use super::CommandFailure;
 
+mod accountability;
+use accountability::{is_accountability_issue, reviewable_issue};
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -246,14 +248,6 @@ fn set_review_limit(
     Ok(())
 }
 
-fn reviewable_issue(issue: &RemoteIssue) -> bool {
-    !issue.closed
-        && issue_has_label(issue, "auto-implement")
-        && !issue_has_label(issue, "needs-classify")
-        && !issue_has_label(issue, "autospec:needs-human")
-        && !issue_has_label(issue, "security:quarantined")
-}
-
 fn issue_has_label(issue: &RemoteIssue, label: &str) -> bool {
     issue.labels.iter().any(|current| current == label)
 }
@@ -307,6 +301,7 @@ fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, 
 fn reviewable_pass(issue: &RemoteIssue) -> Result<bool, CommandFailure> {
     Ok(!issue.closed
         && issue_has_label(issue, "auto-implement")
+        && !is_accountability_issue(issue)
         && confirm_issue_safety_for_queue(&issue_safety_input(issue))?)
 }
 
@@ -482,7 +477,10 @@ pub(crate) fn ready_plan_for(
         let _ = recover_active_issue(repo, issue.number, 300);
         let _ = requeue_abandoned_active_issue(repo, issue.number);
     }
-    let candidates = list_issues(repo, "auto-implement")?;
+    let candidates = list_issues(repo, "auto-implement")?
+        .into_iter()
+        .filter(|issue| !is_accountability_issue(issue))
+        .collect::<Vec<_>>();
     active = list_issues(repo, "in-progress-by-bot")?
         .into_iter()
         .filter(|issue| {
@@ -1198,7 +1196,8 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::fetch_issue_page_with_retries;
+    include!("queue/accountability_tests.rs");
+    use super::{fetch_issue_page_with_retries, reviewable_issue};
     use autospec_core::coordination::parse_remote_issue_page_json;
 
     #[test]
@@ -1228,4 +1227,5 @@ mod tests {
         assert_eq!(calls, 3);
         assert_eq!(error, "still invalid");
     }
+
 }

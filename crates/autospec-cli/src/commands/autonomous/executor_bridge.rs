@@ -999,16 +999,10 @@ pub(crate) fn legacy_bridge_proves_claim(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_executor_bridge(
-    request: &ExecutorBridgeRequest,
-) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    run_executor_bridge_with_codex_probe(request, preflight_codex_sandbox)
-}
-
-#[cfg(target_os = "linux")]
-fn run_executor_bridge_with_codex_probe(
+fn run_executor_bridge_with_codex_probe_observed(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
+    observe: &mut dyn FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     let terminal_path = request.state_path.with_extension("terminal.json");
     if terminal_path.is_file() {
@@ -1472,6 +1466,7 @@ fn run_executor_bridge_with_codex_probe(
             &remote,
         )?;
     }
+    let review_pull_request = observe_pull_request_and_review(&state, observe)?;
     let Some(premerge_receipt) = ensure_premerge_and_review(
         request,
         &environment,
@@ -1483,6 +1478,7 @@ fn run_executor_bridge_with_codex_probe(
     else {
         return Ok(pending_bridge_receipt(request)?);
     };
+    observe_verified(review_pull_request, observe)?;
     if state.phase == BridgePhase::ReviewPassed {
         originate_and_accept_executor_result(
             &request.state_path,
@@ -1510,6 +1506,7 @@ fn run_executor_bridge_with_codex_probe(
     let pull_request = state
         .pr
         .ok_or_else(|| "executor merged state has no pull request".to_string())?;
+    observe_merged(pull_request, observe)?;
     let head_oid = state
         .head_oid
         .clone()
@@ -23008,6 +23005,9 @@ mod base_fetch;
 // Trusted git binding and hook containment for untrusted executor code.
 mod trusted_git;
 use trusted_git::*;
+
+mod accountability_lifecycle;
+#[cfg(target_os = "linux")] pub(crate) use accountability_lifecycle::*;
 
 // The continuation checkpoint: preserving a run that outgrew the patch-size gate or met only
 // some of its criteria, and carrying the rest forward as child issues. `use continuation::*`

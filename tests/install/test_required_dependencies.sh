@@ -7,6 +7,7 @@ ISOLATED_BIN="$TMP_DIR/bin"
 FAKE_HOME="$TMP_DIR/home"
 ORIGINAL_HOME="$HOME"
 ORIGINAL_PATH="$PATH"
+ORIGINAL_UID="$(id -u)"
 failures=0
 
 cleanup() {
@@ -130,12 +131,25 @@ for tool in git curl gh jq; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/$tool"
     chmod +x "$ISOLATED_BIN/$tool"
 done
+cat > "$ISOLATED_BIN/git" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "--show-toplevel" ]; then
+    (CDPATH='' cd -- "$2" && pwd -P)
+elif [ "${1:-}" = "-C" ] && [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "--verify" ] && [ "${5:-}" = "HEAD" ]; then
+    printf '0000000000000000000000000000000000000000\n'
+elif [ "${1:-}" = "-C" ] && [ "${3:-}" = "ls-files" ]; then
+    exit 0
+else
+    exit 0
+fi
+SHIM
+chmod +x "$ISOLATED_BIN/git"
 TEST_CARGO_TARGET_DIR="$TMP_DIR/cargo-target"
 cat > "$ISOLATED_BIN/cargo" <<SHIM
 #!/usr/bin/env bash
-mkdir -p "$TEST_CARGO_TARGET_DIR/release"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_CARGO_TARGET_DIR/release/autospec"
-chmod +x "$TEST_CARGO_TARGET_DIR/release/autospec"
+mkdir -p "\${CARGO_TARGET_DIR:-$TEST_CARGO_TARGET_DIR}/release"
+printf '#!/usr/bin/env bash\nexit 0\n' > "\${CARGO_TARGET_DIR:-$TEST_CARGO_TARGET_DIR}/release/autospec"
+chmod +x "\${CARGO_TARGET_DIR:-$TEST_CARGO_TARGET_DIR}/release/autospec"
 exit 0
 SHIM
 chmod +x "$ISOLATED_BIN/cargo"
@@ -152,9 +166,9 @@ chmod +x "$ISOLATED_BIN/python3"
 # materialize commands only when the expected fallback is attempted.
 SCANNER_LOG="$TMP_DIR/scanner-install.log"
 rm -f "$ISOLATED_BIN/id"
-cat > "$ISOLATED_BIN/id" <<'SHIM'
+cat > "$ISOLATED_BIN/id" <<SHIM
 #!/usr/bin/env bash
-[ "${1:-}" = "-u" ] && printf '1000\n'
+[ "\${1:-}" = "-u" ] && printf '%s\n' "$ORIGINAL_UID"
 SHIM
 cat > "$ISOLATED_BIN/sudo" <<SHIM
 #!/usr/bin/env bash
@@ -257,6 +271,11 @@ fi
 printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/semgrep"
 chmod +x "$ISOLATED_BIN/semgrep"
 rm -f "$ISOLATED_BIN/python3" "$ISOLATED_BIN/id" "$ISOLATED_BIN/sudo" "$ISOLATED_BIN/apt-get" "$ISOLATED_BIN/pipx"
+cat > "$ISOLATED_BIN/id" <<SHIM
+#!/usr/bin/env bash
+[ "\${1:-}" = "-u" ] && printf '%s\n' "$ORIGINAL_UID"
+SHIM
+chmod +x "$ISOLATED_BIN/id"
 
 # WinGet updates the persistent Windows PATH, not the already-running Git Bash
 # process. Simulate Python landing outside the original PATH and require the
