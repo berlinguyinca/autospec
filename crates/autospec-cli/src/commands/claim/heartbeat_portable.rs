@@ -700,32 +700,16 @@ fn publish_exact(
     document: &[u8],
     before_rename: &mut impl FnMut(&Path),
 ) -> Result<(), CommandFailure> {
-    let temporary_name = format!(".autospec-heartbeat-{name}.stage");
-    #[cfg(target_os = "freebsd")]
-    if recover_freebsd_linked_publication(directory, &temporary_name, name, expected)? {
-        return Ok(());
-    }
+    reconcile_staged_publications(directory, name, expected)?;
     if existing_generation(directory, name, expected)? {
         return Ok(());
     }
+    let (temporary_name, mut file) = create_unique_stage(directory, name)?;
     let temporary_path = directory.path.join(&temporary_name);
-    let file = match create_private_file_relative(directory, &temporary_name) {
-        Ok(mut file) => {
-            file.write_all(document)
-                .map_err(|error| CommandFailure::diagnostic(format!("heartbeat write: {error}")))?;
-            file.sync_all()
-                .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fsync: {error}")))?;
-            file
-        }
-        Err(error) if existing_generation(directory, &temporary_name, expected)? => {
-            open_staged_file_relative(directory, &temporary_name).map_err(|open_error| {
-                CommandFailure::diagnostic(format!(
-                    "heartbeat stage reopen after {error}: {open_error}"
-                ))
-            })?
-        }
-        Err(error) => return Err(error),
-    };
+    file.write_all(document)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat write: {error}")))?;
+    file.sync_all()
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fsync: {error}")))?;
     before_rename(&temporary_path);
     atomic_rename_exclusive(directory, &temporary_name, name, &file).or_else(|error| {
         if existing_generation(directory, name, expected)? {
@@ -804,10 +788,190 @@ fn same_generation(left: &StartupHeartbeatEvidence, right: &StartupHeartbeatEvid
     let mut right = right.clone();
     for evidence in [&mut left, &mut right] {
         evidence.ts = 0;
-        evidence.pid = 0;
-        evidence.process_start.clear();
     }
     left == right
+}
+
+static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn create_unique_stage(
+    directory: &PrivateDirectory,
+    destination: &str,
+) -> Result<(String, fs::File), CommandFailure> {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    for _ in 0..32 {
+        let epoch_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+        let token = format!(
+            "{epoch_nanos:016x}{:08x}{:08x}",
+            std::process::id(),
+            sequence as u32
+        );
+        let name = format!(".autospec-heartbeat-{destination}.{token}.stage");
+        match create_private_file_relative(directory, &name) {
+            Ok(file) => return Ok((name, file)),
+            Err(error) => match open_private_file_relative(directory, &name) {
+                Ok(_) => continue,
+                Err(open_error) if open_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(error)
+                }
+                Err(_) => continue,
+            },
+        }
+    }
+    Err(CommandFailure::diagnostic(
+        "heartbeat stage create exhausted unique names",
+    ))
+}
+
+fn reconcile_staged_publications(
+    directory: &PrivateDirectory,
+    destination: &str,
+    expected: &StartupHeartbeatEvidence,
+) -> Result<(), CommandFailure> {
+    for source in staged_publication_names(directory, destination)? {
+        let mut source_file = match open_staged_file_relative(directory, &source) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        let metadata = match source_file.metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            _ => continue,
+        };
+        let links = file_link_count(&source_file)?;
+        if !private_stage_metadata(&metadata, links) || !matches!(links, 1 | 2) {
+            continue;
+        }
+        let mut document = Vec::new();
+        if source_file.read_to_end(&mut document).is_err() {
+            continue;
+        }
+        let Some(observed) = parse_startup_heartbeat(&document) else {
+            continue;
+        };
+        if observed.repo != expected.repo
+            || observed.issue != expected.issue
+            || !staged_document_targets(&observed, destination)
+        {
+            continue;
+        }
+        if links == 2 {
+            let destination_file = match open_private_file_relative(directory, destination) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            let destination_metadata = destination_file.metadata().map_err(|_| {
+                CommandFailure::diagnostic("heartbeat publication target conflicts")
+            })?;
+            if !private_stage_metadata(&destination_metadata, 2)
+                || !same_file_identity(&source_file, &destination_file)?
+                || !same_generation(&observed, expected)
+            {
+                continue;
+            }
+        }
+        unlink_staged_file(directory, &source, &source_file)?;
+        sync_private_directory(directory)?;
+    }
+    Ok(())
+}
+
+fn staged_document_targets(observed: &StartupHeartbeatEvidence, destination: &str) -> bool {
+    if destination == format!("{}.json", observed.issue) {
+        return true;
+    }
+    observed.session_id.as_deref().is_some_and(|session_id| {
+        destination == format!("{}.json", heartbeat_session_key(session_id))
+    })
+}
+
+fn staged_publication_names(
+    directory: &PrivateDirectory,
+    destination: &str,
+) -> Result<Vec<String>, CommandFailure> {
+    let Some(path_directory) = open_existing_private_directory(&directory.path)? else {
+        return Ok(Vec::new());
+    };
+    if !same_file_identity(&directory.file, &path_directory.file)? {
+        return Ok(Vec::new());
+    }
+    let prefix = format!(".autospec-heartbeat-{destination}.");
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&directory.path)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage scan: {error}")))?
+    {
+        let Ok(entry) = entry else { continue };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(token) = name
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(".stage"))
+        else {
+            continue;
+        };
+        if token.len() == 32
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn file_link_count(file: &fs::File) -> Result<u64, CommandFailure> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata()
+        .map(|metadata| metadata.nlink())
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage inspect: {error}")))
+}
+
+#[cfg(windows)]
+fn file_link_count(file: &fs::File) -> Result<u64, CommandFailure> {
+    windows_file_identity(file).map(|identity| u64::from(identity.2))
+}
+
+#[cfg(unix)]
+fn private_stage_metadata(metadata: &fs::Metadata, links: u64) -> bool {
+    private_file_metadata_with_links(metadata, links)
+}
+
+#[cfg(windows)]
+fn private_stage_metadata(metadata: &fs::Metadata, _links: u64) -> bool {
+    private_file_metadata(metadata)
+}
+
+#[cfg(unix)]
+fn unlink_staged_file(
+    directory: &PrivateDirectory,
+    name: &str,
+    _file: &fs::File,
+) -> Result<(), CommandFailure> {
+    nix::unistd::unlinkat(
+        &directory.file,
+        name,
+        nix::unistd::UnlinkatFlags::NoRemoveDir,
+    )
+    .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage cleanup: {error}")))
+}
+
+#[cfg(windows)]
+fn unlink_staged_file(
+    _directory: &PrivateDirectory,
+    _name: &str,
+    file: &fs::File,
+) -> Result<(), CommandFailure> {
+    delete_windows_file_handle(file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage cleanup: {error}")))
 }
 
 #[cfg(unix)]
@@ -1051,87 +1215,6 @@ fn atomic_rename_exclusive(
 
 #[cfg(all(test, target_os = "freebsd"))]
 static FREEBSD_CRASH_AFTER_LINK: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
-#[cfg(target_os = "freebsd")]
-fn recover_freebsd_linked_publication(
-    directory: &PrivateDirectory,
-    source: &str,
-    destination: &str,
-    expected: &StartupHeartbeatEvidence,
-) -> Result<bool, CommandFailure> {
-    use nix::unistd::{unlinkat, UnlinkatFlags};
-    use std::io::Seek;
-
-    let mut source_file = match open_private_file_relative(directory, source) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => {
-            return Err(CommandFailure::diagnostic(
-                "heartbeat publication target conflicts",
-            ))
-        }
-    };
-    let destination_file = match open_private_file_relative(directory, destination) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => {
-            return Err(CommandFailure::diagnostic(
-                "heartbeat publication target conflicts",
-            ))
-        }
-    };
-    let source_metadata = source_file
-        .metadata()
-        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
-    let destination_metadata = destination_file
-        .metadata()
-        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
-    if !source_metadata.file_type().is_file()
-        || !destination_metadata.file_type().is_file()
-        || !private_file_metadata_with_links(&source_metadata, 2)
-        || !private_file_metadata_with_links(&destination_metadata, 2)
-        || !same_file_identity(&source_file, &destination_file)?
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ));
-    }
-    source_file
-        .rewind()
-        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
-    let mut document = Vec::new();
-    source_file
-        .read_to_end(&mut document)
-        .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
-    let Some(observed) = parse_startup_heartbeat(&document) else {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ));
-    };
-    if !same_generation(&observed, expected) {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ));
-    }
-    unlinkat(&directory.file, source, UnlinkatFlags::NoRemoveDir)
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat stage cleanup: {error}")))?;
-    sync_private_directory(directory)?;
-    let final_file = open_private_file_relative(directory, destination).map_err(|error| {
-        CommandFailure::diagnostic(format!("heartbeat published target reopen: {error}"))
-    })?;
-    let final_metadata = final_file.metadata().map_err(|error| {
-        CommandFailure::diagnostic(format!("heartbeat published identity: {error}"))
-    })?;
-    if !private_file_metadata(&final_metadata)
-        || !same_file_identity(&source_file, &final_file)?
-        || !existing_generation(directory, destination, expected)?
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ));
-    }
-    Ok(true)
-}
 
 #[cfg(target_os = "freebsd")]
 fn atomic_rename_exclusive(
@@ -1797,6 +1880,19 @@ mod tests {
         fn repo_path(&self) -> std::path::PathBuf {
             self.root.join(repository_progress_key("owner/repo"))
         }
+
+        fn staging_paths(&self) -> Vec<std::path::PathBuf> {
+            std::fs::read_dir(self.repo_path())
+                .expect("repository entries")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".autospec-heartbeat-") && name.ends_with(".stage")
+                })
+                .map(|entry| entry.path())
+                .collect()
+        }
     }
 
     impl Drop for Fixture {
@@ -1825,6 +1921,39 @@ mod tests {
         .expect_err("generation conflict");
 
         assert_eq!(error.message, "heartbeat publication target conflicts");
+    }
+
+    #[test]
+    fn publication_rejects_process_identity_changes_but_allows_timestamp_refreshes() {
+        let fixture = Fixture::new("immutable-process-identity");
+        let original = fixture.document("claim-a", None);
+        publish(&fixture.root, "owner/repo", 42, None, &original).expect("initial publication");
+
+        let timestamp_refresh = String::from_utf8(original.clone())
+            .expect("heartbeat is UTF-8")
+            .replace(r#""ts":1"#, r#""ts":2"#)
+            .into_bytes();
+        publish(&fixture.root, "owner/repo", 42, None, &timestamp_refresh)
+            .expect("timestamp-only replay");
+
+        for changed in [
+            String::from_utf8(original.clone())
+                .expect("heartbeat is UTF-8")
+                .replace(r#""pid":7"#, r#""pid":8"#)
+                .into_bytes(),
+            String::from_utf8(original.clone())
+                .expect("heartbeat is UTF-8")
+                .replace(r#""process_start":"9""#, r#""process_start":"10""#)
+                .into_bytes(),
+        ] {
+            let error = publish(&fixture.root, "owner/repo", 42, None, &changed)
+                .expect_err("process identity change must conflict");
+            assert_eq!(error.message, "heartbeat publication target conflicts");
+            assert_eq!(
+                std::fs::read(fixture.issue_path()).expect("original heartbeat retained"),
+                original
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2069,31 +2198,25 @@ mod tests {
         }));
         assert!(interrupted.is_err(), "publication did not stop after link");
         assert!(fixture.issue_path().is_file(), "destination was not linked");
-        assert!(
-            fixture
-                .repo_path()
-                .join(".autospec-heartbeat-42.json.stage")
-                .is_file(),
-            "stage was unexpectedly removed"
-        );
+        let stages = fixture.staging_paths();
+        assert_eq!(stages.len(), 1, "linked stage alias was not retained");
+        use std::os::unix::fs::MetadataExt;
+        let linked_identity = std::fs::metadata(&stages[0]).expect("linked stage metadata");
+        let destination_identity =
+            std::fs::metadata(fixture.issue_path()).expect("linked destination metadata");
+        assert_eq!(linked_identity.dev(), destination_identity.dev());
+        assert_eq!(linked_identity.ino(), destination_identity.ino());
+        assert_eq!(linked_identity.nlink(), 2);
 
         publish(&fixture.root, "owner/repo", 42, None, &document)
             .expect("resume exact publication");
 
         assert_eq!(std::fs::read(&fixture.issue_path()).unwrap(), document);
-        assert!(
-            !fixture
-                .repo_path()
-                .join(".autospec-heartbeat-42.json.stage")
-                .exists(),
-            "resumed publication left staging alias"
-        );
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(
-            std::fs::metadata(fixture.issue_path()).unwrap().nlink(),
-            1,
-            "published heartbeat retained an alias"
-        );
+        assert!(fixture.staging_paths().is_empty());
+        let recovered_identity = std::fs::metadata(fixture.issue_path()).unwrap();
+        assert_eq!(recovered_identity.dev(), destination_identity.dev());
+        assert_eq!(recovered_identity.ino(), destination_identity.ino());
+        assert_eq!(recovered_identity.nlink(), 1);
     }
 
     #[cfg(unix)]
@@ -2115,17 +2238,84 @@ mod tests {
         assert!(interrupted.is_err());
 
         publish(&fixture.root, "owner/repo", 42, None, &document).expect("restart publication");
-        let aliases = std::fs::read_dir(fixture.repo_path())
-            .expect("repository entries")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".autospec-heartbeat-")
-            })
-            .count();
-        assert_eq!(aliases, 0, "publication left staging aliases");
+        assert!(
+            fixture.staging_paths().is_empty(),
+            "publication left staging aliases"
+        );
+    }
+
+    #[test]
+    fn successor_publication_reconciles_an_abandoned_pre_rename_stage() {
+        let fixture = Fixture::new("publication-successor-after-abandoned-stage");
+        let abandoned = fixture.document("claim-a", None);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publish_with_hooks(
+                &fixture.root,
+                "owner/repo",
+                42,
+                None,
+                &abandoned,
+                &mut |_| {},
+                &mut |_| panic!("simulated publication crash before rename"),
+            );
+        }));
+        assert!(interrupted.is_err());
+
+        let successor = fixture.document("claim-b", None);
+        publish(&fixture.root, "owner/repo", 42, None, &successor)
+            .expect("publish successor generation");
+
+        assert_eq!(
+            std::fs::read(fixture.issue_path()).expect("successor heartbeat"),
+            successor
+        );
+        assert!(
+            fixture.staging_paths().is_empty(),
+            "successor left an abandoned staging file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_reconciliation_ignores_noncanonical_entries_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new("publication-safe-stage-reconciliation");
+        let abandoned = fixture.document("claim-a", None);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publish_with_hooks(
+                &fixture.root,
+                "owner/repo",
+                42,
+                None,
+                &abandoned,
+                &mut |_| {},
+                &mut |_| panic!("simulated publication crash before rename"),
+            );
+        }));
+        assert!(interrupted.is_err());
+
+        let caller_owned = fixture.repo_path().join("caller-owned");
+        std::fs::write(&caller_owned, b"retain me").expect("caller-owned file");
+        let stage_symlink = fixture
+            .repo_path()
+            .join(".autospec-heartbeat-42.json.00000000000000000000000000000000.stage");
+        symlink(&caller_owned, &stage_symlink).expect("canonical-looking stage symlink");
+
+        publish(
+            &fixture.root,
+            "owner/repo",
+            42,
+            None,
+            &fixture.document("claim-b", None),
+        )
+        .expect("successor publication");
+
+        assert_eq!(std::fs::read(caller_owned).unwrap(), b"retain me");
+        assert!(
+            stage_symlink.is_symlink(),
+            "stage symlink was followed or removed"
+        );
     }
 
     #[cfg(unix)]
