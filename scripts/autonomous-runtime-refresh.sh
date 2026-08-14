@@ -129,6 +129,32 @@ autospec_runtime_identity_tuple() {
     printf '%s\n%s\n%s\n%s\n' "$repo" "$head" "$source" "$identity"
 }
 
+autospec_runtime_source_checkout() {
+    local target state_root generations target_digest generation source
+    target=$(autospec_runtime_repo_dir "${1-}") || return 2
+    if [ -f "$target/Cargo.toml" ] && [ -f "$target/crates/autospec-cli/Cargo.toml" ]; then
+        printf '%s\n' "$target"
+        return 0
+    fi
+
+    state_root=${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}
+    generations=${AUTOSPEC_RUNTIME_ROOT:-$state_root/runtime-generations}
+    autospec_runtime_private_dir "$state_root" || { autospec_runtime_error source-state-untrusted; return 2; }
+    autospec_runtime_private_dir "$generations" || { autospec_runtime_error source-state-untrusted; return 2; }
+    [ -L "$generations/current" ] || { autospec_runtime_error source-receipt-unavailable; return 2; }
+    target_digest=$(readlink "$generations/current") || return 2
+    autospec_runtime_valid_sha256 "$target_digest" || { autospec_runtime_error source-receipt-invalid; return 2; }
+    [ "$target_digest" = "${target_digest##*/}" ] || { autospec_runtime_error source-receipt-invalid; return 2; }
+    generation="$generations/$target_digest"
+    autospec_runtime_parse_receipt "$generation/receipt" || { autospec_runtime_error source-receipt-invalid; return 2; }
+    source=$(autospec_runtime_repo_dir "$receipt_repo") || { autospec_runtime_error source-checkout-unavailable; return 2; }
+    [ -f "$source/Cargo.toml" ] && [ -f "$source/crates/autospec-cli/Cargo.toml" ] \
+        || { autospec_runtime_error source-checkout-invalid; return 2; }
+    autospec_runtime_verify_generation "$source" "$target_digest" "$generation" \
+        || { autospec_runtime_error source-receipt-invalid; return 2; }
+    printf '%s\n' "$source"
+}
+
 autospec_runtime_tuple_digest() {
     local repo=$1 head=$2 source=$3 tuple
     tuple=$(autospec_runtime_temp_file) || return 2
@@ -286,7 +312,7 @@ autospec_runtime_check() {
 }
 
 autospec_runtime_usage() {
-    printf 'usage: %s {identity|check|ensure} --repo-dir DIR\n' "${0##*/}" >&2
+    printf 'usage: %s {source|identity|check|ensure} --repo-dir DIR\n' "${0##*/}" >&2
     return 2
 }
 
@@ -300,6 +326,7 @@ autospec_runtime_main() {
     done
     [ -n "$repo" ] || { autospec_runtime_usage; return 2; }
     case "$action" in
+        source) autospec_runtime_source_checkout "$repo" ;;
         identity) autospec_runtime_identity_tuple "$repo" | sed -n '4p' ;;
         check) autospec_runtime_check "$repo" ;;
         ensure) exec bash "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/autospec-runtime-install.sh" --repo-dir "$repo" ;;

@@ -7,10 +7,13 @@ setup() {
   FIXTURE_REPO="$TEST_ROOT/repo"
   FAKE_BIN="$TEST_ROOT/bin"
   BUILD_LOG="$TEST_ROOT/build.log"
-  mkdir -p "$TEST_HOME" "$FIXTURE_REPO/crates/demo/src" "$FAKE_BIN"
+  mkdir -p "$TEST_HOME" "$FIXTURE_REPO/crates/demo/src" \
+    "$FIXTURE_REPO/crates/autospec-cli" "$FAKE_BIN"
   printf '[workspace]\nmembers=["crates/demo"]\n' >"$FIXTURE_REPO/Cargo.toml"
   printf '# lock\n' >"$FIXTURE_REPO/Cargo.lock"
   printf '[package]\nname="demo"\nversion="0.1.0"\n' >"$FIXTURE_REPO/crates/demo/Cargo.toml"
+  printf '[package]\nname="autospec-cli"\nversion="0.1.0"\n' \
+    >"$FIXTURE_REPO/crates/autospec-cli/Cargo.toml"
   printf 'pub const BUILD: &str = "one";\n' >"$FIXTURE_REPO/crates/demo/src/lib.rs"
   git -C "$FIXTURE_REPO" init -q
   git -C "$FIXTURE_REPO" config user.email test@example.com
@@ -34,6 +37,20 @@ if [ "${AUTOSPEC_TEST_MUTATE_SOURCE:-0}" = 1 ]; then
 fi
 SH
   chmod +x "$FAKE_BIN/cargo"
+}
+
+@test "runtime source resolution keeps a generic target checkout separate" {
+  install_runtime
+  [ "$status" -eq 0 ]
+  target="$TEST_ROOT/target"
+  mkdir -p "$target"
+  git -C "$target" init -q
+
+  run env HOME="$TEST_HOME" bash "$REPO_ROOT/scripts/autonomous-runtime-refresh.sh" \
+    source --repo-dir "$target"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(cd -P "$FIXTURE_REPO" && pwd -P)" ]
 }
 
 teardown() {

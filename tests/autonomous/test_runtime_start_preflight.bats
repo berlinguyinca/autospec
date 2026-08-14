@@ -15,6 +15,8 @@ setup() {
   export AUTOSPEC_TEST_HELPER_CALLS="$TEST_ROOT/helper.calls"
   export AUTOSPEC_TEST_STATUS_COUNT="$TEST_ROOT/status.count"
   export AUTOSPEC_TEST_GENERATION="$TEST_ROOT/runtime/autospec"
+  export AUTOSPEC_TEST_SOURCE_REPO="$TEST_ROOT/source"
+  mkdir -p "$AUTOSPEC_TEST_SOURCE_REPO"
 
   cat > "$TEST_ROOT/bin/git" <<'EOF'
 #!/usr/bin/env bash
@@ -48,9 +50,17 @@ EOF
 
   cat > "$TEST_ROOT/scripts/autonomous-runtime-refresh.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$1" >> "$AUTOSPEC_TEST_HELPER_CALLS"
 case "$1" in
+  source)
+    printf '%s\n' "$AUTOSPEC_TEST_SOURCE_REPO"
+    ;;
   check)
+    printf '%s\n' "$1" >> "$AUTOSPEC_TEST_HELPER_CALLS"
+    if [ "${AUTOSPEC_TEST_REQUIRE_SOURCE:-0}" = 1 ] &&
+       [ "${3-}" != "$AUTOSPEC_TEST_SOURCE_REPO" ]; then
+      printf 'wrong runtime source: %s\n' "${3-}" >&2
+      exit 2
+    fi
     if [ "${AUTOSPEC_TEST_STALE:-0}" = 1 ]; then
       printf '%s\n' 'stale:source-digest'
       exit 10
@@ -58,12 +68,31 @@ case "$1" in
     printf '%s\n' "$AUTOSPEC_TEST_GENERATION"
     ;;
   ensure)
+    printf '%s\n' "$1" >> "$AUTOSPEC_TEST_HELPER_CALLS"
+    if [ "${AUTOSPEC_TEST_REQUIRE_SOURCE:-0}" = 1 ] &&
+       [ "${3-}" != "$AUTOSPEC_TEST_SOURCE_REPO" ]; then
+      printf 'wrong runtime source: %s\n' "${3-}" >&2
+      exit 2
+    fi
     [ "${AUTOSPEC_TEST_BUILD_FAIL:-0}" != 1 ] || exit 2
     printf '%s\n' "$AUTOSPEC_TEST_GENERATION"
     ;;
 esac
 EOF
   chmod +x "$TEST_ROOT/scripts/autonomous-runtime-refresh.sh"
+}
+
+@test "target-repository start refreshes from the installed Autospec source checkout" {
+  install_launcher_fixture
+  export AUTOSPEC_TEST_STALE=1
+  export AUTOSPEC_TEST_REQUIRE_SOURCE=1
+
+  run "$LAUNCHER" start --repo-dir "$TEST_ROOT/repo" --json
+
+  [ "$status" -eq 0 ]
+  [ "$(tr '\n' ' ' < "$AUTOSPEC_TEST_HELPER_CALLS")" = "check ensure " ]
+  [ "$(sed -n '3p' "$AUTOSPEC_TEST_GENERATION_ARGS")" = --repo-dir ]
+  [ "$(sed -n '4p' "$AUTOSPEC_TEST_GENERATION_ARGS")" = "$TEST_ROOT/repo" ]
 }
 
 teardown() {
