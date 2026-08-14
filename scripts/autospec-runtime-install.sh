@@ -3,8 +3,10 @@
 set -u
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-# shellcheck source=scripts/autonomous-runtime-refresh.sh
-. "$SCRIPT_DIR/autonomous-runtime-refresh.sh"
+if ! declare -F autospec_runtime_repo_dir >/dev/null; then
+    # shellcheck source=scripts/autonomous-runtime-refresh.sh
+    . "$SCRIPT_DIR/autonomous-runtime-refresh.sh"
+fi
 
 runtime_install_error() {
     printf 'error:runtime-install:%s\n' "$1" >&2
@@ -472,4 +474,6 @@ runtime_install_main() {
     printf '%s/autospec\n' "$generation"
 }
 
-runtime_install_main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    runtime_install_main "$@"
+fi
