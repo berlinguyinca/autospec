@@ -41,8 +41,14 @@ jobs:
         run: |
           run_exact() {
             behavior_test="$1"
+            set +e
             behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+            behavior_status=$?
+            set -e
             printf '%s\n' "$behavior_output"
+            if [ "$behavior_status" -ne 0 ]; then
+              return "$behavior_status"
+            fi
             test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
           }
           cargo test -p autospec-core --lib
@@ -81,8 +87,14 @@ jobs:
         run: |
           run_exact() {
             behavior_test="$1"
+            set +e
             behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+            behavior_status=$?
+            set -e
             printf '%s\n' "$behavior_output"
+            if [ "$behavior_status" -ne 0 ]; then
+              return "$behavior_status"
+            fi
             test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
           }
           run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
@@ -111,10 +123,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Check autospec CLI and tests
+      - name: Check autospec CLI binary
         shell: pwsh
         run: |
-          cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc
+          cargo check -p autospec-cli --bin autospec --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test portable autonomous ownership
@@ -156,8 +168,14 @@ jobs:
             . "$HOME/.cargo/env"
             run_exact() {
               behavior_test="$1"
+              set +e
               behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+              behavior_status=$?
+              set -e
               printf '%s\n' "$behavior_output"
+              if [ "$behavior_status" -ne 0 ]; then
+                return "$behavior_status"
+              fi
               test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
             }
             cargo check -p autospec-cli

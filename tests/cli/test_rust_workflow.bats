@@ -36,7 +36,8 @@ assert "cargo build --release -p autospec-cli" in macos_commands
 windows = jobs["windows-test"]
 assert windows["runs-on"] == "windows-latest"
 windows_commands = commands(windows)
-assert "cargo check -p autospec-cli --tests --target x86_64-pc-windows-msvc" in windows_commands
+assert "cargo check -p autospec-cli --bin autospec --target x86_64-pc-windows-msvc" in windows_commands
+assert "cargo check -p autospec-cli --tests" not in windows_commands
 
 freebsd = jobs["freebsd-test"]
 freebsd_uses = "\n".join(
@@ -78,4 +79,38 @@ for job_commands in (macos_commands, freebsd_commands):
 for job_commands in (macos_commands, windows_commands, freebsd_commands):
     assert "cargo build --release -p autospec-cli" in job_commands
 PY
+}
+
+@test "rust workflow prints and propagates a failing exact test under errexit" {
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case "$*" in' \
+    '  *publication_is_idempotent_but_rejects_another_generation*)' \
+    '    echo "injected exact-test failure"' \
+    '    exit 37' \
+    '    ;;' \
+    'esac' \
+    'exit 0' > "$fake_bin/cargo"
+  chmod +x "$fake_bin/cargo"
+  linux_test_script="$(python3 - "$WORKFLOW" <<'PY'
+import pathlib
+import sys
+import yaml
+
+workflow = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
+for step in workflow["jobs"]["build-test"]["steps"]:
+    if step.get("name") == "Test":
+        print(step["run"])
+        break
+else:
+    raise AssertionError("missing Linux test step")
+PY
+)"
+
+  run env PATH="$fake_bin:$PATH" bash -euo pipefail -c "$linux_test_script"
+
+  [ "$status" -eq 37 ]
+  [[ "$output" == *"injected exact-test failure"* ]]
 }

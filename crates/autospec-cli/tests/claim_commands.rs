@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use autospec_core::claim::RunStateRecord;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;

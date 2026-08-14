@@ -5228,219 +5228,16 @@ fn normalize_heartbeat_root_parent(
     private_heartbeat_directory_identity(&parent, "root parent")
 }
 
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-) -> Result<fs::File, CommandFailure> {
-    open_heartbeat_directory_beneath_with_hook(trusted_parent, descendant, || {})
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HeartbeatDirectoryIdentity {
-    device: u64,
-    inode: u64,
-    owner: u32,
-    mode: u32,
-}
-
-#[cfg(unix)]
-fn private_heartbeat_directory_identity(
-    directory: &impl std::os::fd::AsFd,
-    role: &str,
-) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
-    use nix::sys::stat::{fstat, SFlag};
-
-    let stat = fstat(directory).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not inspect heartbeat {role}: {error}"))
-    })?;
-    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFDIR)
-        || stat.st_uid != nix::unistd::geteuid().as_raw()
-        || stat.st_mode & 0o7777 != 0o700
-    {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat {role} must be owned by the effective user with mode 0700"
-        )));
-    }
-    Ok(HeartbeatDirectoryIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-        owner: stat.st_uid as u32,
-        mode: (stat.st_mode & 0o7777) as u32,
-    })
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-fn private_heartbeat_name_identity(
-    parent: &impl std::os::fd::AsFd,
-    name: &Path,
-    role: &str,
-) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
-    use nix::fcntl::AtFlags;
-    use nix::sys::stat::{fstatat, SFlag};
-
-    let stat = fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not inspect heartbeat {role}: {error}"))
-    })?;
-    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFDIR)
-        || stat.st_uid != nix::unistd::geteuid().as_raw()
-        || stat.st_mode & 0o7777 != 0o700
-    {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat {role} must be owned by the effective user with mode 0700"
-        )));
-    }
-    Ok(HeartbeatDirectoryIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-        owner: stat.st_uid as u32,
-        mode: (stat.st_mode & 0o7777) as u32,
-    })
-}
-
 #[cfg(target_os = "linux")]
-fn heartbeat_openat2_resolve_flags() -> nix::fcntl::ResolveFlag {
-    use nix::fcntl::ResolveFlag;
-
-    ResolveFlag::RESOLVE_BENEATH
-        | ResolveFlag::RESOLVE_NO_SYMLINKS
-        | ResolveFlag::RESOLVE_NO_MAGICLINKS
-        | ResolveFlag::RESOLVE_NO_XDEV
-}
-
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    use nix::fcntl::{openat2, OFlag, OpenHow};
-    use std::path::Component;
-
-    if descendant.as_os_str().is_empty()
-        || descendant.is_absolute()
-        || descendant
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant must be relative, non-empty, and contain no '..'",
-        ));
-    }
-    let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
-    let expected_binding =
-        private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?;
-    before_open();
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift before descendant open",
-        ));
-    }
-    let how = OpenHow::new()
-        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
-        .resolve(heartbeat_openat2_resolve_flags());
-    let directory = openat2(trusted_parent, descendant, how).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "heartbeat directory secure resolution failed: {error}"
-        ))
-    })?;
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift after descendant open",
-        ));
-    }
-    let opened = private_heartbeat_directory_identity(&directory, "descendant")?;
-    if opened != expected_binding
-        || private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?
-            != opened
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant name binding changed during open",
-        ));
-    }
-    Ok(fs::File::from(directory))
-}
-
+use open_beneath::open_heartbeat_directory_beneath;
+#[cfg(all(test, unix))]
+use open_beneath::open_heartbeat_directory_portable_unix_with_hook;
 #[cfg(unix)]
-#[allow(dead_code)]
-fn open_heartbeat_directory_portable_unix_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::Mode;
-    use std::path::Component;
-
-    if !matches!(
-        descendant.components().collect::<Vec<_>>().as_slice(),
-        [Component::Normal(_)]
-    ) {
-        return Err(CommandFailure::diagnostic(
-            "portable heartbeat descendant must be exactly one normal component",
-        ));
-    }
-    let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
-    let expected_binding =
-        private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?;
-    before_open();
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift before descendant open",
-        ));
-    }
-    let directory = openat(
-        trusted_parent,
-        descendant,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "portable heartbeat directory resolution failed: {error}"
-        ))
-    })?;
-    let opened = private_heartbeat_directory_identity(&directory, "descendant")?;
-    if opened != expected_binding
-        || private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?
-            != opened
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant name binding changed during open",
-        ));
-    }
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift after descendant open",
-        ));
-    }
-    Ok(fs::File::from(directory))
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    open_heartbeat_directory_portable_unix_with_hook(trusted_parent, descendant, before_open)
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    _trusted_parent: &fs::File,
-    _descendant: &Path,
-    _before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "secure heartbeat directory resolution requires Unix descriptor operations",
-    ))
-}
+use open_beneath::private_heartbeat_directory_identity;
+#[cfg(all(test, target_os = "linux"))]
+use open_beneath::{heartbeat_openat2_resolve_flags, open_heartbeat_directory_beneath_with_hook};
+#[cfg(target_os = "linux")]
+use open_beneath::{private_heartbeat_name_identity, HeartbeatDirectoryIdentity};
 
 // These primitives remain inert until the guarded recovery activation slice.
 #[allow(dead_code)]
@@ -7444,6 +7241,7 @@ mod heartbeat_liveness;
 mod heartbeat_portable;
 mod heartbeat_predecessor;
 pub(crate) mod lease;
+mod open_beneath;
 use heartbeat_liveness::startup_heartbeat_exists;
 use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,

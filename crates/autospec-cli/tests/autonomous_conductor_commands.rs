@@ -1,4 +1,3 @@
-#![cfg(unix)]
 #![allow(dead_code)]
 
 use autospec_core::autonomous::no_work::NoWorkTier;
@@ -20,6 +19,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/autonomous_accountability_acquisition.rs"]
 mod autonomous_accountability_acquisition;
+#[path = "support/autonomous_conductor_process.rs"]
+mod autonomous_conductor_process;
+use autonomous_conductor_process::{
+    process_identity, process_is_running, terminate_process, terminate_process_group,
+};
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -7534,39 +7538,4 @@ fn wait_for_file_contents(path: &Path, expected: &str) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("{} did not contain {expected}", path.display());
-}
-
-fn process_is_running(pid: u32) -> bool {
-    Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && !String::from_utf8_lossy(&output.stdout)
-                    .trim_start()
-                    .starts_with('Z')
-        })
-}
-
-fn process_identity(pid: u32) -> Option<(u32, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(") ")?;
-    let fields = fields.split_whitespace().collect::<Vec<_>>();
-    Some((fields.get(2)?.parse().ok()?, fields.get(19)?.parse().ok()?))
-}
-
-fn terminate_process_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-fn terminate_process(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }

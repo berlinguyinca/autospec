@@ -212,7 +212,7 @@ mod requeue {
         let (sandbox, _) = startup_heartbeat_fixture("portable-live-owner");
         let root = sandbox.join("heartbeats");
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
-        unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
         super::super::super::write_startup_heartbeat(
             "owner/repo",
             42,
@@ -231,8 +231,8 @@ mod requeue {
         .expect("portable owner classification"));
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value) },
-            None => unsafe { std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR") },
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
         }
         std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
     }

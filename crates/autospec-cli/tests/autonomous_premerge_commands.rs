@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use autospec_core::autonomous::premerge::{
     evaluate_premerge, EvidenceAvailability, EvidenceVerdict, PremergeDecision,
     PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
