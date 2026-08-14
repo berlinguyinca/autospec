@@ -18932,6 +18932,11 @@ fn launch_and_supervise(
                             "executor cleanup evidence",
                         )?;
                         append_executor_event(event_log, state, "child_cleanup_complete", None)?;
+                        if sinks.supervisor_identity.exists() {
+                            fs::remove_file(&sinks.supervisor_identity).map_err(|error| {
+                                format!("retire executor supervisor journal: {error}")
+                            })?;
+                        }
                         match readers.drain_after_completion(
                             state_path,
                             event_log,
