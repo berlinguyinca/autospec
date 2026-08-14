@@ -6095,6 +6095,7 @@ struct ForegroundFixture {
     comments: PathBuf,
     pull_requests: PathBuf,
     calls: PathBuf,
+    accountability: PathBuf,
     operator: PathBuf,
     state: PathBuf,
     health: PathBuf,
@@ -6152,6 +6153,7 @@ impl ForegroundFixture {
         let comments = root.join("comments.json");
         let pull_requests = root.join("pull-requests.json");
         let calls = root.join("gh.log");
+        let accountability = root.join("accountability-epic.md");
         let operator = root.join("operator");
         let state = root.join("state");
         let health = root.join("health");
@@ -6175,6 +6177,28 @@ impl ForegroundFixture {
             r####"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_FOREGROUND_CALLS"
+if [ "$1" = api ] && printf '%s\n' "$@" | grep -q 'labels=autospec%3Arun-accountability'; then
+  if [ -s "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" ]; then
+    jq -n --rawfile body "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" '[[{"number":999,"url":"https://api.github.com/repos/test/repo/issues/999","html_url":"https://github.com/test/repo/issues/999","state":"open","body":$body,"labels":[{"name":"epic"},{"name":"type:tracker"},{"name":"no-auto"},{"name":"autospec:run-accountability"}]}]]'
+  else
+    printf '%s\n' '[[]]'
+  fi
+  exit 0
+fi
+if [ "$1" = label ] && [ "${2:-}" = create ]; then exit 0; fi
+if [ "$1" = issue ] && [ "${2:-}" = create ] && printf '%s\n' "$@" | grep -q 'Autonomous run'; then
+  cat > "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY"
+  printf '%s\n' 'https://github.com/test/repo/issues/999'
+  exit 0
+fi
+if [ "$1" = issue ] && [ "${2:-}" = edit ] && [ "${3:-}" = 999 ]; then
+  cat > "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "${2:-}" = view ] && [ "${3:-}" = 999 ]; then
+  jq -n --rawfile body "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY" '{number:999,url:"https://github.com/test/repo/issues/999",state:"OPEN",body:$body,labels:[{name:"epic"},{name:"type:tracker"},{name:"no-auto"},{name:"autospec:run-accountability"}]}'
+  exit 0
+fi
 if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
   while :; do sleep 1; done
 fi
@@ -6423,6 +6447,7 @@ exit 1
             comments,
             pull_requests,
             calls,
+            accountability,
             operator,
             state,
             health,
@@ -6647,6 +6672,7 @@ printf '%s\n' '[]' > "$report"
             .env("AUTOSPEC_FOREGROUND_COMMENTS", &self.comments)
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
