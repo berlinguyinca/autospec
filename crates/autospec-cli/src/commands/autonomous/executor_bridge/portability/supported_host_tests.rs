@@ -43,13 +43,13 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let sequence = DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let repository = format!("owner/portable-admission-{}-{sequence}", std::process::id());
-    let root = fs::canonicalize(std::env::temp_dir())
-        .expect("canonical temp directory")
-        .join(format!(
-            "autospec-supported-host-admission-{}-{}",
-            std::process::id(),
-            sequence
-        ));
+    // Keep the spelling accepted by external tools. On Windows, canonicalizing the
+    // temporary directory adds a verbatim (`\\?\`) prefix that Git rejects for `init`.
+    let root = std::env::temp_dir().join(format!(
+        "autospec-supported-host-admission-{}-{}",
+        std::process::id(),
+        sequence
+    ));
     let repo = root.join("repo");
     let remote = root.join("remote.git");
     let heartbeat = root.join("heartbeats");
