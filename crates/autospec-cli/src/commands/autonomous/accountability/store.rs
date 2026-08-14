@@ -198,6 +198,7 @@ pub struct AccountabilityStatus {
     pub journal_segment: u64,
     pub prior_remote_digest: Option<String>,
     pub segment_chain_digest: String,
+    pub lifecycle_phase: String,
 }
 
 #[derive(Default)]
@@ -216,6 +217,8 @@ struct State {
     prior_remote_digest: Option<String>,
     segment_chain_digest: String,
     create_attempted: bool,
+    resume_event_pending: bool,
+    lifecycle_phase: String,
 }
 
 pub struct AccountabilityStore {
@@ -275,6 +278,7 @@ impl AccountabilityStore {
             return Ok(());
         }
         self.state.launch = Some(launch);
+        self.state.lifecycle_phase = "bound_not_spawned".to_owned();
         self.state.journal_segment = 1;
         self.state.segment_chain_digest = sha256_hex(
             format!(
@@ -324,17 +328,47 @@ impl AccountabilityStore {
             .as_bytes(),
         );
         self.state.create_attempted = true;
+        self.state.resume_event_pending = true;
+        self.state.lifecycle_phase = "bound_not_spawned".to_owned();
         ensure_private_file(&self.path(EVENTS_FILE))?;
         ensure_private_file(&self.path(OUTBOX_FILE))?;
         self.persist_state()?;
-        self.append_event(AccountabilityEvent::new(
+        let record = self.append_event(AccountabilityEvent::new(
             EventKind::ResumedFromEpic {
                 epic: manifest.epic_number,
             },
             format!("Resumed accountability from epic {}", manifest.epic_number),
             "The managed recovery manifest reconstructed a missing local journal segment",
             vec![Evidence::github_url(manifest.epic_url)?],
-        )?)
+        )?)?;
+        self.state.resume_event_pending = false;
+        self.persist_state()?;
+        Ok(record)
+    }
+
+    pub fn ensure_resume_event(&mut self) -> Result<(), AccountabilityError> {
+        if !self.state.resume_event_pending {
+            return Ok(());
+        }
+        let epic = self
+            .state
+            .epic_number
+            .ok_or_else(|| AccountabilityError::new("pending resume event has no bound epic"))?;
+        if !self.events.iter().any(|record| {
+            matches!(record.kind, EventKind::ResumedFromEpic { epic: found } if found == epic)
+        }) {
+            let url = self.state.epic_url.clone().ok_or_else(|| {
+                AccountabilityError::new("pending resume event has no epic URL")
+            })?;
+            self.append_event(AccountabilityEvent::new(
+                EventKind::ResumedFromEpic { epic },
+                format!("Resumed accountability from epic {epic}"),
+                "The managed recovery manifest reconstructed a missing local journal segment",
+                vec![Evidence::github_url(url)?],
+            )?)?;
+        }
+        self.state.resume_event_pending = false;
+        self.persist_state()
     }
 
     pub fn append_event(
@@ -350,6 +384,7 @@ impl AccountabilityStore {
             .last_seq
             .checked_add(1)
             .ok_or_else(|| AccountabilityError::new("event sequence overflow"))?;
+        let terminal = matches!(event.kind, EventKind::Completed | EventKind::Stopped);
         let record = EventRecord::create(
             launch.identity.run_id(),
             &self.state.segment_chain_digest,
@@ -360,6 +395,9 @@ impl AccountabilityStore {
         self.events.push(record.clone());
         self.state.last_seq = seq;
         self.state.event_count += 1;
+        if terminal {
+            self.state.lifecycle_phase = "terminal".to_owned();
+        }
         self.persist_state()?;
         Ok(record)
     }
@@ -408,6 +446,28 @@ impl AccountabilityStore {
         Ok(projection)
     }
 
+    pub fn projection_for_delivery(&mut self) -> Result<RenderedProjection, AccountabilityError> {
+        if self.state.pending_projection_count == 0 {
+            return self.render();
+        }
+        let launch = self.state.launch.as_ref().ok_or_else(|| {
+            AccountabilityError::new("begin_launch is required before projection delivery")
+        })?;
+        let markdown = render::markdown(launch, &self.events);
+        let digest = sha256_hex(markdown.as_bytes());
+        if self.state.desired_digest.as_deref() != Some(&digest) {
+            return Err(AccountabilityError::new(
+                "pending projection digest no longer matches the durable journal",
+            ));
+        }
+        Ok(RenderedProjection {
+            revision: self.state.projection_revision,
+            digest,
+            desired_high_watermark: self.state.desired_high_watermark,
+            markdown,
+        })
+    }
+
     pub fn ack_projection(
         &mut self,
         revision: u64,
@@ -446,6 +506,7 @@ impl AccountabilityStore {
             journal_segment: self.state.journal_segment,
             prior_remote_digest: self.state.prior_remote_digest.clone(),
             segment_chain_digest: self.state.segment_chain_digest.clone(),
+            lifecycle_phase: self.state.lifecycle_phase.clone(),
         }
     }
 
@@ -457,6 +518,10 @@ impl AccountabilityStore {
         self.state.create_attempted
     }
 
+    pub fn desired_projection_digest(&self) -> Option<&str> {
+        self.state.desired_digest.as_deref()
+    }
+
     pub fn mark_create_attempted(&mut self) -> Result<(), AccountabilityError> {
         if self.state.launch.is_none() {
             return Err(AccountabilityError::new(
@@ -464,6 +529,21 @@ impl AccountabilityStore {
             ));
         }
         self.state.create_attempted = true;
+        self.persist_state()
+    }
+
+    pub fn mark_spawned(&mut self) -> Result<(), AccountabilityError> {
+        if self.state.launch.is_none() || self.state.epic_number.is_none() {
+            return Err(AccountabilityError::new(
+                "a bound accountability epic is required before spawn",
+            ));
+        }
+        if self.state.lifecycle_phase == "terminal" {
+            return Err(AccountabilityError::new(
+                "terminal accountability state cannot be spawned",
+            ));
+        }
+        self.state.lifecycle_phase = "spawned".to_owned();
         self.persist_state()
     }
 
@@ -513,6 +593,8 @@ impl AccountabilityStore {
             "prior_remote_digest":self.state.prior_remote_digest,
             "segment_chain_digest":self.state.segment_chain_digest,
             "create_attempted":self.state.create_attempted,
+            "resume_event_pending":self.state.resume_event_pending,
+            "lifecycle_phase":self.state.lifecycle_phase,
         }))
         .expect("JSON value serializes");
         atomic_write(&self.path(STATE_FILE), &document)
@@ -542,6 +624,7 @@ fn parse_state(document: &str) -> Result<State, AccountabilityError> {
         Some(value) => Some(LaunchDescriptor::from_value(value)?),
     };
     let optional_string = |name: &str| object.get(name).and_then(Value::as_str).map(str::to_owned);
+    let has_launch = launch.is_some();
     Ok(State {
         launch,
         epic_number: object.get("epic_number").and_then(Value::as_u64),
@@ -560,6 +643,17 @@ fn parse_state(document: &str) -> Result<State, AccountabilityError> {
             .get("create_attempted")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        resume_event_pending: object
+            .get("resume_event_pending")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        lifecycle_phase: optional_string("lifecycle_phase").unwrap_or_else(|| {
+            if has_launch {
+                "bound_not_spawned".to_owned()
+            } else {
+                String::new()
+            }
+        }),
     })
 }
 

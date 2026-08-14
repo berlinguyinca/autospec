@@ -1,9 +1,11 @@
 use super::{
-    AccountabilityError, AccountabilityStore, RecoveryManifest, RenderedProjection,
+    AccountabilityError, AccountabilityStore, RecoveryManifest, RecoveryState, RenderedProjection,
     RepositoryIdentity,
 };
+use autospec_core::autonomous::waterfall::sha256_hex;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -76,13 +78,36 @@ pub enum GithubCommand {
 }
 
 pub trait GithubTransport {
-    fn execute(&mut self, command: GithubCommand) -> Result<String, String>;
+    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GithubFailure {
+    Retryable(String),
+    Ambiguous(String),
+    Definitive(String),
+}
+
+impl GithubFailure {
+    fn retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_) | Self::Ambiguous(_))
+    }
+}
+
+impl fmt::Display for GithubFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable(message) | Self::Ambiguous(message) | Self::Definitive(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
 }
 
 pub struct GhCli;
 
 impl GithubTransport for GhCli {
-    fn execute(&mut self, command: GithubCommand) -> Result<String, String> {
+    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure> {
         execute_gh(command)
     }
 }
@@ -94,6 +119,11 @@ struct RemoteIssue {
     state: String,
     body: String,
     labels: BTreeSet<String>,
+}
+
+struct ReconcileError {
+    error: AccountabilityError,
+    retryable: bool,
 }
 
 pub fn bind_epic<T, R>(
@@ -133,7 +163,8 @@ where
     }
     let marker = run_marker(&request.repository, identity.run_id());
     let bound = store.status().epic_number;
-    let mut matches = reconcile(github, &request.repository, &marker, renew_lease)?;
+    let mut matches = reconcile(github, &request.repository, &marker, renew_lease)
+        .map_err(|failure| failure.error)?;
     if matches.len() > 1 {
         return Err(AccountabilityError::new(
             "multiple accountability epics carry the exact run marker",
@@ -149,7 +180,6 @@ where
             ));
         }
         validate_issue(&issue, &request.repository, Some(identity.run_id()))?;
-        validate_remote_manifest(&issue, &request.repository, identity.run_id())?;
         if store.status().pending_projection_count > 0 {
             project_and_ack(
                 store,
@@ -159,6 +189,18 @@ where
                 &marker,
                 renew_lease,
             )?;
+        } else {
+            let manifest =
+                validate_remote_manifest(&issue, &request.repository, identity.run_id())?;
+            let status = store.status();
+            if manifest.projection_revision != status.projection_revision
+                || Some(manifest.remote_digest.as_str()) != store.desired_projection_digest()
+                || manifest.high_watermark != status.acknowledged_high_watermark
+            {
+                return Err(AccountabilityError::new(
+                    "bound epic revision, digest, or high-watermark disagrees with local state",
+                ));
+            }
         }
         return finish_binding(store, github, request, issue);
     }
@@ -184,7 +226,7 @@ where
             renew(renew_lease)?;
             let projection = store.render()?;
             let body = format!("{marker}\n\n{}", projection.markdown);
-            let _ambiguous_or_success = github.execute(GithubCommand::CreateIssue {
+            let create_result = github.execute(GithubCommand::CreateIssue {
                 repository: request.repository.as_str().to_owned(),
                 title: format!("Autonomous run {}", &identity.run_id()[..12]),
                 body,
@@ -193,6 +235,11 @@ where
                     .map(|label| (*label).to_owned())
                     .collect(),
             });
+            if let Err(error @ GithubFailure::Definitive(_)) = create_result {
+                return Err(AccountabilityError::new(format!(
+                    "cannot create accountability epic: {error}"
+                )));
+            }
         }
         let mut found = None;
         let mut last_error = None;
@@ -200,13 +247,13 @@ where
             let mut reconciled = match reconcile(github, &request.repository, &marker, renew_lease)
             {
                 Ok(reconciled) => reconciled,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    if attempt + 1 < RECONCILE_ATTEMPTS {
+                Err(failure) => {
+                    last_error = Some(failure.error.to_string());
+                    if failure.retryable && attempt + 1 < RECONCILE_ATTEMPTS {
                         thread::sleep(Duration::from_millis(25));
                         continue;
                     }
-                    Vec::new()
+                    return Err(failure.error);
                 }
             };
             if reconciled.len() > 1 {
@@ -264,8 +311,7 @@ where
     if marker_repo != request.repository.as_str() {
         return Err(AccountabilityError::new("epic marker repository mismatch"));
     }
-    let manifest = extract_manifest(&issue.body)?;
-    let manifest = RecoveryManifest::parse_for_repository(&manifest, &request.repository)?;
+    let manifest = verified_manifest(&issue.body, &request.repository)?;
     if marker_run_id != manifest.identity.run_id()
         || manifest.epic_number != issue.number
         || manifest.epic_url != issue.url
@@ -274,6 +320,7 @@ where
             "epic marker and managed recovery manifest do not agree",
         ));
     }
+    validate_resume_policy(&issue, &manifest, request.resume_policy)?;
     if issue.state.eq_ignore_ascii_case("closed") {
         if request.resume_policy != ResumePolicy::ReopenClosed {
             return Err(AccountabilityError::new(
@@ -304,6 +351,7 @@ where
         }
         Some(identity) if identity.run_id() == marker_run_id => {
             store.bind_epic(issue.number, &issue.url)?;
+            store.ensure_resume_event()?;
         }
         Some(_) => {
             return Err(AccountabilityError::new(
@@ -335,7 +383,7 @@ where
     T: GithubTransport,
     R: FnMut() -> Result<(), String>,
 {
-    let projection = store.render()?;
+    let projection = store.projection_for_delivery()?;
     let identity = store
         .identity()
         .cloned()
@@ -365,11 +413,13 @@ where
         repository,
         Some(store.identity().unwrap().run_id()),
     )?;
-    let returned_manifest =
-        RecoveryManifest::parse_for_repository(&extract_manifest(&verified.body)?, repository)?;
+    let (returned_projection, returned_manifest) = extract_managed_projection(&verified.body)?;
+    let returned_manifest = RecoveryManifest::parse_for_repository(&returned_manifest, repository)?;
     if returned_manifest.projection_revision != projection.revision
         || returned_manifest.remote_digest != projection.digest
         || returned_manifest.high_watermark != projection.desired_high_watermark
+        || sha256_hex(format!("{}\n", returned_projection.trim_end()).as_bytes())
+            != projection.digest
     {
         return Err(AccountabilityError::new(
             "GitHub returned a stale accountability projection",
@@ -396,6 +446,7 @@ fn finish_binding<T: GithubTransport>(
                 issue_url: issue.url.clone(),
             })
             .err()
+            .map(|error| error.to_string())
     });
     Ok(EpicBinding {
         number: issue.number,
@@ -414,18 +465,28 @@ fn reconcile<T, R>(
     repository: &RepositoryIdentity,
     marker: &str,
     renew_lease: &mut R,
-) -> Result<Vec<RemoteIssue>, AccountabilityError>
+) -> Result<Vec<RemoteIssue>, ReconcileError>
 where
     T: GithubTransport,
     R: FnMut() -> Result<(), String>,
 {
-    renew(renew_lease)?;
+    renew(renew_lease).map_err(|error| ReconcileError {
+        error,
+        retryable: false,
+    })?;
     let output = github
         .execute(GithubCommand::ListAccountabilityIssues {
             repository: repository.as_str().to_owned(),
         })
-        .map_err(|error| AccountabilityError::new(format!("cannot reconcile epics: {error}")))?;
-    Ok(parse_issue_pages(&output)?
+        .map_err(|error| ReconcileError {
+            retryable: error.retryable(),
+            error: AccountabilityError::new(format!("cannot reconcile epics: {error}")),
+        })?;
+    Ok(parse_issue_pages(&output)
+        .map_err(|error| ReconcileError {
+            error,
+            retryable: false,
+        })?
         .into_iter()
         .filter(|issue| issue.body.matches(marker).count() == 1)
         .collect())
@@ -492,9 +553,8 @@ fn validate_remote_manifest(
     issue: &RemoteIssue,
     repository: &RepositoryIdentity,
     run_id: &str,
-) -> Result<(), AccountabilityError> {
-    let manifest =
-        RecoveryManifest::parse_for_repository(&extract_manifest(&issue.body)?, repository)?;
+) -> Result<RecoveryManifest, AccountabilityError> {
+    let manifest = verified_manifest(&issue.body, repository)?;
     if manifest.identity.run_id() != run_id
         || manifest.epic_number != issue.number
         || manifest.epic_url != issue.url
@@ -503,7 +563,47 @@ fn validate_remote_manifest(
             "bound epic recovery manifest does not match its marker and identity",
         ));
     }
-    Ok(())
+    validate_resume_policy(issue, &manifest, ResumePolicy::ActiveOnly)?;
+    Ok(manifest)
+}
+
+fn verified_manifest(
+    body: &str,
+    repository: &RepositoryIdentity,
+) -> Result<RecoveryManifest, AccountabilityError> {
+    let (projection, document) = extract_managed_projection(body)?;
+    let manifest = RecoveryManifest::parse_for_repository(&document, repository)?;
+    let digest = sha256_hex(format!("{}\n", projection.trim_end()).as_bytes());
+    if manifest.remote_digest != digest {
+        return Err(AccountabilityError::new(
+            "managed accountability projection digest mismatch",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn validate_resume_policy(
+    issue: &RemoteIssue,
+    manifest: &RecoveryManifest,
+    policy: ResumePolicy,
+) -> Result<(), AccountabilityError> {
+    let open = issue.state.eq_ignore_ascii_case("open");
+    let allowed = matches!(
+        (open, manifest.recovery_state, policy),
+        (true, RecoveryState::Active, _)
+            | (
+                false,
+                RecoveryState::Parked | RecoveryState::Terminal,
+                ResumePolicy::ReopenClosed
+            )
+    );
+    if allowed {
+        Ok(())
+    } else {
+        Err(AccountabilityError::new(
+            "accountability epic open/closed state and recovery ownership policy disagree",
+        ))
+    }
 }
 
 fn parse_single_marker(body: &str) -> Result<(&str, &str), AccountabilityError> {
@@ -571,7 +671,24 @@ fn strip_managed_content(body: &str) -> String {
     kept.join("\n").trim().to_owned()
 }
 
-fn extract_manifest(body: &str) -> Result<String, AccountabilityError> {
+fn extract_managed_projection(body: &str) -> Result<(String, String), AccountabilityError> {
+    if body.matches(MANAGED_START).count() != 1
+        || body.matches(MANAGED_END).count() != 1
+        || body.matches(MANIFEST_START).count() != 1
+        || body.matches(MANIFEST_END).count() != 1
+    {
+        return Err(AccountabilityError::new(
+            "accountability epic must contain exactly one managed block and recovery manifest",
+        ));
+    }
+    let managed_start = body.find(MANAGED_START).unwrap() + MANAGED_START.len();
+    let managed_end = body.find(MANAGED_END).unwrap();
+    if managed_start >= managed_end {
+        return Err(AccountabilityError::new(
+            "managed accountability block is malformed",
+        ));
+    }
+    let managed = &body[managed_start..managed_end];
     let start = body
         .find(MANIFEST_START)
         .ok_or_else(|| AccountabilityError::new("managed recovery manifest is missing"))?
@@ -586,7 +703,16 @@ fn extract_manifest(body: &str) -> Result<String, AccountabilityError> {
             "managed recovery manifest is ambiguous",
         ));
     }
-    Ok(manifest.to_owned())
+    let projection_end = managed.find(MANIFEST_START).ok_or_else(|| {
+        AccountabilityError::new("managed recovery manifest is outside its managed block")
+    })?;
+    let projection = managed[..projection_end].trim();
+    if projection.is_empty() {
+        return Err(AccountabilityError::new(
+            "managed accountability projection is missing",
+        ));
+    }
+    Ok((projection.to_owned(), manifest.to_owned()))
 }
 
 fn run_marker(repository: &RepositoryIdentity, run_id: &str) -> String {
@@ -658,7 +784,11 @@ fn parse_issue(value: &Value) -> Result<RemoteIssue, AccountabilityError> {
     })
 }
 
-fn execute_gh(command: GithubCommand) -> Result<String, String> {
+fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
+    let mutating = !matches!(
+        command,
+        GithubCommand::ListAccountabilityIssues { .. } | GithubCommand::ViewIssue { .. }
+    );
     let (args, stdin) = match command {
         GithubCommand::EnsureLabel { repository, name } => (
             vec![
@@ -774,22 +904,28 @@ fn execute_gh(command: GithubCommand) -> Result<String, String> {
     }
     let mut child = process
         .spawn()
-        .map_err(|error| format!("cannot execute gh: {error}"))?;
+        .map_err(|error| GithubFailure::Retryable(format!("cannot execute gh: {error}")))?;
     if let Some(input) = stdin {
         child
             .stdin
             .take()
-            .ok_or_else(|| "cannot open gh stdin".to_string())?
+            .ok_or_else(|| GithubFailure::Ambiguous("cannot open gh stdin".to_string()))?
             .write_all(input.as_bytes())
-            .map_err(|error| format!("cannot write gh stdin: {error}"))?;
+            .map_err(|error| GithubFailure::Ambiguous(format!("cannot write gh stdin: {error}")))?;
     }
     let output = child
         .wait_with_output()
-        .map_err(|error| format!("cannot wait for gh: {error}"))?;
+        .map_err(|error| GithubFailure::Ambiguous(format!("cannot wait for gh: {error}")))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if mutating {
+            GithubFailure::Definitive(message)
+        } else {
+            GithubFailure::Retryable(message)
+        });
     }
-    String::from_utf8(output.stdout).map_err(|error| format!("gh returned invalid UTF-8: {error}"))
+    String::from_utf8(output.stdout)
+        .map_err(|error| GithubFailure::Definitive(format!("gh returned invalid UTF-8: {error}")))
 }
 
 fn json_error(error: serde_json::Error) -> AccountabilityError {

@@ -3,11 +3,11 @@
 mod accountability;
 
 use accountability::github::{
-    bind_epic, EpicBindingRequest, GithubCommand, GithubTransport, ResumePolicy,
+    bind_epic, EpicBindingRequest, GithubCommand, GithubFailure, GithubTransport, ResumePolicy,
 };
 use accountability::{
-    AccountabilityStore, LaunchDescriptor, LeaseGeneration, RepositoryIdentity, RunIdentity,
-    RunNonce,
+    AccountabilityEvent, AccountabilityStore, EventKind, Evidence, LaunchDescriptor,
+    LeaseGeneration, RepositoryIdentity, RunIdentity, RunNonce,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -43,13 +43,13 @@ impl Drop for Fixture {
 
 #[derive(Default)]
 struct StubGithub {
-    responses: VecDeque<Result<String, String>>,
+    responses: VecDeque<Result<String, GithubFailure>>,
     calls: Vec<GithubCommand>,
     last_edit: Option<String>,
 }
 
 impl StubGithub {
-    fn with(responses: impl IntoIterator<Item = Result<String, String>>) -> Self {
+    fn with(responses: impl IntoIterator<Item = Result<String, GithubFailure>>) -> Self {
         Self {
             responses: responses.into_iter().collect(),
             calls: Vec::new(),
@@ -59,7 +59,7 @@ impl StubGithub {
 }
 
 impl GithubTransport for StubGithub {
-    fn execute(&mut self, command: GithubCommand) -> Result<String, String> {
+    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure> {
         if let GithubCommand::EditIssue { body, .. } = &command {
             self.last_edit = Some(body.clone());
         }
@@ -68,10 +68,11 @@ impl GithubTransport for StubGithub {
             _ => None,
         };
         self.calls.push(command);
-        let response = self
-            .responses
-            .pop_front()
-            .unwrap_or_else(|| Err("unexpected GitHub call".to_string()));
+        let response = self.responses.pop_front().unwrap_or_else(|| {
+            Err(GithubFailure::Definitive(
+                "unexpected GitHub call".to_string(),
+            ))
+        });
         match (response, dynamic_number) {
             (Ok(value), Some(number)) if value == "__return_last_edit__" => Ok(issue(
                 number,
@@ -192,8 +193,12 @@ fn ambiguous_create_response_never_permits_a_second_create() {
         Ok(String::new()),
         Ok(String::new()),
         Ok(String::new()),
-        Err("connection reset after request body".to_string()),
-        Err("temporary list failure".to_string()),
+        Err(GithubFailure::Ambiguous(
+            "connection reset after request body".to_string(),
+        )),
+        Err(GithubFailure::Retryable(
+            "temporary list failure".to_string(),
+        )),
         Ok("[[]]".to_string()),
         Ok(pages(&[remote])),
         Ok(String::new()),
@@ -250,7 +255,7 @@ fn lease_loss_during_reconciliation_fails_before_spawn_binding() {
         Ok(String::new()),
         Ok(String::new()),
         Ok(String::new()),
-        Err("timeout".to_string()),
+        Err(GithubFailure::Ambiguous("timeout".to_string())),
         Ok("[[]]".to_string()),
     ]);
 
@@ -267,15 +272,18 @@ fn explicit_resume_reconstructs_manifest_reopens_and_records_resume() {
     let fixture = Fixture::new("resume");
     let empty = AccountabilityStore::open(fixture.path()).unwrap();
     drop(empty);
+    let projection = "Existing run overview";
     let manifest = accountability::RecoveryManifest::new(
         run(),
         77,
         "https://github.com/acme/widgets/issues/77",
         4,
-        "a".repeat(64),
+        autospec_core::autonomous::waterfall::sha256_hex(format!("{projection}\n").as_bytes()),
         12,
         2,
     )
+    .unwrap()
+    .with_recovery_state(accountability::RecoveryState::Parked, vec![], vec![])
     .unwrap();
     let marker = format!(
         "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
@@ -283,7 +291,7 @@ fn explicit_resume_reconstructs_manifest_reopens_and_records_resume() {
     );
     let body = accountability::github::compose_managed_body(
         &marker,
-        "Existing run overview",
+        projection,
         &manifest,
         "human-authored tail",
     );
@@ -342,6 +350,52 @@ fn explicit_epic_rejects_wrong_labels_or_duplicate_markers() {
 }
 
 #[test]
+fn resume_policy_rejects_parked_open_and_active_closed_epics() {
+    for (name, state, recovery_state, policy) in [
+        (
+            "parked-open",
+            "OPEN",
+            accountability::RecoveryState::Parked,
+            ResumePolicy::ActiveOnly,
+        ),
+        (
+            "active-closed",
+            "CLOSED",
+            accountability::RecoveryState::Active,
+            ResumePolicy::ReopenClosed,
+        ),
+    ] {
+        let fixture = Fixture::new(name);
+        let mut store = AccountabilityStore::open(fixture.path()).unwrap();
+        let projection = "Existing run overview";
+        let manifest = accountability::RecoveryManifest::new(
+            run(),
+            79,
+            "https://github.com/acme/widgets/issues/79",
+            4,
+            autospec_core::autonomous::waterfall::sha256_hex(format!("{projection}\n").as_bytes()),
+            12,
+            2,
+        )
+        .unwrap()
+        .with_recovery_state(recovery_state, vec![], vec![])
+        .unwrap();
+        let marker = format!(
+            "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+            run().run_id()
+        );
+        let body = accountability::github::compose_managed_body(&marker, projection, &manifest, "");
+        let mut github = StubGithub::with([Ok(issue(79, state, &body))]);
+        let mut explicit = request();
+        explicit.explicit_epic = Some(79);
+        explicit.resume_policy = policy;
+
+        let error = bind_epic(&mut store, &mut github, explicit, || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("policy"));
+    }
+}
+
+#[test]
 fn optional_project_failure_does_not_unbind_verified_epic() {
     let fixture = Fixture::new("project-warning");
     let mut store = store(&fixture);
@@ -356,7 +410,9 @@ fn optional_project_failure_does_not_unbind_verified_epic() {
         Ok(pages(std::slice::from_ref(&remote))),
         Ok(String::new()),
         Ok("__return_last_edit__".to_string()),
-        Err("missing project scope".to_string()),
+        Err(GithubFailure::Definitive(
+            "missing project scope".to_string(),
+        )),
     ]);
 
     let binding = bind_epic(&mut store, &mut github, project_request, || Ok(())).unwrap();
@@ -366,6 +422,121 @@ fn optional_project_failure_does_not_unbind_verified_epic() {
         binding.project_warning.as_deref(),
         Some("missing project scope")
     );
+}
+
+#[test]
+fn definitive_create_failure_is_not_reclassified_as_unknown_or_retried() {
+    let fixture = Fixture::new("definitive-create");
+    let mut store = store(&fixture);
+    let mut github = StubGithub::with([
+        Ok("[[]]".to_string()),
+        Ok(String::new()),
+        Ok(String::new()),
+        Ok(String::new()),
+        Ok(String::new()),
+        Err(GithubFailure::Definitive("validation failed".to_string())),
+    ]);
+
+    let error = bind_epic(&mut store, &mut github, request(), || Ok(())).unwrap_err();
+    assert!(error.to_string().contains("validation failed"));
+    assert_eq!(
+        github
+            .calls
+            .iter()
+            .filter(|call| matches!(call, GithubCommand::CreateIssue { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn crash_after_local_binding_projects_missing_manifest_without_creating_again() {
+    let fixture = Fixture::new("bound-before-manifest");
+    let mut store = store(&fixture);
+    let projection = store.render().unwrap();
+    let marker = format!(
+        "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+        run().run_id()
+    );
+    store
+        .bind_epic(91, "https://github.com/acme/widgets/issues/91")
+        .unwrap();
+    assert_eq!(store.status().pending_projection_count, 1);
+    let remote_without_manifest = issue(91, "OPEN", &format!("{marker}\n{}", projection.markdown));
+    let mut github = StubGithub::with([
+        Ok(pages(&[remote_without_manifest])),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+    ]);
+
+    let binding = bind_epic(&mut store, &mut github, request(), || Ok(())).unwrap();
+    assert_eq!(binding.number, 91);
+    assert_eq!(store.status().pending_projection_count, 0);
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateIssue { .. })));
+}
+
+#[test]
+fn managed_projection_rejects_duplicate_blocks_and_digest_mismatch() {
+    let marker = format!(
+        "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+        run().run_id()
+    );
+    let manifest = accountability::RecoveryManifest::new(
+        run(),
+        92,
+        "https://github.com/acme/widgets/issues/92",
+        3,
+        "a".repeat(64),
+        0,
+        1,
+    )
+    .unwrap();
+    let body = accountability::github::compose_managed_body(&marker, "projection", &manifest, "");
+    let duplicate = body.replace(
+        "<!-- autospec:accountability:end -->",
+        "<!-- autospec:accountability:end -->\n<!-- autospec:accountability:start -->\nextra\n<!-- autospec:accountability:end -->",
+    );
+    for invalid in [
+        duplicate,
+        body.replacen("\nprojection\n", "\ntampered\n", 1),
+    ] {
+        let fixture = Fixture::new("managed-integrity");
+        let mut store = store(&fixture);
+        let mut github = StubGithub::with([Ok(issue(92, "OPEN", &invalid))]);
+        let mut explicit = request();
+        explicit.explicit_epic = Some(92);
+        let error = bind_epic(&mut store, &mut github, explicit, || Ok(())).unwrap_err();
+        assert!(
+            error.to_string().contains("managed") || error.to_string().contains("digest"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn retryable_issue_failure_keeps_the_spawned_run_active() {
+    let fixture = Fixture::new("retryable-failure");
+    let mut store = store(&fixture);
+    store
+        .bind_epic(93, "https://github.com/acme/widgets/issues/93")
+        .unwrap();
+    store.mark_spawned().unwrap();
+    store
+        .append_event(
+            AccountabilityEvent::new(
+                EventKind::Failed,
+                "Issue attempt failed",
+                "The issue remains eligible for bounded retry",
+                vec![Evidence::outcome("retry scheduled")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(store.status().lifecycle_phase, "spawned");
 }
 
 #[test]
