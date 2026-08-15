@@ -5,6 +5,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/claim_process_fixture.rs"]
+mod claim_process_fixture;
+use claim_process_fixture::{bind_to_current_process, current_process_start};
+
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn autospec() -> Command {
@@ -1502,6 +1506,7 @@ fn claim_stale_heartbeat_recovery() {
         .expect("private heartbeat repository");
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+    let process_start = current_process_start();
     let heartbeat = heartbeat_repo.join("42.json");
     let expired_document = format!(
         "{{\"issue\":\"42\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
@@ -1572,20 +1577,16 @@ exit 17
     assert_eq!(claim_ref_message(&repo, 42), claimed);
     std::fs::remove_file(&heartbeat).expect("remove FIFO");
 
-    for document in [
-        "{}\n".to_string(),
-        expired_document.replace(
-            "\"ts\":1,",
-            &format!(
-                "\"ts\":{},",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("wall clock")
-                    .as_secs()
-            ),
-        ),
-    ] {
-        std::fs::write(&heartbeat, document).expect("blocking heartbeat");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs();
+    let live_document = format!(
+        "{{\"issue\":\"42\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{now},\"ttl_seconds\":1,\"pid\":{},\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
+        std::process::id(), host.trim(), boot.trim()
+    );
+    for document in ["{}\n".to_string(), live_document] {
+        std::fs::write(&heartbeat, &document).expect("blocking heartbeat");
         std::fs::set_permissions(&heartbeat, std::fs::Permissions::from_mode(0o600))
             .expect("private heartbeat");
         let blocked = recover("42");
@@ -1674,12 +1675,12 @@ exit 17
         .as_secs();
     std::fs::write(
         &fresh_heartbeat,
-        prior_generation_document(
+        bind_to_current_process(prior_generation_document(
             "testorg/testrepo",
             45,
             now,
             "200ba5dde87a479bccd82ffab1dcc64d59b63e68d0234682c133873593363a67",
-        ),
+        )),
     )
     .expect("fresh prior-generation heartbeat");
     std::fs::set_permissions(&fresh_heartbeat, std::fs::Permissions::from_mode(0o600))
@@ -1765,14 +1766,6 @@ exit 17
     std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
         .expect("private session directory");
     let session = sessions.join("73657373696f6e2d63757272656e74.json");
-    let stat = std::fs::read_to_string("/proc/self/stat").expect("process identity");
-    let process_start = stat
-        .rsplit_once(") ")
-        .expect("process stat fields")
-        .1
-        .split_whitespace()
-        .nth(19)
-        .expect("process start");
     std::fs::write(&session, format!("{{\"issue\":\"48\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{now},\"ttl_seconds\":10800,\"pid\":{},\"nonce\":\"d7289361137ba9d5556f9e1c9ddb9367a7cb4768e6b9dcb48a8c0dcc4273e1d2\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-new\",\"claim_id\":\"claim-new\",\"session_id\":\"session-current\"}}\n", std::process::id(), host.trim(), boot.trim())).expect("current session heartbeat");
     std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
         .expect("private session heartbeat");
@@ -2320,7 +2313,10 @@ fn startup_heartbeat_claim_lifecycle() {
     let binding = sessions.join("73657373696f6e2d636f6e666c696374.json");
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
-    std::fs::write(&binding, format!("{{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":10800,\"pid\":1,\"nonce\":\"27ba109f66aa73f03cb40a405356da986874fb0ef2a279127821fdc4dc319b0c\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}}\n", host.trim(), boot.trim())).unwrap();
+    let process_start = current_process_start();
+    std::fs::write(&binding, format!("{{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":10800,\"pid\":{},\"nonce\":\"27ba109f66aa73f03cb40a405356da986874fb0ef2a279127821fdc4dc319b0c\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}}\n", std::process::id(), host.trim(), boot.trim())).unwrap();
+    std::fs::set_permissions(&binding, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let binding_before = std::fs::read(&binding).unwrap();
     let stale = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":43,"worker_id":"worker-c","state":"claimed","branch":"feat/c","pr":"","step":"heartbeat-publishing:73657373696f6e2d636f6e666c696374:attempt-old","paths":[],"claimed_at":"2000-07-30T00:00:00Z","updated_at":"2000-07-30T00:00:00Z","ttl_seconds":1,"claim_id":"claim-old"}"#).unwrap();
     transition_claim_ref(&repo, &stale);
     let fresh = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":44,"worker_id":"worker-d","state":"claimed","branch":"feat/d","pr":"","step":"heartbeat-publishing:73657373696f6e2d6672657368:attempt-live","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-live"}"#).unwrap();
@@ -2363,7 +2359,8 @@ fn startup_heartbeat_claim_lifecycle() {
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d61.json")
         .exists());
     let ready = claim_ref_message(&repo, 43);
-    assert!(ready.contains("\"step\":\"heartbeat-ready:"));
+    assert!(ready.contains("\"step\":\"heartbeat-pending:"), "{ready}");
+    assert_eq!(std::fs::read(&binding).unwrap(), binding_before);
     assert!(ready.contains("\"claim_id\":\"claim-old\""));
     assert_eq!(claim_ref_oid(&repo, 44), fresh_oid);
 }
