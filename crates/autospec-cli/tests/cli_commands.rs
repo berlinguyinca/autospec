@@ -8,6 +8,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static FRESH_LEASE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -3071,6 +3072,9 @@ fn autonomous_start_uses_explicit_conductor_log_path() {
 
 #[test]
 fn autonomous_start_rejects_a_fresh_existing_lease_without_force() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-duplicate");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -3113,6 +3117,9 @@ fn autonomous_start_rejects_a_fresh_existing_lease_without_force() {
 
 #[test]
 fn autonomous_start_force_rejects_a_fresh_existing_lease_without_killing_conductor() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-force");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -3840,6 +3847,9 @@ fn autonomous_supervise_does_not_relaunch_after_a_stop_request() {
 
 #[test]
 fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_or_clearing_stop() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-restart");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
