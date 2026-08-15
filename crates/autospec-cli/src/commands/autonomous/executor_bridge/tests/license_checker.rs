@@ -12,6 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+const SCANNER_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn scanner_fixtures_with_license(root: &Path, license_report: &str) -> bridge::ScannerExecutables {
     let bin = root.join("license-scanner-bin");
     fs::create_dir_all(&bin).expect("scanner bin");
@@ -221,7 +223,7 @@ fn autonomous_executor_bridge_license_checker_admits_only_unchanged_graph_findin
         &fixture.root.join("symbolic-security"),
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect_err("symbolic scanner base must fail closed");
     assert!(error.contains("canonical"), "{error}");
@@ -231,7 +233,7 @@ fn autonomous_executor_bridge_license_checker_admits_only_unchanged_graph_findin
         &fixture.root.join("security"),
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect("pre-existing forbidden license with unchanged graph");
     let license = observed
@@ -295,7 +297,7 @@ fn autonomous_executor_bridge_license_checker_rejects_changed_graph_finding() {
         &fixture.root.join("security"),
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect_err("changed dependency graph must enforce forbidden-license policy");
 
@@ -315,7 +317,7 @@ fn autonomous_executor_bridge_license_checker_rejects_malformed_preexisting_reco
         &fixture.root.join("security"),
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect_err("malformed record must fail closed on an unchanged graph");
 
@@ -420,7 +422,7 @@ fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
         &artifact_root,
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect_err("source finding must block the required scan");
     assert!(error.contains("gitleaks reported findings"), "{error}");
@@ -501,15 +503,16 @@ fn autonomous_executor_bridge_gitleaks_preserves_repository_rules() {
     .expect("scanner paths");
     let artifact_root = fixture.root.join("scanner-evidence");
 
-    bridge::run_required_scanners(
+    let error = bridge::run_required_scanners(
         &fixture.repo,
         &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
         &artifact_root,
         &scanners,
         None,
-        Duration::from_secs(5),
+        SCANNER_TEST_TIMEOUT,
     )
     .expect_err("repository source finding must block");
+    assert!(error.contains("gitleaks reported findings"), "{error}");
     let findings: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(artifact_root.join("gitleaks/result.json"))
             .expect("repository-rule report"),

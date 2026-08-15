@@ -9,6 +9,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+const SEMGREP_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[test]
 fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
     let _environment = test_environment();
@@ -316,7 +318,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
             },
             &fixture.root.join(artifact),
             None,
-            Duration::from_secs(30),
+            SEMGREP_INTEGRATION_TIMEOUT,
         )
         .expect("Semgrep process observation");
         let command = &observed[0];

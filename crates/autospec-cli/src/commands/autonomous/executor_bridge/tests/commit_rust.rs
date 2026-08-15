@@ -1,7 +1,6 @@
 // executor_bridge tests: commit / rust — 12 cases.
 //
 // Split out of tests.rs; see the note in that file.
-
 use super::support_base::{git, git_stdout};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use crate::commands::autonomous::executor_bridge as bridge;
@@ -313,6 +312,10 @@ fn contained_hook_rejects_linter_symlink_into_worktree() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux lacks unprivileged user/network namespaces; macOS CI supplies live containment evidence"
+)]
 #[test]
 fn rust_commit_runs_trusted_validation_hook_inside_containment() {
     let (_fixture, state, _snapshot, _closeout) =
@@ -371,7 +374,6 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
     .expect("write validation hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
         .expect("make validation hook executable");
-
     assert!(bridge::commit_sandboxed_executor_diff_with_hook_context(
         &state,
         "test: contained hook",
@@ -392,6 +394,10 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux lacks unprivileged user/network namespaces; macOS CI supplies live containment evidence"
+)]
 #[test]
 fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation() {
     let (fixture, state, _snapshot, _closeout) =

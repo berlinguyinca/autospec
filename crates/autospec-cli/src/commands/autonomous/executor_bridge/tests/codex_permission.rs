@@ -259,6 +259,10 @@ fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux lacks unprivileged user/network namespaces; macOS CI supplies live containment evidence"
+)]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential_files() {
     let _environment = test_environment();
@@ -426,6 +430,7 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
     let root = test_root("codex-sandbox-loopback-blocked");
@@ -459,6 +464,7 @@ fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_blocks_non_loopback_probe_failures() {
     let root = test_root("codex-sandbox-unsupported");

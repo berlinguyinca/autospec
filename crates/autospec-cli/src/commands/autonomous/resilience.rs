@@ -1158,6 +1158,15 @@ mod tests {
         }
     }
 
+    fn dead_child_pid() -> u32 {
+        let mut child = Command::new("true")
+            .spawn()
+            .expect("start dead PID fixture");
+        let pid = child.id();
+        assert!(child.wait().expect("reap dead PID fixture").success());
+        pid
+    }
+
     #[test]
     fn pid_liveness_requires_observed_process_absence() {
         assert!(!pid_is_dead(std::process::id()));
@@ -1287,7 +1296,7 @@ mod tests {
 
         assert_eq!(
             store
-                .release_terminated_owner(u32::MAX)
+                .release_terminated_owner(dead_child_pid())
                 .unwrap_or_else(|_| panic!("reject a mismatched dead pid")),
             TerminatedOwnerRelease::OwnerMismatch
         );
@@ -1326,7 +1335,7 @@ mod tests {
 
         assert_eq!(
             store
-                .release_terminated_owner(u32::MAX)
+                .release_terminated_owner(dead_child_pid())
                 .unwrap_or_else(|_| panic!("release abandoned claim")),
             TerminatedOwnerRelease::Released
         );

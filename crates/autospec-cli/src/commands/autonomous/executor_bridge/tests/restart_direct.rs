@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+const CLEANUP_BEFORE_VALIDATION_TEST: &str = "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_cleanup_precedes_executable_validation";
+const CLEANUP_BEFORE_VALIDATION_RECEIPT: &str = "AUTOSPEC_TEST_CLEANUP_BEFORE_VALIDATION_RECEIPT";
+
 #[test]
 fn autonomous_executor_bridge_requires_exact_normalized_evidence_headings() {
     for heading in [
@@ -229,12 +232,19 @@ fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
     let _environment = test_environment();
     let fixture = GitFixture::new("direct-live-adopted-reap");
     let artifact_root = fixture.root.join("evidence");
+    let receipt_path = fixture.root.join("cleanup-before-validation.receipt");
     let executable = std::env::current_exe().expect("current test executable");
     let plan = bridge::DirectCommandPlan {
         commands: vec![bridge::DirectCommand::success(vec![
+            "/usr/bin/env".to_string(),
+            format!(
+                "{CLEANUP_BEFORE_VALIDATION_RECEIPT}={}",
+                receipt_path.display()
+            ),
             executable.display().to_string(),
+            "--ignored".to_string(),
             "--exact".to_string(),
-            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_cleanup_precedes_executable_validation".to_string(),
+            CLEANUP_BEFORE_VALIDATION_TEST.to_string(),
             "--test-threads=1".to_string(),
         ])],
     };
@@ -246,13 +256,27 @@ fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
         None,
         Duration::from_secs(15),
     )
-    .expect("nested process-cleanup test must pass under direct supervision");
+    .unwrap_or_else(|error| {
+        let stdout = fs::read_to_string(artifact_root.join("command-000.stdout"))
+            .unwrap_or_else(|read_error| format!("<cannot read stdout: {read_error}>"));
+        let stderr = fs::read_to_string(artifact_root.join("command-000.stderr"))
+            .unwrap_or_else(|read_error| format!("<cannot read stderr: {read_error}>"));
+        panic!(
+            "nested process-cleanup test failed under direct supervision: {error}; stdout={stdout} stderr={stderr}"
+        );
+    });
 
     assert_eq!(observed[0].terminal, bridge::AttemptTerminal::Exited(0));
+    assert_eq!(
+        fs::read_to_string(&receipt_path).expect("nested cleanup test receipt"),
+        format!("{CLEANUP_BEFORE_VALIDATION_TEST}\n"),
+        "nested cleanup test did not publish its exact completion receipt"
+    );
 }
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "launched in isolation by the adopted-children supervision test"]
 fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
     let _environment = test_environment();
     // Break caught: a missing/replaced current executable returning before an old live
@@ -322,5 +346,9 @@ fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
         "harness survived pre-validation cleanup"
     );
     assert!(!launch.exists(), "retired launch identity survived cleanup");
+    if let Some(path) = std::env::var_os(CLEANUP_BEFORE_VALIDATION_RECEIPT) {
+        fs::write(path, format!("{CLEANUP_BEFORE_VALIDATION_TEST}\n"))
+            .expect("publish exact cleanup helper receipt");
+    }
     cleanup.disarm();
 }
