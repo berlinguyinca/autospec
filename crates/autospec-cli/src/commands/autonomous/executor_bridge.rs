@@ -107,9 +107,11 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod test_coordination;
 #[cfg(test)]
-use test_coordination::{lock_test_fork_lifecycle, LaunchFailpoint};
+use test_coordination::LaunchFailpoint;
 #[cfg(all(test, target_os = "linux"))]
-use test_coordination::{test_fork_lifecycle_is_available, TestForkLifecycleGuard};
+use test_coordination::{
+    lock_test_fork_lifecycle, test_fork_lifecycle_is_available, TestForkLifecycleGuard,
+};
 
 mod review_evidence;
 use review_evidence::*;
