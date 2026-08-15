@@ -3282,14 +3282,61 @@ fn execute_foreground_dispatch(
                     )?,
                     false,
                 )?;
-                let acquisition = claim::acquire_for_conductor(
+                let acquisition = match claim::acquire_for_conductor(
                     &layout.repo,
                     selection.issue,
                     &worker_id,
                     &branch,
                     base_branch,
-                )?;
-                let _startup_recovery = acquisition.recovery;
+                ) {
+                    Ok(acquisition) => acquisition,
+                    Err(error) => {
+                        if let Some(deferred) = error.heartbeat_publication_deferral() {
+                            record_accountability_event_once(
+                                layout,
+                                accountability_event(
+                                    accountability::EventKind::HeartbeatPublicationDeferred {
+                                        issue: deferred.issue,
+                                        claim_id: deferred.claim_id.clone(),
+                                    },
+                                    format!(
+                                        "Heartbeat publication deferred for issue {}",
+                                        deferred.issue
+                                    ),
+                                    "The authoritative claim remains pending because startup ownership was not published",
+                                    format!(
+                                        "repository {} issue {} generation {} returned heartbeat_write_failed",
+                                        layout.repo, deferred.issue, deferred.claim_id
+                                    ),
+                                )?,
+                                true,
+                            )?;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let Some(recovery) = acquisition.recovery.as_ref() {
+                    record_accountability_event_once(
+                        layout,
+                        accountability_event(
+                            accountability::EventKind::StartupClaimRecovered {
+                                issue: selection.issue,
+                                previous_claim_id: recovery.previous_claim_id.clone(),
+                                next_claim_id: recovery.next_claim_id.clone(),
+                            },
+                            format!("Startup claim recovered for issue {}", selection.issue),
+                            "The authoritative recovery CAS advanced the stale generation before reacquisition",
+                            format!(
+                                "repository {} issue {} advanced generation {} to {}",
+                                layout.repo,
+                                selection.issue,
+                                recovery.previous_claim_id,
+                                recovery.next_claim_id
+                            ),
+                        )?,
+                        true,
+                    )?;
+                }
                 let lease = acquisition.lease;
                 record_accountability_event(
                     layout,

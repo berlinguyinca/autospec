@@ -8,6 +8,63 @@ use std::os::unix::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn recovery_events_replay_into_the_active_existing_epic_projection() {
+    let fixture = Fixture::new("recovery-projection");
+    let mut store = store(&fixture);
+    store
+        .bind_epic(97, "https://github.com/acme/widgets/issues/97")
+        .unwrap();
+    store.mark_spawned().unwrap();
+
+    for (kind, what, why, evidence) in [
+        (
+            EventKind::HeartbeatPublicationDeferred {
+                issue: 42,
+                claim_id: "claim-generation-1".to_owned(),
+            },
+            "Heartbeat publication deferred for issue 42",
+            "The authoritative claim remains pending until startup ownership can be proven",
+            "claim claim-generation-1 remains pending",
+        ),
+        (
+            EventKind::StartupClaimRecovered {
+                issue: 42,
+                previous_claim_id: "claim-generation-1".to_owned(),
+                next_claim_id: "claim-generation-2".to_owned(),
+            },
+            "Startup claim recovered for issue 42",
+            "The authoritative recovery CAS replaced the stale generation before reacquisition",
+            "claim-generation-1 advanced to claim-generation-2",
+        ),
+    ] {
+        store
+            .append_event(
+                AccountabilityEvent::new(kind, what, why, vec![Evidence::outcome(evidence)])
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let projection = store.render().unwrap();
+    assert!(projection.markdown.contains("Heartbeat publication deferred"));
+    assert!(projection.markdown.contains("Startup claim recovered"));
+    assert!(projection.markdown.contains("**What:**"));
+    assert!(projection.markdown.contains("**Why:**"));
+    assert!(projection.markdown.contains("**Evidence:**"));
+    assert!(projection.markdown.contains("deferred_42 --> recovered_42"));
+    assert_eq!(store.recovery_projection().0, accountability::RecoveryState::Active);
+
+    drop(store);
+    let reopened = AccountabilityStore::open(fixture.path()).unwrap();
+    assert_eq!(reopened.status().epic_number, Some(97));
+    assert_eq!(reopened.status().event_count, 2);
+    assert_eq!(
+        reopened.recovery_projection().0,
+        accountability::RecoveryState::Active
+    );
+}
+
+#[test]
 fn autonomous_cli_exposes_explicit_epic_start_and_resume_contract() {
     let help = Command::new(env!("CARGO_BIN_EXE_autospec"))
         .args(["autonomous", "--help"])

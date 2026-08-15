@@ -570,6 +570,12 @@ pub(crate) enum ConductorClaimError {
     Deferred { json: String, exit_code: i32 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeartbeatPublicationDeferral {
+    pub(crate) issue: u64,
+    pub(crate) claim_id: String,
+}
+
 impl From<CommandFailure> for ConductorClaimError {
     fn from(error: CommandFailure) -> Self {
         Self::Diagnostic(error)
@@ -577,6 +583,25 @@ impl From<CommandFailure> for ConductorClaimError {
 }
 
 impl ConductorClaimError {
+    pub(crate) fn heartbeat_publication_deferral(
+        &self,
+    ) -> Option<HeartbeatPublicationDeferral> {
+        let Self::Deferred { json, .. } = self else {
+            return None;
+        };
+        let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+        (value.get("reason")?.as_str()? == "heartbeat_write_failed").then(|| {
+            HeartbeatPublicationDeferral {
+                issue: value.get("issue").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                claim_id: value
+                    .get("claim_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }
+        }).filter(|evidence| evidence.issue > 0 && !evidence.claim_id.is_empty())
+    }
+
     fn into_command_failure(self) -> CommandFailure {
         match self {
             Self::Diagnostic(error) => error,
@@ -1180,11 +1205,11 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             {
                 project_claim_ref_to_comments(&repo, &pending);
             }
-            return unavailable_claim(
+            return heartbeat_publication_deferred(
                 options.issue,
                 &repo,
-                Some(&worker_id),
-                "heartbeat_write_failed",
+                &worker_id,
+                &claim_id,
             );
         }
         let mut ready = head.record.clone();
@@ -7992,6 +8017,23 @@ fn unavailable_claim<T>(
             "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
             json_escape(repo),
             json_escape(reason),
+        ),
+        exit_code: 2,
+    })
+}
+
+fn heartbeat_publication_deferred<T>(
+    issue: u64,
+    repo: &str,
+    worker_id: &str,
+    claim_id: &str,
+) -> Result<T, ConductorClaimError> {
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"heartbeat_write_failed\"}}",
+            json_escape(repo),
+            json_escape(worker_id),
+            json_escape(claim_id),
         ),
         exit_code: 2,
     })
