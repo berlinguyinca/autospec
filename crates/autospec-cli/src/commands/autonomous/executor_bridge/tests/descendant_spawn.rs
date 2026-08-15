@@ -25,6 +25,10 @@ fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() {
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
+            supervised_executable: invocation
+                .program
+                .canonicalize()
+                .expect("canonical supervised shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir
