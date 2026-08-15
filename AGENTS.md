@@ -377,11 +377,31 @@ Rules:
 - Skips apply only to the specific PR derived from this issue; they do NOT cascade
   to other issues.
 
+### Per-layer stack guard (`scripts/stack-guard.sh`)
+
+`PR_SIZE` above is measured on the whole accumulated diff. `scripts/stack-guard.sh`
+enforces the same cap on a **single stack layer** — the `base...head` delta — so a
+large change can ship as a chain of small PRs, each within the cap. It reuses
+`lint-implementation.sh`'s `PR_SIZE` detector via `--diff-file` (single source of
+truth) and adds a **linearity** check: a PR's base must be the default branch or the
+head branch of another open PR (no orphan target branches).
+
+- Advisory by default (`INFO` findings, exit 0); blocking under
+  `AUTOSPEC_PR_SIZE_STRICT=1` (`ERROR` findings, exit 1).
+- CI: `.github/workflows/stack-guard.yml` runs it per PR in advisory mode. Set the
+  `STACK_GUARD_STRICT` repository variable to `1` to make it blocking.
+- `AUTOSPEC_STACK_DEFAULT_BRANCH` overrides the default-branch name (else `gh repo view`).
+- Tests: `tests/stack-guard.bats`.
+
 ### Env-var contract
 
 - `AUTOSPEC_NO_GUARDIAN=1` — short-circuit guardian, fall back to LGTM-only path.
   Mirrors `AUTOSPEC_NO_AUTOMERGE_SPEC=1` and `AUTOSPEC_NO_SELF_UPDATE=1`. Logged
   as `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` on every Phase 4 dispatch.
+- `AUTOSPEC_PR_SIZE_STRICT=1` — make `PR_SIZE` (and the stack-guard's per-layer size
+  + linearity) blocking instead of advisory.
+- `AUTOSPEC_STACK_DEFAULT_BRANCH` — default-branch name for `stack-guard.sh`
+  (else `gh repo view`).
 
 ## Closeout report contract
 
