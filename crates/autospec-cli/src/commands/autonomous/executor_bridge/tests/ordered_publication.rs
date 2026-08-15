@@ -268,7 +268,6 @@ fn autonomous_executor_bridge_reuse_lens_follows_exact_environment_contract() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_lints_the_proven_tree_not_mutable_worktree() {
-    let _environment = test_environment();
     // Break caught: an uncommitted allow marker suppressing an unsafe committed diff.
     let (fixture, mut state, snapshot, closeout) =
         implementation_proof_fixture("draft-lint-exact-tree");
@@ -322,7 +321,6 @@ fn autonomous_executor_bridge_lints_the_proven_tree_not_mutable_worktree() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_rejects_nonexact_authoritative_drafts() {
-    let _environment = test_environment();
     // Break caught: treating partial PR identity or additional PRs as the one owned draft.
     for variant in [
         "missing",
@@ -390,7 +388,6 @@ fn autonomous_executor_bridge_rejects_nonexact_authoritative_drafts() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_rejects_prelaunch_remote_snapshot_drift() {
-    let _environment = test_environment();
     // Break caught: harness-created extra refs or PRs being mistaken for Rust-owned mutations.
     let mut branch = prepared_draft_transaction("draft-extra-branch");
     git(

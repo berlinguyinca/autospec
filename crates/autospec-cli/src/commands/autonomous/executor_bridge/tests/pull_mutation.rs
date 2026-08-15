@@ -18,7 +18,6 @@ use std::time::Duration;
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_excludes_server_managed_pull_refs_from_mutation_ownership() {
-    let _environment = test_environment();
     // Break caught: GitHub refs/pull advertisements making the operator-owned ref proof unusable.
     let mut prepared = prepared_draft_transaction("draft-server-managed-refs");
     let remote = prepared.fixture.root.join("remote.git");
@@ -165,7 +164,6 @@ fn autonomous_executor_bridge_proof_recovery_preserves_phase_and_artifact_digest
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_rejects_a_forged_closeout_body_at_mutation_boundary() {
-    let _environment = test_environment();
     // Break caught: a caller constructing an exact-head proof with an unvalidated PR body.
     let mut prepared = prepared_draft_transaction("proof-forged-closeout");
     let forged = bridge::ImplementationProof {

@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::support_base::{git_stdout, test_environment, test_root, write_executable, GitFixture};
+use super::support_base::{git_stdout, test_root, write_executable, GitFixture};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, supervision_state,
 };
@@ -70,7 +70,6 @@ fn autonomous_executor_bridge_marks_only_exact_passed_draft_ready() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_observes_exact_draft_becoming_ready() {
-    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("ready-success");
     prepared.bind_continuation();
     prepared.publish().expect("draft");
@@ -119,7 +118,6 @@ fn autonomous_executor_bridge_observes_exact_draft_becoming_ready() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_keeps_ready_inventory_outages_transient() {
-    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("ready-inventory-outage");
     prepared.publish().expect("draft");
     let failing_gh = prepared.fixture.root.join("gh-inventory-outage");
@@ -161,7 +159,6 @@ fn autonomous_executor_bridge_keeps_ready_inventory_outages_transient() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_claim_takeover_blocks_ready_mutation() {
-    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("ready-takeover");
     prepared.publish().expect("draft");
     let current_path = PathBuf::from(

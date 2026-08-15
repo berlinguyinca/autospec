@@ -104,6 +104,10 @@ const MAX_DIRECT_COMMAND_ARGS: usize = 128;
 const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
 const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+mod test_coordination;
+#[cfg(test)]
+use test_coordination::{lock_test_fork_lifecycle, LaunchFailpoint, TestForkLifecycleGuard};
 
 mod review_evidence;
 use review_evidence::*;
@@ -14704,6 +14708,9 @@ where
         .map_err(|_| "executor draft release temporary path contains NUL".to_string())?;
     let receipt_path_c = CString::new(receipt_path.as_os_str().as_bytes())
         .map_err(|_| "executor draft release path contains NUL".to_string())?;
+    // Keep sibling test forks out until every parent-owned pipe has reached cleanup or EOF.
+    #[cfg(test)]
+    let _fork_lifecycle = lock_test_fork_lifecycle();
     let (release_read, release_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft release pipe: {error}"))?;
     let (digest_read, digest_write) =
@@ -15738,56 +15745,6 @@ pub(crate) struct HarnessLaunch<'a> {
     pub(crate) resolved: &'a ResolvedHarness,
     pub(crate) artifact: &'a Path,
     pub(crate) prompt: &'a str,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaunchFailpoint {
-    None = 0,
-    PersistAfterSpawn = 1,
-    LogAfterSpawn = 2,
-    BeforeSnapshotVerification = 3,
-    NeverReady = 4,
-    NeverCloseExecStatus = 5,
-    AdoptedPoll = 6,
-    AdoptedFlush = 7,
-    AdoptedLog = 8,
-    DirectPoll = 9,
-    CleanupSignal = 10,
-    CleanupLiveness = 11,
-    ParentAfterPidfd = 12,
-    ParentHarnessCapture = 13,
-    ParentBirthRefresh = 14,
-    RingBeforeSync = 15,
-    DirectSetup = 16,
-    PostReturnIdentity = 17,
-    CleanupFreezeWindow = 18,
-    ParentHarnessPidRead = 19,
-    ParentHarnessBirth = 20,
-    ParentHarnessPidfd = 21,
-    ParentReadiness = 22,
-    JournalCreate = 23,
-    JournalWrite = 24,
-    JournalSync = 25,
-    JournalRename = 26,
-    JournalDirectorySync = 27,
-    DescendantCapture = 28,
-    RingReadInterrupted = 29,
-    ArchiveAfterManifest = 30,
-    ArchiveMidMove = 31,
-    ArchiveBeforeComplete = 32,
-    RetireAfterProof = 33,
-    RetireMidDelete = 34,
-    RetireAfterLaunchDelete = 35,
-    BeforeEvidenceBundle = 36,
-    RecoveryAfterAnchorClear = 37,
-    RecoveryBeforeSnapshot = 38,
-    RetireAfterPendingRemoval = 39,
-    RotationAfterArchive = 40,
-    RotationAfterActive = 41,
-    EvidenceAfterGenerationSelect = 42,
-    OwnershipBeforeMarker = 43,
-    OwnershipAfterMarker = 44,
 }
 
 #[cfg(test)]
@@ -17611,6 +17568,9 @@ struct ForkedChild {
     exec_status: Option<File>,
     harness_exit: Option<File>,
     reaped: Option<ChildExit>,
+    // This field is last so descriptor owners above are dropped before the test lock is released.
+    #[cfg(test)]
+    _fork_lifecycle: TestForkLifecycleGuard,
 }
 
 #[cfg(target_os = "linux")]
@@ -18250,6 +18210,9 @@ fn spawn_blocked_harness(
         .map(|value| value.as_ptr())
         .collect::<Vec<_>>();
     environment_pointers.push(std::ptr::null());
+    // On success this moves into ForkedChild; on failure it outlives parent cleanup locals.
+    #[cfg(test)]
+    let mut fork_lifecycle = Some(lock_test_fork_lifecycle());
     let (barrier_read, barrier_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create launch barrier: {error}"))?;
     let (ready_read, ready_write) =
@@ -18424,6 +18387,8 @@ fn spawn_blocked_harness(
                     exec_status: Some(File::from(status_read)),
                     harness_exit: Some(File::from(harness_exit_read)),
                     reaped: None,
+                    #[cfg(test)]
+                    _fork_lifecycle: fork_lifecycle.take().expect("test fork lifecycle guard"),
                 })
             })();
             match setup {

@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_retry_adopts_preserved_remote_wip_branch() {
-    let _environment = test_environment();
     let (fixture, mut state, _snapshot, closeout) =
         implementation_proof_fixture("retry-preserved-branch");
     let state_path = fixture.root.join("state/invocation.json");
@@ -79,7 +78,6 @@ fn autonomous_executor_bridge_retry_adopts_preserved_remote_wip_branch() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_retry_closes_pr_but_preserves_remote_wip() {
-    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("retry-close-preserve");
     prepared.publish().expect("published draft");
     let branch = prepared.state.identity.branch.clone();
@@ -114,7 +112,6 @@ fn autonomous_executor_bridge_retry_closes_pr_but_preserves_remote_wip() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_retry_close_requires_live_claim_and_exact_closed_state() {
-    let _environment = test_environment();
     let mut takeover = prepared_draft_transaction("retry-close-takeover");
     takeover.publish().expect("published draft");
     let error = bridge::close_retryable_pull_request_with_refresh(
@@ -175,7 +172,6 @@ fn autonomous_executor_bridge_retry_close_requires_live_claim_and_exact_closed_s
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_recovers_push_and_draft_creation_boundaries() {
-    let _environment = test_environment();
     // Break caught: restart duplicating a push or draft after Rust mutated remote state.
     let mut pushed = prepared_draft_transaction("draft-recover-push");
     pushed.push_exact_at_intent();
@@ -218,7 +214,6 @@ fn autonomous_executor_bridge_recovers_push_and_draft_creation_boundaries() {
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn portable_draft_prepare_failure_is_the_only_safe_retry_boundary() {
-    let _environment = test_environment();
     // Break caught: a portable draft child running before its release state is durable, or a
     // never-released prepared transaction being quarantined instead of safely retried.
     let mut prepared = prepared_draft_transaction("portable-draft-prepare");
@@ -251,7 +246,6 @@ fn portable_draft_prepare_failure_is_the_only_safe_retry_boundary() {
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn portable_draft_release_failure_quarantines_without_replay() {
-    let _environment = test_environment();
     // Break caught: treating an intended but ambiguously released request as safe to replay.
     let mut prepared = prepared_draft_transaction("portable-draft-release");
     prepared
@@ -282,7 +276,6 @@ fn portable_draft_release_failure_quarantines_without_replay() {
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn portable_draft_post_request_crash_reconciles_without_replay() {
-    let _environment = test_environment();
     // Break caught: delayed observation after a released request issuing a second PR create.
     let mut prepared = prepared_draft_transaction("portable-draft-post-request");
     prepared.adapter.environment.insert(
@@ -403,7 +396,6 @@ fn autonomous_executor_bridge_draft_release_child_closes_unrelated_inherited_loc
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
-    let _environment = test_environment();
     // Break caught: gh starting before its exact prepared identity/release is durable.
     let mut prepared = prepared_draft_transaction("draft-create-release-gate");
     prepared
@@ -422,7 +414,6 @@ fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child() {
-    let _environment = test_environment();
     // Break caught: a parent crash before release permanently stranding a safe create intent.
     let mut prepared = prepared_draft_transaction("draft-create-never-released");
     prepared.push_exact_at_intent();
@@ -450,7 +441,6 @@ fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child()
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
-    let _environment = test_environment();
     // Break caught: the suspended child sending a request after its parent disappears pre-release.
     let mut prepared = prepared_draft_transaction("draft-create-parent-loss");
     prepared.adapter.environment.insert(
@@ -483,7 +473,6 @@ fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable() {
-    let _environment = test_environment();
     // Break caught: failed child launch leaving a release receipt that permanently blocks retry.
     let mut prepared = prepared_draft_transaction("draft-create-launch-failure");
     let executable = prepared.adapter.gh.clone();
@@ -529,7 +518,6 @@ fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable()
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_recovers_after_durable_intent_clear_crash() {
-    let _environment = test_environment();
     // Break caught: a crash after durable intent removal permanently stranding a safe retry.
     let mut prepared = prepared_draft_transaction("draft-create-intent-clear-crash");
     let executable = prepared.adapter.gh.clone();
