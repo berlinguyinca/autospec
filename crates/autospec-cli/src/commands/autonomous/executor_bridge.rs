@@ -14984,6 +14984,14 @@ where
     );
     #[cfg(not(test))]
     let inject_receipt_directory_fsync_failure = false;
+    #[cfg(target_os = "macos")]
+    let descriptor_limit = unsafe { nix::libc::getdtablesize() };
+    #[cfg(target_os = "macos")]
+    if descriptor_limit <= nix::libc::STDERR_FILENO {
+        return Err("resolve Darwin draft descriptor-table bound"
+            .to_string()
+            .into());
+    }
     // SAFETY: every allocation and pointer array is complete before fork. The child branch
     // performs only async-signal-safe syscalls before execve and never returns to Rust.
     let child = match unsafe { fork() }
@@ -14991,6 +14999,19 @@ where
     {
         ForkResult::Child => unsafe {
             // SAFETY: async-signal-safe calls only.
+            #[cfg(target_os = "macos")]
+            raw_close_unintended_descriptors(
+                descriptor_limit,
+                &[
+                    release_read_fd,
+                    digest_read_fd,
+                    cleanup_status_write_fd,
+                    stderr_write_fd,
+                    null_fd,
+                    receipt_fd,
+                    receipt_directory_fd,
+                ],
+            );
             nix::libc::close(release_write_fd);
             nix::libc::close(digest_write_fd);
             nix::libc::close(cleanup_status_read_fd);
@@ -15144,6 +15165,25 @@ where
         let _ = stderr_reader.join();
         let _ = fs::remove_file(&receipt_temporary);
         return Err(error.into());
+    }
+    #[cfg(test)]
+    if let Some(hold) = adapter
+        .environment
+        .get(std::ffi::OsStr::new("AUTOSPEC_TEST_DRAFT_RELEASE_HOLD"))
+    {
+        let started = adapter
+            .environment
+            .get(std::ffi::OsStr::new("AUTOSPEC_TEST_DRAFT_RELEASE_HOLD_STARTED"))
+            .ok_or_else(|| "draft release hold requires a started marker".to_string())?;
+        fs::write(started, b"started\n")
+            .map_err(|error| format!("write draft release hold marker: {error}"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Path::new(hold).exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if Path::new(hold).exists() {
+            return Err("draft release hold was not released".to_string().into());
+        }
     }
     #[cfg(test)]
     if adapter.environment.contains_key(std::ffi::OsStr::new(

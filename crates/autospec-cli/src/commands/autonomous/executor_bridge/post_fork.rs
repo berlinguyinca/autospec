@@ -17,6 +17,24 @@
 
 use super::*;
 
+/// # Safety
+///
+/// Must run only in a Darwin post-fork child. `descriptor_limit` and every descriptor in
+/// `preserved` must have been captured before fork. The implementation performs no allocation
+/// or locking and uses only the async-signal-safe `close` syscall.
+#[cfg(target_os = "macos")]
+pub(super) unsafe fn raw_close_unintended_descriptors(
+    descriptor_limit: i32,
+    preserved: &[i32],
+) {
+    for descriptor in nix::libc::STDERR_FILENO + 1..descriptor_limit {
+        if !preserved.contains(&descriptor) {
+            // SAFETY: this is the isolated child descriptor table; EBADF is harmless.
+            unsafe { nix::libc::close(descriptor) };
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn raw_errno() -> i32 {
     // SAFETY: errno is thread-local process state.

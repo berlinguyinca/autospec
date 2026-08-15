@@ -58,8 +58,9 @@ everything the gate does **not** flag.
 Linux autonomous execution proves process ownership with pidfds and subreaper
 containment. macOS proves the exact kernel boot and process start identities and
 isolates executor descendants in an owned process group. Unsupported platforms
-fail before creating claims or accountability epics. Every autonomous
-`--dry-run`, including start, restart, and resume, is a read-only preview.
+fail before creating claims or accountability epics. The autonomous launch-family
+`start --dry-run`, `restart --dry-run`, and `resume --dry-run` commands are
+read-only previews.
 
 ## 4. Configuration
 

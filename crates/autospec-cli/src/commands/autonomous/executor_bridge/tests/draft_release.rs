@@ -12,7 +12,7 @@ use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 #[test]
@@ -239,10 +239,8 @@ fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
         let result = prepared.publish();
         (prepared, result)
     });
-    for _ in 0..100 {
-        if started.exists() {
-            break;
-        }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(started.exists(), "delayed gh never entered create");
@@ -254,6 +252,48 @@ fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
     let (prepared, result) = publisher.join().expect("join publisher");
     assert_eq!(result.expect("finish single create"), 17);
     assert!(prepared.state.draft_process.is_some());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn autonomous_executor_bridge_draft_release_child_closes_unrelated_inherited_lock() {
+    let _environment = test_environment();
+    let mut prepared = prepared_draft_transaction("draft-release-inherited-lock");
+    let hold = prepared.fixture.root.join("draft-release.hold");
+    let started = prepared.fixture.root.join("draft-release.started");
+    let lock_path = prepared.fixture.root.join("unrelated.lock");
+    fs::write(&hold, b"hold\n").expect("create draft release hold");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("open unrelated lock");
+    lock.try_lock().expect("acquire unrelated lock");
+    prepared.adapter.environment.insert(
+        "AUTOSPEC_TEST_DRAFT_RELEASE_HOLD".into(),
+        hold.clone().into_os_string(),
+    );
+    prepared.adapter.environment.insert(
+        "AUTOSPEC_TEST_DRAFT_RELEASE_HOLD_STARTED".into(),
+        started.clone().into_os_string(),
+    );
+    let publisher = std::thread::spawn(move || prepared.publish());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(started.exists(), "draft release child did not reach hold");
+    drop(lock);
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .expect("reopen unrelated lock");
+    let probe_result = probe.try_lock();
+    fs::remove_file(hold).expect("release draft child");
+    assert_eq!(publisher.join().expect("join publisher").expect("publish"), 17);
+    probe_result.expect("draft release child must not retain unrelated lock");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -258,6 +258,14 @@ impl DarwinOwnedGroup {
             .read(true)
             .open("/dev/null")
             .map_err(|error| format!("open Darwin executor null input: {error}"))?;
+        // Resolve the descriptor-table bound before fork; the child path must remain limited to
+        // async-signal-safe operations and stack-only data.
+        let descriptor_limit = unsafe { nix::libc::getdtablesize() };
+        if descriptor_limit <= nix::libc::STDERR_FILENO {
+            return Err("resolve Darwin executor descriptor-table bound"
+                .to_string()
+                .into());
+        }
         let fds = DarwinForkDescriptors {
             barrier_read: barrier_read.as_raw_fd(),
             barrier_write: barrier_write.as_raw_fd(),
@@ -275,6 +283,7 @@ impl DarwinOwnedGroup {
             stdout_cursor: pump.stdout_cursor.as_raw_fd(),
             stderr_cursor: pump.stderr_cursor.as_raw_fd(),
             exit_status: pump.exit_status.as_raw_fd(),
+            descriptor_limit,
         };
         // SAFETY: all strings, pointer arrays, files, and pipes are prepared before fork. The
         // child path uses only async-signal-safe libc calls and never returns to Rust.
@@ -664,6 +673,30 @@ struct DarwinForkDescriptors {
     stdout_cursor: i32,
     stderr_cursor: i32,
     exit_status: i32,
+    descriptor_limit: i32,
+}
+
+impl DarwinForkDescriptors {
+    fn preserved(self) -> [i32; 16] {
+        [
+            self.barrier_read,
+            self.barrier_write,
+            self.ready_read,
+            self.ready_write,
+            self.status_read,
+            self.status_write,
+            self.stdout_read,
+            self.stdout_write,
+            self.stderr_read,
+            self.stderr_write,
+            self.null,
+            self.stdout_ring,
+            self.stderr_ring,
+            self.stdout_cursor,
+            self.stderr_cursor,
+            self.exit_status,
+        ]
+    }
 }
 
 unsafe fn run_blocked_supervisor(
@@ -675,6 +708,7 @@ unsafe fn run_blocked_supervisor(
 ) -> ! {
     // SAFETY: this is the isolated post-fork child and every descriptor was prepared by parent.
     unsafe {
+        super::raw_close_unintended_descriptors(fds.descriptor_limit, &fds.preserved());
         nix::libc::close(fds.barrier_write);
         nix::libc::close(fds.ready_read);
         nix::libc::close(fds.status_read);
@@ -907,6 +941,7 @@ fn wait_for_empty_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::autonomous::tier2_receipts_tests::TempRoot;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -969,10 +1004,42 @@ mod tests {
                 status => panic!("test group was not reaped: {status:?}"),
             }
         }
-        while !group_is_empty(identity.process_group).expect("prove test group empty") {
-            assert!(Instant::now() < deadline, "test group retained membership");
-            thread::sleep(OBSERVATION_INTERVAL);
+        loop {
+            match group_is_empty(identity.process_group) {
+                Ok(true) => break,
+                Ok(false) | Err(_) if Instant::now() < deadline => {
+                    thread::sleep(OBSERVATION_INTERVAL);
+                }
+                result => panic!("prove test group empty: {result:?}"),
+            }
         }
+    }
+
+    #[test]
+    fn darwin_fork_child_closes_unrelated_inherited_store_lock() {
+        let lock_root = TempRoot::new();
+        let lock_path = lock_root.path().join("unrelated.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open unrelated lock");
+        lock.try_lock().expect("acquire unrelated lock");
+        let (group, root) = blocked_fixture("exit 0");
+        drop(lock);
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .expect("reopen unrelated lock");
+        probe
+            .try_lock()
+            .expect("supervisor child must not retain unrelated lock");
+        group
+            .cancel_unreleased()
+            .expect("cancel isolated Darwin fork fixture");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1420,7 +1487,7 @@ mod tests {
         let other_identity = other.identity().clone();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let peer_barrier = barrier.clone();
-        let _uncertainty = force_next_termination_uncertainty_for_test();
+        let uncertainty = force_next_termination_uncertainty_for_test();
 
         let peer = thread::spawn(move || {
             peer_barrier.wait();
@@ -1429,6 +1496,7 @@ mod tests {
         barrier.wait();
         let other_result = peer.join().expect("parallel cleanup thread");
         let armed_result = armed.terminate();
+        drop(uncertainty);
 
         cleanup_test_group(&armed_identity);
         cleanup_test_group(&other_identity);
