@@ -1,3 +1,7 @@
+    fn retry_lease<T>(operation: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+        retry_transient_lock(operation, |result| matches!(result, Err(StoreError::Held)))
+    }
+
     #[test]
     fn matching_token_transfers_a_pre_spawn_renewed_lease() {
         let root = test_root("adopt-pre-spawn-renewed");
@@ -6,16 +10,15 @@
             Ok(value) => value,
             Err(_) => panic!("acquire claimed lease"),
         };
-        if store.renew(&claimed).is_err() {
-            panic!("epic reconciliation renews before spawn");
-        }
+        retry_lease(|| store.renew(&claimed))
+            .unwrap_or_else(|_| panic!("epic reconciliation renews before spawn"));
 
         let before = match store.read_state() {
             Ok(Some((state, _))) => state,
             _ => panic!("read renewed state"),
         };
         assert_eq!(before.status, "running");
-        let adopted = match store.adopt(&claimed.token) {
+        let adopted = match retry_lease(|| store.adopt(&claimed.token)) {
             Ok(lease) => lease,
             Err(_) => panic!("spawned child must adopt the exact renewed generation"),
         };

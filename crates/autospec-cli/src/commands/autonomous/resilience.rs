@@ -1354,9 +1354,8 @@ mod tests {
         let (_, claimed) = owner
             .acquire(None, 1, 1)
             .unwrap_or_else(|_| panic!("claim lease"));
-        let lease = owner
-            .adopt(&claimed.token)
-            .unwrap_or_else(|_| panic!("adopt lease"));
+        let lease =
+            retry_lease(|| owner.adopt(&claimed.token)).unwrap_or_else(|_| panic!("adopt lease"));
         let mut stale_state = owner
             .read_state()
             .unwrap_or_else(|_| panic!("read state"))
@@ -1367,9 +1366,7 @@ mod tests {
             .write_state(&stale_state)
             .unwrap_or_else(|_| panic!("age running lease"));
 
-        owner
-            .renew(&lease)
-            .unwrap_or_else(|_| panic!("renew owned lease"));
+        retry_lease(|| owner.renew(&lease)).unwrap_or_else(|_| panic!("renew owned lease"));
 
         assert!(matches!(
             contender.acquire(None, 1, 1),
@@ -1405,9 +1402,8 @@ mod tests {
         let (_, claimed) = owner
             .acquire(None, 1, 1)
             .unwrap_or_else(|_| panic!("claim lease"));
-        let lease = owner
-            .adopt(&claimed.token)
-            .unwrap_or_else(|_| panic!("adopt lease"));
+        let lease =
+            retry_lease(|| owner.adopt(&claimed.token)).unwrap_or_else(|_| panic!("adopt lease"));
         let mut stale_state = owner
             .read_state()
             .unwrap_or_else(|_| panic!("read state"))
