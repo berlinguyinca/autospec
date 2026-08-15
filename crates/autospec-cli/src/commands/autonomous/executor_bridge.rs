@@ -16794,7 +16794,7 @@ struct ChildExit {
 }
 
 #[cfg(test)]
-const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
