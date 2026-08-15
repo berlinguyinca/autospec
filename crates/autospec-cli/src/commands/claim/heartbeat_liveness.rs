@@ -23,10 +23,10 @@ pub(super) fn startup_heartbeat_owner_is_gone(path: &Path) -> bool {
     let Some(evidence) = super::parse_startup_heartbeat(&document) else {
         return false;
     };
-    use super::super::autonomous::platform_process::{observe_expected, ProcessObservation};
-    match observe_expected(evidence.pid, &evidence.boot_id, &evidence.process_start) {
+    use super::super::autonomous::{observe_expected_process, ProcessObservation};
+    match observe_expected_process(evidence.pid, &evidence.boot_id, &evidence.process_start) {
         ProcessObservation::Dead => true,
-        ProcessObservation::Exact(_)
+        ProcessObservation::Exact
         | ProcessObservation::Mismatch
         | ProcessObservation::Unknown(_) => false,
     }

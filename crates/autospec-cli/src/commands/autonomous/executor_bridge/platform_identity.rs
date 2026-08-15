@@ -221,3 +221,107 @@ pub(crate) fn current_boot_identity() -> Result<String, String> {
     }
     Ok(format!("windows-session-{session_id}"))
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessObservation {
+    Exact,
+    Dead,
+    Mismatch,
+    Unknown(String),
+}
+
+pub(crate) fn observe_expected_process(
+    pid: u32,
+    expected_boot: &str,
+    expected_start: &str,
+) -> ProcessObservation {
+    match current_boot_identity() {
+        Ok(current_boot) if current_boot != expected_boot => return ProcessObservation::Mismatch,
+        Ok(_) => {}
+        Err(error) => return ProcessObservation::Unknown(error),
+    }
+    match process_birth_identity(pid) {
+        Ok(None) => ProcessObservation::Dead,
+        Ok(Some((boot_id, process_start)))
+            if boot_id == expected_boot && process_start == expected_start =>
+        {
+            ProcessObservation::Exact
+        }
+        Ok(Some(_)) => ProcessObservation::Mismatch,
+        Err(error) => ProcessObservation::Unknown(error),
+    }
+}
+
+pub(crate) fn observe_runtime_process_identity(
+    pid: u32,
+) -> Result<Option<(u32, String, String)>, String> {
+    let Some((boot_id, process_start)) = process_birth_identity(pid)? else {
+        return Ok(None);
+    };
+    #[cfg(unix)]
+    let container_id = {
+        let pid = nix::unistd::Pid::from_raw(
+            i32::try_from(pid).map_err(|_| "autonomous process PID is out of range".to_string())?,
+        );
+        match nix::unistd::getpgid(Some(pid)) {
+            Ok(group) => u32::try_from(group.as_raw())
+                .map_err(|_| "autonomous process group is negative".to_string())?,
+            Err(nix::errno::Errno::ESRCH) => return Ok(None),
+            Err(error) => return Err(format!("observe autonomous process group: {error}")),
+        }
+    };
+    #[cfg(windows)]
+    let container_id = pid;
+    Ok(Some((container_id, boot_id, process_start)))
+}
+
+pub(crate) fn ensure_autonomous_runtime_supported() -> Result<(), String> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    ))]
+    {
+        Ok(())
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    )))]
+    {
+        Err("autonomous runtime is unsupported on this host".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_host_is_admitted_by_shared_platform_identity() {
+        ensure_autonomous_runtime_supported().expect("current CI host must be supported");
+    }
+
+    #[test]
+    fn process_observation_only_reports_dead_for_an_absent_pid() {
+        let pid = std::process::id();
+        let (boot_id, process_start) = process_birth_identity(pid)
+            .expect("observe current process")
+            .expect("current process is present");
+        assert_eq!(
+            observe_expected_process(pid, &boot_id, &process_start),
+            ProcessObservation::Exact
+        );
+        assert_eq!(
+            observe_expected_process(pid, &boot_id, "different-start"),
+            ProcessObservation::Mismatch
+        );
+        assert_eq!(
+            observe_expected_process(i32::MAX as u32, &boot_id, "missing"),
+            ProcessObservation::Dead
+        );
+    }
+}

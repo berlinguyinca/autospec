@@ -63,11 +63,10 @@ use one_shot_selector::{
 };
 #[allow(dead_code)]
 mod executor_bridge;
-pub(crate) mod platform_process;
 #[allow(unused_imports)]
-pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
-#[allow(unused_imports)]
-pub(crate) use platform_process::observe_birth;
+pub(crate) use executor_bridge::{
+    current_boot_identity, observe_expected_process, process_birth_identity, ProcessObservation,
+};
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
@@ -285,7 +284,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return preview_launch(&options, launch_mode);
     }
     if requires_autonomous_runtime_support(&options, launch_mode) {
-        platform_process::ensure_autonomous_runtime_supported()
+        executor_bridge::ensure_autonomous_runtime_supported()
             .map_err(CommandFailure::diagnostic)?;
     }
     if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
@@ -5525,6 +5524,11 @@ fn read_unit_with_process_observer(
     } else {
         observe_identity(&pid)
     };
+    let process_probe = match &current_identity {
+        Ok(Some(_)) => ProcessProbe::Alive,
+        Ok(None) => ProcessProbe::Missing,
+        Err(_) => ProcessProbe::Indeterminate,
+    };
     let identity_mismatch = recorded_identity
         .zip(current_identity.as_ref().ok().copied().flatten())
         .is_some_and(|(recorded, current)| recorded != current);
@@ -5541,7 +5545,7 @@ fn read_unit_with_process_observer(
             UnitMetadataState::Ambiguous
         }
     } else {
-        classify_unit_metadata(raw_pid, &layout.repo, &layout.scope, probe_process(&pid))
+        classify_unit_metadata(raw_pid, &layout.repo, &layout.scope, process_probe)
     };
     let running = metadata_state == UnitMetadataState::Live;
     let stale_pid = metadata_state == UnitMetadataState::Stale;
@@ -5731,43 +5735,19 @@ fn record_json_object_key(
     object_keys.last_mut().is_some_and(|keys| keys.insert(key))
 }
 
-#[cfg(unix)]
 fn probe_process(pid: &str) -> ProcessProbe {
-    let Some(pid) = pid.parse::<i32>().ok().filter(|pid| *pid > 0) else {
+    if pid.parse::<u32>().ok().filter(|pid| *pid > 0).is_none() {
         return ProcessProbe::Indeterminate;
-    };
-    if process_is_zombie(pid) {
-        return ProcessProbe::Missing;
     }
-    match kill(Pid::from_raw(pid), None) {
-        Ok(()) => ProcessProbe::Alive,
-        Err(Errno::ESRCH) => ProcessProbe::Missing,
+    match observe_unit_process_identity(pid) {
+        Ok(Some(_)) => ProcessProbe::Alive,
+        Ok(None) => ProcessProbe::Missing,
         Err(_) => ProcessProbe::Indeterminate,
     }
 }
 
-#[cfg(not(unix))]
-fn probe_process(_pid: &str) -> ProcessProbe {
-    ProcessProbe::Indeterminate
-}
-
 fn process_alive(pid: &str) -> bool {
     probe_process(pid) == ProcessProbe::Alive
-}
-
-#[cfg(target_os = "linux")]
-fn process_is_zombie(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
-        .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
-        .as_deref()
-        == Some("Z")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_is_zombie(_pid: i32) -> bool {
-    false
 }
 
 #[cfg(unix)]
@@ -5838,9 +5818,7 @@ fn terminate_unit_with_process_observer(
                 )
             })?;
             let owned = observed.is_some_and(|observed| {
-                recorded == observed
-                    && recorded.pgid.to_string() == unit.pid
-                    && group_alive
+                recorded == observed && recorded.pgid.to_string() == unit.pid && group_alive
             });
             if !owned {
                 return Err(format!(
@@ -5858,49 +5836,21 @@ fn process_identity(pid: &str) -> Option<ProcessIdentity> {
 }
 
 fn observe_unit_process_identity(pid: &str) -> Result<Option<ProcessIdentity>, String> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        let pid = pid
-            .parse::<u32>()
-            .map_err(|_| "autonomous process PID is invalid".to_string())?;
-        let Some(birth) = platform_process::observe_birth(pid)? else {
-            return Ok(None);
-        };
-        #[cfg(target_os = "linux")]
-        let start_time_ticks = birth
-            .start_identity
+    let pid = pid
+        .parse::<u32>()
+        .map_err(|_| "autonomous process PID is invalid".to_string())?;
+    let Some((container_id, _boot_id, process_start)) =
+        executor_bridge::observe_runtime_process_identity(pid)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProcessIdentity {
+        pgid: i32::try_from(container_id)
+            .map_err(|_| "autonomous process container is out of range".to_string())?,
+        start_time_ticks: process_start
             .parse()
-            .map_err(|_| "Linux process start identity is invalid".to_string())?;
-        #[cfg(target_os = "macos")]
-        let start_time_ticks = {
-            let (seconds, micros) = birth
-                .start_identity
-                .split_once('.')
-                .ok_or_else(|| "Darwin process start identity is invalid".to_string())?;
-            seconds
-                .parse::<u64>()
-                .map_err(|_| "Darwin process start seconds are invalid".to_string())?
-                .checked_mul(1_000_000)
-                .and_then(|seconds| {
-                    micros
-                        .parse::<u64>()
-                        .ok()
-                        .and_then(|micros| seconds.checked_add(micros))
-                })
-                .ok_or_else(|| "Darwin process start identity is out of range".to_string())?
-        };
-        return Ok(Some(ProcessIdentity {
-            pgid: i32::try_from(birth.process_group)
-                .map_err(|_| "autonomous process group is out of range".to_string())?,
-            start_time_ticks,
-        }));
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        Err("autonomous process identity requires Linux or macOS native process APIs".to_string())
-    }
+            .map_err(|_| "autonomous process start identity is invalid".to_string())?,
+    }))
 }
 
 #[cfg(unix)]

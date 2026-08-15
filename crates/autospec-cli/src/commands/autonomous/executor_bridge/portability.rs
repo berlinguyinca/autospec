@@ -101,9 +101,14 @@ mod autonomous_runtime_support_tests {
         entries
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    ))]
     #[test]
-    fn native_run_foreground_dry_run_is_an_exact_artifact_free_preview() {
+    fn supported_run_foreground_dry_run_is_an_exact_artifact_free_preview() {
         let _serial = ENVIRONMENT.lock().expect("lock environment");
         let root = std::env::temp_dir().join(format!(
             "autospec-native-foreground-dry-run-{}",
@@ -135,7 +140,12 @@ mod autonomous_runtime_support_tests {
         std::fs::remove_dir_all(root).expect("remove native dry-run fixture");
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    )))]
     #[test]
     fn unsupported_platform_rejects_mutating_launches_before_artifact_creation() {
         let _serial = ENVIRONMENT.lock().expect("lock environment");
@@ -160,7 +170,7 @@ mod autonomous_runtime_support_tests {
         for command in ["start", "restart", "resume"] {
             let error = autonomous::run(&launch_arguments(command, &repo_dir, false))
                 .expect_err("unsupported mutating launch must fail");
-            assert!(error.message.contains("requires Linux or macOS"));
+            assert!(error.message.contains("unsupported on this host"));
             assert_eq!(artifact_snapshot(&root), baseline, "{command}");
         }
 
@@ -168,12 +178,12 @@ mod autonomous_runtime_support_tests {
         foreground_start.push("--foreground".to_string());
         let error = autonomous::run(&foreground_start)
             .expect_err("unsupported foreground start must fail before artifact creation");
-        assert!(error.message.contains("requires Linux or macOS"));
+        assert!(error.message.contains("unsupported on this host"));
         assert_eq!(artifact_snapshot(&root), baseline, "start --foreground");
 
         let error = autonomous::run(&launch_arguments("run-foreground", &repo_dir, false))
             .expect_err("unsupported public foreground entry must fail before artifact creation");
-        assert!(error.message.contains("requires Linux or macOS"));
+        assert!(error.message.contains("unsupported on this host"));
         assert_eq!(artifact_snapshot(&root), baseline, "run-foreground");
 
         for command in ["start", "restart", "resume"] {

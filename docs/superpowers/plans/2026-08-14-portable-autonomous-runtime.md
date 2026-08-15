@@ -37,6 +37,7 @@
 - `crates/autospec-cli/src/commands/autonomous/executor_bridge/process_owner.rs` defines the common live-child ownership contract and target module selection.
 - `crates/autospec-cli/src/commands/autonomous/executor_bridge/process_owner/unix_group.rs` owns macOS/FreeBSD child process groups through retained `Child` handles.
 - `crates/autospec-cli/src/commands/autonomous/executor_bridge/process_owner/windows_job.rs` owns Windows child trees through raw, target-gated Windows SDK handles.
+- `crates/autospec-cli/src/commands/autonomous/executor_bridge/platform_identity.rs` is the single admission and PID birth-identity authority for Linux, macOS, Windows, and FreeBSD; mismatch and unknown observations never authorize mutation.
 - `crates/autospec-cli/src/commands/autonomous/executor_bridge/portability.rs` implements the non-Linux bridge entrypoints by reusing shared durable state and the ownership contract rather than returning Linux-only errors.
 - `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs` exposes shared state-machine helpers to the target backends while leaving Linux pidfd code behavior unchanged.
 - `.github/workflows/rust.yml` contains explicit Linux, macOS, Windows, and FreeBSD gates.

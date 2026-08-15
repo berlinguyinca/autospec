@@ -48,13 +48,13 @@ fn this_boot() -> String {
 
 /// The native start identity for a live pid — what a genuine heartbeat would record.
 fn start_identity_of(pid: u32) -> String {
-    super::super::super::autonomous::observe_birth(pid)
+    super::super::super::autonomous::process_birth_identity(pid)
         .expect("observe process")
         .expect("process is live")
-        .start_identity
+        .1
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn a_heartbeat_owned_by_a_live_process_is_not_gone() {
     let directory = sandbox("live");
@@ -67,7 +67,7 @@ fn a_heartbeat_owned_by_a_live_process_is_not_gone() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn a_heartbeat_owned_by_a_dead_process_is_gone() {
     let directory = sandbox("dead");
@@ -79,7 +79,7 @@ fn a_heartbeat_owned_by_a_dead_process_is_gone() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn a_dead_pid_from_another_boot_fails_closed() {
     let directory = sandbox("foreign-boot");
@@ -96,7 +96,7 @@ fn a_dead_pid_from_another_boot_fails_closed() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn an_unparseable_heartbeat_fails_closed() {
     let directory = sandbox("garbage");
@@ -108,7 +108,7 @@ fn an_unparseable_heartbeat_fails_closed() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn a_missing_heartbeat_fails_closed() {
     let directory = sandbox("absent");
@@ -118,7 +118,7 @@ fn a_missing_heartbeat_fails_closed() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn a_mismatched_pid_identity_fails_closed() {
     let directory = sandbox("recycled");

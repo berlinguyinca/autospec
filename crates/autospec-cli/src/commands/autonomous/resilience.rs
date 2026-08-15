@@ -1112,28 +1112,11 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
-#[cfg(unix)]
 fn pid_is_dead(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return true;
-    }
-    if super::process_is_zombie(pid as i32) {
-        return true;
-    }
-    pid_probe_is_dead(nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        None,
-    ))
-}
-
-#[cfg(unix)]
-fn pid_probe_is_dead(result: Result<(), nix::errno::Errno>) -> bool {
-    matches!(result, Err(nix::errno::Errno::ESRCH))
-}
-
-#[cfg(not(unix))]
-fn pid_is_dead(_pid: u32) -> bool {
-    false
+    matches!(
+        super::executor_bridge::observe_runtime_process_identity(pid),
+        Ok(None)
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -1171,8 +1154,14 @@ mod tests {
     #[test]
     fn pid_liveness_requires_observed_process_absence() {
         assert!(!pid_is_dead(std::process::id()));
-        assert!(pid_is_dead(0));
-        assert!(pid_is_dead(i32::MAX as u32 + 1));
+        assert!(
+            !pid_is_dead(0),
+            "an invalid PID is unknown, not proven dead"
+        );
+        assert!(
+            !pid_is_dead(i32::MAX as u32 + 1),
+            "an unrepresentable PID is unknown, not proven dead"
+        );
 
         let mut child = ChildGuard(
             Command::new("sleep")
@@ -1184,14 +1173,6 @@ mod tests {
         assert!(!pid_is_dead(pid));
         child.stop_and_reap();
         assert!(pid_is_dead(pid));
-    }
-
-    #[test]
-    fn pid_probe_fails_closed_for_errors_other_than_process_absence() {
-        assert!(!pid_probe_is_dead(Ok(())));
-        assert!(pid_probe_is_dead(Err(nix::errno::Errno::ESRCH)));
-        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EPERM)));
-        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EINVAL)));
     }
 
     #[test]
