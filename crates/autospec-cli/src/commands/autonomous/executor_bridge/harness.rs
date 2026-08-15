@@ -98,6 +98,7 @@ pub(crate) struct ResolvedHarness {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HarnessInvocation {
     pub(crate) program: PathBuf,
+    pub(crate) supervised_executable: PathBuf,
     pub(crate) args: Vec<String>,
     pub(crate) current_dir: PathBuf,
     pub(crate) requires_mutation_snapshots: bool,
@@ -281,6 +282,7 @@ impl ResolvedHarness {
         };
         Ok(HarnessInvocation {
             program,
+            supervised_executable: self.executable.clone(),
             args,
             current_dir: worktree.to_path_buf(),
             requires_mutation_snapshots: false,
@@ -297,6 +299,7 @@ impl ResolvedHarness {
         if let Some(exact_test) = test_executor_harness_exact() {
             return Ok(HarnessInvocation {
                 program: self.executable.clone(),
+                supervised_executable: self.executable.clone(),
                 args: vec![
                     "--exact".into(),
                     exact_test,
@@ -369,6 +372,7 @@ impl ResolvedHarness {
         };
         Ok(HarnessInvocation {
             program,
+            supervised_executable: self.executable.clone(),
             args,
             current_dir: worktree.to_path_buf(),
             requires_mutation_snapshots,

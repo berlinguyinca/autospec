@@ -191,6 +191,7 @@ pub(super) fn supervision_state(fixture: &GitFixture) -> PersistedInvocation {
 pub(crate) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocation {
     HarnessInvocation {
         program: PathBuf::from("/bin/sh"),
+        supervised_executable: PathBuf::from("/bin/sh"),
         args: vec!["-c".to_string(), script.to_string()],
         current_dir: directory.to_path_buf(),
         requires_mutation_snapshots: false,
@@ -215,6 +216,10 @@ pub(super) fn detach_harness_for_adoption(
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
+            supervised_executable: invocation
+                .program
+                .canonicalize()
+                .expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir

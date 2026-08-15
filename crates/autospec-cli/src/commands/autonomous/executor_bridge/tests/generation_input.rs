@@ -375,6 +375,10 @@ fn autonomous_executor_bridge_input_rebind_cleans_nested_live_command() {
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
+            supervised_executable: invocation
+                .program
+                .canonicalize()
+                .expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir
