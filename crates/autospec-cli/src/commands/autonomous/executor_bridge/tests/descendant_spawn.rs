@@ -3,8 +3,8 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::{
-    supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, ProcessIdentity,
-    SupervisionOutcome,
+    supervise_harness, BridgePhase, HarnessInvocation, MutationSnapshot, PersistedInvocation,
+    ProcessIdentity, SupervisionOutcome,
 };
 use super::support_base::{test_environment, GitFixture};
 use super::support_invocation::{
@@ -15,6 +15,41 @@ use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+#[test]
+fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() {
+    let _environment = test_environment();
+    let fixture = GitFixture::new("fork-lock-release-after-exec");
+    let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+    let validated = bridge::validate_invocation(
+        &HarnessInvocation {
+            program: invocation.program.canonicalize().expect("canonical shell"),
+            args: invocation.args,
+            current_dir: invocation
+                .current_dir
+                .canonicalize()
+                .expect("canonical fixture repo"),
+            requires_mutation_snapshots: false,
+        },
+        &fixture.repo.canonicalize().expect("canonical fixture repo"),
+    )
+    .expect("validate sleeping harness");
+    let sinks = bridge::output_sink_paths(
+        &fixture.root.join("state/invocation.json"),
+        "fork-lock-release",
+    )
+    .expect("output sinks");
+    let mut child =
+        bridge::spawn_blocked_harness(&validated, &sinks, None).expect("spawn sleeping harness");
+
+    child.release_launch_barrier().expect("release harness");
+    assert!(
+        bridge::test_fork_lifecycle_is_available(),
+        "an execed harness must not serialize unrelated test forks until process exit"
+    );
+    child.terminate().expect("terminate sleeping harness");
+}
 
 #[test]
 fn autonomous_executor_bridge_pending_and_interrupted_phases_round_trip_nonterminally() {

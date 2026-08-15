@@ -10,6 +10,10 @@ pub(super) fn lock_test_fork_lifecycle() -> TestForkLifecycleGuard {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+pub(super) fn test_fork_lifecycle_is_available() -> bool {
+    TEST_FORK_LIFECYCLE.try_lock().is_ok()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchFailpoint {
     None = 0,

@@ -107,7 +107,9 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod test_coordination;
 #[cfg(test)]
-use test_coordination::{lock_test_fork_lifecycle, LaunchFailpoint, TestForkLifecycleGuard};
+use test_coordination::{lock_test_fork_lifecycle, LaunchFailpoint};
+#[cfg(all(test, target_os = "linux"))]
+use test_coordination::{test_fork_lifecycle_is_available, TestForkLifecycleGuard};
 
 mod review_evidence;
 use review_evidence::*;
@@ -17570,7 +17572,7 @@ struct ForkedChild {
     reaped: Option<ChildExit>,
     // This field is last so descriptor owners above are dropped before the test lock is released.
     #[cfg(test)]
-    _fork_lifecycle: TestForkLifecycleGuard,
+    _fork_lifecycle: Option<TestForkLifecycleGuard>,
 }
 
 #[cfg(target_os = "linux")]
@@ -17712,7 +17714,13 @@ impl ForkedChild {
             LAUNCH_HANDSHAKE_TIMEOUT,
             "executor exec-status",
         )? {
-            None => Ok(()),
+            None => {
+                #[cfg(test)]
+                {
+                    self._fork_lifecycle = None;
+                }
+                Ok(())
+            }
             Some(_) => Err("executor child failed before exact harness exec".to_string()),
         }
     }
@@ -18388,7 +18396,9 @@ fn spawn_blocked_harness(
                     harness_exit: Some(File::from(harness_exit_read)),
                     reaped: None,
                     #[cfg(test)]
-                    _fork_lifecycle: fork_lifecycle.take().expect("test fork lifecycle guard"),
+                    _fork_lifecycle: Some(
+                        fork_lifecycle.take().expect("test fork lifecycle guard"),
+                    ),
                 })
             })();
             match setup {
