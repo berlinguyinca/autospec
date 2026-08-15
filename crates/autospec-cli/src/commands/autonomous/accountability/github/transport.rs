@@ -207,7 +207,8 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
             )
         }
     };
-    let mut process = Command::new("gh");
+    let mut process =
+        Command::new(std::env::var_os("AUTOSPEC_GH_PROGRAM").unwrap_or_else(|| "gh".into()));
     process
         .args(&args)
         .stdout(Stdio::piped())

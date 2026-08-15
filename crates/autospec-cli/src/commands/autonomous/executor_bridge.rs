@@ -10238,7 +10238,9 @@ pub(crate) struct DraftPrAdapter {
 impl DraftPrAdapter {
     pub(crate) fn github_cli() -> Self {
         Self {
-            gh: PathBuf::from("gh"),
+            gh: std::env::var_os("AUTOSPEC_GH_PROGRAM")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("gh")),
             environment: BTreeMap::new(),
         }
     }

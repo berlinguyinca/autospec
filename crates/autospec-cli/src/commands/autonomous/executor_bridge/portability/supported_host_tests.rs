@@ -106,24 +106,17 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         .success());
     git(&repo, &["remote", "set-head", "origin", "main"]);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let gh = bin.join("gh");
-        fs::write(
-            &gh,
-            "#!/bin/sh\nset -eu\ncase \"$1 $2\" in\n  'issue view')\n    mode=initial; [ ! -f \"$AUTOSPEC_TEST_GH_STATE\" ] || mode=$(cat \"$AUTOSPEC_TEST_GH_STATE\")\n    case \" $* \" in\n      *' labels,body,title,author '*)\n        if [ \"$mode\" = claimed ]; then\n          printf '%s\\n' '{\"labels\":[\"in-progress-by-bot\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** `SAFETY_PASS`\\n<!-- autospec-safety:end -->\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}'\n        else\n          printf '%s\\n' '{\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** `SAFETY_PASS`\\n<!-- autospec-safety:end -->\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}'\n        fi ;;\n      *) printf '%s\\n' '{\"labels\":[{\"name\":\"auto-implement\"},{\"name\":\"safety:reviewed\"}]}' ;;\n    esac ;;\n  'issue edit')\n    case \" $* \" in *' --add-label in-progress-by-bot '*) printf claimed > \"$AUTOSPEC_TEST_GH_STATE\" ;; *' --add-label auto-implement '*) printf released > \"$AUTOSPEC_TEST_GH_STATE\" ;; esac ;;\n  'pr list') printf '%s\\n' '[]' ;;\n  api*) printf '%s\\n' '[]' ;;\n  *) : ;;\nesac\n",
-        )
-        .expect("write admission gh shim");
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))
-            .expect("make admission gh shim executable");
-    }
-    #[cfg(windows)]
-    fs::write(
-        bin.join("gh.cmd"),
-        "@echo off\r\nif \"%1\"==\"api\" echo []\r\nif \"%1 %2\"==\"issue edit\" (\r\n  echo %* | findstr /c:\"--add-label in-progress-by-bot\" >nul && echo claimed>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n  echo %* | findstr /c:\"--add-label auto-implement\" >nul && echo released>\"%AUTOSPEC_TEST_GH_STATE%\"\r\n)\r\nif \"%1 %2\"==\"issue view\" (\r\n  echo %* | findstr /c:\"labels,body,title,author\" >nul\r\n  if errorlevel 1 (\r\n    echo {\"labels\":[{\"name\":\"auto-implement\"},{\"name\":\"safety:reviewed\"}]}\r\n  ) else (\r\n    findstr /x claimed \"%AUTOSPEC_TEST_GH_STATE%\" >nul 2>nul && (echo {\"labels\":[\"in-progress-by-bot\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"}) || (echo {\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"body\":\"## Safety review\\n\\n^<!-- autospec-safety:begin --^>\\n- **decision:** `SAFETY_PASS`\\n^<!-- autospec-safety:end --^>\\n\\n## Goal\\nRun the portable admission.\",\"title\":\"Portable admission\",\"author\":\"fixture\"})\r\n  )\r\n)\r\nif \"%1 %2\"==\"pr list\" echo []\r\nexit /b 0\r\n",
-    )
-    .expect("write admission gh shim");
+    let gh_source = bin.join("gh-fixture.rs");
+    let gh_program = bin.join(if cfg!(windows) { "gh.exe" } else { "gh" });
+    fs::write(&gh_source, include_str!("fixtures/gh.rs"))
+        .expect("write native admission gh fixture source");
+    assert!(Command::new("rustc")
+        .arg(&gh_source)
+        .arg("-o")
+        .arg(&gh_program)
+        .status()
+        .expect("compile native admission gh fixture")
+        .success());
     let harness_aliases = root.join("harness-runtime-aliases.tsv");
     fs::write(
         &harness_aliases,
@@ -158,11 +151,7 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claim_state);
         std::env::set_var("AUTOSPEC_CLAIM_CONFIRM_READS", "1");
         std::env::set_var("AUTOSPEC_TEST_GH_STATE", root.join("gh-state"));
-        #[cfg(windows)]
-        let gh_program = bin.join("gh.cmd");
-        #[cfg(not(windows))]
-        let gh_program = bin.join("gh");
-        std::env::set_var("AUTOSPEC_GH_PROGRAM", gh_program);
+        std::env::set_var("AUTOSPEC_GH_PROGRAM", &gh_program);
         std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &harness_aliases);
         std::env::set_var("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "claude");
         let mut path = vec![bin.clone()];
