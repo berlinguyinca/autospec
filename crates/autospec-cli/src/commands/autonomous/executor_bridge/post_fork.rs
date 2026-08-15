@@ -18,9 +18,8 @@
 use super::*;
 
 #[cfg(target_os = "linux")]
-unsafe fn raw_errno() -> i32 {
-    // SAFETY: errno is thread-local process state.
-    unsafe { *nix::libc::__errno_location() }
+fn raw_errno() -> i32 {
+    nix::errno::Errno::last_raw()
 }
 
 #[cfg(target_os = "linux")]
@@ -52,7 +51,7 @@ pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offse
         };
         if count < 0 {
             // SAFETY: errno is thread-local process state.
-            if unsafe { raw_errno() } == nix::libc::EINTR {
+            if raw_errno() == nix::libc::EINTR {
                 continue;
             }
             return false;
@@ -129,7 +128,7 @@ pub(super) unsafe fn raw_pump_stream(
             break count;
         }
         // SAFETY: errno is thread-local process state.
-        let error = unsafe { raw_errno() };
+        let error = raw_errno();
         if error == nix::libc::EINTR {
             continue;
         }
@@ -187,7 +186,7 @@ pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
             offset += count as usize;
         } else if count < 0
             // SAFETY: errno is thread-local process state.
-            && unsafe { raw_errno() } == nix::libc::EINTR
+            && raw_errno() == nix::libc::EINTR
         {
             continue;
         } else {
@@ -213,7 +212,7 @@ pub(super) unsafe fn raw_children_quiescent() -> i32 {
             return 0;
         }
         // SAFETY: errno is thread-local process state.
-        let error = unsafe { raw_errno() };
+        let error = raw_errno();
         if error == nix::libc::EINTR {
             continue;
         }
@@ -245,7 +244,7 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
         };
         if observed < 0 {
             // SAFETY: errno is thread-local process state.
-            let error = unsafe { raw_errno() };
+            let error = raw_errno();
             if error == nix::libc::EINTR {
                 continue;
             }
@@ -264,7 +263,7 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
         }
         if waited < 0 {
             // SAFETY: errno is thread-local process state.
-            let error = unsafe { raw_errno() };
+            let error = raw_errno();
             if error == nix::libc::EINTR || error == nix::libc::ECHILD {
                 continue;
             }
@@ -389,7 +388,7 @@ pub(super) unsafe fn raw_supervisor_loop(
                 exit_code = Some(code);
             } else if waited < 0
                 // SAFETY: errno is thread-local process state.
-                && unsafe { raw_errno() } != nix::libc::EINTR
+                && raw_errno() != nix::libc::EINTR
             {
                 terminate_post_fork(127);
             }
