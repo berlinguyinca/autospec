@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +27,39 @@ fn make_git_repo(repo_dir: &Path) {
         .expect("git init")
         .status
         .success());
+}
+
+fn install_accountability_fixture(command: &mut Command, temp: &Path) {
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&bin).expect("fixture bin");
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n. \"$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER\"\nexit 1\n",
+    )
+    .expect("fixture gh");
+    #[cfg(unix)]
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("executable gh");
+    command
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+        )
+        .env(
+            "AUTOSPEC_FOREGROUND_ACCOUNTABILITY",
+            temp.join("accountability.md"),
+        )
+        .env(
+            "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_REPO",
+            "berlinguyinca/autospec",
+        )
+        .env(
+            "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/foreground_accountability_gh.sh"
+            ),
+        );
 }
 
 fn cleanup_pids(scope: &Path) {
@@ -130,7 +165,9 @@ fn autonomous_foreground_warns_about_persisted_update_failure_without_blocking_e
     let failure_record = autospec_home.join("last-update-failure.json");
     std::fs::write(&failure_record, "{}\n").expect("failure record");
 
-    let output = autospec()
+    let mut command = autospec();
+    install_accountability_fixture(&mut command, &temp);
+    let output = command
         .args([
             "autonomous",
             "run-foreground",
@@ -138,7 +175,6 @@ fn autonomous_foreground_warns_about_persisted_update_failure_without_blocking_e
             "berlinguyinca/autospec",
             "--repo-dir",
             repo_dir.to_str().unwrap(),
-            "--dry-run",
         ])
         .env("HOME", &home)
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
@@ -149,7 +185,12 @@ fn autonomous_foreground_warns_about_persisted_update_failure_without_blocking_e
         .expect("autospec autonomous foreground enters");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(stderr.contains("WARN: autospec self-update failed"));
+    assert!(
+        stderr.contains("WARN: autospec self-update failed"),
+        "status: {}; stdout: {}; stderr: {stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(stderr.contains(failure_record.to_str().unwrap()));
 }
 
@@ -165,7 +206,9 @@ fn autonomous_start_warns_invoking_operator_about_persisted_update_failure() {
     let failure_record = autospec_home.join("last-update-failure.json");
     std::fs::write(&failure_record, "{}\n").expect("failure record");
 
-    let output = autospec()
+    let mut command = autospec();
+    install_accountability_fixture(&mut command, &temp);
+    let output = command
         .args([
             "autonomous",
             "start",
@@ -184,7 +227,11 @@ fn autonomous_start_warns_invoking_operator_about_persisted_update_failure() {
         .expect("autospec autonomous start runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stderr.contains("WARN: autospec self-update failed"));
     assert!(stderr.contains(failure_record.to_str().unwrap()));
     cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
