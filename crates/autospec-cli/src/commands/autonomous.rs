@@ -50,9 +50,11 @@ use accountability_runtime::*;
 mod blocked_cycle;
 mod foreground_failure;
 mod launch;
+mod launch_preview;
 mod lifecycle_stop_notice;
 use foreground_failure::ForegroundFailure;
 use launch::*;
+use launch_preview::*;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
 mod main_health_output;
@@ -72,6 +74,8 @@ mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
 mod premerge;
+#[cfg(test)]
+mod recovery_metadata_tests;
 mod resilience;
 #[cfg(test)]
 mod restart_policy_tests;
@@ -308,58 +312,6 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
         ))),
-    }
-}
-
-fn is_launch_preview(options: &Options) -> bool {
-    options.dry_run
-        && matches!(
-            options.subcommand.as_str(),
-            "start" | "restart" | "resume" | "run-foreground"
-        )
-}
-
-fn requires_autonomous_runtime_support(options: &Options, launch_mode: LaunchMode) -> bool {
-    options.subcommand == "run-foreground"
-        || (!options.dry_run
-            && (matches!(options.subcommand.as_str(), "start" | "restart" | "resume")
-                || launch_mode == LaunchMode::Foreground))
-}
-
-#[cfg(test)]
-mod runtime_support_gate_tests {
-    use super::*;
-
-    #[test]
-    fn mutating_foreground_entries_require_native_runtime_support() {
-        let mut options = Options {
-            subcommand: "run-foreground".to_string(),
-            ..Options::default()
-        };
-        assert!(requires_autonomous_runtime_support(
-            &options,
-            LaunchMode::Detached
-        ));
-
-        options.subcommand = "start".to_string();
-        options.foreground = true;
-        assert!(requires_autonomous_runtime_support(
-            &options,
-            LaunchMode::Foreground
-        ));
-
-        options.dry_run = true;
-        assert!(!requires_autonomous_runtime_support(
-            &options,
-            LaunchMode::Foreground
-        ));
-
-        options.subcommand = "run-foreground".to_string();
-        assert!(is_launch_preview(&options));
-        assert!(requires_autonomous_runtime_support(
-            &options,
-            LaunchMode::Detached
-        ));
     }
 }
 
@@ -1083,36 +1035,6 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
     args.get(*index)
         .cloned()
         .ok_or_else(|| format!("{option} requires a value"))
-}
-
-fn preview_launch(options: &Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
-    let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
-    let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
-    if options.json {
-        let mut body = format!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"{}\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
-            json_escape(&options.subcommand),
-            json_escape(&options.repo),
-            json_escape(&options.repo_dir),
-            json_escape(&foreground.display()),
-            json_escape(&commands.monitor.display()),
-            json_escape(&commands.supervisor.display())
-        );
-        if launch_mode == LaunchMode::Follow {
-            body.pop();
-            body.push_str(",\"follow\":\"scoped conductor log\"}");
-        }
-        println!("{body}");
-    } else {
-        println!("autospec autonomous {}: dry-run", options.subcommand);
-        println!("conductor: {}", foreground.display());
-        println!("monitor: {}", commands.monitor.display());
-        println!("supervisor: {}", commands.supervisor.display());
-        if launch_mode == LaunchMode::Follow {
-            println!("follow: scoped conductor log");
-        }
-    }
-    Ok(())
 }
 
 fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
@@ -7319,76 +7241,6 @@ mod autonomous_metadata_tests {
 
     fn metadata(pid: u32, repo: &str, scope: &str) -> String {
         format!(r#"{{"pid":{pid},"repo":"{repo}","scope":"{scope}"}}"#)
-    }
-
-    fn metadata_with_identity(pid: u32, start_time_ticks: u64) -> String {
-        format!(
-            r#"{{"pid":{pid},"repo":"{REPO}","scope":"{SCOPE}","pgid":{pid},"start_time_ticks":{start_time_ticks}}}"#
-        )
-    }
-
-    fn metadata_layout(label: &str) -> (PathBuf, RunLayout) {
-        let root = std::env::temp_dir().join(format!(
-            "autospec-autonomous-metadata-{label}-{}-{}",
-            std::process::id(),
-            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).expect("create metadata fixture");
-        let layout = RunLayout {
-            state_dir: root.clone(),
-            log_dir: root.join("logs"),
-            scope: SCOPE.to_string(),
-            repo: REPO.to_string(),
-        };
-        (root, layout)
-    }
-
-    #[test]
-    fn autonomous_process_observation_error_is_ambiguous() {
-        let (root, layout) = metadata_layout("observation-error");
-        let pid = std::process::id();
-        fs::write(
-            layout.state_dir.join("conductor.pid"),
-            metadata_with_identity(pid, 1),
-        )
-        .expect("write unit metadata");
-
-        let unit = read_unit_with_process_observer("conductor", &layout, |_| {
-            Err("injected native observation error".to_string())
-        });
-
-        assert_eq!(unit.metadata_state, UnitMetadataState::Ambiguous);
-        assert!(!unit.running);
-        fs::remove_dir_all(root).expect("remove metadata fixture");
-    }
-
-    #[test]
-    fn autonomous_termination_refuses_ambiguous_birth_observation() {
-        let (root, layout) = metadata_layout("termination-observation-error");
-        let pid = std::process::id();
-        let unit = UnitStatus {
-            pid: pid.to_string(),
-            running: true,
-            stale_pid: false,
-            metadata_only: false,
-            metadata_state: UnitMetadataState::Live,
-            recorded_identity: Some(ProcessIdentity {
-                pgid: i32::try_from(pid).expect("test pid fits i32"),
-                start_time_ticks: 1,
-            }),
-            identity_mismatch: false,
-            pid_file: layout.state_dir.join("conductor.pid"),
-            logpath: String::new(),
-            logpath_file: layout.state_dir.join("conductor.logpath"),
-        };
-
-        let error = terminate_unit_with_process_observer("conductor", &unit, |_| {
-            Err("injected native observation error".to_string())
-        })
-        .expect_err("ambiguous observation must refuse termination");
-
-        assert!(error.contains("injected native observation error"));
-        fs::remove_dir_all(root).expect("remove metadata fixture");
     }
 
     #[test]

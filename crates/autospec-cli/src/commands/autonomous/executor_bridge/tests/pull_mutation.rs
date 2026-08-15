@@ -239,6 +239,7 @@ fn autonomous_executor_bridge_rejects_saturated_pull_request_inventory() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state() {
+    let _environment = test_environment();
     nix::sys::prctl::set_child_subreaper(false).expect("clear fixture subreaper state");
     let fixture = GitFixture::new("subreaper-restore");
     let mut state = supervision_state(&fixture);
@@ -279,6 +280,7 @@ fn autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state()
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state() {
+    let _environment = test_environment();
     nix::sys::prctl::set_child_subreaper(true).expect("enable fixture subreaper state");
     let fixture = GitFixture::new("subreaper-preserve");
     let mut state = supervision_state(&fixture);
