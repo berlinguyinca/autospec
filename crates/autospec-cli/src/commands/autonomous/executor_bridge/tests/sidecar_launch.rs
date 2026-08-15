@@ -242,7 +242,8 @@ fn autonomous_executor_bridge_adopts_fast_exit_after_harness_identity_disappears
     let sinks =
         bridge::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
     for _ in 0..100 {
-        if bridge::read_executor_exit_status(&sinks.exit_status).expect("exit sidecar") == Some(0)
+        if bridge::read_live_executor_exit_status(&sinks.exit_status).expect("exit sidecar")
+            == Some(0)
             && bridge::observe_process_identity(harness.pid, &harness.argv_digest)
                 .expect("observe exited harness")
                 .is_none()

@@ -13,6 +13,53 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+static EXTERNAL_HOOK_FIXTURE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct ExternalHookFixture(PathBuf);
+
+#[cfg(unix)]
+impl ExternalHookFixture {
+    fn new(label: &str) -> Self {
+        let root = PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+            .join(".local/share/autospec-hook-security-tests")
+            .join(format!(
+                "{label}-{}-{}",
+                std::process::id(),
+                EXTERNAL_HOOK_FIXTURE_NONCE.fetch_add(1, Ordering::Relaxed)
+            ));
+        fs::create_dir_all(&root).expect("external hook fixture");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("protect external hook fixture");
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "external hook fixture must remain private"
+        );
+        let git_probe = Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .expect("probe enclosing Git workspace");
+        assert!(
+            !git_probe.status.success(),
+            "hook security fixture must be outside every Git workspace: {}",
+            String::from_utf8_lossy(&git_probe.stdout).trim()
+        );
+        Self(root)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExternalHookFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 #[cfg(unix)]
 #[test]
@@ -156,16 +203,8 @@ fn executor_commit_subject_requires_a_conventional_description() {
 fn trusted_git_inventory_accepts_external_validation_hook() {
     let (_fixture, state, _snapshot, _closeout) =
         implementation_proof_fixture("rust-commit-trusted-hook-inventory");
-    let common_dir = PathBuf::from(git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--git-common-dir"],
-    ));
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        state.identity.worktree.join(common_dir)
-    };
-    let hook = common_dir.join("hooks/pre-commit");
+    let trusted_git = bridge::trusted_worktree_git(&state).expect("trusted worktree hook path");
+    let hook = trusted_git.hooks_dir.join("pre-commit");
     fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write validation hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
         .expect("make validation hook executable");
@@ -241,10 +280,10 @@ fn contained_hook_rejects_codex_selected_from_writable_worktree() {
         worktree: codex.parent().expect("Codex parent").to_path_buf(),
     };
 
-    let error = bridge::trusted_codex_executable_from(&binding, &environment)
+    let error = bridge::trusted_codex_launch_from(&binding, &environment)
         .expect_err("worktree-selected Codex must fail closed");
 
-    assert!(error.contains("writable by the implementer"), "{error}");
+    assert!(error.contains("worktree"), "{error}");
 }
 
 #[cfg(unix)]
@@ -276,9 +315,20 @@ fn contained_hook_rejects_linter_symlink_into_worktree() {
 #[cfg(unix)]
 #[test]
 fn rust_commit_runs_trusted_validation_hook_inside_containment() {
-    let (fixture, state, _snapshot, _closeout) =
+    let (_fixture, state, _snapshot, _closeout) =
         implementation_proof_fixture("rust-commit-contained-hook");
-    let home = fixture.root.join("contained-hook-home");
+    let external = ExternalHookFixture::new("contained-hook");
+    let external_hooks = external.0.join("trusted-hooks");
+    fs::create_dir(&external_hooks).expect("external trusted hooks");
+    git(
+        &state.identity.worktree,
+        &[
+            "config",
+            "core.hooksPath",
+            external_hooks.to_str().expect("external hooks path"),
+        ],
+    );
+    let home = external.0.join("home");
     fs::create_dir_all(home.join(".config/gh")).expect("create credential fixture");
     fs::write(
         home.join(".config/gh/hosts.yml"),
@@ -308,16 +358,8 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
     };
     let implementation = state.identity.worktree.join("implementation.txt");
     fs::write(&implementation, "contained hook proof\n").expect("write implementation");
-    let common_dir = PathBuf::from(git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--git-common-dir"],
-    ));
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        state.identity.worktree.join(common_dir)
-    };
-    let hook = common_dir.join("hooks/pre-commit");
+    let trusted_git = bridge::trusted_worktree_git(&state).expect("trusted worktree hook path");
+    let hook = trusted_git.hooks_dir.join("pre-commit");
     fs::write(
         &hook,
         format!(
@@ -354,6 +396,31 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
 fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation() {
     let (fixture, state, _snapshot, _closeout) =
         implementation_proof_fixture("rust-commit-sandboxed-failure");
+    let external = ExternalHookFixture::new("rejecting-hook");
+    let external_hooks = external.0.join("trusted-hooks");
+    fs::create_dir(&external_hooks).expect("external trusted hooks");
+    git(
+        &state.identity.worktree,
+        &[
+            "config",
+            "core.hooksPath",
+            external_hooks.to_str().expect("external hooks path"),
+        ],
+    );
+    let mut environment = std::env::vars_os()
+        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+        .collect::<BTreeMap<_, _>>();
+    environment.insert(
+        "AUTOSPEC_SCRIPTS_DIR".to_string(),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts")
+            .into_os_string(),
+    );
+    let hook_context = bridge::TrustedHookContext {
+        environment,
+        autospec: fs::canonicalize(std::env::current_exe().expect("current test executable"))
+            .expect("canonical test executable"),
+    };
     let remote_before = git_stdout(
         &fixture.root,
         &[
@@ -368,17 +435,9 @@ fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation
     )
     .expect("write sandboxed diff");
     let head_before = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
-    let common_dir = PathBuf::from(git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--git-common-dir"],
-    ));
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        state.identity.worktree.join(common_dir)
-    };
-    let hook = common_dir.join("hooks/pre-commit");
-    let escaped = fixture.root.join("hook-escaped-containment");
+    let trusted_git = bridge::trusted_worktree_git(&state).expect("trusted worktree hook path");
+    let hook = trusted_git.hooks_dir.join("pre-commit");
+    let escaped = external.0.join("hook-escaped-containment");
     let hook_body = format!(
         "#!/bin/sh\nset +e\nchmod 600 implementation.txt\nprintf 'hook mutation\\n' > implementation.txt\ngit add implementation.txt\ngit update-ref refs/heads/hook-escape HEAD\ngit config autospec.hook-escape true\nprintf compromised > {}\nprintf escaped > {}\nexit 1\n",
         bridge::posix_shell_quote(hook.to_string_lossy().as_ref()),
@@ -387,12 +446,27 @@ fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation
     fs::write(&hook, &hook_body).expect("write escaping hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
         .expect("make rejecting hook executable");
+    let trusted_git =
+        bridge::trusted_worktree_git(&state).expect("inventory rejecting validation hook");
+    assert_eq!(
+        trusted_git.active_hooks,
+        vec![fs::canonicalize(&hook).expect("canonical rejecting validation hook")],
+        "the commit must see exactly the rejecting validation hook"
+    );
 
-    let error = bridge::commit_sandboxed_executor_diff(&state, "test: blocked commit", "")
-        .expect_err("hook must block Rust-owned commit");
+    let error = bridge::commit_sandboxed_executor_diff_with_hook_context(
+        &state,
+        "test: blocked commit",
+        "",
+        &hook_context,
+    )
+    .expect_err("hook must block Rust-owned commit");
 
     assert!(error.contains("commit"), "{error}");
-    assert!(!escaped.exists(), "validation hook escaped containment");
+    assert!(
+        !escaped.exists(),
+        "validation hook escaped containment after: {error}"
+    );
     assert_eq!(
         fs::metadata(state.identity.worktree.join("implementation.txt"))
             .unwrap()
@@ -400,7 +474,7 @@ fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation
             .mode()
             & 0o777,
         0o600,
-        "hook execution receipt is missing"
+        "hook execution receipt is missing after: {error}"
     );
     assert_eq!(
         git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),

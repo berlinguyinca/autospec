@@ -1,6 +1,6 @@
 // executor_bridge tests: integration-smoke review evidence.
 
-use super::support_base::{git, GitFixture};
+use super::support_base::{git, test_environment, GitFixture};
 use super::support_invocation::supervision_state;
 use crate::commands::autonomous::executor_bridge as bridge;
 use autospec_core::autonomous::review_policy::{
@@ -204,6 +204,7 @@ fn integration_primary_smoke_accepts_a_repository_integration_test() {
 
 #[test]
 fn failing_integration_smoke_blocks_ci_passed_transition() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("integration-smoke-failure");
     let mut state = supervision_state(&fixture);
     state.phase = bridge::BridgePhase::DraftCreated;
@@ -232,6 +233,7 @@ fn failing_integration_smoke_blocks_ci_passed_transition() {
 
 #[test]
 fn passing_integration_smoke_is_bound_into_premerge_evidence() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("integration-smoke-binding");
     let mut state = supervision_state(&fixture);
     state.phase = bridge::BridgePhase::DraftCreated;

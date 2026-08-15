@@ -382,6 +382,7 @@ fn autonomous_executor_bridge_license_checker_persisted_base_identity_fails_clos
 
 #[test]
 fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
+    let _environment = test_environment();
     // Break caught: generated Next.js bundles replaying source-like test secrets into the
     // required scan while an equivalent finding in a source fixture must still block.
     let fixture = GitFixture::new("gitleaks-next-policy");
@@ -463,6 +464,7 @@ fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
 
 #[test]
 fn autonomous_executor_bridge_gitleaks_preserves_repository_rules() {
+    let _environment = test_environment();
     // Break caught: the generated exclusion policy replacing a repository's custom rules
     // instead of extending them.
     let fixture = GitFixture::new("gitleaks-repository-policy");

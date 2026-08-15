@@ -372,6 +372,7 @@ fn autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
+    let _environment = test_environment();
     let leader = bridge::OwnedProcess::capture_forked_child(std::process::id())
         .expect("capture test process");
     let mut processes = bridge::OwnedProcessSet {

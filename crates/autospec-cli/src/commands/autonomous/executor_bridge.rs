@@ -39,6 +39,8 @@ use autospec_core::autonomous::premerge::{
 };
 use autospec_core::autonomous::review_policy::ReviewRequirements;
 use autospec_core::autonomous::waterfall::sha256_hex;
+#[cfg(unix)]
+use autospec_core::autonomous::waterfall::sha256_reader_hex;
 use autospec_core::claim::{
     parse_open_pull_requests_json, parse_required_checks_json,
     successful_executor_result_for_pull_request, ExecutorResultEvidence, OpenPullRequest,
@@ -9823,8 +9825,8 @@ fn commit_sandboxed_executor_diff_inner(
             )
         }
     }
-
     let subject = executor_commit_subject(state.identity.issue, issue_title);
+    hook_bundle.revalidate_launch()?;
     let commit = binding
         .command()
         .arg("-c")

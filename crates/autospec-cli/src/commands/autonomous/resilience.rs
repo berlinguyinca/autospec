@@ -1113,6 +1113,13 @@ fn now_nanos() -> u128 {
 }
 
 fn pid_is_dead(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return false;
+    }
     matches!(
         super::executor_bridge::observe_runtime_process_identity(pid),
         Ok(None)

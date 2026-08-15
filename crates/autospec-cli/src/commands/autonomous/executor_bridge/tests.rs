@@ -27,6 +27,8 @@ mod closeout_harness;
 mod closeout_remote;
 mod closeout_repairs;
 mod codex_permission;
+#[cfg(unix)]
+mod codex_root_policy;
 #[cfg(target_os = "linux")]
 mod codex_sandbox;
 mod commit_rust;
@@ -83,6 +85,8 @@ mod snapshot_identity;
 mod structured_review;
 mod structured_review_receipt;
 mod support_base;
+#[cfg(unix)]
+mod trusted_codex_launch;
 #[cfg(windows)]
 pub(super) use support_base::TEST_ENVIRONMENT;
 mod support_harness_env;
