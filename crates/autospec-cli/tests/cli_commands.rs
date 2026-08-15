@@ -4065,6 +4065,15 @@ fn start_sleeping_autonomous_with_state(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    for _ in 0..100 {
+        if autonomous_status(operator_dir, log_dir, repo)
+            .contains("\"conductor\":{\"running\":true")
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("detached conductor did not publish a stable live identity");
 }
 
 fn make_git_repo(repo_dir: &std::path::Path, remote: Option<&str>) {
