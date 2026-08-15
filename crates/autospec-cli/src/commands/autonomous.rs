@@ -287,10 +287,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     {
         return preview_launch(&options, launch_mode);
     }
-    if matches!(
-        options.subcommand.as_str(),
-        "start" | "restart" | "resume"
-    ) {
+    if requires_autonomous_runtime_support(&options, launch_mode) {
         platform_process::ensure_autonomous_runtime_supported()
             .map_err(CommandFailure::diagnostic)?;
     }
@@ -315,6 +312,44 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
         ))),
+    }
+}
+
+fn requires_autonomous_runtime_support(options: &Options, launch_mode: LaunchMode) -> bool {
+    !options.dry_run
+        && (matches!(
+            options.subcommand.as_str(),
+            "start" | "restart" | "resume" | "run-foreground"
+        ) || launch_mode == LaunchMode::Foreground)
+}
+
+#[cfg(test)]
+mod runtime_support_gate_tests {
+    use super::*;
+
+    #[test]
+    fn mutating_foreground_entries_require_native_runtime_support() {
+        let mut options = Options {
+            subcommand: "run-foreground".to_string(),
+            ..Options::default()
+        };
+        assert!(requires_autonomous_runtime_support(
+            &options,
+            LaunchMode::Detached
+        ));
+
+        options.subcommand = "start".to_string();
+        options.foreground = true;
+        assert!(requires_autonomous_runtime_support(
+            &options,
+            LaunchMode::Foreground
+        ));
+
+        options.dry_run = true;
+        assert!(!requires_autonomous_runtime_support(
+            &options,
+            LaunchMode::Foreground
+        ));
     }
 }
 

@@ -10,6 +10,63 @@ use crate::commands::claim;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
+fn startup_document(ts: u64, pid: u32, process_start: &str) -> Vec<u8> {
+    format!(
+        "{{\"issue\":\"42\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":{ts},\"ttl_seconds\":300,\"pid\":{pid},\"nonce\":\"nonce\",\"host\":\"host-a\",\"boot_id\":\"boot-a\",\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(unix)]
+#[test]
+fn heartbeat_startup_existing_generation_allows_timestamp_drift_only() {
+    let expected = startup_document(100, 4242, "12345");
+    let timestamp_drift = startup_document(101, 4242, "12345");
+    let pid_drift = startup_document(100, 4343, "12345");
+    let process_start_drift = startup_document(100, 4242, "12346");
+
+    assert!(claim::same_startup_heartbeat_generation(
+        &timestamp_drift,
+        &expected
+    ));
+    assert!(!claim::same_startup_heartbeat_generation(
+        &pid_drift, &expected
+    ));
+    assert!(!claim::same_startup_heartbeat_generation(
+        &process_start_drift,
+        &expected
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn heartbeat_startup_existing_permissive_file_is_rejected_without_chmod_repair() {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+
+    let (fixture, issue) = startup_heartbeat_fixture("existing-permissive");
+    let document = startup_document(100, 4242, "12345");
+    std::fs::write(&issue, &document).unwrap();
+    std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let directory = std::fs::File::from(
+        open(
+            &fixture,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+
+    claim::inspect_heartbeat_target(&directory, "42.json", &document)
+        .expect_err("permissive existing heartbeat must block publication");
+    assert_eq!(
+        std::fs::metadata(&issue).unwrap().permissions().mode() & 0o7777,
+        0o640,
+        "inspection must not chmod-repair pre-existing heartbeat state"
+    );
+    std::fs::remove_dir_all(fixture).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn startup_heartbeat_atomic_publication() {

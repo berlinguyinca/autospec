@@ -1,18 +1,19 @@
 use super::*;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-const LINUX_EXECUTOR_REQUIRED: &str = "executor supervision requires Linux pidfd ownership";
+const NATIVE_EXECUTOR_OWNERSHIP_REQUIRED: &str =
+    "executor supervision requires Linux or macOS native ownership";
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn require_linux_executor_supervision() -> Result<(), String> {
-    Err(LINUX_EXECUTOR_REQUIRED.to_string())
+fn require_native_executor_ownership() -> Result<(), String> {
+    Err(NATIVE_EXECUTOR_OWNERSHIP_REQUIRED.to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn run_executor_bridge(
     _request: &ExecutorBridgeRequest,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
-    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
+    require_native_executor_ownership().map_err(BridgeRunFailure::from)?;
     unreachable!("non-Linux executor admission always fails")
 }
 
@@ -24,7 +25,7 @@ pub(crate) fn execute_direct_plan(
     _runtime: Option<&DirectRuntimeAdapter>,
     _stall_timeout: Duration,
 ) -> Result<Vec<ObservedDirectCommand>, String> {
-    require_linux_executor_supervision()?;
+    require_native_executor_ownership()?;
     unreachable!("non-Linux direct execution admission always fails")
 }
 
@@ -45,7 +46,7 @@ pub(super) fn reconcile_direct_launch(
     _paths: &DirectAttemptPaths,
     _expected_intent_body: Option<&str>,
 ) -> Result<bool, String> {
-    require_linux_executor_supervision()?;
+    require_native_executor_ownership()?;
     unreachable!("non-Linux executor admission always fails")
 }
 
@@ -136,7 +137,7 @@ pub(super) fn create_draft_pull_request<Refresh>(
 where
     Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
 {
-    require_linux_executor_supervision().map_err(BridgeRunFailure::from)?;
+    require_native_executor_ownership().map_err(BridgeRunFailure::from)?;
     unreachable!("non-Linux executor admission always fails")
 }
 
@@ -165,7 +166,7 @@ pub(super) fn supervise_validated_harness_with_claim_renewal(
     _config: SupervisionConfig,
     _renewal: ClaimRenewalSchedule,
 ) -> Result<SupervisionOutcome, String> {
-    require_linux_executor_supervision()?;
+    require_native_executor_ownership()?;
     unreachable!("unsupported executor admission always fails")
 }
 
@@ -378,10 +379,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn executor_bridge_fails_closed_before_state_mutation_without_linux_pidfds() {
+    fn executor_bridge_fails_closed_before_state_mutation_without_native_ownership() {
         assert_eq!(
-            require_linux_executor_supervision().unwrap_err(),
-            "executor supervision requires Linux pidfd ownership"
+            require_native_executor_ownership().unwrap_err(),
+            "executor supervision requires Linux or macOS native ownership"
         );
     }
 
@@ -471,6 +472,37 @@ mod autonomous_runtime_support_tests {
         arguments
     }
 
+    fn artifact_snapshot(root: &Path) -> Vec<String> {
+        fn visit(root: &Path, path: &Path, entries: &mut Vec<String>) {
+            let mut children = std::fs::read_dir(path)
+                .expect("read artifact snapshot directory")
+                .map(|entry| entry.expect("read artifact snapshot entry"))
+                .collect::<Vec<_>>();
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children {
+                let child_path = child.path();
+                let relative = child_path.strip_prefix(root).expect("relative artifact path");
+                let metadata = std::fs::symlink_metadata(&child_path)
+                    .expect("inspect artifact snapshot entry");
+                let kind = if metadata.is_dir() {
+                    "dir"
+                } else if metadata.is_file() {
+                    "file"
+                } else {
+                    "other"
+                };
+                entries.push(format!("{kind}:{}", relative.display()));
+                if metadata.is_dir() {
+                    visit(root, &child_path, entries);
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        visit(root, root, &mut entries);
+        entries
+    }
+
     #[test]
     fn unsupported_platform_rejects_mutating_launches_before_artifact_creation() {
         let _serial = ENVIRONMENT.lock().expect("lock environment");
@@ -490,29 +522,30 @@ mod autonomous_runtime_support_tests {
             ("AUTOSPEC_CLAIM_GIT_STATE_DIR", &claims),
             ("AUTOSPEC_HEARTBEAT_DIR", &heartbeats),
         ]);
-        let fixtures = [
-            operator.clone(),
-            operator.join("owner_repo"),
-            operator.join("owner_repo/lifecycle.json"),
-            operator.join("owner_repo/accountability.json"),
-            operator.join("owner_repo/conductor.pid"),
-            logs.clone(),
-            logs.join("owner_repo"),
-            claims.clone(),
-            heartbeats.clone(),
-            repo_dir.join(".autospec"),
-        ];
+        let baseline = artifact_snapshot(&root);
         for command in ["start", "restart", "resume"] {
             let error = autonomous::run(&launch_arguments(command, &repo_dir, false))
                 .expect_err("unsupported mutating launch must fail");
             assert!(error.message.contains("requires Linux or macOS"));
-            assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+            assert_eq!(artifact_snapshot(&root), baseline, "{command}");
         }
+
+        let mut foreground_start = launch_arguments("start", &repo_dir, false);
+        foreground_start.push("--foreground".to_string());
+        let error = autonomous::run(&foreground_start)
+            .expect_err("unsupported foreground start must fail before artifact creation");
+        assert!(error.message.contains("requires Linux or macOS"));
+        assert_eq!(artifact_snapshot(&root), baseline, "start --foreground");
+
+        let error = autonomous::run(&launch_arguments("run-foreground", &repo_dir, false))
+            .expect_err("unsupported public foreground entry must fail before artifact creation");
+        assert!(error.message.contains("requires Linux or macOS"));
+        assert_eq!(artifact_snapshot(&root), baseline, "run-foreground");
 
         for command in ["start", "restart", "resume"] {
             autonomous::run(&launch_arguments(command, &repo_dir, true))
                 .expect("unsupported dry-run preview remains available");
-            assert!(fixtures.iter().all(|fixture| !fixture.exists()));
+            assert_eq!(artifact_snapshot(&root), baseline, "{command} --dry-run");
         }
         std::fs::remove_dir_all(root).expect("remove unsupported-platform fixture");
     }

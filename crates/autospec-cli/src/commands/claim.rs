@@ -4302,7 +4302,7 @@ fn inspect_heartbeat_target(
     expected: &[u8],
 ) -> Result<Option<HeartbeatPublication>, CommandFailure> {
     use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
+    use nix::sys::stat::{fstat, Mode, SFlag};
 
     let blocking = || CommandFailure::diagnostic("heartbeat publication target conflicts");
     let descriptor = match openat(
@@ -4320,6 +4320,7 @@ fn inspect_heartbeat_target(
     if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
         || stat.st_uid != nix::unistd::geteuid().as_raw()
         || stat.st_nlink != 1
+        || stat.st_mode & 0o7777 != 0o600
     {
         return Err(blocking());
     }
@@ -4328,11 +4329,6 @@ fn inspect_heartbeat_target(
         .and_then(read_regular_file)
         .map_err(|_| blocking())?;
     if !same_startup_heartbeat_generation(&snapshot.document, expected) {
-        return Err(blocking());
-    }
-    if stat.st_mode & 0o7777 != 0o600
-        && (fchmod(&file, Mode::from_bits_truncate(0o600)).is_err() || file.sync_all().is_err())
-    {
         return Err(blocking());
     }
     let current = fstat(&file).map_err(|_| blocking())?;
@@ -4467,8 +4463,6 @@ fn same_startup_heartbeat_generation(left: &[u8], right: &[u8]) -> bool {
     let normalize = |document: &[u8]| {
         parse_startup_heartbeat(document).map(|mut evidence| {
             evidence.ts = 0;
-            evidence.pid = 0;
-            evidence.process_start.clear();
             evidence
         })
     };

@@ -12,7 +12,7 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -31,19 +31,28 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Bootstrap repository test tools
+        run: bash scripts/dev-bootstrap.sh
+
       - name: Clippy (lint)
         run: cargo clippy --workspace --all-targets
 
+      - name: Test Linux ownership contracts
+        run: |
+          cargo test -p autospec-cli --bin autospec pidfd -- --nocapture
+          cargo test -p autospec-cli --bin autospec subreaper -- --nocapture
+          cargo test -p autospec-cli --bin autospec heartbeat_startup -- --nocapture
+          cargo test -p autospec-cli --test claim_commands stale_startup_recovery -- --nocapture
+          cargo test -p autospec-cli --bin autospec cleanup_restart -- --nocapture
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Validate repository
+        run: cargo run -p autospec-cli -- validate
+
       - name: Build
         run: cargo build --workspace
-
-      - name: Test
-        run: cargo test -p autospec-core --lib
-        # Deterministic inline unit tests only. Integration tests under
-        # tests/*.rs and the executor_bridge inline suite invoke shell
-        # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
-        # bubblewrap) that are absent or flaky on a bare GitHub runner; the
-        # full suite runs in the local target-repo validation gate.
 
   macos-build:
     runs-on: macos-latest
