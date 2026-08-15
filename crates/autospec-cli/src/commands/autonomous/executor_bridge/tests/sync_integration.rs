@@ -3,7 +3,9 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::{provision_issue_worktree, resolve_base};
-use super::support_base::{git, git_stdout, test_root, GitFixture, TEST_SEQUENCE};
+use super::support_base::{
+    git, git_stdout, test_environment, test_root, GitFixture, TEST_SEQUENCE,
+};
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -449,6 +451,7 @@ fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before_launch() {
+    let _environment = test_environment();
     bridge::METADATA_WIP_SYNC_EVENTS
         .lock()
         .expect("metadata WIP event lock")
