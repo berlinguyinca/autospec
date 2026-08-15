@@ -1593,8 +1593,9 @@ mod tests {
     fn test_root(name: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "autospec-resilience-lease-{name}-{}-{sequence}",
-            std::process::id()
+            "autospec-resilience-lease-{name}-{}-{}-{sequence}",
+            std::process::id(),
+            now_nanos()
         ));
         fs::create_dir_all(&root).expect("create test root");
         root
