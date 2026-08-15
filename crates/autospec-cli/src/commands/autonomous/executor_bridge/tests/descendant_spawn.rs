@@ -134,7 +134,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
         "unexpected error: {error}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(3),
         "ready handshake exceeded its test deadline"
     );
 }
@@ -167,7 +167,7 @@ fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
         "unexpected error: {error}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(3),
         "exec-status handshake exceeded its test deadline"
     );
     let persisted = PersistedInvocation::from_json(

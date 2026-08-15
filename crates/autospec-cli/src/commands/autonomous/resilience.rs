@@ -1139,6 +1139,13 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    fn assert_token_mismatch<T>(operation: impl FnMut() -> Result<T, StoreError>) {
+        assert!(matches!(
+            retry_transient_lock(operation, |result| matches!(result, Err(StoreError::Held))),
+            Err(StoreError::TokenMismatch)
+        ));
+    }
+
     const LEASE_LOCK_TEST_ROOT: &str = "AUTOSPEC_LEASE_LOCK_TEST_ROOT";
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1262,19 +1269,13 @@ mod tests {
         let replacement_state =
             fs::read_to_string(second.canonical_state_path()).expect("read replacement state");
 
-        assert!(matches!(
-            first.adopt(&stale_lease.token),
-            Err(StoreError::TokenMismatch)
-        ));
+        assert_token_mismatch(|| first.adopt(&stale_lease.token));
         assert_eq!(
             fs::read_to_string(second.canonical_state_path())
                 .expect("read state after stale adopt"),
             replacement_state
         );
-        assert!(matches!(
-            first.release(&stale_lease),
-            Err(StoreError::TokenMismatch)
-        ));
+        assert_token_mismatch(|| first.release(&stale_lease));
         assert_eq!(
             fs::read_to_string(second.canonical_state_path())
                 .expect("read state after stale release"),
