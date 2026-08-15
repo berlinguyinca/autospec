@@ -334,15 +334,13 @@ fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
 
     assert!(error.contains("executable"), "{error}");
     assert!(
-        bridge::observe_process_birth(supervisor.pid)
-            .expect("observe old supervisor")
-            .is_none(),
+        !bridge::immutable_process_instance_is_live(&supervisor)
+            .expect("observe old supervisor liveness"),
         "supervisor survived pre-validation cleanup"
     );
     assert!(
-        bridge::observe_process_birth(harness.pid)
-            .expect("observe old harness")
-            .is_none(),
+        !bridge::immutable_process_instance_is_live(&harness)
+            .expect("observe old harness liveness"),
         "harness survived pre-validation cleanup"
     );
     assert!(!launch.exists(), "retired launch identity survived cleanup");
