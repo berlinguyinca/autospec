@@ -1176,10 +1176,7 @@ mod tests {
     #[test]
     fn pid_liveness_requires_observed_process_absence() {
         assert!(!pid_is_dead(std::process::id()));
-        assert!(
-            !pid_is_dead(0),
-            "an invalid PID is unknown, not proven dead"
-        );
+        assert!(!pid_is_dead(0));
         assert!(
             !pid_is_dead(i32::MAX as u32 + 1),
             "an unrepresentable PID is unknown, not proven dead"
@@ -1384,9 +1381,11 @@ mod tests {
             .expect("renewed state")
             .0;
         assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
-        owner
-            .release(&lease)
-            .unwrap_or_else(|_| panic!("release renewed lease"));
+        retry_transient_lock(
+            || owner.release(&lease),
+            |result| matches!(result, Err(StoreError::Held)),
+        )
+        .unwrap_or_else(|_| panic!("release renewed lease"));
         assert_eq!(
             owner
                 .read_state()
