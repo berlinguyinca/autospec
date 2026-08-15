@@ -4457,7 +4457,7 @@ fn immediate_stop_terminates_recorded_wrapper_descendants() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
+fn immediate_stop_refuses_unverified_descendants_after_the_recorded_leader_exits() {
     let fixture = ForegroundFixture::new();
     let child_pid_path = fixture.root.join("orphan-child.pid");
     let leader_release = fixture.root.join("release-orphan-leader");
@@ -4498,20 +4498,16 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .args(["--immediate", "--json"])
         .output()
         .expect("stop orphaned process group");
-    wait_for_process_exit(child_pid);
     let child_survived = process_is_running(child_pid);
     terminate_process_group(leader_pid);
     terminate_process(child_pid);
     assert!(leader.wait().expect("reap group leader").success());
 
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ownership is unverified"));
     assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !child_survived,
-        "orphaned descendant {child_pid} survived immediate stop"
+        child_survived,
+        "unverified descendant {child_pid} was signaled by immediate stop"
     );
 }
 
