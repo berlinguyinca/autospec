@@ -19,6 +19,7 @@ pub struct ForegroundWaterfallFixture {
     calls: PathBuf,
     mode: PathBuf,
     auto_calls: PathBuf,
+    accountability: PathBuf,
     safety_reviews: PathBuf,
     executor: PathBuf,
     shell: PathBuf,
@@ -79,6 +80,7 @@ impl ForegroundWaterfallFixture {
             calls: root.join("gh.log"),
             mode: root.join("mode"),
             auto_calls: root.join("auto-calls"),
+            accountability: root.join("accountability.md"),
             safety_reviews: root.join("safety-reviews"),
             executor: root.join("executor-launched"),
             shell: root.join("shell-launched"),
@@ -150,6 +152,14 @@ impl ForegroundWaterfallFixture {
             .env("FW_CALLS", &self.calls)
             .env("FW_AUTO_CALLS", &self.auto_calls)
             .env("FW_SAFETY_REVIEWS", &self.safety_reviews)
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
+            .env(
+                "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/foreground_accountability_gh.sh"
+                ),
+            )
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", self.root.join("state"))
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
@@ -350,6 +360,7 @@ fn collect_files(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, V
 
 const FAKE_GH: &str = r####"#!/bin/sh
 set -eu
+if [ -n "${AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER:-}" ]; then . "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"; fi
 printf '%s ' "$@" >> "$FW_CALLS"; printf '\n' >> "$FW_CALLS"
 mode="$(cat "$FW_MODE")"
 endpoint=""
