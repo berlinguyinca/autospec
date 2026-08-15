@@ -239,21 +239,16 @@ fi
 work_dir="$(mktemp -d -t explore-cycle.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
-# In finalize (pass 2) the deduped proposals come from the pass-1 artifact, NOT
-# from re-running researchers (re-running would be non-deterministic for some
-# sources and would re-derive different deduped titles, breaking the verdict-map
-# keying). Skip the whole researcher + specialist dispatch block.
+# Finalize uses the pass-1 artifact; rerunning researchers would make verdict-map
+# keys non-deterministic. Skip the researcher + specialist dispatch block.
 if [ "$STAGE" != "finalize" ]; then
 # linter:allow-COMPLEXITY existing orchestrator is outside this narrow watchdog fix
 run_researcher_bounded() {
-    _script="$1"
-    _json="$2"
-    _err="$3"
+    _script="$1"; _json="$2"; _err="$3"
     if command -v setsid >/dev/null 2>&1; then
         setsid bash "$_script" >"$_json" 2>"$_err" &
     else
-        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
-            bash "$_script" >"$_json" 2>"$_err" &
+        python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1],sys.argv[1:])' bash "$_script" >"$_json" 2>"$_err" &
     fi
     _pid="$!"
     _started="$(date +%s)"

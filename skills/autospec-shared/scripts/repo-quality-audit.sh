@@ -398,20 +398,12 @@ canonical_git_common_dir() {
   case "$common" in /*) : ;; *) common="$root/$common" ;; esac
   (cd "$common" 2>/dev/null && pwd -P)
 }
-
 normalize_repo_path() {
-  path="$1"
+  path="$1"; repo_root="$(cd "$REPO" 2>/dev/null && pwd -P || printf '%s' "$REPO")"
   case "$path" in
     /*) case "/$path/" in */../*) external_path_identity "$path"; return 0 ;; esac ;;
   esac
-  if case "$path" in /*) true ;; *) false ;; esac; then
-    path_dir="$(dirname "$path")"
-    canonical_dir="$(cd "$path_dir" 2>/dev/null && pwd -P || true)"
-    if [ -n "$canonical_dir" ]; then
-      path="$canonical_dir/$(basename "$path")"
-    fi
-  fi
-  repo_root="$(cd "$REPO" 2>/dev/null && pwd -P || printf '%s' "$REPO")"
+  case "$path" in /*) canonical_dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P || true)"; [ -z "$canonical_dir" ] || path="$canonical_dir/$(basename "$path")" ;; esac
   case "$path" in
     "$repo_root"/*) printf '%s' "${path#"$repo_root"/}"; return 0 ;;
     /*)
