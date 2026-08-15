@@ -36,6 +36,34 @@ fn recovery_events_replay_into_the_active_existing_epic_projection() {
             "The authoritative recovery CAS replaced the stale generation before reacquisition",
             "claim-generation-1 advanced to claim-generation-2",
         ),
+        (
+            EventKind::HeartbeatPublicationDeferred {
+                issue: 42,
+                claim_id: "claim-generation-2".to_owned(),
+            },
+            "Heartbeat publication deferred again for issue 42",
+            "The successor claim also awaits authoritative recovery evidence",
+            "claim claim-generation-2 remains pending",
+        ),
+        (
+            EventKind::StartupClaimRecovered {
+                issue: 42,
+                previous_claim_id: "claim-generation-2".to_owned(),
+                next_claim_id: "claim-generation-3".to_owned(),
+            },
+            "Second startup claim recovered for issue 42",
+            "The second authoritative recovery CAS advanced its exact generation",
+            "claim-generation-2 advanced to claim-generation-3",
+        ),
+        (
+            EventKind::HeartbeatPublicationDeferred {
+                issue: 42,
+                claim_id: "claim-generation-unmatched".to_owned(),
+            },
+            "Later heartbeat publication deferred for issue 42",
+            "No authoritative recovery has matched this later generation",
+            "claim claim-generation-unmatched remains pending",
+        ),
     ] {
         store
             .append_event(
@@ -51,13 +79,16 @@ fn recovery_events_replay_into_the_active_existing_epic_projection() {
     assert!(projection.markdown.contains("**What:**"));
     assert!(projection.markdown.contains("**Why:**"));
     assert!(projection.markdown.contains("**Evidence:**"));
-    assert!(projection.markdown.contains("deferred_42 --> recovered_42"));
+    assert!(projection.markdown.contains("deferred_42_1 --> recovered_42_2"));
+    assert!(projection.markdown.contains("deferred_42_3 --> recovered_42_4"));
+    assert!(!projection.markdown.contains("deferred_42_5 -->"));
+    assert!(!projection.markdown.contains("recovered_42_2 --> deferred_42_1"));
     assert_eq!(store.recovery_projection().0, accountability::RecoveryState::Active);
 
     drop(store);
     let reopened = AccountabilityStore::open(fixture.path()).unwrap();
     assert_eq!(reopened.status().epic_number, Some(97));
-    assert_eq!(reopened.status().event_count, 2);
+    assert_eq!(reopened.status().event_count, 5);
     assert_eq!(
         reopened.recovery_projection().0,
         accountability::RecoveryState::Active

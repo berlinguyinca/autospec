@@ -1200,10 +1200,21 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             let mut pending = head.record.clone();
             pending.step = heartbeat_claim_step("pending", options.session_id.as_deref());
             pending.updated_at = utc_now_iso()?;
-            if let ClaimRefAdvance::Won(pending) =
-                advance_claim_ref(&repo, options.issue, Some(&head), &pending)?
-            {
-                project_claim_ref_to_comments(&repo, &pending);
+            match advance_claim_ref(&repo, options.issue, Some(&head), &pending)? {
+                ClaimRefAdvance::Won(pending) => {
+                    project_claim_ref_to_comments(&repo, &pending);
+                }
+                ClaimRefAdvance::Lost => {
+                    let observed_owner = read_claim_ref(&repo, options.issue)?
+                        .map(|head| head.record.worker_id)
+                        .unwrap_or_default();
+                    return unavailable_claim_with_observed_owner(
+                        options.issue,
+                        &repo,
+                        &worker_id,
+                        &observed_owner,
+                    );
+                }
             }
             return heartbeat_publication_deferred(
                 options.issue,

@@ -3241,6 +3241,19 @@ fn dispatch_foreground(
     )
 }
 
+fn observe_recovery_accountability_event(
+    layout: &RunLayout,
+    event: Result<accountability::AccountabilityEvent, CommandFailure>,
+) {
+    let result = event.and_then(|event| record_accountability_event_once(layout, event, true));
+    if let Err(error) = result {
+        eprintln!(
+            "autospec autonomous recovery accountability degraded: {}; authoritative claim state is unchanged",
+            error.message
+        );
+    }
+}
+
 fn execute_foreground_dispatch(
     layout: &RunLayout,
     options: &Options,
@@ -3292,7 +3305,7 @@ fn execute_foreground_dispatch(
                     Ok(acquisition) => acquisition,
                     Err(error) => {
                         if let Some(deferred) = error.heartbeat_publication_deferral() {
-                            record_accountability_event_once(
+                            observe_recovery_accountability_event(
                                 layout,
                                 accountability_event(
                                     accountability::EventKind::HeartbeatPublicationDeferred {
@@ -3308,15 +3321,14 @@ fn execute_foreground_dispatch(
                                         "repository {} issue {} generation {} returned heartbeat_write_failed",
                                         layout.repo, deferred.issue, deferred.claim_id
                                     ),
-                                )?,
-                                true,
-                            )?;
+                                ),
+                            );
                         }
                         return Err(error.into());
                     }
                 };
                 if let Some(recovery) = acquisition.recovery.as_ref() {
-                    record_accountability_event_once(
+                    observe_recovery_accountability_event(
                         layout,
                         accountability_event(
                             accountability::EventKind::StartupClaimRecovered {
@@ -3333,9 +3345,8 @@ fn execute_foreground_dispatch(
                                 recovery.previous_claim_id,
                                 recovery.next_claim_id
                             ),
-                        )?,
-                        true,
-                    )?;
+                        ),
+                    );
                 }
                 let lease = acquisition.lease;
                 record_accountability_event(

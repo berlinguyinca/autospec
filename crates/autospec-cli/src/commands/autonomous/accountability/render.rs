@@ -63,33 +63,37 @@ fn build_flow(events: &[EventRecord]) -> String {
         let label = sanitize_text(&record.event.what, 80);
         graph.push_str(&format!("    goal --> work_{number}[{label}]\n"));
     }
-    let mut recovery = BTreeMap::new();
+    let mut deferred_by_generation = BTreeMap::new();
     for record in events {
         match &record.kind {
-            EventKind::HeartbeatPublicationDeferred { issue, .. } => {
-                recovery.entry(*issue).or_insert((None, None)).0 = Some(record);
+            EventKind::HeartbeatPublicationDeferred { issue, claim_id } => {
+                graph.push_str(&format!(
+                    "    deferred_{issue}_{}[{}]\n",
+                    record.seq,
+                    sanitize_text(&record.event.what, 80)
+                ));
+                deferred_by_generation.insert((*issue, claim_id.as_str()), record.seq);
             }
-            EventKind::StartupClaimRecovered { issue, .. } => {
-                recovery.entry(*issue).or_insert((None, None)).1 = Some(record);
+            EventKind::StartupClaimRecovered {
+                issue,
+                previous_claim_id,
+                ..
+            } => {
+                graph.push_str(&format!(
+                    "    recovered_{issue}_{}[{}]\n",
+                    record.seq,
+                    sanitize_text(&record.event.what, 80)
+                ));
+                if let Some(deferred_seq) =
+                    deferred_by_generation.get(&(*issue, previous_claim_id.as_str()))
+                {
+                    graph.push_str(&format!(
+                        "    deferred_{issue}_{deferred_seq} --> recovered_{issue}_{}\n",
+                        record.seq
+                    ));
+                }
             }
             _ => {}
-        }
-    }
-    for (issue, (deferred, recovered)) in recovery {
-        if let Some(record) = deferred {
-            graph.push_str(&format!(
-                "    deferred_{issue}[{}]\n",
-                sanitize_text(&record.event.what, 80)
-            ));
-        }
-        if let Some(record) = recovered {
-            graph.push_str(&format!(
-                "    recovered_{issue}[{}]\n",
-                sanitize_text(&record.event.what, 80)
-            ));
-        }
-        if deferred.is_some() && recovered.is_some() {
-            graph.push_str(&format!("    deferred_{issue} --> recovered_{issue}\n"));
         }
     }
     graph.push_str("```\n\n");
