@@ -196,6 +196,7 @@ fn autonomous_executor_bridge_trivy_findings_are_scoped_to_changed_targets() {
 
 #[test]
 fn autonomous_executor_bridge_license_checker_admits_only_unchanged_graph_findings() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("license-unchanged-graph");
     fs::write(
         fixture.repo.join("package.json"),
@@ -274,6 +275,7 @@ fn autonomous_executor_bridge_license_checker_admits_only_unchanged_graph_findin
 
 #[test]
 fn autonomous_executor_bridge_license_checker_rejects_changed_graph_finding() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("license-changed-graph");
     fs::write(fixture.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
     git(&fixture.repo, &["add", "package-lock.json"]);
@@ -306,6 +308,7 @@ fn autonomous_executor_bridge_license_checker_rejects_changed_graph_finding() {
 
 #[test]
 fn autonomous_executor_bridge_license_checker_rejects_malformed_preexisting_record() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("license-malformed-record");
     let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
     let scanners =

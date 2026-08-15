@@ -242,6 +242,7 @@ fn autonomous_executor_bridge_process_only_restart_proves_and_cleans_parent_supe
 
 #[test]
 fn autonomous_executor_bridge_dead_legacy_recovery_retains_permanent_quarantine() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-dead-recovery");
     let mut state = supervision_state(&fixture);
     state.phase = BridgePhase::Implementing;
@@ -321,6 +322,7 @@ fn autonomous_executor_bridge_inherited_pipe_writer_blocks_success_and_is_cleane
 
 #[test]
 fn autonomous_executor_bridge_closed_stdio_descendant_blocks_terminal_success() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-closed-stdio-descendant");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -353,6 +355,7 @@ fn autonomous_executor_bridge_closed_stdio_descendant_blocks_terminal_success() 
 
 #[test]
 fn autonomous_executor_bridge_bounds_oversized_unterminated_output() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-bounded-output");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -380,6 +383,7 @@ fn autonomous_executor_bridge_bounds_oversized_unterminated_output() {
 
 #[test]
 fn autonomous_executor_bridge_failing_leader_cleans_background_descendant() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-daemon-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =
