@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::BridgePhase;
-use super::support_base::git_stdout;
+use super::support_base::{git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::{prepared_draft_transaction, DRAFT_ISSUE_BODY};
 use crate::commands::autonomous::executor_bridge as bridge;
@@ -330,6 +330,7 @@ fn autonomous_executor_bridge_rejects_original_closeout_symlink_before_canonical
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_pushes_exact_oid_and_creates_one_draft_pr() {
+    let _environment = test_environment();
     // Break caught: Rust pushing before lint/proof or creating a PR before DraftCreating is durable.
     let mut prepared = prepared_draft_transaction("draft-create");
     prepared.bind_continuation();
@@ -370,6 +371,7 @@ fn autonomous_executor_bridge_pushes_exact_oid_and_creates_one_draft_pr() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_takeover_before_push_blocks_all_remote_mutation() {
+    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("draft-push-takeover");
     let error = bridge::push_and_create_draft_with_refresh(
         &prepared.state_path,
@@ -413,6 +415,7 @@ fn autonomous_executor_bridge_takeover_before_push_blocks_all_remote_mutation() 
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_refreshes_again_before_draft_creation() {
+    let _environment = test_environment();
     let mut prepared = prepared_draft_transaction("draft-create-takeover");
     let refreshes = std::cell::Cell::new(0_u8);
     let error = bridge::push_and_create_draft_with_refresh(

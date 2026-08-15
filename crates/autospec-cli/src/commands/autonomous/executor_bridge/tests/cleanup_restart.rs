@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::BridgePhase;
-use super::support_base::{git, git_stdout};
+use super::support_base::{git, git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::{
     adapter_path, draft_pr_adapter_fixture, prepared_draft_transaction, PreparedDraftTransaction,
@@ -37,6 +37,7 @@ fn cleanup_pending_transaction(label: &str) -> PreparedDraftTransaction {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_requires_both_guards_absent() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery retrying while a release guard still exists.
     for guard in ["receipt", "intent"] {
         let mut prepared = cleanup_pending_transaction(&format!("draft-cleanup-guard-{guard}"));
@@ -74,6 +75,7 @@ fn autonomous_executor_bridge_cleanup_restart_requires_both_guards_absent() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_requires_both_directory_syncs() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery authorizing retry after either parent sync fails.
     for failpoint in [
         "AUTOSPEC_TEST_DRAFT_FAIL_CLEANUP_RECOVERY_RECEIPT_FSYNC",
@@ -102,6 +104,7 @@ fn autonomous_executor_bridge_cleanup_restart_requires_both_directory_syncs() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_rejects_public_guard_parent() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery silently repairing an untrusted guard directory.
     let mut prepared = cleanup_pending_transaction("draft-cleanup-public-guard-parent");
     let parent = prepared
@@ -135,6 +138,7 @@ fn autonomous_executor_bridge_cleanup_restart_rejects_public_guard_parent() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_requires_durable_state_match() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery trusting in-memory identity not bound to durable state.
     let mut prepared = cleanup_pending_transaction("draft-cleanup-durable-state");
     prepared
@@ -159,6 +163,7 @@ fn autonomous_executor_bridge_cleanup_restart_requires_durable_state_match() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_rejects_live_and_foreign_child_identity() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery retrying while the recorded PID is live or reused.
     for foreign in [false, true] {
         let mut prepared = cleanup_pending_transaction(if foreign {
@@ -206,6 +211,7 @@ fn autonomous_executor_bridge_cleanup_restart_rejects_live_and_foreign_child_ide
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_restart_rejects_any_exact_draft() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery adopting an exact PR instead of proving zero requests.
     let mut prepared = cleanup_pending_transaction("draft-cleanup-exact-pr");
     fs::copy(
@@ -229,6 +235,7 @@ fn autonomous_executor_bridge_cleanup_restart_rejects_any_exact_draft() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_unlink_failure_never_authorizes_draft_retry() {
+    let _environment = test_environment();
     // Break caught: ignored receipt unlink failure being mistaken for proven safe cleanup.
     let mut prepared = prepared_draft_transaction("draft-create-unlink-failure");
     let executable = prepared.adapter.gh.clone();
@@ -286,6 +293,7 @@ fn autonomous_executor_bridge_unlink_failure_never_authorizes_draft_retry() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_fsync_failure_never_authorizes_draft_retry() {
+    let _environment = test_environment();
     // Break caught: ignored receipt-directory fsync failure allowing an unproven retry.
     let mut prepared = prepared_draft_transaction("draft-create-cleanup-fsync-failure");
     let executable = prepared.adapter.gh.clone();
@@ -343,6 +351,7 @@ fn autonomous_executor_bridge_cleanup_fsync_failure_never_authorizes_draft_retry
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_never_retries_a_released_draft_without_visible_pr() {
+    let _environment = test_environment();
     // Break caught: treating a child-recorded request release as a safe pre-request crash.
     let mut prepared = prepared_draft_transaction("draft-create-released-ambiguous");
     prepared.push_exact_at_intent();
@@ -387,6 +396,7 @@ fn autonomous_executor_bridge_never_retries_a_released_draft_without_visible_pr(
 #[test]
 fn autonomous_executor_bridge_issue_contract_blocks_missing_and_pathless_outlines_before_remote_mutation(
 ) {
+    let _environment = test_environment();
     // Break caught: compatibility lint treating a missing/pathless outline as unrestricted.
     for (case, issue_body) in [
         ("missing", "## Goal\n\nImplement the executor behavior.\n"),
@@ -437,6 +447,7 @@ fn autonomous_executor_bridge_issue_contract_blocks_missing_and_pathless_outline
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_lint_blocks_before_git_or_gh_mutation() {
+    let _environment = test_environment();
     // Break caught: a deterministic unfinished-work finding reaching a remote boundary.
     let (fixture, mut state, snapshot, closeout) = implementation_proof_fixture("draft-lint-block");
     let state_path = fixture.root.join("state/invocation.json");
@@ -483,6 +494,7 @@ fn autonomous_executor_bridge_lint_blocks_before_git_or_gh_mutation() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_pr_size_blocks_oversized_push_and_draft_without_mutation() {
+    let _environment = test_environment();
     // Break caught: an oversized exact-head diff reaching git push or gh pr create.
     for (label, files, lines) in [("lines", 1, 401), ("files", 9, 1)] {
         let (fixture, mut state, snapshot, closeout) =
