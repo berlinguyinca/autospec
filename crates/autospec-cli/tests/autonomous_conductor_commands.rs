@@ -23,6 +23,7 @@ mod autonomous_accountability_acquisition;
 mod autonomous_conductor_process;
 use autonomous_conductor_process::{
     process_identity, process_is_running, terminate_process, terminate_process_group,
+    wait_for_process_exit,
 };
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -4444,12 +4445,7 @@ fn immediate_stop_terminates_recorded_wrapper_descendants() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    for _ in 0..100 {
-        if !process_is_running(child_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(child_pid);
     let child_survived = process_is_running(child_pid);
     wrapper.terminate_and_wait();
 
@@ -4484,12 +4480,7 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .parse::<u32>()
         .expect("parse orphan child pid");
     fs::write(&leader_release, "release\n").expect("release short-lived group leader");
-    for _ in 0..100 {
-        if !process_is_running(leader_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(leader_pid);
     assert!(!process_is_running(leader_pid));
     assert!(process_is_running(child_pid));
     let scope = fixture.scoped_dir();
@@ -4507,12 +4498,7 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .args(["--immediate", "--json"])
         .output()
         .expect("stop orphaned process group");
-    for _ in 0..100 {
-        if !process_is_running(child_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(child_pid);
     let child_survived = process_is_running(child_pid);
     terminate_process_group(leader_pid);
     terminate_process(child_pid);
@@ -4625,12 +4611,7 @@ fn forced_restart_releases_an_unknown_host_lease_after_the_conductor_is_gone() {
         .recorded_conductor_pid()
         .expect("original conductor");
     fixture.terminate_recorded_conductor();
-    for _ in 0..100 {
-        if !process_is_running(original_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(original_pid);
     assert!(!process_is_running(original_pid));
 
     let output = fixture
