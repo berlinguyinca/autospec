@@ -2,14 +2,17 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{DetachedForkedCleanup, GitFixture, observe_spawned_identity, reap_fixture_child_within, test_environment};
+use super::support_base::{
+    observe_spawned_identity, reap_fixture_child_within, test_environment, DetachedForkedCleanup,
+    GitFixture,
+};
 use super::support_invocation::{
     detach_harness_for_adoption, shell_invocation, supervision_config, supervision_state,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs::{self, OpenOptions};
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -479,7 +482,10 @@ fn autonomous_executor_bridge_failpoints_are_armed_only_through_the_guard() {
     let mut offenders = Vec::new();
     for entry in fs::read_dir(&root).expect("read test modules") {
         let path = entry.expect("test module entry").path();
-        if path.file_name().is_some_and(|name| name == "support_base.rs") {
+        if path
+            .file_name()
+            .is_some_and(|name| name == "support_base.rs")
+        {
             continue; // the guard methods themselves live here
         }
         let body = fs::read_to_string(&path).expect("read test module");

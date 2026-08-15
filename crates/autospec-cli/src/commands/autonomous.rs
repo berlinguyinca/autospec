@@ -49,10 +49,10 @@ mod accountability_runtime;
 use accountability_runtime::*;
 mod blocked_cycle;
 mod foreground_failure;
-mod lifecycle_stop_notice;
 mod launch;
-use launch::*;
+mod lifecycle_stop_notice;
 use foreground_failure::ForegroundFailure;
+use launch::*;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
 mod main_health_output;
@@ -65,7 +65,9 @@ use one_shot_selector::{
 mod executor_bridge;
 pub(crate) mod platform_process;
 #[allow(unused_imports)]
-pub(crate) use platform_process::{current_boot_identity, observe_birth};
+pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
+#[allow(unused_imports)]
+pub(crate) use platform_process::observe_birth;
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
@@ -825,45 +827,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
-}
-
-fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
-    let selected =
-        usize::from(options.follow) + usize::from(options.detach) + usize::from(options.foreground);
-    if selected > 1 {
-        return Err("--follow, --detach, and --foreground are mutually exclusive".to_string());
-    }
-    if (options.follow || options.detach || options.foreground) && options.subcommand != "start" {
-        return Err(format!(
-            "launch modes are valid only with autospec autonomous start, not {}",
-            options.subcommand
-        ));
-    }
-    if options.follow && options.force {
-        return Err(
-            "--force cannot be combined with --follow; use autospec autonomous restart --force"
-                .to_string(),
-        );
-    }
-    if options.follow && options.json {
-        return Err("--json is not supported with --follow; use autospec autonomous status --json".to_string());
-    }
-    if options.subcommand == "resume" && options.epic.is_none() {
-        return Err("autospec autonomous resume requires --epic N".to_string());
-    }
-    if options.subcommand == "resume" && options.force {
-        return Err("--force is not valid with resume".to_string());
-    }
-    if options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume") {
-        return Err("--epic is valid only with autospec autonomous start or resume".to_string());
-    }
-    Ok(if options.follow {
-        LaunchMode::Follow
-    } else if options.foreground {
-        LaunchMode::Foreground
-    } else {
-        LaunchMode::Detached
-    })
 }
 
 fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
@@ -2275,7 +2238,9 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 Some(lease) => finish_foreground_with_lease(
                     &layout,
                     lease,
-                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(
+                        error,
+                    ))),
                 ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
@@ -2288,7 +2253,9 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 Some(lease) => finish_foreground_with_lease(
                     &layout,
                     lease,
-                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(error))),
+                    Err(ForegroundFailure::Diagnostic(CommandFailure::diagnostic(
+                        error,
+                    ))),
                 ),
                 None => Err(CommandFailure::diagnostic(error)),
             };
@@ -3424,7 +3391,10 @@ fn execute_foreground_dispatch(
                 accountability::EventKind::ImplementationStarted {
                     issue: selection.issue,
                 },
-                format!("Started isolated implementation for issue {}", selection.issue),
+                format!(
+                    "Started isolated implementation for issue {}",
+                    selection.issue
+                ),
                 "Implementation intent must be durable before the executor mutates its worktree",
                 format!("issue {} executor invocation is next", selection.issue),
             )?,
@@ -4212,10 +4182,10 @@ impl ExecutorRequest {
             let mut attempts = 0;
             loop {
                 #[cfg(target_os = "linux")]
-                let result = executor_bridge::run_executor_bridge_observed(
-                    &self.bridge,
-                    |boundary| record_bridge_accountability_boundary(layout, issue, boundary),
-                );
+                let result =
+                    executor_bridge::run_executor_bridge_observed(&self.bridge, |boundary| {
+                        record_bridge_accountability_boundary(layout, issue, boundary)
+                    });
                 #[cfg(not(target_os = "linux"))]
                 let result = executor_bridge::run_executor_bridge(&self.bridge);
                 match result {

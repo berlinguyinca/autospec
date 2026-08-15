@@ -2,12 +2,15 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation};
-use super::support_base::{GitFixture, TEST_SEQUENCE, environment, git, git_stdout, installed_aliases, test_environment, test_root, write_alias_table};
+use super::support_base::{
+    environment, git, git_stdout, installed_aliases, test_environment, test_root,
+    write_alias_table, GitFixture, TEST_SEQUENCE,
+};
 use super::support_invocation::{
     implementation_proof_fixture, persisted_invocation, supervision_state,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -512,9 +515,7 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
     let state_path = fixture.root.join("state/exhausted-lint.json");
     bridge::write_invocation_atomic(&state_path, &state).expect("persist failure state");
 
-    environment.zero_effect_recovery(
-        bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
-    );
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition);
     let interrupted = bridge::finalize_failed_executor_with_transition(
         &state_path,
         &mut state,

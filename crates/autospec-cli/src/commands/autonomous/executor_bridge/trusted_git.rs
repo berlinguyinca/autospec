@@ -12,6 +12,11 @@
 
 use super::*;
 
+mod hook_directory;
+mod signing_program;
+use hook_directory::resolve_hooks_directory;
+use signing_program::resolve_signing_program;
+
 #[derive(Debug)]
 pub(super) struct TrustedWorktreeGit {
     pub(super) active_hooks: Vec<PathBuf>,
@@ -34,7 +39,9 @@ impl TrustedWorktreeGit {
     }
 }
 
-pub(super) fn trusted_worktree_git(state: &PersistedInvocation) -> Result<TrustedWorktreeGit, String> {
+pub(super) fn trusted_worktree_git(
+    state: &PersistedInvocation,
+) -> Result<TrustedWorktreeGit, String> {
     trusted_worktree_git_paths(&state.identity.repository_path, &state.identity.worktree)
 }
 
@@ -136,16 +143,17 @@ pub(super) fn trusted_worktree_git_paths(
     } else {
         binding.worktree.join(hooks)
     };
-    let hooks = fs::canonicalize(hooks)
-        .map_err(|error| format!("canonicalize executor Git hook directory: {error}"))?;
+    let (hooks, hooks_exist) = resolve_hooks_directory(&hooks)?;
     if !test_primary && hooks.starts_with(&binding.worktree) {
         return Err(
             "executor Git hook directory is writable by the sandboxed implementer".to_string(),
         );
     }
-    for entry in fs::read_dir(&hooks)
-        .map_err(|error| format!("inventory executor Git hook directory: {error}"))?
-    {
+    let entries = hooks_exist
+        .then(|| fs::read_dir(&hooks))
+        .transpose()
+        .map_err(|error| format!("inventory executor Git hook directory: {error}"))?;
+    for entry in entries.into_iter().flatten() {
         let hook = entry.map_err(|error| format!("inventory executor Git hook entry: {error}"))?;
         let file_type = hook
             .file_type()
@@ -476,7 +484,9 @@ pub(super) fn sandboxed_executor_diff(state: &PersistedInvocation) -> Result<Vec
     sandboxed_executor_diff_with_binding(&binding)
 }
 
-pub(super) fn sandboxed_executor_diff_with_binding(binding: &TrustedWorktreeGit) -> Result<Vec<u8>, String> {
+pub(super) fn sandboxed_executor_diff_with_binding(
+    binding: &TrustedWorktreeGit,
+) -> Result<Vec<u8>, String> {
     let output = binding
         .command()
         .args([
@@ -598,35 +608,6 @@ pub(super) fn reject_external_filters(binding: &TrustedWorktreeGit) -> Result<()
         }
     }
     Ok(())
-}
-
-pub(super) fn resolve_signing_program(binding: &TrustedWorktreeGit, program: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(program);
-    let resolved = if candidate.components().count() > 1 {
-        let candidate = if candidate.is_absolute() {
-            candidate
-        } else {
-            binding.worktree.join(candidate)
-        };
-        fs::canonicalize(candidate)
-            .map_err(|error| format!("canonicalize executor signing program: {error}"))?
-    } else {
-        let path = std::env::var_os("PATH")
-            .ok_or_else(|| "executor signing program resolution requires PATH".to_string())?;
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(program))
-            .find(|candidate| candidate.is_file())
-            .map(fs::canonicalize)
-            .transpose()
-            .map_err(|error| format!("canonicalize executor signing program: {error}"))?
-            .ok_or_else(|| format!("executor signing program {program} is unavailable"))?
-    };
-    if resolved.starts_with(&binding.worktree) {
-        return Err(
-            "executor signing program is writable by the sandboxed implementer".to_string(),
-        );
-    }
-    Ok(resolved)
 }
 
 pub(super) fn attest_executor_signing(binding: &TrustedWorktreeGit) -> Result<(), String> {

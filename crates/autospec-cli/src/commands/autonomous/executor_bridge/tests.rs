@@ -1,4 +1,5 @@
 // executor_bridge tests.
+#![allow(dead_code, unused_imports)]
 //
 // This was one 23,719-line file. The size gate had been telling us to split it for a long
 // time and finally made it unavoidable: an oversized file may not grow, so a verified
@@ -33,7 +34,7 @@ mod continuation_event;
 #[cfg(target_os = "linux")]
 mod descendant_spawn;
 mod dispatcher_temporary;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 mod draft_release;
 mod explore_pin_staleness;
 mod full_suite;
@@ -82,6 +83,8 @@ mod snapshot_identity;
 mod structured_review;
 mod structured_review_receipt;
 mod support_base;
+#[cfg(windows)]
+pub(super) use support_base::TEST_ENVIRONMENT;
 mod support_harness_env;
 pub(super) mod support_invocation;
 mod support_launch;

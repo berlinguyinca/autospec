@@ -2,10 +2,14 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+use super::support::{
+    anchored_startup_heartbeat_fixture, assert_mode, drift_heartbeat_at,
+    expected_startup_heartbeat, expired_heartbeat_snapshot, heartbeat_copy_path,
+    heartbeat_handoff_count, startup_heartbeat_fixture, write_new_heartbeat_at,
+};
+use crate::commands::claim;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use crate::commands::claim;
-use super::support::{anchored_startup_heartbeat_fixture, assert_mode, drift_heartbeat_at, expected_startup_heartbeat, expired_heartbeat_snapshot, heartbeat_copy_path, heartbeat_handoff_count, startup_heartbeat_fixture, write_new_heartbeat_at};
 
 #[cfg(unix)]
 #[test]
@@ -50,11 +54,10 @@ fn heartbeat_quarantine_copy_is_private_exact_and_create_new() {
     let directory_fd =
         nix::fcntl::open(&directory, flags, nix::sys::stat::Mode::empty()).expect("open root");
     let (pipe, _writer) = nix::unistd::pipe().expect("file-sync pipe");
-    let error =
-        claim::sync_heartbeat_copy(&std::fs::File::from(pipe), &directory_fd, &mut |_| {
-            panic!("boundary emitted after failed file sync")
-        })
-        .expect_err("pipe file cannot sync");
+    let error = claim::sync_heartbeat_copy(&std::fs::File::from(pipe), &directory_fd, &mut |_| {
+        panic!("boundary emitted after failed file sync")
+    })
+    .expect_err("pipe file cannot sync");
     assert!(error.to_string().contains("sync heartbeat quarantine copy"));
 
     let file = std::fs::File::options().write(true).open(&source).unwrap();
@@ -132,12 +135,10 @@ fn heartbeat_quarantine_copy_rejects_preexisting_and_swapped_symlink_ancestors()
         .expect("restore private state root");
     let root_link = preexisting_root.with_extension("root-link");
     std::os::unix::fs::symlink(&preexisting_root, &root_link).expect("state root symlink");
-    assert!(claim::persist_heartbeat_copy(
-        &root_link,
-        &preexisting_source,
-        &preexisting_snapshot
-    )
-    .is_err());
+    assert!(
+        claim::persist_heartbeat_copy(&root_link, &preexisting_source, &preexisting_snapshot)
+            .is_err()
+    );
     std::fs::remove_file(root_link).expect("remove state root symlink");
     std::os::unix::fs::symlink(&outside, preexisting_root.join("quarantine"))
         .expect("preexisting quarantine symlink");
@@ -288,11 +289,8 @@ fn stale_heartbeat_handoff_preserves_replacement_before_and_after_cleanup() {
             || {},
             |root, _, _| {
                 if mode == 2 {
-                    nix::unistd::mkfifo(
-                        &source,
-                        nix::sys::stat::Mode::from_bits_truncate(0o600),
-                    )
-                    .expect("publish live FIFO");
+                    nix::unistd::mkfifo(&source, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                        .expect("publish live FIFO");
                 } else if mode != 1 {
                     write_new_heartbeat_at(root, &snapshot.file.document);
                 }
@@ -394,12 +392,8 @@ fn stale_heartbeat_handoff_failure_atomic() {
             &snapshot,
             |root, handoff, moved| match mode {
                 0 => {
-                    nix::unistd::unlinkat(
-                        handoff,
-                        moved,
-                        nix::unistd::UnlinkatFlags::NoRemoveDir,
-                    )
-                    .unwrap();
+                    nix::unistd::unlinkat(handoff, moved, nix::unistd::UnlinkatFlags::NoRemoveDir)
+                        .unwrap();
                 }
                 1 => {
                     drift_heartbeat_at(handoff, moved);

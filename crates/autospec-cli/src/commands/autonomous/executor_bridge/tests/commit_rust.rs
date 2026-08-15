@@ -2,9 +2,9 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::{git, git_stdout};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
@@ -174,6 +174,31 @@ fn trusted_git_inventory_accepts_external_validation_hook() {
         .expect("trusted common-directory validation hook must be inventoried");
 
     assert_eq!(binding.active_hooks, vec![hook.canonicalize().unwrap()]);
+}
+
+#[test]
+fn trusted_git_inventory_accepts_an_absent_default_hooks_directory() {
+    let (_fixture, state, _snapshot, _closeout) =
+        implementation_proof_fixture("rust-commit-absent-hooks-directory");
+    let hooks = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--git-path", "hooks"],
+    );
+    let hooks = PathBuf::from(hooks);
+    let hooks = if hooks.is_absolute() {
+        hooks
+    } else {
+        state.identity.worktree.join(hooks)
+    };
+    if hooks.exists() {
+        fs::remove_dir_all(&hooks).expect("remove default hooks directory");
+    }
+
+    let binding = bridge::trusted_worktree_git(&state)
+        .expect("an absent protected hooks directory represents no active hooks");
+
+    assert!(binding.active_hooks.is_empty());
+    assert_eq!(binding.hooks_dir, hooks);
 }
 
 #[cfg(unix)]

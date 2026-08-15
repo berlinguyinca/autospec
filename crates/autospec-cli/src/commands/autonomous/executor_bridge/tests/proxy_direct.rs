@@ -2,10 +2,10 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{HarnessKind, MutationSnapshot, SupervisionOutcome};
-use super::support_base::{GitFixture, git_stdout, test_environment, write_executable};
+use super::support_base::{git_stdout, test_environment, write_executable, GitFixture};
 use super::support_invocation::{session_record_ids, supervision_config, supervision_state};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -345,7 +345,8 @@ fn autonomous_executor_bridge_codex_sandbox_preserves_host_auth_for_codex_only()
         executable: fake_codex.canonicalize().expect("canonical fake Codex"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::NetworkPermissionProfile,
-        opencode_model: None, opencode_variant: None,
+        opencode_model: None,
+        opencode_variant: None,
     };
     let previous_codex = std::env::var_os("CODEX_API_KEY");
     let previous_openai = std::env::var_os("OPENAI_API_KEY");

@@ -4,6 +4,12 @@ use autospec_core::claim::RunStateRecord;
 
 use super::{parse_iso_timestamp, unix_now};
 
+pub(super) fn gh_command() -> std::process::Command {
+    std::process::Command::new(
+        std::env::var_os("AUTOSPEC_GH_PROGRAM").unwrap_or_else(|| "gh".into()),
+    )
+}
+
 /// Whether the recorded owner still holds its lease, and so must not be displaced.
 ///
 /// This is the same test `acquire_record` applies before refusing a claim: an owner
@@ -75,12 +81,9 @@ pub(super) fn read_gh_with_retry(
     let sleep_ms = claim_retry_sleep_ms();
     let mut last_error = String::new();
     for attempt in 0..attempts {
-        let output = std::process::Command::new("gh")
-            .args(arguments)
-            .output()
-            .map_err(|error| {
-                super::CommandFailure::transient(format!("could not {action}: {error}"))
-            })?;
+        let output = gh_command().args(arguments).output().map_err(|error| {
+            super::CommandFailure::transient(format!("could not {action}: {error}"))
+        })?;
         if output.status.success() {
             return Ok(output);
         }

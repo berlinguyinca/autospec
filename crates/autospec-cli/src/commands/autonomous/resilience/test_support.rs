@@ -1,9 +1,6 @@
 use super::*;
 
-pub(crate) fn acquire_test_lifecycle(
-    root: &Path,
-    repo: &str,
-) -> Result<ConductorLease, String> {
+pub(crate) fn acquire_test_lifecycle(root: &Path, repo: &str) -> Result<ConductorLease, String> {
     let store = ResilienceStore {
         scope: RepositoryScope::try_from(repo).map_err(|error| error.to_string())?,
         state_root: root.join("state").join("autonomous"),

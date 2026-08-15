@@ -2,14 +2,16 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super::{ClaimRefAdvance, advance_claim_ref_in, create_claim_ref_commit};
+use super::super::{advance_claim_ref_in, create_claim_ref_commit, ClaimRefAdvance};
+use super::support::{
+    assert_bridge_transition_projection, claim_record, git, ClaimRefFixture, BRIDGE_TRANSITION_ENV,
+};
+use crate::commands::claim;
 use autospec_core::claim::{ExecutorResultEvidence, RemoteComment};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use crate::commands::claim;
-use super::support::{BRIDGE_TRANSITION_ENV, ClaimRefFixture, assert_bridge_transition_projection, claim_record, git};
 
 #[test]
 fn bridge_terminal_projection_resumes_only_the_exact_terminal_generation() {

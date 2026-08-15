@@ -805,7 +805,13 @@ pub(crate) fn recover_for_conductor(
         || record.issue != issue
         || !matches!(
             record.state.as_str(),
-            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human" | "available"
+            "claimed"
+                | "merged"
+                | "released"
+                | "failed"
+                | "retryable"
+                | "needs-human"
+                | "available"
         )
     {
         return Err(CommandFailure::diagnostic(
@@ -1115,7 +1121,10 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
         if let Err(error) = heartbeat_predecessor::retire(&repo, options.issue, prior.as_ref()) {
-            eprintln!("WARN: predecessor heartbeat retirement deferred: {}", error.message);
+            eprintln!(
+                "WARN: predecessor heartbeat retirement deferred: {}",
+                error.message
+            );
             return unavailable_claim(
                 options.issue,
                 &repo,
@@ -2602,7 +2611,7 @@ pub(crate) fn recover_released_bridge_claim(
     Ok(exact)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) fn with_released_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     operation: impl FnOnce() -> Result<T, CommandFailure>,
@@ -2627,7 +2636,20 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     )
 }
 
-#[cfg(all(test, not(unix)))]
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn with_released_bridge_predecessor_authority<T>(
+    identity: ClaimMutationIdentity<'_>,
+    operation: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<Option<T>, CommandFailure> {
+    if recover_released_bridge_claim(identity)? {
+        operation().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
 fn with_retained_bridge_predecessor_authority<T>(
     _identity: ClaimMutationIdentity<'_>,
     _observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -4180,7 +4202,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
     let attempts = claim_retry_attempts();
     let sleep_ms = claim_retry_sleep_ms();
     for attempt in 0..attempts {
-        let output = Command::new("gh")
+        let output = lease::gh_command()
             .args(arguments)
             .output()
             .map_err(|error| CommandFailure::transient(format!("could not {action}: {error}")))?;
@@ -4262,7 +4284,7 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     return publish_startup_heartbeat_transaction_with_hook(
         &_root,
         repo,
@@ -4271,10 +4293,20 @@ fn write_startup_heartbeat(
         _body.as_bytes(),
         &mut |_, _| Ok(()),
     );
-    #[cfg(not(unix))]
-    Err(CommandFailure::diagnostic(
-        "heartbeat publisher unavailable",
-    ))
+    #[cfg(not(target_os = "linux"))]
+    heartbeat_portable::publish(&_root, repo, issue, session_id, _body.as_bytes())
+}
+
+#[cfg(test)]
+pub(crate) fn write_startup_heartbeat_for_test(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    session_id: Option<&str>,
+) -> Result<(), CommandFailure> {
+    write_startup_heartbeat(repo, issue, worker_id, branch, claim_id, session_id)
 }
 
 #[cfg(unix)]
@@ -4363,7 +4395,7 @@ fn heartbeat_publication_error(error: HeartbeatPublicationFailure) -> CommandFai
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn publish_startup_heartbeat_transaction_with_hook(
     root: &Path,
     repo: &str,
@@ -4496,15 +4528,15 @@ fn startup_heartbeat_nonce(repo: &str, issue: u64, claim_id: &str) -> String {
     autospec_core::autonomous::waterfall::sha256_hex(&identity)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
-    let host = local_host_identity()
-        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?;
-    let birth = super::autonomous::observe_birth(pid)
+    let host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?
+        .trim()
+        .to_string();
+    let (boot_id, process_start) = super::autonomous::process_birth_identity(pid)
         .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat process: {error}")))?
         .ok_or_else(|| CommandFailure::diagnostic("heartbeat process identity disappeared"))?;
-    let boot_id = birth.boot_id;
-    let process_start = birth.start_identity;
     if host.is_empty() || boot_id.is_empty() || process_start.is_empty() {
         return Err(CommandFailure::diagnostic(
             "heartbeat process identity is incomplete",
@@ -4513,36 +4545,9 @@ fn startup_process_identity(pid: u32) -> Result<(String, String, String), Comman
     Ok((host, boot_id, process_start))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn startup_process_identity(_pid: u32) -> Result<(String, String, String), CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "heartbeat process identity requires Linux or macOS native process APIs",
-    ))
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn local_host_identity() -> Result<String, String> {
-    let mut hostname = [0_u8; 256];
-    // SAFETY: `hostname` is a valid writable buffer and its exact length is supplied.
-    if unsafe {
-        nix::libc::gethostname(
-            hostname.as_mut_ptr().cast::<nix::libc::c_char>(),
-            hostname.len(),
-        )
-    } != 0
-    {
-        return Err(nix::errno::Errno::last().to_string());
-    }
-    let end = hostname
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or_else(|| "hostname was truncated".to_string())?;
-    let hostname = std::str::from_utf8(&hostname[..end])
-        .map_err(|error| format!("hostname is not UTF-8: {error}"))?
-        .to_string();
-    (!hostname.is_empty())
-        .then_some(hostname)
-        .ok_or_else(|| "hostname is empty".to_string())
+#[cfg(not(target_os = "linux"))]
+fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
+    heartbeat_portable::process_identity(pid)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5326,19 +5331,17 @@ fn retire_released_startup_heartbeat_with_hook(
         boundary,
     )
 }
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn retire_released_startup_heartbeat(
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
     retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
 }
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn retire_released_startup_heartbeat(
-    _identity: ClaimMutationIdentity<'_>,
+    identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "predecessor heartbeat retirement requires Unix descriptor operations",
-    ))
+    heartbeat_portable::retire_released(identity)
 }
 #[cfg(target_os = "linux")]
 fn prepare_heartbeat_root_parent_with_hook(
@@ -5838,219 +5841,16 @@ fn normalize_heartbeat_root_parent(
     private_heartbeat_directory_identity(&parent, "root parent")
 }
 
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-) -> Result<fs::File, CommandFailure> {
-    open_heartbeat_directory_beneath_with_hook(trusted_parent, descendant, || {})
-}
-
 #[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HeartbeatDirectoryIdentity {
-    device: u64,
-    inode: u64,
-    owner: u32,
-    mode: u32,
-}
-
+use open_beneath::open_heartbeat_directory_beneath;
+#[cfg(all(test, unix))]
+use open_beneath::open_heartbeat_directory_portable_unix_with_hook;
 #[cfg(unix)]
-fn private_heartbeat_directory_identity(
-    directory: &impl std::os::fd::AsFd,
-    role: &str,
-) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
-    use nix::sys::stat::{fstat, SFlag};
-
-    let stat = fstat(directory).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not inspect heartbeat {role}: {error}"))
-    })?;
-    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFDIR)
-        || stat.st_uid != nix::unistd::geteuid().as_raw()
-        || stat.st_mode & 0o7777 != 0o700
-    {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat {role} must be owned by the effective user with mode 0700"
-        )));
-    }
-    Ok(HeartbeatDirectoryIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-        owner: stat.st_uid as u32,
-        mode: (stat.st_mode & 0o7777) as u32,
-    })
-}
-
+use open_beneath::private_heartbeat_directory_identity;
+#[cfg(all(test, target_os = "linux"))]
+use open_beneath::{heartbeat_openat2_resolve_flags, open_heartbeat_directory_beneath_with_hook};
 #[cfg(unix)]
-#[allow(dead_code)]
-fn private_heartbeat_name_identity(
-    parent: &impl std::os::fd::AsFd,
-    name: &Path,
-    role: &str,
-) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
-    use nix::fcntl::AtFlags;
-    use nix::sys::stat::{fstatat, SFlag};
-
-    let stat = fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not inspect heartbeat {role}: {error}"))
-    })?;
-    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFDIR)
-        || stat.st_uid != nix::unistd::geteuid().as_raw()
-        || stat.st_mode & 0o7777 != 0o700
-    {
-        return Err(CommandFailure::diagnostic(format!(
-            "heartbeat {role} must be owned by the effective user with mode 0700"
-        )));
-    }
-    Ok(HeartbeatDirectoryIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-        owner: stat.st_uid as u32,
-        mode: (stat.st_mode & 0o7777) as u32,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn heartbeat_openat2_resolve_flags() -> nix::fcntl::ResolveFlag {
-    use nix::fcntl::ResolveFlag;
-
-    ResolveFlag::RESOLVE_BENEATH
-        | ResolveFlag::RESOLVE_NO_SYMLINKS
-        | ResolveFlag::RESOLVE_NO_MAGICLINKS
-        | ResolveFlag::RESOLVE_NO_XDEV
-}
-
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    use nix::fcntl::{openat2, OFlag, OpenHow};
-    use std::path::Component;
-
-    if descendant.as_os_str().is_empty()
-        || descendant.is_absolute()
-        || descendant
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant must be relative, non-empty, and contain no '..'",
-        ));
-    }
-    let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
-    let expected_binding =
-        private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?;
-    before_open();
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift before descendant open",
-        ));
-    }
-    let how = OpenHow::new()
-        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
-        .resolve(heartbeat_openat2_resolve_flags());
-    let directory = openat2(trusted_parent, descendant, how).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "heartbeat directory secure resolution failed: {error}"
-        ))
-    })?;
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift after descendant open",
-        ));
-    }
-    let opened = private_heartbeat_directory_identity(&directory, "descendant")?;
-    if opened != expected_binding
-        || private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?
-            != opened
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant name binding changed during open",
-        ));
-    }
-    Ok(fs::File::from(directory))
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-fn open_heartbeat_directory_portable_unix_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::Mode;
-    use std::path::Component;
-
-    if !matches!(
-        descendant.components().collect::<Vec<_>>().as_slice(),
-        [Component::Normal(_)]
-    ) {
-        return Err(CommandFailure::diagnostic(
-            "portable heartbeat descendant must be exactly one normal component",
-        ));
-    }
-    let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
-    let expected_binding =
-        private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?;
-    before_open();
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift before descendant open",
-        ));
-    }
-    let directory = openat(
-        trusted_parent,
-        descendant,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "portable heartbeat directory resolution failed: {error}"
-        ))
-    })?;
-    let opened = private_heartbeat_directory_identity(&directory, "descendant")?;
-    if opened != expected_binding
-        || private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?
-            != opened
-    {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat descendant name binding changed during open",
-        ));
-    }
-    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent descriptor identity drift after descendant open",
-        ));
-    }
-    Ok(fs::File::from(directory))
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    trusted_parent: &fs::File,
-    descendant: &Path,
-    before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    open_heartbeat_directory_portable_unix_with_hook(trusted_parent, descendant, before_open)
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-fn open_heartbeat_directory_beneath_with_hook(
-    _trusted_parent: &fs::File,
-    _descendant: &Path,
-    _before_open: impl FnOnce(),
-) -> Result<fs::File, CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "secure heartbeat directory resolution requires Unix descriptor operations",
-    ))
-}
+use open_beneath::{private_heartbeat_name_identity, HeartbeatDirectoryIdentity};
 
 // These primitives remain inert until the guarded recovery activation slice.
 #[allow(dead_code)]
@@ -7192,7 +6992,7 @@ fn held_heartbeat_at(
     Ok(Some(file))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn with_retained_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
@@ -7642,7 +7442,7 @@ fn handoff_stale_heartbeat_path_with_hooks(
     Ok(copy)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,
@@ -7651,34 +7451,49 @@ fn observe_local_startup_pid(
     boot_id: &str,
     process_start: &str,
 ) -> StartupPidLiveness {
-    let current_host = local_host_identity().ok();
-    if current_host.as_deref() != Some(host) {
+    let current_host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|host| host.trim().to_string());
+    let current_boot = super::autonomous::current_boot_identity().ok();
+    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
         return StartupPidLiveness::Unknown;
     }
-    match super::autonomous::platform_process::observe_expected(pid, boot_id, process_start) {
-        super::autonomous::platform_process::ProcessObservation::Dead => {
-            StartupPidLiveness::Dead
-        }
-        super::autonomous::platform_process::ProcessObservation::Exact(_) => {
-            StartupPidLiveness::Live
-        }
-        super::autonomous::platform_process::ProcessObservation::Mismatch
-        | super::autonomous::platform_process::ProcessObservation::Unknown(_) => {
-            StartupPidLiveness::Unknown
-        }
+    match super::autonomous::process_birth_identity(pid) {
+        Ok(None) => return StartupPidLiveness::Dead,
+        Ok(Some((observed_boot, observed_start)))
+            if observed_boot == boot_id && observed_start == process_start => {}
+        Ok(Some(_)) | Err(_) => return StartupPidLiveness::Unknown,
+    }
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
+        Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
+        Err(nix::errno::Errno::ESRCH) => StartupPidLiveness::Dead,
+        Err(_) => StartupPidLiveness::Unknown,
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 fn observe_local_startup_pid(
     _worker_id: &str,
-    _pid: u32,
-    _host: &str,
-    _boot_id: &str,
-    _process_start: &str,
+    pid: u32,
+    host: &str,
+    boot_id: &str,
+    process_start: &str,
 ) -> StartupPidLiveness {
-    StartupPidLiveness::Unknown
+    let current_host = heartbeat_portable::hostname().ok();
+    let current_boot = super::autonomous::current_boot_identity().ok();
+    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
+        return StartupPidLiveness::Unknown;
+    }
+    match super::autonomous::process_birth_identity(pid) {
+        Ok(None) => StartupPidLiveness::Dead,
+        Ok(Some((observed_boot, observed_start)))
+            if observed_boot == boot_id && observed_start == process_start =>
+        {
+            StartupPidLiveness::Live
+        }
+        Ok(Some(_)) | Err(_) => StartupPidLiveness::Unknown,
+    }
 }
 
 fn branch_ref_exists(branch: &str) -> bool {
@@ -8091,8 +7906,11 @@ fn print_state_help() {
 }
 
 mod heartbeat_liveness;
+#[cfg(any(not(target_os = "linux"), test))]
+mod heartbeat_portable;
 mod heartbeat_predecessor;
 pub(crate) mod lease;
+mod open_beneath;
 use heartbeat_liveness::startup_heartbeat_exists;
 use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,

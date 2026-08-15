@@ -3,9 +3,9 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more than
 // one test module builds on, so they are `pub(super)` rather than private.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, PersistedInvocation, ProcessIdentity};
 use super::support_invocation::supervision_state;
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+pub(in super::super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
 /// Restore every injected-fault switch to the value it was declared with.
 ///
@@ -108,7 +108,9 @@ impl Drop for TestEnvironment {
 }
 
 pub(super) fn test_environment() -> TestEnvironment {
-    let guard = TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner());
+    let guard = TEST_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     // Scrub inside the guard: these are process-wide, so the same lock that orders failpoint
     // arming has to order this too, and Drop restores them on unwind like the failpoints.
     TestEnvironment {
@@ -507,7 +509,8 @@ pub(super) fn zero_effect_classifier_fixture(
         std::process::id(),
         TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
-    let scope_root = PathBuf::from("/tmp/autospec-executor")
+    let scope_root = bridge::executor_worktree_root()
+        .expect("canonical executor root")
         .join(bridge::safe_scope(&repository_scope).expect("safe repository scope"));
     bridge::ensure_private_directory(&scope_root).expect("private executor scope");
     fixture.executor_scope_roots.push(scope_root.clone());

@@ -211,7 +211,104 @@ fn autonomous_executor_bridge_recovers_push_and_draft_creation_boundaries() {
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[test]
+fn portable_draft_prepare_failure_is_the_only_safe_retry_boundary() {
+    // Break caught: a portable draft child running before its release state is durable, or a
+    // never-released prepared transaction being quarantined instead of safely retried.
+    let mut prepared = prepared_draft_transaction("portable-draft-prepare");
+    prepared
+        .adapter
+        .environment
+        .insert("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL".into(), "prepare".into());
+    let error = prepared.publish().expect_err("prepare failpoint");
+    assert!(error.contains("prepare"), "{error}");
+    assert!(!bridge::draft_release_intent_path(&prepared.state_path).exists());
+    assert!(!bridge::draft_release_receipt_path(&prepared.state_path).exists());
+    assert_eq!(
+        fs::read_to_string(prepared.fixture.root.join("gh-calls"))
+            .expect("gh calls")
+            .matches("pr create")
+            .count(),
+        0
+    );
+
+    prepared
+        .adapter
+        .environment
+        .remove(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"));
+    assert_eq!(
+        prepared.publish().expect("retry never-released prepare"),
+        17
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[test]
+fn portable_draft_release_failure_quarantines_without_replay() {
+    // Break caught: treating an intended but ambiguously released request as safe to replay.
+    let mut prepared = prepared_draft_transaction("portable-draft-release");
+    prepared
+        .adapter
+        .environment
+        .insert("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL".into(), "release".into());
+    let error = prepared.publish().expect_err("release failpoint");
+    assert!(error.contains("release"), "{error}");
+    assert!(bridge::draft_release_intent_path(&prepared.state_path).is_file());
+    assert!(!bridge::draft_release_receipt_path(&prepared.state_path).exists());
+    prepared
+        .adapter
+        .environment
+        .remove(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"));
+    let retry = prepared
+        .publish()
+        .expect_err("ambiguous release must quarantine");
+    assert!(retry.contains("intent remains"), "{retry}");
+    assert_eq!(
+        fs::read_to_string(prepared.fixture.root.join("gh-calls"))
+            .expect("gh calls")
+            .matches("pr create")
+            .count(),
+        0
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[test]
+fn portable_draft_post_request_crash_reconciles_without_replay() {
+    // Break caught: delayed observation after a released request issuing a second PR create.
+    let mut prepared = prepared_draft_transaction("portable-draft-post-request");
+    prepared.adapter.environment.insert(
+        "AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL".into(),
+        "post-request".into(),
+    );
+    let error = prepared.publish().expect_err("post-request failpoint");
+    assert!(error.contains("post-request"), "{error}");
+    assert!(bridge::draft_release_receipt_path(&prepared.state_path).is_file());
+    prepared
+        .adapter
+        .environment
+        .remove(std::ffi::OsStr::new("AUTOSPEC_TEST_PORTABLE_DRAFT_FAIL"));
+    assert_eq!(prepared.publish().expect("reconcile visible draft"), 17);
+    assert!(
+        prepared.state.draft_process.is_none(),
+        "authoritative portable PR reconciliation retained the synthetic draft process"
+    );
+    let durable = PersistedInvocation::from_json(
+        &fs::read_to_string(&prepared.state_path).expect("read reconciled draft state"),
+    )
+    .expect("parse reconciled draft state");
+    assert!(durable.draft_process.is_none());
+    assert_eq!(
+        fs::read_to_string(prepared.fixture.root.join("gh-calls"))
+            .expect("gh calls")
+            .matches("pr create")
+            .count(),
+        1
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
     let _environment = test_environment();

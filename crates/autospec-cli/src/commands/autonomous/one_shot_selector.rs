@@ -104,8 +104,7 @@ mod tests {
         // selector's own field is false. Escaping it into a string value would NOT
         // discriminate — JSON escapes the quotes, so the substring never matched there
         // and such a test passes against the very code this replaces.
-        let (root, path) =
-            fixture(r#"{"issue":42,"consumed":false,"prior":{"consumed":true}}"#);
+        let (root, path) = fixture(r#"{"issue":42,"consumed":false,"prior":{"consumed":true}}"#);
         assert!(
             !one_shot_selector_consumed_at(&path),
             "a nested consumed flag was read as the selector's own"

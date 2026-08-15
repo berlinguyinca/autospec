@@ -2,17 +2,8 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-#[cfg(target_os = "macos")]
-use super::super::tests::support_invocation::{
-    implementation_proof_fixture, shell_invocation, supervision_config,
-};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::super::BridgePhase;
-#[cfg(target_os = "linux")]
-use super::super::{MutationSnapshot, SupervisionOutcome};
-#[cfg(target_os = "linux")]
+use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
 use super::support_base::{test_environment, DetachedForkedCleanup, GitFixture};
-#[cfg(target_os = "linux")]
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state, NonDescendantDirectFixture,
 };

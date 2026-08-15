@@ -2,15 +2,71 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-#[cfg(unix)]
 use super::support::STARTUP_HEARTBEAT_ENV;
 use super::support::{expected_startup_heartbeat, startup_heartbeat_fixture};
 use crate::commands::claim;
-#[cfg(unix)]
 use autospec_core::claim::RunStateRecord;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn released_predecessor_retires_only_its_exact_heartbeat_without_signalling() {
+    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let (sandbox, _) = startup_heartbeat_fixture("portable-released-predecessor");
+    let heartbeat_root = sandbox.join("heartbeats");
+    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+    unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root) };
+
+    claim::write_startup_heartbeat(
+        "owner/repo",
+        42,
+        "worker-a",
+        "feat/worker",
+        "claim-a",
+        Some("session-a"),
+    )
+    .expect("portable heartbeat");
+    let mut record = RunStateRecord::new(
+        "owner/repo",
+        42,
+        "worker-a",
+        "released",
+        "feat/worker",
+        "",
+        "retryable_released",
+        Vec::new(),
+        "2026-08-13T00:00:00Z",
+        "2026-08-13T00:00:00Z",
+        300,
+    )
+    .with_claim_id("claim-b");
+    let predecessor = |record: RunStateRecord| claim::ClaimRefHead {
+        oid: "oid".to_string(),
+        generation: "generation".to_string(),
+        record,
+    };
+    let issue_path = heartbeat_root
+        .join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ))
+        .join("42.json");
+
+    claim::heartbeat_predecessor::retire("owner/repo", 42, Some(&predecessor(record.clone())))
+        .expect("mismatched generation is retained");
+    assert!(issue_path.exists());
+    record.claim_id = Some("claim-a".to_string());
+    claim::heartbeat_predecessor::retire("owner/repo", 42, Some(&predecessor(record)))
+        .expect("exact retirement");
+    assert!(!issue_path.exists());
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value) },
+        None => unsafe { std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR") },
+    }
+    std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+}
 
 #[cfg(target_os = "linux")]
 #[test]

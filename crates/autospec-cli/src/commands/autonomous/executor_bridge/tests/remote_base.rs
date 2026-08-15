@@ -2,12 +2,12 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{BridgePhase, MutationSnapshot};
 use super::support_base::{git, git_stdout, GitFixture};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, supervision_state,
 };
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -262,7 +262,8 @@ fn autonomous_executor_bridge_allows_only_active_attributed_sibling_worktrees() 
         .with_sibling_state_dir(&current_state_path, &repository_scope)
         .expect("bind sibling state directory");
 
-    let sibling_scope = PathBuf::from("/tmp/autospec-executor")
+    let sibling_scope = bridge::executor_worktree_root()
+        .expect("canonical executor root")
         .join(bridge::safe_scope(&repository_scope).expect("safe sibling scope"));
     bridge::ensure_private_directory(&sibling_scope).expect("private sibling scope");
     let sibling_path = sibling_scope.join("issue-43");

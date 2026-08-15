@@ -1,8 +1,8 @@
+use super::catalog::StructuralCheck;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use super::catalog::StructuralCheck;
 mod startup_preflight_contract;
 pub struct StructuralValidator;
 

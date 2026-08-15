@@ -146,7 +146,9 @@ pub(super) fn require_only_keys(
     Ok(())
 }
 
-pub(super) fn validate_parent_records(records: &BTreeMap<u64, ParentIssueRecord>) -> Result<(), String> {
+pub(super) fn validate_parent_records(
+    records: &BTreeMap<u64, ParentIssueRecord>,
+) -> Result<(), String> {
     for (parent_issue, record) in records {
         if parent_issue != &record.parent_issue {
             return Err(format!(

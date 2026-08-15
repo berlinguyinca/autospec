@@ -65,7 +65,11 @@ impl AutospecError {
         }
     }
 
-    pub fn io(operation: impl Into<String>, path: impl Into<String>, error: impl fmt::Display) -> Self {
+    pub fn io(
+        operation: impl Into<String>,
+        path: impl Into<String>,
+        error: impl fmt::Display,
+    ) -> Self {
         Self::Io {
             operation: operation.into(),
             path: path.into(),
@@ -90,10 +94,15 @@ impl fmt::Display for AutospecError {
             AutospecError::State { entity, message } => {
                 write!(formatter, "state error for {entity}: {message}")
             }
-            AutospecError::Schema { schema_name, version } => {
+            AutospecError::Schema {
+                schema_name,
+                version,
+            } => {
                 write!(formatter, "unsupported {schema_name} schema: {version}")
             }
-            AutospecError::Invariant { message } => write!(formatter, "invariant violation: {message}"),
+            AutospecError::Invariant { message } => {
+                write!(formatter, "invariant violation: {message}")
+            }
             AutospecError::Io {
                 operation,
                 path,

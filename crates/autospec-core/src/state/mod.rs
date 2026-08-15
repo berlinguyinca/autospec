@@ -8,8 +8,8 @@ use crate::spec::is_valid_spec_id;
 use storage::{FileState, StatePaths};
 
 pub mod json;
-mod storage;
 mod parse;
+mod storage;
 use parse::*;
 
 const STATE_SCHEMA_VERSION: u64 = 1;
@@ -279,17 +279,19 @@ impl SpecStateStore {
         quarantined_parent: bool,
     ) -> Result<ParentIssueUpdate, AutospecError> {
         if parent_issue == 0 {
-        return Err(AutospecError::other("parent issue number must be positive".to_string()));
+            return Err(AutospecError::other(
+                "parent issue number must be positive".to_string(),
+            ));
         }
         if child_issues.is_empty() {
-            return Err(AutospecError::other("parent issue decomposition requires at least one child issue".to_string()));
+            return Err(AutospecError::other(
+                "parent issue decomposition requires at least one child issue".to_string(),
+            ));
         }
         if self.parent_issues.contains_key(&parent_issue) {
             return Err(AutospecError::state(
                 "parent",
-                format!(
-                    "parent issue #{parent_issue} is already decomposed"
-                ),
+                format!("parent issue #{parent_issue} is already decomposed"),
             ));
         }
 
@@ -297,7 +299,9 @@ impl SpecStateStore {
         let mut children = Vec::new();
         for issue in child_issues {
             if issue == 0 {
-                return Err(AutospecError::other("child issue number must be positive".to_string()));
+                return Err(AutospecError::other(
+                    "child issue number must be positive".to_string(),
+                ));
             }
             if issue == parent_issue {
                 return Err(AutospecError::invariant(format!(
@@ -305,7 +309,9 @@ impl SpecStateStore {
                 )));
             }
             if !seen.insert(issue) {
-                return Err(AutospecError::other(format!("duplicate child issue #{issue}")));
+                return Err(AutospecError::other(format!(
+                    "duplicate child issue #{issue}"
+                )));
             }
             children.push(ChildIssueRecord {
                 issue,
@@ -376,7 +382,9 @@ impl SpecStateStore {
         let mut seen = BTreeSet::new();
         for issue in &child_issues {
             if *issue == 0 {
-                return Err(AutospecError::other("child issue number must be positive".to_string()));
+                return Err(AutospecError::other(
+                    "child issue number must be positive".to_string(),
+                ));
             }
             if *issue == parent_issue {
                 return Err(AutospecError::invariant(format!(
@@ -384,7 +392,9 @@ impl SpecStateStore {
                 )));
             }
             if !seen.insert(*issue) {
-                return Err(AutospecError::other(format!("duplicate child issue #{issue}")));
+                return Err(AutospecError::other(format!(
+                    "duplicate child issue #{issue}"
+                )));
             }
         }
         let added_children = child_issues[existing.len()..].to_vec();
@@ -439,7 +449,9 @@ impl SpecStateStore {
         child_issue: u64,
     ) -> Result<Vec<ParentIssueTerminalAction>, AutospecError> {
         if child_issue == 0 {
-            return Err(AutospecError::other("child issue number must be positive".to_string()));
+            return Err(AutospecError::other(
+                "child issue number must be positive".to_string(),
+            ));
         }
 
         let mut matched = false;
@@ -470,9 +482,7 @@ impl SpecStateStore {
         if !record.child_issues.iter().all(|child| child.terminal) {
             return Err(AutospecError::state(
                 "parent",
-                format!(
-                    "parent issue #{parent_issue} cannot close while child issues are pending"
-                ),
+                format!("parent issue #{parent_issue} cannot close while child issues are pending"),
             ));
         }
         record.parent_closed = true;
@@ -603,23 +613,28 @@ impl SpecStateStore {
                     temporary_state @ (FileState::Missing | FileState::Invalid(_)) => {
                         match (primary_state, temporary_state) {
                             (FileState::Missing, FileState::Missing) => Ok(Self::new()),
-                            (FileState::Invalid(error), FileState::Missing) => Err(AutospecError::io(
-                                "read",
-                                paths.primary.display().to_string(),
-                                error,
-                            )),
-                            (FileState::Missing, FileState::Invalid(error)) => Err(AutospecError::io(
-                                "read",
-                                paths.temporary.display().to_string(),
-                                error,
-                            )),
-                            (FileState::Invalid(primary_error), FileState::Invalid(temporary_error)) => {
+                            (FileState::Invalid(error), FileState::Missing) => {
                                 Err(AutospecError::io(
                                     "read",
                                     paths.primary.display().to_string(),
-                                    format!("{primary_error}; also {temporary_error}"),
+                                    error,
                                 ))
                             }
+                            (FileState::Missing, FileState::Invalid(error)) => {
+                                Err(AutospecError::io(
+                                    "read",
+                                    paths.temporary.display().to_string(),
+                                    error,
+                                ))
+                            }
+                            (
+                                FileState::Invalid(primary_error),
+                                FileState::Invalid(temporary_error),
+                            ) => Err(AutospecError::io(
+                                "read",
+                                paths.primary.display().to_string(),
+                                format!("{primary_error}; also {temporary_error}"),
+                            )),
                             (FileState::Valid(_), _) | (_, FileState::Valid(_)) => {
                                 unreachable!("valid file states return before this branch")
                             }
@@ -641,7 +656,9 @@ impl SpecStateStore {
         let rendered = store.to_json()?;
         let paths = StatePaths::new(root.as_ref());
         if paths.primary.exists() || paths.temporary.exists() {
-            return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()));
+            return Err(AutospecError::other(
+                "autospec init refuses to overwrite existing spec state".to_string(),
+            ));
         }
 
         let autospec_was_missing = !paths.autospec_directory.exists();
@@ -661,7 +678,9 @@ impl SpecStateStore {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()))
+                return Err(AutospecError::other(
+                    "autospec init refuses to overwrite existing spec state".to_string(),
+                ))
             }
             Err(error) => {
                 return Err(AutospecError::io(
@@ -689,7 +708,9 @@ impl SpecStateStore {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&paths.temporary);
-                return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()));
+                return Err(AutospecError::other(
+                    "autospec init refuses to overwrite existing spec state".to_string(),
+                ));
             }
             Err(error) => {
                 return Err(AutospecError::io(
@@ -748,7 +769,6 @@ impl SpecStateStore {
     }
 }
 
-
 fn is_allowed_transition(current: &SpecRunState, next: &SpecRunState) -> bool {
     matches!(
         (current, next),
@@ -794,66 +814,4 @@ fn escape_json_string(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ParentIssueStatus, SpecStateStore};
-
-    #[test]
-    fn extend_parent_decomposition_preserves_terminal_children_and_is_idempotent() {
-        let mut store = SpecStateStore::new();
-        store
-            .record_parent_decomposition(10, vec![11, 12], false)
-            .expect("initial decomposition");
-        store.record_child_terminal(11).expect("merged child");
-        let extended = store
-            .extend_parent_decomposition(10, vec![11, 12, 13])
-            .expect("ordered extension");
-        assert!(extended.changed);
-        assert_eq!(extended.added_children, vec![13]);
-        assert!(extended
-            .comment_body
-            .contains("append-only-parent-extension"));
-
-        let repeated = store
-            .extend_parent_decomposition(10, vec![11, 12, 13])
-            .expect("same full list");
-        assert!(!repeated.changed);
-        store
-            .record_child_terminal(12)
-            .expect("second merged child");
-        store
-            .record_child_terminal(13)
-            .expect("extension merged child");
-        assert_eq!(
-            store.parent_issue_status(10),
-            Some(ParentIssueStatus::CompleteButStale)
-        );
-    }
-
-    #[test]
-    fn extend_parent_decomposition_rejects_non_append_and_owned_children() {
-        let mut store = SpecStateStore::new();
-        store
-            .record_parent_decomposition(10, vec![11, 12], false)
-            .expect("initial decomposition");
-        store
-            .record_parent_decomposition(20, vec![21], false)
-            .expect("other decomposition");
-
-        for children in [
-            vec![11],
-            vec![12, 11, 13],
-            vec![11, 12, 10],
-            vec![11, 12, 13, 13],
-        ] {
-            assert!(
-                store.extend_parent_decomposition(10, children).is_err(),
-                "invalid full list must fail closed"
-            );
-        }
-        assert!(store
-            .extend_parent_decomposition(10, vec![11, 12, 21])
-            .expect_err("child owned by another parent")
-            .to_string().contains("parent #20"));
-        assert_eq!(store.parent_issue_children(10), Some(vec![11, 12]));
-    }
-}
+mod tests;

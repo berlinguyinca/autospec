@@ -587,9 +587,7 @@ fn run_bats_suites(id: &str, required: bool, root: &Path, suites: &[&str]) -> Ch
     if !program_on_path("bats") {
         return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
     }
-    let commands = suites.iter().map(|suite| {
-        bats_command(suite)
-    });
+    let commands = suites.iter().map(|suite| bats_command(suite));
     run_commands(id, required, root, commands)
 }
 
@@ -630,9 +628,7 @@ fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) ->
             &format!("{directory}/*.bats: no integration tests found"),
         );
     }
-    let commands = suites.into_iter().map(|suite| {
-        bats_command(suite.as_str())
-    });
+    let commands = suites.into_iter().map(|suite| bats_command(suite.as_str()));
     run_commands(id, required, root, commands)
 }
 
@@ -660,9 +656,7 @@ fn run_bats_directory_allow_empty_if_available(
         .map(|path| relative_path(root, &path))
         .collect::<Vec<_>>();
     suites.sort();
-    let commands = suites.into_iter().map(|suite| {
-        bats_command(suite.as_str())
-    });
+    let commands = suites.into_iter().map(|suite| bats_command(suite.as_str()));
     run_commands(id, required, root, commands)
 }
 
@@ -2447,8 +2441,7 @@ fn run_qa_verify_first_discipline(id: &str, required: bool, root: &Path) -> Chec
     if program_on_path("bats") {
         for suite in SUITES {
             if root.join(suite).is_file() {
-                let bats = bats_command(suite)
-                    .execute_in(id, required, root);
+                let bats = bats_command(suite).execute_in(id, required, root);
                 let failed = bats.is_failure();
                 results.push(bats);
                 if failed {
@@ -2841,10 +2834,7 @@ fn run_release_area_contract(id: &str, required: bool, root: &Path) -> CheckResu
     }
     let mut results = vec![script];
     if program_on_path("bats") && root.join(SUITE).is_file() {
-        results.push(
-            bats_command(SUITE)
-                .execute_in(id, required, root),
-        );
+        results.push(bats_command(SUITE).execute_in(id, required, root));
     }
     aggregate(id, required, results)
 }
@@ -5470,9 +5460,7 @@ fn run_mutation_and_negative_path(id: &str, required: bool, root: &Path) -> Chec
             "tests/bash-mutate.bats",
         ] {
             if root.join(suite).is_file() {
-                commands.push(
-                    bats_command(suite),
-                );
+                commands.push(bats_command(suite));
             }
         }
     }
