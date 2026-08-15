@@ -20001,7 +20001,7 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
     {
         let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if process_disappeared_error(&error) => return Ok(None),
             Err(error) => return Err(format!("read executor process stat: {error}")),
         };
         let close = stat
@@ -20023,6 +20023,11 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
             start_identity,
         }))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_disappeared_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(nix::libc::ESRCH)
 }
 
 #[cfg(target_os = "linux")]

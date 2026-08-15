@@ -345,4 +345,18 @@ mod tests {
             ProcessObservation::Dead
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_disappearance_accepts_procfs_not_found_and_esrch() {
+        assert!(super::super::process_disappeared_error(
+            &std::io::Error::from(std::io::ErrorKind::NotFound)
+        ));
+        assert!(super::super::process_disappeared_error(
+            &std::io::Error::from_raw_os_error(nix::libc::ESRCH)
+        ));
+        assert!(!super::super::process_disappeared_error(
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        ));
+    }
 }
