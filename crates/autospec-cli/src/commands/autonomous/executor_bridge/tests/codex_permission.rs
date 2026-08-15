@@ -434,8 +434,7 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
     let root = test_root("codex-sandbox-loopback-blocked");
-    let codex = root.join("codex");
-    for (stderr, expected) in [
+    for (index, (stderr, expected)) in [
         (
             "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
             "RTM_NEWADDR",
@@ -448,7 +447,8 @@ fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
             "thread 'main' panicked at sandbox.rs:1\nbwrap: setting up uid map: Operation not permitted\nnote: run with backtrace",
             "setting up uid map",
         ),
-    ] {
+    ].into_iter().enumerate() {
+        let codex = root.join(format!("codex-{index}"));
         write_executable(
             &codex,
             &format!("#!/bin/sh\nprintf '%s\\n' '{}' >&2\nexit 1\n", stderr),
