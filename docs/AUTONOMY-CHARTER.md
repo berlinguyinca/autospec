@@ -53,6 +53,14 @@ would-have-asked decision; exit 1 surfaces the confirmation even in autonomous
 mode. This charter does not weaken the gate — it makes "proceed" the default for
 everything the gate does **not** flag.
 
+## Native autonomous runtime support
+
+Linux autonomous execution proves process ownership with pidfds and subreaper
+containment. macOS proves the exact kernel boot and process start identities and
+isolates executor descendants in an owned process group. Unsupported platforms
+fail before creating claims or accountability epics. Every autonomous
+`--dry-run`, including start, restart, and resume, is a read-only preview.
+
 ## 4. Configuration
 
 | Lever | Default | Aggressive (recommended) |

@@ -67,6 +67,13 @@ jobs:
       - name: Check autospec CLI
         run: cargo check -p autospec-cli
 
+      - name: Test Darwin ownership contracts
+        run: |
+          cargo test -p autospec-cli platform_process -- --nocapture
+          cargo test -p autospec-cli heartbeat_startup -- --nocapture
+          cargo test -p autospec-cli harness_supervisor -- --nocapture
+          cargo test -p autospec-cli adoption_cleanup -- --nocapture
+
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
 
