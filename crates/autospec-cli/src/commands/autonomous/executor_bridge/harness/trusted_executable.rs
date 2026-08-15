@@ -1,4 +1,5 @@
 use super::*;
+use autospec_core::autonomous::waterfall::sha256_reader_hex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrustedExecutableIdentity {
