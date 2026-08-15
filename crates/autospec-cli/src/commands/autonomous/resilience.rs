@@ -1448,9 +1448,11 @@ mod tests {
             .expect("renewed state")
             .0;
         assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
-        owner
-            .release(&lease)
-            .unwrap_or_else(|_| panic!("release lease"));
+        retry_transient_lock(
+            || owner.release(&lease),
+            |result| matches!(result, Err(StoreError::Held)),
+        )
+        .unwrap_or_else(|_| panic!("release lease"));
         let _ = fs::remove_dir_all(root);
     }
 
