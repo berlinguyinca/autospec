@@ -16,6 +16,18 @@ pub(crate) fn run_executor_bridge(
     unreachable!("non-Linux executor admission always fails")
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn execute_direct_plan(
+    _worktree: &Path,
+    _plan: &DirectCommandPlan,
+    _artifact_root: &Path,
+    _runtime: Option<&DirectRuntimeAdapter>,
+    _stall_timeout: Duration,
+) -> Result<Vec<ObservedDirectCommand>, String> {
+    require_linux_executor_supervision()?;
+    unreachable!("non-Linux direct execution admission always fails")
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn run_executor_bridge(
     request: &ExecutorBridgeRequest,
