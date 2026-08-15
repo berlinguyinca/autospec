@@ -278,6 +278,7 @@ fn autonomous_executor_bridge_generation_selection_repairs_stale_owned_attempt_b
 
 #[test]
 fn autonomous_executor_bridge_attempt_lock_serializes_root_pointer_publication() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("evidence-attempt-lock");
     let lane_root = fixture.root.join("lane");
     bridge::ensure_private_directory(&lane_root).expect("lane root");
