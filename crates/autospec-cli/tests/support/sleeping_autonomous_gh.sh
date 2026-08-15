@@ -9,6 +9,9 @@ if [ "${AUTOSPEC_ACCOUNTABILITY_REQUIRED:-}" = 1 ]; then
     kill -KILL "$PPID"
     exit 1
   fi
+  if [ "$fixture_mode" = hold ]; then
+    while :; do sleep 0.1; done
+  fi
   while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
   exit 1
 fi
