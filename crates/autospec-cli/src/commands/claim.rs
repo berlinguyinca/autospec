@@ -4566,8 +4566,10 @@ fn retire_released_startup_heartbeat_with_hook(
         &evidence.boot_id,
         &evidence.process_start,
     );
-    if liveness == StartupPidLiveness::Unknown
-        || (require_dead_process && liveness != StartupPidLiveness::Dead)
+    let completed_handoff = heartbeat_predecessor::completed_handoff(&repo, identity);
+    if !completed_handoff
+        && (liveness == StartupPidLiveness::Unknown
+            || (require_dead_process && liveness != StartupPidLiveness::Dead))
     {
         return Err(CommandFailure::diagnostic(
             "terminal heartbeat process identity is ambiguous",

@@ -4459,17 +4459,20 @@ fn immediate_stop_terminates_recorded_wrapper_descendants() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
     let fixture = ForegroundFixture::new();
     let child_pid_path = fixture.root.join("orphan-child.pid");
+    let leader_release = fixture.root.join("release-orphan-leader");
     let mut leader = Command::new("bash");
     leader
         .arg("-c")
         .arg(
-            "trap '' HUP; bash -c 'trap \"\" HUP; exec -a autospec-autonomous-supervisor sleep 300' & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"",
+            "trap '' HUP; bash -c 'trap \"\" HUP; exec -a autospec-autonomous-supervisor sleep 300' & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"; while [ ! -e \"$LEADER_RELEASE\" ]; do sleep 0.01; done",
         )
         .env("CHILD_PID_FILE", &child_pid_path)
+        .env("LEADER_RELEASE", &leader_release)
         .process_group(0);
     let mut leader = leader.spawn().expect("spawn short-lived group leader");
     let leader_pid = leader.id();
@@ -4480,7 +4483,13 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .trim()
         .parse::<u32>()
         .expect("parse orphan child pid");
-    assert!(leader.wait().expect("reap group leader").success());
+    fs::write(&leader_release, "release\n").expect("release short-lived group leader");
+    for _ in 0..100 {
+        if !process_is_running(leader_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(!process_is_running(leader_pid));
     assert!(process_is_running(child_pid));
     let scope = fixture.scoped_dir();
@@ -4507,6 +4516,7 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
     let child_survived = process_is_running(child_pid);
     terminate_process_group(leader_pid);
     terminate_process(child_pid);
+    assert!(leader.wait().expect("reap group leader").success());
 
     assert!(
         output.status.success(),
