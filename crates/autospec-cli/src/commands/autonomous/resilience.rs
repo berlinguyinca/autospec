@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::CommandFailure;
 use autospec_core::autonomous_lifecycle::{
@@ -17,6 +17,7 @@ use autospec_core::autonomous_lifecycle::{
 
 mod records;
 mod spawn;
+mod startup_transaction;
 pub(super) use spawn::{assert_lifecycle_before_spawn, renew_lifecycle};
 
 use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
@@ -678,7 +679,7 @@ pub(super) fn adopt_lifecycle(
     token: &str,
 ) -> Result<ConductorLease, LifecycleLeaseError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
-    retry_inherited_startup_transaction(|| store.adopt(token)).map_err(store_error_to_lease_error)
+    startup_transaction::retry(|| store.adopt(token)).map_err(store_error_to_lease_error)
 }
 
 pub(super) fn admit_owned_lifecycle(
@@ -701,22 +702,8 @@ pub(super) fn admit_owned_lifecycle(
         DEFAULT_LIFETIME_ISSUES,
     )
     .map_err(lifecycle_admission_to_lease_error)?;
-    retry_inherited_startup_transaction(|| store.admit_owned(lease, issue, usage_cap, issue_cap))
+    startup_transaction::retry(|| store.admit_owned(lease, issue, usage_cap, issue_cap))
         .map_err(store_error_to_lease_error)
-}
-
-fn retry_inherited_startup_transaction<T>(
-    mut operation: impl FnMut() -> Result<T, StoreError>,
-) -> Result<T, StoreError> {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        match operation() {
-            Err(StoreError::Held) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            result => return result,
-        }
-    }
 }
 
 pub(super) fn start_lifecycle_heartbeat(
@@ -1146,35 +1133,10 @@ mod tests {
     use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
-    use std::cell::Cell;
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn inherited_startup_retries_only_transient_transaction_ownership() {
-        let held_attempts = Cell::new(0_u8);
-        let adopted = retry_inherited_startup_transaction(|| {
-            let attempt = held_attempts.get().saturating_add(1);
-            held_attempts.set(attempt);
-            if attempt < 3 {
-                Err(StoreError::Held)
-            } else {
-                Ok("adopted")
-            }
-        });
-        assert!(matches!(adopted, Ok("adopted")));
-        assert_eq!(held_attempts.get(), 3);
-
-        let mismatch_attempts = Cell::new(0_u8);
-        let mismatch = retry_inherited_startup_transaction::<()>(|| {
-            mismatch_attempts.set(mismatch_attempts.get().saturating_add(1));
-            Err(StoreError::TokenMismatch)
-        });
-        assert!(matches!(mismatch, Err(StoreError::TokenMismatch)));
-        assert_eq!(mismatch_attempts.get(), 1);
-    }
 
     fn assert_token_mismatch<T>(operation: impl FnMut() -> Result<T, StoreError>) {
         assert!(matches!(

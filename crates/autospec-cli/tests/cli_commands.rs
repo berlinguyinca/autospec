@@ -2126,10 +2126,7 @@ fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
     assert!(stdout.contains("\"subcommand\":\"stop\""));
     assert!(stdout.contains("\"repo\":\"berlinguyinca/autospec\""));
     assert!(stdout.contains("\"stopped\":2"));
-    assert!(
-        stdout.contains("\"draining\":true"),
-        "unexpected immediate-stop output: {stdout}"
-    );
+    assert!(stdout.contains("\"draining\":true"));
 
     let target_status = autonomous_status(&operator_dir, &log_dir, "berlinguyinca/autospec");
     assert!(target_status.contains("\"conductor\":{\"running\":true"));
@@ -3196,12 +3193,7 @@ fn autonomous_start_force_replaces_unleased_legacy_conductor_metadata() {
         .expect("autospec autonomous start runs");
     let replacement = read_pid(&scope, "conductor");
 
-    assert!(
-        output.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert_ne!(original, replacement);
     assert!(!process_is_alive(&original));
     assert!(process_is_alive(&replacement));
@@ -4084,12 +4076,7 @@ fn start_sleeping_autonomous_with_state(
         .env("PATH", hermetic_autonomous_path(operator_dir))
         .output()
         .expect("autospec autonomous start runs");
-    assert!(
-        output.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
 }
 
 fn make_git_repo(repo_dir: &std::path::Path, remote: Option<&str>) {
