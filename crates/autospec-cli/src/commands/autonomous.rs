@@ -279,12 +279,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
     let launch_mode = validate_launch_mode(&options).map_err(CommandFailure::diagnostic)?;
-    if options.dry_run
-        && matches!(
-            options.subcommand.as_str(),
-            "start" | "restart" | "resume"
-        )
-    {
+    if is_launch_preview(&options) {
         return preview_launch(&options, launch_mode);
     }
     if requires_autonomous_runtime_support(&options, launch_mode) {
@@ -315,12 +310,19 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
 }
 
-fn requires_autonomous_runtime_support(options: &Options, launch_mode: LaunchMode) -> bool {
-    !options.dry_run
-        && (matches!(
+fn is_launch_preview(options: &Options) -> bool {
+    options.dry_run
+        && matches!(
             options.subcommand.as_str(),
             "start" | "restart" | "resume" | "run-foreground"
-        ) || launch_mode == LaunchMode::Foreground)
+        )
+}
+
+fn requires_autonomous_runtime_support(options: &Options, launch_mode: LaunchMode) -> bool {
+    options.subcommand == "run-foreground"
+        || (!options.dry_run
+            && (matches!(options.subcommand.as_str(), "start" | "restart" | "resume")
+                || launch_mode == LaunchMode::Foreground))
 }
 
 #[cfg(test)]
@@ -349,6 +351,13 @@ mod runtime_support_gate_tests {
         assert!(!requires_autonomous_runtime_support(
             &options,
             LaunchMode::Foreground
+        ));
+
+        options.subcommand = "run-foreground".to_string();
+        assert!(is_launch_preview(&options));
+        assert!(requires_autonomous_runtime_support(
+            &options,
+            LaunchMode::Detached
         ));
     }
 }
