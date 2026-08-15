@@ -399,6 +399,7 @@ fn autonomous_executor_bridge_clears_stale_codex_verdict_before_retry() {
     let result = artifact_root.join("harness-result.txt");
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
+        supervised_executable: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
         argv_zero: None,
         args: vec![launches.display().to_string(), result.display().to_string()],
         current_dir: root.clone(),
@@ -467,6 +468,7 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
     );
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).expect("canonical forking reviewer"),
+        supervised_executable: fs::canonicalize(&harness).expect("canonical forking reviewer"),
         argv_zero: None,
         args: vec![
             result.display().to_string(),

@@ -6387,6 +6387,7 @@ fn execute_supervised_direct_attempt(
     };
     let invocation = ValidatedInvocation {
         program: program.to_path_buf(),
+        supervised_executable: program.to_path_buf(),
         argv_zero: Some(command.argv[0].clone().into()),
         args: command.argv[1..].to_vec(),
         current_dir: worktree.to_path_buf(),
@@ -8745,6 +8746,26 @@ impl ProcessIdentity {
 
     fn matches_live_harness(&self, observed: &Self) -> bool {
         self.same_birth(observed) && self.executable == observed.executable
+    }
+
+    fn matches_live_harness_or_preexec_window(
+        &self,
+        observed: &Self,
+        launched_program: &Path,
+        launched_args: &[String],
+    ) -> bool {
+        if self.matches_live_harness(observed) {
+            return true;
+        }
+        if !self.same_birth(observed) {
+            return false;
+        }
+        if observed.executable == launched_program.to_path_buf() {
+            return true;
+        }
+        let mut pre_exec_argv = vec![launched_program.display().to_string()];
+        pre_exec_argv.extend_from_slice(launched_args);
+        observed.argv_digest == argv_digest(&pre_exec_argv)
     }
 
     fn same_birth(&self, observed: &Self) -> bool {
@@ -15728,6 +15749,7 @@ fn write_output_cursor(file: &File, mut cursor: OutputCursor) -> Result<OutputCu
 #[derive(Clone, Debug)]
 struct ValidatedInvocation {
     program: PathBuf,
+    supervised_executable: PathBuf,
     argv_zero: Option<OsString>,
     args: Vec<String>,
     current_dir: PathBuf,
@@ -16216,6 +16238,11 @@ fn validate_invocation(
     if program != invocation.program {
         return Err("executor program must already be canonical before spawn".to_string());
     }
+    let supervised_executable = fs::canonicalize(&invocation.supervised_executable)
+        .map_err(|error| format!("canonicalize executor supervised executable before spawn: {error}"))?;
+    if supervised_executable != invocation.supervised_executable {
+        return Err("executor supervised executable must already be canonical before spawn".to_string());
+    }
     let current_dir = fs::canonicalize(&invocation.current_dir).map_err(|error| {
         format!("canonicalize executor current directory before spawn: {error}")
     })?;
@@ -16233,6 +16260,7 @@ fn validate_invocation(
     }
     Ok(ValidatedInvocation {
         program,
+        supervised_executable,
         argv_zero: None,
         args: invocation.args.clone(),
         current_dir,
@@ -16254,6 +16282,8 @@ fn supervise_harness(
     let mut fixture = harness.clone();
     fixture.program = fs::canonicalize(&fixture.program)
         .map_err(|error| format!("canonicalize fixture program: {error}"))?;
+    fixture.supervised_executable = fs::canonicalize(&fixture.supervised_executable)
+        .map_err(|error| format!("canonicalize fixture supervised executable: {error}"))?;
     fixture.current_dir = fs::canonicalize(&fixture.current_dir)
         .map_err(|error| format!("canonicalize fixture current directory: {error}"))?;
     let validated = validate_invocation(&fixture, &expected_worktree)?;
@@ -16283,6 +16313,8 @@ fn supervise_harness_with_claim_renewal(
     let mut fixture = harness.clone();
     fixture.program = fs::canonicalize(&fixture.program)
         .map_err(|error| format!("canonicalize fixture program: {error}"))?;
+    fixture.supervised_executable = fs::canonicalize(&fixture.supervised_executable)
+        .map_err(|error| format!("canonicalize fixture supervised executable: {error}"))?;
     fixture.current_dir = fs::canonicalize(&fixture.current_dir)
         .map_err(|error| format!("canonicalize fixture current directory: {error}"))?;
     let validated = validate_invocation(&fixture, &expected_worktree)?;
@@ -18363,7 +18395,7 @@ fn spawn_blocked_harness(
                 captured_process = Some(Box::new(ProcessIdentity {
                     pid: harness_birth.pid,
                     process_group: harness_birth.process_group,
-                    executable: harness.program.clone(),
+                    executable: harness.supervised_executable.clone(),
                     argv_digest: argv_digest(&harness.args),
                     boot_id: harness_birth.boot_id.clone(),
                     start_identity: harness_birth.start_identity.clone(),
@@ -18691,7 +18723,7 @@ fn launch_and_supervise(
     let process = ProcessIdentity {
         pid: birth.pid,
         process_group: birth.process_group,
-        executable: harness.program.clone(),
+        executable: harness.supervised_executable.clone(),
         argv_digest: argv_digest(&harness.args),
         boot_id: birth.boot_id,
         start_identity: birth.start_identity,
@@ -18835,7 +18867,13 @@ fn launch_and_supervise(
             }
 
             match observe_process_identity(process.pid, &process.argv_digest)? {
-                Some(observed) if process.matches_live_harness(&observed) => {
+                Some(observed)
+                    if process.matches_live_harness_or_preexec_window(
+                        &observed,
+                        &harness.program,
+                        &harness.args,
+                    ) =>
+                {
                     if !guard.child_mut().processes.leader.is_live()? {
                         return Err("executor supervisor exited while its harness remained live"
                             .to_string());
