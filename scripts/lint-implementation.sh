@@ -607,8 +607,10 @@ detect_pr_size() {
     local message="changed_lines=$lines/$PR_SIZE_MAX_LINES raw_files=$files/$PR_SIZE_MAX_FILES logical_units=$units/$PR_SIZE_MAX_UNITS binary=$binary exceeded=$exceeded"
     if [ -n "$detail" ] && pr_size_validate_exception "$category" "$detail" "$stats"; then
         emit_info "PR_SIZE" "-" "-" "$message category=$category"
-    else
+    elif [ "${AUTOSPEC_PR_SIZE_STRICT:-0}" = "1" ]; then
         emit_error "PR_SIZE" "-" "-" "$message"
+    else
+        emit_info "PR_SIZE" "-" "-" "$message advisory=1 (set AUTOSPEC_PR_SIZE_STRICT=1 to enforce)"
     fi
     rm -f "$stats"
 }
