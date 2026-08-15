@@ -1,8 +1,8 @@
 // executor_bridge tests: schema-5 structured review receipts.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::support_base::GitFixture;
 use super::support_invocation::implementation_proof_fixture;
+use crate::commands::autonomous::executor_bridge as bridge;
 use autospec_core::autonomous::review_policy::{classify_review_requirements, ReviewPolicyInput};
 use std::fs;
 use std::path::{Path, PathBuf};

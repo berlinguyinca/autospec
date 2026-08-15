@@ -88,7 +88,7 @@ pub(super) fn supervise(options: Options) -> Result<(), String> {
             // Judge the last relaunch now that it has had a full interval to get going. A spawn
             // returning is not a start: trusting it is what let 1017 doomed conductors each be
             // logged `conductor=running` (berlinguyinca/autospec#3012 section 1).
-            let survived = process_alive(&previous);
+            let survived = process_alive(previous);
             let settled = restart_policy.record_restart(survived);
             if settled {
                 pending_restart = None;

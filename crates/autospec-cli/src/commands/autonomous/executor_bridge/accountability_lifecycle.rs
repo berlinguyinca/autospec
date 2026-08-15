@@ -8,14 +8,12 @@ pub(crate) enum BridgeLifecycleBoundary {
     Merged { pull_request: u64 },
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn run_executor_bridge(
     request: &ExecutorBridgeRequest,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     run_executor_bridge_observed(request, |_| Ok(()))
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn run_executor_bridge_observed(
     request: &ExecutorBridgeRequest,
     mut observe: impl FnMut(BridgeLifecycleBoundary) -> Result<(), String>,
@@ -23,7 +21,6 @@ pub(crate) fn run_executor_bridge_observed(
     run_executor_bridge_with_codex_probe_observed(request, preflight_codex_sandbox, &mut observe)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn run_executor_bridge_with_codex_probe(
     request: &ExecutorBridgeRequest,
     codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,

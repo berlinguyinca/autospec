@@ -2,11 +2,58 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+#[cfg(target_os = "linux")]
+use super::support::inject_heartbeat_boundary;
+use super::support::{startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV};
 use crate::commands::claim;
-use super::support::{STARTUP_HEARTBEAT_ENV, inject_heartbeat_boundary, startup_heartbeat_fixture};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn startup_heartbeat_process_identity_is_stable_for_the_current_process() {
+    let first =
+        claim::startup_process_identity(std::process::id()).expect("portable process identity");
+    let second = claim::startup_process_identity(std::process::id())
+        .expect("stable portable process identity");
+
+    assert_eq!(first, second);
+    assert!(!first.0.is_empty() && !first.1.is_empty() && !first.2.is_empty());
+    assert!(first.2.parse::<u64>().is_ok());
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn portable_publication_is_idempotent_but_rejects_another_generation() {
+    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let (sandbox, _) = startup_heartbeat_fixture("portable-publication");
+    let heartbeat_root = sandbox.join("heartbeats");
+    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+    unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root) };
+    let publish = |claim_id| {
+        claim::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker",
+            claim_id,
+            Some("session-a"),
+        )
+    };
+
+    publish("claim-a").expect("initial publication");
+    publish("claim-a").expect("idempotent replay");
+    let error = publish("claim-b").expect_err("generation conflict");
+    assert_eq!(error.message, "heartbeat publication target conflicts");
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value) },
+        None => unsafe { std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR") },
+    }
+    std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+}
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -193,9 +240,7 @@ fn startup_heartbeat_atomic_publication() {
         )
     };
     assert!(attempt(43, "session-b", prepared, ("session", "before-link")).is_err());
-    assert!(
-        !repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists()
-    );
+    assert!(!repo.join("43.json").exists() && !sessions.join("73657373696f6e2d62.json").exists());
 
     std::fs::remove_file(&issue).unwrap();
     let transaction_umask = umask(Mode::from_bits_truncate(0o777));
@@ -383,9 +428,7 @@ fn startup_heartbeat_restrictive_umask() {
         }
         Ok(())
     };
-    assert!(
-        claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err()
-    );
+    assert!(claim::prepare_heartbeat_root_parent_with_hook(&root, &mut ancestor_failure).is_err());
     assert!(
         parent.is_dir(),
         "published parent remains pending durability"

@@ -1227,5 +1227,4 @@ mod tests {
         assert_eq!(calls, 3);
         assert_eq!(error, "still invalid");
     }
-
 }

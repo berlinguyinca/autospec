@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
@@ -15,14 +17,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[path = "support/autonomous_accountability_acquisition.rs"] mod autonomous_accountability_acquisition;
+#[path = "support/autonomous_accountability_acquisition.rs"]
+mod autonomous_accountability_acquisition;
+#[path = "support/autonomous_conductor_process.rs"]
+mod autonomous_conductor_process;
+use autonomous_conductor_process::{
+    process_identity, process_is_running, terminate_process, terminate_process_group,
+};
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 
-#[cfg(target_os = "linux")] #[path = "support/foreground_fixture_git.rs"] mod foreground_fixture_git;
-#[cfg(target_os = "linux")] use foreground_fixture_git::seed_preserved_issue_branch;
+#[cfg(target_os = "linux")]
+#[path = "support/foreground_fixture_git.rs"]
+mod foreground_fixture_git;
+#[cfg(target_os = "linux")]
+use foreground_fixture_git::seed_preserved_issue_branch;
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -6646,7 +6657,13 @@ printf '%s\n' '[]' > "$report"
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY", &self.accountability)
-            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/foreground_accountability_gh.sh"))
+            .env(
+                "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/foreground_accountability_gh.sh"
+                ),
+            )
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
@@ -7521,39 +7538,4 @@ fn wait_for_file_contents(path: &Path, expected: &str) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("{} did not contain {expected}", path.display());
-}
-
-fn process_is_running(pid: u32) -> bool {
-    Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && !String::from_utf8_lossy(&output.stdout)
-                    .trim_start()
-                    .starts_with('Z')
-        })
-}
-
-fn process_identity(pid: u32) -> Option<(u32, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(") ")?;
-    let fields = fields.split_whitespace().collect::<Vec<_>>();
-    Some((fields.get(2)?.parse().ok()?, fields.get(19)?.parse().ok()?))
-}
-
-fn terminate_process_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-fn terminate_process(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }

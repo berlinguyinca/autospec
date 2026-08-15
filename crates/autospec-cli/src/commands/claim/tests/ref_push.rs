@@ -2,11 +2,17 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::super::{ClaimRefAdvance, advance_claim_ref_in, private_claim_git_dir_in, read_claim_ref_in, validated_claim_remote};
+use super::super::{
+    advance_claim_ref_in, private_claim_git_dir_in, read_claim_ref_in, validated_claim_remote,
+    ClaimRefAdvance,
+};
+use super::support::{
+    claim_record, git_stdout, race_claim_ref_transitions, seed_claim, source_function,
+    ClaimRefFixture,
+};
+use crate::commands::claim;
 use autospec_core::claim::RunStateRecord;
 use std::path::Path;
-use crate::commands::claim;
-use super::support::{ClaimRefFixture, claim_record, git_stdout, race_claim_ref_transitions, seed_claim, source_function};
 
 #[test]
 fn claim_ref_rejects_a_stale_terminal_transition_after_takeover() {
@@ -329,11 +335,10 @@ fn claim_ref_https_push_uses_gh_credential_helper_without_a_token_argument() {
             .expect("enterprise clone URL"),
         "https://github.enterprise.example/owner/repo.git"
     );
-    assert!(validated_claim_remote(
-        "owner/repo",
-        "https://github.enterprise.example/other/repo"
-    )
-    .is_err());
+    assert!(
+        validated_claim_remote("owner/repo", "https://github.enterprise.example/other/repo")
+            .is_err()
+    );
 }
 
 #[test]
@@ -360,10 +365,10 @@ fn claim_ref_private_git_dirs_are_distinct_and_leave_target_git_metadata_unchang
 
     let fixture = ClaimRefFixture::new("private-git");
     let state_root = fixture.root.join("private-state");
-    let first = private_claim_git_dir_in(&state_root, "owner/repo")
-        .expect("first private claim Git dir");
-    let second = private_claim_git_dir_in(&state_root, "owner/repo")
-        .expect("second private claim Git dir");
+    let first =
+        private_claim_git_dir_in(&state_root, "owner/repo").expect("first private claim Git dir");
+    let second =
+        private_claim_git_dir_in(&state_root, "owner/repo").expect("second private claim Git dir");
     assert_ne!(first.path, second.path);
     assert_eq!(
         std::fs::metadata(&first.path)

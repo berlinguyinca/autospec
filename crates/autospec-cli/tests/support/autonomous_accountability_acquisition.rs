@@ -1,4 +1,4 @@
-use super::{ForegroundFixture, sha256_hex};
+use super::{sha256_hex, ForegroundFixture};
 use std::fs;
 use std::path::Path;
 
@@ -42,12 +42,7 @@ fn active_remote_epic_adopts_the_released_predecessor_generation_after_real_acqu
     );
     fs::write(
         &fixture.accountability,
-        accountability_contract::github::compose_managed_body(
-            &marker,
-            projection,
-            &manifest,
-            "",
-        ),
+        accountability_contract::github::compose_managed_body(&marker, projection, &manifest, ""),
     )
     .unwrap();
     let lifecycle = fixture.resilience_state_path();

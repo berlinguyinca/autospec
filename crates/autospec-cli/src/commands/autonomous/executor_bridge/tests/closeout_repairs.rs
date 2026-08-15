@@ -2,11 +2,11 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     BridgePhase, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
 };
 use super::support_base::{git, git_stdout, zero_effect_classifier_fixture};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

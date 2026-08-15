@@ -148,7 +148,8 @@ mod tests {
     fn the_two_implementations_agree_on_which_rules_an_issue_may_wave_through() {
         // PR_SIZE governs commit shape and is not opt-outable, whatever the issue says —
         // the shell drops it from the skip set for the same reason.
-        let body = "Guardian: skip-PR_SIZE # generated migration\nGuardian: skip-TODO_LEFT # tracked\n";
+        let body =
+            "Guardian: skip-PR_SIZE # generated migration\nGuardian: skip-TODO_LEFT # tracked\n";
         let advisory = advisory_skip_set(&options_without_env(), Some(body));
         assert!(!advisory.contains(ImplementationLintRule::PrSize.id()));
         assert!(advisory.contains(ImplementationLintRule::TodoLeft.id()));

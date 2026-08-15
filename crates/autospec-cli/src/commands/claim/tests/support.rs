@@ -3,8 +3,11 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more
 // than one module builds on, so they are `pub(super)` rather than private.
 
-use super::super::{ClaimRefAdvance, advance_claim_ref_in, lifecycle_claim_evidence_from_record};
-use autospec_core::autonomous_lifecycle::{ClaimBranch, ClaimEvidence, IssueNumber, RepositoryScope, WorkerId};
+use super::super::{advance_claim_ref_in, lifecycle_claim_evidence_from_record, ClaimRefAdvance};
+use crate::commands::claim;
+use autospec_core::autonomous_lifecycle::{
+    ClaimBranch, ClaimEvidence, IssueNumber, RepositoryScope, WorkerId,
+};
 use autospec_core::claim::RunStateRecord;
 #[cfg(unix)]
 use std::io::Write;
@@ -13,7 +16,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
-use crate::commands::claim;
 
 pub(super) static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
 
@@ -302,7 +304,9 @@ pub(super) fn claim_record(worker: &str, claim_id: &str, state: &str) -> RunStat
     .with_claim_id(claim_id)
 }
 
-pub(super) fn lifecycle_evidence(record: &RunStateRecord) -> Result<ClaimEvidence, claim::CommandFailure> {
+pub(super) fn lifecycle_evidence(
+    record: &RunStateRecord,
+) -> Result<ClaimEvidence, claim::CommandFailure> {
     lifecycle_claim_evidence_from_record(
         RepositoryScope::try_from("owner/repo").expect("repository scope"),
         IssueNumber::new(42).expect("issue"),
@@ -475,9 +479,8 @@ pub(super) fn assert_bridge_transition_projection(
     let (_, label_claim) = label_claim
         .split_once("\n\n")
         .expect("claim commit message");
-    let prepared =
-        claim::parse_claim_ref_message("a".repeat(40), label_claim, "owner/repo", 42)
-            .expect("prepared terminal claim");
+    let prepared = claim::parse_claim_ref_message("a".repeat(40), label_claim, "owner/repo", 42)
+        .expect("prepared terminal claim");
     assert_eq!(prepared.record.state, "claimed");
     assert_eq!(prepared.record.step, expected_prepared_step);
     let comment_value: serde_json::Value =

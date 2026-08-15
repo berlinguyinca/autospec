@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,9 @@ use autospec_core::autonomous::drain::{
 use autospec_core::autonomous_lifecycle::RepositoryScope;
 
 use super::{json_escape, Command, CommandFailure, Options, RunLayout};
+
+mod process;
+use process::*;
 
 const GITHUB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -398,16 +400,7 @@ fn termination_attempt_end(
 fn spawn_child(options: &Options) -> Result<Child, CommandFailure> {
     let input = DrainExecutorInput::omx_autospec_run(&options.repo_dir)
         .map_err(CommandFailure::diagnostic)?;
-    Command::new(input.program())
-        .args(input.arguments())
-        .current_dir(&options.repo_dir)
-        .process_group(0)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot start autonomous drain: {error}"))
-        })
+    spawn_input(options, &input)
 }
 
 fn take_output_readers(
@@ -1071,66 +1064,6 @@ fn github_snapshot(
     )))
 }
 
-fn gh_output<const N: usize>(
-    arguments: [&str; N],
-    watched_child: &mut Child,
-) -> Result<GithubOutput, CommandFailure> {
-    let mut observer = match Command::new("gh")
-        .args(arguments)
-        .process_group(0)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return Ok(GithubOutput::Unavailable),
-    };
-    let mut stdout = observer
-        .stdout
-        .take()
-        .ok_or_else(|| CommandFailure::diagnostic("cannot capture drain GitHub output"))?;
-    let reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        stdout.read_to_end(&mut output).map(|_| output)
-    });
-    let started = Instant::now();
-    loop {
-        if let Some(status) = watched_child.try_wait().map_err(child_status_error)? {
-            stop_observer(&mut observer);
-            let _ = reader.join();
-            return Ok(GithubOutput::ChildExited(status));
-        }
-        if let Some(status) = observer.try_wait().map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot inspect drain progress: {error}"))
-        })? {
-            let output = reader
-                .join()
-                .ok()
-                .and_then(Result::ok)
-                .map(|output| String::from_utf8_lossy(&output).to_string());
-            return Ok(match (status.success(), output) {
-                (true, Some(output)) => GithubOutput::Available(output),
-                _ => GithubOutput::Unavailable,
-            });
-        }
-        if started.elapsed() >= GITHUB_SNAPSHOT_TIMEOUT {
-            stop_observer(&mut observer);
-            let _ = reader.join();
-            return Ok(GithubOutput::Unavailable);
-        }
-        thread::sleep(OBSERVER_POLL_INTERVAL);
-    }
-}
-
-fn stop_observer(observer: &mut Child) {
-    let process_group = format!("-{}", observer.id());
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &process_group])
-        .status();
-    let _ = observer.kill();
-    let _ = observer.wait();
-}
-
 fn persist_observation(
     layout: &RunLayout,
     decision: DrainDecision,
@@ -1199,7 +1132,7 @@ fn child_exit_code_json(decision: DrainDecision) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::time::{Duration, Instant};

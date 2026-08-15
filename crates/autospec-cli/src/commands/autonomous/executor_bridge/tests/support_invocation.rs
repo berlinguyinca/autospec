@@ -3,7 +3,6 @@
 // Split out of tests.rs; see the note in that file. These are the helpers more than
 // one test module builds on, so they are `pub(super)` rather than private.
 
-use crate::commands::autonomous::executor_bridge as bridge;
 use super::super::{
     resolve_base, BridgeIdentity, BridgePhase, ExecutorBridgeRequest, HarnessInvocation,
     HarnessKind, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
@@ -12,6 +11,7 @@ use super::super::{
 #[cfg(target_os = "linux")]
 use super::support_base::DetachedForkedCleanup;
 use super::support_base::{git, git_stdout, GitFixture, TEST_SEQUENCE};
+use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
@@ -413,6 +413,16 @@ pub(super) fn implementation_proof_fixture(
     );
     let mut state = supervision_state(&fixture);
     state.identity.worktree = worktree.canonicalize().expect("canonical worktree");
+    let common_dir = PathBuf::from(git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--git-common-dir"],
+    ));
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        state.identity.worktree.join(common_dir)
+    };
+    fs::create_dir_all(common_dir.join("hooks")).expect("create fixture Git hook directory");
     state.phase = BridgePhase::ImplementationComplete;
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
