@@ -362,6 +362,10 @@ fn autonomous_executor_bridge_live_sidecar_beats_stale_completed_retirement() {
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
+            supervised_executable: invocation
+                .program
+                .canonicalize()
+                .expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir

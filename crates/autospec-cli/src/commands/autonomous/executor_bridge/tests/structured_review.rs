@@ -182,6 +182,7 @@ fn structured_review_normalizer_emits_legacy_lgtm_after_json_validation() {
     bridge::ensure_private_directory(&artifact_root).unwrap();
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).unwrap(),
+        supervised_executable: fs::canonicalize(&harness).unwrap(),
         argv_zero: None,
         args: Vec::new(),
         current_dir: root.clone(),
@@ -226,6 +227,7 @@ fn structured_review_normalizer_rejects_wrong_commit_before_lgtm() {
     bridge::ensure_private_directory(&artifact_root).unwrap();
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).unwrap(),
+        supervised_executable: fs::canonicalize(&harness).unwrap(),
         argv_zero: None,
         args: Vec::new(),
         current_dir: root.clone(),
@@ -264,6 +266,7 @@ fn structured_review_normalizer_rejects_unbound_integration_citations() {
     bridge::ensure_private_directory(&artifact_root).unwrap();
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).unwrap(),
+        supervised_executable: fs::canonicalize(&harness).unwrap(),
         argv_zero: None,
         args: Vec::new(),
         current_dir: root.clone(),

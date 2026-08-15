@@ -1,21 +1,25 @@
-// executor_bridge tests: snapshot / identity — 11 cases.
+// executor_bridge tests: snapshot / identity — 13 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
 use super::super::{
-    supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
+    supervise_harness, BridgePhase, HarnessInvocation, MutationSnapshot, PersistedInvocation,
+    ProcessIdentity, SupervisionOutcome,
 };
 use super::support_base::{
-    git, git_stdout, observe_spawned_identity, test_environment, DetachedForkedCleanup, GitFixture,
+    git, git_stdout, observe_spawned_identity, test_environment, write_executable,
+    DetachedForkedCleanup, GitFixture,
 };
-use super::support_invocation::{shell_invocation, supervision_config, supervision_state};
+use super::support_invocation::{
+    persisted_invocation, shell_invocation, supervision_config, supervision_state,
+};
 use crate::commands::autonomous::executor_bridge as bridge;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -452,4 +456,82 @@ fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
     assert!(fs::read_to_string(event_log)
         .expect("structured preverification failure")
         .contains("\"event\":\"child_supervision_error\""));
+}
+
+#[test]
+fn autonomous_executor_bridge_pre_exec_window_allows_only_same_birth_launcher_images() {
+    // Break caught: an adapter's interpreter image before its same-PID exec was mistaken for
+    // PID reuse; pre-exec tolerance must stay anchored on the immutable birth identity.
+    let expected = persisted_invocation().process.expect("process identity");
+    let launched_program = Path::new("/bin/adapter");
+    let launched_args = vec!["--task".to_string()];
+
+    let mut observed = expected.clone();
+    observed.executable = launched_program.to_path_buf();
+    assert!(expected
+        .matches_live_harness_or_preexec_window(&observed, launched_program, &launched_args));
+
+    observed.executable = PathBuf::from("/usr/bin/bash");
+    observed.argv_digest = bridge::argv_digest(&[
+        launched_program.display().to_string(),
+        "--task".to_string(),
+    ]);
+    assert!(expected
+        .matches_live_harness_or_preexec_window(&observed, launched_program, &launched_args));
+
+    for mutate in [
+        |identity: &mut ProcessIdentity| identity.pid += 1,
+        |identity: &mut ProcessIdentity| identity.process_group += 1,
+        |identity: &mut ProcessIdentity| {
+            identity.executable = PathBuf::from("/other");
+            identity.argv_digest = bridge::argv_digest(&["/other".to_string()]);
+        },
+        |identity: &mut ProcessIdentity| identity.boot_id = "other-boot".to_string(),
+        |identity: &mut ProcessIdentity| identity.start_identity = "other-start".to_string(),
+    ] {
+        let mut changed = expected.clone();
+        mutate(&mut changed);
+        assert!(
+            !expected
+                .matches_live_harness_or_preexec_window(&changed, launched_program, &launched_args)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn autonomous_executor_bridge_supervision_adopts_adapter_exec_replacement() {
+    // Break caught: supervision aborted on the adapter's same-PID exec replacement because the
+    // recorded identity named the launched adapter, not the supervised harness executable.
+    let fixture = GitFixture::new("supervise-adapter-exec");
+    let mut state = supervision_state(&fixture);
+    let state_path = fixture.root.join("state/invocation.json");
+    let event_log = fixture.root.join("log/executor.jsonl");
+    let adapter = fixture.root.join("containment-adapter");
+    write_executable(
+        &adapter,
+        "#!/bin/sh\nsleep 0.3\nexec /usr/bin/sleep 0.2\n",
+    );
+    let invocation = HarnessInvocation {
+        program: fs::canonicalize(&adapter).expect("canonical adapter"),
+        supervised_executable: fs::canonicalize("/usr/bin/sleep").expect("canonical sleep"),
+        args: Vec::new(),
+        current_dir: fixture.repo.clone(),
+        requires_mutation_snapshots: false,
+    };
+    let snapshot =
+        MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+    let outcome = supervise_harness(
+        &state_path,
+        &event_log,
+        &mut state,
+        &invocation,
+        &snapshot,
+        supervision_config(2_000),
+    )
+    .expect("supervision must adopt the adapter's exec replacement");
+
+    assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+    assert!(state.process.is_none());
 }
