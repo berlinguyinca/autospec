@@ -1949,7 +1949,16 @@ fn recover_authoritative_stale_startup(
             previous_claim_id: None,
         });
     }
-    let branch_blocked = branch_blocks_stale_recovery(&selected.record.branch, base_branch);
+    let branch_blocked = match branch_blocks_stale_recovery(&selected.record.branch, base_branch) {
+        Ok(blocked) => blocked,
+        Err(()) => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "claim_evidence_or_fresh_state".to_string(),
+                previous_claim_id: None,
+            });
+        }
+    };
     let authorized_prior = if branch_blocked {
         expired_prior_generation_heartbeat(repo, issue, &selected.record)?
     } else {
@@ -6790,9 +6799,9 @@ fn branch_ref_exists(branch: &str) -> bool {
     }
 }
 
-fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> bool {
+fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> Result<bool, ()> {
     if branch.trim().is_empty() {
-        return false;
+        return Ok(false);
     }
     let local = format!("refs/heads/{branch}");
     match Command::new("git")
@@ -6801,31 +6810,31 @@ fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> bool
     {
         Ok(status) if status.success() => {
             let Some(base_branch) = base_branch else {
-                return true;
+                return Ok(true);
             };
             if !local_branch_is_integrated_and_inactive(&local, base_branch) {
-                return true;
+                return Ok(true);
             }
         }
         Ok(status) if status.code() == Some(1) => {}
-        Ok(_) | Err(_) => return true,
+        Ok(_) | Err(_) => return Err(()),
     }
     for reference in [format!("refs/remotes/origin/{branch}")] {
         match Command::new("git")
             .args(["show-ref", "--verify", "--quiet", &reference])
             .status()
         {
-            Ok(status) if status.success() => return true,
+            Ok(status) if status.success() => return Ok(true),
             Ok(status) if status.code() == Some(1) => {}
-            Ok(_) | Err(_) => return true,
+            Ok(_) | Err(_) => return Err(()),
         }
     }
     match Command::new("git")
         .args(["ls-remote", "--heads", "origin", branch])
         .output()
     {
-        Ok(output) if output.status.success() => !output.stdout.is_empty(),
-        Ok(_) | Err(_) => true,
+        Ok(output) if output.status.success() => Ok(!output.stdout.is_empty()),
+        Ok(_) | Err(_) => Err(()),
     }
 }
 

@@ -249,7 +249,12 @@ run_researcher_bounded() {
     _script="$1"
     _json="$2"
     _err="$3"
-    setsid bash "$_script" >"$_json" 2>"$_err" &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash "$_script" >"$_json" 2>"$_err" &
+    else
+        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+            bash "$_script" >"$_json" 2>"$_err" &
+    fi
     _pid="$!"
     _started="$(date +%s)"
     while kill -0 "$_pid" 2>/dev/null; do

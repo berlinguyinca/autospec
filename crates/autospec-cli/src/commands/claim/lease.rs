@@ -313,6 +313,13 @@ where
         &RunStateRecord,
     ) -> Result<super::ClaimRefAdvance, super::CommandFailure>,
 {
+    if selected
+        .as_ref()
+        .map(|head| &head.record)
+        .is_some_and(|record| record.state == "claimed" && super::branch_ref_exists(&record.branch))
+    {
+        return Ok(None);
+    }
     let owner_holds = match selected.as_ref().map(|head| &head.record) {
         Some(record) if record.state == "claimed" => owner_still_holds(repo, issue, record)?,
         None => false,

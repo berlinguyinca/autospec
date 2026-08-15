@@ -3,8 +3,18 @@ set -eu
 
 # A launched conductor must remain alive for lifecycle tests, but the parent start/restart
 # command now has to create its mandatory accountability epic before it can detach.
+fixture_mode=${AUTOSPEC_TEST_AUTONOMOUS_GH_MODE:-sleep}
 if [ "${AUTOSPEC_ACCOUNTABILITY_REQUIRED:-}" = 1 ]; then
+  if [ "$fixture_mode" = crash ]; then
+    kill -KILL "$PPID"
+    exit 1
+  fi
   while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
+  exit 1
+fi
+
+if [ "$fixture_mode" = missing-health ] &&
+   [ "$*" = "api repos/berlinguyinca/autospec/branches/missing-health" ]; then
   exit 1
 fi
 

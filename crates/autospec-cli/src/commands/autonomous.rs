@@ -5761,6 +5761,9 @@ fn observe_unit_process_identity(pid: &str) -> Result<Option<ProcessIdentity>, S
     let pid = pid
         .parse::<u32>()
         .map_err(|_| "autonomous process PID is invalid".to_string())?;
+    if executor_bridge::process_is_terminated(pid)? {
+        return Ok(None);
+    }
     let Some((container_id, _boot_id, process_start)) =
         executor_bridge::observe_runtime_process_identity(pid)?
     else {

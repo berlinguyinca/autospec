@@ -46,7 +46,14 @@ PY
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="SILENT_FAILURE")] | length')" -eq 1 ]
 
-    sed -i 's/return None/print("warning: device sync failed")\n        return None/' "$TMP/repo/src/sync.py"
+    cat > "$TMP/repo/src/sync.py" <<'PY'
+def sync_device(client):
+    try:
+        return client.list_devices()
+    except Exception:
+        print("warning: device sync failed")
+        return None
+PY
     run bash "$SCRIPT" scan --repo-root "$TMP/repo"
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="SILENT_FAILURE")] | length')" -eq 0 ]

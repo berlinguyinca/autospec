@@ -6,10 +6,22 @@
     "justification": "Subcommand dispatch matches on CLI verb strings supplied by the operator; these are the command surface, not a domain representation."
   },
   {
+    "file": "crates/autospec-cli/src/commands/autonomous/accountability.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The accountability adapter validates managed Markdown markers and GitHub issue labels; these protocol strings are not domain representations."
+  },
+  {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This parser validates shell operators, owned artifact suffixes, and Closeout labels; serde is unrelated to those protocol strings."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/launch.rs",
+    "function": "validate_launch_mode",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The branches enforce distinct incompatible CLI option combinations and return different diagnostics; a table would obscure the validation contract."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
@@ -76,6 +88,12 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/support/autonomous_recovery_accountability.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The test fixture asserts exact managed-marker and recovery-event protocol strings rather than encoding application domain meaning."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",

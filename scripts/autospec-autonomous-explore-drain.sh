@@ -170,6 +170,14 @@ export AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD"
 
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-explore-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-explore-drain.%s' "$$")"
 
+run_in_new_session() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@"
+    else
+        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+    fi
+}
+
 # Pass ownership across the harness boundary so a detached explore script can
 # terminate itself when this drain is force-restarted or otherwise disappears.
 export AUTOSPEC_EXPLORE_PARENT_PID="$$"
@@ -178,7 +186,7 @@ export AUTOSPEC_EXPLORE_PARENT_PID="$$"
 # stdout is reserved for the single contract JSON line the conductor parses.
 case "$HARNESS_KIND" in
     codex)
-        setsid "$HARNESS_DISPATCHER" exec \
+        run_in_new_session "$HARNESS_DISPATCHER" exec \
             --cd "$REPO_DIR" \
             --dangerously-bypass-approvals-and-sandbox \
             "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
@@ -186,12 +194,12 @@ case "$HARNESS_KIND" in
     claude)
         (
             cd "$REPO_DIR"
-            exec setsid "$HARNESS_DISPATCHER" -p --dangerously-skip-permissions \
+            run_in_new_session "$HARNESS_DISPATCHER" -p --dangerously-skip-permissions \
                 "$SKILL_INVOCATION"
         ) > "$HARNESS_LOG" 2>&1 &
         ;;
     opencode)
-        setsid "$HARNESS_DISPATCHER" run \
+        run_in_new_session "$HARNESS_DISPATCHER" run \
             --dir "$REPO_DIR" \
             --dangerously-skip-permissions \
             "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
@@ -257,7 +265,7 @@ fi
 if grep -q 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed' "$HARNESS_LOG" 2>/dev/null; then
     DIRECT_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-direct-explore.XXXXXX" 2>/dev/null || printf '/tmp/autospec-direct-explore.%s' "$$")"
     printf 'autospec-autonomous-explore-drain: harness skipped verifier; running direct explore fallback\n' >&2
-    setsid env AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD" AUTOSPEC_EXPLORE_AUTONOMOUS=1 \
+    run_in_new_session env AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD" AUTOSPEC_EXPLORE_AUTONOMOUS=1 \
         bash "$SCRIPT_DIR/autospec-explore.sh" --once >"$DIRECT_LOG" 2>&1 &
     direct_pid="$!"
     direct_started="$(date +%s)"

@@ -404,8 +404,16 @@ normalize_repo_path() {
   case "$path" in
     /*) case "/$path/" in */../*) external_path_identity "$path"; return 0 ;; esac ;;
   esac
+  if case "$path" in /*) true ;; *) false ;; esac; then
+    path_dir="$(dirname "$path")"
+    canonical_dir="$(cd "$path_dir" 2>/dev/null && pwd -P || true)"
+    if [ -n "$canonical_dir" ]; then
+      path="$canonical_dir/$(basename "$path")"
+    fi
+  fi
+  repo_root="$(cd "$REPO" 2>/dev/null && pwd -P || printf '%s' "$REPO")"
   case "$path" in
-    "$REPO"/*) printf '%s' "${path#"$REPO"/}"; return 0 ;;
+    "$repo_root"/*) printf '%s' "${path#"$repo_root"/}"; return 0 ;;
     /*)
       container="$(dirname "$path")"
       foreign_root="$(git -C "$container" rev-parse --show-toplevel 2>/dev/null || true)"

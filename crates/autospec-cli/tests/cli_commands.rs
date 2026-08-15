@@ -6,7 +6,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -661,6 +660,7 @@ fn lint_implementation_caps_a_large_finding_set_at_64() {
             "--diff-file",
             path.to_str().unwrap(),
         ])
+        .env("AUTOSPEC_COMPLEXITY_ENFORCE", "1")
         .output()
         .expect("large implementation lint runs");
 
@@ -1725,14 +1725,6 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
         &repo_dir,
         Some("https://github.com/berlinguyinca/autospec.git"),
     );
-    let bin = fake_bin(
-        &temp,
-        None,
-        Some(
-            "#!/bin/sh\ncase \"$*\" in\n  'api repos/berlinguyinca/autospec/branches/missing-health') exit 1 ;;\n  *) exit 19 ;;\nesac\n",
-        ),
-    );
-
     let output = autospec()
         .args([
             "autonomous",
@@ -1744,7 +1736,8 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
             "--branch",
             "missing-health",
         ])
-        .env("PATH", path_with(&bin))
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .env("AUTOSPEC_TEST_AUTONOMOUS_GH_MODE", "missing-health")
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
         .env("AUTOSPEC_STATE_DIR", temp.join("state"))
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
@@ -3162,7 +3155,7 @@ fn autonomous_start_force_rejects_a_fresh_existing_lease_without_killing_conduct
 }
 
 #[test]
-fn autonomous_start_force_replaces_unleased_legacy_conductor_metadata() {
+fn autonomous_start_force_refuses_unverified_legacy_conductor_metadata() {
     let temp = temp_dir("autospec-autonomous-force-legacy-metadata");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -3191,12 +3184,12 @@ fn autonomous_start_force_replaces_unleased_legacy_conductor_metadata() {
         .env("PATH", hermetic_autonomous_path(&temp))
         .output()
         .expect("autospec autonomous start runs");
-    let replacement = read_pid(&scope, "conductor");
-
-    assert!(output.status.success());
-    assert_ne!(original, replacement);
-    assert!(!process_is_alive(&original));
-    assert!(process_is_alive(&replacement));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exact process identity is unavailable")
+    );
+    assert_eq!(read_pid(&scope, "conductor"), original);
+    assert!(process_is_alive(&original));
     cleanup_pids(&scope);
 }
 
@@ -3722,8 +3715,7 @@ fn autonomous_supervise_reaps_and_relaunches_two_finite_conductors() {
     let repo_dir = temp.join("repo");
     make_git_repo(&repo_dir, None);
     let scope = operator_dir.join("berlinguyinca_autospec");
-    let bin = fake_bin(&temp, None, Some("#!/bin/sh\nexit 1\n"));
-    let path = path_with(&bin);
+    let path = hermetic_autonomous_path(&temp);
 
     let start = autospec()
         .args([
@@ -3743,6 +3735,7 @@ fn autonomous_supervise_reaps_and_relaunches_two_finite_conductors() {
         .env("AUTOSPEC_STATE_DIR", &state_dir)
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_TEST_AUTONOMOUS_GH_MODE", "crash")
         .env("PATH", path)
         .output()
         .expect("autospec autonomous start runs");
@@ -3899,7 +3892,7 @@ fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_o
 }
 
 #[test]
-fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
+fn autonomous_restart_refuses_unverified_legacy_conductor_metadata() {
     let temp = temp_dir("autospec-autonomous-restart-legacy-metadata");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -3929,32 +3922,12 @@ fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
         .env("PATH", hermetic_autonomous_path(&temp))
         .output()
         .expect("autospec autonomous restart runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let new_conductor = read_pid(&scope, "conductor");
-
+    assert_eq!(output.status.code(), Some(2));
     assert!(
-        output.status.success(),
-        "stdout={} stderr={}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr).contains("exact process identity is unavailable")
     );
-    assert!(stdout.contains("\"subcommand\":\"restart\""));
-    assert_ne!(old_conductor, new_conductor);
-    assert!(process_stops(&old_conductor));
-    assert!(
-        process_starts(&new_conductor),
-        "stdout={} stderr={} conductor_log={}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr),
-        std::fs::read_to_string(
-            std::fs::read_to_string(scope.join("conductor.logpath"))
-                .unwrap_or_default()
-                .trim()
-        )
-        .unwrap_or_default()
-    );
-    let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch json");
-    assert!(launch.contains("\"max_cycles\":\"7\""));
+    assert_eq!(read_pid(&scope, "conductor"), old_conductor);
+    assert!(process_is_alive(&old_conductor));
 
     cleanup_pids(&scope);
 }
@@ -4076,7 +4049,12 @@ fn start_sleeping_autonomous_with_state(
         .env("PATH", hermetic_autonomous_path(operator_dir))
         .output()
         .expect("autospec autonomous start runs");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn make_git_repo(repo_dir: &std::path::Path, remote: Option<&str>) {
@@ -4421,10 +4399,7 @@ fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
 }
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let suffix = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir

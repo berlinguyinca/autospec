@@ -88,7 +88,10 @@ jobs:
           printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Bootstrap repository test tools
-        run: bash scripts/dev-bootstrap.sh
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bats ripgrep
+          bash scripts/dev-bootstrap.sh
 
       - name: Clippy (lint)
         run: cargo clippy --workspace --all-targets

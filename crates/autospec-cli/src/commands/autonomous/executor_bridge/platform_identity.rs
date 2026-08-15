@@ -18,6 +18,27 @@ pub(crate) fn current_boot_identity() -> Result<String, String> {
         .ok_or_else(|| "executor boot identity is empty".to_string())
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn process_is_terminated(pid: u32) -> Result<bool, String> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read autonomous process stat: {error}")),
+    };
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| "autonomous process stat is malformed".to_string())?;
+    Ok(stat[close + 1..]
+        .split_whitespace()
+        .next()
+        .is_some_and(|state| matches!(state, "Z" | "X")))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn process_is_terminated(_pid: u32) -> Result<bool, String> {
+    Ok(false)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
     let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;

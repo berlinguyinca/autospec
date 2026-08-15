@@ -548,6 +548,9 @@ Remediate `{title}` at `{file_line}` and prove the security workstream no longer
 - `{row.get('file','')}`
 - `scripts/security-workstream.sh`
 
+## Dependencies
+none
+
 ## Implementation outline
 - Inspect `{file_line}` and apply the smallest remediation for `{row.get('dimension','vuln')}`.
 - Remediation guidance: {row.get('remediation','Re-run the scan and remediate the finding.')}

@@ -47,6 +47,7 @@ teardown() {
   local args_file="$TEST_TMP/autospec-args"
   mkdir -p "$scripts_dir/lib" "$bin_dir"
   cp "$CLI" "$scripts_dir/autospec-autonomous.sh"
+  cp "$REPO_ROOT/scripts/lib/autospec-status-accountability.sh" "$scripts_dir/lib/"
   chmod +x "$scripts_dir/autospec-autonomous.sh"
   cat > "$scripts_dir/lib/autospec-loop.sh" <<'EOF'
 autospec_conductor_run() {
@@ -461,6 +462,7 @@ EOF_STOP
   # start_detached fails loud unless --repo-dir is a real git checkout.
   git -C "$repo_dir" init -q
   cp "$CLI" "$scripts_dir/autospec-autonomous.sh"
+  cp "$REPO_ROOT/scripts/lib/autospec-status-accountability.sh" "$scripts_dir/lib/"
   chmod +x "$scripts_dir/autospec-autonomous.sh"
   cat > "$scripts_dir/lib/autospec-loop.sh" <<'LIBEOF'
 autospec_conductor_run() {
