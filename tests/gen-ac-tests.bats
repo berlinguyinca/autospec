@@ -67,36 +67,34 @@ teardown() {
 }
 
 @test "gen-ac-tests.sh --verify exits 0 on clean dir (no stubs)" {
-  # Write a clean bats file with no skip auto-stub
-  cat > "$BATS_TMPDIR/ac-clean/clean.bats" <<'EOF'
-#!/usr/bin/env bats
-@test "AC#1: something real" {
-  run echo ok
-  [ "$status" -eq 0 ]
-}
-EOF
+  # Write a clean bats file with no skip auto-stub. printf keeps the @test out of
+  # line-start position so bats does not parse the fixture as a real test.
+  printf '%s\n' \
+    '#!/usr/bin/env bats' \
+    '@test "AC#1: something real" {' \
+    '  run echo ok' \
+    '  [ "$status" -eq 0 ]' \
+    '}' > "$BATS_TMPDIR/ac-clean/clean.bats"
   run "$SCRIPT" --verify "$BATS_TMPDIR/ac-clean"
   [ "$status" -eq 0 ]
 }
 
 @test "gen-ac-tests.sh --verify exits 1 when stubs present" {
-  cat > "$BATS_TMPDIR/ac-stubs/stubs.bats" <<'EOF'
-#!/usr/bin/env bats
-@test "AC#1: criterion" {
-  skip "auto-stub"
-}
-EOF
+  printf '%s\n' \
+    '#!/usr/bin/env bats' \
+    '@test "AC#1: criterion" {' \
+    '  skip "auto-stub"' \
+    '}' > "$BATS_TMPDIR/ac-stubs/stubs.bats"
   run "$SCRIPT" --verify "$BATS_TMPDIR/ac-stubs"
   [ "$status" -eq 1 ]
 }
 
 @test "gen-ac-tests.sh --verify prints stub file list on failure" {
-  cat > "$BATS_TMPDIR/ac-stubs/stubs2.bats" <<'EOF'
-#!/usr/bin/env bats
-@test "AC#1: criterion" {
-  skip "auto-stub"
-}
-EOF
+  printf '%s\n' \
+    '#!/usr/bin/env bats' \
+    '@test "AC#1: criterion" {' \
+    '  skip "auto-stub"' \
+    '}' > "$BATS_TMPDIR/ac-stubs/stubs2.bats"
   run "$SCRIPT" --verify "$BATS_TMPDIR/ac-stubs"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'auto-stub'
