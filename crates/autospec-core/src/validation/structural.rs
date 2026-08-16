@@ -184,6 +184,7 @@ impl StructuralValidator {
             StructuralCheck::RootHelperWrapperPolicy => {
                 Self::validate_root_helper_wrapper_policy(root)
             }
+            StructuralCheck::ReferencePointerIntegrity => super::reference_pointer::validate(root),
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
             StructuralCheck::RustOutputMacros => super::output_macros::validate(root),
         }
@@ -749,7 +750,7 @@ impl StructuralValidator {
         if expected != priority_sort_excerpt(&strip_frontmatter(&read(&opencode)?)) {
             return Err("priority sort lockstep (opencode)".to_string());
         }
-        if expected != priority_sort_excerpt(&strip_first_blank_line(&read(&codex)?)) {
+        if expected != priority_sort_excerpt(&super::structural_text::strip_first_blank_line(&read(&codex)?)) {
             return Err("priority sort lockstep (codex)".to_string());
         }
         Ok(())
@@ -2334,7 +2335,7 @@ fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String
     Ok(())
 }
 
-fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+pub(super) fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let skills_root = root.join("skills");
     if !skills_root.exists() {
         return Ok(Vec::new());
@@ -2805,14 +2806,6 @@ fn priority_sort_excerpt(document: &str) -> String {
         return String::new();
     };
     lines[start..lines.len().min(start + 9)].join("\n")
-}
-
-fn strip_first_blank_line(document: &str) -> String {
-    document
-        .strip_prefix("\n")
-        .or_else(|| document.strip_prefix("\r\n"))
-        .unwrap_or(document)
-        .to_string()
 }
 
 #[cfg(test)]

@@ -284,7 +284,7 @@ the LGTM reviewer is dispatched. The enforcer is `scripts/lint-implementation.sh
 
 | RULE_ID | Detector | Tier | Threshold / regex |
 |---|---|---|---|
-| `PR_SIZE` | det | git diff/numstat | hard above 400 additions+deletions, 8 raw files, or 3 normalized logical units; binary rows are always hard |
+| `PR_SIZE` | det | git diff/numstat | **advisory by default** (INFO) above 400 additions+deletions, 8 raw files, or 3 normalized logical units; blocking only when `AUTOSPEC_PR_SIZE_STRICT=1`; binary rows always block in strict mode |
 | `OUT_OF_SCOPE` | det | path-list compare | files touched ∉ issue body `## Implementation outline` paths |
 | `MISSING_TEST` | det | path-prefix scan | required test type from issue body `## Tests required` not present in diff under `tests/{unit,integration,smoke,e2e}/` |
 | `COMPLEXITY` | det | line/regex scan | function >50 LOC, file >500 LOC, nesting >4 |
@@ -305,7 +305,7 @@ retry prompt as cumulative context.
 
 | RULE_ID | Directive |
 |---|---|
-| `PR_SIZE` | "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff." |
+| `PR_SIZE` | "Advisory: prefer splitting the diff into a stack of small PRs (each layer ≤ cap) so the cap can be enforced per layer. If it must ship as one diff, note why in the PR body; set `AUTOSPEC_PR_SIZE_STRICT=1` to make it blocking." |
 | `OUT_OF_SCOPE` | "Restrict diff to files listed in issue's ## Implementation outline. Revert other changes or amend the issue body." |
 | `MISSING_TEST` | "Add a test under tests/<TIER>/ for the listed required test type before re-pushing." |
 | `COMPLEXITY` | "Split functions >50 LOC, files >500 LOC, nesting >4. No copy-paste branches." |
@@ -366,20 +366,42 @@ Rules:
 
 - Justification (text after `#`) is **mandatory**. Bare `Guardian: skip-X` is
   rejected (treated as malformed and ignored — RULE remains active).
-- `PR_SIZE` accepts only `generated migration: <generator>`,
-  `dependency-solver lockfile: <solver>`, or
-  `mandatory lock-step artifacts: <identity>`. The measured diff must prove the
-  stated category; binary, forged, mixed manual code, and nested test paths stay blocking.
+- `PR_SIZE` is **advisory by default** (emitted as `INFO`, never blocks the merge).
+  Set `AUTOSPEC_PR_SIZE_STRICT=1` to make it blocking; in strict mode a
+  `Guardian: skip-PR_SIZE # <category>` waiver accepts only `generated migration:
+  <generator>`, `dependency-solver lockfile: <solver>`, or `mandatory lock-step
+  artifacts: <identity>` (the measured diff must prove the stated category; binary,
+  forged, mixed manual code, and nested test paths stay blocking).
 - Skipped RULE_IDs are still emitted by the linter as `INFO:RULE_ID...`
   (audit-trail visibility) but do NOT block the merge.
 - Skips apply only to the specific PR derived from this issue; they do NOT cascade
   to other issues.
+
+### Per-layer stack guard (`scripts/stack-guard.sh`)
+
+`PR_SIZE` above is measured on the whole accumulated diff. `scripts/stack-guard.sh`
+enforces the same cap on a **single stack layer** — the `base...head` delta — so a
+large change can ship as a chain of small PRs, each within the cap. It reuses
+`lint-implementation.sh`'s `PR_SIZE` detector via `--diff-file` (single source of
+truth) and adds a **linearity** check: a PR's base must be the default branch or the
+head branch of another open PR (no orphan target branches).
+
+- Advisory by default (`INFO` findings, exit 0); blocking under
+  `AUTOSPEC_PR_SIZE_STRICT=1` (`ERROR` findings, exit 1).
+- CI: `.github/workflows/stack-guard.yml` runs it per PR in advisory mode. Set the
+  `STACK_GUARD_STRICT` repository variable to `1` to make it blocking.
+- `AUTOSPEC_STACK_DEFAULT_BRANCH` overrides the default-branch name (else `gh repo view`).
+- Tests: `tests/stack-guard.bats`.
 
 ### Env-var contract
 
 - `AUTOSPEC_NO_GUARDIAN=1` — short-circuit guardian, fall back to LGTM-only path.
   Mirrors `AUTOSPEC_NO_AUTOMERGE_SPEC=1` and `AUTOSPEC_NO_SELF_UPDATE=1`. Logged
   as `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` on every Phase 4 dispatch.
+- `AUTOSPEC_PR_SIZE_STRICT=1` — make `PR_SIZE` (and the stack-guard's per-layer size
+  + linearity) blocking instead of advisory.
+- `AUTOSPEC_STACK_DEFAULT_BRANCH` — default-branch name for `stack-guard.sh`
+  (else `gh repo view`).
 
 ## Closeout report contract
 

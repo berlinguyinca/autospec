@@ -1,0 +1,38 @@
+name: Stack guard
+
+# Per-layer size + linearity gate for always-stacked PRs.
+#
+# The PR_SIZE cap is otherwise enforced only on the whole accumulated diff (pre-commit /
+# the PR linter), so a large change either trips the cap or ships unreviewed. This gate
+# checks the cap on the SINGLE base...head layer instead, so a large change can ship as a
+# chain of small PRs — each within the cap — and the cap becomes enforceable per layer.
+# It also validates the stack is linear: a PR's base must be the default branch or the
+# head branch of another open PR (no orphan target branches).
+#
+# Advisory by default: it reports findings but does not block. Set the STACK_GUARD_STRICT
+# repository variable to "1" (or AUTOSPEC_PR_SIZE_STRICT=1) to make findings blocking.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  stack-guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gate the single stack layer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOSPEC_PR_SIZE_STRICT: ${{ vars.STACK_GUARD_STRICT || '0' }}
+        run: |
+          set -eu
+          base="origin/${GITHUB_BASE_REF:-main}"
+          bash scripts/stack-guard.sh --base "$base" --head HEAD

@@ -88,6 +88,7 @@ fn portable_supervision_state(fixture: &DirectFixture) -> PersistedInvocation {
 fn portable_harness(fixture: &DirectFixture, script: &str) -> ValidatedInvocation {
     ValidatedInvocation {
         program: fs::canonicalize("/bin/sh").expect("canonical shell"),
+        supervised_executable: fs::canonicalize("/bin/sh").expect("canonical shell"),
         argv_zero: None,
         args: vec!["-c".into(), script.into()],
         current_dir: fixture.worktree.clone(),

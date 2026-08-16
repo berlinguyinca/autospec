@@ -64,6 +64,7 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifac
         write_executable(&harness, &body);
         let invocation = bridge::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
+            supervised_executable: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
             argv_zero: None,
             args,
             current_dir: root.clone(),
@@ -401,6 +402,7 @@ fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
     bridge::ensure_private_directory(&artifact_root).expect("private review artifact directory");
     let invocation = bridge::ValidatedInvocation {
         program: fs::canonicalize(&harness).expect("canonical noisy reviewer"),
+        supervised_executable: fs::canonicalize(&harness).expect("canonical noisy reviewer"),
         argv_zero: None,
         args: Vec::new(),
         current_dir: root.clone(),

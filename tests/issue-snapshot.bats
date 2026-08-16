@@ -39,7 +39,7 @@ EOF
 }
 
 teardown() {
-    rm -rf "$TMP" 2>/dev/null || true
+    rm -rf "$TMP" 2>/dev/null || :
 }
 
 gh_call_count() {

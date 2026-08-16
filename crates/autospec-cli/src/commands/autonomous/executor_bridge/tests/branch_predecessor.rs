@@ -182,7 +182,8 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     .expect("restore transfer");
 
     let transfer_target = fixture.root.join("ownership-transfer-target.json");
-    fs::rename(&transfer_path, &transfer_target).expect("move transfer target");
+    fs::copy(&transfer_path, &transfer_target).expect("move transfer target");
+    fs::remove_file(&transfer_path).expect("remove transfer source");
     symlink(&transfer_target, &transfer_path).expect("install transfer symlink");
     let symlink_transfer = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
         panic!("symlinked transfer must fail before the release check")
@@ -190,7 +191,8 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     .expect_err("symlinked transfer fails closed");
     assert!(symlink_transfer.contains("symlink"), "{symlink_transfer}");
     fs::remove_file(&transfer_path).expect("remove transfer symlink");
-    fs::rename(transfer_target, &transfer_path).expect("restore transfer target");
+    fs::copy(&transfer_target, &transfer_path).expect("restore transfer target");
+    fs::remove_file(transfer_target).expect("remove transfer source");
 
     let mut mismatched_transfer = initial_transfer.clone();
     mismatched_transfer["to_claim_id"] = serde_json::json!("missing-claim");
