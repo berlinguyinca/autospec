@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static FRESH_LEASE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4184,7 +4185,13 @@ fn terminate_fixture_process(pid: &str) {
 }
 
 fn assert_lease_held(output: &Output) {
-    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        output.status.code(),
+        Some(20),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
@@ -4419,8 +4426,15 @@ fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
 }
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {
-    let suffix = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock follows Unix epoch")
+        .as_nanos();
+    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
 }
