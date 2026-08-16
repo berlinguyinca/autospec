@@ -6,7 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "support/temp_directory.rs"]
+mod temp_directory;
+use temp_directory::unique as temp_dir;
 
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static FRESH_LEASE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4423,20 +4426,6 @@ fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
         .write_all(input.as_bytes())
         .expect("issue body writes to stdin");
     child.wait_with_output().expect("autospec lint issue exits")
-}
-
-fn temp_dir(prefix: &str) -> std::path::PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock follows Unix epoch")
-        .as_nanos();
-    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "{prefix}-{}-{timestamp}-{sequence}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir
 }
 
 fn workspace_root() -> std::path::PathBuf {
