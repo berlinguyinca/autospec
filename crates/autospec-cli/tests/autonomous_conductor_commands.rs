@@ -2187,6 +2187,15 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         ],
     );
     let before_claim = parse_run_state_comment(&before_message).expect("initial live claim");
+    let before_claim_oid = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "rev-parse",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
     first.kill().expect("kill conductor in live-harness window");
     let _ = first.wait();
 
@@ -2208,6 +2217,15 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     );
     let refreshed_claim =
         parse_run_state_comment(&refreshed_message).expect("refreshed adopted claim");
+    let refreshed_claim_oid = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "rev-parse",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
     assert_eq!(refreshed_claim.claim_id, before_claim.claim_id);
     let replacement_status = replacement.try_wait().expect("inspect replacement");
     let replacement_stderr = if replacement_status.is_some() {
@@ -2223,7 +2241,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         String::new()
     };
     assert_ne!(
-        refreshed_claim.updated_at, before_claim.updated_at,
+        refreshed_claim_oid, before_claim_oid,
         "replacement must renew the exact claim while the adopted harness remains live; status={replacement_status:?} stderr={replacement_stderr} invocation={} calls={}",
         fs::read_to_string(&invocation_path).unwrap_or_default(),
         fs::read_to_string(&fixture.calls).unwrap_or_default()
