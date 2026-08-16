@@ -20267,14 +20267,20 @@ pub(crate) fn resolve_base(
     if let Some(branch) = configured_base_branch(repo)? {
         return fetch_and_resolve_base(repo, &branch, false);
     }
-    let reference = git_stdout(
+    let branch = match git_stdout(
         repo,
         &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )?;
-    let branch = reference
-        .strip_prefix("refs/remotes/origin/")
-        .ok_or_else(|| format!("unexpected remote default reference: {reference}"))?;
-    fetch_and_resolve_base(repo, branch, false)
+    ) {
+        Ok(reference) => reference
+            .strip_prefix("refs/remotes/origin/")
+            .ok_or_else(|| format!("unexpected remote default reference: {reference}"))?
+            .to_string(),
+        // The conductor's working repo is a worktree/clone that never ran
+        // `git remote set-head`, so refs/remotes/origin/HEAD is absent. Fall
+        // back to the conventional default so base-branch resolution still works.
+        Err(_) => "main".to_string(),
+    };
+    fetch_and_resolve_base(repo, &branch, false)
 }
 
 fn configured_base_branch(repo: &Path) -> Result<Option<String>, String> {
