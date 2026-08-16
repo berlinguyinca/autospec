@@ -24,7 +24,7 @@
 - All non-document changes follow red-green TDD.
 - Do not mock operating-system process ownership in behavior tests.
 - Do not change the read-only/autonomous GitHub authority model or add database writes.
-- Run `bash scripts/validate.sh`, `cargo test --workspace`, lint, typecheck/static analysis available to this Rust workspace, and the platform-specific gates before completion.
+- Run `cargo run -q -p autospec-cli -- validate`, `cargo test --workspace`, lint, typecheck/static analysis available to this Rust workspace, and the platform-specific gates before completion.
 - Every commit uses a conventional prefix and the repository's Lore trailers.
 
 ---
@@ -469,7 +469,7 @@
 
   Run: `cargo check -p autospec-cli --target x86_64-pc-windows-msvc`
 
-  Run: `bash scripts/validate.sh`
+  Run: `cargo run -q -p autospec-cli -- validate`
 
   Expected: every available local command passes. Record Windows/FreeBSD runtime behavior evidence from their CI jobs; conditional compilation alone is not sufficient evidence.
 
@@ -498,5 +498,5 @@
 - Stall termination removes descendants through a retained process group or Job Object.
 - Restart recovery reconciles receipts and quarantines ambiguous ownership without signalling by PID.
 - Existing Linux pidfd tests pass unchanged.
-- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `bash scripts/validate.sh`, and workflow contract tests pass.
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo run -q -p autospec-cli -- validate`, and workflow contract tests pass.
 - GitHub Actions supplies green Linux, macOS, Windows, and FreeBSD behavior gates before support is claimed complete.

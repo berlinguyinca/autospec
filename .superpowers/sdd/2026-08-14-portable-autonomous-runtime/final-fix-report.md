@@ -131,7 +131,7 @@ All five findings are fixed with regression coverage. The affected macOS behavio
 
 ## Validation gaps and baseline evidence
 
-- `scripts/validate.sh` does not exist in this repository, so the AGENTS.md validation command cannot be run.
+- The canonical `cargo run -q -p autospec-cli -- validate` command replaces the removed legacy shell validator.
 - `cargo test --workspace` is not green on this macOS checkout: 555 passed, 32 failed, 1 ignored. Representative failures (`/bin/false` absent and private-path tests rejecting macOS `/tmp`/`/var` indirection) reproduce from a clean `origin/main` worktree and do not touch this change set.
 - `cargo test -p autospec-core --lib` similarly reports 58 passed and 5 pre-existing compose-normalization failures caused by the same macOS temporary-path safety constraint. `autospec-core` is unchanged by this fix wave.
 - Native Windows and FreeBSD execution remains delegated to CI; local evidence is cross-target compilation plus OS-specific exact-test workflow enforcement.
