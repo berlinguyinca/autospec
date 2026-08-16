@@ -145,6 +145,15 @@ EOF
     ! echo "$output" | grep -qE "^(OUT_OF_SCOPE|MISSING_TEST|COMPLEXITY|SECURITY|TODO_LEFT|MOCK_DB|DOC_OUT_OF_SYNC):"
 }
 
+@test "lint-implementation: contract .md files count as docs (DOC_OUT_OF_SYNC suppressed)" {
+    # A diff that adds a skills/*/prompts/*.md contract (referencing a CLI flag)
+    # plus a .sh with an env-var-shaped local var must NOT fire DOC_OUT_OF_SYNC —
+    # the contract .md is documentation, so doc_touched=1 short-circuits the check.
+    run bash "$LINT" --diff-file "$FIX/doc-contract-touched.diff"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:"
+}
+
 # ── core implementation-contract delegation ──────────────────────────────────
 
 @test "implementation contract delegates ordered scope and test findings before shell detectors" {

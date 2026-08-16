@@ -670,7 +670,7 @@ is_test_file() {
 # is_doc_file PATH — returns 0 if path is a doc file
 is_doc_file() {
     case "$1" in
-        README*|AGENTS.md|docs/*|*/SKILL.md|SKILL.md) return 0 ;;
+        README*|AGENTS.md|docs/*|*/SKILL.md|SKILL.md|skills/*/prompts/*.md|skills/*/references/*.md) return 0 ;;
         *) return 1 ;;
     esac
 }
