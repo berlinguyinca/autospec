@@ -77,6 +77,12 @@ impl ToolCommand {
         self
     }
 
+    pub fn with_isolated_pytest(self, pythonpath: impl Into<OsString>) -> Self {
+        self.with_env("PYTHONPATH", pythonpath)
+            .with_env("PYTHONDONTWRITEBYTECODE", "1")
+            .with_env("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    }
+
     pub fn without_env(mut self, key: impl Into<OsString>) -> Self {
         let key = key.into();
         self.environment
