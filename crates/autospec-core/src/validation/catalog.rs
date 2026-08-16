@@ -405,6 +405,9 @@ impl ValidationCheck {
             "check_root_helper_wrapper_policy" => {
                 CheckOwner::RustNative(StructuralCheck::RootHelperWrapperPolicy)
             }
+            "check_reference_pointer_integrity" => {
+                CheckOwner::RustNative(StructuralCheck::ReferencePointerIntegrity)
+            }
             "check_derive_trio_consistency" => {
                 CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency)
             }
@@ -528,6 +531,7 @@ pub enum StructuralCheck {
     CodexSkillsInstall,
     SharedScriptInstall,
     RootHelperWrapperPolicy,
+    ReferencePointerIntegrity,
     StartupPreflight,
     RustOutputMacros,
 }
@@ -592,6 +596,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_codex_skills_install",
     "check_shared_script_install",
     "check_root_helper_wrapper_policy",
+    "check_reference_pointer_integrity",
     "check_mutation_and_negative_path",
     "check_python_suites",
     "check_agents_md_subagent_section",
@@ -746,6 +751,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_codex_skills_install",
     "check_shared_script_install",
     "check_root_helper_wrapper_policy",
+    "check_reference_pointer_integrity",
     "check_mutation_and_negative_path",
     "check_python_suites",
     "check_subagent_model_tier",
