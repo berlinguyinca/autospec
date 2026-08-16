@@ -4057,7 +4057,6 @@ fn start_sleeping_autonomous_with_state(
                 .join("spend"),
         )
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
         .env("AUTOSPEC_TEST_AUTONOMOUS_GH_MODE", "hold")
         .env("AUTOSPEC_TEST_AUTONOMOUS_HOLD_READY", &hold_ready)
         .env("PATH", hermetic_autonomous_path(operator_dir))
