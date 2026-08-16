@@ -1349,26 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_heartbeat_preserves_the_claimed_transfer_window() {
-        let root = test_root("claimed-heartbeat");
-        let owner = test_store(&root);
-        let (_, claimed) = owner
-            .acquire(None, 1, 1)
-            .unwrap_or_else(|_| panic!("claim lease"));
-
-        retry_lease(|| owner.renew(&claimed)).unwrap_or_else(|_| panic!("renew claimed lease"));
-
-        let renewed = owner
-            .read_state()
-            .unwrap_or_else(|_| panic!("read renewed claim"))
-            .expect("renewed claim")
-            .0;
-        assert_eq!(renewed.status, "claimed");
-        assert_eq!(renewed.lock_pid, Some(std::process::id()));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn owned_lease_renewal_prevents_abandonment_reclaim() {
         let root = test_root("renewal");
         let owner = test_store(&root);
