@@ -51,7 +51,7 @@ impl WaterfallStore {
         root: impl AsRef<Path>,
         repo: impl Into<String>,
     ) -> Result<StoreAcquisition, WaterfallStoreError> {
-        Self::acquire_with_optional_tier4_source_policy(root, repo, None)
+        Self::acquire_for_receipts(root, repo, None)
     }
 
     pub(super) fn acquire_with_policy(
