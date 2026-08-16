@@ -717,12 +717,21 @@ do not fall back to an inline label-swap path.
 >   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #$ISSUE: claimed" "Starting implementation on {repo}" || true
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
->   # Single body fetch — all later steps consume this file (D5: duplicate-read elimination).
+>   # Single API call — body+title+url+labels in ONE `gh issue view` (D5: duplicate-read elimination).
+>   # issue-snapshot.sh wraps that one call and caches the JSON per issue; later steps
+>   # (start summary, implementer/reviewer prompt assembly) reuse the file instead of
+>   # re-fetching. --refresh: labels may have transitioned since the previous run.
+>   _issue_snapshot_file="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/issue-snapshot.sh" get "$ISSUE" --refresh 2>/dev/null || true)"
 >   _issue_body_file="/tmp/issue-${ISSUE}-body.md"
->   gh issue view ISSUE --json body --jq .body 2>/dev/null > "$_issue_body_file" || true
->   ISSUE_TITLE=$(gh issue view ISSUE --json title --jq .title 2>/dev/null || echo "")
->   ISSUE_URL=$(gh issue view ISSUE --json url --jq .url 2>/dev/null || echo "")
->   ISSUE_LABELS=$(gh issue view ISSUE --json labels --jq -r '[.labels[].name] | join(", ")' 2>/dev/null || echo "")
+>   if [ -n "${_issue_snapshot_file:-}" ] && [ -f "${_issue_snapshot_file:-}" ]; then
+>     jq -r '.body // ""' "$_issue_snapshot_file" > "$_issue_body_file"
+>     ISSUE_TITLE=$(jq -r '.title // ""' "$_issue_snapshot_file")
+>     ISSUE_URL=$(jq -r '.url // ""' "$_issue_snapshot_file")
+>     ISSUE_LABELS=$(jq -r '[.labels[]?.name] | join(", ")' "$_issue_snapshot_file")
+>   else
+>     # fetch failed — fail open with empty metadata (same end state as a gh outage)
+>     : > "$_issue_body_file"; ISSUE_TITLE=""; ISSUE_URL=""; ISSUE_LABELS=""
+>   fi
 >   ISSUE_GOAL=$(awk '
 >     BEGIN{in_goal=0}
 >     /^## Goal[[:space:]]*$/ {in_goal=1; next}
