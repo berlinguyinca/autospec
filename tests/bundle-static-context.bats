@@ -7,6 +7,8 @@ FIXTURES_DIR="${BATS_TEST_DIRNAME}/fixtures/bundle-static-context"
 setup() {
   mkdir -p "$FIXTURES_DIR/memory"
   mkdir -p "$FIXTURES_DIR/skills/autospec-run/prompts"
+  mkdir -p "$FIXTURES_DIR/skills/autospec-define/prompts"
+  mkdir -p "$FIXTURES_DIR/skills/autospec-classify/prompts"
   mkdir -p "$FIXTURES_DIR/skills/autospec-shared/scripts"
 
   # Fixture SKILL.md for implementer role
@@ -52,7 +54,26 @@ EOF
 Return LGTM if clean.
 EOF
 
-  # Fixture AGENTS.md with RULE_ID table
+  # Fixture decomposer-contract.md (M1: decomposer role injects this, not SKILL.md)
+  cat > "$FIXTURES_DIR/skills/autospec-define/prompts/decomposer-contract.md" <<'EOF'
+# Decomposer contract (test fixture)
+
+## Phase 3 — Decompose into linked GitHub issues (delegate)
+
+Sizing caps: body <=400 words, files touched <=3 logical units.
+EOF
+
+  # Fixture classifier-contract.md (M1: classifier role injects this, not SKILL.md)
+  cat > "$FIXTURES_DIR/skills/autospec-classify/prompts/classifier-contract.md" <<'EOF'
+# Classifier contract (test fixture)
+
+## Rubric
+
+ctx:32k / ctx:64k / ctx:120k; reasoning:shallow / medium / deep.
+EOF
+
+  # Fixture AGENTS.md with RULE_ID table + the sections the decomposer/classifier
+  # roles extract (issue-quality, small-LLM target, subagent model selection).
   cat > "$FIXTURES_DIR/AGENTS.md" <<'EOF'
 # AGENTS.md
 
@@ -66,6 +87,20 @@ EOF
 | `MISSING_TEST` | det | path-prefix scan | required test absent |
 
 ### Other section
+
+## Small-LLM target
+
+Generated child issues are sized for 32B-class local LLMs.
+
+## Issue-quality contract
+
+### Goal concreteness
+
+The Goal section must contain exactly one sentence.
+
+## Subagent model selection (two-tier, cost-aware)
+
+Tier A is spec work; Tier B is implementation work.
 EOF
 
   # Fixture memory files
@@ -328,4 +363,76 @@ teardown() {
   disc_line="$(printf '%s\n' "$output" | grep -n '## Output discipline' | head -1 | cut -d: -f1)"
   last_boundary="$(printf '%s\n' "$output" | grep -n 'CACHE BOUNDARY' | tail -1 | cut -d: -f1)"
   [ "$disc_line" -gt "$last_boundary" ]
+}
+
+@test "bundle-static-context.sh --role decomposer injects decomposer-contract.md, NOT the SKILL.md" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role decomposer --issue-labels "skill:autospec-define"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "Decomposer contract"
+  ! printf '%s\n' "$output" | grep -q "SKILL.md (decomposer role)"
+}
+
+@test "bundle-static-context.sh --role classifier injects classifier-contract.md, NOT the SKILL.md" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role classifier --issue-labels "skill:autospec-classify"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "Classifier contract"
+  ! printf '%s\n' "$output" | grep -q "SKILL.md (classifier role)"
+}
+
+@test "bundle-static-context.sh --role decomposer injects the AGENTS.md issue-quality + small-LLM sections" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role decomposer --issue-labels "skill:autospec-define"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "issue-quality + small-LLM target"
+  printf '%s\n' "$output" | grep -q "Goal concreteness"
+  printf '%s\n' "$output" | grep -q "32B-class local LLMs"
+}
+
+@test "bundle-static-context.sh --role classifier injects the AGENTS.md subagent-model-selection section" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role classifier --issue-labels "skill:autospec-classify"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "subagent model selection"
+  printf '%s\n' "$output" | grep -q "Tier A is spec work"
+}
+
+@test "decomposer-contract.md exists and is at most 20480 bytes (size guard)" {
+  contract="${BATS_TEST_DIRNAME}/../skills/autospec-define/prompts/decomposer-contract.md"
+  [ -f "$contract" ]
+  size=$(wc -c < "$contract" | tr -d ' ')
+  [ "$size" -le 20480 ]
+}
+
+@test "classifier-contract.md exists and is at most 9216 bytes (size guard)" {
+  contract="${BATS_TEST_DIRNAME}/../skills/autospec-classify/prompts/classifier-contract.md"
+  [ -f "$contract" ]
+  size=$(wc -c < "$contract" | tr -d ' ')
+  [ "$size" -le 9216 ]
+}
+
+@test "decomposer + classifier prefixes are byte-stable across issue-label inputs" {
+  pfx() {
+    env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+      AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+      AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+      AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+      "$SCRIPT" --role "$1" --issue-labels "$2" \
+      | awk '/<!-- CACHE BOUNDARY -->/{c++} {print} c==2{exit}'
+  }
+  [ "$(pfx decomposer 'skill:autospec-define')" = "$(pfx decomposer 'other,labels')" ]
+  [ "$(pfx classifier 'skill:autospec-classify')" = "$(pfx classifier 'other,labels')" ]
 }

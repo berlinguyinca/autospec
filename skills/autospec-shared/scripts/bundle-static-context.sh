@@ -26,11 +26,19 @@
 #   4. Lockstep paragraph
 #   5. Reviewer scaffolding
 #
-# Composition order (decomposer/classifier roles):
+# Composition order (decomposer role — M1 prefix slim):
 #   --- inside the CACHE BOUNDARY ---
-#   1. SKILL.md (role's skill, verbatim)
-#   2. AGENTS.md (verbatim)   [NO separate RULE_ID re-extraction — it already
-#      rides inside AGENTS.md; the duplicate block was dropped in Phase 1]
+#   1. decomposer-contract.md (curated Phase 3 extract — NOT the 67KB SKILL.md)
+#   2. AGENTS.md ## Issue-quality contract + ## Small-LLM target sections
+#   --- below the closing CACHE BOUNDARY (per-issue) ---
+#   3. Tag-filtered saved-memory files
+#   4. Lockstep paragraph
+#   5. Role-specific scaffolding
+#
+# Composition order (classifier role — M1 prefix slim):
+#   --- inside the CACHE BOUNDARY ---
+#   1. classifier-contract.md (curated Phase 3.5 extract — NOT the ~18KB SKILL.md)
+#   2. AGENTS.md ## Subagent model selection section
 #   --- below the closing CACHE BOUNDARY (per-issue) ---
 #   3. Tag-filtered saved-memory files
 #   4. Lockstep paragraph
@@ -128,19 +136,20 @@ IMPLEMENTER_CONTRACT="$REPO_ROOT/skills/autospec-run/prompts/implementer-contrac
 # Phase 1 (prompt-cache reclaim): the reviewer role injects this curated contract
 # instead of the ~14KB autospec-run/SKILL.md.
 REVIEWER_CONTRACT="$REPO_ROOT/skills/autospec-run/prompts/reviewer-contract.md"
+# M1 (prefix slim): the decomposer role injects this curated Phase 3 contract
+# instead of the 67KB autospec-define/SKILL.md.
+DECOMPOSER_CONTRACT="$REPO_ROOT/skills/autospec-define/prompts/decomposer-contract.md"
+# M1 (prefix slim): the classifier role injects this curated Phase 3.5 contract
+# instead of the ~18KB autospec-classify/SKILL.md.
+CLASSIFIER_CONTRACT="$REPO_ROOT/skills/autospec-classify/prompts/classifier-contract.md"
 
 # Cap on injected saved-memory files (top-K most-specific tag matches).
 AUTOSPEC_MAX_MEMORY_FILES="${AUTOSPEC_MAX_MEMORY_FILES:-6}"
 
-# Role-to-skill mapping. The implementer and reviewer roles no longer inject a
-# SKILL.md (prefix slim) — they inject their curated *-contract.md instead.
+# Role-to-contract mapping. Every role injects a curated *-contract.md (prefix
+# slim) instead of its full SKILL.md — implementer/reviewer since D3/Phase 1,
+# decomposer/classifier since M1. SKILL_MD is no longer used by any role.
 SKILL_MD=""
-case "$ROLE" in
-  implementer) SKILL_MD="" ;;
-  reviewer)    SKILL_MD="" ;;
-  decomposer)  SKILL_MD="$REPO_ROOT/skills/autospec-define/SKILL.md" ;;
-  classifier)  SKILL_MD="$REPO_ROOT/skills/autospec-classify/SKILL.md" ;;
-esac
 
 # Validate required files
 if [ ! -f "$AGENTS_MD" ]; then
@@ -157,9 +166,16 @@ elif [ "$ROLE" = "reviewer" ]; then
     printf 'bundle-static-context.sh: reviewer-contract.md not found: %s\n' "$REVIEWER_CONTRACT" >&2
     exit 1
   fi
-elif [ ! -f "$SKILL_MD" ]; then
-  printf 'bundle-static-context.sh: SKILL.md not found for role %s: %s\n' "$ROLE" "$SKILL_MD" >&2
-  exit 1
+elif [ "$ROLE" = "decomposer" ]; then
+  if [ ! -f "$DECOMPOSER_CONTRACT" ]; then
+    printf 'bundle-static-context.sh: decomposer-contract.md not found: %s\n' "$DECOMPOSER_CONTRACT" >&2
+    exit 1
+  fi
+elif [ "$ROLE" = "classifier" ]; then
+  if [ ! -f "$CLASSIFIER_CONTRACT" ]; then
+    printf 'bundle-static-context.sh: classifier-contract.md not found: %s\n' "$CLASSIFIER_CONTRACT" >&2
+    exit 1
+  fi
 fi
 
 # ── tag-filtered memory selection ────────────────────────────────────────────
@@ -372,22 +388,54 @@ elif [ "$ROLE" = "reviewer" ]; then
   emit_memory
   emit_lockstep
   emit_scaffolding
-else
-  # decomposer / classifier: SKILL.md + AGENTS.md verbatim inside the boundary.
-  # The duplicate '## RULE_ID table' re-extraction was dropped in Phase 1 — the
-  # canonical table already rides inside AGENTS.md verbatim. Per-issue memory +
-  # scaffolding move BELOW the closing marker.
+ elif [ "$ROLE" = "decomposer" ]; then
+  # M1 prefix slim: the decomposer prefix is byte-stable across specs. Only the
+  # curated Phase 3 contract + the AGENTS.md issue-quality + small-LLM sections
+  # live inside the cache boundary; per-issue memory + scaffolding go BELOW the
+  # closing marker.
   printf '<!-- CACHE BOUNDARY -->\n'
 
-  # 1. SKILL.md verbatim
-  printf '## SKILL.md (%s role)\n\n' "$ROLE"
-  cat "$SKILL_MD"
+  # 1. Curated decomposer contract (NOT the 67KB SKILL.md).
+  printf '## Decomposer contract\n\n'
+  cat "$DECOMPOSER_CONTRACT"
   printf '\n'
 
-  # 2. AGENTS.md verbatim (carries the canonical RULE_ID table — no duplicate
-  #    re-extraction).
-  printf '## AGENTS.md\n\n'
-  cat "$AGENTS_MD"
+  # 2. AGENTS.md issue-quality + small-LLM sections — the contract the decomposer
+  #    must satisfy when filing issues.
+  printf '## AGENTS.md — issue-quality + small-LLM target\n\n'
+  awk '
+    /^(## Issue-quality contract|## Small-LLM target)/ { in_sec=1; print; next }
+    /^## / && in_sec { in_sec=0 }
+    in_sec { print }
+  ' "$AGENTS_MD"
+  printf '\n'
+
+  printf '<!-- CACHE BOUNDARY -->\n'
+
+  # Below the boundary: per-issue, NOT part of the cached prefix.
+  emit_memory
+  emit_lockstep
+  emit_scaffolding
+elif [ "$ROLE" = "classifier" ]; then
+  # M1 prefix slim: the classifier prefix is byte-stable across issues. Only the
+  # curated Phase 3.5 contract + the AGENTS.md subagent-model-selection section
+  # live inside the cache boundary; per-issue memory + scaffolding go BELOW the
+  # closing marker.
+  printf '<!-- CACHE BOUNDARY -->\n'
+
+  # 1. Curated classifier contract (NOT the ~18KB SKILL.md).
+  printf '## Classifier contract\n\n'
+  cat "$CLASSIFIER_CONTRACT"
+  printf '\n'
+
+  # 2. AGENTS.md subagent-model-selection section — the two-tier rules the
+  #    classifier applies.
+  printf '## AGENTS.md — subagent model selection\n\n'
+  awk '
+    /^## Subagent model selection/ { in_sec=1; print; next }
+    /^## / && in_sec { in_sec=0 }
+    in_sec { print }
+  ' "$AGENTS_MD"
   printf '\n'
 
   printf '<!-- CACHE BOUNDARY -->\n'

@@ -1,0 +1,24 @@
+diff --git a/skills/autospec-define/prompts/decomposer-contract.md b/skills/autospec-define/prompts/decomposer-contract.md
+new file mode 100644
+--- /dev/null
++++ b/skills/autospec-define/prompts/decomposer-contract.md
+@@ -0,0 +1,3 @@
++# Decomposer contract
++
++Apply board assignments with the --apply-boards flag.
+diff --git a/skills/autospec-shared/scripts/bundle-static-context.sh b/skills/autospec-shared/scripts/bundle-static-context.sh
+new file mode 100755
+--- /dev/null
++++ b/skills/autospec-shared/scripts/bundle-static-context.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/env bash
++# M1: decomposer role injects this curated contract.
++DECOMPOSER_CONTRACT="$REPO_ROOT/skills/autospec-define/prompts/decomposer-contract.md"
+diff --git a/tests/unit/test_bundle.bats b/tests/unit/test_bundle.bats
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_bundle.bats
+@@ -0,0 +1,3 @@
++#!/usr/bin/env bats
++
++@test "placeholder" { [ 1 -eq 1 ]; }
