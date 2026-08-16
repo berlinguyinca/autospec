@@ -7,7 +7,9 @@ pub mod output_macros;
 pub mod plan;
 pub mod results;
 pub mod runner;
+pub mod reference_pointer;
 pub mod structural;
+pub mod structural_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationStatus {

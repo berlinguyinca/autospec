@@ -184,9 +184,7 @@ impl StructuralValidator {
             StructuralCheck::RootHelperWrapperPolicy => {
                 Self::validate_root_helper_wrapper_policy(root)
             }
-            StructuralCheck::ReferencePointerIntegrity => {
-                Self::validate_reference_pointer_integrity(root)
-            }
+            StructuralCheck::ReferencePointerIntegrity => super::reference_pointer::validate(root),
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
             StructuralCheck::RustOutputMacros => super::output_macros::validate(root),
         }
@@ -752,7 +750,7 @@ impl StructuralValidator {
         if expected != priority_sort_excerpt(&strip_frontmatter(&read(&opencode)?)) {
             return Err("priority sort lockstep (opencode)".to_string());
         }
-        if expected != priority_sort_excerpt(&strip_first_blank_line(&read(&codex)?)) {
+        if expected != priority_sort_excerpt(&super::structural_text::strip_first_blank_line(&read(&codex)?)) {
             return Err("priority sort lockstep (codex)".to_string());
         }
         Ok(())
@@ -2198,28 +2196,6 @@ impl StructuralValidator {
         ))
     }
 
-    /// Every `**MUST** read `<path>`` pointer in a trio body must resolve to an
-    /// existing, non-stub file; if the pointer names a `(section "X")`, that heading
-    /// must be present in the target. This keeps reference extraction honest: a
-    /// dangling or empty target would silently strand the content the pointer claims
-    /// to hold, and it stops a one-line body anchor from being the only thing a gate
-    /// can see once the real procedure moves to a reference.
-    pub fn validate_reference_pointer_integrity(root: &Path) -> Result<(), String> {
-        let skills_root = root.join("skills");
-        if !skills_root.is_dir() {
-            return Ok(());
-        }
-        let mut errors = Vec::new();
-        for skill_dir in skill_directories(root)? {
-            errors.extend(check_member_pointers(root, &skill_dir));
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
     pub fn validate_startup_preflight(root: &Path) -> Result<(), String> {
         let template = root.join("templates/skill-blocks/startup-self-update.md");
         if !template.is_file() {
@@ -2359,7 +2335,7 @@ fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String
     Ok(())
 }
 
-fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+pub(super) fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let skills_root = root.join("skills");
     if !skills_root.exists() {
         return Ok(Vec::new());
@@ -2386,97 +2362,6 @@ fn trio_skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String
             })
             .collect()
     })
-}
-
-const MIN_REFERENCE_BYTES: u64 = 200;
-
-struct MustReadPointer {
-    path: String,
-    section: Option<String>,
-}
-
-/// Extract `**MUST** read `<path>`` pointers (optionally naming a `(section "X")`)
-/// from a document. Paths are resolved against the repo root by the caller.
-fn must_read_pointers(document: &str) -> Vec<MustReadPointer> {
-    const MARKER: &str = "**MUST** read `";
-    const SECTION_MARKER: &str = "(section \"";
-    let mut out = Vec::new();
-    for line in document.lines() {
-        let Some(start) = line.find(MARKER) else {
-            continue;
-        };
-        let after = &line[start + MARKER.len()..];
-        let Some(close) = after.find('`') else {
-            continue;
-        };
-        let path = after[..close].to_string();
-        if path.is_empty() {
-            continue;
-        }
-        let section = after[close..]
-            .find(SECTION_MARKER)
-            .map(|i| &after[close + i + SECTION_MARKER.len()..])
-            .and_then(|rest| rest.find('"').map(|j| rest[..j].to_string()));
-        out.push(MustReadPointer { path, section });
-    }
-    out
-}
-
-/// Collect pointer-integrity errors for the trio members of one skill directory.
-fn check_member_pointers(root: &Path, skill_dir: &Path) -> Vec<String> {
-    let mut errors = Vec::new();
-    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
-        let path = skill_dir.join(member);
-        let Ok(document) = read(&path) else {
-            continue;
-        };
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        for pointer in must_read_pointers(&document) {
-            if let Some(error) = check_reference_pointer(root, &rel, &pointer) {
-                errors.push(error);
-            }
-        }
-    }
-    errors
-}
-
-/// Validate a single `**MUST** read` pointer: the target must exist, be a
-/// non-stub file, and (if the pointer names a section) contain it.
-fn check_reference_pointer(
-    root: &Path,
-    rel: &str,
-    pointer: &MustReadPointer,
-) -> Option<String> {
-    let target = root.join(&pointer.path);
-    if !target.is_file() {
-        return Some(format!(
-            "{rel}: `**MUST** read` pointer to `{}` dangles (file missing)",
-            pointer.path
-        ));
-    }
-    let bytes = fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-    if bytes < MIN_REFERENCE_BYTES {
-        return Some(format!(
-            "{rel}: `**MUST** read` pointer to `{}` resolves to a stub ({} bytes < {})",
-            pointer.path, bytes, MIN_REFERENCE_BYTES
-        ));
-    }
-    let Ok(target_doc) = read(&target) else {
-        return None;
-    };
-    if let Some(section) = &pointer.section {
-        if !target_doc.contains(section.as_str()) {
-            return Some(format!(
-                "{rel}: `**MUST** read` pointer to `{}` claims section `{}` but it is absent",
-                pointer.path, section
-            ));
-        }
-    }
-    None
 }
 
 fn skill_name(skill_dir: &Path) -> Result<String, String> {
@@ -2923,14 +2808,6 @@ fn priority_sort_excerpt(document: &str) -> String {
     lines[start..lines.len().min(start + 9)].join("\n")
 }
 
-fn strip_first_blank_line(document: &str) -> String {
-    document
-        .strip_prefix("\n")
-        .or_else(|| document.strip_prefix("\r\n"))
-        .unwrap_or(document)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{contains_docs_drift_note, StructuralValidator};
@@ -2962,63 +2839,6 @@ mod tests {
             opencode,
         )
         .expect("opencode fixture");
-    }
-
-    fn write_pointer_trio(root: &Path, skill: &str, body: &str) {
-        let dir = root.join("skills").join(skill);
-        fs::create_dir_all(dir.join("codex")).expect("codex dir");
-        fs::create_dir_all(dir.join("opencode")).expect("opencode dir");
-        fs::write(dir.join("SKILL.md"), body).expect("skill fixture");
-        fs::write(dir.join("codex/prompt.md"), body).expect("codex fixture");
-        fs::write(dir.join("opencode/agent.md"), body).expect("opencode fixture");
-    }
-
-    #[test]
-    fn reference_pointer_integrity_passes_for_resolving_pointer() {
-        let root = temp_root("ref-ptr-valid");
-        let body = "**MUST** read `skills/demo/references/guide.md` (section \"## Setup\") and follow it.\n";
-        write_pointer_trio(&root, "demo", body);
-        let refdir = root.join("skills/demo/references");
-        fs::create_dir_all(&refdir).expect("reference dir");
-        fs::write(refdir.join("guide.md"), "## Setup\n\n".repeat(20)).expect("reference");
-        StructuralValidator::validate_reference_pointer_integrity(&root)
-            .expect("resolving pointer with claimed section passes");
-    }
-
-    #[test]
-    fn reference_pointer_integrity_fails_on_dangling_pointer() {
-        let root = temp_root("ref-ptr-dangle");
-        let body = "**MUST** read `skills/demo/references/missing.md` and follow it.\n";
-        write_pointer_trio(&root, "demo", body);
-        let err = StructuralValidator::validate_reference_pointer_integrity(&root)
-            .expect_err("dangling pointer must fail");
-        assert!(err.contains("dangles"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn reference_pointer_integrity_fails_on_stub_target() {
-        let root = temp_root("ref-ptr-stub");
-        let body = "**MUST** read `skills/demo/references/stub.md` and follow it.\n";
-        write_pointer_trio(&root, "demo", body);
-        let refdir = root.join("skills/demo/references");
-        fs::create_dir_all(&refdir).expect("reference dir");
-        fs::write(refdir.join("stub.md"), "tiny\n").expect("stub reference");
-        let err = StructuralValidator::validate_reference_pointer_integrity(&root)
-            .expect_err("stub target must fail");
-        assert!(err.contains("stub"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn reference_pointer_integrity_fails_when_claimed_section_absent() {
-        let root = temp_root("ref-ptr-nosection");
-        let body = "**MUST** read `skills/demo/references/guide.md` (section \"## Setup\") and follow it.\n";
-        write_pointer_trio(&root, "demo", body);
-        let refdir = root.join("skills/demo/references");
-        fs::create_dir_all(&refdir).expect("reference dir");
-        fs::write(refdir.join("guide.md"), "## Other\n\n".repeat(20)).expect("reference");
-        let err = StructuralValidator::validate_reference_pointer_integrity(&root)
-            .expect_err("missing claimed section must fail");
-        assert!(err.contains("claims section"), "unexpected: {err}");
     }
 
     #[test]
