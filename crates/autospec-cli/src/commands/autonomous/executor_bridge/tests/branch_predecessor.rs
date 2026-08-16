@@ -342,6 +342,7 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
 
 #[test]
 fn autonomous_executor_bridge_retry_fast_forwards_proven_empty_worktree_to_advanced_base() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("retry-empty-base-adoption");
     let original = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve original base");
     let scope = format!(
