@@ -134,11 +134,16 @@ fn load_verified_documents(
     state_root: &Path,
     repo: &str,
 ) -> Result<(TierReceipt, String, String), String> {
-    let store =
-        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => return Err("Tier 2 publication store is busy".to_string()),
-        };
+    let store = match WaterfallStore::acquire_for_receipts(
+        state_root.join("waterfall"),
+        repo,
+        None,
+    )
+    .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Err("Tier 2 publication store is busy".to_string()),
+    };
     let state = store
         .load_state()
         .map_err(store_error)?

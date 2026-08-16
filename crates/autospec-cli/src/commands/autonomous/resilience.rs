@@ -782,8 +782,11 @@ pub(super) fn with_current_lifecycle_lease<T>(
 ) -> Result<T, String> {
     // Global mutation lock order is resilience lease first, then subsystem locks. Holding the
     // lease transaction across `operation` prevents a reclaim from racing a fenced write.
-    let _transaction =
-        LeaseTransaction::try_open(&lease.lock_path).map_err(|error| match error {
+    #[cfg(test)]
+    let transaction = startup_transaction::retry(|| LeaseTransaction::try_open(&lease.lock_path));
+    #[cfg(not(test))]
+    let transaction = LeaseTransaction::try_open(&lease.lock_path);
+    let _transaction = transaction.map_err(|error| match error {
             StoreError::Held => "resilience lease transaction is held".to_string(),
             StoreError::Diagnostic(reason) => reason,
             StoreError::TokenMismatch => "resilience lease token mismatch".to_string(),
