@@ -2082,6 +2082,9 @@ fn autonomous_status_all_json_aliases_list_with_conductors_key() {
 
 #[test]
 fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-stop");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -2143,6 +2146,9 @@ fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
 
 #[test]
 fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-graceful-stop");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -2204,6 +2210,9 @@ fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
 
 #[test]
 fn autonomous_list_json_reports_each_repo_scope_with_companions() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-list");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -2752,6 +2761,9 @@ fn autonomous_start_mismatched_repo_warns_but_launches() {
 
 #[test]
 fn autonomous_start_writes_launch_provenance_and_list_reports_it() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-launch");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -3248,6 +3260,9 @@ fn autonomous_logs_falls_back_to_newest_legacy_flat_log() {
 
 #[test]
 fn autonomous_cleanup_removes_dead_metadata_without_killing_live_units() {
+    let _lease_test = FRESH_LEASE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let temp = temp_dir("autospec-autonomous-cleanup");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
