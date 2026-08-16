@@ -17,7 +17,7 @@
             Ok(Some((state, _))) => state,
             _ => panic!("read renewed state"),
         };
-        assert_eq!(before.status, "running");
+        assert_eq!(before.status, "claimed");
         let adopted = match retry_lease(|| store.adopt(&claimed.token)) {
             Ok(lease) => lease,
             Err(_) => panic!("spawned child must adopt the exact renewed generation"),

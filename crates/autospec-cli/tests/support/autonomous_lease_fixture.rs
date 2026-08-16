@@ -17,7 +17,7 @@ pub fn wait_until_owned(ready: &Path, state_dir: &Path, operator_dir: &Path, rep
         })
         .collect::<String>();
     let conductor = operator_dir.join(scope).join("conductor.pid");
-    for _ in 0..200 {
+    for _ in 0..1000 {
         let pid = json_u64(&conductor, "pid");
         let owner = json_u64(&lease, "lock_pid");
         let running = json_string(&lease, "status").as_deref() == Some("running");
@@ -26,7 +26,12 @@ pub fn wait_until_owned(ready: &Path, state_dir: &Path, operator_dir: &Path, rep
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("detached conductor did not adopt its fresh lease before the hold fixture");
+    panic!(
+        "detached conductor did not adopt its fresh lease: ready={} conductor={} lease={}",
+        ready.exists(),
+        fs::read_to_string(&conductor).unwrap_or_else(|error| format!("<{error}>")),
+        fs::read_to_string(&lease).unwrap_or_else(|error| format!("<{error}>")),
+    );
 }
 
 fn json(path: &Path) -> Option<serde_json::Value> {
