@@ -10,6 +10,7 @@ if [ "${AUTOSPEC_ACCOUNTABILITY_REQUIRED:-}" = 1 ]; then
     exit 1
   fi
   if [ "$fixture_mode" = hold ]; then
+    : > "${AUTOSPEC_TEST_AUTONOMOUS_HOLD_READY:?hold mode requires a readiness marker}"
     while :; do sleep 0.1; done
   fi
   while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
