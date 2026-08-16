@@ -1237,6 +1237,7 @@ _vacuous_scan_no_assert() {
     local name_pat='"([^"]+)"'
     local close_pat='^[[:space:]]*\}[[:space:]]*$'
     local assert_pat='\b(assert|expect|run|grep|check|verify)\b'
+    local shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
 
     while IFS=: read -r lineno content; do
         # New @test block: flush previous if open
@@ -1254,8 +1255,8 @@ _vacuous_scan_no_assert() {
             _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
             in_test=0; has_assert=0; test_name=""; continue
         fi
-        # Assert/expect/run/grep counts as assertion presence
-        if [[ "$content" =~ $assert_pat ]]; then
+        # Assert/expect/run/grep or shell test expression counts as assertion presence
+        if [[ "$content" =~ $assert_pat ]] || [[ "$content" =~ $shell_test_pat ]]; then
             has_assert=1
         fi
     done <<EOF
@@ -1306,6 +1307,7 @@ _density_scan_file() {
     local js_pat='^[+]?[[:space:]]*(it|test)[[:space:]]*\('
     local py_pat='^[+]?[[:space:]]*def[[:space:]]+test_'
     local assert_pat='\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'
+    local shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
     local brace_pat='^[+]?[[:space:]]*\}[[:space:]]*$'
     while IFS=: read -r lineno content; do
         # bats @test block start
@@ -1324,8 +1326,8 @@ _density_scan_file() {
             in_block=1; block_start="$lineno"; has_assert=0; block_lang="python"; continue
         fi
         [ "$in_block" -eq 0 ] && continue
-        # Assertion presence check
-        if [[ "$content" =~ $assert_pat ]]; then
+        # Assertion presence check (shell test expressions only count for bats blocks)
+        if [[ "$content" =~ $assert_pat ]] || { [ "$block_lang" = "bats" ] && [[ "$content" =~ $shell_test_pat ]]; }; then
             has_assert=1
         fi
         # Bats block end on closing brace
