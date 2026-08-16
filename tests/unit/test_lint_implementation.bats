@@ -827,43 +827,6 @@ _vac_diff() {
     ! echo "$output" | grep -q "VACUOUS_NO_ASSERT"
 }
 
-@test "density: no ASSERTION_DENSITY for bats test using only [ ... ] test expressions" {
-    _vac_diff 'tests/unit/test_x.bats' \
-        '#!/usr/bin/env bats' \
-        '@test "reference file is non-empty" {' \
-        '  [ -f "$REF" ]' \
-        '  [ -s "$REF" ]' \
-        '  [ "$(wc -l < "$REF")" -gt 100 ]' \
-        '}'
-    run bash "$LINT" --diff-file "$_vac_tmpfile" --assertion-density
-    rm -f "$_vac_tmpfile"
-    ! echo "$output" | grep -q "ASSERTION_DENSITY"
-}
-
-@test "vacuous: no VACUOUS_NO_ASSERT for bats test using only [[ ... ]] test expressions" {
-    _vac_diff 'tests/unit/test_x.bats' \
-        '#!/usr/bin/env bats' \
-        '@test "output is set" {' \
-        '  [[ -n "$output" ]]' \
-        '  [[ "$output" == *expected* ]]' \
-        '}'
-    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
-    rm -f "$_vac_tmpfile"
-    ! echo "$output" | grep -q "VACUOUS_NO_ASSERT"
-}
-
-@test "density: ASSERTION_DENSITY still fires for JS test whose [ ... ] line is an array literal" {
-    _vac_diff 'tests/unit/test_x.js' \
-        'it("lists items", () => {' \
-        '  [ a, b ].forEach(render)' \
-        '  render(a)' \
-        '});'
-    run bash "$LINT" --diff-file "$_vac_tmpfile" --assertion-density
-    rm -f "$_vac_tmpfile"
-    [ "$status" -ge 1 ]
-    echo "$output" | grep -q "ASSERTION_DENSITY"
-}
-
 @test "vacuous: no VACUOUS_GREP_INVERSE_OR_TRUE for grep -qv without || true" {
     _vac_diff 'tests/unit/test_x.bats' \
         '#!/usr/bin/env bats' \

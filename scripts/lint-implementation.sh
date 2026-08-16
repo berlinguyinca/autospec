@@ -1236,8 +1236,7 @@ _vacuous_scan_no_assert() {
     local start_pat='^[[:space:]]*@test[[:space:]]'
     local name_pat='"([^"]+)"'
     local close_pat='^[[:space:]]*\}[[:space:]]*$'
-    local assert_pat='\b(assert|expect|run|grep|check|verify)\b'
-    local shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
+    local assert_pat='\b(assert|expect|run|grep|check|verify)\b' shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
 
     while IFS=: read -r lineno content; do
         # New @test block: flush previous if open
@@ -1306,8 +1305,7 @@ _density_scan_file() {
     local bats_pat='^[+]?[[:space:]]*@test[[:space:]]+"'
     local js_pat='^[+]?[[:space:]]*(it|test)[[:space:]]*\('
     local py_pat='^[+]?[[:space:]]*def[[:space:]]+test_'
-    local assert_pat='\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'
-    local shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
+    local assert_pat='\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b' shell_test_pat='^[[:space:]]*\[\[?[[:space:]]'
     local brace_pat='^[+]?[[:space:]]*\}[[:space:]]*$'
     while IFS=: read -r lineno content; do
         # bats @test block start
