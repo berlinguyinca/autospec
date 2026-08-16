@@ -7,6 +7,8 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "support/autonomous_lease_fixture.rs"]
+mod autonomous_lease_fixture;
 #[path = "support/temp_directory.rs"]
 mod temp_directory;
 use temp_directory::unique as temp_dir;
@@ -4072,13 +4074,7 @@ fn start_sleeping_autonomous_with_state(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    for _ in 0..100 {
-        if hold_ready.exists() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("detached conductor did not adopt its lease before entering the hold fixture");
+    autonomous_lease_fixture::wait_until_owned(&hold_ready, state_dir, operator_dir, repo);
 }
 
 fn make_git_repo(repo_dir: &std::path::Path, remote: Option<&str>) {
