@@ -35,7 +35,15 @@ fn autonomous_executor_bridge_rejects_temporary_dispatcher_paths() {
     // Break caught: launching a PATH-shadowed dispatcher from an attacker-writable temp root.
     use std::os::unix::fs::PermissionsExt;
 
-    let root = test_root("unsafe-dispatcher");
+    let root = std::env::temp_dir().join(format!(
+        "autospec-unsafe-dispatcher-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create unsafe dispatcher root");
     let dispatcher = root.join("codex");
     fs::write(&dispatcher, "#!/bin/sh\nexit 0\n").expect("write dispatcher");
     fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755))
@@ -48,6 +56,10 @@ fn autonomous_executor_bridge_rejects_temporary_dispatcher_paths() {
     );
     let mut env = environment(&table);
     env.insert("PATH".to_string(), root.as_os_str().to_os_string());
+    env.insert(
+        "TMPDIR".to_string(),
+        std::env::temp_dir().as_os_str().to_os_string(),
+    );
     env.insert("CODEX_THREAD_ID".to_string(), OsString::from("thread-1"));
 
     let error = HarnessConfig::load(&root, &env)
