@@ -4016,6 +4016,8 @@ fn run_python_suites(id: &str, required: bool, root: &Path) -> CheckResult {
     )
     .expect("pytest suites use a direct Python argument vector")
     .with_env("PYTHONPATH", "packages/autospec_context_monitor")
+    .with_env("PYTHONDONTWRITEBYTECODE", "1")
+    .with_env("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     .execute_in(id, required, root);
     aggregate(id, required, vec![availability, suites])
 }
