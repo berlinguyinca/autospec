@@ -23,6 +23,7 @@
 #   discover-model-supply.sh --json          # probe (honouring cache) + print JSON
 #   discover-model-supply.sh --profiles      # print a model-profiles.yml fragment
 #   discover-model-supply.sh --profiles --only <profile>   # just that one entry
+#   discover-model-supply.sh --runtimes      # list REACHABLE local runtimes only
 #   discover-model-supply.sh --fingerprint   # print the hardware fingerprint only
 #   discover-model-supply.sh -h | --help
 #
@@ -50,6 +51,15 @@
 #   0  probe complete (fresh or cache-hit)
 #   1  usage error, including --only naming a profile the probe did not find
 #   2  jq missing — fail closed, this is a data-integrity tool
+#   3  --require-accelerator and the accelerator state is not provably usable
+#
+# --require-accelerator is opt-in because the DEFAULT contract is "record the
+# reason, do not error": an unusable GPU is a fact about the host, and callers
+# that only want an inventory must still get one. What is never allowed, with or
+# without the flag, is a silent GPU→CPU fallback reported as healthy (§15) —
+# `accelerator.usable` stays false, `cpu_only` stays true, and no model on such a
+# host is dispatch_recommended. The flag turns that fact into a hard stop for
+# callers that cannot proceed without an accelerator.
 #
 # bash 3.2+. set -eu; if/then/fi one-sided conditionals; no RETURN traps.
 
@@ -61,6 +71,8 @@ FORCE=0
 PRINT_JSON=0
 PRINT_PROFILES=0
 PRINT_FINGERPRINT=0
+PRINT_RUNTIMES=0
+REQUIRE_ACCELERATOR=0
 ONLY_PROFILE=
 CALIBRATION_DIR="${AUTOSPEC_CALIBRATION_DIR:-$HOME/.autospec/calibration}"
 OLLAMA_HOST="${AUTOSPEC_OLLAMA_HOST:-127.0.0.1:11434}"
@@ -73,10 +85,16 @@ Usage:
   discover-model-supply.sh [--out <path>] [--ttl <seconds>] [--force]
   discover-model-supply.sh --json
   discover-model-supply.sh --profiles [--only <profile>]
+  discover-model-supply.sh --runtimes [--json]
   discover-model-supply.sh --fingerprint
+  discover-model-supply.sh [--require-accelerator]
   discover-model-supply.sh -h | --help
 
 --only narrows the emitted fragment to one profile; discovery is unaffected.
+--runtimes lists only REACHABLE local endpoints; the stored document still
+  records every probed runtime with its reachable flag.
+--require-accelerator exits 3 with reason=<why> unless the accelerator is
+  provably usable. Without it an unusable accelerator is recorded, not fatal.
 
 Writes a capability document (default ~/.autospec/model-capability.json)
 describing the usable accelerator, reachable local runtimes, measured
@@ -99,6 +117,8 @@ while [ $# -gt 0 ]; do
         --only)
             if [ $# -lt 2 ]; then _die '--only requires an argument'; fi
             ONLY_PROFILE="$2"; shift 2 ;;
+        --runtimes)    PRINT_RUNTIMES=1; shift ;;
+        --require-accelerator) REQUIRE_ACCELERATOR=1; shift ;;
         --fingerprint) PRINT_FINGERPRINT=1; shift ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -146,6 +166,18 @@ fi
 # ── probe ─────────────────────────────────────────────────────────────────────
 
 probe_accelerator
+
+# §15 fail closed. Ambiguous means an accelerator is present but its capability
+# could not be established (a broken NVML driver, an unparseable query) — the
+# state where a silent CPU fallback would otherwise be reported as healthy. The
+# reason is printed so the caller can act on the specific fault, and nothing is
+# written: a document produced under a refusal would be indistinguishable from
+# one produced by a clean probe.
+if [ "$REQUIRE_ACCELERATOR" -eq 1 ] && [ "$ACC_USABLE" != "true" ]; then
+    printf 'discover-model-supply: accelerator not provably usable reason=%s\n' \
+        "${ACC_REASON:-unknown}" >&2
+    exit 3
+fi
 
 cpu_only="true"
 if [ "$ACC_USABLE" = "true" ]; then cpu_only="false"; fi
@@ -209,7 +241,17 @@ fi
 
 # ── output ────────────────────────────────────────────────────────────────────
 
-if [ "$PRINT_JSON" -eq 1 ]; then
+# §17: a listing of runtimes is a listing of what can actually be dispatched to,
+# so an unreachable endpoint is OMITTED here. The stored document keeps all four
+# with their reachable flag — "probed and unreachable" and "never probed" are
+# different facts and the document must not conflate them.
+if [ "$PRINT_RUNTIMES" -eq 1 ]; then
+    if [ "$PRINT_JSON" -eq 1 ]; then
+        jq -c '[.runtimes[] | select(.reachable)]' "$OUT_PATH"
+    else
+        jq -r '.runtimes[] | select(.reachable) | "\(.name)\t\(.endpoint)"' "$OUT_PATH"
+    fi
+elif [ "$PRINT_JSON" -eq 1 ]; then
     cat "$OUT_PATH"
 fi
 

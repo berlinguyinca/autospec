@@ -142,6 +142,7 @@ teardown() {
     [ "$(jq -r '.cloud.anthropic_api_key_present' "$OUT")" = "false" ]
     [ "$(jq -r '.cloud.openai_api_key_present' "$OUT")" = "false" ]
 }
+
 # ── §8 capability evidence levels ─────────────────────────────────────────────
 # Exactly four levels, precedence advertised < discovered < calibrated < observed.
 # §51: a model-generated advertisement is untrusted until calibration says
@@ -204,6 +205,62 @@ teardown() {
     [ "$(jq -r "$entry | .evidence[\"roles.security_reviewer\"]" "$OUT")" = "advertised" ]
     [ "$(jq -r "$entry | .capability_class" "$OUT")" = "C" ]
 }
+
+# ── §17 runtime discovery ─────────────────────────────────────────────────────
+
+@test "--runtimes omits every unreachable endpoint" {
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --runtimes
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "--runtimes --json lists only the reachable endpoint" {
+    stub_curl_reachable_only ":8000"
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --runtimes --json
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '[.[].name] | join(",")')" = "vllm" ]
+    [ "$(printf '%s' "$output" | jq '[.[] | select(.reachable | not)] | length')" = "0" ]
+}
+
+@test "the stored document still records unreachable runtimes with a flag" {
+    stub_curl_reachable_only ":8000"
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --runtimes
+    [ "$(jq -r '[.runtimes[].name] | join(",")' "$OUT")" = "ollama,lmstudio,vllm,llamacpp" ]
+    [ "$(jq -r '.runtimes[] | select(.name == "llamacpp") | .reachable' "$OUT")" = "false" ]
+}
+
+# ── §15 fail closed on an ambiguous accelerator ───────────────────────────────
+
+@test "--require-accelerator exits nonzero printing reason= when the state is ambiguous" {
+    stub_nvidia_nvml_mismatch
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --require-accelerator
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"reason=nvml_driver_library_mismatch"* ]]
+    [ ! -f "$OUT" ]
+}
+
+@test "an ambiguous accelerator is never usable and never silently falls back to CPU dispatch" {
+    stub_nvidia_nvml_mismatch
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$(jq -r '.accelerator.usable' "$OUT")" = "false" ]
+    [ "$(jq -r '.cpu_only' "$OUT")" = "true" ]
+    [ "$(jq '[.local_models[] | select(.dispatch_recommended)] | length' "$OUT")" = "0" ]
+}
+
+@test "--require-accelerator exits 0 on a healthy accelerator" {
+    stub_nvidia_healthy
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --require-accelerator
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.accelerator.usable' "$OUT")" = "true" ]
+}
+
+@test "--require-accelerator refuses a host with no accelerator at all" {
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --require-accelerator
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"reason=no_accelerator_detected"* ]]
+}
+
 # ── §52 backward compatibility ────────────────────────────────────────────────
 
 @test "a host with zero local runtimes still produces a valid document" {
@@ -221,15 +278,4 @@ teardown() {
     [ "$status" -eq 0 ]
     printf '%s' "$output" | jq -e '.cloud.anthropic_api_key_present == true' >/dev/null
     printf '%s' "$output" | jq -e '.local_models == []' >/dev/null
-}
-
-# ── §15 fail closed on an ambiguous accelerator ───────────────────────
-
-@test "an ambiguous accelerator is never usable and never silently falls back to CPU dispatch" {
-    stub_nvidia_nvml_mismatch
-    stub_ollama_mixed
-    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
-    [ "$(jq -r '.accelerator.usable' "$OUT")" = "false" ]
-    [ "$(jq -r '.cpu_only' "$OUT")" = "true" ]
-    [ "$(jq '[.local_models[] | select(.dispatch_recommended)] | length' "$OUT")" = "0" ]
 }
