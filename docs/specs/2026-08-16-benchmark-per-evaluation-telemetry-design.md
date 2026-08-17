@@ -8,6 +8,17 @@
 — specifically §8 (capability evidence levels), §25 (required per-dispatch telemetry),
 §26 (outcome statistics), §28 (model performance ledger) and §32 (calibration).
 
+## Benchmark authority
+
+`2026-08-16-repository-derived-real-work-benchmark-design.md` is authoritative for
+the benchmark subsystem as a whole — corpus, replay methodology, scoring,
+qualification rules, the `autospec bench` CLI surface, and `crates/autospec-bench/`.
+
+This document is the **metric layer** beneath it: it deepens that spec's §31
+(required inference telemetry) with the token-weighted throughput rule, the
+context/performance curves, and the correct-work productivity metrics. Where the
+two describe the same CLI verb or metric name, the RealWork spec wins.
+
 ## Scope binding
 
 The parent spec makes *calibrated* an evidence level between *discovered* and

@@ -155,6 +155,35 @@ conditions:
   increase, and the first async boundary in a codebase that has none — not for a
   schema exercise.
 
+### D6 — The RealWork spec is authoritative for the benchmark subsystem
+
+*Added 2026-08-16, resolving Open item 1 of the original ADR.*
+
+`docs/specs/2026-08-16-repository-derived-real-work-benchmark-design.md` owns the
+benchmark subsystem: corpus, historical-replay methodology, difficulty and scoring
+model, qualification rules, the `autospec bench` CLI (§49), and
+`crates/autospec-bench/` (§51).
+
+The other three documents become layers under it rather than competitors:
+
+| Document | Role after D6 |
+|---|---|
+| `2026-08-16-benchmark-per-evaluation-telemetry-design.md` | Metric layer — deepens RealWork §31 |
+| `2026-08-16-vision-image-generation-qualification-design.md` | A task family alongside the RealWork families |
+| AS-AEO-001 Epic 4 | Integration point only — ingests RealWork results; must not define a second benchmark system |
+
+This holds D3: RealWork §53 appends to the existing ledger rather than creating a
+benchmark store, so the JSONL ledger remains the system of record.
+
+**Two hard gates carried into decomposition.** Phases 1–2 (corpus framework, public
+seed corpus) are decomposable now. Phase 3 mines LC-BinBase Scheduler, the WCMC
+applications, and private Go modules — real production repositories containing
+credentials, customer data, and protected datasets — so RealWork §36 secret
+detection and §37 access levels must exist, be tested against known-positive
+fixtures, and be independently reviewed **before** any private repository is mined.
+Phase 7 (router integration) waits on AS-AEO-001 Epic 5, since the deterministic
+router was parked by D1.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
@@ -190,8 +219,8 @@ model identity, not profile alias).
 
 ## Open items
 
-1. Which document is authoritative for the benchmark subsystem — AS-AEO-001 Epic 4,
-   the telemetry amendment, or the vision amendment.
+1. ~~Which document is authoritative for the benchmark subsystem.~~
+   **Resolved by D6 — the RealWork spec.**
 2. ~~Whether tokio plus a database driver and migration tool are accepted into
    `autospec-core`'s dependency graph in Phase 1.~~ **Resolved by D5 — accepted.**
 3. Whether `executor_bridge/waterfall_policy.rs` and `review_evidence.rs` encode
