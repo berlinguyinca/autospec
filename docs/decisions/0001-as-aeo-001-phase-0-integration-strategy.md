@@ -243,6 +243,37 @@ resource ledger (resource-lifecycle Phase 1) and the router (Epic 5). Decompose 
 only after the executor chain and resource-lifecycle Phase 1 have merged. The
 delegated sections are never decomposed from that document.
 
+### D9 — The control-plane spec contributes three workstreams; five delegate
+
+*Added 2026-08-16, on landing `2026-08-16-next-generation-control-plane-design.md`.*
+
+Of its eight workstreams, three are genuinely new and are the reason to implement it:
+**A Context Compiler** (what to put in an agent's prompt — note the name collision with
+the multi-model spec's §11 GPU KV-cache budgeting, an unrelated concern), **B Complexity
+Governor** (the trigger for replanning, where change-graph §47 is the mechanism), and
+**H Engineering Policy Compiler** (deriving policy, where AS-AEO-001 only enforces it).
+
+Five delegate: **C** outcome learning to multi-model §24-§29 and D6, appending to the one
+ledger per D3; **D** traceability to AS-AEO-001 §47/Epic 7 over the shipped
+`core::evidence`; **E** tournament mode to multi-model §4 and D2 for independence rules;
+**F** onboarding-calibration to the RealWork spec per D6; **G** multi-repo to the existing
+fleet layer and change-graph §48-§49 per D8.
+
+Its §14 eighteen record types persist in the ONE shared database (D5, D7) using the
+resource ledger's shared-migration protocol. Its §15 provenance contract unifies with the
+routing ledger's explainability output rather than becoming a parallel decision log.
+
+**Gate:** only Workstream A has no unbuilt dependency. Nothing here is decomposable
+before the executor chain (#3172/#3173) and resource-lifecycle Phase 1 merge.
+
+**Standing note on planning cadence.** This was the eighth design landed on 2026-08-16
+against one merged implementation PR. Every spec after the second has required a
+precedence decision (D6, D7, D8, D9), each of the form "X restates Y; Y wins." The
+delegation pattern is working, but the design surface is outrunning the implementation
+surface, and this spec's own §1 argues the same: after these capabilities land, effort
+should shift to implementation quality, dogfooding, benchmarks and reliability rather
+than continued feature invention.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
