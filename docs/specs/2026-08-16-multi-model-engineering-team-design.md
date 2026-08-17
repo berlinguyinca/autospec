@@ -30,6 +30,22 @@ Any implementation issue derived from this spec that would create a parallel rou
 a second ledger format, or a per-model config switch matrix is out of scope by
 construction and must be rejected in review.
 
+## Superseding program — AS-AEO-001
+
+[`2026-08-16-autonomous-engineering-organization-design.md`](2026-08-16-autonomous-engineering-organization-design.md)
+(AS-AEO-001) subsumes the concerns of this document at a higher altitude and in
+Rust: roles and separation of duties, capability registry, context management,
+provider health and quota, adaptive routing with explanation, executor
+abstraction, and the audit ledger all reappear there as §16–§19, §21–§22, §32,
+§26, §27–§29, §67 and §58.
+
+This document remains the source of the already-filed issues #3163–#3176, which
+implement those behaviors in bash against the routing surface that exists today.
+Whether that work continues, is wrapped as an AS-AEO-001 §72.2 compatibility
+adapter, or is withdrawn is decided by the AS-AEO-001 §73 Phase 0 migration map —
+not by either spec on its own. Until that decision is recorded, do not file new
+issues from either document for a subsystem the other already covers.
+
 ## Amendments
 
 Two companion specs extend this document and are decomposed alongside it:
