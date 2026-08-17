@@ -184,6 +184,36 @@ fixtures, and be independently reviewed **before** any private repository is min
 Phase 7 (router integration) waits on AS-AEO-001 Epic 5, since the deterministic
 router was parked by D1.
 
+### D7 — The resource ledger shares AS-AEO-001's persistence layer
+
+*Added 2026-08-16, on landing `2026-08-16-resource-lifecycle-cleanup-design.md`.*
+
+That spec's §12 defines a SQLite `resources` table with leases, heartbeats and
+transactional updates. Two clarifications, so it is neither blocked by nor allowed
+to duplicate existing decisions:
+
+- **D3 does not apply to it.** D3 governs routing and dispatch telemetry — an
+  append-only stream of immutable events. Resource records are mutable operational
+  lifecycle state and are not log-shaped. Forcing them into the JSONL ledger would
+  be wrong.
+- **It is not a second database.** D5 already admitted a driver and migration tooling
+  in AS-AEO-001 Phase 1. The `resources` table belongs in that persistence layer as
+  additional tables and migrations. If the resource subsystem lands first, its storage
+  must be written so those tables migrate into the shared database without a data
+  migration.
+
+Ownership split against AS-AEO-001: resource identity, leases, reconciliation,
+janitor and cleanup verification belong to the resource spec; run/work-item
+lifecycle, policy, risk, approvals, emergency stop and budgets remain AS-AEO-001
+(§51, §69, Epic 12).
+
+**Safety sequencing is part of this decision.** The host measured 6,475 local
+branches, 5,926 of them already merged, 25 worktrees, and 13 Docker containers of
+which none carry an `autospec` label. Phases 3-5 (cleanup, crash recovery, janitor)
+must not be decomposed until the §42 git-safety and §45 property/invariant tests
+exist; Invariants 1, 2, 3 and 5 are the acceptance bar. Phase 1 is observation and
+dry-run only and is safe to start.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
