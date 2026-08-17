@@ -1,7 +1,12 @@
 # Self-discovering, cost-aware model routing — design
 
 - **Date:** 2026-08-05
-- **Status:** Concepts & recommendations (pre-planning; not yet decomposed)
+- **Status:** Superseded on 2026-08-16 by
+  [`2026-08-16-multi-model-engineering-team-design.md`](2026-08-16-multi-model-engineering-team-design.md),
+  which absorbs all three layers below (supply discovery, execution path, learned
+  routing) and extends them. This document remains the reference for the ledger
+  format, the `advisor:`-style single policy knob, and the verified current-state
+  audit; it is no longer the source of decomposition.
 - **Author:** berlinguyinca (with Claude)
 - **Topic:** Let autospec discover its own hardware/provider supply, measure what each
   model is actually good at, and route every dispatch — implementer *and* explorer —
