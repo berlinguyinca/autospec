@@ -434,6 +434,25 @@ telemetry half — metrics nobody measured serialize as `"unknown"` rather than
 that is not installed skip rather than fail, so both suites are meaningful on a
 bare host.
 
+### Per-role verdicts and bounded exploration
+
+Qualification is per role. `--role <role>` scopes a run to one of the 14 engineering
+roles and writes its verdict beside the profile-level one, so
+`discover-model-supply.sh` can lift exactly that role to `calibrated` evidence and
+leave the rest at `advertised`. "Qualified for implementation and docs, not qualified
+for planning and review" is one calibration result, not four runs of a pass/fail tool.
+
+`--exploration-budget N` caps how many replays cold-start exploration may spend, and
+refuses outright — exit `4`, `reason=role_forbidden` — for `security_reviewer`,
+`code_reviewer`, `test_reviewer`, `documentation_reviewer`, `ui_ux_reviewer` and
+`qa_verifier`. Needing statistics is never a reason to let an unqualified model hold
+the gate that would catch its own mistakes.
+
+```bash
+scripts/calibrate-profile.sh --calibrate qwen3-32b-laptop --role implementer \
+  --exploration-budget 3 --gate-cmd "cargo test"
+```
+
 ## Deterministic PR bodies
 
 `scripts/compose-pr-body.sh --issue <n> [--summary-file <path>]` assembles the PR
