@@ -274,6 +274,48 @@ surface, and this spec's own §1 argues the same: after these capabilities land,
 should shift to implementation quality, dogfooding, benchmarks and reliability rather
 than continued feature invention.
 
+### D10 — Postgres compatibility is required; sqlx over rusqlite, database is global
+
+*Added 2026-08-16. Supersedes the driver and location choices in issue #3188, and
+tightens D5 and D7.*
+
+**Postgres compatibility is a hard requirement**, not an eventual option. AS-AEO-001
+§64 already said "SQLite with a migration path to PostgreSQL"; this makes it binding.
+
+**Driver: `sqlx`, with the SQLite and Postgres backends.** `rusqlite` is rejected as
+the shared persistence binding: it is a SQLite-only C-FFI API with no Postgres path, so
+reaching Postgres later would mean rewriting every call site rather than swapping a
+driver. The window to change this is now — once a ledger type embeds a concrete
+`rusqlite::Connection`, the choice stops being cheaply reversible.
+
+Rejected alternatives:
+- **diesel** — synchronous and supports both backends, but backend-generic Diesel code
+  is awkward (differing types, differing upsert syntax) on top of schema codegen.
+- **rusqlite behind a storage trait** — cheapest today, but the Postgres path stays
+  theoretical until a second implementation exists, and the SQL is written twice.
+  A requirement is not satisfied by an abstraction that permits it.
+
+**This accepts async into `autospec-core`.** sqlx is async-only, so tokio enters the
+dependency graph. That is already sanctioned: D5 admitted a runtime and a driver, and
+AS-AEO-001 §67 mandates `async fn` provider traits regardless. D5's bounding condition
+still holds — per §66.1, async belongs at the storage boundary; core policy, risk and
+role types must not gain async signatures because storage is async.
+
+The blanket "no `tokio`, no `sqlx`" prohibition drafted into #3188 is **withdrawn**. It
+was a project-wide constraint asserted by a single child issue, above that issue's
+authority and contrary to D5.
+
+**Location: one global database under `~/.autospec`.** A repo-local file cannot back a
+shared Postgres server, cannot hold AS-AEO-001 §64's cross-repo `organizations` /
+`projects` / `repositories` tables, and is already inconsistent with Phase 1 — sibling
+issue #3191 reads global `~/.autospec/process-heartbeats/`, so Phase 1 spans both roots
+either way. Repo-local `.autospec/` remains correct for the existing JSON state layer
+(`state/storage.rs`, `evidence/`, `execution/`); it is the *database* that is global.
+
+**D7 still governs:** exactly ONE database, shared with AS-AEO-001 Epic 2. The
+shared-migration protocol D7 requires is now more important, not less — sqlx's migration
+tooling must be configured so two subsystems can add migrations without colliding.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
