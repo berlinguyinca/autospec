@@ -111,7 +111,11 @@ while [ $# -gt 0 ]; do
         --schema-path)
             _found="$(_schema_path)" || _die "no $SCHEMA_FILE found"
             printf '%s\n' "$_found"; exit 0 ;;
-        --request)     REQUEST_FILE="${2:-}"; shift 2 ;;
+        --request)
+            # `shift 2` on a trailing `--request` fails without consuming
+            # anything, and the loop spins forever. Shift one at a time.
+            REQUEST_FILE="${2:-}"; shift
+            if [ $# -gt 0 ]; then shift; fi ;;
         --dry-run)     DRY_RUN=1; shift ;;
         *)             printf 'executor-dispatch: unknown option: %s\n' "$1" >&2; usage >&2; exit 1 ;;
     esac

@@ -408,6 +408,23 @@ than retried into submission. On a host whose GPU is unusable, zero is the corre
 answer, and a harness that kept trying until it got a pass would be manufacturing
 evidence.
 
+## Checking the executor contract on your host
+
+Every harness reaches a model through one contract,
+`scripts/executor-dispatch.sh --request <file.json>`, so a change of provider is
+a change of one request field rather than a change of orchestration. Add
+`--dry-run` to see the exact invocation a request resolves to without spending a
+token — the quickest way to confirm a harness is installed and reachable.
+
+`bats tests/executor-dispatch.bats` is the contract's own proof: all three
+harnesses return an identical envelope key set, a timeout is reported as
+`status=timeout` with the partial output it captured, and an unknown provider
+refuses with exit 12. `bats tests/executor-dispatch-metrics.bats` covers the
+telemetry half — metrics nobody measured serialize as `"unknown"` rather than
+`0`, and every envelope validates against the schema. Tests needing a harness
+that is not installed skip rather than fail, so both suites are meaningful on a
+bare host.
+
 ## Deterministic PR bodies
 
 `scripts/compose-pr-body.sh --issue <n> [--summary-file <path>]` assembles the PR
