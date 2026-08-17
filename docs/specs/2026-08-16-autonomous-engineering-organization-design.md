@@ -5,7 +5,7 @@
 **Date:** 2026-08-16
 **Specification ID:** AS-AEO-001  
 **Version:** 1.0  
-**Status:** Implementation-ready — **decomposition gated on Phase 0** (see below)  
+**Status:** Implementation-ready — Phase 0 complete; see [ADR 0001](../decisions/0001-as-aeo-001-phase-0-integration-strategy.md)  
 **Priority:** P0 — Foundational  
 **Implementation language:** Rust  
 **Target repository:** AutoSpec  
@@ -36,9 +36,13 @@ completes:
    behavior is replaced. Decomposing this spec before that map exists would
    violate its own gate.
 
-**Therefore:** no issues may be filed from §78's twelve epics until the Phase 0
-current-state audit and migration map are approved, and the disposition of
-#3163–#3176 is decided. Nothing else in this document is modified.
+**Resolved by [ADR 0001](../decisions/0001-as-aeo-001-phase-0-integration-strategy.md)
+(2026-08-16).** The Phase 0 audit and migration map are complete. Phases 0–2 may
+begin. Epics 1, 3, 5, 6 and 8 may be decomposed once Epics 7, 9, 11 and 12 — which
+describe already-shipped subsystems — are rescoped to formalize rather than rebuild
+them. The role vocabulary is 14 snake_case (§65's 21-variant enum does not apply),
+and the append-only JSONL ledger is the system of record with any §64 database as a
+projection of it. Nothing else in this document is modified.
 
 ---
 
