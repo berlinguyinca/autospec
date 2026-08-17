@@ -266,6 +266,35 @@ writes a capability document consumed by `/autospec-run`'s profile auto-init.
 |---|---|---|
 | `AUTOSPEC_MODEL_CAPABILITY` | `~/.autospec/model-capability.json` | Capability-document path. |
 | `AUTOSPEC_OLLAMA_HOST` | `127.0.0.1:11434` | Ollama host:port probed for local models. |
+| `AUTOSPEC_CALIBRATION_DIR` | `~/.autospec/calibration` | Per-role calibration verdicts folded into the document as `calibrated` evidence. |
+
+### Capability evidence levels
+
+Every capability field of a discovered model carries the evidence backing it:
+
+| Level | Meaning |
+|---|---|
+| `advertised` | The model's or runtime's own claim. **Untrusted** — never sufficient to make a model eligible for a role. |
+| `discovered` | A probe returned the value. |
+| `calibrated` | `calibrate-profile.sh` confirmed the capability for a role on this hardware fingerprint. |
+| `observed` | Real task outcomes established production performance. |
+
+Routing precedence is `observed > calibrated > discovered > advertised`. A field
+no probe returned reads `advertised` and holds `"unknown"` — never a fabricated
+`0` or `false` that would read like a measurement. An uncalibrated model is
+capability class `D` with every one of the 14 roles withheld.
+
+### Runtime and accelerator flags
+
+`--runtimes` lists only endpoints that answered; the stored document still
+records all four probed runtimes with their `reachable` flag, because "probed and
+unreachable" and "never probed" are different facts.
+
+`--require-accelerator` exits `3` printing `reason=<why>` unless the accelerator
+is provably usable. It is opt-in: by default an unusable accelerator is a
+recorded fact, not an error. What never happens either way is a silent GPU→CPU
+fallback reported as healthy — `accelerator.usable` stays `false`, `cpu_only`
+stays `true`, and no model on such a host is `dispatch_recommended`.
 
 The document is cached on a hardware fingerprint (accelerator identity + VRAM +
 the installed model set) plus a TTL; a fingerprint change forces a re-probe, and

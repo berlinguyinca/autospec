@@ -206,3 +206,106 @@ row() {
     [ "$(printf '%s' "$output" | jq -r '.qualified')" = "false" ]
     [ "$(printf '%s' "$output" | jq -r '.attempted')" = "5" ]
 }
+
+# ── §32/§33: per-role calibration verdicts and bounded exploration ────────────
+
+@test "--calibrate is an alias for --profile" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate qwen3-32b-laptop \
+        --model qwen3:32b --issues 1,2 --gate-cmd "true" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qwen3-32b-laptop"* ]]
+}
+
+@test "--role rejects a name outside the 14-role vocabulary" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role wizard --issues 1 --gate-cmd "true" --dry-run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"role"* ]]
+}
+
+@test "--role accepts every one of the 14 roles" {
+    for r in orchestrator planner architect test_planner implementer code_reviewer \
+             test_reviewer qa_verifier documentation_writer documentation_reviewer \
+             ui_ux_reviewer security_reviewer researcher advisor; do
+        run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+            --role "$r" --issues 1 --gate-cmd "true" --dry-run
+        [ "$status" -eq 0 ]
+    done
+}
+
+@test "--calibrate P --role implementer writes a role-scoped qualified verdict" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" \
+        AUTOSPEC_MODEL_CAPABILITY="$TMP/absent-capability.json" \
+        AUTOSPEC_ROUTING_LEDGER="$TMP/ledger.jsonl" \
+        bash "$CALIB" --calibrate qwen3-32b-laptop --model qwen3:32b \
+        --role implementer --issues 1 --gate-cmd "true" --json
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.role')" = "implementer" ]
+    [ "$(printf '%s' "$output" | jq -r '.qualified | type')" = "boolean" ]
+    verdict="$(ls "$TMP"/cal/qwen3-32b-laptop.*.implementer.json)"
+    run test -f "$verdict"
+    [ "$status" -eq 0 ]
+}
+
+@test "a role verdict does not collide with the profile-level verdict path" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" \
+        AUTOSPEC_MODEL_CAPABILITY="$TMP/absent-capability.json" \
+        AUTOSPEC_ROUTING_LEDGER="$TMP/ledger.jsonl" \
+        bash "$CALIB" --calibrate p --model m --role planner --issues 1 --gate-cmd "true"
+    [ "$status" -eq 0 ]
+    run bash -c "ls '$TMP'/cal/p.*.json | grep -c planner"
+    [ "$output" = "1" ]
+}
+
+@test "partial qualification is reported as a clean exit, not an error" {
+    mkdir -p "$TMP/cal"
+    fp="$(bash "${BATS_TEST_DIRNAME}/../scripts/discover-model-supply.sh" --fingerprint 2>/dev/null || printf 'unknown')"
+    printf '{"profile":"p","model":"m","role":"planner","fingerprint":"%s","attempted":5,"passed":2,"qualified":false}\n' "$fp" \
+        > "$TMP/cal/p.$fp.planner.json"
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role planner --json
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.qualified')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.passed')" = "2" ]
+}
+
+@test "exploration refuses security_reviewer" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role security_reviewer --exploration-budget 3 --issues 1 --gate-cmd "true"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"reason=role_forbidden"* ]]
+}
+
+@test "exploration refuses every independent-review role" {
+    for r in code_reviewer test_reviewer documentation_reviewer ui_ux_reviewer qa_verifier; do
+        run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+            --role "$r" --exploration-budget 3 --issues 1 --gate-cmd "true"
+        [ "$status" -eq 4 ]
+    done
+}
+
+@test "exploration permits an implementer role" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role implementer --exploration-budget 3 --issues 1,2 --gate-cmd "true" --dry-run
+    [ "$status" -eq 0 ]
+}
+
+@test "--exploration-budget bounds the replay set" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role implementer --exploration-budget 2 --issues 1,2,3,4,5 --gate-cmd "true" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"replay issues: 1,2"* ]]
+}
+
+@test "--exploration-budget rejects a non-numeric value" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role implementer --exploration-budget many --issues 1 --dry-run
+    [ "$status" -eq 1 ]
+}
+
+@test "an exploration budget of zero refuses to explore at all" {
+    run env AUTOSPEC_CALIBRATION_DIR="$TMP/cal" bash "$CALIB" --calibrate p --model m \
+        --role implementer --exploration-budget 0 --issues 1,2 --gate-cmd "true"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"reason="* ]]
+}

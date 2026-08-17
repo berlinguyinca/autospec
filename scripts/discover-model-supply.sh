@@ -23,8 +23,17 @@
 #   discover-model-supply.sh --json          # probe (honouring cache) + print JSON
 #   discover-model-supply.sh --profiles      # print a model-profiles.yml fragment
 #   discover-model-supply.sh --profiles --only <profile>   # just that one entry
+#   discover-model-supply.sh --runtimes      # list REACHABLE local runtimes only
 #   discover-model-supply.sh --fingerprint   # print the hardware fingerprint only
 #   discover-model-supply.sh -h | --help
+#
+# Each discovered model carries the §8 evidence level behind every capability
+# field: `advertised` (the model's own untrusted claim, §51), `discovered` (a
+# probe returned it), `calibrated` (calibrate-profile.sh confirmed it for a
+# role), `observed` (real task outcomes). Routing precedence is
+# observed > calibrated > discovered > advertised — see lib/model-capability-evidence.sh.
+# Calibration verdicts are folded in on a FRESH probe; --force re-reads them
+# after a calibration run on unchanged hardware.
 #
 # --only narrows the emitted fragment to a single profile. The probe still
 # DISCOVERS everything — hiding models from discovery is what caused the
@@ -36,11 +45,21 @@
 # Environment:
 #   AUTOSPEC_MODEL_CAPABILITY  default output path
 #   AUTOSPEC_OLLAMA_HOST       ollama host:port (default 127.0.0.1:11434)
+#   AUTOSPEC_CALIBRATION_DIR   calibrate-profile.sh verdicts (default ~/.autospec/calibration)
 #
 # Exit codes:
 #   0  probe complete (fresh or cache-hit)
 #   1  usage error, including --only naming a profile the probe did not find
 #   2  jq missing — fail closed, this is a data-integrity tool
+#   3  --require-accelerator and the accelerator state is not provably usable
+#
+# --require-accelerator is opt-in because the DEFAULT contract is "record the
+# reason, do not error": an unusable GPU is a fact about the host, and callers
+# that only want an inventory must still get one. What is never allowed, with or
+# without the flag, is a silent GPU→CPU fallback reported as healthy (§15) —
+# `accelerator.usable` stays false, `cpu_only` stays true, and no model on such a
+# host is dispatch_recommended. The flag turns that fact into a hard stop for
+# callers that cannot proceed without an accelerator.
 #
 # bash 3.2+. set -eu; if/then/fi one-sided conditionals; no RETURN traps.
 
@@ -52,7 +71,10 @@ FORCE=0
 PRINT_JSON=0
 PRINT_PROFILES=0
 PRINT_FINGERPRINT=0
+PRINT_RUNTIMES=0
+REQUIRE_ACCELERATOR=0
 ONLY_PROFILE=
+CALIBRATION_DIR="${AUTOSPEC_CALIBRATION_DIR:-$HOME/.autospec/calibration}"
 OLLAMA_HOST="${AUTOSPEC_OLLAMA_HOST:-127.0.0.1:11434}"
 SCHEMA_VERSION="autospec.model-capability.v1"
 CURL_TIMEOUT=2
@@ -63,10 +85,16 @@ Usage:
   discover-model-supply.sh [--out <path>] [--ttl <seconds>] [--force]
   discover-model-supply.sh --json
   discover-model-supply.sh --profiles [--only <profile>]
+  discover-model-supply.sh --runtimes [--json]
   discover-model-supply.sh --fingerprint
+  discover-model-supply.sh [--require-accelerator]
   discover-model-supply.sh -h | --help
 
 --only narrows the emitted fragment to one profile; discovery is unaffected.
+--runtimes lists only REACHABLE local endpoints; the stored document still
+  records every probed runtime with its reachable flag.
+--require-accelerator exits 3 with reason=<why> unless the accelerator is
+  provably usable. Without it an unusable accelerator is recorded, not fatal.
 
 Writes a capability document (default ~/.autospec/model-capability.json)
 describing the usable accelerator, reachable local runtimes, measured
@@ -89,6 +117,8 @@ while [ $# -gt 0 ]; do
         --only)
             if [ $# -lt 2 ]; then _die '--only requires an argument'; fi
             ONLY_PROFILE="$2"; shift 2 ;;
+        --runtimes)    PRINT_RUNTIMES=1; shift ;;
+        --require-accelerator) REQUIRE_ACCELERATOR=1; shift ;;
         --fingerprint) PRINT_FINGERPRINT=1; shift ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -107,9 +137,28 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-PROBE_LIB="$SCRIPT_DIR/lib/model-supply-probe.sh"
-if [ ! -f "$PROBE_LIB" ]; then
-    _die "probe library not found: $PROBE_LIB" 2
+
+# Sibling resolution: repo layout first, then the installed runtime tree. A bare
+# relative path would resolve against the caller's cwd, not the script's.
+_resolve_lib() {
+    for _cand in "$SCRIPT_DIR/lib/$1" \
+                 "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/$1"; do
+        if [ -f "$_cand" ]; then printf '%s' "$_cand"; return 0; fi
+    done
+    return 1
+}
+
+# Evidence helpers are sourced FIRST: _model_entry() calls capability_block().
+EVIDENCE_LIB="$(_resolve_lib model-capability-evidence.sh || printf '')"
+if [ -z "$EVIDENCE_LIB" ]; then
+    _die "evidence library not found: lib/model-capability-evidence.sh" 2
+fi
+# shellcheck source=scripts/lib/model-capability-evidence.sh
+. "$EVIDENCE_LIB"
+
+PROBE_LIB="$(_resolve_lib model-supply-probe.sh || printf '')"
+if [ -z "$PROBE_LIB" ]; then
+    _die "probe library not found: lib/model-supply-probe.sh" 2
 fi
 # shellcheck source=scripts/lib/model-supply-probe.sh
 . "$PROBE_LIB"
@@ -117,6 +166,18 @@ fi
 # ── probe ─────────────────────────────────────────────────────────────────────
 
 probe_accelerator
+
+# §15 fail closed. Ambiguous means an accelerator is present but its capability
+# could not be established (a broken NVML driver, an unparseable query) — the
+# state where a silent CPU fallback would otherwise be reported as healthy. The
+# reason is printed so the caller can act on the specific fault, and nothing is
+# written: a document produced under a refusal would be indistinguishable from
+# one produced by a clean probe.
+if [ "$REQUIRE_ACCELERATOR" -eq 1 ] && [ "$ACC_USABLE" != "true" ]; then
+    printf 'discover-model-supply: accelerator not provably usable reason=%s\n' \
+        "${ACC_REASON:-unknown}" >&2
+    exit 3
+fi
 
 cpu_only="true"
 if [ "$ACC_USABLE" = "true" ]; then cpu_only="false"; fi
@@ -155,13 +216,17 @@ if [ "$reuse" -eq 0 ]; then
         '{kind:$kind, name:$name, vram_total_mb:$total, vram_free_mb:$free,
           usable:$usable, reason:$reason}')"
 
+    # §51: the model's own advertisement is untrusted. Only a calibration
+    # verdict measured on THIS fingerprint may lift a role to `calibrated`.
+    models_doc="$(apply_calibration_evidence "$models_json" "$fp" "$CALIBRATION_DIR")"
+
     # The model set is REPLACED, never merged, so ghost entries cannot persist.
     doc="$(jq -n \
         --arg schema "$SCHEMA_VERSION" --arg fp "$fp" --arg ts "$(_utc)" \
         --argjson epoch "$(_now)" --argjson budget "$budget_mb" \
         --argjson cpu_only "$cpu_only" --argjson acc "$acc_json" \
         --argjson runtimes "$(probe_runtimes)" \
-        --argjson models "$models_json" \
+        --argjson models "$models_doc" \
         --argjson cloud "$(probe_cloud)" \
         '{schema:$schema, fingerprint:$fp, probed_at:$ts, probed_at_epoch:$epoch,
           accelerator:$acc, cpu_only:$cpu_only, memory_budget_mb:$budget,
@@ -176,7 +241,17 @@ fi
 
 # ── output ────────────────────────────────────────────────────────────────────
 
-if [ "$PRINT_JSON" -eq 1 ]; then
+# §17: a listing of runtimes is a listing of what can actually be dispatched to,
+# so an unreachable endpoint is OMITTED here. The stored document keeps all four
+# with their reachable flag — "probed and unreachable" and "never probed" are
+# different facts and the document must not conflate them.
+if [ "$PRINT_RUNTIMES" -eq 1 ]; then
+    if [ "$PRINT_JSON" -eq 1 ]; then
+        jq -c '[.runtimes[] | select(.reachable)]' "$OUT_PATH"
+    else
+        jq -r '.runtimes[] | select(.reachable) | "\(.name)\t\(.endpoint)"' "$OUT_PATH"
+    fi
+elif [ "$PRINT_JSON" -eq 1 ]; then
     cat "$OUT_PATH"
 fi
 
