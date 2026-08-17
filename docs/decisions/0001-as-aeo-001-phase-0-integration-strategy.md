@@ -214,6 +214,35 @@ must not be decomposed until the §42 git-safety and §45 property/invariant tes
 exist; Invariants 1, 2, 3 and 5 are the acceptance bar. Phase 1 is observation and
 dry-run only and is safe to start.
 
+### D8 — The Change Graph consumes cleanup and routing; it does not define them
+
+*Added 2026-08-16, on landing `2026-08-16-change-graph-pr-orchestration-design.md`.*
+
+That spec's novel contribution is real and unbuilt — verified: no ChangeSet, Change
+Graph or stacked-PR surface exists in `crates/`. Its core is the Change Graph and
+ChangeSet abstractions, dependency edge strength, stack-selection policy, size
+budgets, the PR contract, conflict-aware scheduling, three CI levels, merge
+strategy/queue/bottom-up merge, and replanning.
+
+Its §25-§31, however, restate the resource lifecycle subsystem — both documents
+define `autospec cleanup --dry-run` and an `autospec.*` Docker label set. **The
+resource lifecycle spec wins** (D7); it carries the lease, janitor, reconciliation
+and eight safety invariants. A ChangeSet is an *owner identity in the resource
+ledger*, not a second cleanup engine.
+
+Likewise §17-§20 delegate to AS-AEO-001 Epics 5-6 (roles are D2's 14 snake_case set),
+§21-§23 to Epic 8, §37-§39 to Epics 7/9 and the vision spec, and §48-§49 to the
+existing fleet layer.
+
+Two incumbents must be extended rather than recreated: `core::graph::order.rs`
+(117 lines, topological ordering with cycle detection) for §14, and
+`core::coordination::ready_queue.rs` for §15.1.
+
+**Gate:** the novel core consumes the executor abstraction (#3172/#3173), the
+resource ledger (resource-lifecycle Phase 1) and the router (Epic 5). Decompose it
+only after the executor chain and resource-lifecycle Phase 1 have merged. The
+delegated sections are never decomposed from that document.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
