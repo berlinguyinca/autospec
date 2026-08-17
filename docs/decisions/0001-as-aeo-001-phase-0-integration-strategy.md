@@ -1,0 +1,175 @@
+# ADR 0001 — AS-AEO-001 Phase 0 integration strategy
+
+- **Date:** 2026-08-16
+- **Status:** Accepted
+- **Satisfies:** `docs/specs/2026-08-16-autonomous-engineering-organization-design.md` §73 Phase 0
+  ("map existing modules … identify reusable components; create ADR for integration strategy"),
+  whose exit condition is *"approved migration map; no duplicate subsystem implementation
+  started prematurely."*
+- **Supersedes decomposition assumptions in:** `docs/specs/2026-08-16-multi-model-engineering-team-design.md`
+
+## Context
+
+Three specifications landed on `main` on 2026-08-16:
+
+| Spec | State |
+|---|---|
+| `2026-08-16-multi-model-engineering-team-design.md` | Decomposed into issues #3162–#3176 (bash) |
+| `2026-08-16-benchmark-per-evaluation-telemetry-design.md` | Not decomposed |
+| `2026-08-16-vision-image-generation-qualification-design.md` | Not decomposed |
+| `2026-08-16-autonomous-engineering-organization-design.md` (AS-AEO-001) | Not decomposed — gated by this ADR |
+
+AS-AEO-001 subsumes the concerns of all three and mandates Rust (§64 persistence,
+§65 core types, §66 module architecture). The already-filed issues implement the
+same subsystems in bash. Without this ADR, the two programs would build one
+control plane twice.
+
+## Current-state findings
+
+Established by audit of the tree at `56aa090b`. Findings that changed the decision
+are marked **load-bearing**.
+
+### The bash routing layer is not on the execution path — load-bearing
+
+`scripts/route-decide.sh` (352 lines) has **no executable caller**. References are
+`README.md`, `docs/USER_MANUAL.md`, `docs/CONFIG_REFERENCE.md`, and two prose
+comments in `scripts/calibrate-profile.sh` and `scripts/verify-voter-vendor.sh`.
+`scripts/dispatch-implementer.sh` consults no routing helper at all.
+
+The routing/provider bash surface is ~2,264 lines across 10 files and is
+**advisory scaffolding beside the pipeline, not inside it**. Live dispatch runs
+through Rust `executor_bridge` plus `dispatch-implementer.sh`.
+
+Consequence: the usual argument for preserving the bash layer — *it works, don't
+break it* — does not apply. Wrapping a subsystem nothing calls buys backward
+compatibility with nothing, and §72.3 shadow operation has no "current
+assignments" stream to compare against.
+
+Tracked as a defect in its own right: **#3179**.
+
+### There is no database — load-bearing for cost
+
+No `sqlx` / `rusqlite` / `diesel` / `postgres` dependency in any `Cargo.toml`.
+No `migrations/`. State is JSON files (`crates/autospec-core/src/state/storage.rs`)
+plus append-only JSONL under `~/.autospec/`.
+
+`autospec-db` is **not in this repo** — it is an optional external binary, reached
+through a 53-line fire-and-forget shim (`skills/autospec-shared/scripts/emit-event.sh`),
+write-only, and contractually a no-op when `AUTOSPEC_DB_DSN` is unset.
+
+Consequence: §64 introduces persistence **from scratch**, and §67's `async fn`
+provider trait additionally introduces an async runtime. Both enter a workspace
+with six pinned dependencies and no async. This is a Phase 1 cost to budget, not
+a schema exercise.
+
+### Orchestration is already Rust
+
+`core::{coordination, autonomous, execution, claim}` ≈ 16,400 LOC; `cli::commands::autonomous`
+including `executor_bridge` ≈ 53,600 LOC. AS-AEO-001's Rust mandate **agrees** with
+where orchestration lives and disagrees only with where the disconnected routing
+scaffolding lives.
+
+### Several AS-AEO-001 epics describe shipped code
+
+Epic 11 ("proposal state", "policy-controlled promotion") already exists as
+`schemas/autospec-explore-proposal.schema.json`, `core::explore` (1,522 LOC),
+tiers 2/3/4, and `tier15`/`issue_promotion`. Epic 12 overlaps
+`autonomous-usage-governor.sh` and `autospec-stop`. Epic 9 overlaps the shipped
+playwright/accessibility/UI-audit surface. Epic 7 overlaps `core::evidence` (485 LOC)
+and three evidence schemas.
+
+These epics must be rescoped to *formalize what exists* before decomposition.
+
+### GitHub Projects V2 is genuinely greenfield
+
+No `gh project` executable code exists in bash or Rust — only prose in
+`skills/autospec-define/SKILL.md`. Nothing to be compatible with, and therefore
+nothing lost by deferring it to whichever program builds it once.
+
+## Decisions
+
+### D1 — Rescope, do not supersede and do not layer wholesale
+
+Keep the work that extends live, wired code; park the net-new bash subsystems that
+AS-AEO-001 rebuilds in Rust; begin AS-AEO-001 at Phases 0–2, which have no overlap.
+
+Rejected alternatives:
+
+- **Supersede everything.** Discards #3167/#3172/#3173/#3174, which are precisely the
+  inventory, adapter, and shadow-telemetry inputs §72.1–§72.3 require, and parks the
+  repo's only concrete plan for local-model execution behind a ten-phase program.
+- **Layer, keeping all 13.** "The bash layer is the §72.2 compatibility surface" holds
+  only for #3172/#3173 and partly #3167/#3174. For the rest there is no existing
+  behavior to be compatible with, so it pays for two implementations to get the
+  compatibility value of one.
+
+### D2 — Role vocabulary is 14 snake_case
+
+`orchestrator planner architect test_planner implementer code_reviewer test_reviewer
+qa_verifier documentation_writer documentation_reviewer ui_ux_reviewer
+security_reviewer researcher advisor`.
+
+§65's 21-variant CamelCase enum does not apply. §65 explicitly permits adapting
+naming to the codebase, and the 14 names are already binding across every filed
+issue body. The eight §65 roles without an autospec analogue — `RiskAssessor`,
+`RoutingAdvisor`, `BenchmarkAnalyst`, `DependencyReviewer`, `AccessibilityReviewer`,
+`IntegrationReviewer`, `ReleasePreparer`, `ReleaseReviewer` — are recorded here as a
+**documented future extension**, not as a competing enum.
+
+### D3 — The JSONL ledger is the system of record; any database is a projection
+
+§64's `routing_decisions` / `execution_attempts` / `metrics` tables, if built, are a
+derived read model over the append-only JSONL ledger. The "ONE ledger — extend,
+never fork" rule binding on #3163–#3175 stands.
+
+This keeps local-only operation working with no database present, which the
+external, optional, no-op-by-default nature of `autospec-db` already requires.
+
+### D4 — The disconnected router is a defect, not a design
+
+Filed as #3179. Independent of D1: whichever language wins, documentation must not
+describe an entry point that nothing invokes.
+
+## Issue disposition
+
+| Issue | Action | Rationale |
+|---|---|---|
+| #3167 discovery evidence + calibration | **keep** | Extends `discover-model-supply.sh` / `calibrate-profile.sh`, which exist and run; produces §72.1 inventory and Epic 3 qualification inputs |
+| #3172 provider-neutral executor | **keep** | Literally §72.2 — wraps existing provider/execution paths behind an interface before behavior is replaced |
+| #3173 local Qwen execution | **keep** | Only concrete plan for running local models; extends `local-dispatch.sh` in place |
+| #3174 per-dispatch ledger fields | **keep** | Additive optional fields on an existing JSONL; the stream §72.3 shadow operation needs |
+| #3175 smoothed statistics | **keep** | Substrate validated by D3; hierarchical backoff is unowned by AS-AEO-001 |
+| #3176 Phase 5.5 audit | **rescoped** | Now audits only the surviving set; seams shifted to executor contract, ledger back-compat, evidence levels, fail-closed dispatch |
+| #3163 roles + independence | **rewrite** | Behavior mandatory (§7.6, §19, AC-007); belongs in `core::safety` beside `review_policy.rs`, not a new bash script |
+| #3164, #3165 GitHub Project + sync | **parked** | Epic 8, 1:1; Projects V2 is greenfield in both plans |
+| #3166 capability schemas | **parked** | Epic 3 registry; typed Rust supersedes a hand-written JSON Schema envelope |
+| #3168 context reservations | **parked** | Lowest-confidence call — §64 has no table for a host-local GPU lease. Revive under Epic 5 if local multi-worker scheduling is needed before Phase 4 |
+| #3169 quota + health probes | **parked** | Epic 5 "provider-health interface", named identically |
+| #3170, #3171 router + explainability | **parked** | Epic 5 "candidate filtering" / "route explanation"; §65 `RoutingRequest` is field-for-field #3170's CLI surface |
+
+Carried forward into the Epic 6 re-file of #3163, because neither is stated in
+§78's bullets and both are easy to lose: §4.3 (escalation removes the escalated
+model from reviewer candidates) and §4.4 (independence is judged on underlying
+model identity, not profile alias).
+
+## Consequences
+
+- AS-AEO-001 may begin at Phases 0–2. Epics 1, 3, 5, 6, 8 are unblocked for
+  decomposition only after the epics that describe shipped code (7, 9, 11, 12) are
+  rescoped to formalize rather than rebuild.
+- The two unsplit 2026-08-16 amendment specs remain unsplit. They and AS-AEO-001
+  Epic 4 are three documents describing one `autospec bench` subsystem that does not
+  exist (`commands/benchmark.rs` is a 3-line stub). Splitting them before naming one
+  authoritative would recreate this conflict in the benchmark layer.
+- Parked issues keep their bodies as source material; only the substrate changes.
+
+## Open items
+
+1. Which document is authoritative for the benchmark subsystem — AS-AEO-001 Epic 4,
+   the telemetry amendment, or the vision amendment.
+2. Whether tokio plus a database driver and migration tool are accepted into
+   `autospec-core`'s dependency graph in Phase 1, or whether §67's provider trait
+   should be synchronous.
+3. Whether `executor_bridge/waterfall_policy.rs` and `review_evidence.rs` encode
+   policy rather than delegating to `core` — a suspected §66.1 violation
+   ("provider adapters shall not contain policy logic"), unverified.
