@@ -30,6 +30,19 @@ Any implementation issue derived from this spec that would create a parallel rou
 a second ledger format, or a per-model config switch matrix is out of scope by
 construction and must be rejected in review.
 
+## Amendments
+
+Two companion specs extend this document and are decomposed alongside it:
+
+| Amendment | Extends | Adds |
+|---|---|---|
+| [`2026-08-16-benchmark-per-evaluation-telemetry-design.md`](2026-08-16-benchmark-per-evaluation-telemetry-design.md) | §8, §25, §26, §28, §32 | The `autospec bench` harness and the per-evaluation performance telemetry that gives *calibrated* (§8) a concrete measurement contract |
+| [`2026-08-16-vision-image-generation-qualification-design.md`](2026-08-16-vision-image-generation-qualification-design.md) | §7, §9, §21, §32, Wave 11 | Vision and image-generation capability classes, their benchmark suites, and the path by which a visual capability moves from advertised to calibrated |
+
+The vision amendment depends on the telemetry amendment for its harness and
+metric contract. Neither introduces a routing concept independent of this
+document.
+
 ---
 
 # 1. Executive Summary
