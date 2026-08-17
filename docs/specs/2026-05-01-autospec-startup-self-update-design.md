@@ -22,6 +22,25 @@ top-level `toolchain` object. Both `autonomous start` and direct foreground cond
 non-blocking warning naming the failure record when it exists. The recent-success fast path remains
 local and silent.
 
+## 2026-08-16 harness-substitution amendment (issue #3177)
+
+The preflight shell no longer lives inlined in the injected markdown block. It lives in
+`scripts/autospec-startup-self-update.sh`, and the block only resolves and invokes it.
+
+A harness substitutes positional parameters inside a *rendered skill body* at load time. Because
+the expanded block was shell inlined into `SKILL.md` / `prompts/<skill>.md` /
+`agent/<skill>.md`, `target="$1"` in `write_autonomous_operator_wrapper()` was rendered as
+`target="<first argument to the slash command>"`. The function then ignored its own argument and
+wrote a wrapper script — plus `chmod +x` — over that path on every iteration of
+`heal_autonomous_operator_wrappers()`, which runs *before* the daily throttle. Passing a real file
+path as a skill argument overwrote that file. The repository source was clean; only the installed
+copies under `~/.claude/skills/`, `~/.codex/prompts/`, and `~/.config/opencode/agent/` carried the
+substituted text, so a grep of this repo showed nothing.
+
+Shell that lives in a `.sh` file is never rendered by a harness, so its positional parameters stay
+positional. `StructuralValidator::validate_startup_preflight` now rejects any `="$1"` / `="$2"`
+assignment in the block and asserts the behavioral contract against the extracted script.
+
 ## 1. Goals
 
 When the user invokes any autospec skill (`/autospec`, `/autospec-define`,
@@ -42,13 +61,21 @@ introducing a runtime version-pin file.
 
 ## 2. Architecture
 
-### 2.1 Inline preflight in every skill's trio
+### 2.1 Preflight invocation in every skill's trio
 
 Every multi-harness skill body carries an `autospec-block:startup-self-update` marker above its
 existing self-update section. At install/load time, `scripts/expand-skill-blocks.sh` expands that
 marker from `templates/skill-blocks/startup-self-update.md`, substituting only `SKILL_NAME`. This
 keeps one executable source while preserving byte-identical harness bodies and derived golden
 proof for every marked `SKILL.md`, `opencode/agent.md`, and `codex/prompt.md`.
+
+The expanded block contains no self-update logic of its own (see the 2026-08-16 amendment). It
+resolves `autospec-startup-self-update.sh` through the standard three-way fallback —
+`$SCRIPT_DIR`, then `${AUTOSPEC_REPO_ROOT:-$PWD}/scripts`, then
+`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` — and invokes it with the skill name as an
+inert provenance label. A missing script degrades to a `WARN:` line and exit 0, matching the
+fail-open contract. `install.sh`'s `copy_repo_scripts()` globs `scripts/*.sh`, so the extracted
+script ships on every fresh install and `--update`.
 
 ### 2.2 State directory
 
@@ -201,12 +228,16 @@ not abort the calling shell on any failure.
 
 ## 6. Bash preflight contract (canonical reference)
 
-The authoritative executable block is
-[`templates/skill-blocks/startup-self-update.md`](../../templates/skill-blocks/startup-self-update.md).
+The authoritative executable body is
+[`scripts/autospec-startup-self-update.sh`](../../scripts/autospec-startup-self-update.sh). The
+injected block
+[`templates/skill-blocks/startup-self-update.md`](../../templates/skill-blocks/startup-self-update.md)
+only resolves and invokes it, and must never inline shell that assigns a positional parameter.
 Skill files contain `autospec-block:startup-self-update` markers, expanded by
 `scripts/expand-skill-blocks.sh`; generated SHA fixtures prove every marked harness surface expands
 from that one source. `StructuralValidator::validate_startup_preflight` additionally requires the
-durable failure record, bounded log, remote version, and success-only guard ordering.
+durable failure record, bounded log, remote version, and success-only guard ordering — asserted
+against the extracted script.
 
 The block runs as a child process, so fail-open `exit 0` terminates only the preflight. Atomic state
 writes use temp-file plus `mv`, and concurrency uses the portable `mkdir` lock directory. Runtime

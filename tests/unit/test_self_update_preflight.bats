@@ -37,16 +37,21 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 # Run the block with PATH prepended by SHIMDIR (for shim tests).
+# The block resolves scripts/autospec-startup-self-update.sh through the
+# three-way fallback; AUTOSPEC_SCRIPTS_DIR pins it to this checkout so the test
+# never depends on the cwd or on an installed ~/.autospec copy (issue #3177).
 _run_block_shimmed() {
     local h="$HOME"
     local sd="$SHIMDIR"
-    run bash -c "export HOME='${h}'; PATH='${sd}:${PATH}'; ${BLOCK}"
+    local rs="$REPO_ROOT/scripts"
+    run bash -c "export HOME='${h}'; export AUTOSPEC_SCRIPTS_DIR='${rs}'; PATH='${sd}:${PATH}'; ${BLOCK}"
 }
 
 # Run the block with the real PATH (for non-shim tests).
 _run_block() {
     local h="$HOME"
-    run bash -c "export HOME='${h}'; ${BLOCK}"
+    local rs="$REPO_ROOT/scripts"
+    run bash -c "export HOME='${h}'; export AUTOSPEC_SCRIPTS_DIR='${rs}'; ${BLOCK}"
 }
 
 # ---------------------------------------------------------------------------
@@ -112,7 +117,8 @@ _run_block() {
     chmod +x "$SHIMDIR/curl"
     local h="$HOME"
     local sd="$SHIMDIR"
-    run bash -c "export HOME='${h}'; export AUTOSPEC_NO_SELF_UPDATE=1; PATH='${sd}:${PATH}'; ${BLOCK}"
+    local rs="$REPO_ROOT/scripts"
+    run bash -c "export HOME='${h}'; export AUTOSPEC_SCRIPTS_DIR='${rs}'; export AUTOSPEC_NO_SELF_UPDATE=1; PATH='${sd}:${PATH}'; ${BLOCK}"
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -q "UNEXPECTED"
     ! echo "$output" | grep -q "WARN:"

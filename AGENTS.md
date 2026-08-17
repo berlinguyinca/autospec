@@ -159,9 +159,16 @@ Start-family commands also refresh the requested checkout before acquiring the l
 Every multi-harness skill runs a preflight at startup that updates the installed copy
 from `main` at most once per 24 hours (fail-open: any network or install error logs a
 `WARN:` line and continues). Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip. The canonical
-bash block lives in `skills/autospec/SKILL.md` (`## Startup self-update` section) and
-is mirrored byte-identically (modulo `SKILL_NAME=`) across all multi-harness skill trios.
-`autospec validate` (`check_startup_preflight`) enforces byte-identity.
+bash lives in `scripts/autospec-startup-self-update.sh`. The injected
+`## Startup self-update` block (`templates/skill-blocks/startup-self-update.md`) only
+resolves and invokes that script, and is mirrored byte-identically (modulo `SKILL_NAME=`)
+across all multi-harness skill trios. `autospec validate` (`check_startup_preflight`)
+enforces byte-identity.
+
+**Never inline shell that assigns a positional parameter into an injected skill block.**
+A harness substitutes `$1` inside a *rendered* skill body at load time, so `target="$1"`
+becomes the caller's slash-command argument (issue #3177). `check_startup_preflight`
+rejects `="$1"` / `="$2"` in the block; put the shell in a `.sh` file instead.
 
 ## Small-LLM target
 
