@@ -413,6 +413,45 @@ cloud model, the most expensive possible failure), when the capability probe rep
 model is not `dispatch_recommended`, or when no wall-clock bound can be applied. Exit
 **4** means the dispatch hit its ceiling, kept distinct from a wrong answer.
 
+## Provider-neutral executor dispatch
+`scripts/executor-dispatch.sh --request <file.json>` is the single
+`dispatch(request) → result` contract for every harness, so orchestration never
+special-cases a provider. The request carries the design's executor fields —
+`work_item role dispatch_kind model provider context_budget tools workspace
+acceptance_criteria timeout` — and stdout is the result envelope
+`status output patch input_tokens output_tokens cached_tokens prompt_tok_s
+decode_tok_s ttft_ms wall_clock_ms tool_calls failure_class`, validated by
+[`schemas/autospec-dispatch-result.schema.json`](../schemas/autospec-dispatch-result.schema.json).
+
+`provider` selects the adapter and is one of `claude`, `codex`, `opencode`. A
+cloud-only single-provider dispatch needs no capability document, no routing
+policy and no local runtime, so existing setups keep working unchanged.
+
+**Any metric the adapter did not observe is the string `"unknown"`, never `0`.**
+A fabricated zero is indistinguishable from a measured zero once it reaches the
+routing ledger, and it makes a provider look infinitely slow. `wall_clock_ms` is
+the only metric the dispatcher measures itself, so it is the only one always
+numeric. Token counts appear as real integers only when the harness reported
+them; an unparseable or truncated harness stream degrades to `"unknown"`.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_EXECUTOR_TIMEOUT_SECS` | `600` | Ceiling applied when the request omits `timeout`. |
+| `AUTOSPEC_EXECUTOR_CLAUDE_BIN` | resolved from `PATH` | Override the `claude` executable. |
+| `AUTOSPEC_EXECUTOR_CODEX_BIN` | resolved from `PATH` | Override the `codex` executable. |
+| `AUTOSPEC_EXECUTOR_OPENCODE_BIN` | resolved from `PATH` | Override the `opencode` executable. |
+
+A timeout always applies and is enforced by a portable watchdog rather than
+`timeout(1)`, which is absent on a stock macOS. Expiry yields `status=timeout`
+with the partial output captured before the ceiling was enforced.
+
+Exit **1** is a usage error or an invalid request, **2** a missing `jq` (fail
+closed — the envelope has no other serializer), **3** an unavailable harness,
+**4** a timeout, **5** a harness failure, and **12** an unknown `provider` with
+`failure_class=unsupported_provider`. Local runtime names (`ollama`,
+`lmstudio`, `vllm`, `llamacpp`) are runtimes, not harnesses: they refuse with
+exit 12 rather than silently reaching a cloud harness.
+
 ## Automation lifecycle toggles
 | Var | Default | Effect |
 |---|---|---|
