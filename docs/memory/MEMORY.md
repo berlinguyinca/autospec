@@ -42,7 +42,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience shortcuts only
 - [Perpetual capabilities extend the conductor](feedback_capabilities_are_conductor_tiers_not_new_conductors.md) — autonomous workstreams reuse autospec-autonomous tiers instead of duplicating conductor control planes
 - [One-shot tiers must clear trigger state](feedback_oneshot_to_tier_must_clear_trigger_state.md) — a conductor tier must retire the signal it consumes or it will re-fire and starve lower tiers
-- [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update/Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}`
+- [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update/Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}`, and no inlined `$1`/`$2`/`$3` (the harness DOES substitute those; #3177 fixed, #3101 is the un-gated residual)
 - [Refine-then-run workflow shorthand](feedback_refine_then_run_workflow.md) — user's normal autospec flow is refine, review checkpoint, then run; route imperative shorthand through autospec-listen
 
 # Quality / framework discipline
