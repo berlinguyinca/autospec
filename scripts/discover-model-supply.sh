@@ -26,6 +26,14 @@
 #   discover-model-supply.sh --fingerprint   # print the hardware fingerprint only
 #   discover-model-supply.sh -h | --help
 #
+# Each discovered model carries the §8 evidence level behind every capability
+# field: `advertised` (the model's own untrusted claim, §51), `discovered` (a
+# probe returned it), `calibrated` (calibrate-profile.sh confirmed it for a
+# role), `observed` (real task outcomes). Routing precedence is
+# observed > calibrated > discovered > advertised — see lib/model-capability-evidence.sh.
+# Calibration verdicts are folded in on a FRESH probe; --force re-reads them
+# after a calibration run on unchanged hardware.
+#
 # --only narrows the emitted fragment to a single profile. The probe still
 # DISCOVERS everything — hiding models from discovery is what caused the
 # blindness this tool was written to fix — so --only is a paste-time filter, not
@@ -36,6 +44,7 @@
 # Environment:
 #   AUTOSPEC_MODEL_CAPABILITY  default output path
 #   AUTOSPEC_OLLAMA_HOST       ollama host:port (default 127.0.0.1:11434)
+#   AUTOSPEC_CALIBRATION_DIR   calibrate-profile.sh verdicts (default ~/.autospec/calibration)
 #
 # Exit codes:
 #   0  probe complete (fresh or cache-hit)
@@ -53,6 +62,7 @@ PRINT_JSON=0
 PRINT_PROFILES=0
 PRINT_FINGERPRINT=0
 ONLY_PROFILE=
+CALIBRATION_DIR="${AUTOSPEC_CALIBRATION_DIR:-$HOME/.autospec/calibration}"
 OLLAMA_HOST="${AUTOSPEC_OLLAMA_HOST:-127.0.0.1:11434}"
 SCHEMA_VERSION="autospec.model-capability.v1"
 CURL_TIMEOUT=2
@@ -107,9 +117,28 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-PROBE_LIB="$SCRIPT_DIR/lib/model-supply-probe.sh"
-if [ ! -f "$PROBE_LIB" ]; then
-    _die "probe library not found: $PROBE_LIB" 2
+
+# Sibling resolution: repo layout first, then the installed runtime tree. A bare
+# relative path would resolve against the caller's cwd, not the script's.
+_resolve_lib() {
+    for _cand in "$SCRIPT_DIR/lib/$1" \
+                 "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/$1"; do
+        if [ -f "$_cand" ]; then printf '%s' "$_cand"; return 0; fi
+    done
+    return 1
+}
+
+# Evidence helpers are sourced FIRST: _model_entry() calls capability_block().
+EVIDENCE_LIB="$(_resolve_lib model-capability-evidence.sh || printf '')"
+if [ -z "$EVIDENCE_LIB" ]; then
+    _die "evidence library not found: lib/model-capability-evidence.sh" 2
+fi
+# shellcheck source=scripts/lib/model-capability-evidence.sh
+. "$EVIDENCE_LIB"
+
+PROBE_LIB="$(_resolve_lib model-supply-probe.sh || printf '')"
+if [ -z "$PROBE_LIB" ]; then
+    _die "probe library not found: lib/model-supply-probe.sh" 2
 fi
 # shellcheck source=scripts/lib/model-supply-probe.sh
 . "$PROBE_LIB"
@@ -155,13 +184,17 @@ if [ "$reuse" -eq 0 ]; then
         '{kind:$kind, name:$name, vram_total_mb:$total, vram_free_mb:$free,
           usable:$usable, reason:$reason}')"
 
+    # §51: the model's own advertisement is untrusted. Only a calibration
+    # verdict measured on THIS fingerprint may lift a role to `calibrated`.
+    models_doc="$(apply_calibration_evidence "$models_json" "$fp" "$CALIBRATION_DIR")"
+
     # The model set is REPLACED, never merged, so ghost entries cannot persist.
     doc="$(jq -n \
         --arg schema "$SCHEMA_VERSION" --arg fp "$fp" --arg ts "$(_utc)" \
         --argjson epoch "$(_now)" --argjson budget "$budget_mb" \
         --argjson cpu_only "$cpu_only" --argjson acc "$acc_json" \
         --argjson runtimes "$(probe_runtimes)" \
-        --argjson models "$models_json" \
+        --argjson models "$models_doc" \
         --argjson cloud "$(probe_cloud)" \
         '{schema:$schema, fingerprint:$fp, probed_at:$ts, probed_at_epoch:$epoch,
           accelerator:$acc, cpu_only:$cpu_only, memory_budget_mb:$budget,

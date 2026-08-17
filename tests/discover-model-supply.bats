@@ -142,3 +142,94 @@ teardown() {
     [ "$(jq -r '.cloud.anthropic_api_key_present' "$OUT")" = "false" ]
     [ "$(jq -r '.cloud.openai_api_key_present' "$OUT")" = "false" ]
 }
+# ── §8 capability evidence levels ─────────────────────────────────────────────
+# Exactly four levels, precedence advertised < discovered < calibrated < observed.
+# §51: a model-generated advertisement is untrusted until calibration says
+# otherwise, so nothing may reach `calibrated` on the model's own say-so.
+
+@test "every evidence value is one of the four §8 levels" {
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$status" -eq 0 ]
+    [ "$(jq '[.local_models[].evidence | to_entries[].value] | length > 0' "$OUT")" = "true" ]
+    [ "$(jq '[.local_models[].evidence | to_entries[].value]
+             | unique - ["advertised","discovered","calibrated","observed"] | length' "$OUT")" = "0" ]
+}
+
+@test "a probed field reads discovered" {
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$(jq -r '.local_models[] | select(.model == "qwen3:32b") | .evidence.context_length' "$OUT")" = "discovered" ]
+    [ "$(jq -r '.local_models[] | select(.model == "qwen3:32b") | .evidence.quantization' "$OUT")" = "discovered" ]
+}
+
+@test "an unprobed field reads advertised and carries no fabricated value" {
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$(jq -r '.local_models[0].evidence["automation.filesystem"]' "$OUT")" = "advertised" ]
+    [ "$(jq -r '.local_models[0].automation.filesystem' "$OUT")" = "unknown" ]
+    [ "$(jq -r '.local_models[0].modalities.audio' "$OUT")" = "unknown" ]
+}
+
+@test "an advertised capability never reaches calibrated on its own claim" {
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    # qwen3:32b advertises vision in its Capabilities block.
+    [ "$(jq -r '.local_models[] | select(.model == "qwen3:32b") | .modalities.vision' "$OUT")" = "true" ]
+    [ "$(jq '[.local_models[].evidence | to_entries[]
+              | select(.value == "calibrated" or .value == "observed")] | length' "$OUT")" = "0" ]
+    [ "$(jq -r '.local_models[0].evidence["roles.implementer"]' "$OUT")" = "advertised" ]
+}
+
+@test "an uncalibrated model is class D with every role withheld" {
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$(jq -r '.local_models[0].capability_class' "$OUT")" = "D" ]
+    [ "$(jq '[.local_models[].roles | to_entries[] | select(.value == true)] | length' "$OUT")" = "0" ]
+    [ "$(jq '.local_models[0].roles | keys | length' "$OUT")" = "14" ]
+}
+
+@test "a calibration verdict promotes exactly that role to calibrated" {
+    stub_ollama_mixed
+    fp="$(env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --fingerprint)"
+    mkdir -p "$TMP/cal"
+    printf '{"profile":"qwen3-32b-laptop","role":"implementer","qualified":true}\n' \
+        > "$TMP/cal/qwen3-32b-laptop.$fp.implementer.json"
+    run env PATH="$PROBE_PATH" HOME="$TMP" AUTOSPEC_CALIBRATION_DIR="$TMP/cal" \
+        bash "$SCRIPT" --out "$OUT" --force
+    [ "$status" -eq 0 ]
+    entry='.local_models[] | select(.profile == "qwen3-32b-laptop")'
+    [ "$(jq -r "$entry | .roles.implementer" "$OUT")" = "true" ]
+    [ "$(jq -r "$entry | .evidence[\"roles.implementer\"]" "$OUT")" = "calibrated" ]
+    [ "$(jq -r "$entry | .evidence[\"roles.security_reviewer\"]" "$OUT")" = "advertised" ]
+    [ "$(jq -r "$entry | .capability_class" "$OUT")" = "C" ]
+}
+# ── §52 backward compatibility ────────────────────────────────────────────────
+
+@test "a host with zero local runtimes still produces a valid document" {
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '.schema == "autospec.model-capability.v1"' "$OUT"
+    [ "$status" -eq 0 ]
+    [ "$(jq '.local_models | length' "$OUT")" = "0" ]
+    [ "$(jq '[.runtimes[] | select(.reachable)] | length' "$OUT")" = "0" ]
+}
+
+@test "cloud-only single-provider operation still produces a valid document" {
+    run env PATH="$PROBE_PATH" HOME="$TMP" ANTHROPIC_API_KEY="sk-ant-x" \
+        bash "$SCRIPT" --out "$OUT" --json
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '.cloud.anthropic_api_key_present == true' >/dev/null
+    printf '%s' "$output" | jq -e '.local_models == []' >/dev/null
+}
+
+# ── §15 fail closed on an ambiguous accelerator ───────────────────────
+
+@test "an ambiguous accelerator is never usable and never silently falls back to CPU dispatch" {
+    stub_nvidia_nvml_mismatch
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT"
+    [ "$(jq -r '.accelerator.usable' "$OUT")" = "false" ]
+    [ "$(jq -r '.cpu_only' "$OUT")" = "true" ]
+    [ "$(jq '[.local_models[] | select(.dispatch_recommended)] | length' "$OUT")" = "0" ]
+}

@@ -188,15 +188,20 @@ ctx_ordinal() {
 # Only completion-capable models are kept, which drops embedding models without
 # a name blocklist.
 
-# _has_completion <show-output> — exit 0 when the Capabilities block lists completion.
-_has_completion() {
-    printf '%s\n' "$1" | awk '
+# _has_capability <show-output> <name> — exit 0 when the Capabilities block
+# lists <name>. The block is the runtime's own mechanical report, so a hit is
+# §8 `discovered`; a miss is a discovered ABSENCE, not an unprobed field.
+_has_capability() {
+    printf '%s\n' "$1" | awk -v want="$2" '
         /^[[:space:]]*Capabilities[[:space:]]*$/ {incap=1; next}
         incap && /^[[:alpha:]]/ {incap=0}
-        incap && /completion/ {found=1}
+        incap && index($0, want) {found=1}
         END {exit !found}
     '
 }
+
+# _has_completion <show-output> — exit 0 when the Capabilities block lists completion.
+_has_completion() { _has_capability "$1" "completion"; }
 
 # _weights_mb <list-output> <tag> — on-disk footprint from the SIZE + unit column.
 _weights_mb() {
@@ -234,19 +239,32 @@ _model_entry() {
     # Normalized profile key; `model:` keeps the original dispatchable tag.
     _key="$(printf '%s' "$_tag" | tr '[:upper:]' '[:lower:]' | sed 's/[:\/. 	]/-/g')-laptop"
 
+    # §8: the Capabilities block is a mechanical report, so vision and tool
+    # calling are `discovered` either way. Everything the runtime does not report
+    # stays "unknown"/`advertised` inside capability_block.
+    _vision="false"
+    if _has_capability "$_show" "vision"; then _vision="true"; fi
+    _tools="false"
+    if _has_capability "$_show" "tools"; then _tools="true"; fi
+
+    _params_c="$(_clean "${_params:-unknown}")"
+    _quant_c="$(_clean "${_quant:-unknown}")"
+
     jq -nc \
         --arg tag "$_tag" --arg profile "$_key" \
-        --arg params "$(_clean "${_params:-unknown}")" \
-        --arg quant "$(_clean "${_quant:-unknown}")" \
+        --arg params "$_params_c" \
+        --arg quant "$_quant_c" \
         --arg ctx "$(ctx_ordinal "$_ctx_tokens" "$_head")" \
         --argjson ctx_tokens "${_ctx_tokens:-0}" \
         --argjson size_mb "${_size:-0}" \
         --argjson dispatchable "$_ok" \
+        --argjson cap "$(capability_block "ollama" "${_ctx_tokens:-0}" \
+            "$_params_c" "$_quant_c" "${_size:-0}" "$_vision" "$_tools")" \
         '{profile:$profile, model:$tag, runtime:"ollama",
           context_length_measured:$ctx_tokens, ctx:$ctx,
           reasoning:"shallow",
           parameters_reported:$params, quantization:$quant,
-          weights_mb:$size_mb, dispatch_recommended:$dispatchable}'
+          weights_mb:$size_mb, dispatch_recommended:$dispatchable} + $cap'
 }
 
 probe_ollama_models() {
