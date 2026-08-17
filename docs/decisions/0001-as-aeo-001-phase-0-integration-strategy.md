@@ -130,6 +130,31 @@ external, optional, no-op-by-default nature of `autospec-db` already requires.
 Filed as #3179. Independent of D1: whichever language wins, documentation must not
 describe an entry point that nothing invokes.
 
+### D5 — Accept an async runtime and a database driver in Phase 1
+
+*Added 2026-08-16, resolving Open item 2 of the original ADR.*
+
+§64 (persistence) and §67 (`async fn` provider trait) are taken as written. Phase 1
+therefore admits tokio, a database driver, and a migration tool into a workspace
+whose current dependency set is six pinned crates (`serde`, `serde_json`, `sha2`,
+`yaml-edit`, `getrandom`, `nix`) with no async runtime.
+
+This is the larger of the two options and it is chosen deliberately. Bounding
+conditions:
+
+- **D3 still governs the data.** The database is a projection; the append-only JSONL
+  ledger remains the system of record. Accepting a driver does not promote the
+  database to authoritative.
+- **Local-only operation must keep working with no database present.** This follows
+  from D3 and from the existing contract that `autospec-db` is optional and a no-op
+  without a DSN. A missing database degrades functionality, never correctness.
+- **Dependency direction per §66.1.** The driver and runtime belong beneath the
+  domain layer. Core policy, risk, and role types must not gain an async signature
+  merely because a provider adapter is async.
+- **The cost is real.** Budget Phase 1 for dependency-graph review, build-time
+  increase, and the first async boundary in a codebase that has none — not for a
+  schema exercise.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
@@ -167,9 +192,8 @@ model identity, not profile alias).
 
 1. Which document is authoritative for the benchmark subsystem — AS-AEO-001 Epic 4,
    the telemetry amendment, or the vision amendment.
-2. Whether tokio plus a database driver and migration tool are accepted into
-   `autospec-core`'s dependency graph in Phase 1, or whether §67's provider trait
-   should be synchronous.
+2. ~~Whether tokio plus a database driver and migration tool are accepted into
+   `autospec-core`'s dependency graph in Phase 1.~~ **Resolved by D5 — accepted.**
 3. Whether `executor_bridge/waterfall_policy.rs` and `review_evidence.rs` encode
    policy rather than delegating to `core` — a suspected §66.1 violation
    ("provider adapters shall not contain policy logic"), unverified.
