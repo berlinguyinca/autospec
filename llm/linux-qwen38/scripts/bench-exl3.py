@@ -26,10 +26,16 @@ def main() -> int:
     ap.add_argument("--prompt-tokens", type=int, default=512)
     ap.add_argument("--needle", action="store_true",
                     help="run a needle-in-haystack retrieval at ~85%% of --ctx")
+    ap.add_argument("--kv-bits", type=int, default=0,
+                    help="quantised K/V cache at N bits (e.g. 4 or 8); 0 = fp16. "
+                         "fp16 KV costs ~64 KiB/token here, so six-figure "
+                         "contexts need this.")
     args = ap.parse_args()
 
-    from exllamav3 import Config, Model, Cache, Tokenizer, Generator, Job
+    from exllamav3 import (Config, Model, Cache, Tokenizer, Generator, Job,
+                           CacheLayer_quant, CacheLayer_fp16)
     import torch
+    from functools import partial
 
     model_dir = Path(args.model)
     if not model_dir.is_dir():
@@ -40,14 +46,18 @@ def main() -> int:
     config = Config.from_directory(str(model_dir))
     model = Model.from_config(config)
     tokenizer = Tokenizer.from_config(config)
-    # fp16 cache; exl3 also supports quantised K/V, which would trade a little
-    # quality for more context exactly as fp8 does on the vLLM side.
-    cache = Cache(model, max_num_tokens=args.ctx)
+    if args.kv_bits:
+        layer_type = partial(CacheLayer_quant,
+                             k_bits=args.kv_bits, v_bits=args.kv_bits)
+    else:
+        layer_type = CacheLayer_fp16
+    cache = Cache(model, max_num_tokens=args.ctx, layer_type=layer_type)
     model.load()
     load_s = time.perf_counter() - t0
 
     free, total = torch.cuda.mem_get_info()
     vram_used_mib = (total - free) // (1024 * 1024)
+    print(f"kv             : {str(args.kv_bits) + '-bit' if args.kv_bits else 'fp16'}")
     print(f"load           : {load_s:.1f}s")
     print(f"vram after load: {vram_used_mib} MiB")
 
