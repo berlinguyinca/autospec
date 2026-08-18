@@ -16,17 +16,30 @@
 # The verdict is cached per hardware fingerprint (from discover-model-supply.sh):
 # re-running on unchanged hardware is a no-op, and swapping a GPU invalidates it.
 #
+# §32 makes qualification PER ROLE: "qualified for implementation and docs, not
+# qualified for planning and review" is one calibration result, not four runs of
+# a pass/fail tool. --role scopes the verdict to a single role and writes it to
+# its own file, so discover-model-supply.sh can lift exactly that role to §8
+# `calibrated` and leave every other role at `advertised`.
+#
+# §33 bounds cold-start exploration with --exploration-budget, and forbids it
+# outright for the security and independent-review roles: collecting statistics
+# is never a reason to let an unqualified model near the gate that would catch
+# its own mistakes.
+#
 # Usage:
-#   calibrate-profile.sh --profile <name> [--model <tag>]
+#   calibrate-profile.sh --profile|--calibrate <name> [--model <tag>]
+#                        [--role <role>] [--exploration-budget N]
 #                        [--issues <n1,n2,...>] [--count K]
 #                        [--gate-cmd "<command>"] [--repo <owner/name>]
 #                        [--dry-run] [--force] [--json]
 #
 # Exit codes:
 #   0  calibration ran (or a cached verdict was reused); read `qualified`
-#   1  bad arguments
+#   1  bad arguments, including a role outside the 14-role vocabulary
 #   3  cannot calibrate — no capability document, no local dispatch, or no
 #      replayable issues. Distinct from "ran and failed": nothing was measured.
+#   4  exploration refused — see reason= (§33)
 #
 # Environment:
 #   AUTOSPEC_CALIBRATION_DIR   verdict cache (default ~/.autospec/calibration)
@@ -36,19 +49,46 @@
 set -u
 
 PROFILE=""; MODEL=""; ISSUES=""; COUNT=5
+ROLE=""; EXPLORATION_BUDGET=""
 GATE_CMD="${AUTOSPEC_CALIBRATION_GATE:-}"
 REPO=""; DRY_RUN=0; FORCE=0; JSON=0
 CACHE_DIR="${AUTOSPEC_CALIBRATION_DIR:-$HOME/.autospec/calibration}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
+# The 14 snake_case roles (§3, ADR 0001 D2) — kept in step with
+# scripts/lib/model-capability-evidence.sh.
+ROLE_VOCABULARY="orchestrator planner architect test_planner implementer
+code_reviewer test_reviewer qa_verifier documentation_writer
+documentation_reviewer ui_ux_reviewer security_reviewer researcher advisor"
+
+# §33: never explore into security or independent review. A model that has not
+# earned a role cannot be handed the very role that would judge its own output,
+# and "we needed the statistics" is not an exception.
+EXPLORATION_FORBIDDEN_ROLES="security_reviewer code_reviewer test_reviewer
+documentation_reviewer ui_ux_reviewer qa_verifier"
+
 _die() { printf 'calibrate-profile: %s\n' "$1" >&2; exit "${2:-1}"; }
 _refuse() { printf 'calibrate-profile: %s\n' "$1" >&2; exit 3; }
+# _forbid <message> <reason> — an exploration refusal. The reason is a stable
+# code callers can branch on; the specific role stays in the human message so
+# `reason` never becomes a free-text field.
+_forbid() { printf 'calibrate-profile: %s reason=%s\n' "$1" "$2" >&2; exit 4; }
+
+# _in_list <needle> <whitespace-separated list>
+_in_list() {
+    for _item in $2; do
+        if [ "$_item" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        --profile)  PROFILE="${2:-}"; shift 2 ;;
+        --profile|--calibrate)  PROFILE="${2:-}"; shift 2 ;;
         --model)    MODEL="${2:-}"; shift 2 ;;
+        --role)     ROLE="${2:-}"; shift 2 ;;
+        --exploration-budget) EXPLORATION_BUDGET="${2:-}"; shift 2 ;;
         --issues)   ISSUES="${2:-}"; shift 2 ;;
         --count)    COUNT="${2:-}"; shift 2 ;;
         --gate-cmd) GATE_CMD="${2:-}"; shift 2 ;;
@@ -65,6 +105,30 @@ case "$COUNT" in ''|*[!0-9]*) _die "--count must be an integer: $COUNT" ;; esac
 if [ "$COUNT" -lt 1 ] 2>/dev/null; then _die '--count must be >= 1'; fi
 if ! command -v jq >/dev/null 2>&1; then _refuse 'jq is required'; fi
 
+if [ -n "$ROLE" ]; then
+    if ! _in_list "$ROLE" "$ROLE_VOCABULARY"; then
+        _die "unknown role: $ROLE (expected one of: $(printf '%s' "$ROLE_VOCABULARY" | tr '\n' ' '))"
+    fi
+fi
+
+# §33 cold start. The budget caps how many replays exploration may spend, and
+# gates WHICH roles exploration may touch at all. Both checks run before any
+# dispatch: a refusal after the first replay would already have spent the risk.
+if [ -n "$EXPLORATION_BUDGET" ]; then
+    case "$EXPLORATION_BUDGET" in
+        ''|*[!0-9]*) _die "--exploration-budget must be a non-negative integer: $EXPLORATION_BUDGET" ;;
+    esac
+    if [ -z "$ROLE" ]; then
+        _die '--exploration-budget requires --role (exploration is gated per role)'
+    fi
+    if _in_list "$ROLE" "$EXPLORATION_FORBIDDEN_ROLES"; then
+        _forbid "exploration may never qualify role $ROLE" role_forbidden
+    fi
+    if [ "$EXPLORATION_BUDGET" -eq 0 ]; then
+        _forbid "exploration budget is 0; no replay may be spent on role $ROLE" exploration_budget_exhausted
+    fi
+fi
+
 # ── hardware fingerprint (verdicts are only valid for the hardware measured) ───
 FP="unknown"
 _probe="$SCRIPT_DIR/discover-model-supply.sh"
@@ -73,13 +137,21 @@ if [ -f "$_probe" ]; then
 fi
 if [ -z "$FP" ]; then FP="unknown"; fi
 
+# A role-scoped verdict gets its own file. The profile-level path is left exactly
+# where it was so an existing cache — and every caller that reads it — keeps
+# working; the two never collide because a role name cannot be empty.
 VERDICT_FILE="$CACHE_DIR/${PROFILE}.${FP}.json"
+VERDICT_ROLE="any"
+if [ -n "$ROLE" ]; then
+    VERDICT_FILE="$CACHE_DIR/${PROFILE}.${FP}.${ROLE}.json"
+    VERDICT_ROLE="$ROLE"
+fi
 
 _report() {
     if [ "$JSON" -eq 1 ]; then
         cat "$VERDICT_FILE"
     else
-        jq -r '"profile=\(.profile) qualified=\(.qualified) passed=\(.passed)/\(.attempted) fingerprint=\(.fingerprint)"' \
+        jq -r '"profile=\(.profile) role=\(.role // "any") qualified=\(.qualified) passed=\(.passed)/\(.attempted) fingerprint=\(.fingerprint)"' \
             "$VERDICT_FILE" 2>/dev/null || printf 'profile=%s (no verdict)\n' "$PROFILE"
     fi
 }
@@ -121,6 +193,25 @@ if [ -z "$ISSUES" ]; then
     _refuse 'no replayable merged issues found'
 fi
 
+# §33: the budget is a hard ceiling on replays, applied AFTER the set is built so
+# an operator's explicit --issues list is truncated rather than silently ignored.
+if [ -n "$EXPLORATION_BUDGET" ]; then
+    _kept=""; _spent=0
+    _b_ifs="$IFS"; IFS=','
+    for _n in $ISSUES; do
+        IFS="$_b_ifs"
+        if [ "$_spent" -ge "$EXPLORATION_BUDGET" ]; then break; fi
+        if [ -z "$_kept" ]; then _kept="$_n"; else _kept="$_kept,$_n"; fi
+        _spent=$((_spent + 1))
+        IFS=','
+    done
+    IFS="$_b_ifs"
+    ISSUES="$_kept"
+    if [ -z "$ISSUES" ]; then
+        _forbid "exploration budget left no replay for role $ROLE" exploration_budget_exhausted
+    fi
+fi
+
 # ── gate: the repo's own definition of correct ─────────────────────────────────
 if [ -z "$GATE_CMD" ]; then
     if command -v autospec >/dev/null 2>&1; then
@@ -131,7 +222,7 @@ if [ -z "$GATE_CMD" ]; then
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    printf 'would calibrate profile=%s model=%s\n' "$PROFILE" "$MODEL"
+    printf 'would calibrate profile=%s model=%s role=%s\n' "$PROFILE" "$MODEL" "$VERDICT_ROLE"
     printf 'replay issues: %s\n' "$ISSUES"
     printf 'gate: %s\n' "$GATE_CMD"
     printf 'verdict file: %s\n' "$VERDICT_FILE"
@@ -173,7 +264,7 @@ for _issue in $ISSUES; do
     # formula. dispatch_id is namespaced so a replay is never mistaken for a
     # real dispatch of that issue.
     if [ -f "$SCRIPT_DIR/routing-ledger.sh" ]; then
-        _rec="$(jq -nc --arg id "calib-$PROFILE-$FP-$_issue" --arg p "$PROFILE" --arg m "$MODEL" \
+        _rec="$(jq -nc --arg id "calib-$PROFILE-$VERDICT_ROLE-$FP-$_issue" --arg p "$PROFILE" --arg m "$MODEL" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg oc "$_outcome" \
             --argjson issue "$_issue" --argjson ms "$_elapsed_ms" \
             '{dispatch_id:$id, ts:$ts, dispatch_kind:"implementer", profile:$p, model:$m,
@@ -196,12 +287,16 @@ if [ "$attempted" -gt 0 ] && [ $((passed * 2)) -gt "$attempted" ]; then
 fi
 
 if [ ! -d "$CACHE_DIR" ]; then mkdir -p "$CACHE_DIR"; fi
-jq -n --arg p "$PROFILE" --arg m "$MODEL" --arg fp "$FP" \
+_budget_json="null"
+if [ -n "$EXPLORATION_BUDGET" ]; then _budget_json="$EXPLORATION_BUDGET"; fi
+
+jq -n --arg p "$PROFILE" --arg m "$MODEL" --arg fp "$FP" --arg role "$VERDICT_ROLE" \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --argjson attempted "$attempted" --argjson passed "$passed" \
-      --argjson qualified "$qualified" \
-      '{profile:$p, model:$m, fingerprint:$fp, calibrated_at:$ts,
-        attempted:$attempted, passed:$passed, qualified:$qualified}' > "$VERDICT_FILE"
+      --argjson qualified "$qualified" --argjson budget "$_budget_json" \
+      '{profile:$p, model:$m, role:$role, fingerprint:$fp, calibrated_at:$ts,
+        attempted:$attempted, passed:$passed, qualified:$qualified,
+        exploration_budget:$budget}' > "$VERDICT_FILE"
 
 _report
 exit 0

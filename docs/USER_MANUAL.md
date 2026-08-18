@@ -300,6 +300,15 @@ the entry from what is actually installed with
 `scripts/discover-model-supply.sh --profiles --only <profile>`, and rate its `ctx`
 for the window that fits alongside the weights rather than the advertised one.
 
+Each discovered model records the evidence behind every capability field —
+`advertised` (untrusted claim) → `discovered` (a probe returned it) → `calibrated`
+(a calibration replay confirmed it) → `observed` (real task outcomes), with routing
+precedence `observed > calibrated > discovered > advertised`. Use
+`scripts/discover-model-supply.sh --runtimes` to list only the local endpoints that
+actually answered, and `--require-accelerator` to turn an unusable accelerator into a
+hard stop instead of a recorded fact. See
+[CONFIG_REFERENCE.md](CONFIG_REFERENCE.md#capability-evidence-levels).
+
 ### Project map (`~/.autospec/project-map.yml`)
 
 Maps repo slugs to local paths. See `examples/project-map.yml`.
@@ -407,6 +416,42 @@ re-running on unchanged hardware is a no-op and swapping a GPU invalidates it.
 than retried into submission. On a host whose GPU is unusable, zero is the correct
 answer, and a harness that kept trying until it got a pass would be manufacturing
 evidence.
+
+## Checking the executor contract on your host
+
+Every harness reaches a model through one contract,
+`scripts/executor-dispatch.sh --request <file.json>`, so a change of provider is
+a change of one request field rather than a change of orchestration. Add
+`--dry-run` to see the exact invocation a request resolves to without spending a
+token — the quickest way to confirm a harness is installed and reachable.
+
+`bats tests/executor-dispatch.bats` is the contract's own proof: all three
+harnesses return an identical envelope key set, a timeout is reported as
+`status=timeout` with the partial output it captured, and an unknown provider
+refuses with exit 12. `bats tests/executor-dispatch-metrics.bats` covers the
+telemetry half — metrics nobody measured serialize as `"unknown"` rather than
+`0`, and every envelope validates against the schema. Tests needing a harness
+that is not installed skip rather than fail, so both suites are meaningful on a
+bare host.
+
+### Per-role verdicts and bounded exploration
+
+Qualification is per role. `--role <role>` scopes a run to one of the 14 engineering
+roles and writes its verdict beside the profile-level one, so
+`discover-model-supply.sh` can lift exactly that role to `calibrated` evidence and
+leave the rest at `advertised`. "Qualified for implementation and docs, not qualified
+for planning and review" is one calibration result, not four runs of a pass/fail tool.
+
+`--exploration-budget N` caps how many replays cold-start exploration may spend, and
+refuses outright — exit `4`, `reason=role_forbidden` — for `security_reviewer`,
+`code_reviewer`, `test_reviewer`, `documentation_reviewer`, `ui_ux_reviewer` and
+`qa_verifier`. Needing statistics is never a reason to let an unqualified model hold
+the gate that would catch its own mistakes.
+
+```bash
+scripts/calibrate-profile.sh --calibrate qwen3-32b-laptop --role implementer \
+  --exploration-budget 3 --gate-cmd "cargo test"
+```
 
 ## Deterministic PR bodies
 

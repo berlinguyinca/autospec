@@ -2205,27 +2205,18 @@ impl StructuralValidator {
             );
         }
 
-        let canonical = startup_preflight_body(&read(&template)?);
-        if canonical.is_empty() {
+        let template_body = startup_preflight_body(&read(&template)?);
+        if template_body.is_empty() {
             return Err(
                 "templates/skill-blocks/startup-self-update.md missing ## Startup self-update bash block"
                     .to_string(),
             );
         }
-        if !canonical.contains("raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh")
-        {
-            return Err("startup preflight must call the curl-safe suite bootstrap.sh".to_string());
-        }
-        if !canonical.contains("--skill all --harness all --update") {
-            return Err(
-                "startup preflight must update all skills across all harnesses".to_string(),
-            );
-        }
-        if canonical.contains("raw.githubusercontent.com/berlinguyinca/autospec/main/install.sh")
-            || canonical.contains("raw.githubusercontent.com/berlinguyinca/autospec/main/skills/")
-        {
-            return Err("startup preflight must not call a raw installer directly".to_string());
-        }
+        // Asserts the block is harness-safe, then yields whichever text actually
+        // carries the executable body (the extracted script, or the block itself
+        // on legacy trees).
+        let canonical =
+            startup_preflight_contract::resolve_contract_source(root, &template_body)?;
         startup_preflight_contract::validate_reliability(&canonical)?;
 
         let trio_dirs = skill_directories(root)?
@@ -2258,7 +2249,7 @@ impl StructuralValidator {
                 if body.is_empty() {
                     continue;
                 }
-                if body != canonical {
+                if body != template_body {
                     return Err(format!(
                         "{} preflight body diverges from canonical",
                         display_path(root, &path)?

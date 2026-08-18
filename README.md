@@ -313,6 +313,19 @@ Implementation-lint results can be cached by content with
 `scripts/lint-implementation-cached.sh --staged`; unchanged staged diffs reuse
 the prior result from `.autospec/cache/lint/`.
 
+### Provider-neutral executor dispatch
+
+`scripts/executor-dispatch.sh --request <file.json>` runs one dispatch through a
+single `dispatch(request) → result` contract shared by the `claude`, `codex` and
+`opencode` harnesses, so orchestration never special-cases a provider. stdout is
+a result envelope with the same keys whichever harness ran, validated by
+`schemas/autospec-dispatch-result.schema.json`.
+
+Metrics the harness never reported are emitted as `"unknown"`, never `0` — a
+fabricated zero is indistinguishable from a measured one in the routing ledger.
+An unknown provider exits 12 rather than guessing. See
+[`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md#provider-neutral-executor-dispatch).
+
 ### Local model dispatch
 
 Once a model is discovered and qualified, `scripts/calibrate-profile.sh --profile <name>`

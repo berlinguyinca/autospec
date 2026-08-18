@@ -126,3 +126,21 @@ exit 1
 EOF
     chmod +x "$STUBS/ollama"
 }
+
+# curl that succeeds for exactly one endpoint substring and fails for the rest.
+# Argument-aware on purpose: an argument-blind stub would report every runtime
+# reachable and the "unreachable endpoints are omitted" assertion would pass for
+# the wrong reason.
+stub_curl_reachable_only() {
+    cat > "$STUBS/curl" <<EOF
+#!/usr/bin/env bash
+want='$1'
+for a in "\$@"; do
+    case "\$a" in
+        *"\$want"*) exit 0 ;;
+    esac
+done
+exit 7
+EOF
+    chmod +x "$STUBS/curl"
+}

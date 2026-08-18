@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-dispatch-result.schema.json",
+  "title": "autospec provider-neutral dispatch result",
+  "description": "The §16 `dispatch(request) → result` envelope emitted by scripts/executor-dispatch.sh. Every harness returns the same key set, so orchestration never special-cases a provider. Any metric the adapter did not observe is the string \"unknown\" — §25 requires unknown over fabricated values, and a fabricated 0 is indistinguishable from a measured 0 once it reaches the routing ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "output",
+    "patch",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "prompt_tok_s",
+    "decode_tok_s",
+    "ttft_ms",
+    "wall_clock_ms",
+    "tool_calls",
+    "failure_class"
+  ],
+  "properties": {
+    "schema": {
+      "const": "autospec.dispatch-result.v1",
+      "description": "Self-identifying schema tag."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure", "timeout"],
+      "description": "Terminal state of the dispatch. `timeout` is kept distinct from `failure` so a caller can tell 'too slow' from 'wrong answer'."
+    },
+    "output": {
+      "type": "string",
+      "description": "The harness's textual result. On a timeout this is the partial output captured before the ceiling was enforced. On a path that never reached a harness — an invalid request, an unsupported provider, a missing binary — it is the diagnostic explaining the refusal."
+    },
+    "patch": {
+      "type": "string",
+      "description": "Working-tree diff produced in the workspace, empty when nothing changed, or \"unknown\" when the workspace is not a git worktree and no diff can be observed."
+    },
+    "input_tokens": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Prompt tokens as reported by the harness. \"unknown\" when the harness reported none."
+    },
+    "output_tokens": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Completion tokens as reported by the harness. \"unknown\" when the harness reported none."
+    },
+    "cached_tokens": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Cache-read prompt tokens as reported by the harness. \"unknown\" when the harness reported none."
+    },
+    "prompt_tok_s": {
+      "anyOf": [
+        { "type": "number", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Prefill throughput. Cloud harnesses do not measure it; they report \"unknown\", never 0."
+    },
+    "decode_tok_s": {
+      "anyOf": [
+        { "type": "number", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Decode throughput. Cloud harnesses do not measure it; they report \"unknown\", never 0."
+    },
+    "ttft_ms": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Time to first token. \"unknown\" unless the harness reported it."
+    },
+    "wall_clock_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Elapsed wall-clock time. Always measured by the dispatcher itself, so it is never \"unknown\"."
+    },
+    "tool_calls": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "const": "unknown" }
+      ],
+      "description": "Tool invocations made during the dispatch. \"unknown\" when the harness reported none."
+    },
+    "failure_class": {
+      "type": "string",
+      "enum": [
+        "none",
+        "invalid_request",
+        "unsupported_provider",
+        "harness_unavailable",
+        "precondition_failed",
+        "harness_error",
+        "timeout"
+      ],
+      "description": "`none` on success. `unsupported_provider` accompanies exit 12; `timeout` accompanies exit 4."
+    }
+  }
+}

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 #[test]
-fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() {
+fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() { // linter:allow-SECURITY test fn name ends in _exec( — Rust test function, not a builtin call
     let _environment = test_environment();
     let fixture = GitFixture::new("fork-lock-release-after-exec");
     let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");

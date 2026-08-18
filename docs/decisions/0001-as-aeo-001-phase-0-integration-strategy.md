@@ -155,6 +155,167 @@ conditions:
   increase, and the first async boundary in a codebase that has none — not for a
   schema exercise.
 
+### D6 — The RealWork spec is authoritative for the benchmark subsystem
+
+*Added 2026-08-16, resolving Open item 1 of the original ADR.*
+
+`docs/specs/2026-08-16-repository-derived-real-work-benchmark-design.md` owns the
+benchmark subsystem: corpus, historical-replay methodology, difficulty and scoring
+model, qualification rules, the `autospec bench` CLI (§49), and
+`crates/autospec-bench/` (§51).
+
+The other three documents become layers under it rather than competitors:
+
+| Document | Role after D6 |
+|---|---|
+| `2026-08-16-benchmark-per-evaluation-telemetry-design.md` | Metric layer — deepens RealWork §31 |
+| `2026-08-16-vision-image-generation-qualification-design.md` | A task family alongside the RealWork families |
+| AS-AEO-001 Epic 4 | Integration point only — ingests RealWork results; must not define a second benchmark system |
+
+This holds D3: RealWork §53 appends to the existing ledger rather than creating a
+benchmark store, so the JSONL ledger remains the system of record.
+
+**Two hard gates carried into decomposition.** Phases 1–2 (corpus framework, public
+seed corpus) are decomposable now. Phase 3 mines LC-BinBase Scheduler, the WCMC
+applications, and private Go modules — real production repositories containing
+credentials, customer data, and protected datasets — so RealWork §36 secret
+detection and §37 access levels must exist, be tested against known-positive
+fixtures, and be independently reviewed **before** any private repository is mined.
+Phase 7 (router integration) waits on AS-AEO-001 Epic 5, since the deterministic
+router was parked by D1.
+
+### D7 — The resource ledger shares AS-AEO-001's persistence layer
+
+*Added 2026-08-16, on landing `2026-08-16-resource-lifecycle-cleanup-design.md`.*
+
+That spec's §12 defines a SQLite `resources` table with leases, heartbeats and
+transactional updates. Two clarifications, so it is neither blocked by nor allowed
+to duplicate existing decisions:
+
+- **D3 does not apply to it.** D3 governs routing and dispatch telemetry — an
+  append-only stream of immutable events. Resource records are mutable operational
+  lifecycle state and are not log-shaped. Forcing them into the JSONL ledger would
+  be wrong.
+- **It is not a second database.** D5 already admitted a driver and migration tooling
+  in AS-AEO-001 Phase 1. The `resources` table belongs in that persistence layer as
+  additional tables and migrations. If the resource subsystem lands first, its storage
+  must be written so those tables migrate into the shared database without a data
+  migration.
+
+Ownership split against AS-AEO-001: resource identity, leases, reconciliation,
+janitor and cleanup verification belong to the resource spec; run/work-item
+lifecycle, policy, risk, approvals, emergency stop and budgets remain AS-AEO-001
+(§51, §69, Epic 12).
+
+**Safety sequencing is part of this decision.** The host measured 6,475 local
+branches, 5,926 of them already merged, 25 worktrees, and 13 Docker containers of
+which none carry an `autospec` label. Phases 3-5 (cleanup, crash recovery, janitor)
+must not be decomposed until the §42 git-safety and §45 property/invariant tests
+exist; Invariants 1, 2, 3 and 5 are the acceptance bar. Phase 1 is observation and
+dry-run only and is safe to start.
+
+### D8 — The Change Graph consumes cleanup and routing; it does not define them
+
+*Added 2026-08-16, on landing `2026-08-16-change-graph-pr-orchestration-design.md`.*
+
+That spec's novel contribution is real and unbuilt — verified: no ChangeSet, Change
+Graph or stacked-PR surface exists in `crates/`. Its core is the Change Graph and
+ChangeSet abstractions, dependency edge strength, stack-selection policy, size
+budgets, the PR contract, conflict-aware scheduling, three CI levels, merge
+strategy/queue/bottom-up merge, and replanning.
+
+Its §25-§31, however, restate the resource lifecycle subsystem — both documents
+define `autospec cleanup --dry-run` and an `autospec.*` Docker label set. **The
+resource lifecycle spec wins** (D7); it carries the lease, janitor, reconciliation
+and eight safety invariants. A ChangeSet is an *owner identity in the resource
+ledger*, not a second cleanup engine.
+
+Likewise §17-§20 delegate to AS-AEO-001 Epics 5-6 (roles are D2's 14 snake_case set),
+§21-§23 to Epic 8, §37-§39 to Epics 7/9 and the vision spec, and §48-§49 to the
+existing fleet layer.
+
+Two incumbents must be extended rather than recreated: `core::graph::order.rs`
+(117 lines, topological ordering with cycle detection) for §14, and
+`core::coordination::ready_queue.rs` for §15.1.
+
+**Gate:** the novel core consumes the executor abstraction (#3172/#3173), the
+resource ledger (resource-lifecycle Phase 1) and the router (Epic 5). Decompose it
+only after the executor chain and resource-lifecycle Phase 1 have merged. The
+delegated sections are never decomposed from that document.
+
+### D9 — The control-plane spec contributes three workstreams; five delegate
+
+*Added 2026-08-16, on landing `2026-08-16-next-generation-control-plane-design.md`.*
+
+Of its eight workstreams, three are genuinely new and are the reason to implement it:
+**A Context Compiler** (what to put in an agent's prompt — note the name collision with
+the multi-model spec's §11 GPU KV-cache budgeting, an unrelated concern), **B Complexity
+Governor** (the trigger for replanning, where change-graph §47 is the mechanism), and
+**H Engineering Policy Compiler** (deriving policy, where AS-AEO-001 only enforces it).
+
+Five delegate: **C** outcome learning to multi-model §24-§29 and D6, appending to the one
+ledger per D3; **D** traceability to AS-AEO-001 §47/Epic 7 over the shipped
+`core::evidence`; **E** tournament mode to multi-model §4 and D2 for independence rules;
+**F** onboarding-calibration to the RealWork spec per D6; **G** multi-repo to the existing
+fleet layer and change-graph §48-§49 per D8.
+
+Its §14 eighteen record types persist in the ONE shared database (D5, D7) using the
+resource ledger's shared-migration protocol. Its §15 provenance contract unifies with the
+routing ledger's explainability output rather than becoming a parallel decision log.
+
+**Gate:** only Workstream A has no unbuilt dependency. Nothing here is decomposable
+before the executor chain (#3172/#3173) and resource-lifecycle Phase 1 merge.
+
+**Standing note on planning cadence.** This was the eighth design landed on 2026-08-16
+against one merged implementation PR. Every spec after the second has required a
+precedence decision (D6, D7, D8, D9), each of the form "X restates Y; Y wins." The
+delegation pattern is working, but the design surface is outrunning the implementation
+surface, and this spec's own §1 argues the same: after these capabilities land, effort
+should shift to implementation quality, dogfooding, benchmarks and reliability rather
+than continued feature invention.
+
+### D10 — Postgres compatibility is required; sqlx over rusqlite, database is global
+
+*Added 2026-08-16. Supersedes the driver and location choices in issue #3188, and
+tightens D5 and D7.*
+
+**Postgres compatibility is a hard requirement**, not an eventual option. AS-AEO-001
+§64 already said "SQLite with a migration path to PostgreSQL"; this makes it binding.
+
+**Driver: `sqlx`, with the SQLite and Postgres backends.** `rusqlite` is rejected as
+the shared persistence binding: it is a SQLite-only C-FFI API with no Postgres path, so
+reaching Postgres later would mean rewriting every call site rather than swapping a
+driver. The window to change this is now — once a ledger type embeds a concrete
+`rusqlite::Connection`, the choice stops being cheaply reversible.
+
+Rejected alternatives:
+- **diesel** — synchronous and supports both backends, but backend-generic Diesel code
+  is awkward (differing types, differing upsert syntax) on top of schema codegen.
+- **rusqlite behind a storage trait** — cheapest today, but the Postgres path stays
+  theoretical until a second implementation exists, and the SQL is written twice.
+  A requirement is not satisfied by an abstraction that permits it.
+
+**This accepts async into `autospec-core`.** sqlx is async-only, so tokio enters the
+dependency graph. That is already sanctioned: D5 admitted a runtime and a driver, and
+AS-AEO-001 §67 mandates `async fn` provider traits regardless. D5's bounding condition
+still holds — per §66.1, async belongs at the storage boundary; core policy, risk and
+role types must not gain async signatures because storage is async.
+
+The blanket "no `tokio`, no `sqlx`" prohibition drafted into #3188 is **withdrawn**. It
+was a project-wide constraint asserted by a single child issue, above that issue's
+authority and contrary to D5.
+
+**Location: one global database under `~/.autospec`.** A repo-local file cannot back a
+shared Postgres server, cannot hold AS-AEO-001 §64's cross-repo `organizations` /
+`projects` / `repositories` tables, and is already inconsistent with Phase 1 — sibling
+issue #3191 reads global `~/.autospec/process-heartbeats/`, so Phase 1 spans both roots
+either way. Repo-local `.autospec/` remains correct for the existing JSON state layer
+(`state/storage.rs`, `evidence/`, `execution/`); it is the *database* that is global.
+
+**D7 still governs:** exactly ONE database, shared with AS-AEO-001 Epic 2. The
+shared-migration protocol D7 requires is now more important, not less — sqlx's migration
+tooling must be configured so two subsystems can add migrations without colliding.
+
 ## Issue disposition
 
 | Issue | Action | Rationale |
@@ -190,8 +351,8 @@ model identity, not profile alias).
 
 ## Open items
 
-1. Which document is authoritative for the benchmark subsystem — AS-AEO-001 Epic 4,
-   the telemetry amendment, or the vision amendment.
+1. ~~Which document is authoritative for the benchmark subsystem.~~
+   **Resolved by D6 — the RealWork spec.**
 2. ~~Whether tokio plus a database driver and migration tool are accepted into
    `autospec-core`'s dependency graph in Phase 1.~~ **Resolved by D5 — accepted.**
 3. Whether `executor_bridge/waterfall_policy.rs` and `review_evidence.rs` encode

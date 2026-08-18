@@ -12,6 +12,16 @@ classes), §21 (UI/UX verification), §32 (calibration) and Wave 11.
 for the `autospec bench` harness and the telemetry contract this amendment extends
 with image-specific metrics.
 
+## Benchmark authority
+
+`2026-08-16-repository-derived-real-work-benchmark-design.md` is authoritative for
+the benchmark subsystem. This document contributes a **task family** alongside the
+RealWork families: the vision and image-generation suites, their accuracy metrics,
+and the initial candidate matrix. It does not define a separate harness, CLI, or
+result store — `autospec bench` (§49) and the shared result ledger (§53) are the
+RealWork spec's, and the `autospec bench vision|image|ui-review` verbs named here
+are extensions of that surface.
+
 ## Scope binding
 
 The parent spec requires that UI/UX verification dispatch to a model with
