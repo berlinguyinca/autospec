@@ -138,6 +138,9 @@ Two traps:
 - **The login node's `/tmp` is not the compute node's `/tmp`.** A script written
   to `/tmp` on login2 fails with `No such file or directory` inside the job.
   Stage scripts on `/quobyte`.
+- **`/quobyte` takes a few seconds to propagate between nodes.** A file a
+  compute node has just written and can `ls` is briefly absent from the login
+  node. Don't read a job's output the instant it claims to have written it.
 - **Stage weights to node-local NVMe at job start.** `/quobyte` is fine for one
   sequential read but every other user shares it; the node has 3.5 TB of idle
   local flash.

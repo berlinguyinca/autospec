@@ -13,7 +13,7 @@
     "roofline on two very different cards, so bandwidth / weight_bytes * 0.8",
     "predicts an untouched machine to within about 10%."
   ],
-  "roofline_efficiency": 0.80,
+  "roofline_efficiency": 0.8,
   "gpus": {
     "NVIDIA GeForce RTX 4090": {
       "vram_mib": 24564,
@@ -21,8 +21,12 @@
       "bandwidth_gbs": 1008,
       "fp8": true,
       "nvfp4": false,
-      "measured_tps": {"Qwen3.8-27B-Q5_K_M.gguf": 40.55},
-      "seen_at": ["local-workstation"]
+      "measured_tps": {
+        "Qwen3.8-27B-Q5_K_M.gguf": 40.55
+      },
+      "seen_at": [
+        "local-workstation"
+      ]
     },
     "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": {
       "vram_mib": 97887,
@@ -30,8 +34,12 @@
       "bandwidth_gbs": 1792,
       "fp8": true,
       "nvfp4": true,
-      "measured_tps": {"Qwen3.8-27B-UD-Q8_K_XL.gguf": 45.57},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "measured_tps": {
+        "Qwen3.8-27B-UD-Q8_K_XL.gguf": 45.57
+      },
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA L40S": {
       "vram_mib": 46068,
@@ -40,7 +48,9 @@
       "fp8": true,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA A100-SXM4-80GB": {
       "vram_mib": 81920,
@@ -49,7 +59,9 @@
       "fp8": false,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA A100 80GB PCIe": {
       "vram_mib": 81920,
@@ -58,7 +70,9 @@
       "fp8": false,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA A100-PCIE-40GB": {
       "vram_mib": 40960,
@@ -67,7 +81,9 @@
       "fp8": false,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA RTX A6000": {
       "vram_mib": 49140,
@@ -76,7 +92,9 @@
       "fp8": false,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     },
     "NVIDIA RTX 5000 Ada Generation": {
       "vram_mib": 32760,
@@ -85,7 +103,9 @@
       "fp8": true,
       "nvfp4": false,
       "measured_tps": {},
-      "seen_at": ["hive.hpc.ucdavis.edu"]
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
     }
   }
 }
