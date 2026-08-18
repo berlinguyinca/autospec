@@ -29,6 +29,22 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   288,970 tokens of peak against a 180,224-token KV pool and killed every live
   session with `Context size has been exceeded`.
 
+#### Fixture diffs are data, not source (2026-08-18)
+- `TODO_LEFT` and `MOCK_DB` scanned `*.diff` fixtures line by line, so a fixture
+  that exists to contain a violation was reported as the violation -- which
+  blocked landing one. `DOC_OUT_OF_SYNC` and the density scanner already skipped
+  `*.diff`; these two now do too. `SECURITY` deliberately still scans them: a
+  leaked key is a leaked key wherever it sits.
+
+#### Nested tests count as tests (2026-08-18)
+- `is_test_file` matched only the repo-root `tests/` tree, so the 826 test files
+  living elsewhere -- 381 under `crates/autospec-cli`, 75 under
+  `skills/autospec-shared`, 51 under `skills/autospec-test` -- were invisible to
+  `ASSERTION_DENSITY`, `MOCK_DB` and the gated `VACUOUS_*` detectors, while
+  `TODO_LEFT` and `DOC_OUT_OF_SYNC` fired on them as if they were production
+  source. Measured on three real commits that touch nested tests, widening the
+  glob adds no new findings; it removes false positives and closes the hole.
+
 #### Nested docs count as docs (2026-08-18)
 - `lint-implementation.sh`'s `is_doc_file` anchored `README*`, `docs/*` and
   `AGENTS.md` at the repo root, so none of the 63 non-root README files and no

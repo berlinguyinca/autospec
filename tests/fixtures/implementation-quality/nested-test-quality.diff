@@ -1,0 +1,20 @@
+diff --git a/skills/autospec-shared/tests/unit/store_test.py b/skills/autospec-shared/tests/unit/store_test.py
+--- a/skills/autospec-shared/tests/unit/store_test.py
++++ b/skills/autospec-shared/tests/unit/store_test.py
+@@ -1,2 +1,5 @@
+ import store
+ 
++def test_reads_rows():
++    db = mock(sqlite3.connect(":memory:"))
++    assert store.rows(db) == []
+diff --git a/skills/autospec-test/tests/unit/other.bats b/skills/autospec-test/tests/unit/other.bats
+--- a/skills/autospec-test/tests/unit/other.bats
++++ b/skills/autospec-test/tests/unit/other.bats
+@@ -1,3 +1,7 @@
+ #!/usr/bin/env bats
+ 
++# TODO: cover the failure path too
++@test "it does the thing" {
++    run thing --run
++    [ "$status" -eq 0 ]
++}

@@ -661,8 +661,28 @@ get_added_lines_with_lineno() {
 
 # is_test_file PATH — returns 0 if path is under tests/
 is_test_file() {
+    # Nested as well as root, for the same reason is_doc_file is: 826 of this
+    # repo's test files live outside the root tests/ tree -- 381 under
+    # crates/autospec-cli, 75 under skills/autospec-shared, 51 under
+    # skills/autospec-test. Anchoring the glob pointed every test-quality
+    # detector at the smaller half of the codebase: ASSERTION_DENSITY and the
+    # VACUOUS_* family silently skipped those 826 files, while TODO_LEFT and
+    # DOC_OUT_OF_SYNC treated them as production source and fired on them.
     case "$1" in
-        tests/*) return 0 ;;
+        tests/*|*/tests/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# is_fixture_file PATH — returns 0 if the path holds captured data, not live code.
+# A .diff under tests/fixtures/ exists precisely to contain code that violates a
+# rule, so scanning its body reports the fixture as the violation. DOC_OUT_OF_SYNC
+# and the density scanner already skip *.diff; the quality detectors that read
+# added lines need the same exemption. SECURITY deliberately does NOT use this: a
+# leaked key is a leaked key wherever it sits.
+is_fixture_file() {
+    case "$1" in
+        *.diff|*.patch) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1070,6 +1090,7 @@ detect_todo_left() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" && continue
+        is_fixture_file "$diff_file" && continue
 
         while IFS=: read -r lineno content; do
             if [[ "$content" =~ $pat ]]; then
@@ -1093,6 +1114,7 @@ detect_mock_db() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" || continue
+        is_fixture_file "$diff_file" && continue
 
         while IFS=: read -r lineno content; do
             local is_mock=0 is_db=0
@@ -1143,7 +1165,7 @@ EOF
         is_test_file "$diff_file" && continue
         is_doc_file "$diff_file" && continue
 
-        # Skip binary-ish files, and Rust tests: is_test_file only matches a repo-root tests/
+        # Skip binary-ish files, and Rust inline test modules, which are not under tests/
         case "$diff_file" in
             *.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
         esac

@@ -34,3 +34,25 @@ setup() {
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:"
 }
+
+# 826 of this repo's test files live outside the root tests/ tree, so anchoring
+# is_test_file pointed the test-quality detectors at the smaller half of the
+# codebase: MOCK_DB skipped those files entirely while TODO_LEFT treated them as
+# production source. Both flip with the widened glob, which is why this test
+# asserts one of each rather than only the absence of a finding.
+@test "lint-implementation: a nested tests/ tree is treated as tests, not source" {
+    run bash "$LINT" --vacuous-assertions --assertion-density \
+        --diff-file "$FIX/nested-test-quality.diff"
+    echo "$output" | grep -qE "^MOCK_DB:skills/autospec-shared/tests/unit/store_test\.py:"
+    ! echo "$output" | grep -qE "^TODO_LEFT:"
+}
+
+# A .diff under tests/fixtures/ exists to CONTAIN a violation, so scanning its body
+# reports the fixture as the violation -- which is how landing the fixture above
+# was itself blocked. Data, not code.
+@test "lint-implementation: a .diff fixture is data, not scannable source" {
+    run bash "$LINT" --vacuous-assertions --assertion-density \
+        --diff-file "$FIX/fixture-data-not-code.diff"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -qE "^(MOCK_DB|TODO_LEFT):"
+}
