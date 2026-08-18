@@ -1,6 +1,7 @@
 ---
 name: autospec-fleet
 description: Use when the user wants to supervise autospec-run across multiple GitHub repositories from an empty workspace - initializes fleet config, clones or syncs repos, and runs per-repo autospec-run workers.
+mode: primary
 ---
 
 # autospec-fleet workflow (harness-neutral)

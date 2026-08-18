@@ -1,6 +1,7 @@
 ---
 name: autospec-story
 description: Use when the user wants a repo-level product story, implementation-state overview, or narrative synthesis from local specs plus GitHub issues and PRs for the current repository.
+mode: primary
 ---
 
 # autospec-story (harness-neutral)

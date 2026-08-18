@@ -1,6 +1,7 @@
 ---
 name: autospec-guide
 description: Inspect, guide, pause, resume, and understand local Autospec autonomy work through existing scripts and GitHub issue comments when explicitly confirmed.
+mode: primary
 ---
 # autospec-guide
 

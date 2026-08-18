@@ -1,6 +1,7 @@
 ---
 name: autospec-define
 description: Use when the user wants to plan a feature — bootstrap repo if missing, brainstorm a design spec, decompose into linked GitHub issues, or split an existing spec into issues. Stops after Phase 3 and hands off to /autospec-run for autonomous implementation.
+mode: primary
 ---
 
 # autospec-define workflow (harness-neutral)
