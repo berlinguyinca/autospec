@@ -81,6 +81,11 @@ PLATFORMS = {
     "a100-80":          (79_000,      2039, 3072, "A100 80 GB SXM4"),
     "a100-80-pcie":     (79_000,      1935, 3072, "A100 80 GB PCIe"),
     "h100-80":          (79_000,      3350, 3072, "H100 80 GB SXM5"),
+    # sm_120: FP8 and NVFP4 both available, unlike Ampere. Budget is the real
+    # 97,887 MiB the card reports, less a larger reserve than a 24 GiB part
+    # needs because compute buffers grow with the slot counts this much memory
+    # makes practical.
+    "blackwell-96":     (97_887,      1792, 4096, "RTX PRO 6000 Blackwell 96 GB"),
 }
 
 CATALOGUE = {

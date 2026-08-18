@@ -104,13 +104,21 @@ def pick_default(models: dict, entries: dict, owner: dict, args) -> str:
     def pool_of(model_id: str) -> int:
         return models[owner[model_id]]["context"] or 0
 
-    roomy = [(e["limit"]["context"], mid) for mid, e in text.items()
+    # Tie-break toward the PLAINEST preset, by shortest owning section name.
+    # Sorting ids as strings put "qwen3.8-27b-uncensored-40k" above
+    # "qwen3.8-27b-40k" at equal context, which silently made an abliterated
+    # model the default for every new session. A default must be the boring
+    # choice; a variant is something you opt into.
+    def rank(mid: str, ctx: int) -> tuple:
+        return (ctx, -len(owner[mid]), -len(mid))
+
+    roomy = [mid for mid, e in text.items()
              if pool_of(mid) // max(1, e["limit"]["context"])
              >= args.default_seats]
     if roomy:
-        return max(roomy)[1]
+        return max(roomy, key=lambda m: rank(m, text[m]["limit"]["context"]))
     # No tier is small enough to seat that many; fall back to the smallest.
-    return min((e["limit"]["context"], mid) for mid, e in text.items())[1]
+    return min(text, key=lambda m: (text[m]["limit"]["context"], len(owner[m])))
 
 
 def main() -> int:

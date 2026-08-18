@@ -61,9 +61,10 @@ Blackwell allocates in seconds.
 **One-command driver:** `llm/linux-qwen38/hive/opencode_hive` acquires a
 GPU, serves, tunnels, configures OpenCode, and launches it. The tunnel is
 outbound from the workstation, so NAT/firewall there is irrelevant:
-`127.0.0.1:8081 -> hive login -> compute node:8080`. It uses local port
-**8081**, not 8080, because the local RTX 4090 router owns 8080 and a
-tunnel onto it would silently shadow the local node. The tunnel is
+`127.0.0.1:11111 -> hive login -> compute node:8080`. It uses local port
+**11111**, deliberately not 8080, because the local RTX 4090 router owns
+8080 and a forward onto it would silently shadow the local node — every
+"local" request would quietly execute on the cluster. The tunnel is
 supervised: `low` is preemptible, so the job can be requeued onto a
 different node and the supervisor re-reads `logs/endpoint.txt` and
 re-forwards. The hive provider is added to OpenCode without becoming the
@@ -92,6 +93,28 @@ globally, so HTTPS GitHub URLs authenticate over SSH with `~/.ssh/id_rsa`
 `user.name`/`user.email` were unset — now set to Gert Wohlgemuth
 <wohlgemuth@ucdavis.edu>. Clone into `/quobyte/metabolomicsgrp/it`, never
 `$HOME`.
+
+**Both routers publish the same four-way matrix**, as context tiers
+aliased onto one loaded model (switching tier is free; switching family
+costs one reload, since `--models-max 1`):
+
+| preset | hive (96 GiB, Q8) | local 4090 (24 GiB, Q5) |
+|---|---|---|
+| `qwen3.8-27b` | 262,144 pool, 8 slots | 180,224 pool, 6 slots |
+| `qwen3.8-27b-vision` | 196,608 | 98,304 |
+| `qwen3.8-27b-uncensored` | 262,144 | 163,840 |
+| `qwen3.8-27b-uncensored-vision` | 196,608 | 98,304 |
+
+Read the smallest tier as "fast" and the largest as "deep" — same
+weights and same per-token speed, but the small tier funds several
+concurrent sessions and answers in seconds while the large one funds one
+and spends minutes prefilling. `qwen3.8-27b-abliterated` is retained as
+an alias of the uncensored text preset so pre-rename selections resolve.
+
+**Default selection must break ties toward the plainest preset.** Ranking
+ids as strings put `qwen3.8-27b-uncensored-40k` above `qwen3.8-27b-40k`
+at equal context and silently made an abliterated model the default for
+every new session.
 
 Related: [[feedback_shared_kv_pool_has_no_admission_control]] and
 [[feedback_context_floor_kills_small_tiers]] — 96 GiB removes the

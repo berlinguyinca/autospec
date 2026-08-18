@@ -25,7 +25,7 @@ REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
 # NOT 8080: the local llama.cpp router already owns that port on this machine,
 # and a tunnel onto it would either fail to bind or silently shadow the local
 # node, so every "local" request would quietly go to the cluster.
-LOCAL_PORT="${OPENCODE_HIVE_LOCAL_PORT:-8081}"
+LOCAL_PORT="${OPENCODE_HIVE_LOCAL_PORT:-11111}"
 PROVIDER="${OPENCODE_HIVE_PROVIDER:-qwen-hive}"
 LAUNCH=1
 

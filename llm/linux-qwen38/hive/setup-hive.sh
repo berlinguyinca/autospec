@@ -91,9 +91,18 @@ echo "== built =="
 # (verified), so the download runs here rather than on the login node.
 export HF_HOME="${ROOT}/hf-cache"
 export PATH="${HOME}/.local/bin:${PATH}"
-uvx --from huggingface_hub hf download unsloth/Qwen3.8-27B-GGUF \
-    --include "*UD-Q8_K_XL*.gguf" "mmproj-F16.gguf" \
-    --local-dir "${MODELS}"
+
+# Two model families, each with its projector, so the router can serve the full
+# matrix (text or vision, standard or uncensored) from one node. Re-running is
+# cheap: hf download skips files that already match.
+fetch() {
+  echo "-- ${1}"
+  uvx --from huggingface_hub hf download "$1" \
+      --include "${@:2}" --local-dir "${MODELS}"
+}
+fetch unsloth/Qwen3.8-27B-GGUF "*UD-Q8_K_XL*.gguf" "mmproj-F16.gguf"
+fetch Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF \
+      "Qwen3.8-27B-ABLITERATED-Q8_0.gguf" "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf"
 
 echo "== staged =="
 ls -lh "${MODELS}" | head
