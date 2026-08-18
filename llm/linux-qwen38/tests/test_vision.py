@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove the vision profile actually processes an image.
 
-    test_vision.py <base-url> <model>
+    test_vision.py <base-url> <model> [api-key]
 
 Generates a deterministic 256x256 PNG with the standard library only -- no
 downloaded asset, so the test cannot silently start passing because some URL
@@ -45,14 +45,20 @@ def chessboard_png(size: int = 256, squares: int = 8) -> bytes:
             + chunk(b"IEND", b""))
 
 
-def ask(base: str, model: str, content: list, max_tokens: int = 64) -> dict:
+def ask(base: str, model: str, content: list, max_tokens: int = 64,
+        api_key: str = "") -> dict:
     body = json.dumps({
         "model": model, "temperature": 0, "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "user", "content": content}],
     }).encode()
+    headers = {"Content-Type": "application/json"}
+    # A remote node on a shared network must require a key, so a vision test
+    # that cannot send one can only ever check the local box.
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(f"{base}/v1/chat/completions", data=body,
-                                 headers={"Content-Type": "application/json"})
+                                 headers=headers)
     t0 = time.perf_counter()
     with urllib.request.urlopen(req, timeout=600) as resp:
         data = json.load(resp)
@@ -63,6 +69,7 @@ def ask(base: str, model: str, content: list, max_tokens: int = 64) -> dict:
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8082"
     model = sys.argv[2] if len(sys.argv) > 2 else "qwen3.8-27b"
+    api_key = sys.argv[3] if len(sys.argv) > 3 else ""
 
     png = chessboard_png()
     url = "data:image/png;base64," + base64.b64encode(png).decode()
@@ -83,7 +90,8 @@ def main() -> int:
     text_only = ask(base, model,
                     [{"type": "text",
                       "text": "What board game uses the board pattern shown? "
-                              "Respond with exactly one lowercase word."}])
+                              "Respond with exactly one lowercase word."}],
+                    api_key=api_key)
     base_tokens = text_only["usage"]["prompt_tokens"]
 
     got = ask(base, model, [
@@ -91,7 +99,7 @@ def main() -> int:
          "text": "What board game uses the board pattern shown? "
                  "Respond with exactly one lowercase word."},
         {"type": "image_url", "image_url": {"url": url}},
-    ])
+    ], api_key=api_key)
     answer = got["choices"][0]["message"]["content"].strip().lower()
     img_tokens = got["usage"]["prompt_tokens"]
     delta = img_tokens - base_tokens
