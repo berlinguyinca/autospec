@@ -130,6 +130,13 @@ def main() -> int:
     ap.add_argument("--default-seats", type=int, default=4,
                     help="the automatic default is the roomiest text tier that "
                          "still funds this many concurrent sessions")
+    ap.add_argument("--api-key",
+                    help="bearer token the server requires; needed for a "
+                         "remote node, where binding an open port on a shared "
+                         "network without one exposes the model to every other "
+                         "user of that network")
+    ap.add_argument("--provider-name",
+                    help="human-readable provider label in the client")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -186,10 +193,14 @@ def main() -> int:
                                    key=lambda kv: -kv[1]):
             add(alias, limit)
 
+    options = {"baseURL": f"http://{args.host}:{args.port}/v1"}
+    if args.api_key:
+        options["apiKey"] = args.api_key
     cfg["provider"][args.provider] = {
-        "name": "Qwen local (llama.cpp router, swaps on model select)",
+        "name": args.provider_name
+                or "Qwen local (llama.cpp router, swaps on model select)",
         "npm": "@ai-sdk/openai-compatible",
-        "options": {"baseURL": f"http://{args.host}:{args.port}/v1"},
+        "options": options,
         "models": entries,
     }
 

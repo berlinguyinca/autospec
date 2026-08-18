@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Bring up a Qwen node on hive and point OpenCode at it, in one command.
+#
+#   opencode_hive                 acquire a GPU, serve, tunnel, configure, launch
+#   opencode_hive status          where things stand
+#   opencode_hive stop            drop the tunnel and cancel the job
+#   opencode_hive logs            follow the server log
+#
+# The tunnel is OUTBOUND from this workstation, so a router, NAT or firewall on
+# this end does not matter:
+#
+#   127.0.0.1:LOCAL_PORT  ->  hive login node  ->  compute node:REMOTE_PORT
+#
+# Nothing listens on a public address here, and the compute node never has to be
+# reachable from outside the cluster.
+set -euo pipefail
+
+HIVE_HOST="${OPENCODE_HIVE_HOST:-hive.hpc.ucdavis.edu}"
+HIVE_USER="${OPENCODE_HIVE_USER:-gw}"
+ROOT="${OPENCODE_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
+GPU="${OPENCODE_HIVE_GPU:-6000_blackwell}"
+NGPU="${OPENCODE_HIVE_NGPU:-1}"
+WALLTIME="${OPENCODE_HIVE_TIME:-12:00:00}"
+REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
+# NOT 8080: the local llama.cpp router already owns that port on this machine,
+# and a tunnel onto it would either fail to bind or silently shadow the local
+# node, so every "local" request would quietly go to the cluster.
+LOCAL_PORT="${OPENCODE_HIVE_LOCAL_PORT:-8081}"
+PROVIDER="${OPENCODE_HIVE_PROVIDER:-qwen-hive}"
+LAUNCH=1
+
+STATE="${XDG_CACHE_HOME:-${HOME}/.cache}/opencode-hive"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "${STATE}"
+
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+say()   { printf '\033[1m==\033[0m %s\n' "$*"; }
+warn()  { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
+die()   { printf '\033[31m!!\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Slurm is not on PATH in a non-login shell on this cluster -- `ssh host sinfo`
+# gives "command not found". Everything remote goes through a login shell.
+hssh() { ssh -o BatchMode=yes -o ConnectTimeout=20 "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'"; }
+
+CMD="up"
+case "${1:-}" in
+  up|status|stop|logs) CMD="$1"; shift ;;
+  -h|--help) usage; exit 0 ;;
+esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gpu)        GPU="$2"; shift 2 ;;
+    --gpus)       NGPU="$2"; shift 2 ;;
+    --time)       WALLTIME="$2"; shift 2 ;;
+    --local-port) LOCAL_PORT="$2"; shift 2 ;;
+    --no-launch)  LAUNCH=0; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+# --- remote helpers ----------------------------------------------------------
+
+job_id() { hssh <<< "squeue -u ${HIVE_USER} -n qwen-serve -h -o '%i %T' | awk '\$2==\"RUNNING\"{print \$1; exit}'"; }
+
+endpoint_node() { hssh <<< "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt 2>/dev/null"; }
+
+api_key() { hssh <<< "cat ${ROOT}/logs/api-key.txt 2>/dev/null"; }
+
+stack_ready() {
+  hssh <<REMOTE
+ls ${ROOT}/models/*.gguf >/dev/null 2>&1 \
+  && [ -x ${ROOT}/opt/llama.cpp/bin/llama-server ] \
+  && echo ready || echo missing
+REMOTE
+}
+
+# --- commands ----------------------------------------------------------------
+
+do_status() {
+  local jid node
+  jid="$(job_id || true)"
+  printf '  stack   : %s\n' "$(stack_ready | tail -1)"
+  printf '  job     : %s\n' "${jid:-none running}"
+  [ -n "$jid" ] && printf '  node    : %s\n' "$(endpoint_node | tail -1)"
+  if [ -s "${STATE}/tunnel.pid" ] && kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null; then
+    printf '  tunnel  : up (pid %s) 127.0.0.1:%s\n' "$(cat "${STATE}/tunnel.pid")" "${LOCAL_PORT}"
+  else
+    printf '  tunnel  : down\n'
+  fi
+  if curl -fsS -m 5 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1; then
+    printf '  endpoint: responding\n'
+  else
+    printf '  endpoint: not responding\n'
+  fi
+}
+
+do_stop() {
+  if [ -s "${STATE}/tunnel.pid" ]; then
+    kill "$(cat "${STATE}/tunnel.pid")" 2>/dev/null || true
+    rm -f "${STATE}/tunnel.pid"
+    say "tunnel closed"
+  fi
+  local jid; jid="$(job_id || true)"
+  if [ -n "$jid" ]; then
+    hssh <<< "scancel ${jid}" && say "cancelled job ${jid}"
+  fi
+}
+
+do_logs() { ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" "tail -f ${ROOT}/logs/serve-*.out"; }
+
+# The tunnel is supervised rather than started once. `low` is preemptible with a
+# 130s grace period, so the job can be requeued onto a DIFFERENT node mid-session;
+# when that happens the old forward is dead and the new node is only discoverable
+# by re-reading endpoint.txt.
+start_tunnel() {
+  local node="$1"
+  cat > "${STATE}/tunnel.sh" <<TUNNEL
+#!/usr/bin/env bash
+node="${node}"
+while true; do
+  jid=\$(ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" \\
+        "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null \\
+        | awk '\$2=="RUNNING"{print \$1; exit}')
+  [ -z "\$jid" ] && { echo "\$(date -Is) job gone, tunnel supervisor exiting"; exit 0; }
+  fresh=\$(ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" \\
+          "awk '/^node/{print \\\$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)
+  [ -n "\$fresh" ] && [ "\$fresh" != "\$node" ] && { echo "\$(date -Is) node moved \$node -> \$fresh"; node="\$fresh"; }
+  echo "\$(date -Is) forwarding 127.0.0.1:${LOCAL_PORT} -> \$node:${REMOTE_PORT}"
+  ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \\
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
+      -L "${LOCAL_PORT}:\$node:${REMOTE_PORT}" "${HIVE_USER}@${HIVE_HOST}" || true
+  echo "\$(date -Is) forward dropped, retrying in 10s"
+  sleep 10
+done
+TUNNEL
+  chmod +x "${STATE}/tunnel.sh"
+  nohup "${STATE}/tunnel.sh" > "${STATE}/tunnel.log" 2>&1 &
+  echo $! > "${STATE}/tunnel.pid"
+}
+
+do_up() {
+  say "checking hive"
+  hssh <<< "true" >/dev/null || die "cannot reach ${HIVE_USER}@${HIVE_HOST}"
+
+  if [ "$(stack_ready | tail -1)" != "ready" ]; then
+    say "llama.cpp or weights missing — running setup (this takes a while)"
+    hssh <<REMOTE
+cd ${ROOT} && sbatch --time=01:00:00 --cpus-per-task=16 --mem=48G \
+  -o ${ROOT}/logs/setup-%j.out setup-hive.sh
+REMOTE
+    say "setup submitted; re-run 'opencode_hive' once it finishes"
+    say "watch it with: ssh ${HIVE_USER}@${HIVE_HOST} 'tail -f ${ROOT}/logs/setup-*.out'"
+    exit 0
+  fi
+
+  local jid; jid="$(job_id || true)"
+  if [ -n "$jid" ]; then
+    say "reusing running job ${jid}"
+  else
+    say "requesting ${NGPU}x ${GPU} for ${WALLTIME}"
+    hssh <<REMOTE
+cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
+  -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+REMOTE
+    say "waiting for the scheduler"
+    for _ in $(seq 1 240); do
+      jid="$(job_id || true)"; [ -n "$jid" ] && break
+      sleep 10
+    done
+    [ -n "$jid" ] || die "job did not start; check: opencode_hive status"
+  fi
+
+  local node
+  for _ in $(seq 1 60); do
+    node="$(endpoint_node | tail -1)"; [ -n "$node" ] && break
+    sleep 5
+  done
+  [ -n "$node" ] || die "job ${jid} is running but published no endpoint"
+  say "node ${node}"
+
+  start_tunnel "$node"
+  local key; key="$(api_key | tail -1)"
+  [ -n "$key" ] || die "no API key at ${ROOT}/logs/api-key.txt"
+
+  say "waiting for the model to load (weights stage to local NVMe first)"
+  local ok=0
+  for _ in $(seq 1 180); do
+    if curl -fsS -m 5 -H "Authorization: Bearer ${key}" \
+         "http://127.0.0.1:${LOCAL_PORT}/v1/models" >/dev/null 2>&1; then ok=1; break; fi
+    sleep 10
+  done
+  [ "$ok" = 1 ] || die "endpoint never answered; see ${STATE}/tunnel.log and 'opencode_hive logs'"
+
+  say "configuring OpenCode provider '${PROVIDER}'"
+  local presets; presets="$(mktemp)"
+  scp -q "${HIVE_USER}@${HIVE_HOST}:${ROOT}/router-presets-hive.ini" "$presets"
+  # --set-default is deliberately NOT passed: the local 4090 provider stays the
+  # default and hive is opt-in per session, so losing the cluster job does not
+  # leave the client pointed at a dead endpoint.
+  python3 "${HERE}/../scripts/configure-opencode.py" \
+      --presets "$presets" --provider "${PROVIDER}" \
+      --provider-name "Qwen on hive (${GPU}, job ${jid})" \
+      --host 127.0.0.1 --port "${LOCAL_PORT}" --api-key "${key}"
+  rm -f "$presets"
+
+  say "ready — pick a '${PROVIDER}/...' model inside OpenCode"
+  [ "$LAUNCH" = 1 ] && exec opencode
+}
+
+case "$CMD" in
+  up)     do_up ;;
+  status) do_status ;;
+  stop)   do_stop ;;
+  logs)   do_logs ;;
+esac

@@ -122,9 +122,17 @@ Two traps:
 - **Slurm is not on `PATH` in a non-login shell.** `ssh host 'sinfo'` gives
   `command not found`; `ssh host 'bash -lc sinfo'` works. This bites any
   automation that shells in non-interactively.
-- Modules: `cuda/13.3.0` (default), `gcc/13.2.0`, `cmake/3.28.1`,
-  `python/3.11.9`. `uv` is installed at `~/.local/bin/uv`; `apptainer` is
-  available; there is no `docker`.
+- **Environment Modules 5.5.0** (Tcl), *not* Lmod — so `module`/`ml` work but
+  Lmod-only syntax (`module spider`, hierarchical `ml gcc cuda`) does not.
+  `MODULEPATH` has seven roots, all on CVMFS, which is mounted on compute nodes
+  as well. Useful modules: `cuda/13.3.0` (default), `gcc/13.2.0`,
+  `cmake/3.28.1`, `python/3.11.9`, plus a large `conda/*` tree. `uv` is at
+  `~/.local/bin/uv`; `apptainer` is available; there is no `docker`.
+- **Built binaries need two runtime paths.** llama.cpp splits each tool into a
+  thin driver plus `libllama-<tool>-impl.so`, so `LD_LIBRARY_PATH` must include
+  the install `lib/`, and `module load cuda` must be in effect for
+  `libcudart.so.13`. Missing either looks like a broken build — "error while
+  loading shared libraries" — when the build was fine.
 - **Compute nodes have outbound internet** — `huggingface.co` returns 200, DNS
   resolves, no proxy needed. Weights can be fetched inside the job.
 - There is no prebuilt llama.cpp; `setup-hive.sh` builds it for
@@ -132,21 +140,62 @@ Two traps:
 
 ## Running it
 
-```bash
-sbatch setup-hive.sh                 # once: build llama.cpp, stage weights
-sbatch serve-qwen.sbatch             # start the server
-cat logs/endpoint.txt                # node, port, and the ssh tunnel command
-```
-
-Then from your workstation, using the node named in `endpoint.txt`:
+One command, from the workstation:
 
 ```bash
-ssh -N -L 8080:${NODE}:8080 gw@hive.hpc.ucdavis.edu
+opencode_hive                  # acquire a GPU, serve, tunnel, configure, launch
+opencode_hive status           # where things stand
+opencode_hive stop             # drop the tunnel, cancel the job
+opencode_hive --gpu nvidia_a100-sxm4-80gb --time 04:00:00
 ```
+
+It reuses a running job rather than starting a second one, and runs the setup
+job for you if llama.cpp or the weights are missing.
+
+### The tunnel
+
+Outbound from the workstation, so a router, NAT, or firewall on that end is
+irrelevant and the compute node never needs to be reachable from outside:
+
+```
+127.0.0.1:8081  ->  hive login node  ->  compute node:8080
+```
+
+**Local port 8081, not 8080.** The local RTX 4090 router already owns 8080; a
+tunnel onto it would either refuse to bind or silently shadow the local node, so
+every "local" request would quietly execute on the cluster.
+
+The tunnel is **supervised, not started once**. `low` is preemptible, so the job
+can be requeued onto a different node mid-session; the supervisor re-reads
+`logs/endpoint.txt`, notices the move, and re-forwards.
 
 The server binds `0.0.0.0` on a shared cluster network, so `serve-qwen.sbatch`
 generates a per-deployment API key into `logs/api-key.txt` (mode 600) and
 requires it. Do not remove that.
+
+The hive provider is added to OpenCode as `qwen-hive/...` **without** becoming
+the default: the local 4090 stays default, so losing the cluster job never
+leaves the client pointed at a dead endpoint. Pick a `qwen-hive/` model when you
+want the cluster.
+
+### Setup jobs ask for no GPU
+
+Compiling CUDA needs `nvcc`, not a device, and downloading weights needs
+neither. `setup-hive.sh` therefore requests **no** `--gres`, so it schedules
+against all 168 nodes in `low` instead of queueing behind the 86 GPUs that the
+serving job actually wants. The first version asked for a Blackwell and sat
+`PENDING`; without it, the same job started immediately.
+
+## Git
+
+`git` 2.34.1, with `url.git@github.com:.insteadOf https://github.com/` already
+set globally — so HTTPS GitHub URLs are rewritten to SSH and authenticate with
+`~/.ssh/id_rsa`. Verified: GitHub answers `Hi berlinguyinca!`. There is no `gh`
+CLI and no credential helper.
+
+`user.name` and `user.email` were **unset**, which fails any commit made on the
+cluster; they are now configured. Clone work into `/quobyte/metabolomicsgrp/it`,
+never `$HOME` (3.3 GB free).
 
 ### Scheduling
 

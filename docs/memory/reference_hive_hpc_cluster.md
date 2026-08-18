@@ -58,6 +58,41 @@ Blackwell allocates in seconds.
   `python/3.11.9`. `uv` is at `~/.local/bin`; `apptainer` exists; there
   is no docker and no prebuilt llama.cpp.
 
+**One-command driver:** `llm/linux-qwen38/hive/opencode_hive` acquires a
+GPU, serves, tunnels, configures OpenCode, and launches it. The tunnel is
+outbound from the workstation, so NAT/firewall there is irrelevant:
+`127.0.0.1:8081 -> hive login -> compute node:8080`. It uses local port
+**8081**, not 8080, because the local RTX 4090 router owns 8080 and a
+tunnel onto it would silently shadow the local node. The tunnel is
+supervised: `low` is preemptible, so the job can be requeued onto a
+different node and the supervisor re-reads `logs/endpoint.txt` and
+re-forwards. The hive provider is added to OpenCode without becoming the
+default, so a lost job never leaves the client on a dead endpoint.
+
+**Setup jobs must not request a GPU.** Compiling CUDA needs `nvcc`, not a
+device, and downloading weights needs neither; asking for a Blackwell
+left the job `PENDING` while a GPU-free submission of the same work
+started immediately against all 168 nodes.
+
+**Modules are Environment Modules 5.5.0 (Tcl), not Lmod** — `module`/`ml`
+work, but `module spider` and hierarchical Lmod syntax do not.
+`MODULEPATH` has seven CVMFS roots, mounted on compute nodes too.
+
+**Built llama.cpp binaries need two runtime paths**: `LD_LIBRARY_PATH`
+must include the install `lib/` (each tool is a thin driver plus
+`libllama-<tool>-impl.so`) *and* `module load cuda` must be in effect for
+`libcudart.so.13`. Missing either reads as a broken build ("error while
+loading shared libraries") when the build was fine. A `set -e` script
+that verifies with `--version` before downloading weights will abort a
+perfectly good build and leave nothing staged.
+
+**Git** already has `url.git@github.com:.insteadOf https://github.com/`
+globally, so HTTPS GitHub URLs authenticate over SSH with `~/.ssh/id_rsa`
+(verified: *Hi berlinguyinca!*). No `gh` CLI, no credential helper.
+`user.name`/`user.email` were unset — now set to Gert Wohlgemuth
+<wohlgemuth@ucdavis.edu>. Clone into `/quobyte/metabolomicsgrp/it`, never
+`$HOME`.
+
 Related: [[feedback_shared_kv_pool_has_no_admission_control]] and
 [[feedback_context_floor_kills_small_tiers]] — 96 GiB removes the
 capacity fight but not the need for client-side tier rationing.

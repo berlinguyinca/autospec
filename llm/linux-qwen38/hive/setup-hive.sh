@@ -2,7 +2,6 @@
 #SBATCH --job-name=qwen-setup
 #SBATCH --partition=low
 #SBATCH --account=publicgrp
-#SBATCH --gres=gpu:6000_blackwell:1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
@@ -14,6 +13,11 @@
 #
 # Run once. Everything it produces lives on /quobyte and survives the job, so
 # the serving job (serve-qwen.sbatch) starts in seconds afterwards.
+#
+# Deliberately requests NO GPU. Compiling CUDA code needs nvcc, not a device,
+# and downloading weights needs neither -- so this schedules against all 168
+# nodes in `low` instead of queueing for one of the 86 GPUs that the serving
+# job actually wants.
 #
 # Account note: GPUs must be charged to publicgrp. The metabolomicsgrp
 # association carries gres/gpu=0 and a GPU request under it is rejected at
@@ -36,7 +40,8 @@ module load cuda/13.3.0 gcc/13.2.0 cmake/3.28.1
 echo "== toolchain =="
 nvcc --version | tail -2
 cmake --version | head -1
-nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader
+nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>/dev/null \
+  || echo "no GPU on this node (expected: none was requested)"
 
 # --- llama.cpp ---------------------------------------------------------------
 # Built for every GPU generation on this cluster, because the serving job may
@@ -45,8 +50,21 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader
 #   80  A100        86  A6000        89  L40S / RTX 5000 Ada      120  Blackwell
 ARCHS="80;86;89;120"
 
+# Runtime linkage, needed by anything that EXECUTES a built binary. llama.cpp
+# splits each tool into a thin driver plus a libllama-<tool>-impl.so beside it,
+# and CUDA's own runtime comes from the module -- so both paths are required.
+# Getting this wrong looks like a broken build ("error while loading shared
+# libraries: libllama-server-impl.so") when the build was in fact fine.
+export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+if [ -x "${PREFIX}/bin/llama-server" ] && "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1; then
+  echo "== llama.cpp already built and runnable, skipping rebuild =="
+  SKIP_BUILD=1
+fi
+
 # BUILD_ROOT is per-job scratch, so this is always a fresh shallow clone --
 # no reuse to invalidate and nothing in the tree to reset.
+if [ -z "${SKIP_BUILD:-}" ]; then
 git clone --depth 1 https://github.com/ggml-org/llama.cpp "${SRC}"
 cd "${SRC}"
 echo "llama.cpp at $(git rev-parse --short HEAD)"
@@ -59,9 +77,13 @@ cmake -B build \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}"
 cmake --build build --config Release -j "$(nproc)"
 cmake --install build
+fi
 
 echo "== built =="
-"${PREFIX}/bin/llama-server" --version 2>&1 | head -2
+# Informational only. This ran under `set -e` before and a linkage problem here
+# aborted the script BEFORE the weights download, turning a working build into a
+# failed job with no weights to show for it.
+"${PREFIX}/bin/llama-server" --version 2>&1 | head -2 || true
 
 # --- weights -----------------------------------------------------------------
 # 96 GiB of VRAM removes the capacity pressure that forced Q5 on a 24 GiB card,
