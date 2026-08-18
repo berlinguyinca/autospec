@@ -16,10 +16,12 @@ pub(super) fn missing_remote_ref(error: &str) -> bool {
 ///
 /// Matched on git's own wording, lowercased so a future capitalisation change does not silently
 /// reclassify a permanent condition as transient.
+///
+/// Deliberately only the local-path wording. Git's remote-side phrasing -- `'origin' does not
+/// appear to be a git repository` -- also fires on an unreachable host or a failed SSH auth, and
+/// classifying those permanent would turn one bad second into a hard stop needing a human.
 pub(super) fn structural_repository_failure(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    error.contains("not a git repository")
-        || error.contains("does not appear to be a git repository")
+    error.to_ascii_lowercase().contains("not a git repository")
 }
 
 pub(super) fn classify_error(branch: &str, explore_mode: bool, error: String) -> String {

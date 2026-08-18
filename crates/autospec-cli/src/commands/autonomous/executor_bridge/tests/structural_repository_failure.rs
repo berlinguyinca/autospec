@@ -46,9 +46,6 @@ fn the_structural_classifier_matches_git_wording() {
         "git [\"fetch\", \"--quiet\", \"origin\", \"refs/heads/main:refs/remotes/origin/main\"] \
          failed: fatal: not a git repository (or any of the parent directories): .git"
     ));
-    assert!(bridge::base_fetch::structural_repository_failure(
-        "fatal: 'origin' does not appear to be a git repository"
-    ));
     // Case-insensitive, so a future capitalisation change cannot silently reclassify it.
     assert!(bridge::base_fetch::structural_repository_failure(
         "FATAL: Not A Git Repository"
@@ -64,5 +61,10 @@ fn a_genuine_transient_fetch_failure_is_still_retryable() {
     ));
     assert!(!bridge::base_fetch::structural_repository_failure(
         "git [\"fetch\"] failed: fatal: Authentication failed"
+    ));
+    // Git's remote-side wording fires on an unreachable host and a failed SSH auth too, so it
+    // must stay retryable; it is also a different string from the local-path form above.
+    assert!(!bridge::base_fetch::structural_repository_failure(
+        "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository."
     ));
 }
