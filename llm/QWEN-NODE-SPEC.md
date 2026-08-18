@@ -166,6 +166,127 @@ and after loading, measure resident size. See Appendix C.1 for the case where a
 | **exl3** | NVIDIA, ExLlamaV3 | fine-grained bpw (2.0–6.0); best size/quality at a target footprint |
 | **MLX** 4/6/8-bit | Apple Silicon | native Metal path; often fastest on Mac |
 
+### Let the hardware pick the quant
+
+`scripts/select-quant.py` automates this phase: it enumerates what a repository
+publishes, derives KV cost from the base model's own `config.json`, and reports
+the **highest-quality quant that still serves a target context** on the detected
+hardware.
+
+```bash
+# what fits at 196k on this box, and what it would leave spare
+./linux-qwen38/scripts/select-quant.py --repo unsloth/Qwen3.8-27B-GGUF \
+    --target-context 196608 --kv q4_0 --emit-preset
+
+# uncensored builds, vision required, smaller context
+./linux-qwen38/scripts/select-quant.py --variant uncensored --vision \
+    --target-context 98304
+```
+
+Three details that make it correct rather than approximate:
+
+- **Rank by quant tier, not file size.** `Q4_K_L` is *larger* than `Q5_K_M` yet
+  lower quality — the `_L`/`_XL` variants keep a 4-bit body and only raise the
+  embedding and output tensors. Ranking on size alone picks the wrong file.
+- **Group split GGUFs.** `…-00001-of-00003.gguf` is one model; treated
+  separately, a single shard looks like an attractive small candidate.
+- **Cap at `n_ctx_train`.** Memory is not the only ceiling.
+
+Its context figures are **arithmetic upper bounds**. Compute buffers grow with
+depth and some runtimes allocate outside their own budget, so a bound must be
+confirmed with `measure-ceiling.sh` before it is configured. Validation: on the
+reference host the tool independently recommended a Q5 quant at ~196k, matching
+what was arrived at manually — and its KV term predicts 18.0 KiB/token for
+`q4_0`, against 18.4 KiB/token measured.
+
+### Planning a ladder for a machine you are not sitting at
+
+`--platform` targets a named machine and `--ladder` emits a whole profile set at
+once, so a context ladder can be planned before the hardware arrives.
+
+```bash
+# 48 GB MacBook: small / medium / large, best quant for each
+./linux-qwen38/scripts/select-quant.py --platform mac-48 \
+    --repo unsloth/Qwen3.8-27B-GGUF --kv q4_0 \
+    --ladder "small=32768,medium=131072,large=262144" --emit-preset
+```
+
+**Worked example — Apple 48 GB unified.** Budget ~36.9 GiB (75% of RAM; macOS
+caps GPU-wired memory near there, and raising it is a deliberate
+`sysctl iogpu.wired_limit_mb` change). At `q4_0` KV:
+
+| tier | context | best quant that fits | size | predicted t/s |
+|---|---:|---|---:|---:|
+| small | 32,768 | `UD-Q8_K_XL` | 29.30 GiB | 8.7 |
+| medium | 131,072 | `UD-Q8_K_XL` | 29.30 GiB | 8.7 |
+| large | **262,144** | `UD-Q8_K_XL` | 29.30 GiB | 8.7 |
+
+The ladder is **degenerate on this machine, and that is the answer**: 48 GB of
+unified memory holds an 8-bit 27B at the *full trained context*, so there is no
+tier where you must drop quality. Compare the 24 GB discrete card, where Q5 at
+196k was the ceiling.
+
+What you pay is speed. At 273 GB/s the 8-bit weights predict **~8.7 t/s** where
+Q5 predicts ~14.5. So on unified memory the interesting knob is not "what fits"
+but "what is fast enough":
+
+```bash
+--min-tps 12     # -> UD-Q5_K_XL at every tier, ~14.5 t/s predicted
+```
+
+| you want | pass | you get on a 48 GB Mac |
+|---|---|---|
+| best quality, speed secondary | *(no floor)* | Q8 at up to 262k, ~8.7 t/s |
+| usable interactive speed | `--min-tps 12` | Q5 at up to 262k, ~14.5 t/s |
+| a vision tier as well | `--vision` | projector budgeted (~885 MiB) and emitted |
+
+This is the unified-memory/discrete split from section 1 in concrete form: on the
+Mac, capacity stops being the constraint and **bandwidth becomes the only real
+decision.** Pick the quant from the tokens/sec you can tolerate, not from what
+fits — because almost everything fits.
+
+Two mechanics worth stating: the projector is only budgeted **and** emitted when
+`--vision` is passed (emitting it otherwise spends ~885 MiB the arithmetic never
+reserved, which is how a preset that "should fit" OOMs), and `--json` is the
+interface for other tools — the human table changes shape and must not be
+scraped.
+
+### Uncensored / abliterated builds
+
+Abliterated ("uncensored") community builds of the same base model are ordinary
+model choices for a local node and are supported directly:
+
+```bash
+./linux-qwen38/scripts/add-gguf-model.sh \
+    --repo Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF \
+    --file Qwen3.8-27B-ABLITERATED-Q5_K_M.gguf \
+    --mmproj mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf
+```
+
+That downloads, writes a router preset, restarts, and verifies the model answers
+— after which it is selectable from any client on the same endpoint.
+
+Because they share the base architecture, **all the sizing arithmetic above
+applies unchanged**: same layer counts, same KV cost per token, same quant
+ladder. Three engineering caveats that do differ:
+
+1. **Provenance.** These are third-party edits of the weights, not vendor
+   artefacts. Pin the revision you fetched (`add-gguf-model.sh` records it in the
+   preset), check file sizes, and prefer builds with real download counts.
+2. **Capability is not assumed to survive the edit.** Abliteration removes
+   refusal directions and can degrade instruction-following and reasoning as a
+   side effect. If you rely on tool calling or long-context retrieval, re-run the
+   verification suite against the new id rather than inheriting the base model's
+   results.
+3. **Not every build ships a projector.** Vision presets need an `mmproj`; the
+   selector skips repos that publish none when `--vision` is passed.
+
+Verified to publish usable ladders (checked, with revisions pinned at selection
+time): `Blackfrost-AI/…-ABLITERATED-GGUF` and
+`huihui-ai/Huihui-…-abliterated-GGUF` (both with projectors, Q2–Q8),
+`JonathanColetti/…-Uncensored-GGUF` (largest download count, ships MTP draft
+heads), `orcarouter/…-Uncensored-GGUF`.
+
 ### Sizing rule of thumb
 
 ```
@@ -727,6 +848,8 @@ From [`linux-qwen38/`](linux-qwen38/); the shapes port, the values do not.
 |---|---|
 | **`scripts/install-node.sh`** | **provisions the whole shipped stack**: llama.cpp (fetch or build), model + projector, router presets, unit, client — and verifies with real inference before claiming success |
 | `scripts/configure-opencode.py` | derives the client config from the router presets, so client and server cannot drift |
+| **`scripts/select-quant.py`** | picks the highest-quality quant that fits; knows the quant tier ladder, split GGUFs and `n_ctx_train` |
+| **`scripts/add-gguf-model.sh`** | adds any GGUF (including abliterated builds) to the router and verifies it answers |
 | `scripts/setup-linux-qwen38.sh` | optional vLLM profiles (throughput/short-context) |
 | `scripts/serve-profile.sh` | one launcher, dispatches on runtime (vLLM / llama.cpp / router) |
 | `scripts/qwen38ctl` | status / start / switch / stop, waits on health and memory release |
