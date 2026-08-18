@@ -91,6 +91,21 @@ endpoint for it — the first attempt advertised node, port and tunnel
 command and only then died, so the client forwarded to a port nothing
 ever listened on.
 
+**`set -e` + `set -o pipefail` kills a polling script silently.** Any
+command substitution containing a pipe aborts the whole script when the
+remote side fails — `awk` exiting 2 because a file does not exist yet,
+`ssh` exiting 255 because the login node throttled us. The symptom is a
+bare `exit 2` with no message, mid-poll. Guard every such substitution
+with `|| true`.
+
+**Put an always-listening proxy in front of an SSH tunnel.** If the
+listening socket IS the forward, every reconnect or node change reaches
+the client as `Connection refused`. A local byte relay that owns the
+port and *holds* clients until the upstream returns converts an outage
+into latency (measured: 6s round trip across a killed tunnel). Keep it a
+byte relay so it carries SSE untouched; it cannot replay a connection
+lost mid-response, only ones not yet started.
+
 **A tunnel supervisor must not treat an unanswered query as an answer.**
 `[ -z "$jid" ] && exit` ended supervision on the first empty `squeue` —
 indistinguishable from a throttled ssh, so one blip killed the tunnel

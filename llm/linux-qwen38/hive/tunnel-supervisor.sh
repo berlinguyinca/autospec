@@ -4,17 +4,27 @@
 # Driven entirely by environment, so it can be read and tested on its own
 # rather than through a layer of heredoc escaping:
 #
-#   HIVE_USER HIVE_HOST ROOT LOCAL_PORT REMOTE_PORT NODE STATE
+#   HIVE_USER HIVE_HOST ROOT FORWARD_PORT REMOTE_PORT NODE STATE
+#   GPU NGPU WALLTIME ACCOUNT PARTITION   (for re-acquiring a node)
 #
 # The job is to survive things that are NORMAL on a shared cluster: a login
-# node that throttles connections, a network that blinks, and a preemptible
-# job that comes back on a different host.
+# node that throttles connections, a network that blinks, a preemptible job
+# that comes back on a different host, and a walltime that eventually expires.
+#
+# When the job really is gone this does NOT stop. It submits another one, waits
+# for the scheduler, and re-points the forward. Combined with hive-proxy.py
+# holding the client side, an expired allocation becomes a long pause rather
+# than a dead endpoint -- and OpenCode's own state lives on the workstation, so
+# there is nothing on the cluster to lose.
 set -uo pipefail
 
 HIVE_USER="${HIVE_USER:?}"; HIVE_HOST="${HIVE_HOST:?}"
 ROOT="${ROOT:?}"; STATE="${STATE:?}"
-LOCAL_PORT="${LOCAL_PORT:?}"; REMOTE_PORT="${REMOTE_PORT:?}"
+FORWARD_PORT="${FORWARD_PORT:?}"; REMOTE_PORT="${REMOTE_PORT:?}"
 node="${NODE:?}"
+GPU="${GPU:-6000_blackwell}"; NGPU="${NGPU:-1}"
+WALLTIME="${WALLTIME:-12:00:00}"
+ACCOUNT="${ACCOUNT:-publicgrp}"; PARTITION="${PARTITION:-low}"
 
 # How many times the scheduler must AUTHORITATIVELY report no running job
 # before we believe it. The previous version exited on the first empty answer,
@@ -22,8 +32,38 @@ node="${NODE:?}"
 # permanently killed the tunnel mid-session.
 GONE_LIMIT="${GONE_LIMIT:-5}"
 MAX_BACKOFF="${MAX_BACKOFF:-30}"
+# How long to wait for a replacement allocation before trying again. The queue
+# is the slow part here, not us.
+REACQUIRE_WAIT="${REACQUIRE_WAIT:-2400}"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*"; }
+
+# Submit a replacement allocation and wait for it to publish an endpoint. The
+# previous behaviour -- exit and let the human notice -- meant a walltime
+# expiry silently ended the session.
+reacquire() {
+  log "no job; requesting a replacement (${NGPU}x ${GPU}, ${WALLTIME})"
+  printf 'reacquiring' > "${STATE}/tunnel.state"
+  ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE >/dev/null 2>&1
+cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
+  -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+REMOTE
+  local waited=0
+  while [ "$waited" -lt "$REACQUIRE_WAIT" ]; do
+    sleep 30; waited=$((waited + 30))
+    local fresh
+    fresh="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
+            "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
+    if [ -n "$fresh" ]; then
+      log "replacement is serving on ${fresh} (waited ${waited}s)"
+      node="$fresh"
+      printf 'up' > "${STATE}/tunnel.state"
+      return 0
+    fi
+    log "waiting for a replacement allocation (${waited}s)"
+  done
+  return 1
+}
 
 # A dedicated connection for the DATA path. It deliberately does not share the
 # driver's ControlMaster: a multiplexed master that dies takes every channel on
@@ -53,8 +93,9 @@ while true; do
       gone=$((gone + 1))
       log "scheduler reports no running job (${gone}/${GONE_LIMIT})"
       if [ "$gone" -ge "$GONE_LIMIT" ]; then
-        log "job is gone; supervisor exiting"
-        exit 0
+        reacquire || log "re-acquire failed; will try again"
+        gone=0
+        continue
       fi
     else
       gone=0
@@ -70,10 +111,11 @@ while true; do
   fi
 
   # --- hold the forward ------------------------------------------------------
-  log "forwarding 127.0.0.1:${LOCAL_PORT} -> ${node}:${REMOTE_PORT}"
+  log "forwarding 127.0.0.1:${FORWARD_PORT} -> ${node}:${REMOTE_PORT}"
+  printf 'up' > "${STATE}/tunnel.state"
   printf '%s' "$node" > "${STATE}/tunnel.node"
   start=$(date +%s)
-  ssh "${forward_opts[@]}" -L "${LOCAL_PORT}:${node}:${REMOTE_PORT}" \
+  ssh "${forward_opts[@]}" -L "${FORWARD_PORT}:${node}:${REMOTE_PORT}" \
       "${HIVE_USER}@${HIVE_HOST}"
   held=$(( $(date +%s) - start ))
   reconnects=$((reconnects + 1))

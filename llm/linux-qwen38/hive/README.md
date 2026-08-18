@@ -178,18 +178,37 @@ opencode_hive --gpu nvidia_a100-sxm4-80gb --time 04:00:00
 It reuses a running job rather than starting a second one, and runs the setup
 job for you if llama.cpp or the weights are missing.
 
-### The tunnel
+### Staying connected
 
-Outbound from the workstation, so a router, NAT, or firewall on that end is
-irrelevant and the compute node never needs to be reachable from outside:
+Three processes, because the middle one is allowed to fail:
 
 ```
-127.0.0.1:8081  ->  hive login node  ->  compute node:8080
+OpenCode -> 127.0.0.1:11111   hive-proxy.py      always listening
+         -> 127.0.0.1:11112   ssh forward        comes and goes
+         -> login node -> compute node:8080      llama-server
 ```
 
-**Local port 8081, not 8080.** The local RTX 4090 router already owns 8080; a
-tunnel onto it would either refuse to bind or silently shadow the local node, so
-every "local" request would quietly execute on the cluster.
+**Local port 11111, not 8080.** The local RTX 4090 router owns 8080; a tunnel
+onto it would either refuse to bind or silently shadow the local node, so every
+"local" request would quietly execute on the cluster.
+
+**The proxy exists so an outage is latency, not an error.** If the listening
+socket were the ssh forward itself — as it was — then a reconnect, a preempted
+job landing on another node, or an expired allocation all reach OpenCode as
+`Connection refused`. `hive-proxy.py` owns 11111 permanently and simply *holds*
+a client until the upstream returns. Measured: kill the forward, send a request
+immediately, get an answer 6 s later.
+
+It is a byte relay, not an HTTP proxy, so it carries streamed SSE and long
+keep-alive connections without opinions about framing. Its honest limit: a
+connection lost **mid-response** cannot be replayed from there, because bytes
+have already reached the client. Requests that had not started are covered.
+
+**A lost allocation is also recoverable.** `low` caps at 7 days and is
+preemptible, so the job ending is a matter of when. The supervisor submits a
+replacement, waits for the scheduler, and re-points the forward. Every piece of
+session state lives on the workstation, so there is nothing on the cluster to
+lose — the outage is a pause.
 
 The tunnel is **supervised, not started once** (`tunnel-supervisor.sh`). `low`
 is preemptible, so the job can be requeued onto a different node mid-session;

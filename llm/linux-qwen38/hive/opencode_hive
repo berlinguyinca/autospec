@@ -18,6 +18,14 @@
 # reachable from outside the cluster.
 set -euo pipefail
 
+# NOTE for anyone editing: `set -e` and `set -o pipefail` are both on, so ANY
+# command substitution containing a pipe must end in `|| true` unless a failure
+# there really should abort. A remote helper that legitimately fails while
+# polling -- awk exiting 2 because the endpoint file does not exist yet, ssh
+# exiting 255 because the login node throttled us -- otherwise kills this script
+# with NO message at all. That is what "waiting for the scheduler" followed by a
+# bare `exit 2` was, twice.
+
 HIVE_HOST="${OPENCODE_HIVE_HOST:-hive.hpc.ucdavis.edu}"
 HIVE_USER="${OPENCODE_HIVE_USER:-gw}"
 ROOT="${OPENCODE_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
@@ -29,6 +37,10 @@ REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
 # and a tunnel onto it would either fail to bind or silently shadow the local
 # node, so every "local" request would quietly go to the cluster.
 LOCAL_PORT="${OPENCODE_HIVE_LOCAL_PORT:-11111}"
+# The SSH forward does NOT land on LOCAL_PORT. hive-proxy.py owns that, so the
+# port OpenCode talks to stays open through a reconnect, a node change, or a
+# whole new allocation; the forward lands here and is free to come and go.
+FORWARD_PORT="${OPENCODE_HIVE_FORWARD_PORT:-$((LOCAL_PORT + 1))}"
 PROVIDER="${OPENCODE_HIVE_PROVIDER:-qwen-hive}"
 LAUNCH=1
 SYNC=1
@@ -109,9 +121,9 @@ REMOTE
 do_status() {
   local jid node
   jid="$(job_id || true)"
-  printf '  stack   : %s\n' "$(stack_ready | tail -1)"
+  printf '  stack   : %s\n' "$(stack_ready | tail -1 || true)"
   printf '  job     : %s\n' "${jid:-none running}"
-  if [ -n "$jid" ]; then printf '  node    : %s\n' "$(endpoint_node "$jid" | tail -1)"; fi
+  if [ -n "$jid" ]; then printf '  node    : %s\n' "$(endpoint_node "$jid" | tail -1 || true)"; fi
   if [ -s "${STATE}/tunnel.pid" ] && kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null; then
     printf '  tunnel  : up (pid %s) 127.0.0.1:%s -> %s, %s reconnect(s)\n' \
       "$(cat "${STATE}/tunnel.pid")" "${LOCAL_PORT}" \
@@ -119,6 +131,12 @@ do_status() {
       "$(cat "${STATE}/tunnel.reconnects" 2>/dev/null || echo 0)"
   else
     printf '  tunnel  : down\n'
+  fi
+  if [ -s "${STATE}/proxy.pid" ] && kill -0 "$(cat "${STATE}/proxy.pid")" 2>/dev/null; then
+    printf '  proxy   : holding 127.0.0.1:%s (state: %s)\n' "${LOCAL_PORT}" \
+      "$(cat "${STATE}/tunnel.state" 2>/dev/null || echo unknown)"
+  else
+    printf '  proxy   : down\n'
   fi
   if curl -fsS -m 5 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1; then
     printf '  endpoint: responding\n'
@@ -128,10 +146,10 @@ do_status() {
 }
 
 do_stop() {
+  stop_proxy
   if [ -s "${STATE}/tunnel.pid" ]; then
-    kill "$(cat "${STATE}/tunnel.pid")" 2>/dev/null || true
-    rm -f "${STATE}/tunnel.pid"
-    say "tunnel closed"
+    stop_tunnel
+    say "tunnel and proxy closed"
   fi
   local jid; jid="$(job_id || true)"
   if [ -n "$jid" ]; then
@@ -161,7 +179,28 @@ stop_tunnel() {
   # The supervisor's ssh child does not die with it, and an orphaned forward
   # still holds the local port -- which is what a fresh supervisor then fails
   # to bind, backing off instead of connecting.
-  pkill -f "ssh -N .*-L ${LOCAL_PORT}:" 2>/dev/null || true
+  pkill -f "ssh -N .*-L ${FORWARD_PORT}:" 2>/dev/null || true
+}
+
+# The always-open near side. Started before the tunnel and left running, so a
+# client that connects during an outage is held rather than refused.
+start_proxy() {
+  if [ -s "${STATE}/proxy.pid" ] && kill -0 "$(cat "${STATE}/proxy.pid")" 2>/dev/null; then
+    return 0
+  fi
+  setsid nohup python3 "${HERE}/hive-proxy.py" \
+      --listen "${LOCAL_PORT}" --upstream "${FORWARD_PORT}" \
+      >> "${STATE}/proxy.log" 2>&1 &
+  echo $! > "${STATE}/proxy.pid"
+  sleep 1
+  say "proxy holding 127.0.0.1:${LOCAL_PORT} (upstream ${FORWARD_PORT})"
+}
+
+stop_proxy() {
+  if [ -s "${STATE}/proxy.pid" ]; then
+    kill "$(cat "${STATE}/proxy.pid")" 2>/dev/null || true
+    rm -f "${STATE}/proxy.pid"
+  fi
 }
 
 start_tunnel() {
@@ -179,8 +218,8 @@ start_tunnel() {
   # terminal or a job runner tears down. Without it the tunnel died silently
   # alongside its parent and the endpoint simply stopped answering.
   HIVE_USER="${HIVE_USER}" HIVE_HOST="${HIVE_HOST}" ROOT="${ROOT}" \
-  STATE="${STATE}" LOCAL_PORT="${LOCAL_PORT}" REMOTE_PORT="${REMOTE_PORT}" \
-  NODE="${node}" \
+  STATE="${STATE}" FORWARD_PORT="${FORWARD_PORT}" REMOTE_PORT="${REMOTE_PORT}" \
+  NODE="${node}" GPU="${GPU}" NGPU="${NGPU}" WALLTIME="${WALLTIME}" \
     setsid nohup "${HERE}/tunnel-supervisor.sh" >> "${STATE}/tunnel.log" 2>&1 &
   echo $! > "${STATE}/tunnel.pid"
   sleep 2
@@ -206,7 +245,7 @@ do_up() {
   hssh <<< "true" >/dev/null || die "cannot reach ${HIVE_USER}@${HIVE_HOST}"
   if [ "$SYNC" = 1 ]; then sync_artifacts; fi
 
-  if [ "$(stack_ready | tail -1)" != "ready" ]; then
+  if [ "$(stack_ready | tail -1 || true)" != "ready" ]; then
     say "llama.cpp or weights missing — running setup (this takes a while)"
     hssh <<REMOTE
 cd ${ROOT} && sbatch --time=01:00:00 --cpus-per-task=16 --mem=48G \
@@ -237,15 +276,16 @@ REMOTE
 
   local node
   for _ in $(seq 1 60); do
-    node="$(endpoint_node "$jid" | tail -1)"
+    node="$(endpoint_node "$jid" | tail -1 || true)"
     if [ -n "$node" ]; then break; fi
     sleep 5
   done
   [ -n "$node" ] || die "job ${jid} is running but published no endpoint"
   say "node ${node}"
 
+  start_proxy
   start_tunnel "$node"
-  local key; key="$(api_key | tail -1)"
+  local key; key="$(api_key | tail -1 || true)"
   [ -n "$key" ] || die "no API key at ${ROOT}/logs/api-key.txt"
 
   say "waiting for the model to load (weights stage to local NVMe first)"
