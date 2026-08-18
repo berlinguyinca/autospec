@@ -443,14 +443,14 @@ process.stdout.write(d.src_globs.join('\n'));
                     rel_screenshot="${screenshot#${AUTOSPEC_REPO_ROOT}/}"
                     screenshot_mtime=0
                     if [ -f "$screenshot" ]; then
-                        screenshot_mtime="$(stat -f '%m' "$screenshot" 2>/dev/null || stat -c '%Y' "$screenshot" 2>/dev/null || echo 0)"
+                        screenshot_mtime="$(stat -c '%Y' "$screenshot" 2>/dev/null || stat -f '%m' "$screenshot" 2>/dev/null || echo 0)"
                     fi
                     stale_sources=""
                     while IFS= read -r sf; do
                         [ -z "$sf" ] && continue
                         full_sf="${AUTOSPEC_REPO_ROOT}/${sf}"
                         if [ -f "$full_sf" ]; then
-                            src_mtime="$(stat -f '%m' "$full_sf" 2>/dev/null || stat -c '%Y' "$full_sf" 2>/dev/null || echo 0)"
+                            src_mtime="$(stat -c '%Y' "$full_sf" 2>/dev/null || stat -f '%m' "$full_sf" 2>/dev/null || echo 0)"
                             if [ "$src_mtime" -gt "$screenshot_mtime" ] 2>/dev/null; then
                                 stale_sources="${stale_sources:+$stale_sources,}\"$sf\""
                             fi
