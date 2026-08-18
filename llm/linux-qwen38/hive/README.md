@@ -287,6 +287,17 @@ idle. Every candidate has at least 48 GiB, which is what the Q8 preset needs
 (~28 GiB weights + 8 GiB of f16 KV at full context + compute); the 32 GiB
 RTX 5000 Ada is deliberately excluded.
 
+### The client is configured from what the server publishes
+
+The serving job copies the preset it generated to
+`logs/router-presets.active.ini`, and `opencode_hive` configures OpenCode from
+**that**, never from a template. Configuring from a template written for the
+largest card is not a cosmetic mismatch: against a smaller one it advertises
+models the server does not have (`400 model 'qwen3.8-27b-256k' not found`) and,
+worse, a context the pool cannot fund — and over-committing a shared pool fails
+*every* live session, not just the greedy one. Observed exactly that: client
+told 262,144, server serving 131,072.
+
 ### The preset sizes itself to the card
 
 Since `--gpu auto` takes whichever GPU can start soonest, the job does not know

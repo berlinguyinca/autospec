@@ -97,6 +97,14 @@ if ! grep -q '^c = ' "${PRESETS}"; then
 fi
 echo "serving:"; grep -E '^\[|^c = |^parallel' "${PRESETS}" | sed 's/^/  /'
 
+# Publish what is ACTUALLY being served, so the client can be configured from
+# it rather than from a template. The template is written for the largest card;
+# a client configured from it against a smaller one advertises models the
+# server does not have (400 model not found) and context the pool cannot fund
+# -- and over-committing a shared pool fails every live session, not just the
+# greedy one.
+cp "${PRESETS}" "${ROOT}/logs/router-presets.active.ini"
+
 
 # An unauthenticated model server on a shared cluster network is reachable by
 # every other user on it. The key is generated per job and written next to the

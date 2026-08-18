@@ -127,5 +127,62 @@ else
   ok "install-node.sh ships every operator tool"
 fi
 
+# 15 — every hive artefact parses
+for f in "${HERE}"/hive/*.sh "${HERE}"/hive/opencode_hive "${HERE}"/hive/*.sbatch; do
+  bash -n "$f" 2>/dev/null
+  check $? "bash -n hive/$(basename "$f")"
+done
+for f in "${HERE}"/hive/*.py; do
+  python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$f" 2>/dev/null
+  check $? "python -m ast hive/$(basename "$f")"
+done
+
+# 16 — under `set -e` with pipefail, an unguarded substitution containing a pipe
+# kills the script with no message when a remote helper legitimately fails while
+# polling. This exact bug stopped the driver dead twice, reported only as a bare
+# `exit 2`, and it is invisible on inspection.
+if grep -nE '="\$\(.*\|' "${HERE}/hive/opencode_hive" | grep -qv '|| true'; then
+  bad "hive/opencode_hive has a pipe in a command substitution without || true"
+  grep -nE '="\$\(.*\|' "${HERE}/hive/opencode_hive" | grep -v '|| true' | sed 's/^/        /'
+else
+  ok "hive/opencode_hive guards every piped command substitution"
+fi
+
+# 17 — a preset generated for any supported card must satisfy the same
+# invariants the static ones do, or the client is told about context the pool
+# cannot fund. 24564 stands for a card too small, which must produce nothing.
+gp="${HERE}/hive/gen-preset.py"
+gen_ok=0
+for vram in 97887 81920 46068 40960; do
+  tmp="$(mktemp)"
+  python3 "$gp" --vram-mib "$vram" --models-dir /m >"$tmp" 2>/dev/null
+  if ! grep -q '^c = ' "$tmp"; then
+    bad "gen-preset.py produced no model for ${vram} MiB"
+    gen_ok=1
+  elif ! python3 "${HERE}/tests/check_presets.py" "$tmp" >/dev/null 2>&1; then
+    bad "gen-preset.py output for ${vram} MiB fails the preset invariants"
+    python3 "${HERE}/tests/check_presets.py" "$tmp" | sed 's/^/        /'
+    gen_ok=1
+  fi
+  rm -f "$tmp"
+done
+check $gen_ok "gen-preset.py output is valid for every supported card"
+
+# A card too small for the weights must refuse, not emit something unservable.
+tmp="$(mktemp)"
+python3 "$gp" --vram-mib 24564 --models-dir /m >"$tmp" 2>/dev/null
+! grep -q '^c = ' "$tmp"
+check $? "gen-preset.py refuses a card too small for the weights"
+rm -f "$tmp"
+
+# 18 — the client must be configured from what the server publishes, never from
+# a template written for the largest card. Advertising a model the server does
+# not have is a 400; advertising more context than the pool funds kills every
+# live session, not just the greedy one.
+grep -q 'router-presets.active.ini' "${HERE}/hive/opencode_hive"
+check $? "opencode_hive configures from the job's published active preset"
+! grep -q 'router-presets-hive.ini' "${HERE}/hive/opencode_hive"
+check $? "opencode_hive does not read the per-card-agnostic template"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

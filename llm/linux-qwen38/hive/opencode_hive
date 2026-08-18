@@ -276,7 +276,7 @@ sync_artifacts() {
   scp -q -o ControlMaster=auto -o "ControlPath=${STATE}/ssh-%r@%h:%p" \
          "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
          "${HERE}/gen-preset.py" "${HERE}/tunnel-supervisor.sh" \
-         "${HERE}/router-presets-hive.ini" "${HERE}/README.md" \
+         "${HERE}/README.md" \
          "${HIVE_USER}@${HIVE_HOST}:${ROOT}/" \
     || die "could not copy job scripts to ${ROOT}"
   hssh <<< "chmod +x ${ROOT}/setup-hive.sh ${ROOT}/serve-qwen.sbatch"
@@ -346,7 +346,13 @@ REMOTE
 
   say "configuring OpenCode provider '${PROVIDER}'"
   local presets; presets="$(mktemp)"
-  scp -q "${HIVE_USER}@${HIVE_HOST}:${ROOT}/router-presets-hive.ini" "$presets"
+  # From the ACTIVE preset the running job published, never the template. The
+  # template describes a 96 GiB card; this job may be on 46 GiB, in which case
+  # the template names models that do not exist and contexts the pool cannot
+  # fund.
+  scp -q "${HIVE_USER}@${HIVE_HOST}:${ROOT}/logs/router-presets.active.ini" \
+      "$presets" \
+    || die "job ${jid} published no active preset; is it still starting?"
   # --set-default is deliberately NOT passed: the local 4090 provider stays the
   # default and hive is opt-in per session, so losing the cluster job does not
   # leave the client pointed at a dead endpoint.

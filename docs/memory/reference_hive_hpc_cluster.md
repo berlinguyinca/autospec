@@ -133,6 +133,18 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**If the server sizes itself dynamically, the client must be
+configured from what it PUBLISHES, not from a template.** Once
+`opencode_hive` chose the GPU by earliest start, the preset became
+per-card too — but the client was still built from the 96 GiB template.
+Against the 46 GiB card actually allocated, OpenCode was told about a
+model the server did not have (`400 model 'qwen3.8-27b-256k' not found`)
+and about 262,144 tokens against a 131,072 pool. The second is the
+dangerous half: a client that fills to its declared limit over-commits
+the shared pool, which fails *every* live session. The serving job now
+copies its generated preset to `logs/router-presets.active.ini` and the
+driver configures from that.
+
 **f16 KV is 64 KiB/token for Qwen3.8-27B, not 32.** The formula is
 `2 x 16 full-attention layers x 4 kv_heads x 256 head_dim x bytes/elem`
 — 32 KiB at fp8, so double that at f16. Getting this wrong put a 16 GiB
