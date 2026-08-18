@@ -79,8 +79,16 @@ duplicates; `clear` removes only marked run-state comments; and `reconcile-linke
 one eligible linked PR before posting the idempotent post-PR handoff reminder. `acquire` validates
 the current issue safety review before it writes a startup heartbeat and moves labels, then uses
 the lowest GitHub comment ID plus a server-side timestamp to decide the lease. `release` writes
-terminal merge evidence before state and label transitions. Legacy script entrypoints remain only
-as compatibility surfaces until every caller is redirected to this command family.
+terminal merge evidence before state and label transitions, and then retires the local evidence for
+that claim: the issue heartbeat and the session binding whose recorded identity matches the released
+claim. Retiring the session binding is what lets one worker session claim a second issue — the
+binding is create-once, so a binding left naming a finished issue makes every later `acquire` from
+that session fail with `heartbeat_write_failed`. Retirement is best effort and only runs when local
+evidence exists; the remote record is already authoritative, and the next acquirer's predecessor
+path retires anything left behind. When that predecessor retirement fails, the refusal reports the
+predecessor's `claim_id`, which is the value `claim release --claim-id` needs. Legacy script
+entrypoints remain only as compatibility surfaces until every caller is redirected to this command
+family.
 
 `autospec issue promote` owns the remote admission transaction. It fetches the canonical GitHub
 issue, applies the repository's trusted-actor and regex policy, validates the existing canonical

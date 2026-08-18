@@ -728,6 +728,22 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         arguments.push("auto-implement".to_string());
     }
     run_gh_with_retry(&arguments, "transition issue claim labels")?;
+    // The remote record is terminal now, so retire the local evidence for this
+    // claim: the issue heartbeat and the identity-matched session binding. This
+    // is best effort — the remote state is already authoritative, and the next
+    // acquirer's predecessor path retires whatever is left behind.
+    if let Err(error) = heartbeat_predecessor::retire_terminal(ClaimMutationIdentity {
+        repo: &repo,
+        issue: options.issue,
+        worker_id: &worker_id,
+        branch: &options.branch,
+        claim_id: &options.claim_id,
+    }) {
+        eprintln!(
+            "WARN: local heartbeat retirement deferred: {}",
+            error.message
+        );
+    }
     println!(
         "{{\"released\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"state\":\"{}\"}}",
         options.issue,
@@ -1126,12 +1142,20 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
                 "WARN: predecessor heartbeat retirement deferred: {}",
                 error.message
             );
-            return unavailable_claim(
-                options.issue,
-                &repo,
-                Some(&worker_id),
-                "predecessor_heartbeat_retirement_failed",
-            );
+            return match prior
+                .as_ref()
+                .and_then(|head| head.record.claim_id.as_deref())
+            {
+                Some(claim_id) => {
+                    unavailable_predecessor_claim(options.issue, &repo, &worker_id, claim_id)
+                }
+                None => unavailable_claim(
+                    options.issue,
+                    &repo,
+                    Some(&worker_id),
+                    "predecessor_heartbeat_retirement_failed",
+                ),
+            };
         }
     }
 
@@ -7128,6 +7152,28 @@ fn heartbeat_publication_deferred<T>(
     Err(ConductorClaimError::Deferred {
         json: format!(
             "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"heartbeat_write_failed\"}}",
+            json_escape(repo),
+            json_escape(worker_id),
+            json_escape(claim_id),
+        ),
+        exit_code: 2,
+    })
+}
+
+/// Refuse an acquire whose predecessor heartbeat could not be retired, naming
+/// the predecessor's claim id.
+///
+/// Recovery is `claim release --claim-id <predecessor>`, so withholding the id
+/// forces the operator to scrape it out of the run-state comment history.
+fn unavailable_predecessor_claim<T>(
+    issue: u64,
+    repo: &str,
+    worker_id: &str,
+    claim_id: &str,
+) -> Result<T, ConductorClaimError> {
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"predecessor_heartbeat_retirement_failed\"}}",
             json_escape(repo),
             json_escape(worker_id),
             json_escape(claim_id),

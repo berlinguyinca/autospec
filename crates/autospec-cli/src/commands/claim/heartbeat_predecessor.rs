@@ -79,6 +79,31 @@ pub(super) fn retire(
     })
 }
 
+/// Retire the local heartbeat and its session binding for a claim the caller is
+/// terminating itself.
+///
+/// [`retire`] exists for the *next* acquirer cleaning up after a predecessor, so
+/// it insists the owning process is dead. Here the owning process is the caller,
+/// so liveness is not a precondition. Without this, `claim release` left the
+/// session binding on disk forever and the same session could never claim
+/// another issue: the create-once binding still named the finished issue.
+#[cfg(target_os = "linux")]
+pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(), CommandFailure> {
+    // Probe before opening for write. The write path creates the repository
+    // directory when it is absent, and a freshly created directory inherits the
+    // umask, so it then fails its own 0700 private-directory check. Releases of
+    // claims that never published a local heartbeat must stay silent.
+    if !released_predecessor_heartbeat_evidence_exists(identity)? {
+        return Ok(());
+    }
+    retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(), CommandFailure> {
+    heartbeat_portable::retire_released(identity)
+}
+
 #[cfg(all(test, not(unix)))]
 mod tests {
     use super::*;
