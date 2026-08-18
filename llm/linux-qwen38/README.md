@@ -119,10 +119,9 @@ disabled. `~/.config/opencode/opencode.json` now carries two providers:
 | model id | endpoint | context | concurrent | vision | use |
 |---|---|---:|---:|---|---|
 | `qwen-local/qwen3.8-27b-40k` (default) | `:8080` | 40,960 | 4 | no | several agent sessions |
-| `qwen-local/qwen3.8-27b-32k` | `:8080` | 32,768 | 5 | no | many small sessions |
 | `qwen-local/qwen3.8-27b-80k` | `:8080` | 81,920 | 2 | no | two large sessions |
 | `qwen-local/qwen3.8-27b-160k` | `:8080` | 163,840 | 1 | no | one whole repository |
-| `qwen-local/qwen3.8-27b` | `:8080` | 180,224 | 1 | no | the entire pool, solo |
+| `qwen-local/qwen3.8-27b` | `:8080` | 196,608 | 1 | no | the entire pool, solo |
 | `qwen-local/qwen3.8-27b-vision*` | `:8080` | 98,304 / 49,152 / 24,576 | 1–4 | **yes** | screenshots, diagrams |
 | `qwen-local/qwen3.8-27b-abliterated*` | `:8080` | 163,840 / 81,920 / 40,960 | 1–4 | **yes** | uncensored |
 | `qwen-vllm/qwen3.8-27b` | `:8000` | 32,928 | 1 | no | short prompts, ~41 tok/s |
@@ -140,10 +139,18 @@ together make the router reload on every request.
 
 ## Running several sessions at once
 
-The server holds **one 180,224-token KV pool shared across 6 slots**
+The server holds **one 196,608-token KV pool shared across 4 slots**
 (`kv-unified = true`). Sessions draw from it as they need, so an 80k session can
 run beside two 40k ones. Verified: 80k + 40k + 40k concurrently, zero errors,
 one model load.
+
+Four slots rather than six, even though six load: **a seat the pool cannot pay
+for is a trap, not capacity.** Six slots at the default 40,960 tier declares
+245,760 against a 180,224 pool, and a shared pool has no admission control, so
+filling every slot killed every session in it -- 48 `Context size has been
+exceeded` errors on 2026-08-18, all of them subagent fan-out. Four slots on the
+196,608 pool is 163,840 for a full house at the default tier: the failure is no
+longer reachable by arithmetic.
 
 Two things make this configuration rather than luck:
 
@@ -166,7 +173,46 @@ that happens. Keep the running total of live sessions at or under 163,840;
 `tests/check_presets.py` fails the build if a tier outgrows its pool or claims
 more concurrent sessions than there are slots.
 
-Measure it with `scripts/bench-concurrency.py`:
+### Fan-out costs what a session costs, times the width
+
+A subagent is a whole session. It gets its own context, and on this client it
+**inherits the parent's model id** unless something pins it -- so a parent sitting
+on the solo tier hands each of its children a window the size of the pool. That
+is how the 08-18 failure happened: four children, each declaring 180,224,
+summing to 288,970 tokens of peak against a 180,224 pool.
+
+Two numbers make fan-out affordable, both measured on this host:
+
+| child | floor before any work |
+|---|---:|
+| stock `general` | 37,113 |
+| same, with the `skill` tool denied | **18,030** |
+
+The skill tool injects the whole skill roster, ~16.3k tokens, into any session
+that can call it -- 40% of a 40,960 tier spent on skills a child should not be
+loading in the first place. So the client is configured (`~/.config/opencode/opencode.json`)
+to pin every spawnable child to `qwen-local/qwen3.8-27b-40k`, deny it `skill`,
+deny it `task` so fan-out cannot nest, and retire the operator-facing skills from
+`mode: all` to `mode: primary` so an 11k-21k skill body is never spawnable as a
+child.
+
+`scripts/context-budget-check.py` is the gate. It reads the **loaded** server
+rather than these presets, resolves agents through `opencode agent list` and
+`opencode debug agent` so it sees built-ins and config overrides, and prices two
+bounds -- the caller's fan-out width, and a full house of every slot:
+
+```
+context-budget-check.py --width 3
+context-budget-check.py --width 3 --pool 196608 --slots 4   # price a preset first
+```
+
+It reads the newest top-level session out of `~/.local/share/opencode/opencode.db`
+as well, because the tier a session picked in the TUI overrides the configured
+default -- that override is exactly what went wrong on 08-18, and a guard that
+trusted the config would have called it healthy. `tests/test_context_budget.py`
+covers that case, the sum that fits, and an unpinned child.
+
+Measure raw concurrency with `scripts/bench-concurrency.py`:
 
 ```
 bench-concurrency.py --model qwen3.8-27b-40k --concurrency 1,2,4
@@ -278,6 +324,7 @@ systemd/
 tests/
   test_structural.sh       no GPU needed; safe in CI
   test_smoke.sh            the gate the installer will not skip
+  test_context_budget.py   fan-out arithmetic; no GPU, no server needed
 docs/
   measured-ceilings.md     what this hardware actually does
 runtime-descriptor.json    machine-readable, for the AutoSpec model router

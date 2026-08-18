@@ -133,6 +133,20 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**f16 KV is 64 KiB/token for Qwen3.8-27B, not 32.** The formula is
+`2 x 16 full-attention layers x 4 kv_heads x 256 head_dim x bytes/elem`
+— 32 KiB at fp8, so double that at f16. Getting this wrong put a 16 GiB
+KV cache into a 16.4 GiB hole on an L40S; the model loaded and then died
+with `failed to allocate buffer for rs cache`, which looks like a broken
+model rather than a budget error. If the GPU is chosen dynamically, the
+preset must be generated from the VRAM actually found.
+
+**`socket.create_connection(timeout=N)` leaves the timeout on the
+socket.** It does not merely bound the handshake, so every later `recv`
+inherits it — a relay built this way kills any request with a quiet
+stretch longer than N (a model load, a long prefill). Call
+`settimeout(None)` once connected.
+
 **Host RAM, not GPUs, is the scarce resource — and you need almost
 none.** `llama-server`'s measured RSS is **154 MB** with the weights on
 the GPU and the GGUF mmap'd. The 67 GB that `sacct` reports is page

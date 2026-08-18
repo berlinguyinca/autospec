@@ -275,6 +275,7 @@ sync_artifacts() {
   hssh <<< "mkdir -p ${ROOT}/logs"
   scp -q -o ControlMaster=auto -o "ControlPath=${STATE}/ssh-%r@%h:%p" \
          "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
+         "${HERE}/gen-preset.py" "${HERE}/tunnel-supervisor.sh" \
          "${HERE}/router-presets-hive.ini" "${HERE}/README.md" \
          "${HIVE_USER}@${HIVE_HOST}:${ROOT}/" \
     || die "could not copy job scripts to ${ROOT}"

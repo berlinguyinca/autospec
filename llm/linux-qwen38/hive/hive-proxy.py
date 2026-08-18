@@ -46,6 +46,12 @@ def connect_upstream(port: int, deadline: float, host: str = "127.0.0.1"):
     while time.time() < deadline and not SHUTDOWN.is_set():
         try:
             s = socket.create_connection((host, port), timeout=10)
+            # create_connection's timeout is not just for the handshake: it is
+            # left on the socket, so every later recv inherits it. A 10s cap
+            # then kills any request with a longer quiet stretch -- a model
+            # loading for two minutes, or a long prefill before the first
+            # token. Blocking mode is what a relay wants once connected.
+            s.settimeout(None)
             if announced:
                 log(f"upstream back after {waited:.0f}s")
             return s

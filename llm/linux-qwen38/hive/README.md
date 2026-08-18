@@ -287,6 +287,34 @@ idle. Every candidate has at least 48 GiB, which is what the Q8 preset needs
 (~28 GiB weights + 8 GiB of f16 KV at full context + compute); the 32 GiB
 RTX 5000 Ada is deliberately excluded.
 
+### The preset sizes itself to the card
+
+Since `--gpu auto` takes whichever GPU can start soonest, the job does not know
+its card until it runs — 96 GiB Blackwell one time, 46 GiB L40S the next.
+`gen-preset.py` reads `nvidia-smi` and computes pool, slot count and KV type
+from the VRAM it finds, drops tier aliases that no longer fit, and refuses
+outright on a card too small for the weights.
+
+| VRAM | pool | slots | KV |
+|---:|---:|---:|---|
+| 97,887 MiB (Blackwell) | 262,144 | 8 | f16 |
+| 81,920 MiB (A100 80 GB) | 262,144 | 8 | f16 |
+| 46,068 MiB (L40S) | 131,072 | 4 | f16 |
+| 24,564 MiB | — | — | refused |
+
+**Get the KV arithmetic right or this silently overcommits.** For this hybrid
+architecture it is
+
+```
+KV bytes/token = 2 × 16 full-attn layers × 4 kv_heads × 256 head_dim × bytes/elem
+```
+
+— 32 KiB/token at fp8 and therefore **64 KiB at f16**. The full 262,144 context
+is 16 GiB of KV, not 8. A 46 GiB card holding 28.6 GiB of weights has no room
+left for the recurrent-state cache, and the failure reads as
+`failed to allocate buffer for rs cache`, which looks like a corrupt model
+rather than a budget that was never checked.
+
 ## What this hardware changes
 
 The 24 GiB reference build is one long fight with capacity. At 96 GiB, three of

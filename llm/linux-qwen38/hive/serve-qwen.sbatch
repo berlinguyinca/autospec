@@ -79,10 +79,24 @@ mkdir -p "${LOCAL}"
 echo "staging weights to ${LOCAL} ..."
 cp -n "${MODELS}"/*.gguf "${LOCAL}/" 2>/dev/null || true
 
-# The presets ship with a placeholder rather than an absolute path, so the same
-# file works from /quobyte and from node-local scratch.
+# Size the presets to the card we actually landed on. opencode_hive takes
+# whichever GPU can start soonest, so this job may be on a 96 GiB Blackwell or a
+# 46 GiB L40S. A preset written for the larger one loads the weights on the
+# smaller and then dies allocating state --
+#   failed to allocate buffer for rs cache
+# -- which looks like a broken model rather than a budget nobody checked.
+VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)"
+echo "GPU has ${VRAM_MIB} MiB"
 PRESETS="${LOCAL}/router-presets.ini"
-sed "s#MODELS_DIR#${LOCAL}#g" "${ROOT}/router-presets-hive.ini" > "${PRESETS}"
+python3 "${ROOT}/gen-preset.py" --vram-mib "${VRAM_MIB}" \
+        --models-dir "${LOCAL}" > "${PRESETS}"
+if ! grep -q '^c = ' "${PRESETS}"; then
+  echo "no model fits in ${VRAM_MIB} MiB of VRAM; refusing to start" >&2
+  cat "${PRESETS}" >&2
+  exit 1
+fi
+echo "serving:"; grep -E '^\[|^c = |^parallel' "${PRESETS}" | sed 's/^/  /'
+
 
 # An unauthenticated model server on a shared cluster network is reachable by
 # every other user on it. The key is generated per job and written next to the
