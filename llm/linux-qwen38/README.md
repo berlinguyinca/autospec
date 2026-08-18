@@ -103,6 +103,25 @@ the GPU to actually be released before starting the next — systemd reports a
 unit inactive as soon as the process exits, but the driver can hold the
 allocation a moment longer, which is long enough to fail the next start.
 
+## Client configuration (OpenCode)
+
+The endpoint moved when `longcontext` became the default, so any client pinned
+to the old llama.cpp node on **:8080** silently stops working — that node is
+disabled. `~/.config/opencode/opencode.json` now carries two providers:
+
+| provider | endpoint | model | context | use |
+|---|---|---|---:|---|
+| `qwen-local` (default) | `127.0.0.1:8081/v1` | Q5_K_M | 196,608 | large repositories |
+| `qwen-vllm` | `127.0.0.1:8000/v1` | AWQ-INT4 | 32,928 | short prompts, ~41 tok/s |
+
+Capabilities are declared from what was actually tested, not assumed:
+
+- `tool_call: true` — verified, `finish_reason: tool_calls` with correct arguments
+- `reasoning: true` — verified, `reasoning_content` returned separately
+- `attachment: false` — **vision is not available.** The profile loads no mmproj,
+  and the 0.87 GiB projector does not fit alongside 196k of context. Vision
+  requires trading context away; the old :8080 node had it at Q4_K_M.
+
 ## Coexistence with the llama.cpp node
 
 This host also runs `qwen-local.service`, the llama.cpp deployment of the same
