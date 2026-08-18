@@ -104,5 +104,28 @@ presets="${HERE}/config/router-presets.ini"
 python3 "${HERE}/tests/check_presets.py" "$presets"
 check $? "router preset tiers fit their pool, share the KV cache, and have slots"
 
+# 14 — the installer must ship every operator tool.
+# A script that exists only in the checkout is missing on any machine
+# provisioned from a tarball, and the gap shows up exactly when somebody needs
+# the tool. Anything genuinely install-time-only is listed here explicitly, so
+# adding a script forces a decision rather than a silent omission.
+installer="${HERE}/scripts/install-node.sh"
+not_shipped=""
+for f in "${HERE}"/scripts/*; do
+  b="$(basename "$f")"
+  case "$b" in
+    # install-time or superseded: these run FROM the checkout, never from bin/
+    install-node.sh|setup-linux-qwen38.sh|serve-profile.sh|qwen38ctl) continue ;;
+    gen-runtime-descriptor.py|bench-exl3.py) continue ;;
+    __pycache__) continue ;;
+  esac
+  grep -q "$b" "$installer" || not_shipped="${not_shipped} ${b}"
+done
+if [ -n "$not_shipped" ]; then
+  bad "install-node.sh does not ship:${not_shipped}"
+else
+  ok "install-node.sh ships every operator tool"
+fi
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

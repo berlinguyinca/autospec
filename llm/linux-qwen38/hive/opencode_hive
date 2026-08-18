@@ -6,6 +6,9 @@
 #   opencode_hive stop            drop the tunnel and cancel the job
 #   opencode_hive logs            follow the server log
 #
+# Job scripts and presets are copied from this checkout on every run, so the
+# cluster always runs the reviewed version. Pass --no-sync to skip.
+#
 # The tunnel is OUTBOUND from this workstation, so a router, NAT or firewall on
 # this end does not matter:
 #
@@ -28,6 +31,7 @@ REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
 LOCAL_PORT="${OPENCODE_HIVE_LOCAL_PORT:-11111}"
 PROVIDER="${OPENCODE_HIVE_PROVIDER:-qwen-hive}"
 LAUNCH=1
+SYNC=1
 
 STATE="${XDG_CACHE_HOME:-${HOME}/.cache}/opencode-hive"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
     --time)       WALLTIME="$2"; shift 2 ;;
     --local-port) LOCAL_PORT="$2"; shift 2 ;;
     --no-launch)  LAUNCH=0; shift ;;
+    --no-sync)    SYNC=0; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -139,9 +144,24 @@ TUNNEL
   echo $! > "${STATE}/tunnel.pid"
 }
 
+# Push the repo's copies over the cluster's on every run. The alternative is
+# scp-by-hand, which means the version running on hive drifts from the version
+# under review here, and the difference is invisible until something behaves
+# differently there for no apparent reason. The repo is the source of truth.
+sync_artifacts() {
+  say "syncing job scripts to ${ROOT}"
+  hssh <<< "mkdir -p ${ROOT}/logs"
+  scp -q "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
+         "${HERE}/router-presets-hive.ini" "${HERE}/README.md" \
+         "${HIVE_USER}@${HIVE_HOST}:${ROOT}/" \
+    || die "could not copy job scripts to ${ROOT}"
+  hssh <<< "chmod +x ${ROOT}/setup-hive.sh ${ROOT}/serve-qwen.sbatch"
+}
+
 do_up() {
   say "checking hive"
   hssh <<< "true" >/dev/null || die "cannot reach ${HIVE_USER}@${HIVE_HOST}"
+  [ "$SYNC" = 1 ] && sync_artifacts
 
   if [ "$(stack_ready | tail -1)" != "ready" ]; then
     say "llama.cpp or weights missing — running setup (this takes a while)"

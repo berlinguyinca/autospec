@@ -148,8 +148,22 @@ sudo install -m 0644 "${HERE}/config/common.conf"        "${QWEN38_PREFIX}/etc/c
 sudo install -m 0644 "${HERE}/config/router-presets.ini" "${QWEN38_PREFIX}/etc/router-presets.ini"
 sudo install -m 0644 "${HERE}"/config/profiles.d/*.conf  "${QWEN38_PREFIX}/etc/profiles.d/"
 sudo install -m 0755 "${HERE}/scripts/serve-profile.sh"      "${QWEN38_PREFIX}/bin/serve-profile.sh"
-sudo install -m 0755 "${HERE}/scripts/long-prompt-probe.py"  "${QWEN38_PREFIX}/bin/long-prompt-probe.py"
 sudo install -m 0755 "${HERE}/scripts/qwen38ctl" /usr/local/bin/qwen38ctl
+
+# Everything an operator needs AFTER the install: measuring the real ceiling,
+# adding a model, re-deriving the client config, sizing a context window.
+# Leaving these in the checkout means a machine provisioned from a release
+# tarball silently lacks half the toolkit, and the omission only surfaces when
+# somebody needs the tool -- which is exactly when they cannot get it.
+for tool in long-prompt-probe.py measure-ceiling.sh measure-slot-frontier.sh \
+            bench-concurrency.py bench-context-sweep.sh benchmark.py \
+            select-quant.py add-gguf-model.sh configure-opencode.py \
+            analyze-session-contexts.py; do
+  sudo install -m 0755 "${HERE}/scripts/${tool}" "${QWEN38_PREFIX}/bin/${tool}"
+done
+# check_presets.py lives with the tests but is a runtime guard too: it is what
+# catches a preset tier that outgrew its pool before the pool finds out.
+sudo install -m 0755 "${HERE}/tests/check_presets.py" "${QWEN38_PREFIX}/bin/check_presets.py"
 sudo install -m 0644 "${HERE}/systemd/autospec-qwen38@.service" \
   /etc/systemd/system/autospec-qwen38@.service
 sudo systemctl daemon-reload
