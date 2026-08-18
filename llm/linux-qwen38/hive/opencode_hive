@@ -104,6 +104,11 @@ done
 
 job_id() { hssh <<< "squeue -u ${HIVE_USER} -n qwen-serve -h -o '%i %T' | awk '\$2==\"RUNNING\"{print \$1; exit}'"; }
 
+# Anything queued or running, with its state. `status` reporting "none running"
+# while a job sits PENDING reads as "nothing is happening" when in fact the
+# driver is correctly waiting for the scheduler.
+job_any() { hssh <<< "squeue -u ${HIVE_USER} -n qwen-serve -h -o '%i %T %R' | head -1"; }
+
 # Only accept an endpoint published BY THE JOB BEING WAITED ON. A file left by
 # a previous job names a node that is no longer serving, and the tunnel then
 # connects confidently to nothing.
@@ -163,7 +168,12 @@ do_status() {
   local jid node
   jid="$(job_id || true)"
   printf '  stack   : %s\n' "$(stack_ready | tail -1 || true)"
-  printf '  job     : %s\n' "${jid:-none running}"
+  if [ -n "$jid" ]; then
+    printf '  job     : %s (running)\n' "$jid"
+  else
+    local queued; queued="$(job_any | tail -1 || true)"
+    printf '  job     : %s\n' "${queued:-none}"
+  fi
   if [ -n "$jid" ]; then printf '  node    : %s\n' "$(endpoint_node "$jid" | tail -1 || true)"; fi
   if [ -s "${STATE}/tunnel.pid" ] && kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null; then
     printf '  tunnel  : up (pid %s) 127.0.0.1:%s -> %s, %s reconnect(s)\n' \
