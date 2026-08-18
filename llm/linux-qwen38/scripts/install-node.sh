@@ -158,7 +158,8 @@ sudo install -m 0755 "${HERE}/scripts/qwen38ctl" /usr/local/bin/qwen38ctl
 for tool in long-prompt-probe.py measure-ceiling.sh measure-slot-frontier.sh \
             bench-concurrency.py bench-context-sweep.sh benchmark.py \
             select-quant.py add-gguf-model.sh configure-opencode.py \
-            analyze-session-contexts.py context-budget-check.py; do
+            analyze-session-contexts.py context-budget-check.py \
+            gpu-registry.py; do
   sudo install -m 0755 "${HERE}/scripts/${tool}" "${QWEN38_PREFIX}/bin/${tool}"
 done
 # check_presets.py lives with the tests but is a runtime guard too: it is what

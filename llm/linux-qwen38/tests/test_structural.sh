@@ -184,5 +184,27 @@ check $? "opencode_hive configures from the job's published active preset"
 ! grep -q 'router-presets-hive.ini' "${HERE}/hive/opencode_hive"
 check $? "opencode_hive does not read the per-card-agnostic template"
 
+# 19 — the GPU registry must stay machine-readable and honest about what is
+# measured. A prediction for a machine nobody has touched rests on it.
+python3 - "${HERE}/config/gpu-registry.json" <<'PYCHK'
+import json, sys
+reg = json.load(open(sys.argv[1]))
+bad = []
+if not 0.5 <= reg.get("roofline_efficiency", 0) <= 1.0:
+    bad.append("roofline_efficiency is not a sane fraction")
+for name, g in reg.get("gpus", {}).items():
+    if not isinstance(g.get("vram_mib"), int) or g["vram_mib"] <= 0:
+        bad.append(f"{name}: vram_mib must be a positive int")
+    bw = g.get("bandwidth_gbs")
+    if bw is not None and not (100 <= bw <= 10000):
+        bad.append(f"{name}: bandwidth_gbs {bw} is out of range")
+    for quant, tps in (g.get("measured_tps") or {}).items():
+        if not isinstance(tps, (int, float)) or tps <= 0:
+            bad.append(f"{name}: measured_tps[{quant}] must be a positive number")
+print("\n".join(f"        {b}" for b in bad))
+sys.exit(1 if bad else 0)
+PYCHK
+check $? "gpu-registry.json is well-formed"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

@@ -87,6 +87,13 @@ cp -n "${MODELS}"/*.gguf "${LOCAL}/" 2>/dev/null || true
 # -- which looks like a broken model rather than a budget nobody checked.
 VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)"
 echo "GPU has ${VRAM_MIB} MiB"
+
+# Record the card. The GPU is chosen dynamically, so a job may be the first
+# thing this project ever runs on a given model -- and a compute node cannot
+# write the repo, so observations are appended to a log on shared storage and
+# folded into the registry from the workstation.
+python3 "${ROOT}/gpu-registry.py" record --site hive.hpc.ucdavis.edu \
+        --out "${ROOT}/logs/gpu-observed.jsonl" 2>/dev/null || true
 PRESETS="${LOCAL}/router-presets.ini"
 python3 "${ROOT}/gen-preset.py" --vram-mib "${VRAM_MIB}" \
         --models-dir "${LOCAL}" > "${PRESETS}"

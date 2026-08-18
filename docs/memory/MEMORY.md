@@ -62,6 +62,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Infrastructure gotchas
 
+- [GPU capability registry](reference_gpu_capability_registry.md) — self-populating record of every GPU run on; observed/measured/assumed kept apart, and roofline x 0.80 predicts an untouched card to ~10%
+
 - [hive HPC cluster layout](reference_hive_hpc_cluster.md) — GPU jobs go to `-p low -A publicgrp --gres=...`; the gpu-* partitions reject everything and metabolomicsgrp has gres/gpu=0
 
 - [Context floor kills small tiers](feedback_context_floor_kills_small_tiers.md) — measure the before-any-work floor (OpenCode p90 37,873) before picking a window; it is client-specific and invisible in conversation length

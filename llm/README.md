@@ -45,6 +45,7 @@ linux-qwen38/
 | `add-gguf-model.sh` | add any GGUF to the router, verified end to end |
 | `configure-opencode.py` | derive the client config *from the server*, never by hand |
 | `tests/check_presets.py` | catch a preset that over-commits its pool before production does |
+| `gpu-registry.py` | what every GPU we have run on can do, and what it did |
 
 Every one of them is installed by `install-node.sh`; a structural test fails the
 build if a script is added and not shipped.
@@ -60,4 +61,9 @@ build if a script is added and not shipped.
 - **A shared KV pool has no admission control.** Over-subscribe it and every
   live session dies, not just the greedy one. Rationing happens client-side.
 - **Predictions are labelled as predictions.** Anything not measured on the
-  hardware in question says so.
+  hardware in question says so. `config/gpu-registry.json` keeps observed
+  facts (VRAM, compute capability), measured facts (tok/s per quantisation) and
+  the one assumption (vendor bandwidth) in separate fields, and every serving
+  job records the card it landed on — so a GPU nobody has seen before enters
+  the collection the first time it is used rather than being reconstructed from
+  memory afterwards.

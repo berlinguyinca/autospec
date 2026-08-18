@@ -299,6 +299,7 @@ sync_artifacts() {
   scp -q -o ControlMaster=auto -o "ControlPath=${STATE}/ssh-%r@%h:%p" \
          "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
          "${HERE}/gen-preset.py" "${HERE}/tunnel-supervisor.sh" \
+         "${HERE}/../scripts/gpu-registry.py" \
          "${HERE}/README.md" \
          "${HIVE_USER}@${HIVE_HOST}:${ROOT}/" \
     || die "could not copy job scripts to ${ROOT}"
@@ -387,6 +388,15 @@ REMOTE
     sleep 10
   done
   [ "$ok" = 1 ] || die "endpoint never answered; see ${STATE}/tunnel.log and 'opencode_hive logs'"
+
+  # Fold in any GPU this project had not seen before. Cheap, and the registry
+  # is what makes a prediction for an untouched machine worth anything.
+  local obs; obs="$(mktemp)"
+  if scp -q "${HIVE_USER}@${HIVE_HOST}:${ROOT}/logs/gpu-observed.jsonl" \
+        "$obs" 2>/dev/null && [ -s "$obs" ]; then
+    python3 "${HERE}/../scripts/gpu-registry.py" merge "$obs" | sed 's/^/  /'
+  fi
+  rm -f "$obs"
 
   say "configuring OpenCode provider '${PROVIDER}'"
   local presets; presets="$(mktemp)"
