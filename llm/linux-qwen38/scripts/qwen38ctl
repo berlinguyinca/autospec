@@ -17,7 +17,7 @@ CONF_DIR="${QWEN38_CONF_DIR:-/opt/qwen-vllm/etc}"
 . "${CONF_DIR}/common.conf"
 
 UNIT_PREFIX="autospec-qwen38@"
-MANAGED_PROFILES="interactive concurrent extended longcontext vision"
+MANAGED_PROFILES="interactive concurrent extended longcontext vision router"
 
 # Per-profile, NOT global. A profile may override QWEN38_PORT -- the llama.cpp
 # longcontext profile serves on 8081 while the vLLM profiles use 8000. Computing

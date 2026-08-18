@@ -34,8 +34,13 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
   LLAMA_DIR="${QWEN38_LLAMA_DIR:-/opt/qwen-local/llama.cpp/current}"
   [ -x "${LLAMA_DIR}/llama-server" ] || {
     echo "llama-server not found at ${LLAMA_DIR}" >&2; exit 69; }
-  [ -r "${QWEN38_GGUF_PATH}" ] || {
-    echo "GGUF not readable: ${QWEN38_GGUF_PATH}" >&2; exit 69; }
+  # Guarded with :- because router-mode profiles set no single model path --
+  # the presets file owns it. Without the default this trips `set -u` and the
+  # unit restart-loops on "QWEN38_GGUF_PATH: unbound variable".
+  if [ -z "${QWEN38_ROUTER_PRESETS:-}" ]; then
+    [ -r "${QWEN38_GGUF_PATH:-}" ] || {
+      echo "GGUF not readable: ${QWEN38_GGUF_PATH:-<unset>}" >&2; exit 69; }
+  fi
   # The build ships its ggml backends next to the binaries.
   export LD_LIBRARY_PATH="${LLAMA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export HOME="${QWEN38_STATE}"
@@ -44,6 +49,20 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
   if [ "${free_mib:-0}" -lt "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then
     echo "refusing to start: only ${free_mib} MiB VRAM free" >&2
     exit 75
+  fi
+
+  # Router mode: one endpoint, many models, swapped on demand by request.
+  # Takes a different argument set entirely -- no --model, no --ctx-size, since
+  # the presets file owns those per model.
+  if [ -n "${QWEN38_ROUTER_PRESETS:-}" ]; then
+    [ -r "${QWEN38_ROUTER_PRESETS}" ] || {
+      echo "router presets not readable: ${QWEN38_ROUTER_PRESETS}" >&2; exit 69; }
+    echo "starting profile=${PROFILE} version=${QWEN38_PROFILE_VERSION} runtime=llama.cpp router presets=${QWEN38_ROUTER_PRESETS} max-loaded=${QWEN38_ROUTER_MAX_LOADED:-1}"
+    exec "${LLAMA_DIR}/llama-server" \
+      --models-preset "${QWEN38_ROUTER_PRESETS}" \
+      --models-max "${QWEN38_ROUTER_MAX_LOADED:-1}" \
+      --host "${QWEN38_HOST}" \
+      --port "${QWEN38_PORT}"
   fi
 
   gg_args=(

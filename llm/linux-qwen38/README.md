@@ -109,15 +109,22 @@ The endpoint moved when `longcontext` became the default, so any client pinned
 to the old llama.cpp node on **:8080** silently stops working — that node is
 disabled. `~/.config/opencode/opencode.json` now carries two providers:
 
-| provider | endpoint | model | context | vision | use |
-|---|---|---|---:|---|---|
-| `qwen-local` (default) | `:8081` | Q5_K_M | 196,608 | no | large repositories |
-| `qwen-vision` | `:8082` | Q5_K_M + mmproj | 98,304 | **yes** | screenshots, diagrams |
-| `qwen-vllm` | `:8000` | AWQ-INT4 | 32,928 | no | short prompts, ~41 tok/s |
+| model id | endpoint | context | vision | use |
+|---|---|---:|---|---|
+| `qwen-local/qwen3.8-27b` (default) | `:8080` | 196,608 | no | large repositories |
+| `qwen-local/qwen3.8-27b-vision` | `:8080` | 98,304 | **yes** | screenshots, diagrams |
+| `qwen-vllm/qwen3.8-27b` | `:8000` | 32,928 | no | short prompts, ~41 tok/s |
 
-**Only one of these answers at a time.** The GPU holds one profile, so selecting
-a provider in the client is only half the switch — the other half is
-`qwen38ctl start <profile>`. The provider names carry the command as a reminder.
+**The first two swap automatically.** They are served by the `router` profile on
+one port; picking a different model in the client is the entire switch. Measured
+on this host, a swap costs ~5-7 s — the two presets share one weights file, so
+the reload comes from page cache.
+
+`--models-max 1` is mandatory and set: the default is 4, and two 18.5 GiB models
+will not co-reside on this card.
+
+The vLLM provider is still a manual switch (`qwen38ctl start interactive`),
+because it is a different runtime and the router only fronts llama.cpp.
 
 Capabilities are declared from what was tested, not assumed:
 
