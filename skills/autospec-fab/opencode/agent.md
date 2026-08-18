@@ -1,6 +1,7 @@
 ---
 name: autospec-fab
 description: Use when the user wants to autonomously implement, validate, and release parametric 3D / CAD-as-code features whose output is 3D-printable STL — proven watertight, structurally sound, fluid/airflow-correct, and visually inspected — across any repo that opts in via `.autospec/fab.yml`.
+mode: primary
 ---
 
 # autospec-fab workflow

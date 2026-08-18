@@ -7,6 +7,16 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ## [Unreleased]
 
+### Fixed
+
+#### OpenCode subagent mode (2026-08-18)
+- Declared `mode: primary` on the 14 OpenCode agent adapters that omitted it. An
+  absent `mode:` means `all`, which made every one of them spawnable through the
+  task tool: a child would then carry an 11k-21k-token skill body on top of its
+  own preamble. Measured on a 24 GiB llama.cpp node, four such children summed
+  288,970 tokens of peak against a 180,224-token KV pool and killed every live
+  session with `Context size has been exceeded`.
+
 ### Added
 
 #### V62-V74 final platform release candidate (2026-07-06)
