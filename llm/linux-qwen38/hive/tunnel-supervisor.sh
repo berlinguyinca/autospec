@@ -74,64 +74,107 @@ forward_opts=(-N -o BatchMode=yes -o ExitOnForwardFailure=yes
 query_opts=(-o BatchMode=yes -o ConnectTimeout=20
             -o ControlMaster=no -o ControlPath=none)
 
+# An `ssh -N -L` does NOT exit when the far end of the forward dies. The
+# connection to the login node is still perfectly healthy; only the per-request
+# channel fails, and it fails one channel at a time:
+#
+#   channel 2: open failed: connect failed: Connection refused
+#
+# So the forward cannot be used as the liveness signal, and a loop that waits
+# for ssh to exit before re-checking the job will wait forever while the client
+# gets refused on every request. The forward is held in the BACKGROUND and its
+# health is probed instead.
+probe() {
+  # Any HTTP status means something answered; 000 means the channel is dead.
+  # /health needs no API key, so the supervisor does not have to hold one.
+  local code
+  code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+          "http://127.0.0.1:${FORWARD_PORT}/health" 2>/dev/null || true)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+fwd_pid=""
+start_forward() {
+  stop_forward
+  log "forwarding 127.0.0.1:${FORWARD_PORT} -> ${node}:${REMOTE_PORT}"
+  ssh "${forward_opts[@]}" -L "${FORWARD_PORT}:${node}:${REMOTE_PORT}" \
+      "${HIVE_USER}@${HIVE_HOST}" &
+  fwd_pid=$!
+  printf '%s' "$node" > "${STATE}/tunnel.node"
+}
+stop_forward() {
+  if [ -n "$fwd_pid" ] && kill -0 "$fwd_pid" 2>/dev/null; then
+    kill "$fwd_pid" 2>/dev/null || true
+    wait "$fwd_pid" 2>/dev/null || true
+  fi
+  fwd_pid=""
+}
+trap 'stop_forward; exit 0' TERM INT
+
 gone=0
-backoff=1
+sick=0
 reconnects=0
+start_forward
 
 while true; do
-  # --- is the job still there? -----------------------------------------------
-  # ssh's own exit status separates "the scheduler says no job" from "I could
-  # not ask". Only the first is evidence.
+  sleep 10
+
+  if probe; then
+    sick=0; gone=0
+    printf 'up' > "${STATE}/tunnel.state"
+    continue
+  fi
+
+  sick=$((sick + 1))
+  log "endpoint not answering (${sick})"
+  printf 'degraded' > "${STATE}/tunnel.state"
+  # One missed probe is a blip; several mean the far side is really gone.
+  [ "$sick" -lt 3 ] && continue
+
+  # Is the ssh itself dead, or is the far end gone? Restarting the forward is
+  # cheap and fixes the first case, so try it before troubling the scheduler.
+  if ! kill -0 "$fwd_pid" 2>/dev/null; then
+    reconnects=$((reconnects + 1))
+    printf '%s' "$reconnects" > "${STATE}/tunnel.reconnects"
+    log "forward process died; restarting"
+    start_forward; sick=0; continue
+  fi
+
+  # The forward is up but nothing answers through it. Ask the scheduler why.
   out="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
         "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     log "job query unreachable (ssh rc=${rc}); assuming the job is fine"
-  else
-    jid="$(printf '%s\n' "$out" | awk '$2=="RUNNING"{print $1; exit}')"
-    if [ -z "$jid" ]; then
-      gone=$((gone + 1))
-      log "scheduler reports no running job (${gone}/${GONE_LIMIT})"
-      if [ "$gone" -ge "$GONE_LIMIT" ]; then
-        reacquire || log "re-acquire failed; will try again"
-        gone=0
-        continue
-      fi
-    else
-      gone=0
-      # A requeued job can come back on a different host, and the old forward
-      # then points at a node that is no longer serving.
-      fresh="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
-              "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
-      if [ -n "$fresh" ] && [ "$fresh" != "$node" ]; then
-        log "node moved ${node} -> ${fresh}"
-        node="$fresh"
-      fi
-    fi
+    continue
   fi
 
-  # --- hold the forward ------------------------------------------------------
-  log "forwarding 127.0.0.1:${FORWARD_PORT} -> ${node}:${REMOTE_PORT}"
-  printf 'up' > "${STATE}/tunnel.state"
-  printf '%s' "$node" > "${STATE}/tunnel.node"
-  start=$(date +%s)
-  ssh "${forward_opts[@]}" -L "${FORWARD_PORT}:${node}:${REMOTE_PORT}" \
-      "${HIVE_USER}@${HIVE_HOST}"
-  held=$(( $(date +%s) - start ))
-  reconnects=$((reconnects + 1))
-  printf '%s' "$reconnects" > "${STATE}/tunnel.reconnects"
+  jid="$(printf '%s\n' "$out" | awk '$2=="RUNNING"{print $1; exit}')"
+  if [ -z "$jid" ]; then
+    gone=$((gone + 1))
+    log "scheduler reports no running job (${gone}/${GONE_LIMIT})"
+    if [ "$gone" -ge "$GONE_LIMIT" ]; then
+      stop_forward
+      if reacquire; then
+        start_forward
+      else
+        log "re-acquire did not complete; will try again"
+      fi
+      gone=0; sick=0
+    fi
+    continue
+  fi
 
-  # A forward that stood for a while was healthy; treat its loss as a blip and
-  # come back immediately. One that dies instantly is failing for a reason
-  # (port already bound, host unreachable) and deserves backoff instead of a
-  # tight loop hammering the login node.
-  if [ "$held" -ge 60 ]; then
-    backoff=1
-    log "forward dropped after ${held}s; reconnecting immediately"
-  else
-    log "forward failed after ${held}s; retrying in ${backoff}s"
-    sleep "$backoff"
-    backoff=$(( backoff * 2 ))
-    if [ "$backoff" -gt "$MAX_BACKOFF" ]; then backoff="$MAX_BACKOFF"; fi
+  # A job IS running -- most likely a requeue onto a different host, or the
+  # model is still loading after a restart.
+  gone=0
+  fresh="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
+          "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
+  if [ -n "$fresh" ] && [ "$fresh" != "$node" ]; then
+    log "node moved ${node} -> ${fresh}"
+    node="$fresh"
+    reconnects=$((reconnects + 1))
+    printf '%s' "$reconnects" > "${STATE}/tunnel.reconnects"
+    start_forward; sick=0
   fi
 done

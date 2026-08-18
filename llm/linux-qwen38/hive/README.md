@@ -260,6 +260,33 @@ Short jobs backfill; long ones wait. A 3-hour, 32-CPU request sat at `(Priority)
 with a two-hour estimate while GPUs were visibly idle; the same job at 1 hour and
 16 CPUs started immediately. Ask for what you need and no more.
 
+**Ask for very little host RAM.** Memory, not GPUs, is what this cluster runs
+short of. Sixteen Blackwell GPUs were idle while a `--mem=64G` request queued
+with a four-hour estimate, because the two allocatable Blackwell nodes had ~5 GB
+of RAM left between them. And the request was nonsense anyway: **`llama-server`'s
+measured RSS is 154 MB**. The 67 GB that accounting reports for one job is page
+cache from copying 57 GB of weights to local NVMe — reclaimable, and charged to a
+job that died after 68 seconds without loading a model. The serving job now asks
+for 8 GB and 8 CPUs.
+
+**Let the scheduler pick the GPU.** `opencode_hive` defaults to `--gpu auto`,
+which probes each candidate with `sbatch --test-only` (allocating nothing) and
+takes the earliest start. Measured inside one minute:
+
+| GPU | could start |
+|---|---|
+| a6000 | 13:56 |
+| nvidia_a100_80gb_pcie | 14:29 |
+| nvidia_a100-sxm4-80gb | 16:52 |
+| 6000_blackwell | 17:20 |
+| a100 | 20:14 |
+| nvidia_l40s | next day |
+
+Pinning one type is how a session waits half a day while five other GPUs sit
+idle. Every candidate has at least 48 GiB, which is what the Q8 preset needs
+(~28 GiB weights + 8 GiB of f16 KV at full context + compute); the 32 GiB
+RTX 5000 Ada is deliberately excluded.
+
 ## What this hardware changes
 
 The 24 GiB reference build is one long fight with capacity. At 96 GiB, three of

@@ -3,8 +3,8 @@
 #SBATCH --partition=low
 #SBATCH --account=publicgrp
 #SBATCH --gres=gpu:6000_blackwell:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=8G
 #SBATCH --time=7-00:00:00
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@120
@@ -13,6 +13,18 @@
 #
 #   sbatch serve-qwen.sbatch
 #   cat  $ROOT/logs/endpoint.txt     # where it landed, and the tunnel command
+#
+# Modest CPU and host RAM on purpose, because host memory -- not GPUs -- is what
+# this cluster runs out of. Sixteen Blackwell GPUs sat idle while a --mem=64G
+# request queued with a four-hour estimate, since the two allocatable Blackwell
+# nodes had about 5 GB of RAM left between them.
+#
+# The weights live on the GPU and the GGUF is mmap'd from local NVMe, so
+# llama-server's own working set is small. Accounting shows MaxRSS of 67 GB for
+# a job that died after 68 seconds without ever loading a model -- that is page
+# cache from copying 57 GB of weights, not a working set. Page cache is
+# reclaimable under a cgroup limit, so a small --mem makes the copy do more
+# reclaiming rather than making it fail.
 #
 # 7 days is the cap on `low`; `high` allows 30 but has 12 GPUs against low's 86
 # and a queue measured in weeks, and its association still charges publicgrp.

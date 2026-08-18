@@ -133,6 +133,29 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**Host RAM, not GPUs, is the scarce resource — and you need almost
+none.** `llama-server`'s measured RSS is **154 MB** with the weights on
+the GPU and the GGUF mmap'd. The 67 GB that `sacct` reports is page
+cache from copying 57 GB of weights to local NVMe, charged to a job that
+died in 68 seconds without loading a model. Meanwhile a `--mem=64G`
+request queued with a four-hour estimate while sixteen Blackwell GPUs
+sat idle, because the allocatable Blackwell nodes had ~5 GB of RAM free
+between them. Ask for 8 GB.
+
+**Let the scheduler choose the GPU type.** Probing with `sbatch
+--test-only` (allocates nothing) inside one minute gave earliest starts
+from 15 minutes (a6000) to four hours (6000_blackwell) to the next day
+(nvidia_l40s). Pinning a type is how a session waits half a day while
+five other GPUs are free. Restrict candidates to >=48 GiB for a Q8 27B
+at full context.
+
+**`ssh -N -L` does not exit when the far end dies.** The login-node
+connection stays healthy; only the per-request channel fails, logging
+`channel N: open failed: connect failed: Connection refused`. So the
+forward's liveness is not the endpoint's liveness — hold the forward in
+the background and probe the service (`/health` needs no API key)
+instead of waiting for ssh to return.
+
 **Setup jobs must not request a GPU.** Compiling CUDA needs `nvcc`, not a
 device, and downloading weights needs neither; asking for a Blackwell
 left the job `PENDING` while a GPU-free submission of the same work

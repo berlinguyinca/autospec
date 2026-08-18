@@ -29,9 +29,21 @@ set -euo pipefail
 HIVE_HOST="${OPENCODE_HIVE_HOST:-hive.hpc.ucdavis.edu}"
 HIVE_USER="${OPENCODE_HIVE_USER:-gw}"
 ROOT="${OPENCODE_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
-GPU="${OPENCODE_HIVE_GPU:-6000_blackwell}"
+# "auto" asks the scheduler which of these can start soonest. Type matters far
+# more than it looks: measured within one minute, the earliest start ranged from
+# 15 minutes (a6000) to over four hours (6000_blackwell) to the next day
+# (nvidia_l40s). Pinning one type is how a session waits half a day for a GPU
+# while five others sit idle.
+#
+# Every candidate has at least 48 GiB, which is what the Q8 preset needs: ~28
+# GiB of weights, 8 GiB of f16 KV at the full 262,144 context, and compute. A
+# 32 GiB card (nvidia_rtx_5000_ada_generation) is deliberately NOT here.
+GPU="${OPENCODE_HIVE_GPU:-auto}"
+GPU_CANDIDATES="${OPENCODE_HIVE_GPU_CANDIDATES:-6000_blackwell,nvidia_a100-sxm4-80gb,nvidia_a100_80gb_pcie,a100,a6000,nvidia_l40s}"
 NGPU="${OPENCODE_HIVE_NGPU:-1}"
 WALLTIME="${OPENCODE_HIVE_TIME:-12:00:00}"
+ACCOUNT="${OPENCODE_HIVE_ACCOUNT:-publicgrp}"
+PARTITION="${OPENCODE_HIVE_PARTITION:-low}"
 REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
 # NOT 8080: the local llama.cpp router already owns that port on this machine,
 # and a tunnel onto it would either fail to bind or silently shadow the local
@@ -114,6 +126,35 @@ ls ${ROOT}/models/*.gguf >/dev/null 2>&1 \
   && [ -x ${ROOT}/opt/llama.cpp/bin/llama-server ] \
   && echo ready || echo missing
 REMOTE
+}
+
+# Ask the scheduler, do not guess. Progress goes to STDERR: this function's
+# stdout IS its return value, and a `say` inside it ends up concatenated into
+# the chosen GPU name. `--test-only` allocates nothing and returns
+# "Job N to start at <ISO timestamp>", so the choice is made on the cluster's
+# own estimate rather than on which card is nominally fastest.
+pick_gpu() {
+  local best="" best_ts="" t out ts
+  for t in ${GPU_CANDIDATES//,/ }; do
+    out="$(hssh <<REMOTE 2>/dev/null || true
+sbatch --test-only -p ${PARTITION} -A ${ACCOUNT} --gres=gpu:${t}:${NGPU} \
+  -c 8 --mem=24G -t ${WALLTIME} --wrap=true 2>&1 | head -1
+REMOTE
+)"
+    ts="$(printf '%s' "$out" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}' | head -1 || true)"
+    [ -z "$ts" ] && continue
+    printf '   %-26s could start %s\n' "$t" "$ts" >&2
+    if [ -z "$best_ts" ] || [ "$ts" \< "$best_ts" ]; then
+      best="$t"; best_ts="$ts"
+    fi
+  done
+  if [ -z "$best" ]; then
+    # Nothing answered with an estimate; fall back to the first candidate and
+    # let the queue decide rather than refusing to run.
+    best="${GPU_CANDIDATES%%,*}"
+    printf '   no start estimates; falling back to %s\n' "$best" >&2
+  fi
+  printf '%s' "$best"
 }
 
 # --- commands ----------------------------------------------------------------
@@ -260,10 +301,15 @@ REMOTE
   if [ -n "$jid" ]; then
     say "reusing running job ${jid}"
   else
+    if [ "$GPU" = auto ]; then
+      say "asking the scheduler which GPU can start soonest"
+      GPU="$(pick_gpu)"
+      say "choosing ${GPU}"
+    fi
     say "requesting ${NGPU}x ${GPU} for ${WALLTIME}"
     hssh <<REMOTE
 cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
-  -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+  -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
     say "waiting for the scheduler"
     for _ in $(seq 1 80); do
