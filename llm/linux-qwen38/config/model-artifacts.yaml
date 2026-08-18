@@ -1,0 +1,81 @@
+# Model artifact provenance.
+#
+# Every artifact this node can serve is recorded here with an immutable
+# revision. Changing weights or quantisation is a NEW profile version, never an
+# edit in place -- see README.md ("Profile versioning").
+
+artifacts:
+  - id: qwen38-linux-vllm-w4a16-v1
+    role: primary
+    runtime: vllm
+    runtime_version: "0.27.1"
+    repository: cyankiwi/Qwen3.8-27B-AWQ-INT4
+    revision: 63768c10df38c0395e12ef49edac1bd539eaeeea
+    revision_date: "2026-08-15T03:53:23Z"
+    on_disk_gib: 19.60
+    architecture: Qwen3_5ForConditionalGeneration
+    quantization:
+      method: compressed-tensors
+      format: pack-quantized
+      weight_bits: 4
+      activation_bits: 16
+      group_size: 32
+      symmetric: false
+      observer: mse
+      # The 48 linear-attention (GDN) layers and the vision tower stay at 16-bit.
+      # That is correct -- quantising the recurrent path costs quality out of
+      # proportion to the VRAM it saves -- but it is also why the checkpoint is
+      # 19.6 GiB rather than the ~14 GiB a flat 4-bit 27B would be.
+      unquantized: [linear_attn, visual, embed_tokens, lm_head]
+    source_model:
+      repository: Qwen/Qwen3.8-27B
+      revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    tokenizer_revision: 63768c10df38c0395e12ef49edac1bd539eaeeea
+    chat_template: bundled (chat_template.jinja in the checkpoint)
+    context:
+      n_ctx_train: 262144
+      # Measured on this host, not assumed. See docs/measured-ceilings.md.
+      verified_max: null
+
+  - id: qwen38-linux-gguf-q6-v1
+    role: quality-reference
+    runtime: llama.cpp
+    runtime_version: "b10434 (commit 7e4c0a968)"
+    repository: ggml-org/Qwen3.8-27B-GGUF
+    revision: 0669b98607d47046c7c2b3f801011d54a08cfccf
+    quantization:
+      method: gguf
+      variant: Q6_K
+    source_model:
+      repository: Qwen/Qwen3.8-27B
+      revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    notes: >
+      Quality control for judging W4A16 regression. Not expected to match vLLM
+      throughput. Q6_K weights are ~22 GiB and will not co-reside with a large
+      KV cache on a 24 GiB card.
+
+# Considered and rejected, so the decision is not re-litigated later.
+rejected:
+  - repository: goldhub/Qwen3.8-27B-INT4-W4A16-AutoRound
+    reason: >
+      26.39 GiB on disk -- exceeds 24 GiB of VRAM before a single KV block is
+      allocated. It keeps embed_tokens and the vision tower at fp16, which is
+      exactly the weight the spec wanted removed via INT8.
+  - repository: unsloth/Qwen3.8-27B-NVFP4
+    reason: >
+      NVFP4 needs Blackwell (sm_100/sm_120) tensor cores. This host is an
+      RTX 4090 (Ada, sm_89).
+  - repository: Qwen/Qwen3.8-27B-FP8
+    reason: >
+      FP8 weights are ~27 GiB; too large for 24 GiB regardless of KV settings.
+
+# Not yet available anywhere public, and worth building if context matters more
+# than setup time -- this is the single change that would unlock Profile C.
+wanted:
+  - description: >
+      W4A16 with INT8 lm_head and INT8 embed_tokens. Those two tensors are
+      248320 x 5120 each; at fp16 they cost ~2.4 GiB apiece. Quantising both to
+      INT8 would return ~2.4 GiB of VRAM, worth roughly 75k additional tokens of
+      fp8 KV at 32 KiB/token.
+    how: llm-compressor, quantising lm_head and embed_tokens alongside the
+      existing W4A16 scheme, ignoring linear_attn and visual as upstream does.

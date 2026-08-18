@@ -1,0 +1,107 @@
+{
+  "schema": "autospec.runtime-descriptor/1",
+  "node": "linux-qwen38",
+  "host_gpu": "NVIDIA GeForce RTX 4090 24 GiB",
+  "model_family": "Qwen3.8-27B",
+  "n_ctx_train": 262144,
+  "exclusive": true,
+  "context_classes": {
+    "small": 8192,
+    "standard": 24576,
+    "large": 71680
+  },
+  "profiles": [
+    {
+      "name": "concurrent",
+      "version": "qwen38-linux-vllm-w4a16-v1",
+      "runtime": "vllm",
+      "available": true,
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3.8-27b",
+      "max_context": 8192,
+      "max_concurrent_requests": 6,
+      "serves_context_classes": [
+        "small"
+      ],
+      "capabilities": {
+        "vision": false,
+        "streaming": true,
+        "speculative_decoding": false
+      },
+      "unit": "autospec-qwen38@concurrent.service",
+      "startable_via": [
+        "qwen38ctl",
+        "start",
+        "concurrent"
+      ]
+    },
+    {
+      "name": "extended",
+      "version": "qwen38-linux-vllm-w4a16-v1",
+      "runtime": "vllm",
+      "available": true,
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3.8-27b",
+      "max_context": 56448,
+      "max_concurrent_requests": 1,
+      "serves_context_classes": [
+        "small",
+        "standard"
+      ],
+      "capabilities": {
+        "vision": false,
+        "streaming": true,
+        "speculative_decoding": false
+      },
+      "unit": "autospec-qwen38@extended.service",
+      "startable_via": [
+        "qwen38ctl",
+        "start",
+        "extended"
+      ]
+    },
+    {
+      "name": "interactive",
+      "version": "qwen38-linux-vllm-w4a16-v1",
+      "runtime": "vllm",
+      "available": true,
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3.8-27b",
+      "max_context": 39200,
+      "max_concurrent_requests": 1,
+      "serves_context_classes": [
+        "small",
+        "standard"
+      ],
+      "capabilities": {
+        "vision": false,
+        "streaming": true,
+        "speculative_decoding": false
+      },
+      "unit": "autospec-qwen38@interactive.service",
+      "startable_via": [
+        "qwen38ctl",
+        "start",
+        "interactive"
+      ]
+    },
+    {
+      "name": "quality",
+      "version": "qwen38-linux-gguf-q6-v1",
+      "runtime": "llama.cpp",
+      "available": false,
+      "endpoint": "http://127.0.0.1:8080/v1",
+      "model": "qwen3.8-27b",
+      "max_context": null,
+      "max_concurrent_requests": null,
+      "serves_context_classes": [],
+      "capabilities": {
+        "vision": false,
+        "streaming": true,
+        "speculative_decoding": false
+      },
+      "unit": null,
+      "startable_via": null
+    }
+  ]
+}
