@@ -1435,7 +1435,25 @@ mod tests {
         );
 
         drop(transaction);
-        thread::sleep(Duration::from_millis(100));
+        // Wait for the renewal instead of sleeping a fixed slice. The heartbeat runs on its
+        // own thread at a 10 ms interval, so on a loaded machine it can miss a 100 ms window
+        // entirely -- a scheduling fact about the host, not a defect in the code under test.
+        // Observed as a 1-in-811 failure of this assertion while the box was busy.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut renewed_after_contention = false;
+        while Instant::now() < deadline {
+            if let Ok(Some((state, _))) = owner.read_state() {
+                if state.heartbeat_at > stale_state.heartbeat_at {
+                    renewed_after_contention = true;
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            renewed_after_contention,
+            "heartbeat never renewed once contention cleared"
+        );
         heartbeat
             .finish()
             .unwrap_or_else(|_| panic!("finish surviving heartbeat"));

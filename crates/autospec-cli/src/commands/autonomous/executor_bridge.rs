@@ -3927,7 +3927,25 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
 
 #[derive(Debug)]
 struct EvidenceAttemptLease {
-    _file: File,
+    file: File,
+}
+
+impl Drop for EvidenceAttemptLease {
+    fn drop(&mut self) {
+        // Unlock explicitly rather than relying on the close.
+        //
+        // fork() hands the child a duplicate descriptor referring to the SAME open file
+        // description, and an flock belongs to the description, not to the descriptor. This
+        // process forks a supervisor that never execs (see launch_detached_supervisor), so a
+        // lease open at that moment is inherited and CLOEXEC cannot help. Closing our copy
+        // then releases nothing: the lock lives on in the supervisor for its whole life, and
+        // the next attempt on that lane is told another attempt owns it.
+        //
+        // Unlocking is the release that reaches the description, so it frees the lane even
+        // though the inherited descriptor is still open. Verified against the kernel: with a
+        // forked holder alive, close-only leaves the lock held and unlock-then-close does not.
+        let _ = self.file.unlock();
+    }
 }
 
 fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLease, String> {
@@ -3946,7 +3964,7 @@ fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLea
         }
         std::fs::TryLockError::Error(error) => format!("lock evidence attempt: {error}"),
     })?;
-    Ok(EvidenceAttemptLease { _file: file })
+    Ok(EvidenceAttemptLease { file })
 }
 
 #[allow(clippy::too_many_arguments)]
