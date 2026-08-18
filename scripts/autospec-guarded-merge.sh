@@ -160,7 +160,8 @@ _rollup_counts() {
     # legacy status context reads as pending forever and stalls every merge.
     printf '%s' "$1" | jq -r --arg adv "$_ADVISORY" '
         [ .[]
-          | select(((.name // .context // "") | test($adv)) | not) ]
+          | select((((.name // .context // "") as $n
+                     | $n != "" and ($n | test($adv)))) | not) ]
         | (map(select((.conclusion // .state) == null
               or ((.conclusion // .state) | ascii_upcase
                   | . == "PENDING" or . == "EXPECTED"

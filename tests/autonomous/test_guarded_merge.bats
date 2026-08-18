@@ -186,3 +186,19 @@ teardown() { rm -rf "$TMP"; }
     [ "$status" -eq 0 ]
     grep -q "pr merge 18" "$GH_LOG"
 }
+
+@test "checks gate: an unnamed pending check still blocks" {
+    # An entry with neither name nor context cannot be matched by the advisory
+    # regex, so it must count toward pending rather than being filtered out.
+    # Excluding it would let an unidentifiable in-flight check pass as green.
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    # Paired with a green named check so the two filters are distinguishable:
+    # if the unnamed entry is wrongly filtered out, the rollup looks like a
+    # single SUCCESS and merges. A lone unnamed entry cannot tell them apart --
+    # it would refuse either way, via the empty-rollup path.
+    export ROLLUP='[{"conclusion":null},{"name":"build-test","conclusion":"SUCCESS"}]'
+    run bash "$WRAPPER" --pr 19 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --checks-timeout 1 --checks-poll 1
+    [ "$status" -eq 1 ]
+    grep -q "blocked checks_not_green" <<<"$output"
+    ! grep -q "pr merge 19" "$GH_LOG"
+}
