@@ -72,6 +72,14 @@ request here. The measurements and the reasoning behind each value are in
 `tests/test_structural.sh` fails if any profile still carries an unresolved
 `__PLACEHOLDER__`, so a profile can never ship with a guessed context size.
 
+## Which model, exactly
+
+Deployed: **`cyankiwi/Qwen3.8-27B-AWQ-INT4`** @ `63768c10` (W4A16
+compressed-tensors, group size 32), served by vLLM 0.27.1. Chosen for runtime
+compatibility, **not** speed — no Unsloth / NVFP4 / exl3 build is in use.
+Measured alternatives, and why NVFP4 is unavailable on this card, are in
+[docs/runtime-comparison.md](docs/runtime-comparison.md).
+
 ## Profiles
 
 | profile | purpose | CUDA graphs | context | concurrency |
