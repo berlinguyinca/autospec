@@ -70,6 +70,25 @@ different node and the supervisor re-reads `logs/endpoint.txt` and
 re-forwards. The hive provider is added to OpenCode without becoming the
 default, so a lost job never leaves the client on a dead endpoint.
 
+**Binaries built from modules need those modules at RUN time.** llama.cpp
+compiled with `gcc/13.2.0` requires `GLIBCXX_3.4.32`, which Ubuntu
+22.04's system libstdc++ does not provide (it stops at 3.4.30). The
+serving job must `module load cuda/13.3.0 gcc/13.2.0` and put the install
+`lib/` on `LD_LIBRARY_PATH`; loading only cuda gives *"version
+`GLIBCXX_3.4.32' not found"*, which reads as a broken binary rather than
+a missing runtime toolchain. Prove the binary runs BEFORE publishing an
+endpoint for it — the first attempt advertised node, port and tunnel
+command and only then died, so the client forwarded to a port nothing
+ever listened on.
+
+**Multiplex SSH, or the login node throttles you into a phantom bug.**
+One connection per poll (job state, endpoint file) gets rate-limited on
+a campus-shared login node: connections fail with
+`kex_exchange_identification: read: Connection timed out`, helpers
+return empty, and the driver reports "waiting for the scheduler" for a
+job that is plainly RUNNING. Use `ControlMaster=auto` +
+`ControlPersist`, and poll every 30s rather than every 10s.
+
 **`hf download REPO --include A B` silently ignores `--include`.** A
 second positional argument is read as an explicit filename, which
 disables include-globbing entirely — *"Ignoring `--include` since

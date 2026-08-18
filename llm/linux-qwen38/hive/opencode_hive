@@ -37,6 +37,18 @@ STATE="${XDG_CACHE_HOME:-${HOME}/.cache}/opencode-hive"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "${STATE}"
 
+# Multiplex every remote call over ONE connection. Without it each poll opens a
+# fresh SSH session, and a login node shared by a whole campus throttles that
+# long before it looks like throttling: connections start failing with
+# "kex_exchange_identification: read: Connection timed out", the helpers return
+# empty, and the driver concludes a job that is plainly RUNNING has not started.
+# The symptom points at the scheduler; the cause is the connection rate.
+SSH_MUX=(-o ControlMaster=auto
+         -o "ControlPath=${STATE}/ssh-%r@%h:%p"
+         -o ControlPersist=300
+         -o BatchMode=yes -o ConnectTimeout=20
+         -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 say()   { printf '\033[1m==\033[0m %s\n' "$*"; }
 warn()  { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
@@ -44,7 +56,7 @@ die()   { printf '\033[31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Slurm is not on PATH in a non-login shell on this cluster -- `ssh host sinfo`
 # gives "command not found". Everything remote goes through a login shell.
-hssh() { ssh -o BatchMode=yes -o ConnectTimeout=20 "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'"; }
+hssh() { ssh "${SSH_MUX[@]}" "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'"; }
 
 CMD="up"
 case "${1:-}" in
@@ -68,7 +80,19 @@ done
 
 job_id() { hssh <<< "squeue -u ${HIVE_USER} -n qwen-serve -h -o '%i %T' | awk '\$2==\"RUNNING\"{print \$1; exit}'"; }
 
-endpoint_node() { hssh <<< "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt 2>/dev/null"; }
+# Only accept an endpoint published BY THE JOB BEING WAITED ON. A file left by
+# a previous job names a node that is no longer serving, and the tunnel then
+# connects confidently to nothing.
+endpoint_node() {
+  local want="$1"
+  hssh <<REMOTE
+awk -v want="${want}" '
+  /^job/  { j = \$3 }
+  /^node/ { n = \$3 }
+  END     { if (j == want && n != "") print n }
+' ${ROOT}/logs/endpoint.txt 2>/dev/null
+REMOTE
+}
 
 api_key() { hssh <<< "cat ${ROOT}/logs/api-key.txt 2>/dev/null"; }
 
@@ -87,7 +111,7 @@ do_status() {
   jid="$(job_id || true)"
   printf '  stack   : %s\n' "$(stack_ready | tail -1)"
   printf '  job     : %s\n' "${jid:-none running}"
-  [ -n "$jid" ] && printf '  node    : %s\n' "$(endpoint_node | tail -1)"
+  if [ -n "$jid" ]; then printf '  node    : %s\n' "$(endpoint_node "$jid" | tail -1)"; fi
   if [ -s "${STATE}/tunnel.pid" ] && kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null; then
     printf '  tunnel  : up (pid %s) 127.0.0.1:%s\n' "$(cat "${STATE}/tunnel.pid")" "${LOCAL_PORT}"
   else
@@ -151,7 +175,8 @@ TUNNEL
 sync_artifacts() {
   say "syncing job scripts to ${ROOT}"
   hssh <<< "mkdir -p ${ROOT}/logs"
-  scp -q "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
+  scp -q -o ControlMaster=auto -o "ControlPath=${STATE}/ssh-%r@%h:%p" \
+         "${HERE}/setup-hive.sh" "${HERE}/serve-qwen.sbatch" \
          "${HERE}/router-presets-hive.ini" "${HERE}/README.md" \
          "${HIVE_USER}@${HIVE_HOST}:${ROOT}/" \
     || die "could not copy job scripts to ${ROOT}"
@@ -161,7 +186,7 @@ sync_artifacts() {
 do_up() {
   say "checking hive"
   hssh <<< "true" >/dev/null || die "cannot reach ${HIVE_USER}@${HIVE_HOST}"
-  [ "$SYNC" = 1 ] && sync_artifacts
+  if [ "$SYNC" = 1 ]; then sync_artifacts; fi
 
   if [ "$(stack_ready | tail -1)" != "ready" ]; then
     say "llama.cpp or weights missing — running setup (this takes a while)"
@@ -184,16 +209,18 @@ cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
   -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
     say "waiting for the scheduler"
-    for _ in $(seq 1 240); do
-      jid="$(job_id || true)"; [ -n "$jid" ] && break
-      sleep 10
+    for _ in $(seq 1 80); do
+      jid="$(job_id || true)"
+      if [ -n "$jid" ]; then break; fi
+      sleep 30
     done
     [ -n "$jid" ] || die "job did not start; check: opencode_hive status"
   fi
 
   local node
   for _ in $(seq 1 60); do
-    node="$(endpoint_node | tail -1)"; [ -n "$node" ] && break
+    node="$(endpoint_node "$jid" | tail -1)"
+    if [ -n "$node" ]; then break; fi
     sleep 5
   done
   [ -n "$node" ] || die "job ${jid} is running but published no endpoint"
@@ -225,7 +252,7 @@ REMOTE
   rm -f "$presets"
 
   say "ready — pick a '${PROVIDER}/...' model inside OpenCode"
-  [ "$LAUNCH" = 1 ] && exec opencode
+  if [ "$LAUNCH" = 1 ]; then exec opencode; fi
 }
 
 case "$CMD" in

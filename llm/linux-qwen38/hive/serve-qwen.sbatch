@@ -31,7 +31,33 @@ MODELS="${ROOT}/models"
 PORT="${QWEN_PORT:-8080}"
 mkdir -p "${ROOT}/logs"
 
-module load cuda/13.3.0
+# gcc as well as cuda, at RUN time. The binary is compiled by the gcc 13.2
+# module and needs GLIBCXX_3.4.32, which Ubuntu 22.04's system libstdc++ does
+# not provide -- it stops at 3.4.30. Loading only cuda gets you
+# "version `GLIBCXX_3.4.32' not found", which looks like a broken binary rather
+# than a missing runtime toolchain.
+module load cuda/13.3.0 gcc/13.2.0
+# Two runtime paths, both required. llama.cpp splits each tool into a thin
+# driver plus libllama-<tool>-impl.so next to it, so the install lib/ must be on
+# LD_LIBRARY_PATH; libcudart.so.13 comes from the module above. Missing either
+# is exit 127 with "error while loading shared libraries", which reads like a
+# broken build rather than a missing path.
+export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+# Prove the binary RUNS before publishing an endpoint for it. The first attempt
+# advertised a node, port and tunnel command, and only then died on the missing
+# library -- so the client dutifully forwarded to a port nothing ever listened
+# on, and the failure surfaced as a timeout far from its cause.
+if ! "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1; then
+  echo "llama-server will not run; rebuild with setup-hive.sh" >&2
+  "${PREFIX}/bin/llama-server" --version || true
+  exit 1
+fi
+
+# A stale endpoint file outlives the job that wrote it, and a driver reading it
+# will tunnel confidently to a node that is no longer serving. Clear it first,
+# and let the job that owns it be the one that publishes.
+rm -f "${ROOT}/logs/endpoint.txt"
 
 # Stage the weights onto the node's local NVMe. /quobyte is a shared parallel
 # filesystem: fine for a one-time read, but 30 GiB of it competes with everyone
