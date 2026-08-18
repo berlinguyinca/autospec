@@ -42,25 +42,56 @@ log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 # previous behaviour -- exit and let the human notice -- meant a walltime
 # expiry silently ended the session.
 reacquire() {
-  log "no job; requesting a replacement (${NGPU}x ${GPU}, ${WALLTIME})"
-  printf 'reacquiring' > "${STATE}/tunnel.state"
-  ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE >/dev/null 2>&1
+  # Do not pile up allocations. A job already queued IS the replacement; the
+  # previous version resubmitted on every cycle because it never noticed, and
+  # left a queue of duplicate jobs behind.
+  local pending
+  pending="$(q "${HIVE_USER}@${HIVE_HOST}" \
+      "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null \
+      | awk '{print $1}' | head -1 || true)"
+
+  local newjob=""
+  if [ -n "$pending" ]; then
+    log "a replacement (${pending}) is already queued; waiting for it"
+    newjob="$pending"
+  else
+    log "no job; requesting a replacement (${NGPU}x ${GPU}, ${WALLTIME})"
+    printf 'reacquiring' > "${STATE}/tunnel.state"
+    newjob="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null | grep -oE '[0-9]+$' | head -1 || true
 cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
   -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
-  local waited=0
+)"
+    if [ -z "$newjob" ]; then
+      log "sbatch did not return a job id"
+      return 1
+    fi
+    log "submitted ${newjob}"
+  fi
+
+  # Wait for an endpoint published BY THAT JOB. Matching on the node line alone
+  # matches the endpoint file the DEAD job left behind, which is how this
+  # previously declared success in 30 seconds and forwarded to a host that was
+  # no longer serving -- then did it again, and again.
+  local waited=0 fresh
   while [ "$waited" -lt "$REACQUIRE_WAIT" ]; do
     sleep 30; waited=$((waited + 30))
-    local fresh
-    fresh="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
-            "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
+    fresh="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
+awk -v want="${newjob}" '
+  /^job/  { j = \$3 }
+  /^node/ { n = \$3 }
+  END     { if (j == want && n != "") print n }
+' ${ROOT}/logs/endpoint.txt 2>/dev/null
+REMOTE
+)"
+    fresh="$(printf '%s' "$fresh" | tr -d '[:space:]')"
     if [ -n "$fresh" ]; then
-      log "replacement is serving on ${fresh} (waited ${waited}s)"
+      log "job ${newjob} is serving on ${fresh} (waited ${waited}s)"
       node="$fresh"
       printf 'up' > "${STATE}/tunnel.state"
       return 0
     fi
-    log "waiting for a replacement allocation (${waited}s)"
+    log "waiting for ${newjob} to publish an endpoint (${waited}s)"
   done
   return 1
 }
@@ -73,6 +104,11 @@ forward_opts=(-N -o BatchMode=yes -o ExitOnForwardFailure=yes
               -o TCPKeepAlive=yes -o ConnectTimeout=20)
 query_opts=(-o BatchMode=yes -o ConnectTimeout=20
             -o ControlMaster=no -o ControlPath=none)
+# ConnectTimeout bounds the handshake, not the remote command. A login node
+# under load can accept a connection and then leave squeue hanging, which
+# freezes this loop -- and this loop is the only thing keeping the session
+# alive. Every remote call is bounded.
+q() { timeout "${QUERY_TIMEOUT:-45}" ssh "${query_opts[@]}" "$@"; }
 
 # An `ssh -N -L` does NOT exit when the far end of the forward dies. The
 # connection to the login node is still perfectly healthy; only the per-request
@@ -141,7 +177,7 @@ while true; do
   fi
 
   # The forward is up but nothing answers through it. Ask the scheduler why.
-  out="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
+  out="$(q "${HIVE_USER}@${HIVE_HOST}" \
         "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -168,7 +204,7 @@ while true; do
   # A job IS running -- most likely a requeue onto a different host, or the
   # model is still loading after a restart.
   gone=0
-  fresh="$(ssh "${query_opts[@]}" "${HIVE_USER}@${HIVE_HOST}" \
+  fresh="$(q "${HIVE_USER}@${HIVE_HOST}" \
           "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
   if [ -n "$fresh" ] && [ "$fresh" != "$node" ]; then
     log "node moved ${node} -> ${fresh}"
