@@ -1132,9 +1132,10 @@ EOF
         is_test_file "$diff_file" && continue
         is_doc_file "$diff_file" && continue
 
-        # Skip binary-ish files, and Rust inline test modules, which are not under tests/
+        # Markdown joins the binary-ish skips: prose describes a public surface, it
+        # cannot introduce one. CHANGELOG.md is still not a doc (see is_doc_file).
         case "$diff_file" in
-            *.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
+            *.md|*.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
         esac
 
         while IFS=: read -r lineno content; do

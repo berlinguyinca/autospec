@@ -29,6 +29,15 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   288,970 tokens of peak against a 180,224-token KV pool and killed every live
   session with `Context size has been exceeded`.
 
+#### Prose is not a public-surface change (2026-08-18)
+- `DOC_OUT_OF_SYNC` scanned markdown for flag and env-var shapes, so a CHANGELOG
+  entry that *mentions* a flag was read as that flag's introduction -- and since
+  `CHANGELOG.md` is deliberately not a doc for the requirement half, a
+  changelog-only change could never satisfy the gate it had just tripped.
+  Markdown now joins `*.diff` in the scan exemption. `CHANGELOG.md` still earns no
+  credit as documentation: if it did, every commit would satisfy the rule and the
+  rule would be dead.
+
 #### Path classifiers extracted (2026-08-18)
 - The three predicates that decide whether a changed path is doc, test or fixture
   data now live in `scripts/lint-path-classifiers.sh`, sourced from

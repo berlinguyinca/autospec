@@ -56,3 +56,13 @@ setup() {
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -qE "^(MOCK_DB|TODO_LEFT):"
 }
+
+# Prose describes a public surface, it cannot introduce one. A CHANGELOG entry
+# mentioning a flag was read as that flag's introduction -- and CHANGELOG.md must
+# NOT count as documentation for the requirement half, or every commit would
+# satisfy the rule and the rule would be dead. Both halves are asserted here.
+@test "lint-implementation: markdown is described-in, not scanned, and CHANGELOG earns no credit" {
+    run bash "$LINT" --diff-file "$FIX/changelog-mentions-flag.diff"
+    echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:scripts/thing\.sh:"
+    ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:CHANGELOG\.md:"
+}
