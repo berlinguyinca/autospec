@@ -109,18 +109,28 @@ The endpoint moved when `longcontext` became the default, so any client pinned
 to the old llama.cpp node on **:8080** silently stops working — that node is
 disabled. `~/.config/opencode/opencode.json` now carries two providers:
 
-| provider | endpoint | model | context | use |
-|---|---|---|---:|---|
-| `qwen-local` (default) | `127.0.0.1:8081/v1` | Q5_K_M | 196,608 | large repositories |
-| `qwen-vllm` | `127.0.0.1:8000/v1` | AWQ-INT4 | 32,928 | short prompts, ~41 tok/s |
+| provider | endpoint | model | context | vision | use |
+|---|---|---|---:|---|---|
+| `qwen-local` (default) | `:8081` | Q5_K_M | 196,608 | no | large repositories |
+| `qwen-vision` | `:8082` | Q5_K_M + mmproj | 98,304 | **yes** | screenshots, diagrams |
+| `qwen-vllm` | `:8000` | AWQ-INT4 | 32,928 | no | short prompts, ~41 tok/s |
 
-Capabilities are declared from what was actually tested, not assumed:
+**Only one of these answers at a time.** The GPU holds one profile, so selecting
+a provider in the client is only half the switch — the other half is
+`qwen38ctl start <profile>`. The provider names carry the command as a reminder.
+
+Capabilities are declared from what was tested, not assumed:
 
 - `tool_call: true` — verified, `finish_reason: tool_calls` with correct arguments
 - `reasoning: true` — verified, `reasoning_content` returned separately
-- `attachment: false` — **vision is not available.** The profile loads no mmproj,
-  and the 0.87 GiB projector does not fit alongside 196k of context. Vision
-  requires trading context away; the old :8080 node had it at Q4_K_M.
+- `attachment` — **true only for `qwen-vision`**, verified by a generated 256x256
+  chessboard: the prompt grew by 1,026 tokens (matching `--image-min-tokens
+  1024`) and the model answered `chess`. The token delta is the real check; a
+  server ignoring `--mmproj` would still answer plausibly from the text alone.
+
+The vision profile costs context, not quality: same Q5_K_M weights, but the
+885 MiB projector displaces ~98k tokens of KV. It still verified an
+83,593-token retrieval in 40 s.
 
 ## Coexistence with the llama.cpp node
 

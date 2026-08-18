@@ -46,20 +46,34 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
     exit 75
   fi
 
-  echo "starting profile=${PROFILE} version=${QWEN38_PROFILE_VERSION} runtime=llama.cpp ctx=${QWEN38_MAX_MODEL_LEN} kv=${QWEN38_KV_TYPE}"
-  exec "${LLAMA_DIR}/llama-server" \
-    --model "${QWEN38_GGUF_PATH}" \
-    --alias "${QWEN38_SERVED_NAME}" \
-    --n-gpu-layers 999 \
-    --flash-attn auto \
-    --ctx-size "${QWEN38_MAX_MODEL_LEN}" \
-    --parallel "${QWEN38_MAX_SEQS}" \
-    --cache-type-k "${QWEN38_KV_TYPE}" \
-    --cache-type-v "${QWEN38_KV_TYPE}" \
-    --jinja \
-    --no-context-shift \
-    --host "${QWEN38_HOST}" \
+  gg_args=(
+    --model "${QWEN38_GGUF_PATH}"
+    --alias "${QWEN38_SERVED_NAME}"
+    --n-gpu-layers 999
+    --flash-attn auto
+    --ctx-size "${QWEN38_MAX_MODEL_LEN}"
+    --parallel "${QWEN38_MAX_SEQS}"
+    --cache-type-k "${QWEN38_KV_TYPE}"
+    --cache-type-v "${QWEN38_KV_TYPE}"
+    --jinja
+    --no-context-shift
+    --host "${QWEN38_HOST}"
     --port "${QWEN38_PORT}"
+  )
+
+  # Vision is opt-in per profile. Passing --mmproj costs 885 MiB that would
+  # otherwise be KV, so text-only profiles must not load it by accident.
+  if [ -n "${QWEN38_MMPROJ_PATH:-}" ]; then
+    [ -r "${QWEN38_MMPROJ_PATH}" ] || {
+      echo "mmproj not readable: ${QWEN38_MMPROJ_PATH}" >&2; exit 69; }
+    gg_args+=(--mmproj "${QWEN38_MMPROJ_PATH}")
+    if [ -n "${QWEN38_IMAGE_MIN_TOKENS:-}" ]; then
+      gg_args+=(--image-min-tokens "${QWEN38_IMAGE_MIN_TOKENS}")
+    fi
+  fi
+
+  echo "starting profile=${PROFILE} version=${QWEN38_PROFILE_VERSION} runtime=llama.cpp ctx=${QWEN38_MAX_MODEL_LEN} kv=${QWEN38_KV_TYPE} vision=${QWEN38_MULTIMODAL:-off}"
+  exec "${LLAMA_DIR}/llama-server" "${gg_args[@]}"
 fi
 
 if [ "${QWEN38_RUNTIME:-vllm}" != "vllm" ]; then
