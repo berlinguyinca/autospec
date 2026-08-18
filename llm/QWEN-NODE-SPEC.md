@@ -10,6 +10,18 @@ This document is both a **record** of the RTX 4090 build in
 agent on a different machine and it should reach an equivalent result on Apple
 Silicon, NVIDIA consumer, NVIDIA Blackwell/DGX Spark, Intel, or AMD.
 
+**On the reference host, one command does all of it:**
+
+```bash
+./linux-qwen38/scripts/install-node.sh --with-opencode
+```
+
+That installs llama.cpp, fetches the weights and projector, writes the router
+presets, enables the boot service, verifies a completion, a long-prompt
+retrieval and an image, then points OpenCode at it. On other platforms, work
+through the phases below — the arithmetic and the measurement method are what
+port; the commands are not.
+
 > **The one rule.** Never configure a number you have not verified with a real
 > request. Every hard-won lesson in Appendix C is a variant of that rule being
 > broken.
@@ -511,7 +523,7 @@ head_dim 256, n_ctx_train 262,144).
 
 | runtime | checkpoint | quant | disk | resident | gen t/s | verified context |
 |---|---|---|---:|---:|---:|---:|
-| llama.cpp b10434 **(shipped)** | `unsloth/Qwen3.8-27B-GGUF` | Q5_K_M + q4_0 KV | 18.46 GiB | ~18.9 GiB | **33.0** (API) | **196,608** — 153,038-token retrieval, 89 s |
+| llama.cpp b10434 **(shipped)** | `unsloth/Qwen3.8-27B-GGUF` | Q5_K_M + q4_0 KV | 18.46 GiB | ~18.9 GiB | **33.0** (API) | **196,608** — 167,148-token retrieval verified by the installer |
 | llama.cpp b10434 (shipped) | same + `mmproj-F16` | Q5_K_M | 19.3 GiB | ~22.3 GiB | ~33 | **98,304** — 83,593-token retrieval; image = +1,026 tokens |
 | vLLM 0.27.1 | `cyankiwi/Qwen3.8-27B-AWQ-INT4` @`63768c10` | W4A16 g32 | 19.57 GiB | 18.37 GiB | **41.3** | 32,928 — 28,020-token retrieval |
 | vLLM 0.27.1 | same, eager | W4A16 | 19.57 GiB | 18.37 GiB | 14.3 | 56,448 — 44,238-token retrieval |
@@ -535,6 +547,27 @@ reboot recovery; sustained multi-hour load.
 ---
 
 ## Appendix B — Platform playbooks
+
+### B.0 Getting llama.cpp: what is prebuilt and what is not
+
+Checked against release `b10434`. **There is no prebuilt Linux CUDA binary** —
+this surprises people, and it is the one platform where you must compile.
+
+| target | how | asset / note |
+|---|---|---|
+| **Linux + NVIDIA** | **build from source** | `cmake -DGGML_CUDA=ON`; needs `nvcc` |
+| Linux + NVIDIA (quick) | prebuilt | `…-bin-ubuntu-vulkan-x64.tar.gz` — works, usually slower than CUDA |
+| **macOS Apple Silicon** | prebuilt | `…-bin-macos-arm64.tar.gz`, Metal included, ~11 MB |
+| Linux + Intel | prebuilt | `…-bin-ubuntu-sycl-fp16-x64.tar.gz` |
+| Linux + AMD | prebuilt Vulkan, or build HIP | no Linux ROCm release asset |
+| Linux CPU / arm64 | prebuilt | `…-bin-ubuntu-x64` / `-arm64` |
+| Windows | prebuilt | CPU, CUDA 12.4/13.3, ROCm, SYCL, Vulkan all shipped |
+
+`scripts/install-node.sh` encodes this table: it reuses an existing install,
+otherwise fetches for Metal/SYCL/Vulkan/CPU and compiles for CUDA. It then
+asserts the build actually has `--models-preset`, because router mode is what
+the dynamic switching depends on.
+
 
 ### B.1 NVIDIA consumer, Ampere/Ada (RTX 3090/4090, 24 GB) — the reference case
 
@@ -692,7 +725,9 @@ From [`linux-qwen38/`](linux-qwen38/); the shapes port, the values do not.
 
 | file | role |
 |---|---|
-| `scripts/setup-linux-qwen38.sh` | idempotent installer; refuses success without a real completion |
+| **`scripts/install-node.sh`** | **provisions the whole shipped stack**: llama.cpp (fetch or build), model + projector, router presets, unit, client — and verifies with real inference before claiming success |
+| `scripts/configure-opencode.py` | derives the client config from the router presets, so client and server cannot drift |
+| `scripts/setup-linux-qwen38.sh` | optional vLLM profiles (throughput/short-context) |
 | `scripts/serve-profile.sh` | one launcher, dispatches on runtime (vLLM / llama.cpp / router) |
 | `scripts/qwen38ctl` | status / start / switch / stop, waits on health and memory release |
 | `scripts/measure-ceiling.sh` | fixed-point probe + long-prompt verification |

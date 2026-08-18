@@ -35,7 +35,7 @@ the other 48 are linear-attention layers whose state is constant per sequence.
 A dense 27B would fall off far harder.
 
 Through the OpenAI API at ctx 196,608 the sustained rate is **33.0 tok/s**, and
-a **153,038-token needle retrieval completed correctly in 89 s**. The llama-bench
+a **167,148-token needle retrieval completes correctly** (153,038 measured earlier at 89 s). The llama-bench
 figures are a synthetic best case (no HTTP, no full-context allocation); the API
 number is the honest one.
 

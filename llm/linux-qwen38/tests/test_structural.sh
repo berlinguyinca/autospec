@@ -13,6 +13,7 @@ echo "== structural =="
 # 1 — every shell artefact parses
 for f in "${HERE}/scripts/serve-profile.sh" "${HERE}/scripts/qwen38ctl" \
          "${HERE}/scripts/setup-linux-qwen38.sh" "${HERE}/scripts/measure-ceiling.sh" \
+         "${HERE}/scripts/install-node.sh" "${HERE}/scripts/bench-context-sweep.sh" \
          "${HERE}/tests/test_smoke.sh" "${HERE}/tests/test_structural.sh"; do
   bash -n "$f" 2>/dev/null
   check $? "bash -n $(basename "$f")"
@@ -71,6 +72,12 @@ check $? "unit conflicts with qwen-local.service"
 for f in "${HERE}/scripts/serve-profile.sh" "${HERE}/scripts/measure-ceiling.sh"; do
   grep -q 'export PATH="${QWEN38_VENV}/bin:${PATH}"' "$f"
   check $? "$(basename "$f") puts the venv bin on PATH (ninja for FlashInfer JIT)"
+done
+
+# 10b — every python artefact parses
+for f in "${HERE}"/scripts/*.py "${HERE}"/tests/*.py; do
+  python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$f" 2>/dev/null
+  check $? "python -m ast $(basename "$f")"
 done
 
 # 11 — the FlashInfer sampler workaround must stay wired to both entry points

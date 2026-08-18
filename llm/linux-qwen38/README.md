@@ -4,10 +4,17 @@ A reproducible vLLM deployment of Qwen3.8-27B on a single NVIDIA RTX 4090
 (24 GiB), serving an OpenAI-compatible API for AutoSpec workers.
 
 ```
-scripts/setup-linux-qwen38.sh     # install, validate, enable
-qwen38ctl status                  # what is running
-qwen38ctl switch extended         # change profile
+scripts/install-node.sh --with-opencode   # the whole stack: llama.cpp, weights,
+                                          # projector, router, service, client
+qwen38ctl status                          # what is running
+qwen38ctl start vision                    # pin a single-model profile
 ```
+
+`install-node.sh` is the one to run. It fetches or builds llama.cpp, downloads
+the weights and the vision projector, installs the router presets and the boot
+service, and then **verifies a completion, a long-prompt retrieval and an image
+before reporting success**. `setup-linux-qwen38.sh` installs the optional vLLM
+profiles and is not needed for the default configuration.
 
 ## Why this model is cheaper to serve than it looks
 
