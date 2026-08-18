@@ -1033,12 +1033,38 @@ hour measuring rather than assuming: `measure-ceiling.sh` for the real ceiling,
 `bench-concurrency.py` for how batching scales. Those three numbers are what
 make the rest of the configuration derivable instead of guessed.
 
-**Confirm at your site before writing the job script** — these vary and the
-values above are not portable: the scheduler and GPU request syntax
-(`--gres=gpu:a100:1` vs `--gpus=`), partition and QOS names, walltime limits,
-the CUDA module name, whether compute nodes have outbound internet for the
-weights download (often they do not — stage on the login node first), and
-whether inbound connections to compute nodes are permitted at all.
+**Confirm at your site before writing the job script**, and expect the answers
+to be surprising. A worked example with every value measured rather than assumed
+is in `linux-qwen38/hive/README.md`; on that cluster the findings that mattered
+were not in any documentation:
+
+- **Partitions you can see are not partitions you can use.** Six `gpu-*`
+  partitions were `AllowAccounts=ALL` and every submission to them failed with
+  `Invalid account or account/partition combination`, because the user's
+  associations covered only two general partitions. GPUs were reachable from
+  those instead, via `--gres`.
+- **The obvious account had `gres/gpu=0`.** The group account rejected every GPU
+  request with `QOSGrpGRES`; a second, less obvious association carried the GPU
+  entitlement.
+- **GRES names are inconsistent across nodes** of the same model
+  (`a100`, `nvidia_a100-sxm4-80gb`, `nvidia_a100_80gb_pcie`). A wrong name is an
+  allocation failure, not a fallback.
+- **The long-walltime partition was unusable.** It held 12 GPUs against the
+  short one's 86, and `--gres=gpu:1` there estimated a start date **a month
+  out**. The usable partition was preemptible: `PreemptMode=REQUEUE` with a
+  130-second grace time.
+- **Short jobs backfill, long ones do not.** A 3-hour, 32-CPU request queued for
+  hours while GPUs sat idle; the same work at 1 hour and 16 CPUs started
+  immediately.
+
+Use `sbatch --test-only`, which allocates nothing, to establish all of the above
+in minutes rather than discovering it job by job.
+
+Two more that are cheap to check and expensive to assume: whether the login
+node's `/tmp` is shared with compute nodes (it usually is not — a script staged
+there fails with `No such file or directory` inside the job), and whether
+compute nodes have outbound internet. Both go the "convenient" way often enough
+that guessing is tempting, and the failure modes look nothing like the cause.
 
 ## Appendix C — Failure catalogue
 

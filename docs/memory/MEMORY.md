@@ -62,6 +62,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Infrastructure gotchas
 
+- [hive HPC cluster layout](reference_hive_hpc_cluster.md) — GPU jobs go to `-p low -A publicgrp --gres=...`; the gpu-* partitions reject everything and metabolomicsgrp has gres/gpu=0
+
 - [Context floor kills small tiers](feedback_context_floor_kills_small_tiers.md) — measure the before-any-work floor (OpenCode p90 37,873) before picking a window; it is client-specific and invisible in conversation length
 
 - [Shared KV pool has no admission control](feedback_shared_kv_pool_has_no_admission_control.md) — llama.cpp `kv-unified` lets sessions differ in size but over-subscription kills every live session; ration client-side
