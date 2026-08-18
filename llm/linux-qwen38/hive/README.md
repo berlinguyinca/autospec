@@ -283,9 +283,18 @@ takes the earliest start. Measured inside one minute:
 | nvidia_l40s | next day |
 
 Pinning one type is how a session waits half a day while five other GPUs sit
-idle. Every candidate has at least 48 GiB, which is what the Q8 preset needs
-(~28 GiB weights + 8 GiB of f16 KV at full context + compute); the 32 GiB
-RTX 5000 Ada is deliberately excluded.
+idle. Every candidate has at least 46 GiB, which is what the Q8 build needs once
+the KV cache is sized correctly; the 32 GiB RTX 5000 Ada is deliberately
+excluded.
+
+**An estimate is not a promise.** It is made once and the queue moves under it —
+one job submitted on a 15-minute estimate drifted to "tomorrow 00:50" while a
+fresh probe showed another type could start eight hours sooner. So the choice is
+re-probed after ten minutes of queueing and switched if another type is
+materially better, bounded to two switches: cancelling forfeits queue position,
+and thrashing is worse than waiting. Recovery re-probes the same way, so an
+expired allocation is not re-requested on a card that has since become
+congested.
 
 ### The client is configured from what the server publishes
 

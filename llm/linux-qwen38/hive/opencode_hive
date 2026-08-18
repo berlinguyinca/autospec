@@ -208,7 +208,19 @@ do_stop() {
   fi
 }
 
-do_logs() { ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" "tail -f ${ROOT}/logs/serve-*.out"; }
+do_logs() {
+  # `serve-*.out` globs every job this account ever ran, and tail picks the
+  # first -- which is the OLDEST. Follow the log of the job that is actually
+  # running.
+  local jid; jid="$(job_id || true)"
+  if [ -z "$jid" ]; then
+    jid="$(job_any | awk '{print $1}' | tail -1 || true)"
+  fi
+  [ -n "$jid" ] || die "no serving job to follow"
+  say "following job ${jid}"
+  ssh "${SSH_MUX[@]}" "${HIVE_USER}@${HIVE_HOST}" \
+      "tail -f ${ROOT}/logs/serve-${jid}.out"
+}
 
 # The tunnel is supervised rather than started once. `low` is preemptible with a
 # 130s grace period, so the job can be requeued onto a DIFFERENT node mid-session;
@@ -271,6 +283,7 @@ start_tunnel() {
   HIVE_USER="${HIVE_USER}" HIVE_HOST="${HIVE_HOST}" ROOT="${ROOT}" \
   STATE="${STATE}" FORWARD_PORT="${FORWARD_PORT}" REMOTE_PORT="${REMOTE_PORT}" \
   NODE="${node}" GPU="${GPU}" NGPU="${NGPU}" WALLTIME="${WALLTIME}" \
+  GPU_CANDIDATES="${GPU_CANDIDATES}" ACCOUNT="${ACCOUNT}" PARTITION="${PARTITION}" \
     setsid nohup "${HERE}/tunnel-supervisor.sh" >> "${STATE}/tunnel.log" 2>&1 &
   echo $! > "${STATE}/tunnel.pid"
   sleep 2
@@ -323,10 +336,31 @@ cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
   -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
     say "waiting for the scheduler"
+    # A --test-only estimate is made once, and the queue moves under it. One
+    # job here was submitted on a 15-minute estimate and drifted to "tomorrow"
+    # while a different GPU type could have started eight hours sooner. So the
+    # choice is re-examined, and switched if another type is now materially
+    # better. Bounded, because cancelling and resubmitting forfeits queue
+    # position and doing it repeatedly is worse than waiting.
+    local waited=0 switches=0
     for _ in $(seq 1 80); do
       jid="$(job_id || true)"
       if [ -n "$jid" ]; then break; fi
-      sleep 30
+      sleep 30; waited=$((waited + 30))
+      if [ "$waited" -ge "${OPENCODE_HIVE_REEVAL_AFTER:-600}" ] \
+         && [ "$switches" -lt 2 ]; then
+        waited=0
+        local alt; alt="$(pick_gpu)"
+        if [ "$alt" != "$GPU" ]; then
+          say "still queued; ${alt} now looks better than ${GPU}, switching"
+          hssh <<< "scancel -n qwen-serve -u ${HIVE_USER}" >/dev/null 2>&1 || true
+          GPU="$alt"; switches=$((switches + 1))
+          hssh <<REMOTE
+cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
+  -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+REMOTE
+        fi
+      fi
     done
     [ -n "$jid" ] || die "job did not start; check: opencode_hive status"
   fi

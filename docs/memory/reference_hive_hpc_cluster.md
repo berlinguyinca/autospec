@@ -168,6 +168,19 @@ request queued with a four-hour estimate while sixteen Blackwell GPUs
 sat idle, because the allocatable Blackwell nodes had ~5 GB of RAM free
 between them. Ask for 8 GB.
 
+**A `--test-only` start estimate is a guess, and the queue moves under
+it.** One job submitted on a 15-minute estimate drifted to "tomorrow
+00:50" while a fresh probe showed another GPU type could start eight
+hours sooner. Re-probe after ~10 minutes of queueing and switch if
+another type is materially better, bounded to a couple of switches —
+cancelling forfeits queue position, so thrashing is worse than waiting.
+Automatic recovery must re-probe too, or an expired allocation is
+re-requested on a card that has since become congested.
+
+**`tail -f logs/serve-*.out` follows the OLDEST job.** The glob matches
+every job the account ever ran and `tail` takes the first. Resolve the
+current job id and follow that file.
+
 **Let the scheduler choose the GPU type.** Probing with `sbatch
 --test-only` (allocates nothing) inside one minute gave earliest starts
 from 15 minutes (a6000) to four hours (6000_blackwell) to the next day

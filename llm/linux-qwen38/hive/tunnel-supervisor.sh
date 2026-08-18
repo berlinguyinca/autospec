@@ -23,6 +23,11 @@ ROOT="${ROOT:?}"; STATE="${STATE:?}"
 FORWARD_PORT="${FORWARD_PORT:?}"; REMOTE_PORT="${REMOTE_PORT:?}"
 node="${NODE:?}"
 GPU="${GPU:-6000_blackwell}"; NGPU="${NGPU:-1}"
+# Recovery must not be pinned to the card the session started on. If that type
+# is congested when the allocation expires, re-acquiring with it means waiting
+# hours for a GPU while others sit free -- the same stale-estimate trap the
+# driver hit, except here nobody is watching.
+GPU_CANDIDATES="${GPU_CANDIDATES:-${GPU}}"
 WALLTIME="${WALLTIME:-12:00:00}"
 ACCOUNT="${ACCOUNT:-publicgrp}"; PARTITION="${PARTITION:-low}"
 
@@ -41,6 +46,23 @@ log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 # Submit a replacement allocation and wait for it to publish an endpoint. The
 # previous behaviour -- exit and let the human notice -- meant a walltime
 # expiry silently ended the session.
+# Whichever candidate the scheduler says can start soonest. --test-only
+# allocates nothing, so probing costs only a few seconds.
+soonest_gpu() {
+  local best="$GPU" best_ts="" t out ts
+  for t in ${GPU_CANDIDATES//,/ }; do
+    out="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
+sbatch --test-only -p ${PARTITION} -A ${ACCOUNT} --gres=gpu:${t}:${NGPU} \
+  -c 8 --mem=8G -t ${WALLTIME} --wrap=true 2>&1 | head -1
+REMOTE
+)"
+    ts="$(printf '%s' "$out" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}' | head -1 || true)"
+    [ -z "$ts" ] && continue
+    if [ -z "$best_ts" ] || [ "$ts" \< "$best_ts" ]; then best="$t"; best_ts="$ts"; fi
+  done
+  printf '%s' "$best"
+}
+
 reacquire() {
   # Do not pile up allocations. A job already queued IS the replacement; the
   # previous version resubmitted on every cycle because it never noticed, and
@@ -55,6 +77,11 @@ reacquire() {
     log "a replacement (${pending}) is already queued; waiting for it"
     newjob="$pending"
   else
+    local pick; pick="$(soonest_gpu)"
+    if [ "$pick" != "$GPU" ]; then
+      log "switching replacement GPU ${GPU} -> ${pick} (starts sooner)"
+      GPU="$pick"
+    fi
     log "no job; requesting a replacement (${NGPU}x ${GPU}, ${WALLTIME})"
     printf 'reacquiring' > "${STATE}/tunnel.state"
     newjob="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null | grep -oE '[0-9]+$' | head -1 || true

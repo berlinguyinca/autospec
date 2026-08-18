@@ -126,6 +126,19 @@ disabled. `~/.config/opencode/opencode.json` now carries two providers:
 | `qwen-local/qwen3.8-27b-abliterated*` | `:8080` | 163,840 / 81,920 / 40,960 | 1–4 | **yes** | uncensored |
 | `qwen-vllm/qwen3.8-27b` | `:8000` | 32,928 | 1 | no | short prompts, ~41 tok/s |
 
+On a node that fans out, generate the client config with `--no-solo-tier`:
+
+```
+configure-opencode.py --presets /opt/qwen-vllm/etc/router-presets.ini --no-solo-tier
+```
+
+The bare pool-sized id is the one entry whose availability alone can oversubscribe
+the server. A child inherits the parent's model id, so a parent sitting on the
+whole pool hands every child a window the size of the pool -- and the client's
+declared limit is the only admission control there is. Withhold it and the largest
+selectable window becomes the `-160k` tier. Nothing else is lost: the vision
+presets' solo ids are the same context as their `-96k` tiers.
+
 **The `-NNk` entries are not separate models.** They are aliases of one loaded
 model under different declared context limits, so switching between them costs
 nothing — no unload, no reload. Switching between *models* (text ↔ vision ↔
@@ -187,6 +200,20 @@ Two numbers make fan-out affordable, both measured on this host:
 |---|---:|
 | stock `general` | 37,113 |
 | same, with the `skill` tool denied | **18,030** |
+| same again, in a directory with no `AGENTS.md` | **8,474** |
+
+The floor is additive, and every term was measured on this host rather than
+estimated:
+
+| term | tokens |
+|---|---:|
+| OpenCode base prompt + a narrowed tool set | 8,474 |
+| project instructions (`AGENTS.md`, `CLAUDE.md`, `rules/*.md`) | 9,556 |
+| the skill roster, when the `skill` tool is enabled | 16,252 |
+| the tool schemas a general-purpose child keeps (edit, write, webfetch, task) | ~2,300 |
+
+Those four sum to the 37,113 that was actually observed, which is the check that
+the model is right rather than merely plausible.
 
 The skill tool injects the whole skill roster, ~16.3k tokens, into any session
 that can call it -- 40% of a 40,960 tier spent on skills a child should not be
@@ -325,6 +352,7 @@ tests/
   test_structural.sh       no GPU needed; safe in CI
   test_smoke.sh            the gate the installer will not skip
   test_context_budget.py   fan-out arithmetic; no GPU, no server needed
+  test_configure_opencode.py  client tier generation, incl. --no-solo-tier
 docs/
   measured-ceilings.md     what this hardware actually does
 runtime-descriptor.json    machine-readable, for the AutoSpec model router

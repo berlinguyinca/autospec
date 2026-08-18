@@ -143,6 +143,13 @@ def main() -> int:
                          "remote node, where binding an open port on a shared "
                          "network without one exposes the model to every other "
                          "user of that network")
+    ap.add_argument("--no-solo-tier", action="store_true",
+                    help="do not offer the bare pool-sized model id. It is the "
+                         "one tier a subagent must never inherit: children take "
+                         "the parent's model id, so a parent on the whole pool "
+                         "hands every child a window the size of the pool. Drop "
+                         "it and the largest selectable window is the -NNk tier "
+                         "below it, which leaves the pool room for fan-out")
     ap.add_argument("--provider-name",
                     help="human-readable provider label in the client")
     ap.add_argument("--dry-run", action="store_true")
@@ -194,7 +201,8 @@ def main() -> int:
                 "limit": {"context": ctx or 32768, "output": 32768},
             }
 
-        add(mid, pool)
+        if not args.no_solo_tier:
+            add(mid, pool)
         # Tiers are aliases of the SAME loaded model, so switching between them
         # in the client costs nothing -- no unload, no reload.
         for alias, limit in sorted(info["tiers"].items(),
