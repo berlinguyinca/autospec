@@ -70,6 +70,14 @@ different node and the supervisor re-reads `logs/endpoint.txt` and
 re-forwards. The hive provider is added to OpenCode without becoming the
 default, so a lost job never leaves the client on a dead endpoint.
 
+**`hf download REPO --include A B` silently ignores `--include`.** A
+second positional argument is read as an explicit filename, which
+disables include-globbing entirely — *"Ignoring `--include` since
+filenames have been explicitly set"* — so a job that exits 0 can fetch
+one 885 MiB projector instead of the 29 GiB asked for. Pass exact
+filenames positionally, and assert a size floor afterwards: "the command
+exited 0" is not the claim "the weights are here".
+
 **Setup jobs must not request a GPU.** Compiling CUDA needs `nvcc`, not a
 device, and downloading weights needs neither; asking for a Blackwell
 left the job `PENDING` while a GPU-free submission of the same work

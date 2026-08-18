@@ -93,16 +93,44 @@ export HF_HOME="${ROOT}/hf-cache"
 export PATH="${HOME}/.local/bin:${PATH}"
 
 # Two model families, each with its projector, so the router can serve the full
-# matrix (text or vision, standard or uncensored) from one node. Re-running is
-# cheap: hf download skips files that already match.
+# matrix (text or vision, standard or uncensored) from one node.
+#
+# Filenames are given POSITIONALLY, not as --include globs. `hf download REPO
+# --include A B` silently treats B as an explicit filename and then discards
+# --include entirely -- "Ignoring `--include` since filenames have been
+# explicitly set" -- so a run that looked successful fetched only the 885 MiB
+# projector and none of the 29 GiB it was asked for. Explicit names are also
+# exactly what this needs: the set is small, known, and worth pinning.
 fetch() {
-  echo "-- ${1}"
-  uvx --from huggingface_hub hf download "$1" \
-      --include "${@:2}" --local-dir "${MODELS}"
+  local repo="$1"; shift
+  echo "-- ${repo}"
+  uvx --from huggingface_hub hf download "${repo}" "$@" --local-dir "${MODELS}"
 }
-fetch unsloth/Qwen3.8-27B-GGUF "*UD-Q8_K_XL*.gguf" "mmproj-F16.gguf"
+fetch unsloth/Qwen3.8-27B-GGUF \
+      Qwen3.8-27B-UD-Q8_K_XL.gguf mmproj-F16.gguf
 fetch Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF \
-      "Qwen3.8-27B-ABLITERATED-Q8_0.gguf" "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf"
+      Qwen3.8-27B-ABLITERATED-Q8_0.gguf mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf
+
+# Size floors, because "the command exited 0" is not the same claim as "the
+# weights are here". A truncated or skipped download leaves a plausible-looking
+# tree that only fails much later, at model load, on another node.
+missing=0
+check_size() {
+  local f="${MODELS}/$1" min_mib="$2" got
+  got=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  got=$((got / 1048576))
+  if [ "$got" -lt "$min_mib" ]; then
+    echo "MISSING/SHORT: $1 is ${got} MiB, expected >= ${min_mib}" >&2
+    missing=1
+  else
+    printf '  ok  %-52s %6s MiB\n' "$1" "$got"
+  fi
+}
+check_size Qwen3.8-27B-UD-Q8_K_XL.gguf                    25000
+check_size Qwen3.8-27B-ABLITERATED-Q8_0.gguf              25000
+check_size mmproj-F16.gguf                                  800
+check_size mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf          800
+[ "$missing" = 0 ] || { echo "weight staging incomplete" >&2; exit 1; }
 
 echo "== staged =="
 ls -lh "${MODELS}" | head
