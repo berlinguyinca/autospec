@@ -195,6 +195,41 @@ The vision profile costs context, not quality: same Q5_K_M weights, but the
 885 MiB projector displaces ~98k tokens of KV. It still verified an
 83,593-token retrieval in 40 s.
 
+## Sizing the tiers (measured, not guessed)
+
+`scripts/analyze-session-contexts.py` reads real agent sessions — Claude Code
+transcripts and the OpenCode database — and reports what context the work
+actually carried. Across this operator's OpenCode sessions:
+
+| | p50 | p90 | max |
+|---|---:|---:|---:|
+| floor, before any work | 14,492 | 37,873 | 76,006 |
+| session peak | 62,421 | 170,783 | 756,987 |
+
+Growth while rising is 764 tokens/turn, so a tier buys a predictable number of
+turns before the client must compact:
+
+| tier | sessions that never compact | turns before first compaction |
+|---:|---:|---:|
+| 40,960 | 28.6% | 29 |
+| 49,152 | ~40% | 39 |
+| 81,920 | 69.6% | 77 |
+| 163,840 | 89.3% | 174 |
+
+**There is no tier below 40k, and that is deliberate.** The p90 floor is 37,873,
+so a 32k tier cannot start a heavy session at all — the system prompt, project
+instructions, memory and MCP tool schemas are already over the limit. The floor
+is client-specific: the same operator's Claude Code sessions floor at 39,655
+median, nearly three times OpenCode's, so measure the client you will use.
+
+Housekeeping that follows from this:
+
+- Compaction is a **full re-prefill** — 50–115 s at large contexts on this card,
+  because the cached prefix changes. Fewer, larger compactions beat many small.
+- The floor is paid on every turn and buys nothing. Trimming unused MCP servers
+  and skills moves every tier up.
+- Prefer a fresh session over a compacted one when the task changes.
+
 ## Coexistence with the llama.cpp node
 
 This host also runs `qwen-local.service`, the llama.cpp deployment of the same

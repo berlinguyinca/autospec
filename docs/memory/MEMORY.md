@@ -62,6 +62,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Infrastructure gotchas
 
+- [Context floor kills small tiers](feedback_context_floor_kills_small_tiers.md) — measure the before-any-work floor (OpenCode p90 37,873) before picking a window; it is client-specific and invisible in conversation length
+
 - [Shared KV pool has no admission control](feedback_shared_kv_pool_has_no_admission_control.md) — llama.cpp `kv-unified` lets sessions differ in size but over-subscription kills every live session; ration client-side
 
 - [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`

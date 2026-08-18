@@ -692,6 +692,79 @@ each one its own slot.
 
 ---
 
+### 8.7 Size the context from the work, not from the spec sheet
+
+"How much context do I need" is an empirical question, and for anyone who has
+been running agent sessions the answer is already in the logs.
+`analyze-session-contexts.py` reads them and reports the three numbers that
+decide a tier:
+
+**The floor** — context present before any work is done: system prompt, project
+instructions, memory, skill and MCP tool schemas. Measured on this operator's
+own OpenCode sessions:
+
+| percentile | floor |
+|---|---:|
+| p50 | 14,492 |
+| p75 | 17,062 |
+| p90 | 37,873 |
+| max | 76,006 |
+
+This is the number that kills small tiers. A 32k tier looks reasonable and
+**cannot start a p90 session** — the conversation is over the limit before the
+first question. The floor is also client-specific and not transferable: the same
+operator's Claude Code sessions floor at 39,655 median and 70,272 max, nearly
+three times higher, because the system prompt and skill set are larger. Measure
+the client you will actually use.
+
+**Growth per turn** — 764 tokens/turn median while rising, measured on the
+rising segments only. A transcript that compacts is a sawtooth, and averaging
+across the drops understates how fast the window fills.
+
+**Coverage** — what a tier buys, given that floor and that growth:
+
+| tier | turns that fit | sessions that never compact | turns before first compaction |
+|---:|---:|---:|---:|
+| 32,768 | 17.5% | 23.2% | 19 |
+| 40,960 | 23.6% | 28.6% | 29 |
+| 65,536 | 45.2% | 58.9% | 58 |
+| 81,920 | 52.1% | 69.6% | 77 |
+| 131,072 | 70.4% | 85.7% | 135 |
+| 163,840 | 79.5% | 89.3% | 174 |
+
+Read the last two columns together. Doubling 40k to 80k moves "never compacts"
+from 29% to 70% and buys 48 more turns — a large gain. Doubling again to 160k
+adds only 20 points and, on a 24 GiB card, costs the ability to run more than
+one session. That is where the money is on this hardware.
+
+**Sizing rule.** A tier must clear `p90 floor + (turns you want × growth)`. For
+these sessions, wanting 30 productive turns: `37,873 + 30 × 764 ≈ 60,800`. So
+40k is workable but tight, 64–80k is comfortable, and anything at or below 32k
+is a trap.
+
+### 8.8 Housekeeping: compaction is a schedule, not an accident
+
+A local node has a hard ceiling and no graceful degradation, so compaction has
+to be planned rather than hit.
+
+- **Set the client's declared limit below the served context, not equal to it.**
+  Generated tokens land on top of the prompt. Budget ~90%.
+- **Compaction is not free — it is a full re-prefill.** The next request after a
+  compaction cannot reuse the cached prefix, because the prefix changed. On this
+  build that is 50–115 s at large contexts. Fewer, larger compactions beat many
+  small ones.
+- **Keep the floor small.** It is paid on every single turn and it is the one
+  part of the budget that buys nothing. Trimming MCP servers and skill sets a
+  session does not need moves the p90 floor down and every tier up.
+- **Prefer a fresh session to a compacted one** when the task changes. Compaction
+  preserves a summary of work you are done with; a new session starts at the
+  floor with full fidelity.
+- **Give each concurrent session its own slot.** Sessions that stay resident keep
+  their prefix cached and do not re-pay prefill; sessions that queue through a
+  shared slot re-prefill each time they are swapped in.
+
+---
+
 ---
 
 ## 9. Phase 8 — Wire the clients, and treat that as part of the deployment
@@ -879,6 +952,93 @@ GB/s at best, so a 27B at 4-bit runs at low single digits. Use a much smaller
 model instead.
 
 ---
+
+### B.7 NVIDIA datacentre (A100 / H100) — when the constraints disappear
+
+Everything hard about the 24 GiB reference build is a capacity problem. On an
+A100 the capacity problem is simply gone, and the configuration changes shape.
+
+Predictions below are the bandwidth roofline scaled by the efficiency this
+project actually measured — the reference build hit **79.7%** of its roofline
+(1008 GB/s ÷ 19.82 GB = 50.9 t/s predicted, 40.55 t/s measured). They are
+arithmetic, not benchmarks; confirm on the machine.
+
+| card | HBM GB/s | Q5_K_M | Q8_0 | BF16 | context at Q8 |
+|---|---:|---:|---:|---:|---|
+| RTX 4090 24 GB | 1008 | **40.6** (measured) | does not fit | no | — |
+| A100 40 GB SXM | 1555 | ~62 | ~43 | no | full 262,144 |
+| A100 80 GB PCIe | 1935 | ~78 | ~53 | ~28 | full 262,144 |
+| A100 80 GB SXM | 2039 | ~82 | ~56 | ~30 | full 262,144 |
+| H100 80 GB SXM | 3350 | ~135 | ~92 | ~49 | full 262,144 |
+
+**What this means in practice.**
+
+- **A100 40 GB** already reaches the full trained context at Q5_K_M with room
+  left over. The 24 GiB build's central compromise — pool versus seats versus
+  quantisation — does not arise; pick Q5, take 262,144, take 8+ slots.
+- **A100 80 GB** runs **Q8_0 at the full 262,144 context** with roughly 47 GiB
+  still free, or **BF16 unquantised** with ~23 GiB free. At that point KV
+  quantisation is also unnecessary: f16 KV costs 32 KiB/token, so 262,144 tokens
+  is 8 GiB, which fits trivially. Every accuracy compromise in this document can
+  be dropped at once.
+- **Ampere is not Hopper.** The A100 is sm_80: **no FP8** (that starts at Ada
+  sm_89) and no NVFP4 (Blackwell). vLLM recipes written around `fp8` weights or
+  `--kv-cache-dtype fp8` do not apply. W4A16 Marlin does, and GGUF is unaffected
+  because `q8_0`/`q4_0` KV are integer formats.
+- **Concurrency should scale better than on the 4090**, which reached 2.37×
+  aggregate at 4 slots. More compute per unit of bandwidth means batched decode
+  has more headroom. This is **not measured** — treat it as a reason to run
+  `bench-concurrency.py` on arrival, not as a number to plan against.
+
+### B.8 Shared HPC clusters (Slurm) — a node you do not own
+
+Time-boxed access to a cluster is a different deployment from a workstation:
+no root, no systemd, no persistent service, and a job that disappears at
+walltime. The stack still works, but four assumptions in the main text break.
+
+**No root, no `/opt`, no service.** Install everything under `$HOME` or scratch
+and run the server as a foreground process inside the job. `install-node.sh`
+assumes systemd and a service account; on a cluster, use its pieces (weights
+fetch, presets, verification) and start `llama-server` directly.
+
+**Put weights on scratch, not `$HOME`.** Home directories are small, often
+NFS-mounted, and slow to page a 20 GiB file from. Set `HF_HOME` and the model
+directory to the fast parallel filesystem, and expect the first load of a job to
+be slow and subsequent ones to be fast only if the node's page cache survives.
+
+**There is no prebuilt Linux CUDA llama.cpp** (see B.0), so the binary must be
+built — and the build needs `nvcc` from the cluster's toolchain, which usually
+means a `module load` and often a compute node. Build once into scratch and
+reuse it across jobs; do not rebuild per job.
+
+**The server is on a compute node, your editor is not.** Reach it with an SSH
+tunnel through the login node, then point the client at `127.0.0.1` as usual:
+
+```bash
+# in the job: bind to the node's address, print where it landed
+llama-server --models-preset presets.ini --models-max 1 \
+             --host 0.0.0.0 --port 8080
+
+# from the workstation: forward through the login node to that compute node
+ssh -N -L 8080:${COMPUTE_NODE}:8080 ${USER}@${LOGIN_HOST}
+```
+
+Binding `0.0.0.0` on a shared cluster exposes an unauthenticated model server to
+every other user on the network. Set an API key, or bind to the node's private
+interface only, and check the site's policy before doing either.
+
+**Sizing for a time-boxed loan.** With days rather than minutes, spend the first
+hour measuring rather than assuming: `measure-ceiling.sh` for the real ceiling,
+`measure-slot-frontier.sh` for the seat/pool exchange rate on that card, and
+`bench-concurrency.py` for how batching scales. Those three numbers are what
+make the rest of the configuration derivable instead of guessed.
+
+**Confirm at your site before writing the job script** — these vary and the
+values above are not portable: the scheduler and GPU request syntax
+(`--gres=gpu:a100:1` vs `--gpus=`), partition and QOS names, walltime limits,
+the CUDA module name, whether compute nodes have outbound internet for the
+weights download (often they do not — stage on the login node first), and
+whether inbound connections to compute nodes are permitted at all.
 
 ## Appendix C — Failure catalogue
 

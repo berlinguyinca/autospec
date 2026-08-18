@@ -74,6 +74,13 @@ PLATFORMS = {
     "mac-128-max":      (98_304,       546, 3072, "Apple 128 GB M-Max (75%)"),
     "mac-512-ultra":    (393_216,      819, 4096, "Apple 512 GB M-Ultra (75%)"),
     "spark-128":        (108_000,      273, 3072, "DGX Spark GB10 128 GB (~85%)"),
+    # Datacentre Ampere. No FP8 and no NVFP4 -- those need Ada (sm_89) and
+    # Blackwell respectively -- so the quant choice here is GGUF or W4A16
+    # Marlin, never the fp8 recipes written for H100.
+    "a100-40":          (39_000,      1555, 2048, "A100 40 GB SXM4"),
+    "a100-80":          (79_000,      2039, 3072, "A100 80 GB SXM4"),
+    "a100-80-pcie":     (79_000,      1935, 3072, "A100 80 GB PCIe"),
+    "h100-80":          (79_000,      3350, 3072, "H100 80 GB SXM5"),
 }
 
 CATALOGUE = {
