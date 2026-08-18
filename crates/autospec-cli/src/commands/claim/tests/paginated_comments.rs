@@ -15,7 +15,7 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId,
 };
 use autospec_core::claim::RemoteComment;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -459,6 +459,52 @@ fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
             ClaimBranch::try_from("feat/worker-old").expect("recorded branch"),
         ))
     );
+}
+
+#[test]
+fn lifecycle_claim_delegates_only_exact_incomplete_startup_to_requested_owner() {
+    // Break caught: lifecycle stale-owner projection rejected the exact
+    // evidenceless startup sentinel before authoritative CAS recovery ran.
+    let mut pending = claim_record("worker-old", "claim-old", "claimed");
+    pending.updated_at = "2026-07-29T00:49:45Z".to_string();
+    pending.step = "heartbeat-pending:none".to_string();
+    let assert_requested_owner_fresh = |evidence| {
+        assert_eq!(
+            evidence,
+            ClaimEvidence::Observed(ClaimContext::active(
+                RepositoryScope::try_from("owner/repo").expect("repository scope"),
+                IssueNumber::new(42).expect("issue"),
+                WorkerId::try_from("worker-requested").expect("requested worker"),
+                ClaimBranch::try_from("feat/requested").expect("requested branch"),
+                LeaseFreshness::Fresh,
+            ))
+        );
+    };
+    let assert_recorded_owner_stale = |evidence| {
+        assert_eq!(
+            evidence,
+            ClaimEvidence::Observed(ClaimContext::active(
+                RepositoryScope::try_from("owner/repo").expect("repository scope"),
+                IssueNumber::new(42).expect("issue"),
+                WorkerId::try_from("worker-old").expect("recorded worker"),
+                ClaimBranch::try_from("feat/worker-old").expect("recorded branch"),
+                LeaseFreshness::Abandoned,
+            ))
+        );
+    };
+
+    assert_requested_owner_fresh(lifecycle_evidence(&pending).expect("pending startup evidence"));
+
+    for step in [
+        "heartbeat-publishing:none",
+        "heartbeat-pending:abc123",
+        "claimed",
+    ] {
+        let mut record = claim_record("worker-old", "claim-old", "claimed");
+        record.updated_at = "2026-07-29T00:49:45Z".to_string();
+        record.step = step.to_string();
+        assert_recorded_owner_stale(lifecycle_evidence(&record).expect("recorded owner evidence"));
+    }
 }
 
 #[test]

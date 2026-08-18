@@ -25,6 +25,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_stall_cleans_exact_process_group_nonterminally() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-stall");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -65,6 +66,7 @@ fn autonomous_executor_bridge_stall_cleans_exact_process_group_nonterminally() {
 
 #[test]
 fn autonomous_executor_bridge_does_not_duplicate_or_signal_mismatched_identity() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-identity");
     let mut running = Command::new("/bin/sh");
     #[cfg(unix)]
@@ -205,6 +207,7 @@ fn autonomous_executor_bridge_pidfd_signal_ignores_substituted_numeric_identity(
 
 #[test]
 fn autonomous_executor_bridge_fails_closed_on_protected_ref_mutation() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-mutation");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -385,6 +388,7 @@ fn autonomous_executor_bridge_snapshot_seals_deletion_and_same_status_type_chang
 
 #[test]
 fn autonomous_executor_bridge_mutation_failure_persists_only_interrupted() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("snapshot-persist-interrupted");
     let tracked = fixture.repo.join("README.md");
     fs::write(&tracked, "operator edit before launch\n").expect("dirty tracked file");

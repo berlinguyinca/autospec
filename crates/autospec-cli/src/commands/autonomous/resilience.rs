@@ -6,8 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::CommandFailure;
 use autospec_core::autonomous_lifecycle::{
@@ -18,6 +17,7 @@ use autospec_core::autonomous_lifecycle::{
 
 mod records;
 mod spawn;
+mod startup_transaction;
 pub(super) use spawn::{assert_lifecycle_before_spawn, renew_lifecycle};
 
 use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
@@ -402,7 +402,6 @@ impl ResilienceStore {
             return Err(StoreError::TokenMismatch);
         }
 
-        state.status = "running".to_string();
         state.heartbeat_at = Some(now_secs());
         state.lock_pid = Some(std::process::id());
         state.lock_host = Some(self.host.clone());
@@ -679,7 +678,7 @@ pub(super) fn adopt_lifecycle(
     token: &str,
 ) -> Result<ConductorLease, LifecycleLeaseError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
-    store.adopt(token).map_err(store_error_to_lease_error)
+    startup_transaction::retry(|| store.adopt(token)).map_err(store_error_to_lease_error)
 }
 
 pub(super) fn admit_owned_lifecycle(
@@ -702,8 +701,7 @@ pub(super) fn admit_owned_lifecycle(
         DEFAULT_LIFETIME_ISSUES,
     )
     .map_err(lifecycle_admission_to_lease_error)?;
-    store
-        .admit_owned(lease, issue, usage_cap, issue_cap)
+    startup_transaction::retry(|| store.admit_owned(lease, issue, usage_cap, issue_cap))
         .map_err(store_error_to_lease_error)
 }
 
@@ -783,8 +781,11 @@ pub(super) fn with_current_lifecycle_lease<T>(
 ) -> Result<T, String> {
     // Global mutation lock order is resilience lease first, then subsystem locks. Holding the
     // lease transaction across `operation` prevents a reclaim from racing a fenced write.
-    let _transaction =
-        LeaseTransaction::try_open(&lease.lock_path).map_err(|error| match error {
+    #[cfg(test)]
+    let transaction = startup_transaction::retry(|| LeaseTransaction::try_open(&lease.lock_path));
+    #[cfg(not(test))]
+    let transaction = LeaseTransaction::try_open(&lease.lock_path);
+    let _transaction = transaction.map_err(|error| match error {
             StoreError::Held => "resilience lease transaction is held".to_string(),
             StoreError::Diagnostic(reason) => reason,
             StoreError::TokenMismatch => "resilience lease token mismatch".to_string(),
@@ -1112,28 +1113,18 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
-#[cfg(unix)]
 fn pid_is_dead(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return true;
+    if pid == 0 {
+        return false;
     }
-    if super::process_is_zombie(pid as i32) {
-        return true;
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return false;
     }
-    pid_probe_is_dead(nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        None,
-    ))
-}
-
-#[cfg(unix)]
-fn pid_probe_is_dead(result: Result<(), nix::errno::Errno>) -> bool {
-    matches!(result, Err(nix::errno::Errno::ESRCH))
-}
-
-#[cfg(not(unix))]
-fn pid_is_dead(_pid: u32) -> bool {
-    false
+    matches!(
+        super::executor_bridge::observe_runtime_process_identity(pid),
+        Ok(None)
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -1148,6 +1139,13 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    fn assert_token_mismatch<T>(operation: impl FnMut() -> Result<T, StoreError>) {
+        assert!(matches!(
+            retry_transient_lock(operation, |result| matches!(result, Err(StoreError::Held))),
+            Err(StoreError::TokenMismatch)
+        ));
+    }
 
     const LEASE_LOCK_TEST_ROOT: &str = "AUTOSPEC_LEASE_LOCK_TEST_ROOT";
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1168,11 +1166,23 @@ mod tests {
         }
     }
 
+    fn dead_child_pid() -> u32 {
+        let mut child = Command::new("true")
+            .spawn()
+            .expect("start dead PID fixture");
+        let pid = child.id();
+        assert!(child.wait().expect("reap dead PID fixture").success());
+        pid
+    }
+
     #[test]
     fn pid_liveness_requires_observed_process_absence() {
         assert!(!pid_is_dead(std::process::id()));
-        assert!(pid_is_dead(0));
-        assert!(pid_is_dead(i32::MAX as u32 + 1));
+        assert!(!pid_is_dead(0));
+        assert!(
+            !pid_is_dead(i32::MAX as u32 + 1),
+            "an unrepresentable PID is unknown, not proven dead"
+        );
 
         let mut child = ChildGuard(
             Command::new("sleep")
@@ -1184,14 +1194,6 @@ mod tests {
         assert!(!pid_is_dead(pid));
         child.stop_and_reap();
         assert!(pid_is_dead(pid));
-    }
-
-    #[test]
-    fn pid_probe_fails_closed_for_errors_other_than_process_absence() {
-        assert!(!pid_probe_is_dead(Ok(())));
-        assert!(pid_probe_is_dead(Err(nix::errno::Errno::ESRCH)));
-        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EPERM)));
-        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EINVAL)));
     }
 
     #[test]
@@ -1265,19 +1267,13 @@ mod tests {
         let replacement_state =
             fs::read_to_string(second.canonical_state_path()).expect("read replacement state");
 
-        assert!(matches!(
-            first.adopt(&stale_lease.token),
-            Err(StoreError::TokenMismatch)
-        ));
+        assert_token_mismatch(|| first.adopt(&stale_lease.token));
         assert_eq!(
             fs::read_to_string(second.canonical_state_path())
                 .expect("read state after stale adopt"),
             replacement_state
         );
-        assert!(matches!(
-            first.release(&stale_lease),
-            Err(StoreError::TokenMismatch)
-        ));
+        assert_token_mismatch(|| first.release(&stale_lease));
         assert_eq!(
             fs::read_to_string(second.canonical_state_path())
                 .expect("read state after stale release"),
@@ -1299,7 +1295,7 @@ mod tests {
 
         assert_eq!(
             store
-                .release_terminated_owner(u32::MAX)
+                .release_terminated_owner(dead_child_pid())
                 .unwrap_or_else(|_| panic!("reject a mismatched dead pid")),
             TerminatedOwnerRelease::OwnerMismatch
         );
@@ -1338,7 +1334,7 @@ mod tests {
 
         assert_eq!(
             store
-                .release_terminated_owner(u32::MAX)
+                .release_terminated_owner(dead_child_pid())
                 .unwrap_or_else(|_| panic!("release abandoned claim")),
             TerminatedOwnerRelease::Released
         );
@@ -1360,9 +1356,8 @@ mod tests {
         let (_, claimed) = owner
             .acquire(None, 1, 1)
             .unwrap_or_else(|_| panic!("claim lease"));
-        let lease = owner
-            .adopt(&claimed.token)
-            .unwrap_or_else(|_| panic!("adopt lease"));
+        let lease =
+            retry_lease(|| owner.adopt(&claimed.token)).unwrap_or_else(|_| panic!("adopt lease"));
         let mut stale_state = owner
             .read_state()
             .unwrap_or_else(|_| panic!("read state"))
@@ -1373,9 +1368,7 @@ mod tests {
             .write_state(&stale_state)
             .unwrap_or_else(|_| panic!("age running lease"));
 
-        owner
-            .renew(&lease)
-            .unwrap_or_else(|_| panic!("renew owned lease"));
+        retry_lease(|| owner.renew(&lease)).unwrap_or_else(|_| panic!("renew owned lease"));
 
         assert!(matches!(
             contender.acquire(None, 1, 1),
@@ -1387,9 +1380,11 @@ mod tests {
             .expect("renewed state")
             .0;
         assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
-        owner
-            .release(&lease)
-            .unwrap_or_else(|_| panic!("release renewed lease"));
+        retry_transient_lock(
+            || owner.release(&lease),
+            |result| matches!(result, Err(StoreError::Held)),
+        )
+        .unwrap_or_else(|_| panic!("release renewed lease"));
         assert_eq!(
             owner
                 .read_state()
@@ -1409,9 +1404,8 @@ mod tests {
         let (_, claimed) = owner
             .acquire(None, 1, 1)
             .unwrap_or_else(|_| panic!("claim lease"));
-        let lease = owner
-            .adopt(&claimed.token)
-            .unwrap_or_else(|_| panic!("adopt lease"));
+        let lease =
+            retry_lease(|| owner.adopt(&claimed.token)).unwrap_or_else(|_| panic!("adopt lease"));
         let mut stale_state = owner
             .read_state()
             .unwrap_or_else(|_| panic!("read state"))
@@ -1451,9 +1445,11 @@ mod tests {
             .expect("renewed state")
             .0;
         assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
-        owner
-            .release(&lease)
-            .unwrap_or_else(|_| panic!("release lease"));
+        retry_transient_lock(
+            || owner.release(&lease),
+            |result| matches!(result, Err(StoreError::Held)),
+        )
+        .unwrap_or_else(|_| panic!("release lease"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1593,8 +1589,9 @@ mod tests {
     fn test_root(name: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "autospec-resilience-lease-{name}-{}-{sequence}",
-            std::process::id()
+            "autospec-resilience-lease-{name}-{}-{}-{sequence}",
+            std::process::id(),
+            now_nanos()
         ));
         fs::create_dir_all(&root).expect("create test root");
         root

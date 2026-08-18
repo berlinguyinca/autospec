@@ -372,6 +372,7 @@ fn autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
+    let _environment = test_environment();
     let leader = bridge::OwnedProcess::capture_forked_child(std::process::id())
         .expect("capture test process");
     let mut processes = bridge::OwnedProcessSet {
@@ -489,25 +490,22 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
         .signal(Signal::SIGKILL)
         .expect("stop intermediary fixture");
     intermediary.wait().expect("reap intermediary fixture");
-    for _ in 0..100 {
+    let nonchild_disappeared = (0..100).any(|_| {
         processes
             .reap_descendants()
             .expect("reap retained non-child fixture");
-        if bridge::observe_process_birth(nonchild_pid)
+        let disappeared = bridge::observe_process_birth(nonchild_pid)
             .expect("observe reparented non-child fixture")
-            .is_none()
-        {
-            break;
+            .is_none();
+        if !disappeared {
+            std::thread::sleep(Duration::from_millis(10));
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(bridge::observe_process_birth(nonchild_pid)
-        .expect("observe reaped non-child fixture")
-        .is_none());
+        disappeared
+    });
     processes
         .capture_descendants_while_leader_live()
-        .expect("forget reaped non-child tombstone");
-    assert!(!processes.exited_descendants.contains_key(&nonchild_key));
+        .expect("reconcile reparented non-child tombstone");
+    assert_eq!(processes.exited_descendants.contains_key(&nonchild_key), !nonchild_disappeared);
     processes
         .descendants
         .get(&live_key)

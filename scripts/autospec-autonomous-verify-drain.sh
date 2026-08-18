@@ -176,7 +176,15 @@ rm -f "$PROMPT_FILE"
 # ── Run the skeptic through omx, with a stall watchdog. ───────────────────────
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-drain.%s' "$$")"
 
-setsid omx exec \
+run_in_new_session() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@"
+    else
+        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+    fi
+}
+
+run_in_new_session omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" > "$HARNESS_LOG" 2>&1 &

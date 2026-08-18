@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -eu
 
+if [ "$(uname -s)" != Linux ]; then
+    printf 'SKIP: Codex AppArmor sandbox dependency applies only on Linux\n'
+    exit 0
+fi
+
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HELPER="$ROOT/scripts/ensure-codex-sandbox.sh"
 TMP_DIR="$(mktemp -d)"

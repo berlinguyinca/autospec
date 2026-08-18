@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::fs;
+use std::process::Command;
 
 use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::no_work::NoWorkTier;
@@ -24,6 +25,7 @@ const CLOSED_ORDER: [NoWorkTier; 5] = [
     NoWorkTier::Tier3,
     NoWorkTier::Tier4,
 ];
+const ISOLATED_TIER4_TEST: &str = "commands::autonomous::foreground_waterfall_tests::nonempty_tier4_config_advances_disabled_policy_without_fetching_isolated";
 
 #[test]
 fn driver_runs_only_the_current_tier_and_returns_the_reloaded_cursor() {
@@ -90,6 +92,23 @@ fn closed_tier_order_is_exact_and_each_advance_stops_after_one_call() {
 
 #[test]
 fn nonempty_tier4_config_advances_disabled_policy_without_fetching() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--ignored", "--exact", ISOLATED_TIER4_TEST, "--nocapture"])
+        .output()
+        .expect("run isolated Tier 4 dispatch test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let receipt = format!("test {ISOLATED_TIER4_TEST} ... ok");
+    let receipt_count = stdout.lines().filter(|line| *line == receipt).count();
+    assert!(
+        output.status.success() && receipt_count == 1,
+        "isolated Tier 4 dispatch emitted {receipt_count} exact receipts: stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+#[ignore = "launched in isolation by the Tier 4 dispatch test"]
+fn nonempty_tier4_config_advances_disabled_policy_without_fetching_isolated() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     let lease = acquire_test_lifecycle(root.path(), REPO).expect("lifecycle lease");

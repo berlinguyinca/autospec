@@ -6,7 +6,13 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "support/resilience_fixture_support.rs"]
+mod resilience_fixture_support;
+use resilience_fixture_support::{
+    dead_child_pid, fixture_root, git_fixture, now_secs, path_with, seed_bound_accountability,
+    stdout, wait_for_path, write_executable, write_file, ACCOUNTABILITY_ONLY_GH,
+};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -602,13 +608,14 @@ fn resilience_decide_rejects_invalid_environment_budget_before_migration() {
 #[test]
 fn resilience_decide_reclaims_only_a_known_same_host_dead_pid() {
     let same_host = ResilienceFixture::new();
+    let dead_pid = dead_child_pid();
     same_host.write_state(
         "owner__repo",
         state_with_lock(
             "owner/repo",
             "running",
             1,
-            u32::MAX,
+            dead_pid,
             Some("autospec-test-host"),
         ),
     );
@@ -716,6 +723,7 @@ fn autonomous_foreground_releases_an_adopted_lease_when_a_stop_is_persisted() {
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     write_file(
         &fixture.operator_stop_flag_path(),
         "graceful\noperator@test\n",
@@ -760,6 +768,7 @@ fn autonomous_foreground_releases_an_adopted_lease_when_the_stop_record_is_inval
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     write_file(
         &fixture.operator_stop_flag_path(),
         "unknown\noperator@test\n",
@@ -797,6 +806,7 @@ fn autonomous_foreground_releases_an_inherited_lease_when_config_turns_invalid()
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     let config_dir = fixture.repo_dir.join(".autospec");
     fs::create_dir_all(&config_dir).expect("create config directory");
     fs::write(
@@ -838,6 +848,7 @@ fn autonomous_foreground_releases_an_adopted_lease_after_admission_diagnostic() 
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     fs::create_dir_all(
         fixture
             .state_root
@@ -877,6 +888,7 @@ fn autonomous_foreground_persists_an_inherited_lease_rejection_before_release() 
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     fixture.write_failures("owner__repo", 42, 3);
 
     let output = fixture
@@ -918,6 +930,7 @@ fn autonomous_foreground_release_diagnostic_emits_no_decision_json() {
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     let stop_flag = fixture.operator_stop_flag_path();
     fs::create_dir_all(stop_flag.parent().expect("stop flag parent"))
         .expect("create stop flag parent");
@@ -995,6 +1008,7 @@ fn autonomous_foreground_token_replacement_during_release_emits_no_decision_json
             Some(1),
         ),
     );
+    fixture.seed_bound_accountability(1);
     let stop_flag = fixture.operator_stop_flag_path();
     fs::create_dir_all(stop_flag.parent().expect("stop flag parent"))
         .expect("create stop flag parent");
@@ -1082,14 +1096,8 @@ fn autonomous_foreground_midrun_rejection_emits_no_decision_json_when_release_fa
         .stderr(Stdio::piped())
         .spawn()
         .expect("start foreground child with mid-run release failure");
-    for _ in 0..80 {
-        if final_selection_ready.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
     assert!(
-        final_selection_ready.exists(),
+        wait_for_path(&final_selection_ready, Duration::from_secs(5)),
         "foreground command must acquire its lease before final selection waits"
     );
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555))
@@ -1121,6 +1129,7 @@ fn concurrent_foreground_command_parks_while_the_first_command_owns_the_lease() 
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh
+. "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"
 touch "$AUTOSPEC_TEST_FOREGROUND_ENTERED"
 sleep 2
 exit 1
@@ -1299,6 +1308,7 @@ fn autonomous_start_passes_lease_token_only_through_the_child_environment() {
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh
+. "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"
 printf '%s' "${AUTOSPEC_CONDUCTOR_LEASE_TOKEN:-}" > "$AUTOSPEC_TEST_CHILD_TOKEN"
 exit 1
 "#,
@@ -1401,6 +1411,7 @@ fn delayed_child_with_replaced_token_exits_before_foreground_mutation() {
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh
+. "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"
 printf 'called\n' > "$AUTOSPEC_TEST_GITHUB_CALLS"
 exit 1
 "#,
@@ -2026,12 +2037,10 @@ struct ResilienceFixture {
 impl ResilienceFixture {
     fn new() -> Self {
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "autospec-resilience-test-{}-{}",
-            std::process::id(),
-            sequence
-        ));
+        let root = fixture_root(sequence);
         fs::create_dir_all(&root).expect("create fixture root");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("create fixture bin");
         let fixture = Self {
             state_root: root.join("state"),
             spend_root: root.join("spend"),
@@ -2040,6 +2049,7 @@ impl ResilienceFixture {
             root,
         };
         fixture.initialize_git_remote();
+        write_executable(&bin.join("gh"), ACCOUNTABILITY_ONLY_GH);
         fixture
     }
 
@@ -2087,6 +2097,20 @@ impl ResilienceFixture {
             .env("AUTOSPEC_STATE_DIR", &self.state_root)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", &self.spend_root)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator_root)
+            .env("AUTOSPEC_NO_SELF_UPDATE", "1")
+            .env(
+                "AUTOSPEC_FOREGROUND_ACCOUNTABILITY",
+                self.root.join("accountability.md"),
+            )
+            .env("AUTOSPEC_FOREGROUND_ACCOUNTABILITY_REPO", "owner/repo")
+            .env(
+                "AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/support/foreground_accountability_gh.sh"
+                ),
+            )
+            .env("PATH", path_with(&self.root.join("bin")))
             .env("HOME", &self.root)
             .env_remove("AUTOSPEC_STOP_FLAG_FILE")
             .env_remove("AUTOSPEC_RUN_ONLY_ISSUES")
@@ -2115,6 +2139,7 @@ impl ResilienceFixture {
             &bin.join("gh"),
             r####"#!/bin/sh
 set -eu
+. "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"
 
 endpoint=""
 for value in "$@"; do
@@ -2203,6 +2228,7 @@ esac
             &bin.join("gh"),
             r####"#!/bin/sh
 set -eu
+. "$AUTOSPEC_FOREGROUND_ACCOUNTABILITY_HANDLER"
 endpoint=""
 for value in "$@"; do
   case "$value" in repos/*) endpoint="$value" ;; esac
@@ -2293,6 +2319,14 @@ esac
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git_fixture(&self.repo_dir, &["push", "-u", "origin", "main"]);
+    }
+
+    fn seed_bound_accountability(&self, lease_generation: u64) {
+        seed_bound_accountability(
+            &self.operator_root,
+            &self.root.join("accountability.md"),
+            lease_generation,
+        );
     }
 
     fn canonical_state_path(&self) -> PathBuf {
@@ -2408,50 +2442,6 @@ fn token_state(
         lease_token.map(|token| format!("\"{token}\"")).unwrap_or_else(|| "null".to_string()),
         lease_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "null".to_string()),
     )
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("current time")
-        .as_secs()
-}
-
-fn write_file(path: &Path, contents: &str) {
-    fs::create_dir_all(path.parent().expect("parent directory")).expect("create parent directory");
-    fs::write(path, contents).expect("write fixture state");
-}
-
-fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write fake executable");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make fake executable");
-}
-
-fn path_with(bin: &Path) -> String {
-    format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").expect("PATH is set")
-    )
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn git_fixture(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .expect("run fixture git command");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn workspace_root() -> PathBuf {

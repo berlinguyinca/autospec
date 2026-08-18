@@ -13,6 +13,15 @@ pub(super) fn process_is_running(pid: u32) -> bool {
         })
 }
 
+pub(super) fn wait_for_process_exit(pid: u32) {
+    for _ in 0..100 {
+        if !process_is_running(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 pub(super) fn process_identity(pid: u32) -> Option<(u32, u64)> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, fields) = stat.rsplit_once(") ")?;

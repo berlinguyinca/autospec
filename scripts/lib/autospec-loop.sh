@@ -1994,7 +1994,7 @@ fi'
             --tier3-dry-cycles "$_tier3_dry_cycles" \
             --tier4-dry-cycles "$_tier4_dry_cycles" \
             ${_repo:+--repo "$_repo"} \
-            "${_waterfall_backlog_args[@]}" \
+            ${_waterfall_backlog_args[@]+"${_waterfall_backlog_args[@]}"} \
             ${_growth_flags} \
             2>/dev/null \
             || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"

@@ -12,7 +12,7 @@ use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 #[test]
@@ -336,10 +336,8 @@ fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
         let result = prepared.publish();
         (prepared, result)
     });
-    for _ in 0..100 {
-        if started.exists() {
-            break;
-        }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(started.exists(), "delayed gh never entered create");
@@ -353,7 +351,49 @@ fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
     assert!(prepared.state.draft_process.is_some());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[test]
+fn autonomous_executor_bridge_draft_release_child_closes_unrelated_inherited_lock() {
+    let _environment = test_environment();
+    let mut prepared = prepared_draft_transaction("draft-release-inherited-lock");
+    let hold = prepared.fixture.root.join("draft-release.hold");
+    let started = prepared.fixture.root.join("draft-release.started");
+    let lock_path = prepared.fixture.root.join("unrelated.lock");
+    fs::write(&hold, b"hold\n").expect("create draft release hold");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("open unrelated lock");
+    lock.try_lock().expect("acquire unrelated lock");
+    prepared.adapter.environment.insert(
+        "AUTOSPEC_TEST_DRAFT_RELEASE_HOLD".into(),
+        hold.clone().into_os_string(),
+    );
+    prepared.adapter.environment.insert(
+        "AUTOSPEC_TEST_DRAFT_RELEASE_HOLD_STARTED".into(),
+        started.clone().into_os_string(),
+    );
+    let publisher = std::thread::spawn(move || prepared.publish());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(started.exists(), "draft release child did not reach hold");
+    drop(lock);
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .expect("reopen unrelated lock");
+    let probe_result = probe.try_lock();
+    fs::remove_file(hold).expect("release draft child");
+    assert_eq!(publisher.join().expect("join publisher").expect("publish"), 17);
+    probe_result.expect("draft release child must not retain unrelated lock");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
     // Break caught: gh starting before its exact prepared identity/release is durable.
@@ -371,7 +411,7 @@ fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
     assert!(prepared.state.draft_process.is_some());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child() {
     // Break caught: a parent crash before release permanently stranding a safe create intent.
@@ -398,7 +438,7 @@ fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child()
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
     // Break caught: the suspended child sending a request after its parent disappears pre-release.
@@ -430,7 +470,7 @@ fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable() {
     // Break caught: failed child launch leaving a release receipt that permanently blocks retry.
@@ -475,7 +515,7 @@ fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable()
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn autonomous_executor_bridge_recovers_after_durable_intent_clear_crash() {
     // Break caught: a crash after durable intent removal permanently stranding a safe retry.

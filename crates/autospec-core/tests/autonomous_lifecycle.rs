@@ -9,6 +9,14 @@ use autospec_core::autonomous_lifecycle::{
 #[test]
 fn conductor_lease_reclaims_at_boundaries_and_for_dead_local_pid() {
     assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::claimed(1, true)),
+        ConductorLeaseDecision::Held,
+    );
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::claimed(300, true)),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::ClaimedExpired),
+    );
+    assert_eq!(
         decide_conductor_lease(ConductorLeaseInput::claimed(300, false)),
         ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::ClaimedExpired),
     );

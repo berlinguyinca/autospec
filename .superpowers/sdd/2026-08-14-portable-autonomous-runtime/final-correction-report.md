@@ -118,7 +118,7 @@ Results:
 
 An attempted `cargo test --no-run --target x86_64-unknown-freebsd` compiled all Rust sources but could not link a FreeBSD test binary with the macOS host linker (`ld: unknown options: --as-needed ...`). This is a host cross-linker limitation, not a Rust diagnostic; native execution remains covered by the FreeBSD VM job.
 
-The repository does not contain `scripts/validate.sh` in this worktree, so that documented command was unavailable. All task-specific validation commands listed above were run directly.
+The removed legacy shell validator is unavailable in this worktree. The canonical `cargo run -q -p autospec-cli -- validate` command and all task-specific validation commands listed above were run directly.
 
 ## Self-review and remaining risk
 

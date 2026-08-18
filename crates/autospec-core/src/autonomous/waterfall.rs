@@ -1,6 +1,10 @@
 mod codec;
 mod sha256;
 
+use std::io::{self, Read};
+
+use sha2::{Digest, Sha256};
+
 use super::no_work::{is_sealed_digest, DryReason, NoWorkTier};
 
 pub const WATERFALL_RECEIPT_SCHEMA: u64 = 1;
@@ -8,6 +12,36 @@ pub const WATERFALL_STATE_SCHEMA: u64 = 1;
 
 pub fn sha256_hex(input: &[u8]) -> String {
     sha256::hex(input)
+}
+
+pub fn sha256_reader_hex(mut input: impl Read) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(test)]
+mod reader_digest_tests {
+    use super::sha256_reader_hex;
+
+    #[test]
+    fn streaming_sha256_matches_the_standard_abc_vector() {
+        assert_eq!(
+            sha256_reader_hex(&b"abc"[..]).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

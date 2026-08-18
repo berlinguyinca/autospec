@@ -168,6 +168,12 @@ pub enum EventKind {
     WorkSelected { issue: Option<u64> },
     ClaimStarted { issue: u64 },
     IssueClaimed { issue: u64 },
+    HeartbeatPublicationDeferred { issue: u64, claim_id: String },
+    StartupClaimRecovered {
+        issue: u64,
+        previous_claim_id: String,
+        next_claim_id: String,
+    },
     ImplementationStarted { issue: u64 },
     PullRequestOpened { pull_request: u64 },
     ReviewStarted { pull_request: u64 },
@@ -190,6 +196,21 @@ impl EventKind {
             Self::WorkSelected { issue } => json!({"type":"work_selected","issue":issue}),
             Self::ClaimStarted { issue } => json!({"type":"claim_started","issue":issue}),
             Self::IssueClaimed { issue } => json!({"type":"issue_claimed","issue":issue}),
+            Self::HeartbeatPublicationDeferred { issue, claim_id } => json!({
+                "type":"heartbeat_publication_deferred",
+                "issue":issue,
+                "claim_id":claim_id,
+            }),
+            Self::StartupClaimRecovered {
+                issue,
+                previous_claim_id,
+                next_claim_id,
+            } => json!({
+                "type":"startup_claim_recovered",
+                "issue":issue,
+                "previous_claim_id":previous_claim_id,
+                "next_claim_id":next_claim_id,
+            }),
             Self::ImplementationStarted { issue } => {
                 json!({"type":"implementation_started","issue":issue})
             }
@@ -226,6 +247,15 @@ impl EventKind {
             },
             "issue_claimed" => Self::IssueClaimed {
                 issue: unsigned(object, "issue")?,
+            },
+            "heartbeat_publication_deferred" => Self::HeartbeatPublicationDeferred {
+                issue: unsigned(object, "issue")?,
+                claim_id: string(object, "claim_id")?.to_owned(),
+            },
+            "startup_claim_recovered" => Self::StartupClaimRecovered {
+                issue: unsigned(object, "issue")?,
+                previous_claim_id: string(object, "previous_claim_id")?.to_owned(),
+                next_claim_id: string(object, "next_claim_id")?.to_owned(),
             },
             "implementation_started" => Self::ImplementationStarted {
                 issue: unsigned(object, "issue")?,
@@ -534,3 +564,7 @@ impl EventRecord {
         Ok(record)
     }
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

@@ -144,8 +144,15 @@ Development follows red-green TDD.
 - Supervisor contract tests cover successful exit, non-zero exit, stall
   termination, descendant cleanup, receipt recovery, and refusal to signal an
   unowned recovered PID.
+- Runtime admission and heartbeat liveness share the executor bridge's platform
+  identity observer on Linux, macOS, Windows, and FreeBSD. Only a natively
+  absent PID is dead; identity mismatch or observation failure remains blocking.
+- Unsupported-host admission tests are compiled only for targets outside those
+  four supported hosts.
 - Linux tests preserve existing pidfd behavior.
-- macOS tests exercise the process-group backend.
+- macOS tests use exact names and prove that each process-owner and portable
+  runtime behavior executes once; broad filters that can pass with zero tests
+  are not platform evidence.
 - Windows tests exercise Job Object ownership.
 - FreeBSD CI runs through `vmactions/freebsd-vm@v1`, builds the CLI, and executes
   the process-group and portable pure-state tests inside the VM.

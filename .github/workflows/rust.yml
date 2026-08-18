@@ -12,7 +12,7 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +31,84 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Install pinned executor integration tools
+        run: |
+          set -eu
+          codex_version=0.147.0
+          codex_sha256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
+          codex_bwrap_sha256=e73dc46e2ec7176499cb14e26c7b80b9d8e24a39cd51fe8fa0d45ddd8f6fb87c
+          gitleaks_version=8.30.1
+          gitleaks_sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          semgrep_version=1.173.0
+          semgrep_image=semgrep/semgrep@sha256:44dd022c29d4f881a939f7281b4ba8855cb940a2dd272883908d8947325a4ba7
+
+          mkdir -p "$HOME/.local/bin"
+          codex_archive="$RUNNER_TEMP/codex.tar.gz"
+          codex_bwrap_archive="$RUNNER_TEMP/codex-bwrap.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/openai/codex/releases/download/rust-v${codex_version}/codex-x86_64-unknown-linux-musl.tar.gz" \
+            --output "$codex_archive"
+          curl --fail --location --silent --show-error \
+            "https://github.com/openai/codex/releases/download/rust-v${codex_version}/bwrap-x86_64-unknown-linux-musl.tar.gz" \
+            --output "$codex_bwrap_archive"
+          {
+            printf '%s  %s\n' "$codex_sha256" "$codex_archive"
+            printf '%s  %s\n' "$codex_bwrap_sha256" "$codex_bwrap_archive"
+          } | sha256sum --check
+          tar -xzf "$codex_archive" -C "$HOME/.local/bin"
+          tar -xzf "$codex_bwrap_archive" -C "$HOME/.local/bin"
+          mv "$HOME/.local/bin/codex-x86_64-unknown-linux-musl" "$HOME/.local/bin/codex"
+          mv "$HOME/.local/bin/bwrap-x86_64-unknown-linux-musl" "$HOME/.local/bin/bwrap"
+
+          gitleaks_archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${gitleaks_version}/gitleaks_${gitleaks_version}_linux_x64.tar.gz" \
+            --output "$gitleaks_archive"
+          printf '%s  %s\n' "$gitleaks_sha256" "$gitleaks_archive" | sha256sum --check
+          tar -xzf "$gitleaks_archive" -C "$HOME/.local/bin" gitleaks
+
+          docker pull "$semgrep_image"
+          cat > "$HOME/.local/bin/semgrep" <<'SEMGREP_WRAPPER'
+          #!/bin/sh
+          set -eu
+          semgrep_image=semgrep/semgrep@sha256:44dd022c29d4f881a939f7281b4ba8855cb940a2dd272883908d8947325a4ba7
+          exec docker run --rm --network none \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e SEMGREP_SEND_METRICS=off \
+            -v "$PWD:/src:ro" \
+            -w /src \
+            "$semgrep_image" semgrep "$@"
+          SEMGREP_WRAPPER
+          chmod 755 "$HOME/.local/bin/semgrep"
+
+          "$HOME/.local/bin/codex" --version
+          "$HOME/.local/bin/gitleaks" version
+          test "$("$HOME/.local/bin/semgrep" --version)" = "$semgrep_version"
+          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Bootstrap repository test tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bats ripgrep
+          bash scripts/dev-bootstrap.sh
+
       - name: Clippy (lint)
         run: cargo clippy --workspace --all-targets
+
+      - name: Test Linux ownership contracts
+        run: |
+          cargo test -p autospec-cli --bin autospec pidfd -- --nocapture
+          cargo test -p autospec-cli --bin autospec subreaper -- --nocapture
+          cargo test -p autospec-cli --bin autospec heartbeat_startup -- --nocapture
+          cargo test -p autospec-cli --test claim_commands stale_startup_recovery -- --nocapture
+          cargo test -p autospec-cli --bin autospec cleanup_restart -- --nocapture
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Validate repository
+        run: cargo run -p autospec-cli -- validate
 
       - name: Build
         run: cargo build --workspace
@@ -55,11 +131,8 @@ jobs:
           run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
           run_exact 'commands::autonomous::executor_bridge::tests::adoption_cleanup::autonomous_executor_bridge_pidfd_adoption_requires_full_exec_identity'
           run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
-        # Deterministic inline unit tests only. Integration tests under
-        # tests/*.rs and the executor_bridge inline suite invoke shell
-        # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
-        # bubblewrap) that are absent or flaky on a bare GitHub runner; the
-        # full suite runs in the local target-repo validation gate.
+        # These exact probes keep the portable ownership contract explicit
+        # after the required full-workspace integration gate above.
 
   macos-test:
     runs-on: macos-latest
@@ -69,6 +142,36 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pinned standalone Codex
+        run: |
+          set -eu
+          codex_version=0.147.0
+          case "$(uname -m)" in
+            arm64)
+              codex_target=aarch64-apple-darwin
+              codex_sha256=75984b81f92a71b0c0f4b3b5cad80e5c57177e4d8c8b4b1e13db703b20dc4358
+              ;;
+            x86_64)
+              codex_target=x86_64-apple-darwin
+              codex_sha256=36e782f71d8164cc37c2b89c64948f2180e9a2f8456b27e660da75bc6b5574e2
+              ;;
+            *)
+              echo "unsupported macOS runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          mkdir -p "$HOME/.local/bin"
+          codex_archive="$RUNNER_TEMP/codex.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/openai/codex/releases/download/rust-v${codex_version}/codex-${codex_target}.tar.gz" \
+            --output "$codex_archive"
+          printf '%s  %s\n' "$codex_sha256" "$codex_archive" | shasum -a 256 --check
+          tar -xzf "$codex_archive" -C "$HOME/.local/bin"
+          mv "$HOME/.local/bin/codex-${codex_target}" "$HOME/.local/bin/codex"
+          chmod 755 "$HOME/.local/bin/codex"
+          "$HOME/.local/bin/codex" --version
+          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -99,7 +202,51 @@ jobs:
           }
           run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
           run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
+          run_exact 'commands::autonomous::executor_bridge::process_owner::tests::terminate_reaps_the_owned_process_group'
+          run_exact 'commands::autonomous::executor_bridge::portability::direct_attempt::tests::portable_supervision_failures_cleanup_before_retiring_owner_journal'
+          run_exact 'commands::autonomous::executor_bridge::platform_identity::tests::process_observation_only_reports_dead_for_an_absent_pid'
+          run_exact 'commands::autonomous::executor_bridge::portability::autonomous_runtime_support_tests::supported_run_foreground_dry_run_is_an_exact_artifact_free_preview'
           run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment'
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation'
+
+      - name: Test contained hooks through the Node launcher path
+        run: |
+          set -eu
+          standalone_codex="$(command -v codex)"
+          node_path="$(command -v node)"
+          launcher_root="$HOME/.local/share/autospec-ci-node-launcher"
+          launcher_bin="$launcher_root/bin"
+          mkdir -p "$launcher_bin"
+          chmod 700 "$launcher_root" "$launcher_bin"
+          standalone_json="$("$node_path" -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$standalone_codex")"
+          printf '%s\n' \
+            '#!/usr/bin/env node' \
+            "'use strict';" \
+            "const { spawnSync } = require('node:child_process');" \
+            "const result = spawnSync($standalone_json, process.argv.slice(2), { stdio: 'inherit' });" \
+            "if (result.error) throw result.error;" \
+            "process.exit(result.status === null ? 1 : result.status);" \
+            > "$launcher_bin/codex"
+          chmod 755 "$launcher_bin/codex"
+          test "$(sed -n '1p' "$launcher_bin/codex")" = '#!/usr/bin/env node'
+          export PATH="$launcher_bin:$PATH"
+          test "$(command -v codex)" = "$launcher_bin/codex"
+
+          run_exact() {
+            behavior_test="$1"
+            set +e
+            behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
+            behavior_status=$?
+            set -e
+            printf '%s\n' "$behavior_output"
+            if [ "$behavior_status" -ne 0 ]; then
+              return "$behavior_status"
+            fi
+            test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+          }
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment'
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation'
 
       - name: Build release autospec CLI
         run: cargo build --release -p autospec-cli
@@ -142,6 +289,9 @@ jobs:
           }
           Invoke-ExactRustTest 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
           Invoke-ExactRustTest 'commands::autonomous::executor_bridge::process_owner::tests::windows_creation_filetime_is_part_of_durable_identity'
+          Invoke-ExactRustTest 'commands::autonomous::executor_bridge::platform_identity::tests::supported_host_is_admitted_by_shared_platform_identity'
+          Invoke-ExactRustTest 'commands::autonomous::executor_bridge::platform_identity::tests::process_observation_only_reports_dead_for_an_absent_pid'
+          Invoke-ExactRustTest 'commands::autonomous::executor_bridge::portability::autonomous_runtime_support_tests::supported_run_foreground_dry_run_is_an_exact_artifact_free_preview'
           Invoke-ExactRustTest 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
 
       - name: Build release autospec CLI
@@ -183,6 +333,9 @@ jobs:
             run_exact 'commands::claim::heartbeat_portable::tests::freebsd_atomic_publication_rejects_destination_collision'
             run_exact 'commands::claim::heartbeat_portable::tests::freebsd_publication_resumes_after_crash_between_link_and_stage_cleanup'
             run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
+            run_exact 'commands::autonomous::executor_bridge::platform_identity::tests::supported_host_is_admitted_by_shared_platform_identity'
+            run_exact 'commands::autonomous::executor_bridge::platform_identity::tests::process_observation_only_reports_dead_for_an_absent_pid'
+            run_exact 'commands::autonomous::executor_bridge::portability::autonomous_runtime_support_tests::supported_run_foreground_dry_run_is_an_exact_artifact_free_preview'
             run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
             cargo build --release -p autospec-cli
 

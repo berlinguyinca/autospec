@@ -54,7 +54,7 @@ pub enum ConductorLeaseDecision {
 }
 
 pub fn decide_conductor_lease(input: ConductorLeaseInput) -> ConductorLeaseDecision {
-    if input.same_host_pid_dead {
+    if input.same_host_pid_dead && !input.claimed {
         return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid);
     }
     let Some(age) = input.heartbeat_age_secs else {

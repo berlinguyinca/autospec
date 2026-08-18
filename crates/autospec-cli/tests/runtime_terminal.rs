@@ -93,7 +93,7 @@ fn session_cleanup_reaps_nested_process_groups_after_timeout() {
         "fixture did not create the nested PTY session"
     );
     assert!(
-        session.owned_process_groups().len() >= 3,
+        session.wait_for_owned_process_group_count(3, discovery_deadline),
         "fixture did not create nested process groups across both sessions"
     );
 
@@ -178,6 +178,17 @@ impl SessionGuard {
         false
     }
 
+    fn wait_for_owned_process_group_count(&mut self, count: usize, deadline: Instant) -> bool {
+        while Instant::now() < deadline {
+            self.refresh_owned_sessions();
+            if self.owned_process_groups().len() >= count {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     fn wait_until(&mut self, deadline: Instant) -> Option<ExitStatus> {
         loop {
             self.refresh_owned_sessions();
@@ -205,7 +216,10 @@ impl SessionGuard {
                 Instant::now() + TERMINATION_TIMEOUT,
             );
         if !gone {
-            return Err("owned PTY sessions survived SIGKILL".to_string());
+            return Err(format!(
+                "owned PTY sessions survived SIGKILL: {:?}",
+                self.owned_process_groups()
+            ));
         }
         if self
             .child
@@ -270,7 +284,10 @@ impl SessionGuard {
         }
         for session in processes
             .iter()
-            .filter(|process| owned_processes.contains(&process.pid))
+            .filter(|process| {
+                owned_processes.contains(&process.pid)
+                    && owned_processes.contains(&process.session)
+            })
             .map(|process| process.session)
         {
             if self.owned_sessions.contains_key(&session) {

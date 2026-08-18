@@ -3,6 +3,7 @@
 //! A dead worker cannot release its own claim, and `claim release` validates the
 //! caller's identity, so an unconditional refusal wedged the issue permanently.
 use super::super::lease::conductor_claim_owner_holds_lease;
+use super::super::{startup_recovery_evidence, ClaimLease, RecoveryOutcome};
 use autospec_core::claim::RunStateRecord;
 
 pub(super) fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> RunStateRecord {
@@ -67,6 +68,30 @@ fn an_unparseable_timestamp_keeps_the_lease() {
     );
 }
 
+#[test]
+fn conductor_acquisition_reports_recovered_prior_and_new_claim_generations() {
+    // Break caught: authoritative recovery succeeded but acquisition discarded
+    // the prior generation needed for later accountability evidence.
+    let outcome = RecoveryOutcome {
+        recovered: true,
+        reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: Some("claim-prior".to_string()),
+    };
+    let lease = ClaimLease {
+        issue: 42,
+        repo: "owner/repo".to_string(),
+        worker_id: "worker-next".to_string(),
+        branch: "feat/next".to_string(),
+        claim_id: "claim-next".to_string(),
+        session_id: None,
+    };
+
+    let evidence = startup_recovery_evidence(&outcome, &lease).expect("recovery metadata");
+
+    assert_eq!(evidence.previous_claim_id, "claim-prior");
+    assert_eq!(evidence.next_claim_id, "claim-next");
+}
+
 mod requeue {
     use super::super::super::lease::{
         acquisition_blocking_owner, claim_is_abandoned, owner_still_holds,
@@ -82,7 +107,12 @@ mod requeue {
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(target_os = "linux")]
-    fn install_dead_heartbeat(root: &std::path::Path, worker_id: &str, claim_id: &str) {
+    fn install_dead_heartbeat(
+        root: &std::path::Path,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) {
         let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
             "owner/repo",
         ));
@@ -98,7 +128,7 @@ mod requeue {
         let boot_id = crate::commands::autonomous::current_boot_identity().expect("boot identity");
         let nonce = super::super::super::startup_heartbeat_nonce("owner/repo", 42, claim_id);
         let document = format!(
-            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker_id}","branch":"feat/worker","pr":"","claim_id":"{claim_id}","step":"claimed","ts":1,"ttl_seconds":1,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot_id}","process_start":"1"}}"#
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker_id}","branch":"{branch}","pr":"","claim_id":"{claim_id}","step":"claimed","ts":1,"ttl_seconds":1,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot_id}","process_start":"1"}}"#
         );
         let heartbeat = repo.join("42.json");
         std::fs::write(&heartbeat, document).expect("dead current heartbeat");
@@ -281,18 +311,21 @@ mod requeue {
         let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
         let (sandbox, _) = startup_heartbeat_fixture("current-owner-takeover");
         let root = sandbox.join("heartbeats");
+        let branch = format!("feat/autospec-dead-owner-{}", std::process::id());
         install_dead_heartbeat(
             &root,
             "rust-foreground-conductor-dead-1785286182924880200",
+            &branch,
             "claim-a",
         );
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
         std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
-        let selected = ClaimRefHead {
+        let mut selected = ClaimRefHead {
             oid: "dead-generation".to_string(),
             generation: "generation-1".to_string(),
             record: ready_record(&utc_now_iso().expect("timestamp")),
         };
+        selected.record.branch = branch;
         let requeued = quarantine_abandoned_claim_generation_with(
             "owner/repo",
             42,
@@ -389,7 +422,7 @@ mod requeue {
         let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
         let (sandbox, _) = startup_heartbeat_fixture("retained-prior-owner");
         let root = sandbox.join("heartbeats");
-        install_dead_heartbeat(&root, "prior-worker", "prior-claim");
+        install_dead_heartbeat(&root, "prior-worker", "feat/worker", "prior-claim");
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
         std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
         let mut prior = owner_record("2026-07-29T00:49:45Z", 1, "verification");
