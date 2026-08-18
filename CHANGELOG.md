@@ -29,6 +29,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   288,970 tokens of peak against a 180,224-token KV pool and killed every live
   session with `Context size has been exceeded`.
 
+#### Nested docs count as docs (2026-08-18)
+- `lint-implementation.sh`'s `is_doc_file` anchored `README*`, `docs/*` and
+  `AGENTS.md` at the repo root, so none of the 63 non-root README files and no
+  subproject `docs/` tree counted. A public-surface change documented in the right
+  place still tripped `DOC_OUT_OF_SYNC`, and the only way to satisfy the gate was
+  to touch an unrelated root doc. `SKILL.md` was already matched at any depth;
+  the rest now are too.
+
 ### Added
 
 #### V62-V74 final platform release candidate (2026-07-06)

@@ -669,8 +669,18 @@ is_test_file() {
 
 # is_doc_file PATH — returns 0 if path is a doc file
 is_doc_file() {
+    # Nested as well as root: this repo documents subprojects in place --
+    # llm/*/README.md, llm/*/docs/*.md, .autospec/*/README.md -- and 63 of its 64
+    # README files are not at the root. Anchoring the glob made every one of them
+    # invisible, so a change documented in the right place still tripped
+    # DOC_OUT_OF_SYNC and the only way to satisfy the gate was to touch an
+    # unrelated root doc. SKILL.md was already matched both ways.
     case "$1" in
-        README*|AGENTS.md|docs/*|*/SKILL.md|SKILL.md|skills/*/prompts/*.md|skills/*/references/*.md) return 0 ;;
+        README*|*/README*) return 0 ;;
+        AGENTS.md|*/AGENTS.md) return 0 ;;
+        docs/*|*/docs/*) return 0 ;;
+        SKILL.md|*/SKILL.md) return 0 ;;
+        skills/*/prompts/*.md|skills/*/references/*.md) return 0 ;;
         *) return 1 ;;
     esac
 }

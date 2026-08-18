@@ -24,3 +24,13 @@ setup() {
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:"
 }
+
+# 63 of this repo's 64 README files are not at the root, and subprojects keep
+# their own docs/ tree. A flag documented in the subproject's own README used to
+# trip DOC_OUT_OF_SYNC anyway, leaving no way to satisfy the gate except touching
+# an unrelated root doc.
+@test "lint-implementation: a nested README counts as a doc (DOC_OUT_OF_SYNC suppressed)" {
+    run bash "$LINT" --diff-file "$FIX/nested-doc-touched.diff"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:"
+}
