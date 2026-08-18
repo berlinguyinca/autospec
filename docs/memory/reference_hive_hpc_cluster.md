@@ -91,6 +91,17 @@ endpoint for it — the first attempt advertised node, port and tunnel
 command and only then died, so the client forwarded to a port nothing
 ever listened on.
 
+**A tunnel supervisor must not treat an unanswered query as an answer.**
+`[ -z "$jid" ] && exit` ended supervision on the first empty `squeue` —
+indistinguishable from a throttled ssh, so one blip killed the tunnel
+for the rest of the session. Read ssh's own exit status: a transport
+failure is not evidence about the job, and only N *consecutive
+authoritative* "no job" answers should end it. Also: each `up` spawning
+another supervisor makes them fight for the local port ("Address already
+in use" → backoff → 24s reconnect instead of 4s), and killing a
+supervisor orphans its `ssh` child, which keeps holding that port.
+Replace rather than duplicate, and reap the orphan.
+
 **Multiplex SSH, or the login node throttles you into a phantom bug.**
 One connection per poll (job state, endpoint file) gets rate-limited on
 a campus-shared login node: connections fail with

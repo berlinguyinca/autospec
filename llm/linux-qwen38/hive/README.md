@@ -191,9 +191,21 @@ irrelevant and the compute node never needs to be reachable from outside:
 tunnel onto it would either refuse to bind or silently shadow the local node, so
 every "local" request would quietly execute on the cluster.
 
-The tunnel is **supervised, not started once**. `low` is preemptible, so the job
-can be requeued onto a different node mid-session; the supervisor re-reads
-`logs/endpoint.txt`, notices the move, and re-forwards.
+The tunnel is **supervised, not started once** (`tunnel-supervisor.sh`). `low`
+is preemptible, so the job can be requeued onto a different node mid-session;
+the supervisor re-reads `logs/endpoint.txt`, notices the move, and re-forwards.
+Measured: kill the forward and the endpoint serves again in **4 seconds**.
+
+Three things it has to get right, each learned the hard way:
+
+- **An unanswered question is not an answer.** The first version exited when one
+  `squeue` came back empty — indistinguishable from a throttled ssh, which this
+  login node does. Only five *consecutive authoritative* "no running job"
+  replies end supervision; a transport failure is ignored.
+- **One supervisor, not one per `up`.** Two of them fight over the local port,
+  and the loser backs off — that alone turned a 4s reconnect into 24s.
+- **Reap the orphaned `ssh`.** Killing a supervisor leaves its child holding the
+  port, which the replacement then cannot bind.
 
 The server binds `0.0.0.0` on a shared cluster network, so `serve-qwen.sbatch`
 generates a per-deployment API key into `logs/api-key.txt` (mode 600) and

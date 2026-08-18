@@ -113,7 +113,10 @@ do_status() {
   printf '  job     : %s\n' "${jid:-none running}"
   if [ -n "$jid" ]; then printf '  node    : %s\n' "$(endpoint_node "$jid" | tail -1)"; fi
   if [ -s "${STATE}/tunnel.pid" ] && kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null; then
-    printf '  tunnel  : up (pid %s) 127.0.0.1:%s\n' "$(cat "${STATE}/tunnel.pid")" "${LOCAL_PORT}"
+    printf '  tunnel  : up (pid %s) 127.0.0.1:%s -> %s, %s reconnect(s)\n' \
+      "$(cat "${STATE}/tunnel.pid")" "${LOCAL_PORT}" \
+      "$(cat "${STATE}/tunnel.node" 2>/dev/null || echo '?')" \
+      "$(cat "${STATE}/tunnel.reconnects" 2>/dev/null || echo 0)"
   else
     printf '  tunnel  : down\n'
   fi
@@ -142,30 +145,45 @@ do_logs() { ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" "tail -f ${ROOT}/lo
 # 130s grace period, so the job can be requeued onto a DIFFERENT node mid-session;
 # when that happens the old forward is dead and the new node is only discoverable
 # by re-reading endpoint.txt.
+# True if a supervisor from a previous run is alive and healthy.
+tunnel_alive() {
+  [ -s "${STATE}/tunnel.pid" ] || return 1
+  kill -0 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null
+}
+
+stop_tunnel() {
+  if [ -s "${STATE}/tunnel.pid" ]; then
+    kill "$(cat "${STATE}/tunnel.pid")" 2>/dev/null || true
+    sleep 1
+    kill -9 "$(cat "${STATE}/tunnel.pid")" 2>/dev/null || true
+    rm -f "${STATE}/tunnel.pid"
+  fi
+  # The supervisor's ssh child does not die with it, and an orphaned forward
+  # still holds the local port -- which is what a fresh supervisor then fails
+  # to bind, backing off instead of connecting.
+  pkill -f "ssh -N .*-L ${LOCAL_PORT}:" 2>/dev/null || true
+}
+
 start_tunnel() {
   local node="$1"
-  cat > "${STATE}/tunnel.sh" <<TUNNEL
-#!/usr/bin/env bash
-node="${node}"
-while true; do
-  jid=\$(ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" \\
-        "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null \\
-        | awk '\$2=="RUNNING"{print \$1; exit}')
-  [ -z "\$jid" ] && { echo "\$(date -Is) job gone, tunnel supervisor exiting"; exit 0; }
-  fresh=\$(ssh -o BatchMode=yes "${HIVE_USER}@${HIVE_HOST}" \\
-          "awk '/^node/{print \\\$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)
-  [ -n "\$fresh" ] && [ "\$fresh" != "\$node" ] && { echo "\$(date -Is) node moved \$node -> \$fresh"; node="\$fresh"; }
-  echo "\$(date -Is) forwarding 127.0.0.1:${LOCAL_PORT} -> \$node:${REMOTE_PORT}"
-  ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \\
-      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
-      -L "${LOCAL_PORT}:\$node:${REMOTE_PORT}" "${HIVE_USER}@${HIVE_HOST}" || true
-  echo "\$(date -Is) forward dropped, retrying in 10s"
-  sleep 10
-done
-TUNNEL
-  chmod +x "${STATE}/tunnel.sh"
-  nohup "${STATE}/tunnel.sh" > "${STATE}/tunnel.log" 2>&1 &
+  # One supervisor, always. Each `up` used to start another, and they then
+  # competed for the local port: the loser logged "Address already in use",
+  # backed off, and turned a two-second reconnect into half a minute. A stale
+  # supervisor is also pointed at whatever node was serving LAST time.
+  if tunnel_alive; then
+    say "replacing the existing tunnel supervisor"
+  fi
+  stop_tunnel
+  # setsid, not just nohup: the supervisor has to outlive the shell that
+  # started it, including when that shell is part of a process group the
+  # terminal or a job runner tears down. Without it the tunnel died silently
+  # alongside its parent and the endpoint simply stopped answering.
+  HIVE_USER="${HIVE_USER}" HIVE_HOST="${HIVE_HOST}" ROOT="${ROOT}" \
+  STATE="${STATE}" LOCAL_PORT="${LOCAL_PORT}" REMOTE_PORT="${REMOTE_PORT}" \
+  NODE="${node}" \
+    setsid nohup "${HERE}/tunnel-supervisor.sh" >> "${STATE}/tunnel.log" 2>&1 &
   echo $! > "${STATE}/tunnel.pid"
+  sleep 2
 }
 
 # Push the repo's copies over the cluster's on every run. The alternative is
