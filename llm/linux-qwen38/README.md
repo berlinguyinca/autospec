@@ -116,19 +116,68 @@ The endpoint moved when `longcontext` became the default, so any client pinned
 to the old llama.cpp node on **:8080** silently stops working — that node is
 disabled. `~/.config/opencode/opencode.json` now carries two providers:
 
-| model id | endpoint | context | vision | use |
-|---|---|---:|---|---|
-| `qwen-local/qwen3.8-27b` (default) | `:8080` | 196,608 | no | large repositories |
-| `qwen-local/qwen3.8-27b-vision` | `:8080` | 98,304 | **yes** | screenshots, diagrams |
-| `qwen-vllm/qwen3.8-27b` | `:8000` | 32,928 | no | short prompts, ~41 tok/s |
+| model id | endpoint | context | concurrent | vision | use |
+|---|---|---:|---:|---|---|
+| `qwen-local/qwen3.8-27b-40k` (default) | `:8080` | 40,960 | 4 | no | several agent sessions |
+| `qwen-local/qwen3.8-27b-32k` | `:8080` | 32,768 | 5 | no | many small sessions |
+| `qwen-local/qwen3.8-27b-80k` | `:8080` | 81,920 | 2 | no | two large sessions |
+| `qwen-local/qwen3.8-27b-160k` | `:8080` | 163,840 | 1 | no | one whole repository |
+| `qwen-local/qwen3.8-27b` | `:8080` | 180,224 | 1 | no | the entire pool, solo |
+| `qwen-local/qwen3.8-27b-vision*` | `:8080` | 98,304 / 49,152 / 24,576 | 1–4 | **yes** | screenshots, diagrams |
+| `qwen-local/qwen3.8-27b-abliterated*` | `:8080` | 163,840 / 81,920 / 40,960 | 1–4 | **yes** | uncensored |
+| `qwen-vllm/qwen3.8-27b` | `:8000` | 32,928 | 1 | no | short prompts, ~41 tok/s |
 
-**The first two swap automatically.** They are served by the `router` profile on
-one port; picking a different model in the client is the entire switch. Measured
-on this host, a swap costs ~5-7 s — the two presets share one weights file, so
-the reload comes from page cache.
+**The `-NNk` entries are not separate models.** They are aliases of one loaded
+model under different declared context limits, so switching between them costs
+nothing — no unload, no reload. Switching between *models* (text ↔ vision ↔
+abliterated) costs a swap of ~5-7 s; the presets share weights files, so the
+reload comes from page cache.
 
 `--models-max 1` is mandatory and set: the default is 4, and two 18.5 GiB models
-will not co-reside on this card.
+will not co-reside on this card. That is also why concurrent sessions must all
+pick tiers of the **same** model — a text session and a vision session running
+together make the router reload on every request.
+
+## Running several sessions at once
+
+The server holds **one 180,224-token KV pool shared across 6 slots**
+(`kv-unified = true`). Sessions draw from it as they need, so an 80k session can
+run beside two 40k ones. Verified: 80k + 40k + 40k concurrently, zero errors,
+one model load.
+
+Two things make this configuration rather than luck:
+
+**Seats are paid for in context.** `--parallel` costs VRAM in compute buffers,
+so more slots means a smaller pool. `scripts/measure-slot-frontier.sh` walks the
+exchange rate on this card:
+
+| slots | largest pool that loads |
+|---:|---:|
+| 4 | 196,608 |
+| 6 | 180,224 |
+| 8 | 163,840 |
+| 12 | 131,072 |
+
+**The pool has no admission control.** Over-subscribe it and *every* in-flight
+session dies, not just the greedy one — three 80k sessions against a 196k pool
+were all accepted, prefilled for 58 s, then all failed with `Context size has
+been exceeded`. The `-NNk` tiers exist so OpenCode compacts each session before
+that happens. Keep the running total of live sessions at or under 163,840;
+`tests/check_presets.py` fails the build if a tier outgrows its pool or claims
+more concurrent sessions than there are slots.
+
+Measure it with `scripts/bench-concurrency.py`:
+
+```
+bench-concurrency.py --model qwen3.8-27b-40k --concurrency 1,2,4
+bench-concurrency.py --mix "qwen3.8-27b-80k:81920,qwen3.8-27b-40k:40960"
+```
+
+At one slot, four clients do not fail — they **queue**. Per-stream speed stays
+at 40.55 tok/s while worst-case time-to-first-token goes 0.76 s → 15.06 s and
+aggregate throughput does not grow. Six slots turn the same case into 56.72
+aggregate tok/s at a 4.78 s worst TTFT.
+
 
 The vLLM provider is still a manual switch (`qwen38ctl start interactive`),
 because it is a different runtime and the router only fronts llama.cpp.

@@ -14,6 +14,7 @@ echo "== structural =="
 for f in "${HERE}/scripts/serve-profile.sh" "${HERE}/scripts/qwen38ctl" \
          "${HERE}/scripts/setup-linux-qwen38.sh" "${HERE}/scripts/measure-ceiling.sh" \
          "${HERE}/scripts/install-node.sh" "${HERE}/scripts/bench-context-sweep.sh" \
+         "${HERE}/scripts/measure-slot-frontier.sh" \
          "${HERE}/tests/test_smoke.sh" "${HERE}/tests/test_structural.sh"; do
   bash -n "$f" 2>/dev/null
   check $? "bash -n $(basename "$f")"
@@ -93,6 +94,15 @@ done
 rev="$(grep -m1 '^QWEN38_MODEL_REVISION=' "${HERE}/config/common.conf" | cut -d'"' -f2)"
 printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'
 check $? "model revision is a full commit sha (${rev})"
+
+# 13 — the router presets must stay internally consistent.
+# The tier aliases ration a shared KV pool that the server does NOT police:
+# over-subscribe it and every in-flight session dies with "Context size has
+# been exceeded", not just the one that asked for too much. A tier wider than
+# its own pool is therefore a live outage waiting to happen.
+presets="${HERE}/config/router-presets.ini"
+python3 "${HERE}/tests/check_presets.py" "$presets"
+check $? "router preset tiers fit their pool, share the KV cache, and have slots"
 
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

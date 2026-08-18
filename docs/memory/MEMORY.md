@@ -62,6 +62,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Infrastructure gotchas
 
+- [Shared KV pool has no admission control](feedback_shared_kv_pool_has_no_admission_control.md) — llama.cpp `kv-unified` lets sessions differ in size but over-subscription kills every live session; ration client-side
+
 - [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`
 - [No tree mutation during background validate](feedback_no_tree_mutation_during_bg_validate.md) — switching/deleting branches while a background validate.sh runs corrupts its checkout mid-run → false "required file missing"; run it in a dedicated detached worktree and confirm the gate's OK line, not just the (echo-masked) exit code
 - [Validate baseline diffing](feedback_validate_baseline_diff.md) — validate is red on main, so compare failure SETS against a clean origin/main worktree; per-suite spot checks gave a false all-clear and let 2 regressions through CI

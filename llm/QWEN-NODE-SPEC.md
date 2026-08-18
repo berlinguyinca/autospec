@@ -567,6 +567,131 @@ they stay unset:
 working. On macOS the equivalent is a launchd `LaunchAgent` with
 `KeepAlive`/`RunAtLoad`.
 
+### 8.5 Serving several sessions at once
+
+One editor window is not the workload. Several agent sessions against one node
+is, and a node tuned for a single enormous context serves that badly. Measure it
+before assuming otherwise: a server with one slot does not refuse the second
+client, it **queues** it, which looks like a healthy server and feels like a
+broken one.
+
+On the reference build, four concurrent clients against a single-slot server:
+
+| clients | per-stream tok/s | aggregate tok/s | worst TTFT |
+|---:|---:|---:|---:|
+| 1 | 40.55 | 32.68 | 0.76 s |
+| 2 | 40.56 | 35.55 | 4.04 s |
+| 4 | 40.55 | 28.08 | 15.06 s |
+
+Per-stream speed never moves, so a single-stream benchmark reports everything as
+fine. The tell is that **aggregate throughput does not grow** while time-to-first
+-token grows without bound. Raising the slot count to four turned the same
+4-client case into 56.72 aggregate tok/s with a 4.78 s worst TTFT — twice the
+work, a third of the wait.
+
+**Three settings, and they are commonly confused.**
+
+| setting | what it controls | what it costs |
+|---|---|---|
+| `--ctx-size` | the **total** KV pool, not a per-session limit | KV memory |
+| `--parallel` | how many sessions may decode at once | compute buffers |
+| `--kv-unified` | whether slots get equal fixed shares or draw on one pool | nothing |
+
+The first is the one that surprises people. `--ctx-size 196608 --parallel 4`
+logs `n_slots = 4, n_ctx_slot = 49152`: the pool was divided, not multiplied.
+
+The second means **seats are paid for in context**. Compute buffers scale with
+slot count, so adding slots at a fixed pool eventually fails to allocate — on a
+24 GiB card, `--parallel 8` with `c = 196608` dies on `cudaMalloc 872.28 MiB:
+out of memory`. Measure the exchange rate rather than deriving it;
+`measure-slot-frontier.sh` walks it:
+
+| slots | largest pool that loads | free VRAM |
+|---:|---:|---:|
+| 4 | 196,608 | 90 MiB |
+| 6 | 180,224 | 158 MiB |
+| 8 | 163,840 | 191 MiB |
+| 12 | 131,072 | 341 MiB |
+
+The third decides whether sessions can differ in size at all. With
+`kv-unified = false` every slot is hard-capped at `c / parallel`, so a client
+cannot ask for more no matter what it declares. With `kv-unified = true` all
+slots see the whole pool and take what they need — which is the only way to run
+an 80k session next to two 40k ones.
+
+### 8.6 A shared pool has no admission control
+
+This is the sharp edge, and it must be designed around rather than discovered.
+Three 80k sessions against a 196k pool were **all accepted**, prefilled for 58
+seconds, and then all died together:
+
+```
+decode: failed to find free space in the KV cache, retrying with smaller batch size
+  ... n_batch = 16 ... 8 ... 4 ... 2 ... 1
+srv  decode: Context size has been exceeded.
+srv  send_error: task id = 97 / 98 / 99
+```
+
+Note *which* sessions died: all of them. A session that stayed well inside its
+budget is killed by a neighbour that did not. There is no queueing, no eviction,
+and no back-pressure — the server over-commits and then fails everyone.
+
+So **the client is where the pool gets rationed.** Publish the same model under
+several ids that differ only in declared context, and let the client's own
+compaction keep each session inside its share:
+
+| tier | declared context | sessions the pool funds |
+|---|---:|---:|
+| `-160k` | 163,840 | 1 |
+| `-80k` | 81,920 | 2 |
+| `-40k` | 40,960 | 4 |
+| `-32k` | 32,768 | 5 |
+
+Two properties make this work rather than merely document a convention:
+
+- **Tiers are aliases, not presets.** `alias = id-160k,id-80k,...` gives one
+  loaded model several names, so switching tiers in the client costs no reload.
+  Separate presets would each be a separate process holding its own copy of the
+  weights, and two 18.5 GiB copies do not fit on a 24 GiB card.
+- **The invariants are enforced.** `tests/check_presets.py` fails the build when
+  a tier declares more than its pool holds, when tiers are offered without
+  `kv-unified`, or when a tier advertises more concurrent sessions than there
+  are slots to decode them. All three are silent at configuration time and loud
+  in production.
+
+Budget to roughly 90% of the pool; the remainder absorbs generated tokens and
+fragmentation. Verified at 6 slots over a 180,224 pool: a single session
+retrieved a needle at 163,867 prompt tokens, four concurrent 42,996-token
+sessions ran clean, and a mixed 80k + 40k + 40k round finished with zero pool
+errors and exactly one model load.
+
+**One constraint worth stating plainly:** concurrent sessions must sit on tiers
+of the *same* model. With `--models-max 1`, mixing a text session and a vision
+session makes the router unload and reload on every request.
+
+**What concurrency actually buys.** Aggregate throughput rises while each
+session gets slower, and at long prompts prefill dominates everything:
+
+| workload | per-session | aggregate | worst TTFT |
+|---|---:|---:|---:|
+| 1 × 4k prompt | 40.07 | 23.91 | 2.16 s |
+| 4 × 4k prompts | 24.29 | 56.72 | 4.78 s |
+| 80k + 40k + 40k | 0.76 – 23.20 | — | 113.5 s |
+
+The last row is the honest one for agent work: three big sessions starting
+together spend roughly two minutes prefilling before anyone sees a token.
+Sessions that stay resident do not re-pay that, which is the real reason to give
+each one its own slot.
+
+> **Benchmark honestly.** Size prompts with the server's own tokenizer
+> (`/tokenize`), never with an assumed tokens-per-line constant. A filler line
+> estimated at 17 tokens was 21, so a "4 × 40k" run really sent 4 × 51,800 and
+> failed a configuration that fits comfortably. And force a fixed decode length
+> (`ignore_eos`); a model that answers in three tokens reports a fine per-stream
+> rate and a meaningless aggregate.
+
+---
+
 ---
 
 ## 9. Phase 8 — Wire the clients, and treat that as part of the deployment
