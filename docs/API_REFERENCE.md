@@ -363,6 +363,22 @@ Both this script and `gen-implementer-prompt.sh` resolve their sibling `bundle-s
 preferring `$AUTOSPEC_SCRIPTS_DIR/bundle-static-context.sh`, then the flat-install sibling in the script's
 own directory, then the repo-layout `skills/autospec-shared/scripts/` copy.
 
+`bundle-static-context.sh` then resolves the **repo root** that supplies `AGENTS.md` and the
+`skills/*/prompts/*-contract.md` files, probing for `AGENTS.md` in this order:
+
+1. `$AUTOSPEC_REPO_ROOT`, when set.
+2. The in-repo layout, three levels above the script (`skills/autospec-shared/scripts/`).
+3. The caller's `git rev-parse --show-toplevel`.
+4. The canonical checkout at `${AUTOSPEC_HOME:-$HOME/.autospec}/repo`.
+
+Steps 3 and 4 exist because `install.sh` flattens helpers into `~/.autospec/scripts`, where step 2
+would otherwise resolve to `/home`. If no candidate carries `AGENTS.md`, the bundler exits non-zero,
+and `gen-implementer-prompt.sh` propagates that failure rather than emitting a prompt without the
+implementation-quality contract.
+
+`gen-implementer-prompt.sh` emits the worktree path as `/tmp/wt-<branch>`, matching
+`dispatch-implementer.sh` and `worktree-guard.sh`.
+
 ```
 Usage: bash scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
                                            [--issue-body <file>]
