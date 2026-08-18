@@ -40,6 +40,16 @@ sbatch -p low -A publicgrp --gres=gpu:6000_blackwell:1 -t 01:00:00 ...
 bandwidth-bound inference (2039 vs 1792 GB/s) but sits `PLANNED` while
 Blackwell allocates in seconds.
 
+**Measured end-to-end, 2026-08-18** (Q8_K_XL, through the tunnel):
+45.57 tok/s single stream, 53.22 aggregate at four concurrent clients.
+That is **80.0% of the memory-bandwidth roofline** — against the RTX
+4090's 79.7% on a different architecture, a quarter of the memory and a
+5-bit quant. The 80% constant belongs to the runtime and the model, not
+the card, so `bandwidth / resident weight bytes x 0.8` predicts an
+untouched machine to within ~10%. Note the 4090 reached a *higher*
+aggregate (56.72): the cluster card buys 8-bit weights at the full
+262,144 context, not more throughput.
+
 **Environment traps:**
 
 - **Slurm is not on `PATH` in a non-login shell.** `ssh host 'sinfo'`

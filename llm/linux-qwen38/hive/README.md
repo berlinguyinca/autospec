@@ -80,8 +80,34 @@ NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97887 MiB, cc 12.0, dri
 
 ### Which card to ask for
 
-Predicted decode speed is the bandwidth roofline scaled by the 79.7% efficiency
-the RTX 4090 reference build actually achieved. **Arithmetic, not benchmarks.**
+Decode speed is the bandwidth roofline scaled by measured efficiency. The
+Blackwell row is now **measured**; the rest remain arithmetic.
+
+The calibration held remarkably well across two very different cards:
+
+| card | quant | roofline | measured | % of roofline |
+|---|---|---:|---:|---:|
+| RTX 4090 | Q5_K_M | 50.9 | **40.55** | 79.7% |
+| RTX PRO 6000 Blackwell | UD-Q8_K_XL | 57.0 | **45.57** | 80.0% |
+
+Ada and Blackwell, 24 GiB and 96 GiB, a 5-bit and an 8-bit quant — and both land
+at 80% of their memory-bandwidth ceiling. That is what makes the predictions in
+this table worth anything: the constant is a property of the runtime and the
+model, not of the card. The prediction for this machine was ~49 t/s against
+45.57 measured, about 7% optimistic — the Max-Q part is power-limited, and the
+tunnel adds a little.
+
+Concurrency, measured on hive at a ~4,000-token prompt:
+
+| clients | per-stream | aggregate | worst TTFT |
+|---:|---:|---:|---:|
+| 1 | 45.57 | 28.10 | 1.74 s |
+| 4 | 32.49 | **53.22** | 5.90 s |
+
+Worth putting beside the 4090, which reached 56.72 aggregate at four clients on
+Q5: the cluster card does not serve *more* throughput, it serves **8-bit weights
+at the full 262,144 context** for about the same. Capacity and quality are what
+you go there for, not speed.
 
 | GPU | GB/s | Q5_K_M | Q8_0 | BF16 | VRAM |
 |---|---:|---:|---:|---:|---:|

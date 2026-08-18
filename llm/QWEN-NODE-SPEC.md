@@ -959,9 +959,20 @@ Everything hard about the 24 GiB reference build is a capacity problem. On an
 A100 the capacity problem is simply gone, and the configuration changes shape.
 
 Predictions below are the bandwidth roofline scaled by the efficiency this
-project actually measured — the reference build hit **79.7%** of its roofline
-(1008 GB/s ÷ 19.82 GB = 50.9 t/s predicted, 40.55 t/s measured). They are
-arithmetic, not benchmarks; confirm on the machine.
+project measured — and that efficiency has now been confirmed on a second,
+very different card:
+
+| card | quant | roofline | measured | % of roofline |
+|---|---|---:|---:|---:|
+| RTX 4090, 24 GiB, Ada | Q5_K_M | 50.9 | 40.55 | **79.7%** |
+| RTX PRO 6000, 96 GiB, Blackwell | UD-Q8_K_XL | 57.0 | 45.57 | **80.0%** |
+
+Two architectures, four times the memory, different quantisations — both at 80%
+of the memory-bandwidth ceiling. **That is the finding that makes this table
+usable**: the constant belongs to the runtime and the model, not to the card, so
+`bandwidth ÷ resident weight bytes × 0.8` predicts a machine you have never
+touched to within about 10%. Everything else here is still arithmetic; confirm
+on the machine.
 
 | card | HBM GB/s | Q5_K_M | Q8_0 | BF16 | context at Q8 |
 |---|---:|---:|---:|---:|---|
