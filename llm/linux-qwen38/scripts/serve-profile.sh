@@ -26,6 +26,42 @@ fi
 # shellcheck source=../config/profiles.d/interactive.conf
 . "$PROFILE_CONF"
 
+# --- llama.cpp profiles ------------------------------------------------------
+# Dispatch on runtime rather than owning a second unit and a second launcher.
+# The unit template runs this script either way, so Conflicts= and the VRAM
+# guard keep applying unchanged.
+if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
+  LLAMA_DIR="${QWEN38_LLAMA_DIR:-/opt/qwen-local/llama.cpp/current}"
+  [ -x "${LLAMA_DIR}/llama-server" ] || {
+    echo "llama-server not found at ${LLAMA_DIR}" >&2; exit 69; }
+  [ -r "${QWEN38_GGUF_PATH}" ] || {
+    echo "GGUF not readable: ${QWEN38_GGUF_PATH}" >&2; exit 69; }
+  # The build ships its ggml backends next to the binaries.
+  export LD_LIBRARY_PATH="${LLAMA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export HOME="${QWEN38_STATE}"
+
+  free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+  if [ "${free_mib:-0}" -lt "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then
+    echo "refusing to start: only ${free_mib} MiB VRAM free" >&2
+    exit 75
+  fi
+
+  echo "starting profile=${PROFILE} version=${QWEN38_PROFILE_VERSION} runtime=llama.cpp ctx=${QWEN38_MAX_MODEL_LEN} kv=${QWEN38_KV_TYPE}"
+  exec "${LLAMA_DIR}/llama-server" \
+    --model "${QWEN38_GGUF_PATH}" \
+    --alias "${QWEN38_SERVED_NAME}" \
+    --n-gpu-layers 999 \
+    --flash-attn auto \
+    --ctx-size "${QWEN38_MAX_MODEL_LEN}" \
+    --parallel "${QWEN38_MAX_SEQS}" \
+    --cache-type-k "${QWEN38_KV_TYPE}" \
+    --cache-type-v "${QWEN38_KV_TYPE}" \
+    --jinja \
+    --no-context-shift \
+    --host "${QWEN38_HOST}" \
+    --port "${QWEN38_PORT}"
+fi
+
 if [ "${QWEN38_RUNTIME:-vllm}" != "vllm" ]; then
   echo "profile ${PROFILE} is served by ${QWEN38_RUNTIME}, not by this script" >&2
   exit 64

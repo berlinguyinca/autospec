@@ -17,8 +17,24 @@ CONF_DIR="${QWEN38_CONF_DIR:-/opt/qwen-vllm/etc}"
 . "${CONF_DIR}/common.conf"
 
 UNIT_PREFIX="autospec-qwen38@"
-VLLM_PROFILES="interactive concurrent extended"
-BASE="http://${QWEN38_HOST}:${QWEN38_PORT}"
+MANAGED_PROFILES="interactive concurrent extended longcontext"
+
+# Per-profile, NOT global. A profile may override QWEN38_PORT -- the llama.cpp
+# longcontext profile serves on 8081 while the vLLM profiles use 8000. Computing
+# this once from common.conf made every health check poll the wrong port and
+# wait the full timeout on a server that was already up.
+base_url_for() {
+  local profile="${1:-}" port="${QWEN38_PORT}"
+  if [ -n "$profile" ] && [ -r "${CONF_DIR}/profiles.d/${profile}.conf" ]; then
+    port="$(
+      # shellcheck disable=SC1090
+      . "${CONF_DIR}/profiles.d/${profile}.conf" >/dev/null 2>&1
+      printf '%s' "${QWEN38_PORT}"
+    )"
+  fi
+  printf 'http://%s:%s' "${QWEN38_HOST}" "${port:-${QWEN38_PORT}}"
+}
+BASE="$(base_url_for "")"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -53,15 +69,16 @@ running_profile() {
   printf '%s\n' "${u%.service}"
 }
 
-is_vllm_profile() {
-  case " ${VLLM_PROFILES} " in *" $1 "*) return 0;; *) return 1;; esac
+is_managed_profile() {
+  case " ${MANAGED_PROFILES} " in *" $1 "*) return 0;; *) return 1;; esac
 }
 
 # Poll /health rather than sleeping. Model load from a warm page cache is tens
 # of seconds; a cold load plus torch.compile is minutes, so the timeout is
 # generous and the failure path prints the journal instead of just timing out.
-wait_healthy() {
-  local timeout="${1:-900}" waited=0
+wait_healthy() {   # $1 = profile, $2 = optional timeout
+  local profile="${1:-}" timeout="${2:-900}" waited=0
+  BASE="$(base_url_for "$profile")"
   while [ "$waited" -lt "$timeout" ]; do
     if curl_auth --fail --max-time 5 "${BASE}/health" >/dev/null 2>&1; then
       echo "healthy after ${waited}s"
@@ -113,6 +130,7 @@ case "$cmd" in
       exit 0
     fi
     unit="${UNIT_PREFIX}${p}.service"
+    BASE="$(base_url_for "$p")"
     if curl_auth --fail --max-time 5 "${BASE}/health" >/dev/null 2>&1; then
       echo "state   : Running"
     elif systemctl is-failed --quiet "$unit"; then
@@ -133,7 +151,7 @@ case "$cmd" in
   start|switch)
     profile="${2:-}"
     [ -n "$profile" ] || die "usage: $(basename "$0") ${cmd} <profile>"
-    if ! is_vllm_profile "$profile"; then
+    if ! is_managed_profile "$profile"; then
       pc="${CONF_DIR}/profiles.d/${profile}.conf"
       [ -r "$pc" ] || die "no such profile: ${profile}"
       # shellcheck disable=SC1090
@@ -155,7 +173,7 @@ case "$cmd" in
     fi
     stop_all
     sudo systemctl start "${UNIT_PREFIX}${profile}.service"
-    wait_healthy
+    wait_healthy "$profile"
     ;;
 
   stop)
@@ -172,11 +190,13 @@ case "$cmd" in
     # GPU memory utilization (0.97, 22.78 GiB)". stop_all waits for the VRAM.
     stop_all
     sudo systemctl start "${UNIT_PREFIX}${p}.service"
-    wait_healthy
+    wait_healthy "$p"
     ;;
 
-  health)  curl_auth --fail "${BASE}/health" && echo ;;
-  models)  curl_auth --fail "${BASE}/v1/models" ;;
+  health)  BASE="$(base_url_for "$(running_profile || true)")"
+           curl_auth --fail "${BASE}/health" && echo ;;
+  models)  BASE="$(base_url_for "$(running_profile || true)")"
+           curl_auth --fail "${BASE}/v1/models" ;;
   logs)    journalctl -u "${UNIT_PREFIX}*.service" -f ;;
   profiles)
     for f in "${CONF_DIR}"/profiles.d/*.conf; do

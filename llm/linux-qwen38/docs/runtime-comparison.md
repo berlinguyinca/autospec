@@ -5,11 +5,39 @@ Every row names the **exact checkpoint** — "4-bit" alone is not a specificatio
 
 ## What is actually deployed
 
-**`cyankiwi/Qwen3.8-27B-AWQ-INT4`** @ `63768c10`, served by vLLM 0.27.1.
+**`unsloth/Qwen3.8-27B-GGUF` Q5_K_M**, served by llama.cpp b10434 on port 8081
+(`longcontext` profile, enabled at boot).
 
-It was chosen for *runtime compatibility*, not speed: compressed-tensors is
-vLLM's best-supported quant path for this hybrid architecture. **No
-speed-optimised build is in use** — not Unsloth, not NVFP4, not exl3.
+It replaced `cyankiwi/Qwen3.8-27B-AWQ-INT4` on vLLM, which remains available as
+the `interactive` profile on port 8000. The switch was made on measurement, not
+preference: the vLLM profiles top out at a verified 56,448 tokens, which is not
+enough for work on a large repository, and the Q5 GGUF is *also* the higher
+quality checkpoint (5-bit vs 4-bit) at essentially the same file size.
+
+The cost is ~20% single-stream speed at short context (33.0 vs 41.3 tok/s).
+
+## Context-depth sweep — unsloth Q5_K_M (the deployed default)
+
+`llama-bench`, q4_0 KV, generation and prefill measured **at depth**, which is
+the number that matters for large-repository work:
+
+| depth | prefill tok/s | generation tok/s | % of empty |
+|---:|---:|---:|---:|
+| 0 | 2,727 | 41.87 | 100% |
+| 16,384 | 2,427 | 39.76 | 95% |
+| 32,768 | 2,148 | 38.21 | 91% |
+| 65,536 | 1,774 | 35.15 | 84% |
+| 131,072 | 1,290 | 30.18 | 72% |
+| **196,608** | 1,013 | **27.04** | 65% |
+
+Generation decays gently because only 16 of 64 layers carry a growing KV cache;
+the other 48 are linear-attention layers whose state is constant per sequence.
+A dense 27B would fall off far harder.
+
+Through the OpenAI API at ctx 196,608 the sustained rate is **33.0 tok/s**, and
+a **153,038-token needle retrieval completed correctly in 89 s**. The llama-bench
+figures are a synthetic best case (no HTTP, no full-context allocation); the API
+number is the honest one.
 
 ## Measured results
 

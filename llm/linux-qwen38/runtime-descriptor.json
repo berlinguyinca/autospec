@@ -86,15 +86,19 @@
       ]
     },
     {
-      "name": "quality",
-      "version": "qwen38-linux-gguf-q6-v1",
+      "name": "longcontext",
+      "version": "qwen38-linux-gguf-q5km-v1",
       "runtime": "llama.cpp",
       "available": false,
-      "endpoint": "http://127.0.0.1:8080/v1",
+      "endpoint": "http://127.0.0.1:8081/v1",
       "model": "qwen3.8-27b",
-      "max_context": null,
-      "max_concurrent_requests": null,
-      "serves_context_classes": [],
+      "max_context": 196608,
+      "max_concurrent_requests": 1,
+      "serves_context_classes": [
+        "small",
+        "standard",
+        "large"
+      ],
       "capabilities": {
         "vision": false,
         "streaming": true,

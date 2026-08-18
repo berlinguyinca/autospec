@@ -152,11 +152,16 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--out", default=None)
     ap.add_argument("--label", default="")
+    # Overrides so the same harness can measure a non-vLLM OpenAI-compatible
+    # server (llama-server, TabbyAPI). Comparing llama-bench numbers against
+    # vLLM API numbers is not a fair fight; this makes both API-level.
+    ap.add_argument("--base-url", default=None)
+    ap.add_argument("--model", default=None)
     args = ap.parse_args()
 
     conf = load_conf(args.conf)
-    base = f"http://{conf['QWEN38_HOST']}:{conf['QWEN38_PORT']}"
-    model = conf["QWEN38_SERVED_NAME"]
+    base = args.base_url or f"http://{conf['QWEN38_HOST']}:{conf['QWEN38_PORT']}"
+    model = args.model or conf["QWEN38_SERVED_NAME"]
     api_key = conf.get("QWEN38_API_KEY", "")
 
     # ~7 tokens per filler line; deterministic so runs are comparable.
