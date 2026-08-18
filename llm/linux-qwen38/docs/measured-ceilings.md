@@ -180,6 +180,49 @@ A real 44,238-token prompt, not an extrapolation:
 The limit is enforced exactly: a 56,449-token request against `extended` is
 rejected with `This model's maximum context length is 56448 tokens`.
 
+## MTP (speculative decoding): does not fit on 24 GB
+
+Tested, not assumed. The checkpoint *does* contain the draft head (15 `mtp.*`
+tensors, `mtp_num_hidden_layers: 1`) and `qwen3_5_mtp` is a valid vLLM method,
+so this was a real attempt, not a config error.
+
+It fails identically in three configurations:
+
+| config | result |
+|---|---|
+| CUDA graphs, util 0.97, ctx 39200 | `OutOfMemoryError: Tried to allocate 2.37 GiB` |
+| eager, util 0.95, ctx 8192 | same, 993 MiB free |
+| eager, util 0.85, ctx 8192 | same — process still held 22.10 GiB |
+
+The draft head is **unquantised fp16 and costs 2.37 GiB**, and vLLM loads it
+*after* claiming the KV pool — so it sits outside `gpu_memory_utilization` and
+lowering that does not make room. Even if it fit, the 2.37 GiB would have to
+come out of the ~2.5 GiB that CUDA graphs occupy, and CUDA graphs are worth 3x
+generation speed. **MTP is the wrong trade on this card.** It becomes viable
+only with a checkpoint small enough to leave ~3 GiB spare.
+
+## Attention backend: TRITON_ATTN does not buy context either
+
+The theory was sound — FlashInfer's 394 MiB workspace forces ~1 GiB of headroom,
+and TRITON_ATTN has no such workspace. Measured, it does not help: at util 0.95
+the engine dies in the **linear-attention prefill kernel** instead.
+
+```
+chunk_gated_delta_rule_fwd_h -> torch.OutOfMemoryError:
+Tried to allocate 20.00 MiB ... 19.62 MiB is free
+```
+
+The GDN prefill kernel allocates working memory outside the profiled budget too,
+so ~1 GiB of headroom is required regardless of attention backend. **util ~0.94
+is the practical ceiling for the eager profiles**, and which backend serves
+attention is not what decides it.
+
+This also exposed a wrong assumption worth stating plainly: **lowering
+`max_model_len` frees no VRAM.** vLLM sizes the KV pool from
+`gpu_memory_utilization`, so the identical OOM reproduced at 109760, 76832,
+53312 and 36064. Utilisation is the only lever that returns memory;
+`scripts/measure-ceiling.sh` descends on utilisation for exactly this reason.
+
 ## How to actually reach 100K+
 
 One change would do it: **quantise `lm_head` and `embed_tokens` to INT8.** Each
@@ -199,7 +242,7 @@ Recorded so silence is not read as a result. All are specified in
 | area | status |
 |---|---|
 | concurrency sweep 16/32/64 | **not run.** At util 0.94 the pool supports ~7x at 8K; 16+ would need a much smaller context. |
-| MTP on/off A/B | **not run.** `qwen3_5_mtp` verified as a valid method string; benefit and VRAM cost unmeasured, so `interactive` ships with MTP off. |
+| MTP on/off A/B | **run — MTP does not fit.** See below. |
 | Profile D (GGUF Q6_K) | **not run.** The llama.cpp node holds Q4_K_M, not Q6_K. |
 | quality / regression suite | **not run.** No promotion decision should be made without it. |
 | long-prompt (100k+) throughput | **not reachable** on this node; 44,238 tokens was executed and is reported above. |

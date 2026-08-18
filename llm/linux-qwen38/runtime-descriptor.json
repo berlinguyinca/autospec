@@ -67,7 +67,7 @@
       "available": true,
       "endpoint": "http://127.0.0.1:8000/v1",
       "model": "qwen3.8-27b",
-      "max_context": 39200,
+      "max_context": 32928,
       "max_concurrent_requests": 1,
       "serves_context_classes": [
         "small",

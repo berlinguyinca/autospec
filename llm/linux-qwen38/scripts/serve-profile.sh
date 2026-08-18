@@ -53,6 +53,10 @@ export HF_HOME="${QWEN38_MODELS}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 # See the FlashInfer sampler workaround in common.conf.
 export VLLM_USE_FLASHINFER_SAMPLER="${QWEN38_USE_FLASHINFER_SAMPLER}"
+# Optional: see the attention-backend note in common.conf.
+if [ -n "${QWEN38_ATTENTION_BACKEND:-}" ]; then
+  export VLLM_ATTENTION_BACKEND="${QWEN38_ATTENTION_BACKEND}"
+fi
 # Keep vLLM's compile cache with the rest of our state instead of in $HOME,
 # so ProtectHome=true in the unit does not silently disable it.
 export VLLM_CACHE_ROOT="${QWEN38_STATE}/vllm-cache"

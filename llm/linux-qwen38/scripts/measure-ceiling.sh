@@ -59,8 +59,21 @@ export HF_HOME="${QWEN38_MODELS}"
 # writable by whoever is running this.
 # See the FlashInfer sampler workaround in common.conf.
 export VLLM_USE_FLASHINFER_SAMPLER="${QWEN38_USE_FLASHINFER_SAMPLER}"
+# Optional: see the attention-backend note in common.conf.
+if [ -n "${QWEN38_ATTENTION_BACKEND:-}" ]; then
+  export VLLM_ATTENTION_BACKEND="${QWEN38_ATTENTION_BACKEND}"
+fi
+
+# Do not inherit the caller's cwd. Run under `sudo -u qwen-vllm` from a home
+# directory and vLLM dies with
+#   PermissionError: [Errno 13] Permission denied: '/home/<you>/...'
+# because the service account cannot read it. The state dir always works.
+cd "${QWEN38_STATE}" 2>/dev/null || cd /tmp
 
 PROBE_CTX=262144   # the model's n_ctx_train; vLLM validates against this
+util="${QWEN38_GPU_MEM_UTIL}"   # descends on OOM; see the verify loop
+HELPER="$(dirname "$(readlink -f "$0")")/long-prompt-probe.py"
+if [ ! -r "$HELPER" ]; then HELPER="/opt/qwen-vllm/bin/long-prompt-probe.py"; fi
 TAG="${PROFILE}"
 BASE="http://${QWEN38_HOST}:${QWEN38_PORT}"
 
@@ -98,7 +111,7 @@ build_args() {
     --served-model-name "${QWEN38_SERVED_NAME}"
     --max-model-len "$ctx"
     --max-num-seqs "${QWEN38_MAX_SEQS}"
-    --gpu-memory-utilization "${QWEN38_GPU_MEM_UTIL}"
+    --gpu-memory-utilization "${util}"
     --kv-cache-dtype "${QWEN38_KV_DTYPE}"
     --max-num-batched-tokens "${QWEN38_MAX_BATCHED_TOKENS}"
     --host "${QWEN38_HOST}" --port "${QWEN38_PORT}"
@@ -190,61 +203,56 @@ echo "vllm estimate : ${usable} tokens"
 echo "configured    : ${QWEN38_MAX_MODEL_LEN} tokens"
 if [ "$CTX_ONLY" -eq 1 ]; then exit 0; fi
 
-# ---- verify ----------------------------------------------------------------
-echo
-echo "=== verify: serving a real request at ${usable} ==="
+# ---- verify, descending until a long prompt actually succeeds ---------------
+# The fixed-point estimate is an upper bound, not an answer: a context can start
+# and still fail a prompt that fills it (measured: 109760 boots, serves a short
+# request, then 500s on a long one). So descend until a long prompt passes,
+# rather than reporting the first value that merely boots.
 verify_log="${LOGDIR}/measure-${TAG}.verify.log"
-build_args "$usable"
-start_and_wait "$verify_log" || exit 1
+block=1568
+verified=""
+tokens=""
+used_vram=""
 
-# The verification prompt must be LONG -- ~90% of the claimed ceiling. A short
-# "reply with X" request proves only that the server is up, and a configuration
-# can pass that while OOMing on any real long prompt: measured here, ctx=109760
-# started, served a 6-token request, and then died with
-# "torch.OutOfMemoryError ... Tried to allocate 48.00 MiB" on a ~70k prompt.
-# Claiming a context you have only exercised with a tiny prompt is the exact
-# mistake this script exists to prevent.
-out="$(python3 - "$BASE" "$QWEN38_SERVED_NAME" "$usable" <<'PY'
-import json, sys, urllib.request, urllib.error
-base, model, ctx = sys.argv[1], sys.argv[2], int(sys.argv[3])
-# These records tokenise to ~15.5 tokens each; 17 keeps the prompt safely under
-# the limit. Overshooting only earns a 400 and wastes a whole model load.
-n = max(1, int(ctx * 0.85) // 17)
-recs = [f"Record {i:05d}: ordinary archival entry with no authorization code." for i in range(n)]
-at = n // 2
-recs[at] = f"Record {at:05d}: authorization code COBALT-719 applies to the lunar inventory."
-prompt = "\n".join(recs) + f"\n\nWhat authorization code appears in record {at:05d}? Respond with only the code."
-body = json.dumps({"model": model, "temperature": 0, "max_tokens": 32,
-                   "chat_template_kwargs": {"enable_thinking": False},
-                   "messages": [{"role": "user", "content": prompt}]}).encode()
-req = urllib.request.Request(f"{base}/v1/chat/completions", data=body,
-                             headers={"Content-Type": "application/json"})
-try:
-    with urllib.request.urlopen(req, timeout=1800) as r:
-        d = json.load(r)
-    used = d["usage"]["prompt_tokens"]
-    text = d["choices"][0]["message"]["content"]
-    print(f"CEILING_OK {used}" if "COBALT-719" in text else f"WRONG_ANSWER {used}")
-except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
-    print(f"REQUEST_FAILED {exc}")
-PY
-)"
-echo "long-prompt probe: ${out}"
+for _ in 1 2 3 4; do
+  echo
+  echo "=== verify: long prompt at ctx=${usable} ==="
+  build_args "$usable"
+  if ! start_and_wait "$verify_log"; then
+    usable=$(( usable * 70 / 100 / block * block ))
+    if [ "$usable" -lt "$block" ]; then break; fi
+    echo "  did not start; trying ${usable}"
+    continue
+  fi
 
-used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)"
-kill "$srv" 2>/dev/null; srv=""
+  out="$("${QWEN38_VENV}/bin/python" "${HELPER}" "$BASE" "$QWEN38_SERVED_NAME" "$usable")"
+  used_vram="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)"
+  echo "  long-prompt probe: ${out}"
+  kill "$srv" 2>/dev/null; srv=""; sleep 5
+
+  case "$out" in
+    CEILING_OK*) verified="$usable"; tokens="${out#CEILING_OK }"; break ;;
+  esac
+
+  # LOWER UTILISATION, not context. vLLM sizes the KV pool from
+  # gpu_memory_utilization, NOT from max_model_len -- so shrinking the context
+  # frees no VRAM at all and the same OOM repeats at every size. Measured: the
+  # gated-delta-rule prefill kernel died with 19 MiB free at ctx 109760, 76832,
+  # 53312 and 36064 alike:
+  #   chunk_gated_delta_rule_fwd_h -> torch.OutOfMemoryError: Tried to allocate
+  #   20.00 MiB ... 19.62 MiB is free
+  # Both FlashInfer's workspace and the GDN prefill kernel allocate working
+  # memory outside the profiled budget, so headroom is the only real lever.
+  util="$(python3 -c "print(f'{max(0.86, ${util} - 0.02):.2f}')")"
+  echo "  failed at length; lowering utilisation to ${util}"
+done
 
 echo
-if printf '%s' "$out" | grep -q 'CEILING_OK'; then
-  echo "VERIFIED  profile=${PROFILE} ctx=${usable} vram_used=${used}MiB"
+if [ -n "$verified" ]; then
+  echo "VERIFIED  profile=${PROFILE} ctx=${verified} (long prompt ${tokens} tokens) vram=${used_vram}MiB"
+  echo "configured in profile: ${QWEN38_MAX_MODEL_LEN}"
 else
-  echo "VERIFY FAILED at ctx=${usable}: ${out:-<empty>}" >&2
-  echo >&2
-  echo "The server started at this context but could not process a prompt near" >&2
-  echo "it. That means ${usable} is ALLOCATABLE but not USABLE. Check the log for:" >&2
-  echo "  - OutOfMemory in _get_workspace_buffer -> lower QWEN38_GPU_MEM_UTIL" >&2
-  echo "  - OutOfMemory elsewhere -> lower QWEN38_MAX_MODEL_LEN" >&2
-  echo "Do NOT configure this value; re-run against a smaller context." >&2
+  echo "NO VERIFIED CEILING FOUND for ${PROFILE}" >&2
   tail -20 "$verify_log" >&2
   exit 1
 fi

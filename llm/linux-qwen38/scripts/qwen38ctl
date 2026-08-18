@@ -30,9 +30,19 @@ curl_auth() {
   fi
 }
 
+# --plain, and match the unit name by pattern rather than by column position.
+# systemctl prefixes FAILED units with a "●" bullet, which shifts every column
+# and makes `awk '{print $1}'` return the bullet -- producing
+# `Failed to stop \xe2\x97\x8f.service`. It only misbehaves once a unit has
+# failed, i.e. exactly when stop_all is most needed.
+list_our_units() {   # $1 = optional --state=... filter
+  systemctl list-units --type=service --plain --no-legend ${1:+"$1"} \
+      "${UNIT_PREFIX}*.service" 2>/dev/null \
+    | grep -oE "${UNIT_PREFIX}[A-Za-z0-9_.-]+\\.service" || true
+}
+
 running_unit() {
-  systemctl list-units --type=service --state=active --no-legend "${UNIT_PREFIX}*.service" 2>/dev/null \
-    | awk '{print $1}' | head -1
+  list_our_units --state=active | head -1
 }
 
 running_profile() {
@@ -71,9 +81,12 @@ wait_healthy() {
 
 stop_all() {
   local u
-  for u in $(systemctl list-units --type=service --no-legend "${UNIT_PREFIX}*.service" 2>/dev/null | awk '{print $1}'); do
+  for u in $(list_our_units); do
     sudo systemctl stop "$u"
   done
+  # A unit left in failed state still owns nothing, but reset it so `status`
+  # and the next list_our_units call are not polluted by the bullet form.
+  sudo systemctl reset-failed "${UNIT_PREFIX}*.service" 2>/dev/null || true
   # Wait for the GPU to actually be released. systemd reports the unit inactive
   # as soon as the process exits, but the driver can hold the allocation a
   # moment longer, which is long enough to fail the next profile's VRAM guard.
@@ -152,7 +165,13 @@ case "$cmd" in
 
   restart)
     p="$(running_profile)" || die "nothing running"
-    sudo systemctl restart "${UNIT_PREFIX}${p}.service"
+    # stop_all + start, NOT `systemctl restart`. systemd starts the replacement
+    # as soon as the old process exits, but the driver has not necessarily
+    # released the allocation yet -- the new engine then dies at startup with
+    # "Free memory on device cuda:0 (22.7/23.48 GiB) ... is less than desired
+    # GPU memory utilization (0.97, 22.78 GiB)". stop_all waits for the VRAM.
+    stop_all
+    sudo systemctl start "${UNIT_PREFIX}${p}.service"
     wait_healthy
     ;;
 
