@@ -29,6 +29,15 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   288,970 tokens of peak against a 180,224-token KV pool and killed every live
   session with `Context size has been exceeded`.
 
+#### Path classifiers extracted (2026-08-18)
+- The three predicates that decide whether a changed path is doc, test or fixture
+  data now live in `scripts/lint-path-classifiers.sh`, sourced from
+  `lint-implementation.sh`. That file is past the 600-line ratchet and may not
+  grow, and the ratchet's own advice is to move code out rather than add to it.
+  It ships through the existing top-level `scripts/*.sh` glob, so no installer
+  change is needed -- deliberately not `scripts/lib/`, which `copy_repo_scripts`
+  excludes.
+
 #### Fixture diffs are data, not source (2026-08-18)
 - `TODO_LEFT` and `MOCK_DB` scanned `*.diff` fixtures line by line, so a fixture
   that exists to contain a violation was reported as the violation -- which
