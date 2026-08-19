@@ -313,7 +313,24 @@ Controls, kept deliberately minimal:
 | Auth | `--api-key`, 32 random bytes, root-only file, injected via systemd `LoadCredential`. Never in a unit file, never in git |
 | Surface | `--no-webui`; the slots endpoint disabled (`/slots` leaks other sessions' prompts) |
 | Firewall | `ufw` default-deny inbound, explicit allowlist, SSH restricted to internal ranges |
-| Privilege | dedicated unprivileged system user; `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `RestrictAddressFamilies`, empty capability bounding set |
+| Privilege | dedicated unprivileged system user; `NoNewPrivileges`, **`ProtectSystem=full`**, `ProtectHome`, `UMask=0027` |
+
+### Sandboxing has a hard ceiling on a CUDA host
+
+`ProtectSystem=full`, **not `strict`**. The existing node's unit documents why,
+and it was learned the hard way:
+
+| setting | why it is NOT set |
+|---|---|
+| `ProtectSystem=strict` | blocks the NVIDIA driver's `/proc` and `/sys` access |
+| `PrivateDevices=true` | hides `/dev/nvidia*`, so CUDA cannot initialise |
+| `DevicePolicy=closed` | same |
+| `MemoryDenyWriteExecute=` | breaks the CUDA JIT |
+
+`full` is the strongest setting that leaves the CUDA stack working, and it
+still makes `/usr` and `/boot` read-only. A hardening pass that "tightens"
+these will produce a unit that restart-loops, so the reasons travel with the
+unit as comments.
 
 **`ufw` on this host is not risk-free.** It carries seven VLAN bridges, Docker
 swarm bridges and libvirt networks; Docker manipulates `FORWARD` directly and
@@ -358,14 +375,25 @@ firewall.
    **first GPU only**. On this host it would report 11 GiB and conclude nothing
    fits. Fix: enumerate all devices, add a device-count notion, and account for
    compute buffers being paid per card.
-2. **`gpu-registry.json`**: new entry `NVIDIA GeForce RTX 2080 Ti` --
+2. **`serve-profile.sh` multi-GPU VRAM guard.** Line ~47 reads
+   `nvidia-smi --query-gpu=memory.free --format=... | head -1` -- the **first
+   card only** -- and refuses to start when it is below
+   `QWEN38_MIN_FREE_VRAM_MIB`. That default is 20000, tuned for a 24 GiB card.
+   On 2 x 11 GiB, card 0 reports ~11000 and **the launcher refuses to start a
+   node that would have fitted**. Fix: aggregate across the devices the profile
+   will actually use, and make the threshold a per-node value.
+3. **`gpu-registry.json`**: new entry `NVIDIA GeForce RTX 2080 Ti` --
    `vram_mib 11264`, `compute_cap "7.5"`, `bandwidth_gbs 616`, `fp8 false`,
    `nvfp4 false`; `measured_tps` filled from benchmarks, not predictions.
-3. **`check_presets.py`** must pass against the multi-GPU pool figure.
-4. New config keys: `split-mode`, `tensor-split`, `main-gpu`.
-5. **Leak guard**: `tests/test_structural.sh` check 22 is case-insensitive over
+4. **`check_presets.py`** must pass against the multi-GPU pool figure.
+5. New config keys: `split-mode`, `tensor-split`, `main-gpu`.
+6. **Leak guard**: `tests/test_structural.sh` check 22 is case-insensitive over
    `llm/` and `docs/memory/`. A committed hostname or address fails the build.
    A `site.conf.example` must cover every value the loader demands.
+7. **`llm/` is in no CI workflow.** Twelve workflows exist and none reference
+   it, so the leak guard and preset checks run only when someone remembers.
+   The structural tests need no accelerator, so the new node wires them into CI
+   -- otherwise a committed hostname reaches a public repository unnoticed.
 
 ---
 
