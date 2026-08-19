@@ -65,8 +65,22 @@ Three properties this must have, because the alternative is a confident lie:
 - **It is labelled an estimate.** Requests that start and finish between two
   samples are missed, which biases the rate low and the wait high.
 
-`p50` and `p95` come from the same window: the duration of each observed
-busy interval, not a modelled distribution.
+**Percentiles are not offered, and that is deliberate.** A `p50`/`p95` of
+response time needs per-request durations, and without a completed-request
+counter all that exists are burst-level busy intervals covering several requests
+at once. Deriving percentiles from those would be the same fabrication as
+inventing a typical request size. What is reported instead is measured:
+
+```
+busy_seconds           = window seconds where outstanding > 0
+mean_service_seconds   = busy_seconds / completions
+service_rate           = completions / busy_seconds
+est_wait_seconds       = requests_ahead / service_rate
+```
+
+`service_rate` divides by **busy** seconds, not wall-clock seconds — a node idle
+for four of five minutes has not become slow, and dividing by wall time would say
+it had.
 
 **Open question to resolve during implementation, not to paper over:** the
 six-request burst never showed `requests_deferred` above 0 in one-second
@@ -171,7 +185,7 @@ the standard to avoid, not to copy.
 
 `GET /api/queue` and `GET /status` are unauthenticated and return **only**:
 `slots`, `processing`, `queued`, `fullness`, `est_wait_seconds`,
-`completion_rate`, `p50_seconds`, `p95_seconds`, `samples`, `model_loaded`
+`service_rate`, `mean_service_seconds`, `samples`, `completions`, `model_loaded`
 (boolean, not the name).
 
 Never: prompts, completions, model paths, file paths, argv, key locations, GPU
@@ -205,7 +219,7 @@ A queue panel above the existing token panels:
 
 - capacity bar: `processing + queued` against `slots`
 - queued count, and estimated wait (or `—` with a "no samples yet" note)
-- completion rate, p50 / p95 response time
+- service rate, and mean service time with its sample count
 - generation and prompt throughput
 
 ## 6. Connection examples, rendered from live state
@@ -305,7 +319,8 @@ Three consequences that must be designed for, not discovered:
    proxy ends up severing the slowest one.
 2. **The queue's wait estimate must tolerate multi-minute requests.** A five-
    minute rolling window can contain a single 100k request and nothing else, so
-   the sample count matters more than ever and `p95` will be dominated by tier.
+   the sample count matters more than ever, and `mean_service_seconds` will
+   swing by tier rather than converging.
 3. **`cache-reuse` is what makes the 100k tier usable for coding.** A follow-up
    turn that shares a prefix prefills only the delta rather than paying 3.5
    minutes again. This is the within-slot reuse that is already on; cross-slot
