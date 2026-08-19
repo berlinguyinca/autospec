@@ -10,18 +10,24 @@ at 80%.
 
 ## Install
 
-Ships with the autospec suite (Claude Code) — no separate installer. Get it via
-the one-line bootstrap, then update with the suite:
+Ships with the autospec suite (Claude Code). Get the whole suite via the one-line
+bootstrap:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
 ```
 
-Already installed? Re-run the suite installer with `--update`, which reinstalls every
-skill in place:
+Already installed? Re-run the suite installer from the **repository root** with
+`--update`, which reinstalls every skill in place:
 
 ```bash
 ./install.sh --update
+```
+
+This skill also has its own installer, for updating it alone from **this directory**:
+
+```bash
+./install.sh --harness claude --update
 ```
 
 ## Invocation
