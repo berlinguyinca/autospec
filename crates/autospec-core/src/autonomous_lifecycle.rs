@@ -54,7 +54,17 @@ pub enum ConductorLeaseDecision {
 }
 
 pub fn decide_conductor_lease(input: ConductorLeaseInput) -> ConductorLeaseDecision {
-    if input.same_host_pid_dead && !input.claimed {
+    // A proven-dead owner on this host releases the lease whatever state it is in. The
+    // `claimed` state used to be excluded, which parked the repository for STALE_LEASE_SECS
+    // (5 minutes) whenever a conductor died inside the claim window -- and the store already
+    // disagreed: `release_terminated_owner` treats `status == "claimed"` with a dead
+    // `lock_pid` as an abandoned claim it may release. The owner's harness may still be
+    // running; the replacement adopts it rather than starting a second one, which is what
+    // `foreground_repeated_restart_observes_one_live_harness_until_merge` asserts end to end.
+    //
+    // `same_host_pid_dead` is only ever true for a pid on the recorded host that we proved
+    // absent or terminated, so an unknown or foreign owner still reads as live.
+    if input.same_host_pid_dead {
         return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid);
     }
     let Some(age) = input.heartbeat_age_secs else {
