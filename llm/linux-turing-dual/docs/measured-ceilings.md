@@ -214,6 +214,31 @@ repository to get CUDA 13 would be complexity bought for nothing.
 `GGML_NATIVE=OFF` is set deliberately — a native build targets the build host's
 CPU and produces a binary that runs only on the machine that compiled it.
 
+## The systemd sandboxing ceiling on a CUDA host
+
+`ProtectSystem=full`, never `strict`. Everything below looks like hardening and
+produces a unit that restart-loops:
+
+| setting | why it is not set |
+|---|---|
+| `ProtectSystem=strict` | blocks the NVIDIA driver's `/proc` and `/sys` access |
+| `PrivateDevices=true` | hides `/dev/nvidia*`, so CUDA cannot initialise |
+| `DevicePolicy=closed` | same |
+| `MemoryDenyWriteExecute=` | breaks the CUDA JIT |
+| `RestrictAddressFamilies=` | the driver uses netlink; the failure is opaque |
+
+What *is* set: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`,
+`ProtectControlGroups`, `ProtectKernelLogs`, `RestrictSUIDSGID`,
+`LockPersonality`, `UMask=0027`, and a single `ReadWritePaths`.
+
+Check 5 of `tests/test_structural.sh` fails the build if any forbidden setting
+reappears, and it was fired in both directions to confirm it works. The reasons
+also live in the unit as comments, because the next person to "tighten" this file
+will read the unit, not this document.
+
+The API key arrives via `LoadCredential`, not `Environment=`. Any local user can
+read an `Environment=` value out of `systemctl show`.
+
 ## Model switch cost
 
 _Filled by Task 12 Step 7._

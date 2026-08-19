@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Launch the dual-Turing node in llama.cpp router mode.
+#
+#   serve-router.sh <profile>        (profile is "router"; the unit passes %i)
+#
+# Invoked by qwen-turing@.service. Safe to run by hand for debugging, but note
+# that by hand there is no CREDENTIALS_DIRECTORY, so pass QT_API_KEY_FILE.
+set -euo pipefail
+
+CONF_DIR="${QT_CONF_DIR:-/opt/qwen-turing/etc}"
+PROFILE="${1:-router}"
+
+# shellcheck source=../config/common.conf
+. "${CONF_DIR}/common.conf"
+
+PROFILE_CONF="${CONF_DIR}/profiles.d/${PROFILE}.conf"
+[ -r "$PROFILE_CONF" ] || { echo "no such profile: ${PROFILE} (${PROFILE_CONF})" >&2; exit 64; }
+# shellcheck source=../config/profiles.d/router.conf
+. "$PROFILE_CONF"
+
+# Site coordinates. require_site returns 78 naming the file; it is sourced, so
+# it never exits on our behalf.
+# shellcheck source=./site.sh
+. "${CONF_DIR}/site.sh"
+require_site || exit $?
+
+[ -x "${QT_LLAMA_DIR}/llama-server" ] || {
+  echo "llama-server not found at ${QT_LLAMA_DIR}" >&2; exit 69; }
+
+# --- the API key ------------------------------------------------------------
+# systemd hands it over via LoadCredential, which puts it in a private tmpfs
+# readable only by this unit. It is deliberately NOT an Environment= value:
+# anyone local can read those out of `systemctl show`.
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "${CREDENTIALS_DIRECTORY}/apikey" ]; then
+  API_KEY_FILE="${CREDENTIALS_DIRECTORY}/apikey"
+elif [ -n "${QT_API_KEY_FILE:-}" ] && [ -r "${QT_API_KEY_FILE}" ]; then
+  API_KEY_FILE="${QT_API_KEY_FILE}"
+else
+  echo "no API key available (expected CREDENTIALS_DIRECTORY/apikey)" >&2
+  exit 78
+fi
+
+# --- render the presets ----------------------------------------------------
+# The committed presets carry <QT_MODELS_DIR> because this repository is public.
+# Rendering at START rather than at install means a site.conf change takes
+# effect on restart instead of needing a reinstall.
+RENDERED="${QT_STATE}/router-presets.rendered.ini"
+install -d -m 0750 "${QT_STATE}"
+sed "s|<QT_MODELS_DIR>|${QT_MODELS_DIR}|g" "${QT_ROUTER_PRESETS}" > "${RENDERED}"
+
+# Fail loudly if a placeholder survived, rather than letting llama-server try to
+# open a file literally named "<QT_MODELS_DIR>/...".
+if grep -q '<[A-Z_]*>' "${RENDERED}"; then
+  echo "unsubstituted placeholder left in ${RENDERED}:" >&2
+  grep -n '<[A-Z_]*>' "${RENDERED}" >&2
+  exit 78
+fi
+
+# Every model the presets name must exist before we start. Otherwise the first
+# request for that id fails at load time, minutes later, looking like a runtime
+# fault rather than a missing file.
+missing=0
+while read -r m; do
+  [ -r "$m" ] || { echo "model not readable: $m" >&2; missing=1; }
+done < <(sed -n 's/^[[:space:]]*model[[:space:]]*=[[:space:]]*//p' "${RENDERED}")
+[ "$missing" -eq 0 ] || exit 69
+
+# --- VRAM guard ------------------------------------------------------------
+# Also wired as ExecStartPre in the unit; harmless here and useful by hand.
+if [ -x "${QT_VRAM_GUARD}" ]; then
+  "${QT_VRAM_GUARD}" --min-total "${QT_MIN_FREE_VRAM_MIB}" \
+                     --min-per-card "${QT_MIN_FREE_PER_CARD_MIB}" || exit $?
+fi
+
+# The build ships its ggml backends beside the binaries.
+export LD_LIBRARY_PATH="${QT_LLAMA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export HOME="${QT_STATE}"
+
+echo "starting profile=${PROFILE} version=${QT_PROFILE_VERSION} runtime=${QT_RUNTIME}"
+echo "  presets=${RENDERED} max-loaded=${QT_ROUTER_MAX_LOADED}"
+echo "  bind=${QT_NODE_ADDR}:${QT_PORT}"
+
+exec "${QT_LLAMA_DIR}/llama-server" \
+  --models "${RENDERED}" \
+  --models-max "${QT_ROUTER_MAX_LOADED}" \
+  --host "${QT_NODE_ADDR}" \
+  --port "${QT_PORT}" \
+  --api-key-file "${API_KEY_FILE}" \
+  --no-webui \
+  --metrics \
+  --slot-prompt-similarity "${QT_SLOT_PROMPT_SIMILARITY}"
