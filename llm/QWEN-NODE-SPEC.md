@@ -1001,6 +1001,56 @@ on the machine.
   has more headroom. This is **not measured** — treat it as a reason to run
   `bench-concurrency.py` on arrival, not as a number to plan against.
 
+### B.9 Serving from a machine you do not control
+
+B.8 covers getting a job to run. This covers keeping a client usefully connected
+to one, which turns out to be a different problem: the node is borrowed, the
+allocation expires, and the only route in is a tunnel. Four things had to be
+true before a session survived that, and each was learned by watching it fail.
+
+**Put an always-listening proxy in front of the tunnel.** If the listening
+socket *is* the SSH forward, then every reconnect, node change, and expired
+allocation reaches the client as `Connection refused` — an error a human must
+notice and act on, not a slow request. A small local byte relay that owns the
+port and simply *holds* a client until the upstream returns converts an outage
+into latency, which HTTP clients already know how to wait through. Keep it a
+byte relay, not an HTTP proxy: it must carry streamed SSE and long keep-alives
+without acquiring opinions about framing. It cannot replay a connection lost
+mid-response — only ones not yet started — and it should answer 503 with a
+reason when its hold window finally expires, because a silent close is
+indistinguishable from a crash or a client bug.
+
+**Do not confuse liveness with capability.** A router process answers `/health`
+with 200 while its model child is dead, every request returning
+`500 proxy error: Could not establish connection`. An entire benchmark run
+failed that way while the supervisor reported the endpoint healthy throughout.
+Check liveness cheaply and often; check capability — ask for one token, require
+a real answer — once per connection, which is when "the job started but the
+model cannot load" actually happens. On a timer it would force a model load on
+an idle node and cost minutes of GPU.
+
+**Generate the configuration from the hardware you got, and publish it.** If the
+GPU is chosen by whichever can start soonest, the card is unknown until the job
+runs — 96 GiB one time, 46 GiB the next. A preset written for the larger one
+loads the weights on the smaller and dies allocating state, which reads like a
+corrupt model rather than a budget nobody checked. Size pool, slots and KV type
+from the VRAM actually found, refuse outright when the weights do not fit, and
+have the job **publish what it is serving** so the client is configured from
+that rather than from a template. A client configured from a template advertises
+models the server does not have and context the pool cannot fund — and
+over-committing a shared pool fails *every* live session, not just the greedy
+one.
+
+**Treat an unanswered question as unanswered, not as an answer.** A supervisor
+that exits when one `squeue` returns empty cannot tell "the job ended" from "the
+login node throttled me", and a shared login node does throttle. Read the
+transport's own exit status, require several *consecutive authoritative*
+negatives before acting, bound every remote call with a timeout, and multiplex
+the connections — one SSH per poll gets rate-limited into a phantom bug where a
+plainly-RUNNING job looks like it never started.
+
+---
+
 ### B.8 Shared HPC clusters (Slurm) — a node you do not own
 
 Time-boxed access to a cluster is a different deployment from a workstation:
