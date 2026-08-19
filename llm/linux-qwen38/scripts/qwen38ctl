@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Control the Qwen3.8-27B vLLM inference node.
+#
+#   qwen38ctl status
+#   qwen38ctl start   <profile>   start a profile (stops any other first)
+#   qwen38ctl stop                stop whatever profile is running
+#   qwen38ctl switch  <profile>   stop current, start named, wait for health
+#   qwen38ctl restart             restart the running profile
+#   qwen38ctl health              query /health
+#   qwen38ctl models              query /v1/models
+#   qwen38ctl logs                follow the journal
+#   qwen38ctl profiles            list known profiles
+set -euo pipefail
+
+CONF_DIR="${QWEN38_CONF_DIR:-/opt/qwen-vllm/etc}"
+# shellcheck source=../config/common.conf
+. "${CONF_DIR}/common.conf"
+
+UNIT_PREFIX="autospec-qwen38@"
+MANAGED_PROFILES="interactive concurrent extended longcontext vision router"
+
+# Per-profile, NOT global. A profile may override QWEN38_PORT -- the llama.cpp
+# longcontext profile serves on 8081 while the vLLM profiles use 8000. Computing
+# this once from common.conf made every health check poll the wrong port and
+# wait the full timeout on a server that was already up.
+base_url_for() {
+  local profile="${1:-}" port="${QWEN38_PORT}"
+  if [ -n "$profile" ] && [ -r "${CONF_DIR}/profiles.d/${profile}.conf" ]; then
+    port="$(
+      # shellcheck disable=SC1090
+      . "${CONF_DIR}/profiles.d/${profile}.conf" >/dev/null 2>&1
+      printf '%s' "${QWEN38_PORT}"
+    )"
+  fi
+  printf 'http://%s:%s' "${QWEN38_HOST}" "${port:-${QWEN38_PORT}}"
+}
+BASE="$(base_url_for "")"
+
+die() { echo "$*" >&2; exit 1; }
+
+curl_auth() {
+  if [ -n "${QWEN38_API_KEY:-}" ]; then
+    curl -sS -H "Authorization: Bearer ${QWEN38_API_KEY}" "$@"
+  else
+    curl -sS "$@"
+  fi
+}
+
+# --plain, and match the unit name by pattern rather than by column position.
+# systemctl prefixes FAILED units with a "●" bullet, which shifts every column
+# and makes `awk '{print $1}'` return the bullet -- producing
+# `Failed to stop \xe2\x97\x8f.service`. It only misbehaves once a unit has
+# failed, i.e. exactly when stop_all is most needed.
+list_our_units() {   # $1 = optional --state=... filter
+  systemctl list-units --type=service --plain --no-legend ${1:+"$1"} \
+      "${UNIT_PREFIX}*.service" 2>/dev/null \
+    | grep -oE "${UNIT_PREFIX}[A-Za-z0-9_.-]+\\.service" || true
+}
+
+running_unit() {
+  list_our_units --state=active | head -1
+}
+
+running_profile() {
+  local u; u="$(running_unit)"
+  [ -n "$u" ] || return 1
+  # autospec-qwen38@interactive.service -> interactive
+  u="${u#"${UNIT_PREFIX}"}"
+  printf '%s\n' "${u%.service}"
+}
+
+is_managed_profile() {
+  case " ${MANAGED_PROFILES} " in *" $1 "*) return 0;; *) return 1;; esac
+}
+
+# Poll /health rather than sleeping. Model load from a warm page cache is tens
+# of seconds; a cold load plus torch.compile is minutes, so the timeout is
+# generous and the failure path prints the journal instead of just timing out.
+wait_healthy() {   # $1 = profile, $2 = optional timeout
+  local profile="${1:-}" timeout="${2:-900}" waited=0
+  BASE="$(base_url_for "$profile")"
+  while [ "$waited" -lt "$timeout" ]; do
+    if curl_auth --fail --max-time 5 "${BASE}/health" >/dev/null 2>&1; then
+      echo "healthy after ${waited}s"
+      return 0
+    fi
+    if [ -z "$(running_unit)" ]; then
+      echo "unit stopped while waiting for health" >&2
+      journalctl -u "${UNIT_PREFIX}*.service" -n 40 --no-pager >&2 || true
+      return 1
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "not healthy after ${timeout}s" >&2
+  journalctl -u "${UNIT_PREFIX}*.service" -n 40 --no-pager >&2 || true
+  return 1
+}
+
+stop_all() {
+  local u
+  for u in $(list_our_units); do
+    sudo systemctl stop "$u"
+  done
+  # A unit left in failed state still owns nothing, but reset it so `status`
+  # and the next list_our_units call are not polluted by the bullet form.
+  sudo systemctl reset-failed "${UNIT_PREFIX}*.service" 2>/dev/null || true
+  # Wait for the GPU to actually be released. systemd reports the unit inactive
+  # as soon as the process exits, but the driver can hold the allocation a
+  # moment longer, which is long enough to fail the next profile's VRAM guard.
+  local waited=0
+  while [ "$waited" -lt 60 ]; do
+    local free; free="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+    # if/then/fi: with `set -e`, `[ test ] && return 0` aborts the whole script
+    # on the first loop iteration where the GPU is not yet free -- i.e. always.
+    if [ "${free:-0}" -ge "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then return 0; fi
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "warning: VRAM still held after ${waited}s" >&2
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+  status)
+    p="$(running_profile || true)"
+    if [ -z "$p" ]; then
+      echo "state   : Stopped"
+      if systemctl is-active --quiet qwen-local.service 2>/dev/null; then
+        echo "note    : llama.cpp node (qwen-local.service) holds the GPU"
+      fi
+      exit 0
+    fi
+    unit="${UNIT_PREFIX}${p}.service"
+    BASE="$(base_url_for "$p")"
+    if curl_auth --fail --max-time 5 "${BASE}/health" >/dev/null 2>&1; then
+      echo "state   : Running"
+    elif systemctl is-failed --quiet "$unit"; then
+      echo "state   : Failed"
+    else
+      echo "state   : Loading"
+    fi
+    echo "profile : ${p}"
+    echo "unit    : ${unit}"
+    # `systemctl is-enabled` prints the state AND exits non-zero when disabled,
+    # so a `|| echo disabled` fallback would print it twice.
+    echo "enabled : $(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    echo "endpoint: ${BASE}"
+    nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu \
+      --format=csv,noheader | sed 's/^/gpu     : /'
+    ;;
+
+  start|switch)
+    profile="${2:-}"
+    [ -n "$profile" ] || die "usage: $(basename "$0") ${cmd} <profile>"
+    if ! is_managed_profile "$profile"; then
+      pc="${CONF_DIR}/profiles.d/${profile}.conf"
+      [ -r "$pc" ] || die "no such profile: ${profile}"
+      # shellcheck disable=SC1090
+      . "$pc"
+      # Deliberately refuses rather than delegating. `qwen-localctl resume` is
+      # `systemctl enable --now`, so starting this profile would silently make
+      # the llama.cpp node the boot default again and leave BOTH units enabled
+      # with a Conflicts= between them -- boot order would decide the winner.
+      # It also would not serve what this profile claims: the profile declares
+      # Q6_K, the llama.cpp node currently holds Q4_K_M.
+      echo "profile '${profile}' is specified but not provisioned on this host." >&2
+      echo "  runtime : ${QWEN38_RUNTIME:-llama.cpp} (not managed by qwen38ctl)" >&2
+      echo "  wanted  : ${QWEN38_GGUF_QUANT:-?}; the qwen-local node holds Q4_K_M" >&2
+      echo >&2
+      echo "Starting it here would re-enable qwen-local at boot and change which" >&2
+      echo "runtime owns the GPU after a reboot. If that is what you want, run:" >&2
+      echo "  qwen38ctl stop && ${QWEN38_DELEGATE_CTL:-qwen-localctl} resume" >&2
+      exit 69   # EX_UNAVAILABLE
+    fi
+    stop_all
+    sudo systemctl start "${UNIT_PREFIX}${profile}.service"
+    wait_healthy "$profile"
+    ;;
+
+  stop)
+    stop_all
+    echo "stopped"
+    ;;
+
+  restart)
+    p="$(running_profile)" || die "nothing running"
+    # stop_all + start, NOT `systemctl restart`. systemd starts the replacement
+    # as soon as the old process exits, but the driver has not necessarily
+    # released the allocation yet -- the new engine then dies at startup with
+    # "Free memory on device cuda:0 (22.7/23.48 GiB) ... is less than desired
+    # GPU memory utilization (0.97, 22.78 GiB)". stop_all waits for the VRAM.
+    stop_all
+    sudo systemctl start "${UNIT_PREFIX}${p}.service"
+    wait_healthy "$p"
+    ;;
+
+  health)  BASE="$(base_url_for "$(running_profile || true)")"
+           curl_auth --fail "${BASE}/health" && echo ;;
+  models)  BASE="$(base_url_for "$(running_profile || true)")"
+           curl_auth --fail "${BASE}/v1/models" ;;
+  logs)    journalctl -u "${UNIT_PREFIX}*.service" -f ;;
+  profiles)
+    for f in "${CONF_DIR}"/profiles.d/*.conf; do
+      n="$(basename "$f" .conf)"
+      printf '%-12s %s\n' "$n" "$(grep -m1 '^QWEN38_PROFILE_VERSION=' "$f" | cut -d'"' -f2)"
+    done
+    ;;
+  *) die "unknown command: ${cmd}" ;;
+esac

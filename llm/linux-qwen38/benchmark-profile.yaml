@@ -1,0 +1,91 @@
+# AutoSpec Model Qualification Benchmark — profile for the Linux RTX 4090 node.
+#
+# This node may not become AutoSpec's default local Qwen worker until it passes
+# the suite below against the named comparison profiles. Throughput alone never
+# qualifies a runtime: a quality regression is disqualifying regardless of how
+# fast the regression is produced.
+
+node: linux-qwen38
+gpu: NVIDIA GeForce RTX 4090 24 GiB
+
+candidate:
+  profile: interactive
+  artifact: qwen38-linux-vllm-w4a16-v1
+
+# Both are required. The GGUF profile controls for quantisation damage on the
+# same hardware; the Mac profile controls for hardware.
+compare_against:
+  - artifact: qwen38-linux-gguf-q6-v1
+    role: quality control (same host, higher-fidelity quant)
+  - artifact: qwen38-mac-gguf-q8
+    role: hardware control (Apple M4 Pro 48 GB, the qwen-local deployment)
+
+suites:
+
+  smoke:
+    blocking: true
+    runner: tests/test_smoke.sh
+    checks:
+      - server launches and /health responds
+      - /v1/models advertises the alias and a max_model_len
+      - non-streaming completion returns the requested token
+      - streaming completion emits SSE chunks
+      - generated merge_intervals passes >=4/5 cases without mutating input
+
+  context_ladder:
+    blocking: true
+    runner: scripts/measure-ceiling.sh
+    # Every rung is recorded pass/fail with the VRAM it used. Rungs above the
+    # measured ceiling are expected to fail; recording the failure is the point.
+    rungs: [32768, 65536, 100000, 131072, 153600, 184320, 199680]
+    record: [pass, vram_used_mib, load_time_s]
+
+  performance:
+    blocking: false
+    runner: scripts/benchmark.py
+    concurrency: [1, 2, 4, 8, 16, 32, 64]
+    # Concurrency on this model is bounded by per-sequence recurrent state, not
+    # by KV. Levels above the measured ceiling will refuse to schedule; that is
+    # a result, not an error.
+    max_tokens: 256
+    prompt_tokens: 512
+    record:
+      - aggregate_gen_tok_s
+      - per_request_gen_tok_s_median
+      - ttft_s_median
+      - ttft_s_p95
+      - vram_used_mib
+
+  speculative_decoding:
+    blocking: false
+    description: MTP on/off A/B at concurrency 1 and 8.
+    # Expectation to be confirmed or refuted, not assumed: MTP should help
+    # single-stream latency and hurt aggregate throughput under batching. The
+    # interactive profile's QWEN38_MTP value is gated on this result.
+    variants: [{mtp: "on"}, {mtp: "off"}]
+    concurrency: [1, 8]
+    record: [aggregate_gen_tok_s, ttft_s_median, acceptance_rate]
+
+  restart:
+    blocking: true
+    steps:
+      - stop the unit, confirm inactive and the GPU released
+      - start the unit, poll /health, record reload-to-health seconds
+      - immediately issue a request, confirm exact output
+      - reboot the host, confirm the enabled profile returns healthy unattended
+
+  quality:
+    blocking: true
+    description: >
+      Held-out coding and reasoning tasks scored identically across candidate
+      and both comparison profiles. No throughput improvement compensates for a
+      quality regression here.
+    gate: candidate must not score materially below qwen38-linux-gguf-q6-v1
+
+promotion:
+  requires:
+    - all blocking suites pass
+    - context ladder verifies at least 100000 tokens
+    - quality suite shows no regression against the GGUF control
+  # Failing this does not mean the node is unusable — it means it is not yet the
+  # default worker. Recorded results live under /var/lib/qwen-vllm/results/.
