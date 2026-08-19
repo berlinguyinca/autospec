@@ -75,5 +75,77 @@ with tempfile.TemporaryDirectory() as d:
     report({"testmodel-160k", "testmodel-40k"} <= set(models),
            "while every -NNk tier survives", str(sorted(models)))
 
+# --- the child tier must come from the server, not from a guess ---------------
+# The same client runs against a 24 GiB 4090, a 96 GiB RTX 6000, an H100 and a
+# MacBook. It never learns which: gen-preset.py sized `c` and `parallel` to the
+# card, so solving parent + width*child <= pool against those two is correct
+# everywhere. A fixed "smallest tier" would be safe and wasteful on a big card.
+SMALL = """version = 1
+
+[testmodel]
+model = /nonexistent/weights.gguf
+c = 131072
+parallel = 4
+alias = testmodel-128k,testmodel-64k,testmodel-40k
+"""
+
+BIG = """version = 1
+
+[testmodel]
+model = /nonexistent/weights.gguf
+c = 262144
+parallel = 8
+alias = testmodel-256k,testmodel-128k,testmodel-64k,testmodel-40k
+"""
+
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    agents = tmp / "agents"
+    agents.mkdir()
+    (agents / "kid.md").write_text("---\nmode: subagent\n---\nbody\n")
+    (agents / "boss.md").write_text("---\nmode: primary\n---\nbody\n")
+
+    def pins(presets_text: str, *extra: str) -> dict:
+        pf = tmp / "p.ini"
+        pf.write_text(presets_text)
+        cfg = tmp / f"cfg-{abs(hash(presets_text + ''.join(extra)))}.json"
+        return generate(pf, cfg, "--agents", str(agents), *extra).get("agent", {})
+
+    small = pins(SMALL)
+    big = pins(BIG)
+
+    report("kid" in small and "kid" in big,
+           "a spawnable agent is pinned on every card", str(small))
+    report("boss" not in small,
+           "a primary agent is left alone — it is never spawned as a child",
+           str(small))
+
+    small_ctx = small.get("kid", {}).get("model", "")
+    big_ctx = big.get("kid", {}).get("model", "")
+    # At the default width both land on the ladder's bottom rung: the bigger
+    # pool also buys a bigger PARENT, which eats the gain. What the extra card
+    # actually funds is more children at that rung, not fatter ones -- the
+    # ladder's granularity is the limit here, not the arithmetic.
+    report(small_ctx.endswith("-40k") and big_ctx.endswith("-40k"),
+           "at full width both cards land on the ladder's bottom rung",
+           f"{small_ctx} vs {big_ctx}")
+
+    # Hold the width still and the pool difference becomes visible, which is
+    # the property that matters: the same client sizes differently per host
+    # without being told which host it is on.
+    small_solo = pins(SMALL, "--fanout", "1").get("kid", {}).get("model", "")
+    big_solo = pins(BIG, "--fanout", "1").get("kid", {}).get("model", "")
+    report(small_solo.endswith("-64k"),
+           "a 131k pool funds one 64k child", small_solo)
+    report(big_solo.endswith("-128k"),
+           "a 262k pool funds one 128k child", big_solo)
+    report(small_solo != big_solo,
+           "the tier tracks the card, not a compiled-in default",
+           f"{small_solo} vs {big_solo}")
+
+    off = pins(BIG, "--no-pin-subagents")
+    report("kid" not in off,
+           "--no-pin-subagents leaves children inheriting", str(off))
+
 print(f"== configure-opencode: {passed} passed, {failed} failed ==")
 sys.exit(1 if failed else 0)
