@@ -69,11 +69,42 @@ name, with a `test_unit_*.py` convention for real pytest modules.
 
 ---
 
-## Host cleanup — before
+## Host cleanup — Tier A, measured
 
-_Filled by Task 5 Step 1._
+The host had been a Docker and compute server for years. Recorded before and
+after so the cleanup is a measurement rather than a claim.
 
-## Host cleanup — after
+| | before | after Tier A |
+|---|---:|---:|
+| root filesystem used | 272 G (84%) | **251 G (78%)** |
+| root filesystem free | 55 G | **75 G** |
+| apt packages (`ii`) | 2875 | **2618** |
+| snaps | 31 | **21** |
+| kernels in `/boot` | 5 | **2** |
+| journal | 3.1 G | 200 M cap |
+| Xorg holding GPUs | yes, both cards | **no** |
+
+`gh` is a snap and survived deliberately; `snapd` was kept for it rather than
+removed wholesale.
+
+### A bug this run found in its own cleanup script
+
+The kernel policy protected `6.8.0-101`, `-111` and `-138`, and the explicit
+purge honoured that list. `apt-get autoremove --purge`, two steps later,
+removed `6.8.0-101` anyway — an auto-installed kernel that nothing depends on
+is precisely what autoremove exists to collect.
+
+Refusing to purge a package does not protect it from autoremove. The script now
+runs `apt-mark manual` on every protected kernel *before* autoremove, and the
+surviving kernels on this host were marked manual retroactively;
+`autoremove --dry-run` now proposes no kernel removal.
+
+The outcome was survivable by luck rather than design: `6.8.0-111` was running,
+known-good, and still installed, so a fallback existed. `6.8.0-101` had never
+been booted on this host either, so nothing verified was lost — but the barrier
+did not hold, and a barrier that holds only when you are lucky is not a barrier.
+
+## Host cleanup — Tier B and C
 
 _Filled by Task 6 Step 7._
 
