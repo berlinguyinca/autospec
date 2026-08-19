@@ -2,6 +2,30 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> ## ✅ EXECUTED — 2026-08-19
+>
+> All eleven tasks were carried out and the node is live. **The authoritative
+> record of what actually happened is
+> [`llm/linux-turing-dual/docs/measured-ceilings.md`](../../../llm/linux-turing-dual/docs/measured-ceilings.md)**,
+> not this file — it carries the measured numbers, and this file carries only the
+> intent.
+>
+> **Where this plan diverged from reality**, so a reader does not follow stale
+> instructions:
+>
+> | plan said | reality |
+> |---|---|
+> | `check_presets.py --config <file>` | takes a **positional** argument, no flag |
+> | report `p50` / `p95` response times | **impossible** without a per-request counter; replaced by `mean_service_seconds` and `service_rate`, divided by *busy* seconds |
+> | `_snapshot()` computed per request | renamed `snapshot()` and reads a **cached** value; one timer polls, because `auth_request` gates every inference request |
+> | `requests_deferred` might be unusable | **usable** — peaks at 4 under a 6-request burst; the `/slots` fallback was never needed |
+> | 100k prefill ≈ 210 s at 475 tok/s | **594–637 tok/s** single-session; the 475 figure came from a *concurrent* run |
+> | `cache-reuse` makes the 100k tier usable | **silently discarded** on this model; ordinary prefix caching does the work, and one slot is what secures it |
+> | 100k as a tier alias | a **dedicated `parallel = 1` preset**, because two slots give a cache hit only every other turn |
+> | 9B served on plain `Q4_K_M` | moved to `UD-Q4_K_XL`; the 27B was already Dynamic v3.0 |
+>
+> Steps are ticked to show they ran, not to suggest the text is still accurate.
+
 **Goal:** Make the node's queue visible (depth, capacity, measured wait), serve everything through nginx on port 80, and add a 100k context tier.
 
 **Architecture:** llama.cpp already queues in slot order, so this adds observation rather than scheduling. nginx becomes the only public listener on `:80` (plus `:8080` for compatibility); llama.cpp retreats to `127.0.0.1:8090` and the dashboard to `127.0.0.1:8081`. The dashboard's collector counts completions from decreases in `processing + queued` over a rolling window and derives a measured service rate; nginx injects `X-Queue-*` headers via an `auth_request` subrequest to the dashboard. The 100k tier is a pool increase plus tier aliases, not a new preset.
@@ -78,7 +102,7 @@ measured before any arithmetic is written.
   `outstanding` comes from `/slots?model=<id>` `is_processing` counts instead.
   Task 2's `queue_state()` reads whichever this task selects.
 
-- [ ] **Step 1: Write the probe**
+- [x] **Step 1: Write the probe**
 
 It must (a) sample `/metrics?model=<id>` and `/slots?model=<id>` every 200 ms,
 (b) fire 6 requests whose prompts are long enough to occupy a slot for tens of
@@ -158,7 +182,7 @@ print("max slots_busy        : %d" % maxbusy)
 print("VERDICT: requests_deferred is %s" % ("USABLE" if maxdef > 0 else "NOT USABLE -- fall back to /slots"))
 ```
 
-- [ ] **Step 2: Run it against the live node**
+- [x] **Step 2: Run it against the live node**
 
 ```bash
 ssh <node> 'sudo cat /etc/qwen-turing.key > /tmp/k; chmod 600 /tmp/k'
@@ -169,7 +193,7 @@ Expected: a `VERDICT:` line. Six slow requests against two slots **must** show
 four waiting at some point; if `deferred` stays 0 while `slots_busy` reaches 2,
 the metric does not report waiters and the fallback is required.
 
-- [ ] **Step 3: Record the verdict**
+- [x] **Step 3: Record the verdict**
 
 Add a "Queue observability" section to `docs/measured-ceilings.md` with the
 transition table and the decision. If `requests_deferred` is unusable, state
@@ -180,7 +204,7 @@ llama.cpp** — in which case Task 2 derives `queued` from
 `max(0, outstanding_seen_max - slots)` over the window and the UI labels it
 "observed", not "exact".
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -215,7 +239,7 @@ verdict is recorded before any arithmetic divides by these numbers."
   `est_wait_seconds(requests_ahead: int) -> float | None`.
   Task 3 constructs one per process and calls `add()` on each poll.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # llm/linux-turing-dual/tests/test_unit_queue_window.py
@@ -361,12 +385,12 @@ def test_negative_outstanding_is_clamped():
     assert w.completions == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_queue_window.py -q`
 Expected: FAIL — `queue_window.py` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 #!/usr/bin/env python3
@@ -458,12 +482,12 @@ class QueueWindow:
         return None if r is None else requests_ahead / r
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_queue_window.py -q`
 Expected: 14 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -508,7 +532,7 @@ argv including the API key's file path.
   Task 4 serves `public_payload()` on `/api/queue` and `sanitise_models()` on
   `/v1/models`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # llm/linux-turing-dual/tests/test_unit_public_payload.py
@@ -664,12 +688,12 @@ def test_sanitise_of_garbage_is_an_empty_list_not_an_exception():
     assert m.sanitise_models({"data": "nonsense"}) == {"object": "list", "data": []}
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_public_payload.py -q`
 Expected: FAIL — `PUBLIC_FIELDS` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `collect-stats.py`:
 
@@ -750,17 +774,17 @@ def sanitise_models(upstream: dict) -> dict:
     return {"object": "list", "data": out}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_public_payload.py -q`
 Expected: 14 passed
 
-- [ ] **Step 5: Run the whole node suite for regressions**
+- [x] **Step 5: Run the whole node suite for regressions**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests llm/linux-qwen38/tests -q`
 Expected: all pass; the existing collector tests must be unaffected.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -797,7 +821,7 @@ not load, and the public surfaces exist to report load."
 - Produces four routes. `/api/queue-headers` returns **204 with `X-Queue-*`
   headers and never a body**; nginx in Task 5 consumes it via `auth_request`.
 
-- [ ] **Step 1: One refresher thread owns all polling; handlers only read a cache**
+- [x] **Step 1: One refresher thread owns all polling; handlers only read a cache**
 
 **This is the load-bearing design decision of the task.** nginx runs
 `auth_request` against `/api/queue-headers` before *every* inference request. If
@@ -871,7 +895,7 @@ Start the thread in `main()` as `threading.Thread(target=_refresher, daemon=True
 
 Every route below calls `snapshot()`. **No route calls `_poll_once()`.**
 
-- [ ] **Step 2: Add the routes**
+- [x] **Step 2: Add the routes**
 
 ```python
         if path == "/api/queue":                 # PUBLIC
@@ -913,7 +937,7 @@ Every route below calls `snapshot()`. **No route calls `_poll_once()`.**
             return
 ```
 
-- [ ] **Step 2b: Prove the header endpoint is cheap, not just correct**
+- [x] **Step 2b: Prove the header endpoint is cheap, not just correct**
 
 Correctness under a *dead* backend is not the failure mode that matters here; nginx
 waiting on a *slow* one is.
@@ -927,7 +951,7 @@ scales with backend latency, the handler is still polling** — find the call an
 move it into `_poll_once()`.
 
 
-- [ ] **Step 3: Write the public status page**
+- [x] **Step 3: Write the public status page**
 
 `web/status.html`: self-contained, no external assets, polls `/api/queue` with
 **no Authorization header**. Shows slots, processing, queued, a fullness bar,
@@ -935,7 +959,7 @@ estimated wait (`—` when `null`, with "not enough samples yet"), service rate 
 mean service time with the sample count, and whether a model is loaded. It must
 contain no model names, no paths, and no key prompt.
 
-- [ ] **Step 4: Verify the routes on the live node**
+- [x] **Step 4: Verify the routes on the live node**
 
 ```bash
 # after deploying and restarting the dashboard
@@ -950,7 +974,7 @@ Expected: `/api/queue` and `/status` **200**, `/api/stats` **401**, the models
 list free of `/`, and `/api/queue-headers` returning `204` with five `X-Queue-*`
 headers.
 
-- [ ] **Step 5: Verify the header endpoint cannot refuse service**
+- [x] **Step 5: Verify the header endpoint cannot refuse service**
 
 Run with llama.cpp deliberately stopped:
 ```bash
@@ -962,7 +986,7 @@ sudo systemctl start qwen-turing@router
 Expected: **204**. Anything else would let a dead backend turn into nginx
 rejecting every inference request.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1003,7 +1027,7 @@ does not strand every configured client.
   in `common.conf`; llama.cpp bound to `127.0.0.1:${QT_LLAMA_PORT}`; the
   dashboard bound to `127.0.0.1:${QT_DASH_PORT}`.
 
-- [ ] **Step 1: Add the new config keys**
+- [x] **Step 1: Add the new config keys**
 
 In `common.conf`:
 ```bash
@@ -1022,14 +1046,14 @@ In `site.conf.example` add `QT_DASH_ADDR` guidance for loopback, and in
 `site.sh` leave `QT_REQUIRED_VARS` unchanged — these are node settings, not site
 coordinates.
 
-- [ ] **Step 2: Point the backends at loopback**
+- [x] **Step 2: Point the backends at loopback**
 
 `serve-router.sh`: replace `--host "${QT_NODE_ADDR}" --port "${QT_PORT}"` with
 `--host 127.0.0.1 --port "${QT_LLAMA_PORT}"`, and add a comment that the public
 address is nginx's business now. `dashboard-run.sh`: `--host 127.0.0.1`, and its
 `--metrics-url` becomes `http://127.0.0.1:${QT_LLAMA_PORT}/metrics`.
 
-- [ ] **Step 3: Write the nginx config**
+- [x] **Step 3: Write the nginx config**
 
 ```nginx
 # The ONLY public listener on this node. llama.cpp and the dashboard both bind
@@ -1142,7 +1166,7 @@ server {
 # }
 ```
 
-- [ ] **Step 4: Add structural checks for the config**
+- [x] **Step 4: Add structural checks for the config**
 
 Append to `tests/test_structural.sh`, as checks 8 and 9:
 
@@ -1175,7 +1199,7 @@ if [ -r "$n" ]; then
 fi
 ```
 
-- [ ] **Step 5: Install nginx and validate before applying**
+- [x] **Step 5: Install nginx and validate before applying**
 
 ```bash
 sudo apt-get install -y --no-install-recommends nginx
@@ -1189,7 +1213,7 @@ Expected: `syntax is ok` / `test is successful`. **Do not reload on any error** 
 `nginx -t` failing after `sites-enabled/default` was removed would leave port 80
 unserved.
 
-- [ ] **Step 6: Restart backends onto loopback, then start nginx**
+- [x] **Step 6: Restart backends onto loopback, then start nginx**
 
 ```bash
 cd ~/qwen-turing-src/llm/linux-turing-dual && bash scripts/install-node.sh --skip-build
@@ -1203,7 +1227,7 @@ Expected: `127.0.0.1:8090` and `127.0.0.1:8081` for the backends, `0.0.0.0:80`
 and `0.0.0.0:8080` for nginx. **A backend on `0.0.0.0` here means the loopback
 change did not take and the firewall is now the only thing protecting it.**
 
-- [ ] **Step 7: Verify through the proxy, including the cases a proxy breaks**
+- [x] **Step 7: Verify through the proxy, including the cases a proxy breaks**
 
 ```bash
 KEY=$(sudo cat /etc/qwen-turing.key)
@@ -1238,7 +1262,7 @@ Expected: completion `OK`; five `X-Queue-*` headers; streamed lines arriving ove
 time rather than all at once; `/`, `/status`, `/api/queue` → 200; `/api/stats` →
 401; `/models` → 403; sanitised model list; both backends refused from off-host.
 
-- [ ] **Step 7b: The failure modes a proxy introduces**
+- [x] **Step 7b: The failure modes a proxy introduces**
 
 Three things that only break once nginx is in front, each verified rather than
 reasoned about:
@@ -1280,7 +1304,7 @@ and six 200s whose `time_total` reflects model work, not added subrequest latenc
 that before opening the firewall, because it converts a dashboard restart into an
 inference outage.
 
-- [ ] **Step 8: Verify a 40k prompt survives the proxy**
+- [x] **Step 8: Verify a 40k prompt survives the proxy**
 
 Run the existing needle probe against port 80:
 ```bash
@@ -1290,7 +1314,7 @@ Expected: needle retrieved. This is the case a default `proxy_read_timeout` or
 request buffering would break, and it must be proven before the 100k tier is
 added on top.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1329,7 +1353,7 @@ before the cert does."
 - Produces served ids `qwen3.8-27b-100k`, `-50k`, `-40k` resolving to the same
   resident weights.
 
-- [ ] **Step 1: Raise the pool, and split 100k into its own preset**
+- [x] **Step 1: Raise the pool, and split 100k into its own preset**
 
 Two changes to `router-presets.ini`.
 
@@ -1382,13 +1406,13 @@ tensor-split = 1,1
 Both presets name the same weights file, so switching costs one reload (~7 s
 measured), not a re-download.
 
-- [ ] **Step 2: Verify the preset gate accepts it**
+- [x] **Step 2: Verify the preset gate accepts it**
 
 Run: `cd /tmp/wt-turing && python3 llm/linux-qwen38/tests/check_presets.py --config llm/linux-turing-dual/config/router-presets.ini`
 Expected: pass. If it rejects a tier for advertising more sessions than slots,
 that is the gate working — fix the aliases, not the gate.
 
-- [ ] **Step 3: Check the arithmetic before touching the node**
+- [x] **Step 3: Check the arithmetic before touching the node**
 
 ```bash
 python3 -c "
@@ -1401,7 +1425,7 @@ for seat,n in ((102400,1),(51200,2),(40960,2)):
 ```
 Expected: 102,400 → ~18,702 MiB resident, ~3,826 MiB free; all three tiers `ok`.
 
-- [ ] **Step 4: Deploy and confirm the tier is served**
+- [x] **Step 4: Deploy and confirm the tier is served**
 
 ```bash
 cd ~/qwen-turing-src/llm/linux-turing-dual && bash scripts/install-node.sh --skip-build
@@ -1412,7 +1436,7 @@ nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 ```
 Expected: the aliases listed; resident VRAM near 18,700 MiB once warm.
 
-- [ ] **Step 5: Verify 100k AT LENGTH — the only claim that counts**
+- [x] **Step 5: Verify 100k AT LENGTH — the only claim that counts**
 
 ```bash
 python3 /tmp/needle.py 100000 qwen3.8-27b-100k
@@ -1422,7 +1446,7 @@ should be ~210 s, so the whole call takes several minutes. **If it fails on a
 timeout rather than on capacity, that is Task 5's `proxy_read_timeout`, not this
 tier.**
 
-- [ ] **Step 5b: Verify the one-slot preset actually delivers the cache hit**
+- [x] **Step 5b: Verify the one-slot preset actually delivers the cache hit**
 
 This is the entire reason it is a separate preset, so it is measured:
 
@@ -1442,7 +1466,7 @@ claim that a dedicated preset buys guaranteed cache hits is **wrong and must be
 corrected in the spec** rather than shipped. Do not proceed to Step 6 on a failed
 5b.
 
-- [ ] **Step 5c: Confirm the two-slot tier still takes two concurrent 40k sessions**
+- [x] **Step 5c: Confirm the two-slot tier still takes two concurrent 40k sessions**
 
 Acceptance criterion 9. A larger pool should only help, but the claim is measured
 rather than assumed:
@@ -1453,14 +1477,14 @@ python3 /tmp/conc.py
 Expected: both sessions HTTP 200 with the needle retrieved, and zero KV-cache
 evictions in the journal.
 
-- [ ] **Step 6: Record it**
+- [x] **Step 6: Record it**
 
 Add to `docs/measured-ceilings.md`: the pool table, the measured prompt token
 count and wall time, resident VRAM at 100k depth, and set `verified_max` in
 `model-artifacts.yaml` to what was actually retrieved. If 100k fails, record the
 largest size that did rather than leaving the tier advertised.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1493,7 +1517,7 @@ why cache-reuse is what makes the tier usable for a coding session."
 - Consumes: `queue` in `/api/stats`, and `/v1/models` for the served ids.
 - Produces: no new interfaces.
 
-- [ ] **Step 1: Add the queue panel**
+- [x] **Step 1: Add the queue panel**
 
 Above the token panels, driven by `d.queue`:
 
@@ -1529,7 +1553,7 @@ function renderQueue(q){
 }
 ```
 
-- [ ] **Step 2: Add the connection-examples panel, rendered from live state**
+- [x] **Step 2: Add the connection-examples panel, rendered from live state**
 
 Build it from `location.origin` and the ids returned by `/v1/models`, so the
 examples cannot drift from what the node actually serves. Four tabs:
@@ -1580,7 +1604,7 @@ console.log(r.choices[0].message.content);`,
 }
 ```
 
-- [ ] **Step 3: Put the two gotchas next to the examples**
+- [x] **Step 3: Put the two gotchas next to the examples**
 
 They are the reasons a working node looks broken, so they belong where people
 copy from, not only in the README:
@@ -1592,7 +1616,7 @@ copy from, not only in the README:
    `-40k`/`-50k` mean two sessions. Nothing enforces it, and a 100k session
    beside a 40k one kills both.
 
-- [ ] **Step 4: Verify in a browser and by fetch**
+- [x] **Step 4: Verify in a browser and by fetch**
 
 ```bash
 curl -sf http://127.0.0.1/ | grep -c 'renderQueue\|renderExamples'
@@ -1603,7 +1627,7 @@ no model name and no path. Then load `http://<node-host>/` and confirm the queue
 panel and examples render, and that the examples show the real origin rather than
 a placeholder.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1630,7 +1654,7 @@ context tiers being a client-side contract that nothing enforces."
 - Modify: `ops/firewall.sh`, `README.md` (node), `llm/README.md`,
   `docs/measured-ceilings.md`
 
-- [ ] **Step 1: Open port 80, close the old backend ports**
+- [x] **Step 1: Open port 80, close the old backend ports**
 
 ```bash
 sudo ufw allow from <campus-cidr>   to any port 80 proto tcp
@@ -1646,7 +1670,7 @@ remove allows for ports nothing public listens on any more. **Verify SSH from a
 second connection anyway** before moving on — the cost of being wrong is the
 same as last time.
 
-- [ ] **Step 2: Confirm the exposure matches the intent**
+- [x] **Step 2: Confirm the exposure matches the intent**
 
 ```bash
 sudo ss -ltnp | grep -E ':(80|443|8080|8081|8090)\b'
@@ -1655,7 +1679,7 @@ sudo ufw status | tail -12
 Expected: nginx on `0.0.0.0:80` and `0.0.0.0:8080`; backends on `127.0.0.1` only;
 no `443` listener and no `443` rule yet.
 
-- [ ] **Step 3: Document it in the node README**
+- [x] **Step 3: Document it in the node README**
 
 Add sections for: the one-URL usage (`/`, `/status`, `/v1`), the queue panel and
 what its numbers mean, **nginx as a single point of failure for inference** with
@@ -1663,12 +1687,12 @@ the reason it was accepted, the 100k tier including its ~3.5 minute prefill, the
 reasoning-token gotcha, and the exact two-step for enabling TLS when the campus
 certificate arrives.
 
-- [ ] **Step 4: Add the fourth row's detail to `llm/README.md`**
+- [x] **Step 4: Add the fourth row's detail to `llm/README.md`**
 
 Mention that this node fronts llama.cpp with nginx and exposes queue state, so a
 reader choosing between nodes knows which one has it.
 
-- [ ] **Step 5: Prove it survives a reboot — acceptance criterion 15**
+- [x] **Step 5: Prove it survives a reboot — acceptance criterion 15**
 
 ```bash
 sudo systemctl is-enabled nginx qwen-turing@router qwen-turing-dashboard
@@ -1687,7 +1711,7 @@ Expected: all three units active, dashboard 200, a real completion, ufw active,
 both cards present. **This must be a real reboot** — `systemctl restart` does not
 test unattended start, and the operator must be asked before it is taken.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1730,7 +1754,7 @@ be changed to stop it. All three signals are misconfigurations, not faults.
   `read_journal(unit: str, since: str) -> tuple[str, bool]` where the bool is
   *readable*, never conflated with *empty*. Task 7's page renders all three.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_unit_config_health.py`. Its module docstring should say: each
 signal is a fixable misconfiguration rather than a fault, and the one hard rule is
@@ -1807,12 +1831,12 @@ def test_hit_rate_zero_is_distinguishable_from_unknown():
     assert c["hit_rate"] == 0.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_config_health.py -q`
 Expected: FAIL — `parse_journal_events` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `collect-stats.py`:
 
@@ -1868,12 +1892,12 @@ def read_journal(unit: str = "qwen-turing@router.service", since: str = "-2h",
         return "", False
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_config_health.py -q`
 Expected: 8 passed
 
-- [ ] **Step 5: Surface it in `/api/stats` and the page**
+- [x] **Step 5: Surface it in `/api/stats` and the page**
 
 `read_journal` **forks a process**, so it must not run on the 1 s refresh tick and
 must never be reachable from `/api/queue-headers`, which gates every inference
@@ -1905,7 +1929,7 @@ unavailable"** and must not render `0 evictions`.
 `config_health` is **not** added to `PUBLIC_FIELDS`: eviction lines name models,
 and the public surfaces carry load only.
 
-- [ ] **Step 6: Verify against a real eviction**
+- [x] **Step 6: Verify against a real eviction**
 
 ```bash
 KEY=$(sudo cat /etc/qwen-turing.key)
@@ -1925,7 +1949,7 @@ print("cache    :", d["cache"])'
 Expected: at least one eviction naming both models; `disabled` **empty**, which is
 the proof that removing `cache-reuse` in Task 6 worked; and a non-null hit rate.
 
-- [ ] **Step 7: Verify the journal-unavailable path**
+- [x] **Step 7: Verify the journal-unavailable path**
 
 ```bash
 curl -sf -H "Authorization: Bearer $KEY" http://127.0.0.1/api/stats \
@@ -1935,7 +1959,7 @@ Then confirm in the page that an unreadable feed reads "event feed unavailable"
 rather than "0 evictions" — temporarily point `read_journal` at a nonexistent unit
 to see it, and revert.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -1984,7 +2008,7 @@ fetched by hand. This closes that.
   `[{"file": str, "repository": str, "revision": str, "size_bytes": int}]`,
   used by the installer and asserted by the test.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # llm/linux-turing-dual/tests/test_unit_artifacts.py
@@ -2032,12 +2056,12 @@ def test_empty_yaml_is_an_empty_plan_not_an_exception():
     assert load().artifact_fetch_plan("") == []
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_artifacts.py -q`
 Expected: FAIL — `artifacts.py` does not exist.
 
-- [ ] **Step 3: Record the new artifacts**
+- [x] **Step 3: Record the new artifacts**
 
 Add to `model-artifacts.yaml`, each with `repository`, `revision`, `file`,
 `size_bytes`, `on_disk_gib`, `served_as` and a `projector` block where relevant:
@@ -2067,7 +2091,7 @@ Give each a distinct local name (`mmproj-27b-F16.gguf`, `mmproj-9b-F16.gguf`) �
 duplicate-filename test exists because otherwise the second download silently
 overwrites the first and the 9B would load the 27B's projector.
 
-- [ ] **Step 4: Write the helper and the installer phase**
+- [x] **Step 4: Write the helper and the installer phase**
 
 `scripts/artifacts.py` parses the YAML with `yaml.safe_load` and flattens
 artifacts plus their projectors into one list. The installer phase then:
@@ -2101,12 +2125,12 @@ fi
 A truncated GGUF is worse than a missing one — it loads and answers subtly wrong —
 so a mismatch is fatal rather than a warning.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_artifacts.py -q`
 Expected: 4 passed
 
-- [ ] **Step 6: Prove the rebuild claim — acceptance criterion 22**
+- [x] **Step 6: Prove the rebuild claim — acceptance criterion 22**
 
 A recipe nobody has run is a description. Delete one artifact and make the
 installer restore it:
@@ -2120,7 +2144,7 @@ Expected: exactly that one file re-fetched at the right byte count, the others
 reported "present at expected size", and the 9B serves a completion afterwards.
 Then `rm /tmp/9b.bak`.
 
-- [ ] **Step 7: Prove a truncated file is refused**
+- [x] **Step 7: Prove a truncated file is refused**
 
 ```bash
 sudo truncate -s -1024 /path/to/models/Qwen3.5-9B-Q4_K_M.gguf
@@ -2129,7 +2153,7 @@ bash scripts/install-node.sh --skip-build; echo "exit=$?"
 Expected: a `SIZE MISMATCH` line and a **non-zero exit**. The installer must then
 re-fetch it cleanly on the next run.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /tmp/wt-turing
@@ -2174,7 +2198,7 @@ come back, because a recipe nobody has run is a description."
   returning `[{"id", "aliases", "kind", "context", "slots", "resident"}]` where
   `kind` is one of `text`, `vision`, `uncensored`, `uncensored-vision`.
 
-- [ ] **Step 1: Add the five new presets**
+- [x] **Step 1: Add the five new presets**
 
 Each is a separate section. **Vision is never an option on a text preset** — the
 4090 node showed a projector on the shared preset costs every text-only session
@@ -2229,13 +2253,13 @@ split-mode = layer
 tensor-split = 1,0
 ```
 
-- [ ] **Step 2: Verify the preset gate accepts all seven**
+- [x] **Step 2: Verify the preset gate accepts all seven**
 
 Run: `cd /tmp/wt-turing && python3 llm/linux-qwen38/tests/check_presets.py --config llm/linux-turing-dual/config/router-presets.ini`
 Expected: pass. If it does not understand `mmproj`, extend it — a preset gate that
 silently ignores the projector is not pricing the pool correctly.
 
-- [ ] **Step 3: Write the failing catalog test**
+- [x] **Step 3: Write the failing catalog test**
 
 ```python
 # llm/linux-turing-dual/tests/test_unit_catalog.py
@@ -2294,19 +2318,19 @@ def test_unknown_id_does_not_crash_the_catalog():
     assert cat[0]["context"] is None and cat[0]["slots"] is None
 ```
 
-- [ ] **Step 4: Implement `model_catalog`**
+- [x] **Step 4: Implement `model_catalog`**
 
 Parse the rendered presets with `configparser`, join on the served id, and derive
 `kind` from the presence of an `mmproj` key and `uncensored` in the section name.
 An id with no matching section yields `None` context and slots rather than a
 guess — the panel then shows `—`, which is honest.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests -q`
 Expected: all pass, including the earlier suites.
 
-- [ ] **Step 6: Add the catalog panel to the key-gated page**
+- [x] **Step 6: Add the catalog panel to the key-gated page**
 
 A table: id (with aliases), kind badge, context, slots, resident marker, and an
 expandable copy-paste block per id built from `location.origin`:
@@ -2334,7 +2358,7 @@ The catalog stays on the **key-gated** page. It is **not** added to
 `PUBLIC_FIELDS`: an inventory of which uncensored and vision models a node serves
 is configuration, not load.
 
-- [ ] **Step 7: Verify every one of the seven actually answers**
+- [x] **Step 7: Verify every one of the seven actually answers**
 
 ```bash
 KEY=$(sudo cat /etc/qwen-turing.key)
@@ -2352,7 +2376,7 @@ Expected: `'OK'` from all seven. Each cold call includes a reload, so this loop
 takes a few minutes — and every one of those reloads should appear as an eviction
 in the config-health panel.
 
-- [ ] **Step 8: Verify the vision presets with a real image**
+- [x] **Step 8: Verify the vision presets with a real image**
 
 A vision preset that has never been sent an image is not verified.
 
@@ -2383,7 +2407,7 @@ Expected: each names the colour, and `prompt_tokens` is ~1,026 higher than a
 text-only request — the proof the projector actually ran rather than the image
 being silently dropped.
 
-- [ ] **Step 9: Record and commit**
+- [x] **Step 9: Record and commit**
 
 Record in `docs/measured-ceilings.md`: the roster table with measured resident
 VRAM per preset, the image token cost, and the reload cost between presets.

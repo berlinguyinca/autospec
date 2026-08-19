@@ -205,11 +205,16 @@ function renderHealth(h){
           ev.evictions[ev.evictions.length-1].to +
           '. Pin clients to one id, or add a third card to raise --models-max.'
         : 'No thrashing.']);
+    // The window travels with the count. Without it, an empty list cannot be told
+    // apart from a window that simply rolled over -- and "config is clean" is
+    // exactly the conclusion someone would act on.
     rows.push(['Options silently disabled',
-      ev.disabled.length ? '<span class="badge u">' + ev.disabled.join(', ') + '</span>' : '<span class="badge on">none</span>',
+      (ev.disabled.length ? '<span class="badge u">' + ev.disabled.join(', ') + '</span>'
+                          : '<span class="badge on">none</span>') +
+      ' <span class="sub">' + (h.window || '') + '</span>',
       ev.disabled.length
         ? 'The config asks for something this model cannot do; remove it rather than leave it looking effective.'
-        : 'Every configured option is in effect.']);
+        : 'No option was discarded in this window. Note that is a WINDOW, not all time: an option removed longer ago than the window will no longer appear.']);
   }
   const c = h.cache || {};
   const hr = c.hit_rate;
