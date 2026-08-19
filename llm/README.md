@@ -6,7 +6,7 @@ that justify each choice. Start with whichever matches your situation.
 | you have | read | run |
 |---|---|---|
 | a single GPU workstation | [`linux-qwen38/README.md`](linux-qwen38/README.md) | `linux-qwen38/scripts/install-node.sh --with-opencode` |
-| time on an HPC cluster | [`linux-qwen38/hive/README.md`](linux-qwen38/hive/README.md) | `linux-qwen38/hive/opencode_hive` |
+| time on an HPC cluster | [`linux-qwen38/slurm/README.md`](linux-qwen38/slurm/README.md) | `linux-qwen38/slurm/opencode_slurm` |
 | different hardware entirely | [`QWEN-NODE-SPEC.md`](QWEN-NODE-SPEC.md) | `linux-qwen38/scripts/select-quant.py --platform ...` |
 
 [`QWEN-NODE-SPEC.md`](QWEN-NODE-SPEC.md) is the portable spec: the method, not
@@ -29,7 +29,7 @@ linux-qwen38/
   scripts/install-node.sh            provisions the whole stack, then VERIFIES it
   scripts/*                          the operator toolkit (see below)
   tests/                             structural checks, smoke, vision, presets
-  hive/                              the UC Davis cluster deployment
+  slurm/                             the Slurm cluster deployment
 ```
 
 ## The toolkit, and what each tool answers

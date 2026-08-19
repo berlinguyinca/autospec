@@ -4,7 +4,7 @@
 # Driven entirely by environment, so it can be read and tested on its own
 # rather than through a layer of heredoc escaping:
 #
-#   HIVE_USER HIVE_HOST ROOT FORWARD_PORT REMOTE_PORT NODE STATE
+#   CLUSTER_USER CLUSTER_HOST ROOT FORWARD_PORT REMOTE_PORT NODE STATE
 #   GPU NGPU WALLTIME ACCOUNT PARTITION   (for re-acquiring a node)
 #   API_KEY                               (for the capability probe)
 #
@@ -13,13 +13,13 @@
 # that comes back on a different host, and a walltime that eventually expires.
 #
 # When the job really is gone this does NOT stop. It submits another one, waits
-# for the scheduler, and re-points the forward. Combined with hive-proxy.py
+# for the scheduler, and re-points the forward. Combined with slurm-proxy.py
 # holding the client side, an expired allocation becomes a long pause rather
 # than a dead endpoint -- and OpenCode's own state lives on the workstation, so
 # there is nothing on the cluster to lose.
 set -uo pipefail
 
-HIVE_USER="${HIVE_USER:?}"; HIVE_HOST="${HIVE_HOST:?}"
+CLUSTER_USER="${CLUSTER_USER:?}"; CLUSTER_HOST="${CLUSTER_HOST:?}"
 ROOT="${ROOT:?}"; STATE="${STATE:?}"
 FORWARD_PORT="${FORWARD_PORT:?}"; REMOTE_PORT="${REMOTE_PORT:?}"
 node="${NODE:?}"
@@ -33,7 +33,7 @@ GPU_CANDIDATES="${GPU_CANDIDATES:-${GPU}}"
 # capability probe below omits the header entirely when it is empty.
 API_KEY="${API_KEY:-}"
 WALLTIME="${WALLTIME:-12:00:00}"
-# Both are passed in by opencode_hive from the site config; the defaults exist
+# Both are passed in by opencode_slurm from the site config; the defaults exist
 # only so this can be run by hand for debugging.
 ACCOUNT="${ACCOUNT:-<slurm-account>}"; PARTITION="${PARTITION:-low}"
 
@@ -64,7 +64,7 @@ log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 soonest_gpu() {
   local best="$GPU" best_ts="" t out ts
   for t in ${GPU_CANDIDATES//,/ }; do
-    out="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
+    out="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
 sbatch --test-only -p ${PARTITION} -A ${ACCOUNT} --gres=gpu:${t}:${NGPU} \
   -c 8 --mem=8G -t ${WALLTIME} --wrap=true 2>&1 | head -1
 REMOTE
@@ -81,8 +81,8 @@ reacquire() {
   # previous version resubmitted on every cycle because it never noticed, and
   # left a queue of duplicate jobs behind.
   local pending
-  pending="$(q "${HIVE_USER}@${HIVE_HOST}" \
-      "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null \
+  pending="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" \
+      "bash -lc 'squeue -u ${CLUSTER_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null \
       | awk '{print $1}' | head -1 || true)"
 
   local newjob=""
@@ -97,7 +97,7 @@ reacquire() {
     fi
     log "no job; requesting a replacement (${NGPU}x ${GPU}, ${WALLTIME})"
     printf 'reacquiring' > "${STATE}/tunnel.state"
-    newjob="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null | grep -oE '[0-9]+$' | head -1 || true
+    newjob="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null | grep -oE '[0-9]+$' | head -1 || true
 cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
   -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
@@ -116,7 +116,7 @@ REMOTE
   local waited=0 fresh
   while [ "$waited" -lt "$REACQUIRE_WAIT" ]; do
     sleep 30; waited=$((waited + 30))
-    fresh="$(q "${HIVE_USER}@${HIVE_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
+    fresh="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" "bash -lc 'bash -s'" <<REMOTE 2>/dev/null || true
 awk -v want="${newjob}" '
   /^job/  { j = \$3 }
   /^node/ { n = \$3 }
@@ -195,7 +195,7 @@ start_forward() {
   stop_forward
   log "forwarding 127.0.0.1:${FORWARD_PORT} -> ${node}:${REMOTE_PORT}"
   ssh "${forward_opts[@]}" -L "${FORWARD_PORT}:${node}:${REMOTE_PORT}" \
-      "${HIVE_USER}@${HIVE_HOST}" &
+      "${CLUSTER_USER}@${CLUSTER_HOST}" &
   fwd_pid=$!
   printf '%s' "$node" > "${STATE}/tunnel.node"
   verified=0
@@ -213,7 +213,7 @@ gone=0
 sick=0
 # Survive our own restarts. The counter is what an operator reads to answer
 # "has this tunnel been stable?", so a supervisor that is itself restarted --
-# by a fresh `opencode_hive up`, or by the session it runs under -- must not
+# by a fresh `opencode_slurm up`, or by the session it runs under -- must not
 # silently reset the history to zero and report a quiet night.
 reconnects="$(cat "${STATE}/tunnel.reconnects" 2>/dev/null || true)"
 case "$reconnects" in ''|*[!0-9]*) reconnects=0 ;; esac
@@ -274,8 +274,8 @@ while true; do
   fi
 
   # The forward is up but nothing answers through it. Ask the scheduler why.
-  out="$(q "${HIVE_USER}@${HIVE_HOST}" \
-        "bash -lc 'squeue -u ${HIVE_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null)"
+  out="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" \
+        "bash -lc 'squeue -u ${CLUSTER_USER} -n qwen-serve -h -o \"%i %T\"'" 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     log "job query unreachable (ssh rc=${rc}); assuming the job is fine"
@@ -301,7 +301,7 @@ while true; do
   # A job IS running -- most likely a requeue onto a different host, or the
   # model is still loading after a restart.
   gone=0
-  fresh="$(q "${HIVE_USER}@${HIVE_HOST}" \
+  fresh="$(q "${CLUSTER_USER}@${CLUSTER_HOST}" \
           "awk '/^node/{print \$3}' ${ROOT}/logs/endpoint.txt" 2>/dev/null)"
   if [ -n "$fresh" ] && [ "$fresh" != "$node" ]; then
     log "node moved ${node} -> ${fresh}"

@@ -8,9 +8,9 @@
 #
 # Build llama.cpp and stage the weights into the group's shared space.
 #
-#   sbatch setup-hive.sh
+#   sbatch setup-slurm.sh
 #
-# opencode_hive submits this with -A/-p from your site config, which override
+# opencode_slurm submits this with -A/-p from your site config, which override
 # the directives above; a manual `sbatch` needs `-A <your-account>`.
 #
 # Run once. Everything it produces lives on shared storage and survives the job,
@@ -27,10 +27,10 @@
 # `sacctmgr show assoc user=$USER format=account,partition,qos,grptres`.
 set -euo pipefail
 
-# Where this script was submitted from IS the shared root -- opencode_hive
+# Where this script was submitted from IS the shared root -- opencode_slurm
 # copies it there and submits from there -- so there is nothing site-specific to
 # hard-code. The last fallback covers running it by hand from the checkout.
-ROOT="${QWEN_HIVE_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
+ROOT="${QWEN_CLUSTER_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
 # Build on node-local NVMe, install to shared storage. A source checkout is tens of
 # thousands of small files and a parallel filesystem is the worst possible place
 # for that -- the first run spent minutes inside `git clone` alone. Only the

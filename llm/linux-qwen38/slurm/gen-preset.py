@@ -3,7 +3,7 @@
 
     gen-preset.py --vram-mib 46068 --models-dir /scratch/x > presets.ini
 
-`opencode_hive` picks whichever GPU can start soonest, so the card is not known
+`opencode_slurm` picks whichever GPU can start soonest, so the card is not known
 until the job runs: 96 GiB Blackwell one time, 46 GiB L40S the next. A preset
 written for the larger card loads the weights on the smaller one and then dies
 allocating state -- `failed to allocate buffer for rs cache` -- which reads like

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A local port that is always open, whatever the cluster is doing.
 
-    hive-proxy.py --listen 11111 --upstream 11112 [--wait 1800]
+    slurm-proxy.py --listen 11111 --upstream 11112 [--wait 1800]
 
 OpenCode talks to this. It relays to the SSH forward, which comes and goes: the
 job gets preempted, the walltime expires, the network blinks. Without something
@@ -93,8 +93,8 @@ GAVE_UP = (
     b"Connection: close\r\n"
     b"\r\n"
     b'{"error":{"type":"upstream_unavailable","message":'
-    b'"the hive tunnel has had no upstream for the whole hold window; '
-    b'check `opencode_hive status` -- the job is probably queued"}}'
+    b'"the cluster tunnel has had no upstream for the whole hold window; '
+    b'check `opencode_slurm status` -- the job is probably queued"}}'
 )
 
 

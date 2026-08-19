@@ -1,6 +1,6 @@
 # Which cluster, as whom, and where the weights live.
 #
-# Copy to ${XDG_CONFIG_HOME:-~/.config}/opencode-hive/site.conf and fill in.
+# Copy to ${XDG_CONFIG_HOME:-~/.config}/opencode-slurm/site.conf and fill in.
 # These are properties of a site, not of this tooling, and this repository is
 # public, so they are not committed. Nothing here is a secret -- the tunnel
 # authenticates with your existing SSH key -- but a login host, an account name
@@ -9,37 +9,37 @@
 # The `: "${VAR:=value}"` form means an environment variable that is already set
 # wins over this file, so a one-off
 #
-#     OPENCODE_HIVE_PARTITION=high opencode_hive up
+#     OPENCODE_SLURM_PARTITION=high opencode_slurm up
 #
 # works without editing anything.
 
 # The login node you ssh to. The compute node never needs to be reachable from
 # outside the cluster -- the tunnel is outbound from your workstation, through
 # here, to whichever node the scheduler gives you.
-: "${OPENCODE_HIVE_HOST:=login.hpc.example.edu}"
+: "${OPENCODE_SLURM_HOST:=login.hpc.example.edu}"
 
 # Your username on that cluster, if it differs from your local one.
-: "${OPENCODE_HIVE_USER:=your-username}"
+: "${OPENCODE_SLURM_USER:=your-username}"
 
 # Shared storage that both the login node and the compute nodes can read, with
 # room for the weights (~30 GB for Q8 plus the projector). Home directories
 # are usually far too small -- check before choosing. Weights are staged from
 # here to the node's local NVMe at job start, so this is read once per job, not
 # on the hot path.
-: "${OPENCODE_HIVE_ROOT:=/shared/your-group/llm}"
+: "${OPENCODE_SLURM_ROOT:=/shared/your-group/llm}"
 
 # The Slurm account to charge, and the partition that actually takes GPU jobs.
 # `sacctmgr show assoc user=$USER format=account,partition,qos` lists what you
 # may use; a partition that looks GPU-shaped can still have gres/gpu=0 for your
 # association, which fails at submit time with a message about QOS rather than
 # about GPUs.
-: "${OPENCODE_HIVE_ACCOUNT:=your-account}"
-: "${OPENCODE_HIVE_PARTITION:=low}"
+: "${OPENCODE_SLURM_ACCOUNT:=your-account}"
+: "${OPENCODE_SLURM_PARTITION:=low}"
 
 # Optional. Which GPU types to consider, best-start-first; "auto" asks the
 # scheduler which can start soonest. Names come from `sinfo -o '%G'`.
-# : "${OPENCODE_HIVE_GPU_CANDIDATES:=a100,a6000,l40s}"
+# : "${OPENCODE_SLURM_GPU_CANDIDATES:=a100,a6000,l40s}"
 
 # Optional. Walltime to request. A preemptible partition may end the job early;
 # the supervisor re-acquires and re-points the tunnel either way.
-# : "${OPENCODE_HIVE_TIME:=12:00:00}"
+# : "${OPENCODE_SLURM_TIME:=12:00:00}"

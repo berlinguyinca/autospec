@@ -1,12 +1,12 @@
 ---
 name: `<login-host>` — GPU access, queues and layout
-description: Measured layout of the UC Davis hive cluster; GPU jobs must go to partition low with account `<gpu-account>`, and the gpu-* partitions are not submittable
+description: Measured layout of the Slurm cluster; GPU jobs must go to partition low with account `<gpu-account>`, and the gpu-* partitions are not submittable
 type: reference
 wing: synthesis
 drawer_class: fact
 ---
 Measured 2026-08-18 from `<user>@<login-host>`. Full playbook:
-`llm/linux-qwen38/hive/README.md`.
+`llm/linux-qwen38/slurm/README.md`.
 
 **Submitting a GPU job:**
 
@@ -68,16 +68,16 @@ aggregate (56.72): the cluster card buys 8-bit weights at the full
   `python/3.11.9`. `uv` is at `~/.local/bin`; `apptainer` exists; there
   is no docker and no prebuilt llama.cpp.
 
-**One-command driver:** `llm/linux-qwen38/hive/opencode_hive` acquires a
+**One-command driver:** `llm/linux-qwen38/slurm/opencode_slurm` acquires a
 GPU, serves, tunnels, configures OpenCode, and launches it. The tunnel is
 outbound from the workstation, so NAT/firewall there is irrelevant:
-`127.0.0.1:11111 -> hive login -> compute node:8080`. It uses local port
+`127.0.0.1:11111 -> cluster login -> compute node:8080`. It uses local port
 **11111**, deliberately not 8080, because the local RTX 4090 router owns
 8080 and a forward onto it would silently shadow the local node — every
 "local" request would quietly execute on the cluster. The tunnel is
 supervised: `low` is preemptible, so the job can be requeued onto a
 different node and the supervisor re-reads `logs/endpoint.txt` and
-re-forwards. The hive provider is added to OpenCode without becoming the
+re-forwards. The cluster provider is added to OpenCode without becoming the
 default, so a lost job never leaves the client on a dead endpoint.
 
 **Binaries built from modules need those modules at RUN time.** llama.cpp
@@ -142,7 +142,7 @@ with zero child exits and zero LCP selections, against 11 and 8 failures
 on the two prior runs. A mitigation, not a diagnosis; the cost is losing
 cross-slot prompt-cache reuse.
 
-**Never build with `-march=native` on a heterogeneous cluster.** hive
+**Never build with `-march=native` on a heterogeneous cluster.** This one
 mixes zen3, zen4 and zen5, and the setup job and the serving job are
 scheduled independently — so a build landing on zen5 produces a binary
 that dies on an older node with `Illegal instruction (core dumped)`.
@@ -177,7 +177,7 @@ heals it, because the request makes the router reload the model.
 
 **If the server sizes itself dynamically, the client must be
 configured from what it PUBLISHES, not from a template.** Once
-`opencode_hive` chose the GPU by earliest start, the preset became
+`opencode_slurm` chose the GPU by earliest start, the preset became
 per-card too — but the client was still built from the 96 GiB template.
 Against the 46 GiB card actually allocated, OpenCode was told about a
 model the server did not have (`400 model 'qwen3.8-27b-256k' not found`)
@@ -265,7 +265,7 @@ cluster are attributed to nobody. Clone into `<shared-storage>`, never
 aliased onto one loaded model (switching tier is free; switching family
 costs one reload, since `--models-max 1`):
 
-| preset | hive (96 GiB, Q8) | local 4090 (24 GiB, Q5) |
+| preset | cluster (96 GiB, Q8) | local 4090 (24 GiB, Q5) |
 |---|---|---|
 | `qwen3.8-27b` | 262,144 pool, 8 slots | 180,224 pool, 6 slots |
 | `qwen3.8-27b-vision` | 196,608 | 98,304 |

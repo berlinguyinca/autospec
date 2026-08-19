@@ -8,7 +8,7 @@
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@120
 #
-# Serve Qwen3.8-27B on a hive GPU node for the duration of the allocation.
+# Serve Qwen3.8-27B on a cluster GPU node for the duration of the allocation.
 #
 #   sbatch serve-qwen.sbatch
 #   cat  $ROOT/logs/endpoint.txt     # where it landed, and the tunnel command
@@ -26,7 +26,7 @@
 # reclaiming rather than making it fail.
 #
 # 7 days is the cap on `low` here; `high` allows 30 but has 12 GPUs against low's
-# 86 and a queue measured in weeks. opencode_hive passes -A/-p from your site
+# 86 and a queue measured in weeks. opencode_slurm passes -A/-p from your site
 # config, which override the directives above; a manual `sbatch` needs
 # `-A <your-account>`.
 #
@@ -38,9 +38,9 @@
 # re-read endpoint.txt after a requeue rather than assuming the old tunnel.
 set -euo pipefail
 
-# Submitted from the shared root by opencode_hive, so the submit directory IS
+# Submitted from the shared root by opencode_slurm, so the submit directory IS
 # the root and there is nothing site-specific to hard-code here.
-ROOT="${QWEN_HIVE_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
+ROOT="${QWEN_CLUSTER_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
 PREFIX="${ROOT}/opt/llama.cpp"
 MODELS="${ROOT}/models"
 PORT="${QWEN_PORT:-8080}"
@@ -64,7 +64,7 @@ export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 # library -- so the client dutifully forwarded to a port nothing ever listened
 # on, and the failure surfaced as a timeout far from its cause.
 if ! "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1; then
-  echo "llama-server will not run; rebuild with setup-hive.sh" >&2
+  echo "llama-server will not run; rebuild with setup-slurm.sh" >&2
   "${PREFIX}/bin/llama-server" --version || true
   exit 1
 fi
@@ -82,7 +82,7 @@ mkdir -p "${LOCAL}"
 echo "staging weights to ${LOCAL} ..."
 cp -n "${MODELS}"/*.gguf "${LOCAL}/" 2>/dev/null || true
 
-# Size the presets to the card we actually landed on. opencode_hive takes
+# Size the presets to the card we actually landed on. opencode_slurm takes
 # whichever GPU can start soonest, so this job may be on a 96 GiB Blackwell or a
 # 46 GiB L40S. A preset written for the larger one loads the weights on the
 # smaller and then dies allocating state --
@@ -130,7 +130,7 @@ cp "${PRESETS}" "${ROOT}/logs/router-presets.active.ini"
 # that can log into this cluster can use this model.
 #
 # Set QWEN_REQUIRE_KEY=1 to turn it back on; the key is generated per
-# deployment, and opencode_hive picks it up and configures the client with it
+# deployment, and opencode_slurm picks it up and configures the client with it
 # automatically, so it costs no manual step either way.
 API_KEY=""
 if [ "${QWEN_REQUIRE_KEY:-0}" = "1" ]; then
