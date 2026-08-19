@@ -63,7 +63,7 @@ impl LeaseTransaction {
     }
 
     #[cfg(not(unix))]
-    fn try_open(_path: &Path) -> Result<Self, StoreError> {
+    pub(super) fn try_open(_path: &Path) -> Result<Self, StoreError> {
         Err(StoreError::Diagnostic(
             "resilience lease transactions require Unix flock support".to_string(),
         ))
