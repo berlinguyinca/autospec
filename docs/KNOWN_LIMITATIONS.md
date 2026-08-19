@@ -60,6 +60,13 @@
 - Production secret storage in reports, metadata, templates, or generated docs.
 - Unbounded autonomous loops.
 
+## Platform-limited
+
+- Reclaiming a lifecycle lease from a terminated-but-unreaped (zombie) holder is Linux-only. The
+  conductor arms a subreaper, so an orphaned holder can stay unreaped for the life of the run;
+  `process_is_terminated` reads the process state from procfs and returns `Ok(false)` on every
+  other host, so macOS, FreeBSD, and Windows still wait for the holder's PID entry to disappear.
+
 ## Requires human guidance
 
 - Auth, authorization, permissions, privacy/security policy, billing/payments, migrations, data deletion, deployment/infrastructure, major dependency upgrades, framework migrations, public API breaking changes, and multi-service behavior.

@@ -4,6 +4,56 @@
 // siblings are: the parent file is past the size ratchet, and these ten tests share the
 // helpers declared there.
 
+    /// Read the raw process state letter straight from procfs.
+    ///
+    /// Deliberately not routed through `process_is_terminated`: a fixture that establishes its
+    /// precondition with the same helper the assertion exercises can agree with a broken helper
+    /// and still pass.
+    #[cfg(target_os = "linux")]
+    fn procfs_state_letter(pid: u32) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let close = stat.rfind(')')?;
+        stat[close + 1..]
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+    }
+
+    /// berlinguyinca/autospec#3219. `pid_is_dead` relies solely on identity observation, and a
+    /// terminated process keeps its PID entry until somebody waits on it -- `/proc/<pid>/stat`
+    /// still resolves and `getpgid` still succeeds for a zombie. The conductor arms a subreaper,
+    /// so an orphaned lifecycle-lease holder can stay unreaped for the life of the run: the lease
+    /// reads as held forever and every replacement conductor defers instead of adopting the
+    /// repository. The sibling call site `observe_unit_process_identity` already probes for
+    /// termination before observing identity; this one did not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminated_but_unreaped_lease_holder_is_not_live() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("start unreaped PID fixture");
+        let pid = child.id();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while procfs_state_letter(pid).as_deref() != Some("Z") {
+            assert!(
+                Instant::now() < deadline,
+                "fixture never became an unreaped zombie; state={:?}",
+                procfs_state_letter(pid)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let observed = pid_is_dead(pid);
+        child.wait().expect("reap unreaped PID fixture");
+        assert!(
+            observed,
+            "a terminated, unreaped lease holder must not hold the lifecycle lease open"
+        );
+    }
+
     #[test]
     fn pid_liveness_requires_observed_process_absence() {
         assert!(!pid_is_dead(std::process::id()));

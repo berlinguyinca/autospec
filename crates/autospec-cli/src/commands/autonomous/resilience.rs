@@ -1081,6 +1081,16 @@ fn pid_is_dead(pid: u32) -> bool {
     if pid > i32::MAX as u32 {
         return false;
     }
+    // A reaped process disappears, but a terminated one keeps its PID entry until somebody waits
+    // on it, and identity observation still resolves for a zombie. The conductor arms a subreaper,
+    // so an orphaned lease holder can stay unreaped for the life of the run: the lifecycle lease
+    // would never free and every replacement conductor would defer instead of adopting the
+    // repository. Sibling call site `observe_unit_process_identity` already asks this first.
+    //
+    // Unknown stays live. Only proven termination releases another worker's lease.
+    if super::executor_bridge::process_is_terminated(pid).unwrap_or(false) {
+        return true;
+    }
     matches!(
         super::executor_bridge::observe_runtime_process_identity(pid),
         Ok(None)
