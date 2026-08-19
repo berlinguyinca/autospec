@@ -225,22 +225,34 @@ child.
 
 ### Reusing the prefix every session shares
 
-Autospec subagents open with the same large skill preamble, so most of a short
-request is a prefix the slot has already seen. `cache-reuse = 256` reuses it by
-KV shifting instead of reprocessing, in the preset, the generator and the
-launcher alike. 256 is the smallest chunk worth moving; below that, shifting
-costs more than recomputing.
+Measured, and the answer was not the one expected. `--cache-reuse` is **inert on
+this model** — llama.cpp disables it in every configuration that can be built
+here, saying so in the log:
 
-This is **within-slot** reuse. The cross-slot variant —
-`slot-prompt-similarity`, which lets one session's prefix serve another — is
-deliberately disabled: the model child died twice immediately after taking that
-path. That is a mitigation, not a diagnosis, and the cost is exactly the reuse
-you would most want across a fan-out. Set it back to `0.1` to retest on a newer
-llama.cpp.
+| configuration | what the server said |
+|---|---|
+| multimodal (projector loaded) | `cache_reuse is not supported by multimodal` |
+| text-only, `q4_0` KV | `cache_reuse is not supported by this context` |
+| text-only, `f16` KV | same |
+| context shift allowed | same |
 
-The effect of `cache-reuse` here is **unmeasured**. Compare prompt-eval time
-with `scripts/bench-concurrency.py` before and after on your own workload before
-claiming a number.
+It reuses KV by *shifting* it, and Qwen3.8 keeps a recurrent state alongside its
+attention cache that cannot be shifted. So the setting is deliberately absent;
+`test_structural.sh` asserts the absence, because a config line that looks like
+an optimisation while being silently disabled is worse than no line at all.
+
+**Ordinary exact-prefix caching, which does work, matters far more.** With a
+37k-token shared preamble:
+
+| prompt shape | cached | evaluated | prefill |
+|---|---:|---:|---:|
+| identical prefix, different question | 36,998 | 513 | **388 ms** |
+| one varying field near the **start** | 0 | 37,523 | **14,597 ms** |
+
+Thirty-seven times slower, from a single changed token early in the prompt. The
+practical rule for anything fanning out subagents: **keep varying content at the
+end**. A session id, a timestamp or a rotating memory block near the top throws
+away the entire cache. `scripts/bench-cache-reuse.py` measures both shapes.
 
 ### Before the server starts: does it fit at all?
 
