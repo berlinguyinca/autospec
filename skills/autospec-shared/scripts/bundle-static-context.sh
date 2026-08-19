@@ -178,8 +178,34 @@ esac
 
 # ── resolve paths ─────────────────────────────────────────────────────────────
 
-WHOAMI=$(whoami 2>/dev/null || echo "$(id -un)")
-MEMORY_DIR="${AUTOSPEC_MEMORY_DIR:-$HOME/.claude/projects/-Users-${WHOAMI}-IdeaProjects-autospec/memory}"
+# Claude Code names its per-project directory after the absolute repo path with
+# the separators rewritten, and the exact rewrite has changed between releases —
+# this host carries both `-autospec--claude-worktrees-...` and
+# `-go-modules-.worktrees-...` — so probe candidates instead of reproducing it.
+#
+# The hardcoded `-Users-${WHOAMI}-IdeaProjects-autospec` prefix this replaced could
+# only ever match one macOS layout. On Linux the directory never existed, so every
+# implementer, decomposer, and classifier dispatch injected nothing and still
+# printed the ordinary "(No memory files matched the issue labels.)" line — the
+# failure was indistinguishable from "this issue has no relevant memory". The
+# committed `docs/memory` mirror carries the same filenames as the harness store,
+# so it is a harness-independent last resort rather than a different corpus.
+if [ -n "${AUTOSPEC_MEMORY_DIR:-}" ]; then
+  MEMORY_DIR="$AUTOSPEC_MEMORY_DIR"
+else
+  _bsc_slug="$(printf '%s' "$REPO_ROOT" | tr '/' '-')"
+  _bsc_harness_dir="$HOME/.claude/projects/${_bsc_slug}/memory"
+  # Default to the harness path so a debug dump still names something meaningful
+  # when neither candidate exists.
+  MEMORY_DIR="$_bsc_harness_dir"
+  for _bsc_candidate in "$_bsc_harness_dir" "$REPO_ROOT/docs/memory"; do
+    if [ -d "$_bsc_candidate" ]; then
+      MEMORY_DIR="$_bsc_candidate"
+      break
+    fi
+  done
+  unset _bsc_slug _bsc_harness_dir _bsc_candidate
+fi
 SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 # Allow explicit override for testing; fall back to scripts dir
 MANIFEST="${AUTOSPEC_MANIFEST:-$SCRIPTS_DIR/memory-tags.yml}"
