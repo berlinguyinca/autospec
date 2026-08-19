@@ -13,7 +13,7 @@ HARNESS=
 DRY_RUN=0
 
 usage() {
-    printf 'Usage: %s [--harness claude|opencode|codex|all] [--dry-run]\n' "$0"
+    printf 'Usage: %s [--harness claude|opencode|codex|all] [--dry-run] [--update]\n' "$0"
 }
 
 cleanup() {
@@ -26,6 +26,9 @@ while [ $# -gt 0 ]; do
         --harness) shift; HARNESS=${1:-} ;;
         --harness=*) HARNESS=${1#--harness=} ;;
         --dry-run) DRY_RUN=1 ;;
+        # Every write below is already an unconditional overwrite, so --update needs
+        # no distinct behaviour -- it exists so `install.sh --update` can pass it through.
+        --update) ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'error: unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
