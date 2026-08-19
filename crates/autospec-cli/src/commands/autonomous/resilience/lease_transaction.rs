@@ -28,7 +28,6 @@ impl Drop for LeaseTransaction {
     }
 }
 
-#[allow(dead_code)] // Task 3 calls this only through the store transaction primitives.
 impl LeaseTransaction {
     #[cfg(unix)]
     pub(super) fn try_open(path: &Path) -> Result<Self, StoreError> {
