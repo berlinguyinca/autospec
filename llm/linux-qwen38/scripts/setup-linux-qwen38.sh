@@ -39,7 +39,7 @@ sudo -n true 2>/dev/null || die "passwordless sudo required (or run 'sudo -v' fi
 
 driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
 gpu="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)"
+vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
 echo "gpu      : ${gpu} (${vram} MiB, driver ${driver})"
 
 [ "${vram}" -ge 23000 ] || die "need >=23 GiB VRAM, found ${vram} MiB"

@@ -45,7 +45,7 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
   export LD_LIBRARY_PATH="${LLAMA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export HOME="${QWEN38_STATE}"
 
-  free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+  free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
   if [ "${free_mib:-0}" -lt "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then
     echo "refusing to start: only ${free_mib} MiB VRAM free" >&2
     exit 75
@@ -104,7 +104,7 @@ fi
 # vLLM otherwise fails minutes into its memory-profiling pass with an error that
 # does not name the real cause. The llama.cpp node on this host holds ~23 GiB
 # when resident, so this fires often and the message needs to be actionable.
-free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
 if [ "${free_mib:-0}" -lt "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then
   echo "refusing to start: only ${free_mib} MiB VRAM free, need ${QWEN38_MIN_FREE_VRAM_MIB} MiB" >&2
   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv >&2 || true

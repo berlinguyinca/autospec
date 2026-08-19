@@ -42,7 +42,7 @@ BENCH="${LLAMA_DIR}/llama-bench"
 [ -x "$BENCH" ] || { echo "llama-bench not found at ${BENCH}" >&2; exit 69; }
 export LD_LIBRARY_PATH="${LLAMA_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
 if [ "${free_mib}" -lt 20000 ]; then
   echo "need a free GPU: only ${free_mib} MiB available" >&2
   echo "hint: 'qwen38ctl stop'" >&2
