@@ -1270,7 +1270,10 @@ fn runner_checks_worktree_ladder_parity_with_typed_stdin_commands() {
     let report = ValidationRunner::run(&catalog, &validation_fixture("worktree-ladder"));
 
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    // One spawn, not two: #3262 narrowed run_worktree_ladder_assert_parity to
+    // skills/autospec-run/SKILL.md when /autospec became a router that carries no
+    // ladder block of its own. The check was adapted; this expectation was not.
+    assert_eq!(report.results[0].spawn_count, 1);
 }
 
 #[test]
