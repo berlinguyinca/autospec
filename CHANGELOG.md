@@ -27,6 +27,16 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   regeneration, nothing more. Re-expanding all 113 goldens now finds zero
   mismatches.
 
+#### Heartbeat renewal is waited for, not slept through (2026-08-18)
+- `heartbeat_survives_owned_transaction_contention_and_renews_later` slept a fixed
+  100 ms for a renewal published by a thread on a 10 ms interval, so a loaded machine
+  missed the window and the test failed on an assertion about the code under test.
+  It now polls for the renewal with a deadline, the same shape as the `wait_for`
+  helper beside it. Observed as a 1-of-811 failure locally.
+- Moved those ten tests into `resilience/heartbeat_tests.rs`, `include!`d the way
+  `policy_tests.rs` and its siblings already are: `resilience.rs` was 1,607 lines and
+  past the size ratchet, so the fix could not be added to it. Now 1,187.
+
 ### Fixed
 
 #### OpenCode subagent mode (2026-08-18)
