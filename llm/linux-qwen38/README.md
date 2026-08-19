@@ -223,6 +223,38 @@ deny it `task` so fan-out cannot nest, and retire the operator-facing skills fro
 `mode: all` to `mode: primary` so an 11k-21k skill body is never spawnable as a
 child.
 
+### Before the server starts: does it fit at all?
+
+`scripts/capacity-preflight.py` prices weights + KV + buffers against the
+accelerator and refuses a context the card cannot hold:
+
+```bash
+capacity-preflight.py --ctx 204800 --kv q4_0 --parallel 1 \
+                      --weights /path/to/model.gguf
+# verdict : DOES NOT FIT — lower the context to 131,072
+```
+
+Exit 0 fits, **75** does not (EX_TEMPFAIL, so a unit refuses rather than
+retries), 2 could not tell. Both boundaries are measured on the RTX 4090 rather
+than modelled: 204800 crash-looped 54 times, 131072 came up healthy holding
+22718 MiB.
+
+It never suggests unpinning `n-gpu-layers`. That is the branch llama.cpp's own
+auto-fitter takes — it fits by moving layers to the CPU, which on a 27B model
+costs far more than the context it saves. Lower the context or the
+quantisation instead.
+
+`--headroom-mib` defaults to 0 because the sizing model already reserves 2 GiB
+plus 512 MiB per slot and then takes 80% of what is left. Raise it on a host
+that also drives a desktop, or one whose node sleeps and has to reclaim its
+memory later — a node sized to the last megabyte cannot wake.
+
+Hardware detection covers CUDA and Apple unified memory, where the budget is
+`iogpu.wired_limit_mb` if set and otherwise three quarters of `hw.memsize`.
+Anything else is undetermined, and the gate says so rather than assuming a card.
+
+### After it starts: can it fund the fan-out?
+
 `scripts/context-budget-check.py` is the gate. It reads the **loaded** server
 rather than these presets, resolves agents through `opencode agent list` and
 `opencode debug agent` so it sees built-ins and config overrides, and prices two
