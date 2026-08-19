@@ -1222,7 +1222,7 @@ Pass the following prompt verbatim to each background subagent:
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
-
+>      <!-- guardian-block:end -->
 **MUST** read `skills/autospec/references/monitor-recovery.md` and follow it when the monitor reaches the reviewer verdict, the reuse-BLOCK refute pass, or Steps 8–11 (SUCCESS/FAILURE/Cleanup/Report): it holds the cold-tail procedures — reviewer lens (data-scope invariant, regression gap-check, hard limit, simplicity axis), the reuse-BLOCK refute pass, verdict handling, Step 8 SUCCESS (full-suite gate, PR-size final merge, guarded merge, parent reconcile), Step 9 FAILURE, Step 10 Cleanup, Step 11 Report, and the monitor hard rules.
 
 Capture the agent ID / log path for monitoring.

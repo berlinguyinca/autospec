@@ -1637,7 +1637,7 @@ impl StructuralValidator {
     }
 
     pub fn validate_phase4_guardian_block_lockstep(root: &Path) -> Result<(), String> {
-        let canonical_relative = "skills/autospec/SKILL.md";
+        let canonical_relative = "skills/autospec-run/SKILL.md";
         let canonical_path = root.join(canonical_relative);
         if !canonical_path.is_file() {
             return Err(format!("guardian lockstep: {canonical_relative} missing"));
@@ -1795,7 +1795,7 @@ impl StructuralValidator {
     pub fn validate_data_scope_review_lens(root: &Path) -> Result<(), String> {
         require_literal_contract(
             root,
-            &PHASE4_ADAPTER_FILES,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
             &[
                 ("data-scope invariant lens", "data-scope invariant lens"),
                 (
@@ -1815,7 +1815,7 @@ impl StructuralValidator {
     }
 
     pub fn validate_phase4_cost_epic_parity_lockstep(root: &Path) -> Result<(), String> {
-        for relative in PHASE4_ADAPTER_FILES {
+        for relative in AUTOSPEC_RUN_ADAPTER_FILES {
             let document = read(&root.join(relative)).unwrap_or_default();
             if document.contains("AUTOSPEC_BATCH_SIZE:-3") {
                 return Err(format!(
@@ -2433,7 +2433,11 @@ fn require_literal_contract(
 fn guardian_block(document: &str) -> String {
     let mut depth = 0i32;
     let mut lines = Vec::new();
+    let mut done = false;
     for line in document.lines() {
+        if done {
+            break;
+        }
         if line.contains("<!-- guardian-block:begin -->") {
             depth += 1;
             if depth == 1 {
@@ -2443,6 +2447,7 @@ fn guardian_block(document: &str) -> String {
         if line.contains("<!-- guardian-block:end -->") {
             if depth == 1 {
                 depth = 0;
+                done = true;
                 continue;
             }
             depth -= 1;
