@@ -66,7 +66,30 @@ def load(path: Path) -> dict:
     return {"roofline_efficiency": 0.80, "gpus": {}}
 
 
-def observe_metal() -> list[dict]:
+def _apple_name() -> str:
+    """Marketing name of the chip, falling back to something honest."""
+    try:
+        brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                               capture_output=True, text=True, timeout=30)
+        if brand.returncode == 0 and brand.stdout.strip():
+            return brand.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return platform.processor() or "Apple Silicon"
+
+
+def _sysctl_int(key: str) -> int | None:
+    """One integer sysctl, or None if the key or the tool is absent."""
+    try:
+        out = subprocess.run(["sysctl", "-n", key], capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    val = out.stdout.strip()
+    return int(val) if out.returncode == 0 and val.isdigit() else None
+
+
+def observe_metal(sysctl=None, is_apple: bool | None = None) -> list[dict]:
     """Apple Silicon, where the GPU has no memory of its own.
 
     Unified memory means "VRAM" is a policy, not a chip: Metal will hand a
@@ -76,33 +99,21 @@ def observe_metal() -> list[dict]:
     at load, so the budget is what is reported, and `unified` marks it as a
     share of RAM rather than a dedicated pool.
     """
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
+    if is_apple is None:
+        is_apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+    if not is_apple:
         return []
-
-    def sysctl(key: str) -> int | None:
-        try:
-            out = subprocess.run(["sysctl", "-n", key], capture_output=True,
-                                 text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        val = out.stdout.strip()
-        return int(val) if out.returncode == 0 and val.isdigit() else None
+    if sysctl is None:
+        sysctl = _sysctl_int
 
     total_bytes = sysctl("hw.memsize")
     if not total_bytes:
         return []
     wired_mib = sysctl("iogpu.wired_limit_mb")
     budget = wired_mib or int(total_bytes / (1024 * 1024) * 0.75)
-    name = platform.processor() or "Apple Silicon"
-    try:
-        brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
-                               capture_output=True, text=True, timeout=30)
-        if brand.returncode == 0 and brand.stdout.strip():
-            name = brand.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return [{"name": name, "vram_mib": int(budget), "compute_cap": "metal",
-             "driver": platform.mac_ver()[0], "unified": True,
+    return [{"name": _apple_name(), "vram_mib": int(budget),
+             "compute_cap": "metal", "driver": platform.mac_ver()[0],
+             "unified": True,
              "system_ram_mib": int(total_bytes / (1024 * 1024))}]
 
 
