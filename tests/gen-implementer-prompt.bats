@@ -124,9 +124,10 @@ STUB
   echo "$output" | grep -qv "bundle-static-context.sh not found"
 }
 
-# Case 8 (Phase 2 child C): --body-file rides BELOW the cached prefix, ahead of
-# the issue assignment, so the v2-flow path realizes the D3 cached prefix.
-@test "body-file: content emitted between cached prefix and issue assignment" {
+# Case 8 (Phase 2 child C, corrected #3228): --body-file rides INSIDE the cached
+# prefix, ahead of the issue assignment. It is one fixed template, so emitting it
+# below the closing boundary re-sent it uncached on every dispatch and retry.
+@test "body-file: content emitted inside the cached prefix, ahead of the assignment" {
   bodyf="$(mktemp)"
   printf 'PHASE4_BODY_SENTINEL line\n' > "$bodyf"
   run bash "$BIN" \
@@ -140,6 +141,48 @@ STUB
   body_ln=$(echo "$output" | grep -n "PHASE4_BODY_SENTINEL line" | head -1 | cut -d: -f1)
   asg_ln=$(echo "$output" | grep -n "Your implementation assignment" | head -1 | cut -d: -f1)
   [ "$body_ln" -lt "$asg_ln" ]
+  # ...and above the CLOSING boundary, which is what makes it cacheable. Without
+  # this the body could drift back below the marker and every assertion above
+  # would still pass.
+  close_ln=$(echo "$output" | grep -n "CACHE BOUNDARY" | tail -1 | cut -d: -f1)
+  [ "$body_ln" -lt "$close_ln" ]
+}
+
+# Case 8b: the body must appear exactly once. The prefix path and the
+# bundle-missing fallback path both emit it, so a regression that runs both
+# duplicates the whole 8.9k-token template.
+@test "body-file: content emitted exactly once" {
+  bodyf="$(mktemp)"
+  printf 'PHASE4_BODY_SENTINEL line\n' > "$bodyf"
+  run bash "$BIN" \
+    --issue-body "$FIX/issue-438.md" \
+    --branch feat/example-hello \
+    --body-file "$bodyf"
+  rm -f "$bodyf"
+  [ "$status" -eq 0 ]
+  count=$(echo "$output" | grep -c "PHASE4_BODY_SENTINEL line")
+  [ "$count" -eq 1 ]
+}
+
+# Case 8c: a degraded install with no bundle-static-context.sh still carries the
+# procedure. AUTOSPEC_SCRIPTS_DIR points at an empty dir and the repo fallback is
+# defeated by running from a tree that has no skills/autospec-shared.
+@test "body-file: emitted via fallback when bundle-static-context.sh is absent" {
+  bodyf="$BATS_TEST_TMPDIR/body.md"
+  printf 'PHASE4_BODY_SENTINEL line\n' > "$bodyf"
+  fake_root="$BATS_TEST_TMPDIR/fakeroot/scripts"
+  mkdir -p "$fake_root"
+  cp "$BIN" "$fake_root/gen-implementer-prompt.sh"
+  mkdir -p "$BATS_TEST_TMPDIR/emptyscripts"
+  run env AUTOSPEC_SCRIPTS_DIR="$BATS_TEST_TMPDIR/emptyscripts" \
+    bash "$fake_root/gen-implementer-prompt.sh" \
+    --issue-body "$FIX/issue-438.md" \
+    --branch feat/example-hello \
+    --body-file "$bodyf"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "static prefix skipped"
+  count=$(echo "$output" | grep -c "PHASE4_BODY_SENTINEL line")
+  [ "$count" -eq 1 ]
 }
 
 # Case 9: --body-file with a missing path exits non-zero

@@ -150,7 +150,7 @@ teardown() {
   printf '%s\n' "$output" | head -1 | grep -q "CACHE BOUNDARY"
 }
 
-@test "bundle-static-context.sh --role implementer emits two CACHE BOUNDARY markers (prefix is framed; memory/scaffolding below the second)" {
+@test "bundle-static-context.sh --role implementer emits two CACHE BOUNDARY markers (prefix is framed; only memory below the second)" {
   run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
     AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
     AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
@@ -159,6 +159,13 @@ teardown() {
   [ "$status" -eq 0 ]
   boundary_count=$(printf '%s\n' "$output" | grep -c "CACHE BOUNDARY")
   [ "$boundary_count" -eq 2 ]
+  # Counting markers alone would still pass with the whole bundle below them.
+  # After the closing marker there must be exactly one section — saved memory.
+  sections_below=$(printf '%s\n' "$output" \
+    | awk '/CACHE BOUNDARY/ { c++; next } c >= 2 && /^## /' | grep -c '^## ')
+  [ "$sections_below" -eq 1 ]
+  printf '%s\n' "$output" | awk '/CACHE BOUNDARY/ { c++; next } c >= 2' \
+    | grep -q '^## Project rules (saved memory)'
 }
 
 @test "bundle-static-context.sh --role implementer injects implementer-contract.md, NOT the SKILL.md" {
@@ -187,6 +194,76 @@ teardown() {
   [ -n "$last_boundary" ]
   [ -n "$mem_line" ]
   [ "$mem_line" -gt "$last_boundary" ]
+}
+
+# #3228: every fixed section belongs INSIDE the boundary. The lockstep paragraph
+# and the role scaffolding are literal strings with no per-issue data, and they
+# used to sit below the marker where they could not be cached.
+@test "bundle-static-context.sh --role implementer keeps lockstep and scaffolding ABOVE the closing boundary" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  [ "$status" -eq 0 ]
+  last_boundary=$(printf '%s\n' "$output" | grep -n "CACHE BOUNDARY" | tail -1 | cut -d: -f1)
+  lock_line=$(printf '%s\n' "$output" | grep -n "^## Lockstep rules" | head -1 | cut -d: -f1)
+  scaf_line=$(printf '%s\n' "$output" | grep -n "^## Implementer scaffolding" | head -1 | cut -d: -f1)
+  [ -n "$lock_line" ]
+  [ -n "$scaf_line" ]
+  [ "$lock_line" -lt "$last_boundary" ]
+  [ "$scaf_line" -lt "$last_boundary" ]
+}
+
+# #3228: --static-body carries the Phase 4 implementer template. It is one fixed
+# file, so it must land inside the cached prefix; below the marker it cost ~8.9k
+# uncached tokens on every dispatch and every retry.
+@test "bundle-static-context.sh --static-body lands ABOVE the closing boundary" {
+  bodyf="$BATS_TEST_TMPDIR/static-body.md"
+  printf 'STATIC_BODY_SENTINEL\n' > "$bodyf"
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run" --static-body "$bodyf"
+  [ "$status" -eq 0 ]
+  last_boundary=$(printf '%s\n' "$output" | grep -n "CACHE BOUNDARY" | tail -1 | cut -d: -f1)
+  body_line=$(printf '%s\n' "$output" | grep -n "STATIC_BODY_SENTINEL" | head -1 | cut -d: -f1)
+  [ -n "$body_line" ]
+  [ "$body_line" -lt "$last_boundary" ]
+}
+
+# The prefix is only cacheable if it stays byte-identical while labels vary. The
+# body is inside it now, so this guards the body against label contamination too.
+@test "bundle-static-context.sh --static-body keeps the prefix byte-stable across labels" {
+  bodyf="$BATS_TEST_TMPDIR/static-body-stable.md"
+  printf 'STATIC_BODY_SENTINEL\n' > "$bodyf"
+  p1=$(env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run" --static-body "$bodyf" \
+    | awk '/<!-- CACHE BOUNDARY -->/{c++} {print} c==2{exit}')
+  p2=$(env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "bash,scripting" --static-body "$bodyf" \
+    | awk '/<!-- CACHE BOUNDARY -->/{c++} {print} c==2{exit}')
+  [ "$p1" = "$p2" ]
+  printf '%s\n' "$p1" | grep -q "STATIC_BODY_SENTINEL"
+}
+
+# A silently dropped body dispatches an implementer holding the contract but no
+# procedure, which reads like a normal run.
+@test "bundle-static-context.sh --static-body with a missing file exits non-zero" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --static-body "/nonexistent/static-body.md"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q "static-body file not found"
 }
 
 @test "bundle-static-context.sh --role implementer prefix is byte-stable across two different issue-label inputs" {
@@ -352,17 +429,22 @@ teardown() {
   printf '%s\n' "$from_elsewhere" | grep -q "Implementer contract"
 }
 
-@test "Output discipline sits BELOW the implementer cache boundary (prefix stays byte-stable)" {
+# Corrected in #3228: this asserted the directive sat BELOW the boundary "so the
+# prefix stays byte-stable". The premise was wrong — the directive is a fixed
+# string, so it cannot vary by issue and cannot destabilize the prefix. Keeping it
+# below the marker only made it uncacheable. The byte-stability it was protecting
+# is asserted directly by the two prefix-stability cases above.
+@test "Output discipline sits ABOVE the implementer cache boundary (fixed string, so cacheable)" {
   run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
     AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
     AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
     AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
     "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
   [ "$status" -eq 0 ]
-  # The directive must appear AFTER the second (closing) CACHE BOUNDARY marker.
+  # The directive must appear BEFORE the second (closing) CACHE BOUNDARY marker.
   disc_line="$(printf '%s\n' "$output" | grep -n '## Output discipline' | head -1 | cut -d: -f1)"
   last_boundary="$(printf '%s\n' "$output" | grep -n 'CACHE BOUNDARY' | tail -1 | cut -d: -f1)"
-  [ "$disc_line" -gt "$last_boundary" ]
+  [ "$disc_line" -lt "$last_boundary" ]
 }
 
 @test "bundle-static-context.sh --role decomposer injects decomposer-contract.md, NOT the SKILL.md" {
