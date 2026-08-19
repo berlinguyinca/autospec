@@ -9,6 +9,16 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### One failing conductor test no longer takes six others with it (2026-08-18)
+- The integration tests that drive the real bridge serialize on a `Mutex`, taken with
+  `lock().expect(..)`. A panicking test poisons that mutex, so every later test died on
+  the lock rather than running: a CI run showed one real assertion failure followed by
+  six `real bridge E2E lock` panics that said nothing about anything. The guard is now
+  poison-tolerant, matching `test_environment()` in the executor-bridge tests. The data
+  it protects is `()`, so no invariant can have been broken by the earlier panic.
+
+### Fixed
+
 #### Evidence-attempt lease survives a fork (2026-08-18)
 - An evidence-attempt lease was released by closing its descriptor. The lane launcher
   forks a supervisor that never execs, so a lease open at that moment is inherited --

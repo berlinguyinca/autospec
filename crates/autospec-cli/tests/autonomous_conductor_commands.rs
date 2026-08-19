@@ -15,7 +15,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[path = "support/autonomous_accountability_acquisition.rs"]
 mod autonomous_accountability_acquisition;
@@ -30,7 +29,6 @@ use autonomous_conductor_process::{
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 #[cfg(target_os = "linux")]
 #[path = "support/foreground_fixture_git.rs"]
 mod foreground_fixture_git;
@@ -685,7 +683,7 @@ fn foreground_closed_selected_issue_retires_before_receipt_recovery() {
 
 #[test]
 fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let review_launches = bridge.safe_root.join("review-launches");
@@ -844,7 +842,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
 
 #[test]
 fn foreground_accepts_fast_forwarded_explore_head() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let recorded_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
@@ -915,7 +913,7 @@ fn foreground_accepts_fast_forwarded_explore_head() {
 
 #[test]
 fn foreground_recovers_complete_bridge_after_transient_terminal_observation_failure() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("terminal-observation.failed");
@@ -1211,7 +1209,7 @@ fn foreground_dispatch_recovery_rejects_mismatched_terminal_claim() {
 
 #[test]
 fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1452,7 +1450,7 @@ fn foreground_closed_claim_phase_selection_retires_without_reacquisition() {
 
 #[test]
 fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_windows() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (name, state, seeded_claim_state) in [
         (
             "claim-before-acquire",
@@ -1668,7 +1666,7 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
 
 #[test]
 fn foreground_missing_failure_intent_requires_exact_retryable_release() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1830,7 +1828,7 @@ struct FreshHeartbeatRun {
 }
 
 fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecovery {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1970,7 +1968,7 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecover
 
 #[test]
 fn foreground_recovers_active_claim_without_executor_invocation() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -2055,7 +2053,7 @@ fn foreground_recovers_active_claim_without_executor_invocation() {
 
 #[test]
 fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let started = fixture.root.join("slow-harness.started");
@@ -2222,7 +2220,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
 }
 
 fn assert_released_heartbeat_generation_handoff() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let zero_effect_once = fixture.root.join("harness.zero-effect");
@@ -2470,7 +2468,7 @@ fn released_heartbeat_generation_handoff() {
 
 #[test]
 fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2524,7 +2522,7 @@ fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
 
 #[test]
 fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2576,7 +2574,7 @@ fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
 
 #[test]
 fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2692,7 +2690,7 @@ fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation()
 
 #[test]
 fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("bridge-gh-read.failed");
@@ -2747,7 +2745,7 @@ fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
 
 #[test]
 fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harness() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("draft-created-harness.launches");
@@ -2871,7 +2869,7 @@ fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harne
 
 #[test]
 fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("merged-draft-harness.launches");
@@ -3105,7 +3103,7 @@ fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
 
 #[test]
 fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("persistent-outage-harness.launches");
@@ -3167,7 +3165,7 @@ fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
 
 #[test]
 fn foreground_receipt_retirement_crash_windows_resume_without_replay() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (scenario, failpoint, fail_harness, expected_phase, receipt_remains) in [
         (
             "retry-before-clear",
@@ -3322,7 +3320,7 @@ fn foreground_normal_fourth_retry_pauses_after_three_completed_retries() {
 
 #[test]
 fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -3411,7 +3409,7 @@ fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
 
 #[test]
 fn foreground_ownership_retirement_recovers_across_receipt_clear_crashes() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (failpoint, receipt_remains) in [("before-clear", true), ("after-clear", false)] {
         let fixture = ForegroundFixture::new();
         let bridge = fixture.configure_real_bridge();
