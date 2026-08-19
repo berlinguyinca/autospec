@@ -101,6 +101,28 @@ else
     && bad "unit exposes the API key via Environment= (readable by systemctl show)"
 fi
 
+# --- 7: no literal IPv4 anywhere in the node tree ------------------------
+# A secret-free companion to check 3. The pattern-based guard needs the real
+# identifiers, which must never appear in a workflow file -- putting them there
+# would publish exactly what the guard exists to keep out. This check needs no
+# secret: any literal dotted quad under the node directory is wrong, because
+# every address this node uses comes from site.conf at runtime.
+#
+# Documentation ranges are allowed so examples can show a shape:
+#   192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (RFC 5737), and 0.0.0.0.
+addrs="$(grep -rInE '[^0-9.]([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' \
+           --include='*.sh' --include='*.conf' --include='*.ini' \
+           --include='*.py' --include='*.example' --include='*.service' \
+           "$NODE" 2>/dev/null \
+         | grep -vE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0' \
+         | grep -v 'leak-guard-allow' || true)"
+if [ -n "$addrs" ]; then
+  bad "a literal IPv4 address is committed under the node directory:"
+  echo "$addrs" | sed 's/^/        /' | head -5 >&2
+else
+  ok "no literal IPv4 address committed under the node directory"
+fi
+
 # --- 6: cross-slot KV reuse must stay off -------------------------------
 p="${NODE}/config/profiles.d/router.conf"
 if [ -r "$p" ]; then

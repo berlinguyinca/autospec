@@ -39,3 +39,39 @@ jobs:
           set -euo pipefail
           export PYTHONPATH="packages/autospec_context_monitor${PYTHONPATH:+:$PYTHONPATH}"
           python3 -m pytest packages tests -q -p no:cacheprovider
+
+  llm-node-checks:
+    # The inference-node tooling under llm/ was in NO workflow: its structural
+    # checks, including the public-repo leak guard, only ran when somebody
+    # remembered. Everything here is pure-python or bash and needs no
+    # accelerator, so it gates every push. The suites that need a live server on
+    # a real GPU (test_smoke.sh, test_vision.py) deliberately stay out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test deps
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pyyaml
+
+      - name: Dual-Turing node structural checks
+        # QT_LEAK_PATTERNS is deliberately NOT set here. The pattern-based guard
+        # needs the site's real identifiers, and writing them into a committed
+        # workflow would publish precisely what the guard exists to prevent.
+        # Check 7 is the secret-free companion and always runs.
+        run: bash llm/linux-turing-dual/tests/test_structural.sh
+
+      - name: Node unit suites (no accelerator)
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q -p no:cacheprovider \
+            llm/linux-turing-dual/tests \
+            llm/linux-qwen38/tests

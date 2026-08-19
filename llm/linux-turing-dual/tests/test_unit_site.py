@@ -12,8 +12,11 @@ import textwrap
 HERE = pathlib.Path(__file__).resolve().parents[1]
 SITE = HERE / "scripts" / "site.sh"
 
+# Addresses here are RFC 5737 documentation range (192.0.2.0/24) on purpose:
+# the structural test forbids any other literal IPv4 under the node directory,
+# including in tests, because every address this node uses comes from site.conf.
 COMPLETE = textwrap.dedent('''
-    : "${QT_NODE_ADDR:=10.0.0.5}"
+    : "${QT_NODE_ADDR:=192.0.2.5}"
     : "${QT_UPLINK_IF:=eth1}"
     : "${QT_MODELS_DIR:=/srv/models}"
     : "${QT_PORT:=8080}"
@@ -33,11 +36,11 @@ def run(tmp_path, body, tail='echo "$QT_NODE_ADDR|$QT_UPLINK_IF|$QT_PORT"'):
 def test_loads_a_complete_config(tmp_path):
     r = run(tmp_path, COMPLETE)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "10.0.0.5|eth1|8080"
+    assert r.stdout.strip() == "192.0.2.5|eth1|8080"
 
 
 def test_placeholder_is_rejected_with_ex_config(tmp_path):
-    body = COMPLETE.replace("10.0.0.5", "<node-addr>")
+    body = COMPLETE.replace("192.0.2.5", "<node-addr>")
     r = run(tmp_path, body)
     assert r.returncode == 78
     assert "placeholder" in r.stderr
@@ -52,7 +55,7 @@ def test_missing_value_is_rejected_and_named(tmp_path):
 
 
 def test_error_names_the_file_to_edit(tmp_path):
-    r = run(tmp_path, ': "${QT_NODE_ADDR:=10.0.0.5}"\n')
+    r = run(tmp_path, ': "${QT_NODE_ADDR:=192.0.2.5}"\n')
     assert r.returncode == 78
     assert str(tmp_path / "site.conf") in r.stderr
 

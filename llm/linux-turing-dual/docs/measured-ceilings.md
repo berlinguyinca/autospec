@@ -43,6 +43,32 @@ hold a 16 GiB model that may not be split. `per_card_ceiling()` and
 
 ---
 
+## What gates this node in CI
+
+`llm/` appeared in none of the twelve workflows before this node existed, so the
+leak guard had never gated a commit. The `llm-node-checks` job in
+`.github/workflows/python.yml` now runs, on every push:
+
+| gate | command |
+|---|---|
+| structural checks (incl. leak guards) | `bash llm/linux-turing-dual/tests/test_structural.sh` |
+| unit suites, no accelerator | `python3 -m pytest -q -p no:cacheprovider llm/linux-turing-dual/tests llm/linux-qwen38/tests` |
+
+Deliberately **not** in CI: `test_smoke.sh` and `test_vision.py` need a live
+server on a real GPU, and `QT_LEAK_PATTERNS` is left unarmed because arming it
+would require committing the site's real identifiers to a workflow file — which
+is the thing the guard exists to prevent. Check 7 of the structural suite is the
+secret-free companion: no literal IPv4 under the node directory at all, since
+every address comes from `site.conf` at runtime.
+
+A note on collection: `llm/linux-qwen38/tests/conftest.py` used to ignore
+`test_*.py` wholesale to keep its standalone script-suites out of pytest. That
+silently swallowed a genuine pytest module added beside them — it passed when
+named explicitly and never ran under directory collection. Ignoring is now by
+name, with a `test_unit_*.py` convention for real pytest modules.
+
+---
+
 ## Host cleanup — before
 
 _Filled by Task 5 Step 1._
