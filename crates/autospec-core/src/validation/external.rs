@@ -3330,9 +3330,6 @@ fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> C
     ];
 
     let mut targets = Vec::new();
-    // The autospec router delegates Phase 4 to /autospec-run, so it no
-    // longer carries the worktree ladder content. Only the autospec-run trio
-    // and the implementer prompt are checked.
     for skill in ["autospec-run"] {
         for member in TRIO_MEMBERS {
             targets.push(format!("skills/{skill}/{member}"));
@@ -3374,8 +3371,6 @@ fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> C
     }
 
     let mut results = Vec::new();
-    // The autospec router no longer carries the worktree-ladder sentinel block;
-    // only the autospec-run SKILL.md is checked for the bash syntax.
     for relative in ["skills/autospec-run/SKILL.md"] {
         let path = root.join(relative);
         let Some(block) = worktree_ladder_block(&path) else {
@@ -3403,9 +3398,7 @@ fn run_phase4_single_agent_discipline(id: &str, required: bool, root: &Path) -> 
         "Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool";
     const SUITE: &str = "tests/phase4/test_single_agent_discipline.bats";
 
-    // The autospec router delegates Phase 4 to /autospec-run, so it no
-    // longer carries the single-agent discipline content. Only the
-    // autospec-run trio is checked.
+    // Router delegates Phase 4 to /autospec-run.
     for skill in ["autospec-run"] {
         for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
             let relative = format!("skills/{skill}/{member}");
@@ -3508,8 +3501,7 @@ fn run_autospec_refine_contract(id: &str, required: bool, root: &Path) -> CheckR
             );
         }
     }
-    // The autospec router delegates Phase 6 to /autospec-run, and the
-    // canonical Next steps directive now lives in the end-of-run reference.
+    // Router delegates Phase 6; Next steps directive lives in end-of-run ref.
     let next_steps_ref = "skills/autospec-run/references/end-of-run.md";
     if !contains(&root.join(next_steps_ref), "canonical `## Next steps` section") {
         return aggregate(

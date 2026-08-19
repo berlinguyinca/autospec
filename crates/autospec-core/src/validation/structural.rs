@@ -646,8 +646,6 @@ impl StructuralValidator {
     }
 
     pub fn validate_existing_spec_mode(root: &Path) -> Result<(), String> {
-        // The autospec router delegates existing-spec mode to /autospec-define,
-        // so it no longer carries the "## Existing spec mode" section inline.
         for skill in ["autospec-split", "autospec-define"] {
             for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
                 let path = root.join("skills").join(skill).join(member);
@@ -792,8 +790,6 @@ impl StructuralValidator {
     }
 
     pub fn validate_phase1_bounded_context_contract(root: &Path) -> Result<(), String> {
-        // The autospec router delegates Phase 1 to /autospec-define, so it no
-        // longer carries the Phase 1 bounded-context rule inline.
         for member in [
             "skills/autospec-define/SKILL.md",
             "skills/autospec-define/codex/prompt.md",
@@ -997,9 +993,7 @@ impl StructuralValidator {
             ("`kanban`", "Mermaid work-queue chart guidance"),
         ];
 
-        // The "Documentation visualization" section lives in autospec-define
-        // (Phase 2 — Brainstorm + design). The autospec router delegates Phase 2
-        // to /autospec-define, so it no longer carries this section inline.
+        // Router delegates Phase 2 (incl. Documentation visualization) to /autospec-define.
         for skill in ["autospec-define"] {
             for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
                 let display = format!("skills/{skill}/{member}");
@@ -1296,8 +1290,7 @@ impl StructuralValidator {
     }
 
     pub fn validate_team_personality_selection_contract(root: &Path) -> Result<(), String> {
-        // The autospec router delegates Phase 2 to /autospec-define, so it no
-        // longer carries the team personality selection section inline.
+        // Router delegates Phase 2 to /autospec-define.
         for skill in ["autospec-define"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
@@ -1347,8 +1340,7 @@ impl StructuralValidator {
 
     pub fn validate_team_personality_issue_template_contract(root: &Path) -> Result<(), String> {
         const TEMPLATE_GATE: &str = "body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`";
-        // The autospec router delegates Phase 3 to /autospec-define, so it no
-        // longer carries the team personality issue template inline.
+        // Router delegates Phase 3 to /autospec-define.
         for skill in ["autospec-define", "autospec-split"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
@@ -1370,8 +1362,7 @@ impl StructuralValidator {
     }
 
     pub fn validate_team_personality_phase4_and_docs_contract(root: &Path) -> Result<(), String> {
-        // The autospec router delegates Phase 4 to /autospec-run, so it no
-        // longer carries the Phase 4 team personality execution lens inline.
+        // Router delegates Phase 4 to /autospec-run.
         for skill in ["autospec-run"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
@@ -1658,9 +1649,7 @@ impl StructuralValidator {
                 "guardian lockstep: no guardian block found in {canonical_relative}"
             ));
         }
-        // The autospec router delegates Phase 4 to /autospec-run, so it no
-        // longer carries the guardian block. Only the autospec-run trio is
-        // checked for lockstep against the canonical source.
+        // Router delegates Phase 4 to /autospec-run; only the run trio is checked.
         for relative in [
             "skills/autospec-run/SKILL.md",
             "skills/autospec-run/codex/prompt.md",
