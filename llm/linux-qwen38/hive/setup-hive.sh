@@ -60,6 +60,19 @@ ARCHS="80;86;89;120"
 # --models-max, --kv-unified, --image-min-tokens. Override to chase a fix or to
 # go back to master deliberately.
 LLAMA_REF="${LLAMA_REF:-v0.1.2}"
+
+# GGML_NATIVE=OFF is not optional on a heterogeneous cluster. llama.cpp builds
+# with -march=native by default, and this cluster mixes zen3, zen4 and zen5. A
+# build that lands on a zen5 node produces a binary that dies with
+#     Illegal instruction (core dumped)
+# on an older one -- and since the setup job and the serving job are scheduled
+# independently, they routinely land on different generations. Worse, SIGILL can
+# arrive mid-run when a kernel using the newer instructions is first reached,
+# which looks like a random crash rather than a portability bug.
+#
+# x86-64-v3 is the cluster's own declared baseline; its module tree is published
+# under linux-ubuntu22.04-x86_64_v3, so every node it schedules supports it.
+CPU_BASELINE="${CPU_BASELINE:-x86-64-v3}"
 STAMP="${PREFIX}/BUILD_REF"
 
 # Runtime linkage, needed by anything that EXECUTES a built binary. llama.cpp
@@ -74,7 +87,7 @@ export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 # binary, which is the sort of thing that makes a pin worthless.
 if [ -x "${PREFIX}/bin/llama-server" ] \
    && "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1 \
-   && [ "$(cat "${STAMP}" 2>/dev/null)" = "${LLAMA_REF}" ]; then
+   && [ "$(cat "${STAMP}" 2>/dev/null)" = "${LLAMA_REF} ${CPU_BASELINE}" ]; then
   echo "== llama.cpp ${LLAMA_REF} already built and runnable, skipping rebuild =="
   SKIP_BUILD=1
 fi
@@ -87,9 +100,13 @@ git clone --depth 1 --branch "${LLAMA_REF}" \
 cd "${SRC}"
 echo "llama.cpp ${LLAMA_REF} at $(git rev-parse --short HEAD)"
 
+
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA=ON \
+  -DGGML_NATIVE=OFF \
+  -DCMAKE_C_FLAGS="-march=${CPU_BASELINE}" \
+  -DCMAKE_CXX_FLAGS="-march=${CPU_BASELINE}" \
   -DCMAKE_CUDA_ARCHITECTURES="${ARCHS}" \
   -DLLAMA_CURL=ON \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}"
@@ -97,7 +114,7 @@ cmake --build build --config Release -j "$(nproc)"
 cmake --install build
 # Record the provenance next to the binary, so a later run can tell whether it
 # is looking at the build it asked for.
-printf '%s' "${LLAMA_REF}" > "${STAMP}"
+printf '%s %s' "${LLAMA_REF}" "${CPU_BASELINE}" > "${STAMP}"
 printf '%s %s\n' "${LLAMA_REF}" "$(git -C "${SRC}" rev-parse HEAD)" \
     >> "${ROOT}/logs/build-history.txt"
 fi

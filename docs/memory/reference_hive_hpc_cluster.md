@@ -133,6 +133,19 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**Never build with `-march=native` on a heterogeneous cluster.** hive
+mixes zen3, zen4 and zen5, and the setup job and the serving job are
+scheduled independently — so a build landing on zen5 produces a binary
+that dies on an older node with `Illegal instruction (core dumped)`.
+SIGILL can also arrive *mid-run*, when a kernel using the newer
+instructions is first reached, which presents as a random crash rather
+than a portability bug and is a strong candidate for the "instance ...
+exited with status 1" seen mid-benchmark. Build with
+`-DGGML_NATIVE=OFF -march=x86-64-v3` — v3 is the cluster's own declared
+baseline, published in its module path
+`linux-ubuntu22.04-x86_64_v3`. Record the baseline in the build stamp so
+changing it forces a rebuild.
+
 **Build a pinned llama.cpp release, not master.** `git clone --depth 1`
 of master is unrecorded and unreproducible, and post-release master is
 the likeliest source of the mid-session child crash below. `v0.1.2`
