@@ -36,7 +36,7 @@ linux-qwen38/
 
 | tool | question it answers |
 |---|---|
-| `select-quant.py` | which quantisation fits *this* hardware, at what context and speed |
+| `select-quant.py` | which quantisation fits *this* hardware, at what context and speed — sizes across **every** GPU present, and scales the per-card reserve by card count |
 | `measure-ceiling.sh` | what context this node can actually serve — verified at length |
 | `measure-slot-frontier.sh` | how much context a concurrent seat costs |
 | `bench-concurrency.py` | what happens when several clients arrive at once |

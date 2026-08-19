@@ -103,29 +103,89 @@ CATALOGUE = {
 }
 
 
-def detect_memory_mib() -> tuple[int, str]:
-    """Return (budget_mib, how). Discrete VRAM if present, else system RAM."""
+def parse_device_totals(raw: str) -> list[int]:
+    """Every device nvidia-smi reported, in MiB.
+
+    The first line is not the answer. Reading only `.splitlines()[0]` made a
+    two-card host report one card's VRAM and conclude that nothing fits.
+    """
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(int(line))
+        except ValueError:
+            continue
+    return out
+
+
+def aggregate_budget(devices: list[int]) -> int:
+    """Total VRAM across the devices a job may use."""
+    return sum(devices)
+
+
+def effective_reserve(reserve_mib: int, n_devices: int) -> int:
+    """Scale the reserve by card count.
+
+    The reserve pays for compute buffers and the CUDA context, and those are
+    paid on EACH card rather than shared -- so two cards cost two of them.
+
+    It is applied here, where the single global reserve already lives, and
+    deliberately NOT inside the budget detection: adding headroom on top of
+    headroom double-counts and silently costs a whole rung of context. One
+    device returns the reserve unchanged, so measured single-card numbers
+    do not move.
+    """
+    return reserve_mib * max(1, n_devices)
+
+
+def per_card_ceiling(devices: list[int], reserve_mib: int) -> int:
+    """What a model PINNED to one card may use.
+
+    Bounded by the smallest card, not by the aggregate: a 16 GiB model does not
+    fit two 11 GiB cards if it may not be split.
+    """
+    if not devices:
+        return 0
+    return min(devices) - reserve_mib
+
+
+def detect_memory() -> tuple[int, str, int]:
+    """Return (budget_mib, how, n_devices). n_devices is 1 for non-CUDA hosts."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10, check=True).stdout
-        return int(out.strip().splitlines()[0]), "nvidia vram"
+        devices = parse_device_totals(out)
+        if devices:
+            total = aggregate_budget(devices)
+            if len(devices) == 1:
+                return total, "nvidia vram", 1
+            return total, f"nvidia vram ({len(devices)} devices, {'+'.join(str(d) for d in devices)} MiB)", len(devices)
     except Exception:
         pass
     try:  # Apple Silicon / any unified-memory box
         out = subprocess.run(["sysctl", "-n", "hw.memsize"],
                              capture_output=True, text=True, timeout=10, check=True).stdout
         # Unified memory is shared with the OS; do not offer it all to the model.
-        return int(int(out.strip()) / 1024 / 1024 * 0.75), "unified memory (75% of total)"
+        return int(int(out.strip()) / 1024 / 1024 * 0.75), "unified memory (75% of total)", 1
     except Exception:
         pass
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal:"):
-                return int(int(line.split()[1]) / 1024 * 0.75), "system RAM (75%)"
+                return int(int(line.split()[1]) / 1024 * 0.75), "system RAM (75%)", 1
     except Exception:
         pass
-    return 0, "unknown"
+    return 0, "unknown", 1
+
+
+def detect_memory_mib() -> tuple[int, str]:
+    """Back-compatible shim: (budget_mib, how), dropping the device count."""
+    budget, how, _ = detect_memory()
+    return budget, how
 
 
 def get_json(url: str) -> dict:
@@ -221,8 +281,14 @@ def main() -> int:
         if args.reserve_mib == 1200:
             args.reserve_mib = pres
     else:
-        budget, how = ((args.memory_mib, "specified") if args.memory_mib
-                       else detect_memory_mib())
+        if args.memory_mib:
+            budget, how, n_devices = args.memory_mib, "specified", 1
+        else:
+            budget, how, n_devices = detect_memory()
+            # Compute buffers and the CUDA context are paid per card, so the
+            # reserve is multiplied rather than the budget being reduced --
+            # see effective_reserve().
+            args.reserve_mib = effective_reserve(args.reserve_mib, n_devices)
     if args.memory_mib:
         budget, how = args.memory_mib, "specified"
     if not budget:
@@ -248,6 +314,10 @@ def main() -> int:
     say(f"kv          : {kv_note}")
     say(f"reserve     : {args.reserve_mib} MiB"
           + (f" + {proj_mib} MiB projector" if proj_mib else ""))
+    if "devices" in how:
+        say("note        : weights are split across cards, so the aggregate is "
+            "spendable -- but a model pinned to ONE card is bounded by the "
+            "smallest card, not by this budget.")
     if not args.ladder:
         say(f"target ctx  : {args.target_context:,} tokens "
             f"= {args.target_context*per_tok/2**20:,.0f} MiB of KV")
