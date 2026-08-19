@@ -91,6 +91,10 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bats ripgrep
+          # check_python_suites shells out to `python3 -m pytest`, both from the workspace test
+          # runner_checks_python_suites_with_a_typed_pytest_command and from `autospec validate`
+          # below. Only the python workflow installed pytest, so both failed here.
+          python3 -m pip install --quiet pytest pyyaml
           bash scripts/dev-bootstrap.sh
 
       - name: Clippy (lint)
@@ -105,7 +109,11 @@ jobs:
           cargo test -p autospec-cli --bin autospec cleanup_restart -- --nocapture
 
       - name: Test workspace
-        run: cargo test --workspace
+        # --no-fail-fast: without it cargo stops at the first failing test binary, so one long
+        # -standing failure hid every later binary -- and every step after this one. main reported
+        # a single failing test while the workspace carried seven, across four binaries that never
+        # ran, and `Validate repository` / `Build` below had not executed in CI for as long.
+        run: cargo test --workspace --no-fail-fast
 
       - name: Validate repository
         run: cargo run -p autospec-cli -- validate
