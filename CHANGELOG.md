@@ -17,6 +17,15 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   poison-tolerant, matching `test_environment()` in the executor-bridge tests. The data
   it protects is `()`, so no invariant can have been broken by the earlier panic.
 
+#### Conductor lease releases despite an inherited descriptor (2026-08-18)
+- `LeaseTransaction` released its flock by closing the descriptor, the same way the
+  evidence-attempt lease did before #3225. `with_current_lifecycle_lease` holds a
+  transaction across an arbitrary operation, and a fork duplicates the descriptor into
+  a child that shares the open file description the lock belongs to — so a child forked
+  during that window pins the lease for its own lifetime and the next conductor is told
+  the lease is `Held` (exit 20). It now unlocks explicitly. Latent: no observed symptom
+  is attributed to it, unlike #3225.
+
 ### Fixed
 
 #### Evidence-attempt lease survives a fork (2026-08-18)

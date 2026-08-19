@@ -150,7 +150,22 @@ pub(super) enum LifecycleLeaseError {
 
 #[allow(dead_code)] // Acquisition/adoption/release are intentionally not public command actions.
 struct LeaseTransaction {
-    _file: fs::File,
+    file: fs::File,
+}
+
+impl Drop for LeaseTransaction {
+    fn drop(&mut self) {
+        // Release by unlocking, not by closing.
+        //
+        // `with_current_lifecycle_lease` holds this transaction across an arbitrary
+        // operation, and fork() duplicates the descriptor into a child that refers to the
+        // same open file description. An flock belongs to the description, so if a child is
+        // forked while this is open -- and the conductor's supervisor never execs -- closing
+        // our copy leaves the lease held for as long as that child lives, and the next
+        // conductor is told the lease is Held. Unlocking reaches the description and frees
+        // it. Same defect, same fix as the evidence-attempt lease in #3225.
+        let _ = self.file.unlock();
+    }
 }
 
 #[allow(dead_code)] // Task 3 calls this only through the store transaction primitives.
@@ -178,7 +193,7 @@ impl LeaseTransaction {
             })?;
 
         match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self { file }),
             Err(fs::TryLockError::WouldBlock) => Err(StoreError::Held),
             Err(fs::TryLockError::Error(error)) => Err(StoreError::Diagnostic(format!(
                 "cannot lock resilience lease {}: {error}",
