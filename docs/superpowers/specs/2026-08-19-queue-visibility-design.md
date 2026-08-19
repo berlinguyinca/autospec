@@ -222,6 +222,29 @@ A queue panel above the existing token panels:
 - service rate, and mean service time with its sample count
 - generation and prompt throughput
 
+## 5.1 Config-health panel
+
+The operator asked to be told when models are offloading, so the configuration
+can be changed to stop it. Three signals, each a **fixable misconfiguration**
+rather than a fault:
+
+| signal | source | what to change |
+|---|---|---|
+| **Model evictions** | journal `srv ensure_model: evicting idle LRU name=X to make room for Y` and `srv unload: stopping model instance name=X`; corroborated by `status.value` transitions on `/v1/models` | clients are mixing models against `--models-max 1`. Pin them to one id, or raise `--models-max` once a third card makes co-residency affordable |
+| **Prompt cache hit rate** | `prompt_tokens_cached_total / prompt_tokens_total` | a rate near zero means slot thrashing — the 9x of §7.6 going unclaimed. Use the one-slot 100k preset for iterative work |
+| **Silently disabled options** | journal `... is not supported by this context, it will be disabled` | the config asks for something this model cannot do; remove it rather than leave it looking effective. This is how `cache_reuse` was caught |
+
+Each renders a count, the time of the last occurrence, and a one-line remedy.
+Counts are **since the current instance started**, not all-time, and the panel
+says so — a count without a window is not a measurement.
+
+The journal is read with `journalctl --since` by the collector. The service user
+can already read its own unit's journal, so this needs **no new privilege** and no
+change to the unit's sandboxing. If the journal is unreadable the panel degrades
+to the metric-derived cache rate and says the event feed is unavailable, rather
+than reporting zero evictions — **zero and unknown must not look the same**, since
+"no evictions" is exactly the good news an operator would act on.
+
 ## 6. Connection examples, rendered from live state
 
 A copy-paste panel built from the served model ids and the actual base URL, so
@@ -321,13 +344,71 @@ Three consequences that must be designed for, not discovered:
    minute rolling window can contain a single 100k request and nothing else, so
    the sample count matters more than ever, and `mean_service_seconds` will
    swing by tier rather than converging.
-3. **`cache-reuse` is what makes the 100k tier usable for coding.** A follow-up
-   turn that shares a prefix prefills only the delta rather than paying 3.5
-   minutes again. This is the within-slot reuse that is already on; cross-slot
-   reuse stays off for the reasons in the parent spec.
+3. **Prefix caching is what makes the tier usable — but only with one slot.**
+   See §7.6. `cache-reuse` is *not* the mechanism, and claiming it was is
+   corrected there.
 
 The tier is verified the same way as the others: a needle retrieved from a real
 ~100k prompt, not an advertised limit.
+
+---
+
+## 7.6 Prefix caching, measured — and why 100k gets its own preset
+
+The first draft of §7.5 said `cache-reuse` was what kept a 100k coding session
+usable. **That was wrong, and the node says so at load time:**
+
+```
+srv load_model: cache_reuse is not supported by this context, it will be disabled
+```
+
+`--cache-reuse` performs chunk-level reuse across a *changed* prefix, and this is
+a hybrid model — its Gated-DeltaNet layers carry recurrent state that cannot be
+partially rewound the way a KV cache can. The option is silently discarded. It is
+removed from the presets rather than left in place looking effective.
+
+**What does work is ordinary prompt prefix caching**, and it is worth a great
+deal. Measured with a ~20k-token shared prefix, three sequential calls:
+
+| call | wall time | `cached_tokens` |
+|---|---:|---:|
+| 1 | 19.8 s | 0 |
+| 2 | 20.4 s | 0 |
+| **3** | **2.3 s** | **19,425** |
+| control, `cache_prompt: false` | 24.0 s | 0 |
+
+**A 9x speedup — when the request lands on the slot that holds its prefix.**
+
+Call 2 missed because there are **two slots and assignment is round-robin**: call
+1 took slot 0, call 2 took slot 1 which was cold, call 3 came back to slot 0. With
+`slot-prompt-similarity = 0.0` nothing steers a request toward the slot holding
+its prefix, so **a single sequential user gets a cache hit roughly half the time**.
+
+At the 100k tier that is the difference between ~3.5 minutes and seconds, on
+alternating turns. It would read as the node being broken.
+
+`slot-prompt-similarity` is exactly the setting disabled in commit `1cd8c1f4`
+because the model child kept dying on it, so it stays at `0.0`.
+
+### The fix is one slot, which is what "drop a slot" already meant
+
+`qwen3.8-27b-100k` becomes a **dedicated preset with `parallel = 1`**, not an
+alias on the two-slot preset. One slot means every request in a session lands on
+the same slot and always hits the warm prefix:
+
+| served id | `c` | `parallel` | pool | why |
+|---|---:|---:|---:|---|
+| `qwen3.8-27b` (+ `-50k`, `-40k`) | 102400 | 2 | 102,400 | two concurrent seats |
+| **`qwen3.8-27b-100k`** | **102400** | **1** | 102,400 | one seat, guaranteed cache hits |
+
+Both presets name the same weights file, so switching between them costs one
+reload (~7 s measured) rather than a re-download. `--models-max 1` means only one
+is resident at a time, which is also why §5.1 surfaces eviction: a user switching
+between the 100k and the 2-slot tier evicts on every switch.
+
+**Consequence to state plainly:** while the 100k preset is loaded the node serves
+**one** session. That is the trade the operator accepted, and it is now enforced by
+the preset rather than trusted to a client-side alias.
 
 ---
 
@@ -357,7 +438,13 @@ The tier is verified the same way as the others: a needle retrieved from a real
     `<node-addr>:8081` refuse connections from off-host.
 14. `/v1/models` through nginx contains **no filesystem paths**, and `/models`
     is refused.
-15. Both units and nginx survive a reboot.
+15. A deliberate model switch appears in the config-health panel as an eviction,
+    with a timestamp — the signal the operator asked for.
+16. With the one-slot 100k preset, a repeated long prefix reports
+    **non-zero `cached_tokens` on the second call**, not merely on the third.
+17. An unreadable journal degrades the panel to "event feed unavailable" rather
+    than to "zero evictions".
+18. Both units and nginx survive a reboot.
 
 ---
 

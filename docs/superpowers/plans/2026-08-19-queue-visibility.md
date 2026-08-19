@@ -20,7 +20,9 @@
 - **Public payload allow-list** for `/api/queue` and `/status`: `slots`, `processing`, `queued`, `fullness`, `est_wait_seconds`, `service_rate`, `mean_service_seconds`, `samples`, `completions`, `model_loaded`. Nothing else, ever.
 - **`ProtectSystem=full`, never `strict`.** Never `PrivateDevices=true`, `DevicePolicy=closed`, or `MemoryDenyWriteExecute=`. Each breaks CUDA. `test_structural.sh` check 5 enforces this.
 - **`proxy_read_timeout 900s`**, `proxy_buffering off`, `proxy_request_buffering off`. A 100k prompt needs ~210 s before its first token and bodies reach 230 KB.
-- **Cross-slot KV reuse stays `0.0`.** Within-slot `cache-reuse` stays on.
+- **Cross-slot KV reuse stays `0.0`** (`slot-prompt-similarity`) — the path commit `1cd8c1f4` disabled for crashing the model child.
+- **`cache-reuse` is REMOVED, not tuned.** The node logs `cache_reuse is not supported by this context, it will be disabled` — a hybrid model's recurrent layers cannot be partially rewound. Leaving it in the presets makes a discarded option look effective.
+- **Prefix caching is real and worth 9x**, but only when a request lands on the slot holding its prefix. Measured with a 20k shared prefix: 19.8 s / 20.4 s / **2.3 s**, the miss being round-robin assignment to a cold slot.
 - **`auth_request` must never reject an inference request.** The header endpoint always returns 204.
 - **Pool is `c = 102400`.** Tier aliases: `-100k` (1 seat), `-50k` (2 seats), `-40k` (2 seats). `check_presets.py` must pass.
 - **Commit shaping:** every source commit needs its own doc touch; keep commits under ~400 lines.
@@ -1216,27 +1218,58 @@ before the cert does."
 - Produces served ids `qwen3.8-27b-100k`, `-50k`, `-40k` resolving to the same
   resident weights.
 
-- [ ] **Step 1: Raise the pool and declare the tiers**
+- [ ] **Step 1: Raise the pool, and split 100k into its own preset**
 
-In `router-presets.ini`, change the 27B section to `c = 102400` and set:
-```ini
-alias = qwen3.8-27b-100k,qwen3.8-27b-50k,qwen3.8-27b-40k
-```
-Replace the tier comment with the measured arithmetic:
+Two changes to `router-presets.ini`.
+
+First, **delete `cache-reuse = 256` from the `[*]` section.** The node reports
+`cache_reuse is not supported by this context, it will be disabled` at every
+load: `--cache-reuse` reuses chunks across a *changed* prefix, and this hybrid
+model's Gated-DeltaNet layers hold recurrent state that cannot be partially
+rewound. An option that is silently discarded must not sit in the config looking
+effective.
+
+Second, the 27B keeps two slots and gains the mid tiers, and **100k becomes a
+separate preset with one slot**:
+
 ```ini
 ; Pool 102,400 tokens. KV is 18.0 KiB/token (16 of 64 layers are full-attention),
 ; so the pool costs 1.76 GiB and the resident total is ~18,702 MiB of 22,528 --
 ; 360 MiB more than the 81,920 pool, leaving ~3.8 GiB free.
 ;
-; Tiers are a CLIENT-SIDE contract; there is no admission control. A 100k session
-; running beside a 40k one asks for 140k of a 102,400 pool and both die together.
-;   -100k  the whole pool, one session      (this is what "drop a slot" means)
-;    -50k  two sessions
-;    -40k  two sessions with headroom
+; Tiers on THIS preset are a client-side contract; there is no admission control.
+; 50k beside 50k is exactly one full pool. Two 100k sessions here would ask for
+; 204,800 of 102,400 and both would die -- which is why 100k is a separate preset
+; with parallel = 1 rather than an alias.
+[qwen3.8-27b]
+model = <QT_MODELS_DIR>/Qwen3.8-27B-UD-Q4_K_M.gguf
+c = 102400
+parallel = 2
+split-mode = layer
+tensor-split = 1,1
+alias = qwen3.8-27b-50k,qwen3.8-27b-40k
+
+; --- 100k, ONE slot ---------------------------------------------------------
+; One slot is the feature, not a limitation. Prefix caching gives a measured 9x on
+; a repeated long prompt (19.8 s -> 2.3 s, 19,425 cached tokens) but only when the
+; request lands on the slot holding that prefix. With two slots and round-robin
+; assignment -- slot-prompt-similarity stays 0.0, because the alternative crashes
+; the model child -- a single sequential user hits the cache about half the time.
+; At 100k that alternates ~3.5 minutes and ~seconds, which reads as a broken node.
 ;
-; 204,800 would fund two concurrent 100k seats but leaves ~2 GiB, and compute
-; buffers grow with sequence length -- measure before configuring it.
+; parallel = 1 puts every turn of a session on the same warm slot. The cost is that
+; while this preset is resident the node serves ONE session, which is exactly what
+; "drop a slot" meant.
+[qwen3.8-27b-100k]
+model = <QT_MODELS_DIR>/Qwen3.8-27B-UD-Q4_K_M.gguf
+c = 102400
+parallel = 1
+split-mode = layer
+tensor-split = 1,1
 ```
+
+Both presets name the same weights file, so switching costs one reload (~7 s
+measured), not a re-download.
 
 - [ ] **Step 2: Verify the preset gate accepts it**
 
@@ -1277,6 +1310,29 @@ Expected: `prompt_tokens` near 100,000 and the needle retrieved. Time it: prefil
 should be ~210 s, so the whole call takes several minutes. **If it fails on a
 timeout rather than on capacity, that is Task 5's `proxy_read_timeout`, not this
 tier.**
+
+- [ ] **Step 5b: Verify the one-slot preset actually delivers the cache hit**
+
+This is the entire reason it is a separate preset, so it is measured:
+
+```bash
+python3 /tmp/cachetest.py     # pointed at qwen3.8-27b-100k
+```
+Expected: **call 2 reports non-zero `cached_tokens`**, not only call 3. On the
+two-slot preset call 2 misses because round-robin sends it to a cold slot; with
+one slot there is no cold slot to land on. If call 2 still misses, the preset did
+not take effect — check `total_slots` on `/props?model=qwen3.8-27b-100k` reads 1.
+
+- [ ] **Step 5c: Confirm the two-slot tier still takes two concurrent 40k sessions**
+
+Acceptance criterion 9. A larger pool should only help, but the claim is measured
+rather than assumed:
+
+```bash
+python3 /tmp/conc.py
+```
+Expected: both sessions HTTP 200 with the needle retrieved, and zero KV-cache
+evictions in the journal.
 
 - [ ] **Step 6: Record it**
 
@@ -1534,6 +1590,251 @@ copy-paste examples rather than only in prose."
 
 ---
 
+### Task 9: Config-health panel — evictions, cache rate, discarded options
+
+The operator asked to be told when models are offloading so the configuration can
+be changed to stop it. All three signals are misconfigurations, not faults.
+
+**Files:**
+- Modify: `llm/linux-turing-dual/scripts/collect-stats.py`
+- Modify: `llm/linux-turing-dual/scripts/dashboard.py`
+- Modify: `llm/linux-turing-dual/web/index.html`
+- Create: `llm/linux-turing-dual/tests/test_unit_config_health.py`
+
+**Interfaces:**
+- Consumes: `read_metrics()` from the collector, and the unit's own journal.
+- Produces:
+  `parse_journal_events(text: str) -> dict` returning
+  `{"evictions": [{"from": str, "to": str, "raw": str}], "unloads": [str], "disabled": [str]}`;
+  `cache_health(metrics: dict) -> dict` returning
+  `{"cached_tokens": int, "prompt_tokens": int, "hit_rate": float | None}`;
+  `read_journal(unit: str, since: str) -> tuple[str, bool]` where the bool is
+  *readable*, never conflated with *empty*. Task 7's page renders all three.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_unit_config_health.py`. Its module docstring should say: each
+signal is a fixable misconfiguration rather than a fault, and the one hard rule is
+that an unreadable journal must not look like a quiet one — "no evictions" is
+exactly the good news an operator would act on.
+
+```python
+import importlib.util
+import pathlib
+
+SRC = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "collect-stats.py"
+
+
+def load():
+    spec = importlib.util.spec_from_file_location("collect_stats", SRC)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+JOURNAL = "\n".join([
+    "[38805] 0.03.390.914 I srv    load_model: initializing, n_slots = 2",
+    "3.00.332.657 I srv  ensure_model: evicting idle LRU name=qwen3.5-9b to make room for name=qwen3.8-27b",
+    "3.00.332.658 I srv        unload: stopping model instance name=qwen3.5-9b",
+    "[58527] 0.06.080.972 W srv    load_model: cache_reuse is not supported by this context, it will be disabled",
+    "12.03.715.819 I srv    unload_all: stopping model instance name=qwen3.8-27b",
+])
+
+
+def test_parses_an_eviction_with_both_model_names():
+    e = load().parse_journal_events(JOURNAL)["evictions"]
+    assert len(e) == 1
+    assert e[0]["from"] == "qwen3.5-9b"
+    assert e[0]["to"] == "qwen3.8-27b"
+
+
+def test_parses_unload_events():
+    u = load().parse_journal_events(JOURNAL)["unloads"]
+    assert "qwen3.5-9b" in u and "qwen3.8-27b" in u
+
+
+def test_parses_silently_disabled_options():
+    d = load().parse_journal_events(JOURNAL)["disabled"]
+    assert any("cache_reuse" in x for x in d)
+
+
+def test_ordinary_load_lines_are_not_events():
+    ev = load().parse_journal_events("I srv load_model: initializing, n_slots = 2")
+    assert ev == {"evictions": [], "unloads": [], "disabled": []}
+
+
+def test_empty_journal_is_empty_events():
+    assert load().parse_journal_events("") == {"evictions": [], "unloads": [], "disabled": []}
+
+
+def test_hit_rate_from_metrics():
+    c = load().cache_health({"llamacpp:prompt_tokens_total": 20000.0,
+                             "llamacpp:prompt_tokens_cached_total": 19425.0})
+    assert c["prompt_tokens"] == 20000
+    assert c["cached_tokens"] == 19425
+    assert abs(c["hit_rate"] - 0.97125) < 1e-6
+
+
+def test_hit_rate_is_none_before_any_prompt():
+    # Zero prompts is not a zero hit rate: one says idle, the other says thrashing.
+    c = load().cache_health({})
+    assert c["prompt_tokens"] == 0
+    assert c["hit_rate"] is None
+
+
+def test_hit_rate_zero_is_distinguishable_from_unknown():
+    c = load().cache_health({"llamacpp:prompt_tokens_total": 5000.0,
+                             "llamacpp:prompt_tokens_cached_total": 0.0})
+    assert c["hit_rate"] == 0.0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_config_health.py -q`
+Expected: FAIL — `parse_journal_events` does not exist.
+
+- [ ] **Step 3: Write the implementation**
+
+Append to `collect-stats.py`:
+
+```python
+import re
+
+_EVICT_RE = re.compile(
+    r"ensure_model:\s*evicting idle LRU name=(?P<frm>\S+)\s+to make room for name=(?P<to>\S+)")
+_UNLOAD_RE = re.compile(r"unload(?:_all)?:\s*stopping model instance name=(?P<name>\S+)")
+_DISABLED_RE = re.compile(r"(?P<opt>\w+) is not supported by this context, it will be disabled")
+
+
+def parse_journal_events(text: str) -> dict:
+    # Deliberately narrow patterns. A broad "unload" match would also catch the
+    # ordinary shutdown of the only resident model, which is not a
+    # misconfiguration and would make the eviction count meaningless.
+    ev = {"evictions": [], "unloads": [], "disabled": []}
+    for line in (text or "").splitlines():
+        m = _EVICT_RE.search(line)
+        if m:
+            ev["evictions"].append({"from": m.group("frm"), "to": m.group("to"),
+                                    "raw": line.strip()})
+            continue
+        m = _UNLOAD_RE.search(line)
+        if m:
+            ev["unloads"].append(m.group("name"))
+            continue
+        m = _DISABLED_RE.search(line)
+        if m and m.group("opt") not in ev["disabled"]:
+            ev["disabled"].append(m.group("opt"))
+    return ev
+
+
+def cache_health(metrics: dict) -> dict:
+    # None, not 0.0, when nothing has been prompted: "idle" and "thrashing slots
+    # and losing a 9x" must not render identically.
+    total = int(metrics.get("llamacpp:prompt_tokens_total", 0) or 0)
+    cached = int(metrics.get("llamacpp:prompt_tokens_cached_total", 0) or 0)
+    return {"prompt_tokens": total, "cached_tokens": cached,
+            "hit_rate": (cached / total) if total > 0 else None}
+
+
+def read_journal(unit: str = "qwen-turing@router.service", since: str = "-2h",
+                 timeout: float = 6.0) -> tuple[str, bool]:
+    # The bool is READABLE. It must never be collapsed into "no events".
+    import subprocess
+    try:
+        r = subprocess.run(["journalctl", "-u", unit, "--since", since,
+                            "-o", "cat", "--no-pager"],
+                           capture_output=True, text=True, timeout=timeout)
+        return (r.stdout, True) if r.returncode == 0 else ("", False)
+    except (OSError, subprocess.SubprocessError):
+        return "", False
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_config_health.py -q`
+Expected: 8 passed
+
+- [ ] **Step 5: Surface it in `/api/stats` and the page**
+
+Add to `_snapshot()` in `dashboard.py`:
+
+```python
+    text, readable = COLLECT.read_journal()
+    summary["config_health"] = {
+        "journal_readable": readable,
+        "events": COLLECT.parse_journal_events(text) if readable else None,
+        "cache": COLLECT.cache_health(metrics),
+    }
+```
+
+The panel renders, per signal, a count **with its window**, the last occurrence,
+and a one-line remedy. When `journal_readable` is false it must show **"event feed
+unavailable"** and must not render `0 evictions`.
+
+`config_health` is **not** added to `PUBLIC_FIELDS`: eviction lines name models,
+and the public surfaces carry load only.
+
+- [ ] **Step 6: Verify against a real eviction**
+
+```bash
+KEY=$(sudo cat /etc/qwen-turing.key)
+for m in qwen3.5-9b qwen3.8-27b; do
+  curl -sf -o /dev/null -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    http://127.0.0.1/v1/chat/completions \
+    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"chat_template_kwargs\":{\"enable_thinking\":false}}"
+done
+curl -sf -H "Authorization: Bearer $KEY" http://127.0.0.1/api/stats | python3 -c '
+import json,sys
+d = json.load(sys.stdin)["config_health"]
+print("readable :", d["journal_readable"])
+print("evictions:", d["events"]["evictions"])
+print("disabled :", d["events"]["disabled"])
+print("cache    :", d["cache"])'
+```
+Expected: at least one eviction naming both models; `disabled` **empty**, which is
+the proof that removing `cache-reuse` in Task 6 worked; and a non-null hit rate.
+
+- [ ] **Step 7: Verify the journal-unavailable path**
+
+```bash
+curl -sf -H "Authorization: Bearer $KEY" http://127.0.0.1/api/stats \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["config_health"]; print("events is None when unreadable:", d["events"] is None or d["journal_readable"])'
+```
+Then confirm in the page that an unreadable feed reads "event feed unavailable"
+rather than "0 evictions" — temporarily point `read_journal` at a nonexistent unit
+to see it, and revert.
+
+- [ ] **Step 8: Commit**
+
+```bash
+cd /tmp/wt-turing
+git add llm/linux-turing-dual/scripts/collect-stats.py \
+        llm/linux-turing-dual/scripts/dashboard.py \
+        llm/linux-turing-dual/web/index.html \
+        llm/linux-turing-dual/tests/test_unit_config_health.py \
+        llm/linux-turing-dual/docs/measured-ceilings.md
+git commit -m "feat(llm): tell the operator which configuration is costing them
+
+Three signals, each a misconfiguration rather than a fault: model evictions from
+the router's own eviction log, the prompt-cache hit rate, and options the model
+silently discarded. The last is not hypothetical -- it is how cache-reuse was
+caught being disabled at every load while sitting in the presets looking
+effective.
+
+An unreadable journal reports 'event feed unavailable' rather than zero
+evictions, because 'no evictions' is exactly the good news an operator would act
+on and the two must not look the same. For the same reason zero prompts yields a
+null hit rate rather than 0%: one says idle, the other says you are thrashing
+slots and losing a 9x.
+
+The eviction patterns are deliberately narrow -- a broad unload match would also
+count the ordinary shutdown of the only resident model and make the number
+meaningless. config_health stays off the public allow-list, since eviction lines
+name models and the public surfaces carry load only."
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage**
@@ -1557,7 +1858,10 @@ copy-paste examples rather than only in prose."
 | §8 acceptance 9 (concurrency unchanged) | 6 Step 5 |
 | §8 acceptance 10-11 (100k needle, check_presets) | 6 |
 | §8 acceptance 12-14 (one port, backends private, no paths) | 5 Step 7 |
-| §8 acceptance 15 (reboot) | 8 |
+| §5.1 config-health panel | **9** |
+| §7.6 prefix caching + one-slot 100k preset | **6** |
+| §8 acceptance 15-17 (eviction shown, cache hit on call 2, journal degradation) | **9**, 6 Step 5b |
+| §8 acceptance 18 (reboot) | 8 |
 
 **Gap found and closed:** acceptance criterion 9 (two concurrent 40k sessions
 still clean after the pool change) had no task. It is now Task 6 Step 5's
