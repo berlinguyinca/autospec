@@ -9,6 +9,16 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### DOC_OUT_OF_SYNC no longer reads a comment as a new CLI surface (2026-08-18)
+- The rule scans added lines for a long flag and demands a touched doc file. It scanned
+  comments too, so moving a doc comment that mentions `claim release --claim-id` between
+  files was reported as introducing that flag — a pure code move could not be committed
+  without an unrelated doc edit. A comment names a surface, it cannot introduce one, which
+  is already why `*.md` is skipped wholesale; the pattern only matches a flag followed by
+  whitespace or `=`, and those lines are never comments. `is_comment_line` now lives beside
+  the path classifiers, with a negative-control test proving a flag in a real invocation
+  still trips the rule.
+
 #### `install.sh --update` no longer exits non-zero on 12 skill pairs (2026-08-18)
 - `install.sh` appends `--update` to every `skills/<skill>/install.sh` invocation, but four
   installers — `autospec-monitor`, `autospec-quality`, `autospec-rollover-status` and

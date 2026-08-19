@@ -66,3 +66,19 @@ setup() {
     echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:scripts/thing\.sh:"
     ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:CHANGELOG\.md:"
 }
+
+# A doc comment that names an existing flag documents a surface; it cannot introduce
+# one. Moving `/// Recovery is `claim release --claim-id <predecessor>`` between files
+# reported a brand-new CLI surface, so a pure code move demanded a doc touch.
+@test "lint-implementation: a flag named only in a comment is not a new CLI surface" {
+    run bash "$LINT" --diff-file "$FIX/comment-mentions-flag.diff"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:"
+}
+
+# Negative control for the check above: the rule must still fire for a flag that
+# appears in a real invocation, or the comment skip would have gutted it.
+@test "lint-implementation: a flag in an invocation still trips DOC_OUT_OF_SYNC" {
+    run bash "$LINT" --diff-file "$FIX/real-flag-introduced.diff"
+    echo "$output" | grep -qE "^DOC_OUT_OF_SYNC:.*CLI long-flag"
+}
