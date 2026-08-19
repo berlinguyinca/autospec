@@ -380,32 +380,51 @@ left for the recurrent-state cache, and the failure reads as
 `failed to allocate buffer for rs cache`, which looks like a corrupt model
 rather than a budget that was never checked.
 
-### A crash worth knowing about
+### A crash worth knowing about, and why the fix is permanent
 
-The model child died mid-session twice, silently — `instance ... exited with
-status 1`, no signal, no assert, no CUDA error, serving at 45 tok/s one line
-earlier. Each time it cost ~8 of 40 benchmark requests while `/health` kept
-returning 200.
-
-Both crashes followed the same log line:
+The model child died twice with a silent `exit(1)` — no signal, no assert, no
+CUDA error, while serving at 45 tok/s. Both times the preceding line was:
 
 ```
-slot get_availabl: ... selected slot by LCP similarity, f_sim_best = 0.349 (> 0.100 thold)
+slot get_availabl: selected slot by LCP similarity, f_sim_best = 0.349 (> 0.100 thold)
 ```
 
-That threshold is `--slot-prompt-similarity` (default 0.10). The generated
-presets set it to **0.0**, and the next run completed 40/40 with zero child
-exits and zero LCP selections. Three runs, one variable:
+Three runs, one variable at a time:
 
 | build | `slot-prompt-similarity` | failures | child exits |
 |---|---|---:|---:|
 | master | 0.10 | 11 | yes |
-| v0.1.2, portable CPU | 0.10 | 8 | yes |
-| v0.1.2, portable CPU | **0.0** | **0** | **0** |
+| v0.1.2 + portable CPU | 0.10 | 8 | yes |
+| v0.1.2 + portable CPU | **0.0** | **0** | **0** |
 
-This is a mitigation, not a diagnosis. The cost is losing cross-slot
-prompt-cache reuse, so some prefill is repeated; each slot still reuses its own
-prefix. Set it back to 0.1 to retest on a newer llama.cpp.
+That was a mitigation with an unknown cost, and the docs promised a retest on a
+newer build. The retest happened on 2026-08-19, and it answered a better
+question than the one asked: **the feature does nothing here even when enabled.**
+
+Driving b10434 with `--parallel 4`, `--slot-prompt-similarity 0.1` and 240
+concurrent requests carrying deliberately similar 11k-token prompts:
+
+```
+0 selections by LCP similarity
+264 selections by LRU
+```
+
+It never engaged, so the reproduction could not have crashed — and the cost of
+turning it off, which these docs described for weeks as "losing cross-slot
+prompt-cache reuse", is nothing. The reuse that matters comes from ordinary
+exact-prefix caching, which this does not touch: 36,998 of 37,511 tokens served
+from cache.
+
+Upstream agrees the feature is a liability: [PR #22083][sps-pr] disables it when
+`--cache-idle-slots` is on or `--parallel 1`, because it causes cache
+*thrashing* rather than sharing, and [issue #17673][sps-issue] reports the same
+"always LRU despite high similarity" behaviour seen here.
+
+So `0.0` is not pending work. Revisit if the upstream default changes — not on a
+schedule.
+
+[sps-pr]: https://github.com/ggml-org/llama.cpp/pull/22083
+[sps-issue]: https://github.com/ggml-org/llama.cpp/issues/17673
 
 ## What this hardware changes
 

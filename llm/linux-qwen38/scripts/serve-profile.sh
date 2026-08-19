@@ -76,8 +76,10 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
     --cache-type-v "${QWEN38_KV_TYPE}"
     --jinja
     --no-context-shift
-    # Cross-slot selection off: the model child died twice right after taking
-    # that path. A mitigation, not a diagnosis -- see config/router-presets.ini.
+    # Cross-slot selection off as a decision, not a workaround: enabled at 0.1
+    # it never engaged (0 LCP vs 264 LRU over 240 concurrent similar-prefix
+    # requests), and it is the path the model child died on twice. Full
+    # reasoning and the upstream references in config/router-presets.ini.
     --slot-prompt-similarity "${QWEN38_SLOT_PROMPT_SIMILARITY:-0.0}"
     --host "${QWEN38_HOST}"
     --port "${QWEN38_PORT}"
