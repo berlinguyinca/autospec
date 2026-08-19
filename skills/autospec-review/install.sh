@@ -37,6 +37,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
+SKILL_REFERENCE_FILES="csv-schema.md gap-taxonomy.md reviewer-prompt.md subagent-contract.md"
 # Shared runtime helpers this skill calls via ${AUTOSPEC_SCRIPTS_DIR}/<name> and
 # that live under skills/autospec-shared/scripts/ (not repo-root scripts/). They
 # MUST ship into ~/.autospec/scripts so a standalone install of autospec-review
@@ -88,6 +89,13 @@ fetch_source_files() {
             exit 1
         fi
     done
+    for rel in $SKILL_REFERENCE_FILES; do
+        mkdir -p "$TMP_FETCH_DIR/references"
+        if ! curl -fsSL "$SKILL_RAW_BASE/references/$rel" -o "$TMP_FETCH_DIR/references/$rel"; then
+            err "failed to download $SKILL_RAW_BASE/references/$rel"
+            exit 1
+        fi
+    done
     mkdir -p "$TMP_FETCH_DIR/lib-scripts"
     for rel in $SHARED_LIB_SCRIPT_FILES; do
         if ! curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
@@ -125,6 +133,31 @@ install_shared_scripts() {
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
+    done
+}
+
+# Ship the skill's references/ files. The trio body carries
+# `**MUST** read skills/<skill>/references/<file>` pointers, and nothing installed
+# that directory: an installed skill running against a target repo had no such
+# path, so a MUST-read phase was silently unreachable. Install to a
+# harness-neutral root every harness can resolve, plus beside the installed
+# SKILL.md for the harnesses that keep a per-skill directory — opencode installs a
+# flat agent file and has no such directory, so it relies on the neutral root.
+install_reference_files() {
+    [ -n "$SKILL_REFERENCE_FILES" ] || return 0
+    info ""
+    info "$SKILL_NAME reference files:"
+    for rel in $SKILL_REFERENCE_FILES; do
+        install_one "$SKILL_DIR/references/$rel" \
+            "$HOME/.autospec/skills/$SKILL_NAME/references/$rel" || return 1
+        if [ "$HARNESS" = "claude" ] || [ "$HARNESS" = "all" ]; then
+            install_one "$SKILL_DIR/references/$rel" \
+                "$CLAUDE_DIR/skills/$SKILL_NAME/references/$rel" || return 1
+        fi
+        if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
+            install_one "$SKILL_DIR/references/$rel" \
+                "$CODEX_DIR/skills/$SKILL_NAME/references/$rel" || return 1
+        fi
     done
 }
 
@@ -275,6 +308,8 @@ fi
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+install_reference_files
 
 # ---------- final summary --------------------------------------------------
 
