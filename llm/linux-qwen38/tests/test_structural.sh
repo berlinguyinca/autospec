@@ -206,5 +206,18 @@ sys.exit(1 if bad else 0)
 PYCHK
 check $? "gpu-registry.json is well-formed"
 
+# 20 — the python suites here are scripts, not pytest modules, and they exit at
+# import time. Left collectable, pytest reports INTERNALERROR, which reads like
+# a broken test rather than a misuse of the runner.
+conftest="${HERE}/tests/conftest.py"
+[ -f "$conftest" ] && grep -q 'collect_ignore_glob' "$conftest"
+check $? "conftest keeps pytest out of the standalone script suites"
+
+# 21 — the reconnect counter is what an operator reads to decide whether the
+# tunnel has been stable. Seeded from zero it forgets every restart of the
+# supervisor itself and reports a quiet night that did not happen.
+grep -q 'reconnects="\$(cat "\${STATE}/tunnel.reconnects"' "${HERE}/hive/tunnel-supervisor.sh"
+check $? "the reconnect counter survives a supervisor restart"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

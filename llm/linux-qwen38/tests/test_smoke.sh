@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Smoke tests — the gate setup-linux-qwen38.sh will not declare success without.
 #
-# Requires a running profile. Starts the default one if nothing is up.
+# Requires a running profile. Starts the default one if nothing is up -- which
+# is NOT read-only: `qwen38ctl start` stops whatever else owns the GPU, so on a
+# host where the llama.cpp node is serving, this suite pauses it and leaves it
+# paused. Restore it with `qwen-localctl resume`, or point the suite at an
+# endpoint that is already up (QWEN38_HOST/QWEN38_PORT) and it will touch
+# nothing.
 set -uo pipefail
 
 CONF_DIR="${QWEN38_CONF_DIR:-/opt/qwen-vllm/etc}"

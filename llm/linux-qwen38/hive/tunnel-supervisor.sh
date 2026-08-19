@@ -209,7 +209,12 @@ trap 'stop_forward; exit 0' TERM INT
 
 gone=0
 sick=0
-reconnects=0
+# Survive our own restarts. The counter is what an operator reads to answer
+# "has this tunnel been stable?", so a supervisor that is itself restarted --
+# by a fresh `opencode_hive up`, or by the session it runs under -- must not
+# silently reset the history to zero and report a quiet night.
+reconnects="$(cat "${STATE}/tunnel.reconnects" 2>/dev/null || true)"
+case "$reconnects" in ''|*[!0-9]*) reconnects=0 ;; esac
 last_deep=0
 start_forward
 
