@@ -3330,7 +3330,10 @@ fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> C
     ];
 
     let mut targets = Vec::new();
-    for skill in ["autospec", "autospec-run"] {
+    // The autospec router delegates Phase 4 to /autospec-run, so it no
+    // longer carries the worktree ladder content. Only the autospec-run trio
+    // and the implementer prompt are checked.
+    for skill in ["autospec-run"] {
         for member in TRIO_MEMBERS {
             targets.push(format!("skills/{skill}/{member}"));
         }
@@ -3371,7 +3374,9 @@ fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> C
     }
 
     let mut results = Vec::new();
-    for relative in ["skills/autospec/SKILL.md", "skills/autospec-run/SKILL.md"] {
+    // The autospec router no longer carries the worktree-ladder sentinel block;
+    // only the autospec-run SKILL.md is checked for the bash syntax.
+    for relative in ["skills/autospec-run/SKILL.md"] {
         let path = root.join(relative);
         let Some(block) = worktree_ladder_block(&path) else {
             return aggregate(
@@ -3398,7 +3403,10 @@ fn run_phase4_single_agent_discipline(id: &str, required: bool, root: &Path) -> 
         "Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool";
     const SUITE: &str = "tests/phase4/test_single_agent_discipline.bats";
 
-    for skill in ["autospec-run", "autospec"] {
+    // The autospec router delegates Phase 4 to /autospec-run, so it no
+    // longer carries the single-agent discipline content. Only the
+    // autospec-run trio is checked.
+    for skill in ["autospec-run"] {
         for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
             let relative = format!("skills/{skill}/{member}");
             let path = root.join(&relative);
@@ -3500,22 +3508,22 @@ fn run_autospec_refine_contract(id: &str, required: bool, root: &Path) -> CheckR
             );
         }
     }
-    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
-        let relative = format!("skills/autospec/{member}");
-        if !contains(&root.join(&relative), "canonical `## Next steps` section") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    syntax,
-                    failure(
-                        id,
-                        required,
-                        &format!("{relative}: missing canonical Next steps directive"),
-                    ),
-                ],
-            );
-        }
+    // The autospec router delegates Phase 6 to /autospec-run, and the
+    // canonical Next steps directive now lives in the end-of-run reference.
+    let next_steps_ref = "skills/autospec-run/references/end-of-run.md";
+    if !contains(&root.join(next_steps_ref), "canonical `## Next steps` section") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(
+                    id,
+                    required,
+                    &format!("{next_steps_ref}: missing canonical Next steps directive"),
+                ),
+            ],
+        );
     }
 
     let schema = run_optional_jsonschema_checks(id, required, root, SCHEMAS);
