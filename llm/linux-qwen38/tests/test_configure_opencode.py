@@ -181,6 +181,18 @@ with tempfile.TemporaryDirectory() as d:
     report(chosen.split("/")[-1].startswith("testmodel-"),
            "and it is still a tier of that model, not the whole pool", chosen)
 
+    # Children must not cross families either. Only tiers of one LOADED model
+    # switch for free; crossing costs a full reload. The variant has the bigger
+    # pool here, so a preference would not be enough -- a width can exist where
+    # only its tier fits.
+    agents = tmp / "kids"
+    agents.mkdir()
+    (agents / "kid.md").write_text("---\nmode: subagent\n---\nbody\n")
+    pinned = generate(pf, tmp / "p2.json", "--agents", str(agents))
+    kid = pinned.get("agent", {}).get("kid", {}).get("model", "")
+    report("uncensored" not in kid,
+           "children stay in the parent's family, not the roomier variant", kid)
+
     named = generate(pf, tmp / "n.json",
                      "--default-model", "testmodel-uncensored-64k")
     report(named.get("model", "").endswith("testmodel-uncensored-64k"),

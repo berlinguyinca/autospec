@@ -167,24 +167,31 @@ def fit_child_tier(text_tiers: dict[str, int], models: dict, owner: dict,
     section = owner.get(parent_id)
     pool = models[section]["context"] if section else None
     slots = models[section]["parallel"] if section else 1
-    smallest = min(text_tiers, key=lambda m: (text_tiers[m], len(owner[m]), len(m)))
     if not pool:
-        return smallest, 0
+        return min(text_tiers,
+                   key=lambda m: (text_tiers[m], len(owner[m]), len(m))), 0
     parent_ctx = entries.get(parent_id, {}).get("limit", {}).get("context", 0)
 
+    # Children stay in the parent's family, and this is a restriction rather
+    # than a preference. Only tiers of one LOADED model switch for free;
+    # crossing families costs a full reload of the weights. Preferring the
+    # parent's section on a tie is not enough, because the families do not have
+    # equal pools -- an abliterated preset loads no projector and is given more,
+    # so a width can exist where only its tier fits and every child silently
+    # moves onto it. That is the same asymmetry that made it the default.
+    own = {mid: ctx for mid, ctx in text_tiers.items() if owner[mid] == section}
+    if own:
+        text_tiers = own
+
     def rank(mid: str) -> tuple:
-        # Same tie-break as pick_default: at equal context prefer the parent's
-        # own section, then the plainest one. Without it a 40k tier of the
-        # abliterated model outranks the text model's 40k on string order, and
-        # every child silently changes family -- which also costs a full model
-        # reload, since only tiers of one loaded model are free to switch.
-        return (text_tiers[mid], owner[mid] == section, -len(owner[mid]), -len(mid))
+        # Within the family, biggest that fits; ties to the plainest id.
+        return (text_tiers[mid], -len(owner[mid]), -len(mid))
 
     for width in range(max(1, slots - 1) if fanout is None else fanout, 0, -1):
         fits = [m for m in text_tiers if parent_ctx + width * text_tiers[m] <= pool]
         if fits:
             return max(fits, key=rank), width
-    return smallest, 1
+    return min(text_tiers, key=lambda m: (text_tiers[m], len(m))), 1
 
 
 def main() -> int:
