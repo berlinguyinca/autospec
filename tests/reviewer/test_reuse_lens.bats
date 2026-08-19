@@ -166,8 +166,10 @@ _baseline_output() {
 # ---------------------------------------------------------------------------
 
 # Case 12: refute pass prose is present in both SKILL.md guardian blocks
-@test "refute-pass: SKILL.md describes the reuse-BLOCK refute pass" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+@test "refute-pass: the trio describes the reuse-BLOCK refute pass" {
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF 'Reuse-BLOCK refute pass' "$f" \
       || { echo "FAIL: refute pass prose missing in $f"; return 1; }
     grep -qF 'Majority rules' "$f" \
@@ -207,7 +209,9 @@ _baseline_output() {
 # Case 12d: ledger record fires at the refute-pass decision point, not the LGTM-only
 # branch (which produced phantom BLOCK rows and never recorded upheld BLOCKs).
 @test "ledger: record is gated by _reuse_block_raised and carries _reuse_upheld" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF '"${_reuse_block_raised:-0}" = "1"' "$f" \
       || { echo "FAIL: ledger record not gated by _reuse_block_raised in $f"; return 1; }
     grep -qF -- '--upheld "${_reuse_upheld:-true}"' "$f" \
@@ -219,8 +223,10 @@ _baseline_output() {
 }
 
 # Case 13: simplicity axis is documented as ADVISE-only (anti-gold-plating)
-@test "anti-gold-plating: simplicity axis is ADVISE-only in SKILL.md" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+@test "anti-gold-plating: simplicity axis is ADVISE-only" {
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF 'Simplicity axis is ADVISE-only' "$f" \
       || { echo "FAIL: ADVISE-only simplicity prose missing in $f"; return 1; }
     grep -qF 'never halt the commit' "$f" \
@@ -228,18 +234,36 @@ _baseline_output() {
   done
 }
 
-# Case 14: refute pass + ADVISE-only prose propagated to all 6 trio mirrors
-@test "trio: refute-pass + ADVISE-only prose present in all 6 trio files" {
+# Case 14: refute pass + ADVISE-only prose reachable from every trio.
+#
+# The autospec trio does not carry this prose inline. #3213 extracted the Phase 4 cold tail
+# to skills/autospec/references/monitor-recovery.md, and #3262 then turned /autospec into a
+# router that delegates to /autospec-run instead of pointing at that reference at all.
+# Asserting the text sits in all six files would force both changes to be undone, so the
+# prose is checked once at each surface that holds it, and the autospec side is checked for
+# reachability instead.
+@test "trio: refute-pass + ADVISE-only prose present in all trio surfaces" {
   for f in \
     "$REPO_ROOT/skills/autospec-run/SKILL.md" \
     "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec-run/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
+    grep -qF 'Reuse-BLOCK refute pass' "$f" \
+      || { echo "FAIL: refute pass prose missing in trio surface $f"; return 1; }
+    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
+      || { echo "FAIL: ADVISE-only prose missing in trio surface $f"; return 1; }
+  done
+
+  # Dropping the three autospec mirrors from the loop above loses real coverage unless
+  # something still proves each member REACHES a surface that holds the prose. Since #3262
+  # that route is the router's delegation to autospec-run, whose trio the loop above already
+  # asserts carries the text; asserting the monitor-recovery pointer here would guard a
+  # reference the router deliberately stopped naming.
+  for m in \
     "$REPO_ROOT/skills/autospec/SKILL.md" \
     "$REPO_ROOT/skills/autospec/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec/opencode/agent.md"; do
-    grep -qF 'Reuse-BLOCK refute pass' "$f" \
-      || { echo "FAIL: refute pass prose missing in mirror $f"; return 1; }
-    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
-      || { echo "FAIL: ADVISE-only prose missing in mirror $f"; return 1; }
+    grep -qF 'skills/autospec-run/SKILL.md' "$m" \
+      || { echo "FAIL: $m no longer reaches a surface holding this prose"; return 1; }
   done
 }

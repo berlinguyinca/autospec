@@ -392,6 +392,13 @@ runtime_install_main() {
     done
     [ -n "$repo" ] || { runtime_install_error usage; return 2; }
     STATE_ROOT="${AUTOSPEC_STATE_ROOT:-$HOME/.autospec}"
+    # A declared no-op, sitting beside the warm-generation fast path below. Tests that drive
+    # install.sh's interactive prompts substitute HOME, so no receipt can ever match and a cold
+    # `cargo build --release` dominates the run; those tests set this instead of waiting for it.
+    if [ "${AUTOSPEC_SKIP_RUNTIME_BINARY:-0}" = "1" ]; then
+        printf 'autospec-runtime-install: skipped by AUTOSPEC_SKIP_RUNTIME_BINARY=1\n' >&2
+        return 0
+    fi
     if runtime_fast_warm_generation "$repo" "$STATE_ROOT"; then return 0; fi
     if [ "$check_only" -eq 1 ]; then printf 'stale:generation-invalid\n'; return 10; fi
     repo=$(autospec_runtime_repo_dir "$repo") || return 2

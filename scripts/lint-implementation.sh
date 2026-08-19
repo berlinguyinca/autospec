@@ -23,7 +23,9 @@
 set -eu
 # Keep operational diagnostics visible when directive mode captures detector output.
 exec 3>&2
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# Builtins only, no `dirname`: a PATH stripped to essentials made it fail, SCRIPT_DIR collapse
+# to the caller's cwd, and the fatal classifier guard below exit 2 instead of linting.
+SCRIPT_DIR="$(cd "${0%/*}" 2>/dev/null && pwd -P || pwd -P)"
 
 HELP_TEXT="Usage: scripts/lint-implementation.sh <PR> --issue <N>
        scripts/lint-implementation.sh --diff-file <path>
@@ -659,11 +661,9 @@ get_added_lines_with_lineno() {
     ' "$TMP_DIFF"
 }
 
-# Path classifiers live in a sibling file: this one is past the size ratchet, and
-# the predicates are shared decision-making rather than detector internals. Sourced
-# from SCRIPT_DIR so the installed copy under ~/.autospec/scripts resolves it the
-# same way the checkout does; a missing sibling is fatal rather than silently
-# reclassifying every file.
+# Path classifiers live in a sibling file: this one is past the size ratchet, and the
+# predicates are shared decision-making rather than detector internals. Resolved from
+# SCRIPT_DIR (see above) so an installed copy resolves it the same way a checkout does.
 _classifiers="$SCRIPT_DIR/lint-path-classifiers.sh"
 if [ ! -r "$_classifiers" ]; then
     printf 'lint-implementation.sh: missing %s\n' "$_classifiers" >&2
