@@ -1651,7 +1651,7 @@ Post a one-paragraph delta to the user (newly closed issues, newly merged PRs, f
 
 If your harness lacks self-paced wakeup: register a local `cron`/`launchd` job that runs the same status-check prompt at the chosen cadence, OR ask the user to invoke `status-update` manually.
 
-**Resolving `references/` paths.** The reference pointers below are written relative to the autospec repo root, which is where the validation gate resolves them. Inside a target repo that path does not exist: resolve against this skill's own installed directory instead — `~/.claude/skills/autospec-run/references/`, `$CODEX_HOME/skills/autospec-run/references/`, or `$AUTOSPEC_SKILLS_DIR/autospec-run/references/` — and fall back to the `~/.autospec/repo` checkout. A pointer that will not resolve is a stop-and-report condition, never a skipped step.
+**Resolving `references/` paths.** The reference pointers below are written relative to the autospec repo root, which is where the validation gate resolves them. Inside a target repo that path does not exist: resolve against this skill's own installed directory instead — `~/.claude/skills/autospec-run/references/`, `$CODEX_HOME/skills/autospec-run/references/`, or `$HOME/.autospec/skills/autospec-run/references/` — and fall back to the `~/.autospec/repo` checkout. A pointer that will not resolve is a stop-and-report condition, never a skipped step.
 
 ## Phase 6 — Final report
 

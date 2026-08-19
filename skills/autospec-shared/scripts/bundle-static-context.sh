@@ -176,6 +176,14 @@ case "$ROLE" in
     ;;
 esac
 
+# --static-body is emitted only by the implementer branch below. Accepting it for
+# another role would silently drop a whole procedure, which is the exact failure
+# this option was added to prevent.
+if [ -n "$STATIC_BODY" ] && [ "$ROLE" != "implementer" ]; then
+  printf 'bundle-static-context.sh: --static-body is only supported for --role implementer (got %s)\n' "$ROLE" >&2
+  exit 1
+fi
+
 # ── resolve paths ─────────────────────────────────────────────────────────────
 
 # Claude Code names its per-project directory after the absolute repo path with
@@ -188,8 +196,11 @@ esac
 # implementer, decomposer, and classifier dispatch injected nothing and still
 # printed the ordinary "(No memory files matched the issue labels.)" line — the
 # failure was indistinguishable from "this issue has no relevant memory". The
-# committed `docs/memory` mirror carries the same filenames as the harness store,
-# so it is a harness-independent last resort rather than a different corpus.
+# committed `docs/memory` store carries the same manifest filenames as the harness
+# store, so it is a harness-independent last resort. Their contents are not
+# identical, so which one answers is observable — the harness store wins when it
+# exists. Note REPO_ROOT is usually a per-session worktree, whose slug has no
+# harness directory, so the committed store is what most runs resolve to.
 if [ -n "${AUTOSPEC_MEMORY_DIR:-}" ]; then
   MEMORY_DIR="$AUTOSPEC_MEMORY_DIR"
 else

@@ -51,6 +51,19 @@ for skill_dir in "$REPO_ROOT"/skills/*/; do
     echo "ok: $skill shipped $(printf '%s\n' "$files" | wc -l | tr -d ' ') reference file(s) to 3 destinations"
 done
 
+# The piped `curl | sh` fetch path needs network and is not exercised here, so
+# assert its one shape statically: a nested declaration is valid per the Rust gate,
+# and `curl -o .../references/sub/deep.md` will not create the parent. One skill
+# lost this line to a stray `git checkout --` during review, which nothing else
+# would have caught.
+for skill_dir in "$REPO_ROOT"/skills/*/; do
+    skill="$(basename "$skill_dir")"
+    grep -q '^SKILL_REFERENCE_FILES=' "$skill_dir/install.sh" 2>/dev/null || continue
+    grep -q 'references/\$(dirname' "$skill_dir/install.sh" \
+        || fail "$skill: fetch_source_files must mkdir the reference file's own parent"
+done
+echo "ok: every declaring installer creates nested reference parents on the piped path"
+
 # Negative control: a skill with no references/ must not gain the directory, or
 # the assertions above would pass for a script that blindly mkdir -p's.
 rm -rf "$TEST_HOME"
