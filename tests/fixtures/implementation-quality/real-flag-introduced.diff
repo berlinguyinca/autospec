@@ -1,0 +1,7 @@
+diff --git a/scripts/some-tool.sh b/scripts/some-tool.sh
+--- a/scripts/some-tool.sh
++++ b/scripts/some-tool.sh
+@@ -3,3 +3,4 @@
+ run_tool() {
++    exec python3 "$HERE/tool.py" --brand-new-flag "$1"
+ }

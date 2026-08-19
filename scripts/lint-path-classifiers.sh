@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lint-path-classifiers.sh — how lint-implementation.sh files a changed path.
+# lint-path-classifiers.sh — how lint-implementation.sh files a changed path, and one
+# line-level predicate that decides whether a line is scannable source at all.
 #
 # Sourced, not executed. Extracted from lint-implementation.sh because that file is
 # past the size ratchet and may not grow, and because these three predicates decide
@@ -51,6 +52,19 @@ is_doc_file() {
         docs/*|*/docs/*) return 0 ;;
         SKILL.md|*/SKILL.md) return 0 ;;
         skills/*/prompts/*.md|skills/*/references/*.md) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_comment_line() {
+    # A comment naming a flag documents a public surface; it cannot introduce one --
+    # the same reason detect_doc_out_of_sync skips *.md wholesale. The CLI pattern it
+    # guards matches a flag followed by whitespace or `=`, i.e. an invocation or an
+    # arg-parser line, and those are never comments. Deliberately no '--' arm: SQL-style
+    # comments are rare here, while a shell continuation line such as `--features foo`
+    # is a real flag introduction.
+    case "${1#"${1%%[![:space:]]*}"}" in
+        '//'*|'#'*|'*'*|'/*'*) return 0 ;;
         *) return 1 ;;
     esac
 }
