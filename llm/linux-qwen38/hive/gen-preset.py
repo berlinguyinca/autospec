@@ -104,6 +104,18 @@ def main() -> int:
     print("[*]")
     print("n-gpu-layers = 999\nflash-attn = auto\njinja = true")
     print("no-context-shift = true\nkv-unified = true")
+    # Slot selection by prompt similarity is disabled because the model child
+    # died twice immediately after taking that path, both times with the
+    # preceding line
+    #     slot get_availabl: ... selected slot by LCP similarity, f_sim_best = ...
+    # and no signal, assert or CUDA error -- a silent exit(1) while serving
+    # happily at 45 tok/s. Each crash cost ~8 of 40 benchmark requests.
+    #
+    # The cost of turning it off is losing cross-slot prompt-cache reuse, so
+    # some prefill is repeated; slots still reuse their own prefix. A stable
+    # server is worth more than that, and this is a mitigation rather than a
+    # diagnosis -- set slot-prompt-similarity back to 0.1 to test a newer build.
+    print("slot-prompt-similarity = 0.0")
     if kv != "f16":
         print(f"cache-type-k = {kv}\ncache-type-v = {kv}")
     print()
