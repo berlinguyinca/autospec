@@ -478,6 +478,65 @@ guess.
 
 ---
 
+## The seven-model roster, verified
+
+Every served id returns a real completion. Each figure below is a COLD call,
+including a full model reload, because `--models-max 1` keeps one resident:
+
+| served id | kind | context | seats | cold call | resident VRAM (predicted) |
+|---|---|---:|---:|---:|---:|
+| `qwen3.8-27b` | text | 102,400 | 2 | **7 s** | 18,702 MiB |
+| `qwen3.8-27b-100k` | text | 102,400 | 1 | **7 s** | 18,702 MiB |
+| `qwen3.8-27b-vision` | vision | 81,920 | 2 | **8 s** | 19,227 MiB |
+| `qwen3.8-27b-uncensored` | uncensored | 102,400 | 2 | **7 s** | 19,034 MiB |
+| `qwen3.8-27b-uncensored-vision` | uncensored + vision | 81,920 | 2 | **8 s** | 19,274 MiB |
+| `qwen3.5-9b` | text | 81,920 | 2 | **4 s** | 7,237 MiB (one card) |
+| `qwen3.5-9b-vision` | vision | 81,920 | 2 | **5 s** | 8,113 MiB (one card) |
+
+Reload cost is better than first measured: 4-8 s rather than the 7 s recorded for
+the 27B alone, and the 9B is fastest because it is a third of the size on one card.
+
+### Vision verified with a real image, not a claim
+
+A projector that silently drops the image still returns a plausible sentence about
+colour, so PASS requires **both** the right answer and `prompt_tokens` rising by
+roughly `image-min-tokens`:
+
+| preset | answer | prompt tokens | rise |
+|---|---|---|---:|
+| `qwen3.8-27b-vision` | `'red'` | 23 → 1,049 | **+1,026** |
+| `qwen3.8-27b-uncensored-vision` | `'Red'` | 293 → 1,319 | **+1,026** |
+| `qwen3.5-9b-vision` | `'Red'` | 23 → 1,049 | **+1,026** |
+
+The token rise is the part that proves the projector ran. All three land on exactly
+1,026 — `image-min-tokens 1024` plus two tokens of framing.
+
+**Negative control:** sending the same image to the *text* preset
+`qwen3.8-27b` **fails the request** rather than quietly ignoring the image. So
+vision genuinely requires a vision preset, which is the behaviour the separate-preset
+design depends on.
+
+### Artifacts on disk
+
+All six verified at their exact pinned byte counts with `GGUF` magic:
+
+| local file | bytes |
+|---|---:|
+| `Qwen3.8-27B-UD-Q4_K_M.gguf` | 16,464,440,224 |
+| `Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf` | 16,810,716,384 |
+| `Qwen3.5-9B-Q4_K_M.gguf` | 5,680,522,464 |
+| `mmproj-27b-F16.gguf` | 927,607,488 |
+| `mmproj-9b-F16.gguf` | 918,166,080 |
+| `mmproj-uncensored-Q8_0.gguf` | 629,247,488 |
+
+38.6 GiB total, on an array with 458 GiB free. **Two of those projectors are both
+called `mmproj-F16.gguf` upstream** — the 27B's and the 9B's — which is why the
+fetch plan carries a local name distinct from the remote one. Without it the second
+download overwrites the first and a model loads the wrong projector, which still
+answers.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.
