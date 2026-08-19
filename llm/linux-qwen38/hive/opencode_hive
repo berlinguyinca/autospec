@@ -284,6 +284,7 @@ start_tunnel() {
   STATE="${STATE}" FORWARD_PORT="${FORWARD_PORT}" REMOTE_PORT="${REMOTE_PORT}" \
   NODE="${node}" GPU="${GPU}" NGPU="${NGPU}" WALLTIME="${WALLTIME}" \
   GPU_CANDIDATES="${GPU_CANDIDATES}" ACCOUNT="${ACCOUNT}" PARTITION="${PARTITION}" \
+  API_KEY="${API_KEY:-}" \
     setsid nohup "${HERE}/tunnel-supervisor.sh" >> "${STATE}/tunnel.log" 2>&1 &
   echo $! > "${STATE}/tunnel.pid"
   sleep 2
@@ -375,15 +376,18 @@ REMOTE
   [ -n "$node" ] || die "job ${jid} is running but published no endpoint"
   say "node ${node}"
 
-  start_proxy
-  start_tunnel "$node"
+  # Optional now. The serving job only writes a key when QWEN_REQUIRE_KEY=1,
+  # and its absence is the normal case rather than a failure.
   local key; key="$(api_key | tail -1 || true)"
-  [ -n "$key" ] || die "no API key at ${ROOT}/logs/api-key.txt"
+
+  start_proxy
+  API_KEY="$key" start_tunnel "$node"
 
   say "waiting for the model to load (weights stage to local NVMe first)"
-  local ok=0
+  local ok=0 auth=()
+  if [ -n "$key" ]; then auth=(-H "Authorization: Bearer ${key}"); fi
   for _ in $(seq 1 180); do
-    if curl -fsS -m 5 -H "Authorization: Bearer ${key}" \
+    if curl -fsS -m 5 "${auth[@]}" \
          "http://127.0.0.1:${LOCAL_PORT}/v1/models" >/dev/null 2>&1; then ok=1; break; fi
     sleep 10
   done
@@ -413,7 +417,7 @@ REMOTE
   python3 "${HERE}/../scripts/configure-opencode.py" \
       --presets "$presets" --provider "${PROVIDER}" \
       --provider-name "Qwen on hive (${GPU}, job ${jid})" \
-      --host 127.0.0.1 --port "${LOCAL_PORT}" --api-key "${key}"
+      --host 127.0.0.1 --port "${LOCAL_PORT}" ${key:+--api-key "${key}"}
   rm -f "$presets"
 
   say "ready — pick a '${PROVIDER}/...' model inside OpenCode"

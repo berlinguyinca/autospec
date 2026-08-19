@@ -207,6 +207,16 @@ keep-alive connections without opinions about framing. Its honest limit: a
 connection lost **mid-response** cannot be replayed from there, because bytes
 have already reached the client. Requests that had not started are covered.
 
+**`/health` is the router's health, not the model's.** A router whose child has
+died still answers `/health` with 200 while every request gets
+`500 proxy error: Could not establish connection` and every model reports
+`unloaded`. An entire benchmark run failed that way while the supervisor
+reported the endpoint healthy throughout. So liveness is checked cheaply on
+`/health` and **capability** is checked separately, by asking for one token and
+requiring a real answer — once after each connect, which is when "the job
+started but the model cannot load" actually happens. Running it on a timer would
+force a model load on an idle node, which costs minutes of GPU.
+
 **A lost allocation is also recoverable.** `low` caps at 7 days and is
 preemptible, so the job ending is a matter of when. The supervisor submits a
 replacement, waits for the scheduler, and re-points the forward. Every piece of
@@ -229,9 +239,19 @@ Three things it has to get right, each learned the hard way:
 - **Reap the orphaned `ssh`.** Killing a supervisor leaves its child holding the
   port, which the replacement then cannot bind.
 
-The server binds `0.0.0.0` on a shared cluster network, so `serve-qwen.sbatch`
-generates a per-deployment API key into `logs/api-key.txt` (mode 600) and
-requires it. Do not remove that.
+**Authentication is off by default**, at the operator's instruction — this is a
+trusted network. What that means concretely, since it is not nothing:
+
+- SSH to compute nodes is refused here (verified), so the server **cannot** bind
+  loopback and be reached by a jump. It has to listen on the node's interface.
+- That port is reachable from the login node — `</dev/tcp/NODE/8080` succeeds
+  from there — so **any account that can log into this cluster can use the
+  model**.
+
+`QWEN_REQUIRE_KEY=1` turns it back on. The key is generated per deployment and
+`opencode_hive` picks it up and configures the client automatically, so it costs
+no manual step either way; when it is off, any stale key file is removed so a
+client cannot send a token the server no longer expects.
 
 The hive provider is added to OpenCode as `qwen-hive/...` **without** becoming
 the default: the local 4090 stays default, so losing the cluster job never

@@ -113,14 +113,31 @@ echo "serving:"; grep -E '^\[|^c = |^parallel' "${PRESETS}" | sed 's/^/  /'
 cp "${PRESETS}" "${ROOT}/logs/router-presets.active.ini"
 
 
-# An unauthenticated model server on a shared cluster network is reachable by
-# every other user on it. The key is generated per job and written next to the
-# endpoint, readable only by this account.
-KEYFILE="${ROOT}/logs/api-key.txt"
-if [ ! -s "${KEYFILE}" ]; then
-  umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' > "${KEYFILE}"
+# Authentication is OFF by default, at the operator's instruction: this is a
+# trusted network and a per-request bearer token was friction for no benefit
+# they wanted to pay for.
+#
+# Be clear about what that means, because it is not nothing. SSH to compute
+# nodes is refused here, so the server cannot bind loopback and be reached by a
+# jump -- it must listen on the node's interface. And that port is reachable
+# from the login node: `</dev/tcp/NODE/8080` succeeds from there, so any account
+# that can log into this cluster can use this model.
+#
+# Set QWEN_REQUIRE_KEY=1 to turn it back on; the key is generated per
+# deployment, and opencode_hive picks it up and configures the client with it
+# automatically, so it costs no manual step either way.
+API_KEY=""
+if [ "${QWEN_REQUIRE_KEY:-0}" = "1" ]; then
+  KEYFILE="${ROOT}/logs/api-key.txt"
+  if [ ! -s "${KEYFILE}" ]; then
+    umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' > "${KEYFILE}"
+  fi
+  API_KEY="$(cat "${KEYFILE}")"
+else
+  # Leave no stale key behind: a client that finds one and sends it to a server
+  # that no longer expects one is a confusing 401 to debug.
+  rm -f "${ROOT}/logs/api-key.txt"
 fi
-API_KEY="$(cat "${KEYFILE}")"
 
 NODE="$(hostname -f)"
 cat > "${ROOT}/logs/endpoint.txt" <<EOF
@@ -131,8 +148,8 @@ started : $(date -Is)
 
 # from your workstation:
 ssh -N -L ${PORT}:${NODE}:${PORT} ${USER}@hive.hpc.ucdavis.edu
-# then point the client at http://127.0.0.1:${PORT}/v1 with the key in
-# ${KEYFILE}
+# then point the client at http://127.0.0.1:${PORT}/v1
+$([ -n "${API_KEY}" ] && echo "# an API key is required; see ${ROOT}/logs/api-key.txt")
 EOF
 cat "${ROOT}/logs/endpoint.txt"
 
@@ -140,11 +157,11 @@ cat "${ROOT}/logs/endpoint.txt"
 term() { echo "preempted or cancelled, shutting down"; kill -TERM "${srv:-0}" 2>/dev/null || true; }
 trap term TERM INT
 
-"${PREFIX}/bin/llama-server" \
-    --models-preset "${PRESETS}" \
-    --models-max 1 \
-    --api-key "${API_KEY}" \
-    --host 0.0.0.0 \
-    --port "${PORT}" &
+srv_args=(--models-preset "${PRESETS}" --models-max 1
+          --host 0.0.0.0 --port "${PORT}")
+if [ -n "${API_KEY}" ]; then
+  srv_args+=(--api-key "${API_KEY}")
+fi
+"${PREFIX}/bin/llama-server" "${srv_args[@]}" &
 srv=$!
 wait "${srv}"

@@ -6,6 +6,7 @@
 #
 #   HIVE_USER HIVE_HOST ROOT FORWARD_PORT REMOTE_PORT NODE STATE
 #   GPU NGPU WALLTIME ACCOUNT PARTITION   (for re-acquiring a node)
+#   API_KEY                               (for the capability probe)
 #
 # The job is to survive things that are NORMAL on a shared cluster: a login
 # node that throttles connections, a network that blinks, a preemptible job
@@ -28,6 +29,9 @@ GPU="${GPU:-6000_blackwell}"; NGPU="${NGPU:-1}"
 # hours for a GPU while others sit free -- the same stale-estimate trap the
 # driver hit, except here nobody is watching.
 GPU_CANDIDATES="${GPU_CANDIDATES:-${GPU}}"
+# Empty unless the serving job was started with QWEN_REQUIRE_KEY=1. The
+# capability probe below omits the header entirely when it is empty.
+API_KEY="${API_KEY:-}"
 WALLTIME="${WALLTIME:-12:00:00}"
 ACCOUNT="${ACCOUNT:-publicgrp}"; PARTITION="${PARTITION:-low}"
 
@@ -148,12 +152,33 @@ q() { timeout "${QUERY_TIMEOUT:-45}" ssh "${query_opts[@]}" "$@"; }
 # gets refused on every request. The forward is held in the BACKGROUND and its
 # health is probed instead.
 probe() {
-  # Any HTTP status means something answered; 000 means the channel is dead.
-  # /health needs no API key, so the supervisor does not have to hold one.
+  # Cheap liveness: any HTTP status means something answered; 000 means the
+  # channel is dead. Note what this does NOT prove -- see deep_probe.
   local code
   code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
           "http://127.0.0.1:${FORWARD_PORT}/health" 2>/dev/null || true)"
   [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# /health is the ROUTER's health, not the model's. A router whose child died --
+# because the preset did not fit the card, say -- still answers /health with
+# 200 while every request gets
+#     500 proxy error: Could not establish connection
+# and every model reports "unloaded". A whole benchmark run failed that way
+# while the supervisor reported the endpoint healthy throughout.
+#
+# So liveness is checked cheaply and CAPABILITY is checked separately: ask for
+# one token and require a real answer. Run once after each (re)connect, which
+# is when "the job started but the model cannot load" actually happens, rather
+# than on a timer -- forcing a load on an idle node costs minutes of GPU.
+deep_probe() {
+  local model="${DEEP_PROBE_MODEL:-qwen3.8-27b}" code
+  code="$(curl -s -o /dev/null -m "${DEEP_PROBE_TIMEOUT:-900}" -w '%{http_code}' \
+      -H 'Content-Type: application/json' \
+      ${API_KEY:+-H "Authorization: Bearer ${API_KEY}"} \
+      -d "{\"model\":\"${model}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
+      "http://127.0.0.1:${FORWARD_PORT}/v1/chat/completions" 2>/dev/null || true)"
+  [ "$code" = "200" ]
 }
 
 fwd_pid=""
@@ -164,6 +189,7 @@ start_forward() {
       "${HIVE_USER}@${HIVE_HOST}" &
   fwd_pid=$!
   printf '%s' "$node" > "${STATE}/tunnel.node"
+  verified=0
 }
 stop_forward() {
   if [ -n "$fwd_pid" ] && kill -0 "$fwd_pid" 2>/dev/null; then
@@ -184,6 +210,25 @@ while true; do
 
   if probe; then
     sick=0; gone=0
+    # Confirm ONCE per connection that the model itself answers, not just the
+    # router in front of it.
+    if [ "${verified:-0}" = 0 ]; then
+      if deep_probe; then
+        verified=1
+        log "endpoint verified: the model answers"
+        printf 'up' > "${STATE}/tunnel.state"
+      else
+        log "router answers but the model does not; treating as a dead job"
+        printf 'degraded' > "${STATE}/tunnel.state"
+        gone=$((gone + 1))
+        if [ "$gone" -ge 2 ]; then
+          stop_forward
+          if reacquire; then start_forward; fi
+          gone=0
+        fi
+      fi
+      continue
+    fi
     printf 'up' > "${STATE}/tunnel.state"
     continue
   fi
