@@ -797,20 +797,35 @@ not load, and the public surfaces exist to report load."
 - Produces four routes. `/api/queue-headers` returns **204 with `X-Queue-*`
   headers and never a body**; nginx in Task 5 consumes it via `auth_request`.
 
-- [ ] **Step 1: Wire the window into the poll path**
+- [ ] **Step 1: One refresher thread owns all polling; handlers only read a cache**
 
-In `dashboard.py`, create one module-level `QueueWindow` and a `_refresh()` that
-collects metrics, calls `queue_state()`, feeds `window.add(time.time(),
-outstanding)`, and merges the window's derived values into `summary["queue"]`:
+**This is the load-bearing design decision of the task.** nginx runs
+`auth_request` against `/api/queue-headers` before *every* inference request. If
+that handler polls, then every completion waits on three HTTP round-trips and a
+`nvidia-smi` fork — and Task 9 would add a `journalctl` fork on top. A six-request
+burst would mean six concurrent forks to produce a number that only changes on a
+one-second cadence.
+
+Worse, `window.add()` must be called on a **fixed cadence**. Feeding it once per
+inference request would add irregular samples and corrupt the completion counting
+the whole ETA rests on.
+
+So exactly one timer polls, and every handler reads a snapshot:
 
 ```python
-import time
-from queue_window import QueueWindow          # loaded like collect-stats.py
+import threading, time
+from queue_window import QueueWindow
+
+REFRESH_SECONDS = 1.0
+JOURNAL_SECONDS = 30.0          # journalctl forks a process: far less often
 
 WINDOW = QueueWindow(window_seconds=300.0)
+_CACHE: dict = {"queue": {}, "llama_up": False, "gpus": []}
+_CACHE_LOCK = threading.Lock()
 
 
-def _snapshot() -> dict:
+def _poll_once() -> dict:
+    """The ONLY place that talks to the backend or forks. Never called per request."""
     base = COLLECT.read_models(BASE_URL, Handler.api_key)
     model = COLLECT.pick_loaded_model(base)
     url = f"{Handler.metrics_url}?model={model}" if model else Handler.metrics_url
@@ -818,7 +833,7 @@ def _snapshot() -> dict:
     slots = COLLECT.read_slot_total(BASE_URL, Handler.api_key, model)
     summary = COLLECT.summarise(metrics, COLLECT.read_gpus(), model)
     q = COLLECT.queue_state(metrics, slots)
-    WINDOW.add(time.time(), q["outstanding"])
+    WINDOW.add(time.time(), q["outstanding"])     # exactly once per tick
     q.update({
         "samples": WINDOW.samples,
         "completions": WINDOW.completions,
@@ -827,17 +842,40 @@ def _snapshot() -> dict:
         "est_wait_seconds": WINDOW.est_wait_seconds(q["queued"]),
     })
     summary["queue"] = q
+    summary["_metrics"] = metrics                 # Task 9's cache_health reads this
     return summary
+
+
+def _refresher() -> None:
+    while True:
+        try:
+            snap = _poll_once()
+            with _CACHE_LOCK:
+                # Preserve whatever the slower journal timer last wrote.
+                snap["config_health"] = _CACHE.get("config_health")
+                _CACHE.clear()
+                _CACHE.update(snap)
+        except Exception:
+            # A refresh failure must never kill the timer -- a dead thread would
+            # freeze the cache at a stale value and look like a quiet node.
+            pass
+        time.sleep(REFRESH_SECONDS)
+
+
+def snapshot() -> dict:
+    with _CACHE_LOCK:
+        return dict(_CACHE)
 ```
 
-Add `read_slot_total(base, api_key, model) -> int` to `collect-stats.py`, reading
-`total_slots` from `/props?model=<id>` and returning `0` when unavailable.
+Start the thread in `main()` as `threading.Thread(target=_refresher, daemon=True).start()`.
+
+Every route below calls `snapshot()`. **No route calls `_poll_once()`.**
 
 - [ ] **Step 2: Add the routes**
 
 ```python
         if path == "/api/queue":                 # PUBLIC
-            self._send(200, json.dumps(COLLECT.public_payload(_snapshot())).encode(),
+            self._send(200, json.dumps(COLLECT.public_payload(snapshot())).encode(),
                        "application/json")
             return
 
@@ -852,12 +890,12 @@ Add `read_slot_total(base, api_key, model) -> int` to `collect-stats.py`, readin
             return
 
         if path == "/api/queue-headers":          # for nginx auth_request
-            # ALWAYS 204, never a body, never an error: nginx treats a non-2xx
-            # auth_request as a rejection, and this endpoint must not be able to
-            # refuse an inference request. A failure here costs headers, not
-            # service.
+            # ALWAYS 204, never a body, and NEVER any I/O: this runs before every
+            # inference request. It reads the cached snapshot only. nginx treats a
+            # non-2xx auth_request as a rejection, so an endpoint that could be
+            # slow or fail would turn a busy dashboard into a refusal of service.
             try:
-                q = _snapshot().get("queue") or {}
+                q = (snapshot().get("queue") or {})
             except Exception:
                 q = {}
             def h(v):
@@ -866,15 +904,28 @@ Add `read_slot_total(base, api_key, model) -> int` to `collect-stats.py`, readin
             self.send_header("X-Queue-Slots", h(q.get("slots")))
             self.send_header("X-Queue-Processing", h(q.get("processing")))
             self.send_header("X-Queue-Depth", h(q.get("queued")))
-            self.send_header("X-Queue-Fullness", h(round(q["fullness"], 3)
-                                                  if q.get("fullness") is not None else None))
+            self.send_header("X-Queue-Fullness",
+                             h(round(q["fullness"], 3) if q.get("fullness") is not None else None))
             self.send_header("X-Queue-Est-Wait-Seconds",
-                             h(round(q["est_wait_seconds"])
-                               if q.get("est_wait_seconds") is not None else None))
+                             h(round(q["est_wait_seconds"]) if q.get("est_wait_seconds") is not None else None))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
 ```
+
+- [ ] **Step 2b: Prove the header endpoint is cheap, not just correct**
+
+Correctness under a *dead* backend is not the failure mode that matters here; nginx
+waiting on a *slow* one is.
+
+```bash
+# 200 sequential calls must be fast, because each one gates an inference request
+time (for i in $(seq 200); do curl -s -o /dev/null http://127.0.0.1:8081/api/queue-headers; done)
+```
+Expected: well under 5 s total (~25 ms each including curl startup). **If this
+scales with backend latency, the handler is still polling** — find the call and
+move it into `_poll_once()`.
+
 
 - [ ] **Step 3: Write the public status page**
 
@@ -1016,6 +1067,11 @@ server {
         proxy_pass http://qwen_dashboard/api/queue-headers;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
+        # Bounded FAR below proxy_read_timeout. A wedged dashboard must cost
+        # headers within a second, never stall an inference request for 900s.
+        proxy_connect_timeout 1s;
+        proxy_send_timeout    1s;
+        proxy_read_timeout    2s;
     }
 
     # --- sanitised model list (NOT llama.cpp's, which leaks argv) ----------
@@ -1041,6 +1097,19 @@ server {
         add_header X-Queue-Fullness         $q_full       always;
         add_header X-Queue-Est-Wait-Seconds $q_wait       always;
 
+        # nginx turns a failed auth_request into an error for the CLIENT, so a
+        # dead or slow dashboard would otherwise take inference down with it.
+        # These map any subrequest failure onto a path that proxies without
+        # headers. Losing headers is acceptable; losing service is not.
+        error_page 500 502 503 504 = @inference_no_headers;
+
+        proxy_pass http://qwen_llama;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+    }
+
+    location @inference_no_headers {
+        internal;
         proxy_pass http://qwen_llama;
         proxy_set_header Host $host;
         proxy_set_header Connection "";
@@ -1168,6 +1237,48 @@ curl -s -m 3 -o /dev/null -w 'dash  direct -> %{http_code}\n' http://<node-addr>
 Expected: completion `OK`; five `X-Queue-*` headers; streamed lines arriving over
 time rather than all at once; `/`, `/status`, `/api/queue` → 200; `/api/stats` →
 401; `/models` → 403; sanitised model list; both backends refused from off-host.
+
+- [ ] **Step 7b: The failure modes a proxy introduces**
+
+Three things that only break once nginx is in front, each verified rather than
+reasoned about:
+
+```bash
+KEY=$(sudo cat /etc/qwen-turing.key)
+# 1. HEADERS ON A STREAMED RESPONSE. add_header fires when response headers are
+#    sent, which for SSE is before the body flows -- so check both together, not
+#    separately, because "headers work" and "streaming works" can each pass alone.
+curl -N -si -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  http://127.0.0.1/v1/chat/completions \
+  -d '{"model":"qwen3.8-27b","stream":true,"messages":[{"role":"user","content":"Count to 30"}],"max_tokens":120,"chat_template_kwargs":{"enable_thinking":false}}' \
+  | awk 'NR<=25{print} /^x-queue/I{h++} END{print "x-queue headers on the streamed response:", h+0}'
+
+# 2. INFERENCE SURVIVES A DEAD DASHBOARD. This is acceptance criterion 8, and it
+#    must be checked THROUGH nginx: a failed auth_request becomes a client error
+#    unless the fallback location catches it.
+sudo systemctl stop qwen-turing-dashboard
+curl -s -o /dev/null -w '  completion with dashboard DOWN -> %{http_code}\n' \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  http://127.0.0.1/v1/chat/completions \
+  -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"Say OK"}],"max_tokens":8,"chat_template_kwargs":{"enable_thinking":false}}'
+sudo systemctl start qwen-turing-dashboard
+
+# 3. auth_request UNDER LOAD. Six concurrent requests each trigger a subrequest;
+#    if the header endpoint is doing I/O this shows up as latency or 5xx.
+for i in $(seq 6); do
+  curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" \
+    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    http://127.0.0.1/v1/chat/completions \
+    -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"Say OK"}],"max_tokens":8,"chat_template_kwargs":{"enable_thinking":false}}' &
+done; wait
+```
+Expected: five `x-queue` headers **on the streamed response** with lines arriving
+over time; **200 with the dashboard stopped** (headers absent, service intact);
+and six 200s whose `time_total` reflects model work, not added subrequest latency.
+
+**A 500 in case 2 means the `@inference_no_headers` fallback is not wired** — fix
+that before opening the firewall, because it converts a dashboard restart into an
+inference outage.
 
 - [ ] **Step 8: Verify a 40k prompt survives the proxy**
 
@@ -1320,8 +1431,16 @@ python3 /tmp/cachetest.py     # pointed at qwen3.8-27b-100k
 ```
 Expected: **call 2 reports non-zero `cached_tokens`**, not only call 3. On the
 two-slot preset call 2 misses because round-robin sends it to a cold slot; with
-one slot there is no cold slot to land on. If call 2 still misses, the preset did
-not take effect — check `total_slots` on `/props?model=qwen3.8-27b-100k` reads 1.
+one slot there is no cold slot to land on.
+
+**This step gates the §7.6 narrative, not just the preset.** Round-robin is the
+most likely explanation for the original miss but it was inferred, not proven. If
+call 2 *still* misses with `total_slots` confirmed as 1 on
+`/props?model=qwen3.8-27b-100k`, then the cause was something else — chat-template
+variance changing the prefix, or pool pressure evicting the slot's cache — and the
+claim that a dedicated preset buys guaranteed cache hits is **wrong and must be
+corrected in the spec** rather than shipped. Do not proceed to Step 6 on a failed
+5b.
 
 - [ ] **Step 5c: Confirm the two-slot tier still takes two concurrent 40k sessions**
 
@@ -1756,16 +1875,28 @@ Expected: 8 passed
 
 - [ ] **Step 5: Surface it in `/api/stats` and the page**
 
-Add to `_snapshot()` in `dashboard.py`:
+`read_journal` **forks a process**, so it must not run on the 1 s refresh tick and
+must never be reachable from `/api/queue-headers`, which gates every inference
+request. It gets its own slower timer:
 
 ```python
-    text, readable = COLLECT.read_journal()
-    summary["config_health"] = {
-        "journal_readable": readable,
-        "events": COLLECT.parse_journal_events(text) if readable else None,
-        "cache": COLLECT.cache_health(metrics),
-    }
+def _journal_refresher() -> None:
+    while True:
+        text, readable = COLLECT.read_journal()
+        ev = COLLECT.parse_journal_events(text) if readable else None
+        with _CACHE_LOCK:
+            metrics = _CACHE.get("_metrics") or {}
+            _CACHE["config_health"] = {
+                "journal_readable": readable,
+                "events": ev,
+                "cache": COLLECT.cache_health(metrics),
+            }
+        time.sleep(JOURNAL_SECONDS)      # 30 s: a fork is not a per-second cost
 ```
+
+Start it alongside `_refresher()` in `main()`. `_poll_once()` already carries
+`_metrics` into the cache for `cache_health()` to read, so the cheap cache rate
+still updates every second while only the event scrape is slow.
 
 The panel renders, per signal, a count **with its window**, the last occurrence,
 and a one-line remedy. When `journal_readable` is false it must show **"event feed
