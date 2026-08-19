@@ -154,6 +154,11 @@ pub(super) enum LifecycleLeaseError {
 mod lease_transaction;
 use lease_transaction::LeaseTransaction;
 
+// Owner-liveness predicates; see the module header there.
+#[path = "resilience/liveness.rs"]
+mod liveness;
+use liveness::{pid_is_dead, same_known_host};
+
 
 impl ResilienceStore {
     fn from_env(repo: &str) -> Result<Self, String> {
@@ -1049,16 +1054,6 @@ fn trailing_cycle(status: &str) -> Option<String> {
         .then(|| suffix.to_string())
 }
 
-fn same_known_host(recorded: &str, current: &str) -> bool {
-    let recorded = recorded.trim();
-    let current = current.trim();
-    !recorded.is_empty()
-        && !current.is_empty()
-        && !recorded.eq_ignore_ascii_case("unknown")
-        && !current.eq_ignore_ascii_case("unknown")
-        && recorded == current
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1071,20 +1066,6 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-fn pid_is_dead(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    if pid > i32::MAX as u32 {
-        return false;
-    }
-    matches!(
-        super::executor_bridge::observe_runtime_process_identity(pid),
-        Ok(None)
-    )
 }
 
 #[cfg(all(test, unix))]
