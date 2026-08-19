@@ -104,9 +104,49 @@ known-good, and still installed, so a fallback existed. `6.8.0-101` had never
 been booted on this host either, so nothing verified was lost — but the barrier
 did not hold, and a barrier that holds only when you are lucky is not a barrier.
 
-## Host cleanup — Tier B and C
+## Host cleanup — Tier B and C, measured
 
-_Filled by Task 6 Step 7._
+| | before | after B/C |
+|---|---:|---:|
+| root filesystem used | 251 G (78%) | **150 G (46%)** |
+| root filesystem free | 75 G | **177 G** |
+
+Tier B moved the two 2019 libvirt qcow2 images (36 GiB) to
+`<bulk-array>/archive/libvirt-images` with all twelve domains left defined, and
+deleted ~20 GiB of stale JetBrains caches.
+
+### LM Studio: removed, not adopted
+
+The store held `Qwen3.5-9B-Q4_K_M.gguf` and a 35B-A3B MoE, and the first version
+of this step relocated it to the fast array to save a download. The operator
+asked for a clean slate instead, so all three LM Studio paths were removed and
+both served models are fetched fresh against pinned revisions.
+
+That is the better outcome on provenance grounds regardless: the on-disk 9B came
+from a different uploader than `model-artifacts.yaml` pins, and a file with the
+right name is not an identity. After removal there is no `.gguf` anywhere under
+`/home`, `<nvme-array>` or `<bulk-array>` — the node starts from nothing.
+
+`Qwen3.5-35B-A3B-Q4_K_M` (21.17 GB) is recorded here as a **rejected candidate,
+not a loss**: a ~3B-active MoE would decode far faster than the 27B dense-hybrid,
+but 19.7 GiB of ~20.5 GiB usable leaves under 1 GiB for KV plus per-card compute
+buffers, so it cannot serve a 40k seat on two 11 GiB cards. It becomes the
+interesting option at three cards.
+
+### Two bugs this step found in itself
+
+**The move aborted and the pipe hid it.** `<nvme-array>` is `root:root 0755`, so
+an unprivileged `mv` onto it failed with EACCES after Tier B.1 had already
+succeeded. `set -e` aborted correctly — but the run was piped to `tail`, so the
+reported exit status was the pipe's `0`. A background pipeline reports the last
+stage's status, so the gate's own final line is what must be read, never the
+pipeline's exit code.
+
+**The enumeration ran unprivileged.** `/var/lib/libvirt/images` is root-only, so
+`ls .../*.qcow2` as a normal user found nothing and the script cheerfully
+reported "no qcow2 images present" — silently skipping 36 GiB while claiming
+success. It now enumerates under `sudo`. A cleanup that cannot see what it is
+cleaning will always report success.
 
 ## Reboot: what it proved
 

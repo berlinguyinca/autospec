@@ -110,7 +110,10 @@ fi
 #
 # Documentation ranges are allowed so examples can show a shape:
 #   192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (RFC 5737), and 0.0.0.0.
-addrs="$(grep -rInE '[^0-9.]([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' \
+# The quad must be delimited by whitespace or punctuation, NOT merely by a
+# non-digit. Matching any non-digit made "monero-gui-v0.11.1.0" a leak, because
+# that version string is a perfectly valid dotted quad preceded by a "v". leak-guard-allow
+addrs="$(grep -rInE '(^|[[:space:]"'"'"'=:(,])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' \
            --include='*.sh' --include='*.conf' --include='*.ini' \
            --include='*.py' --include='*.example' --include='*.service' \
            "$NODE" 2>/dev/null \
