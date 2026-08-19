@@ -90,11 +90,12 @@ jobs:
       - name: Bootstrap repository test tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y bats ripgrep
           # check_python_suites shells out to `python3 -m pytest`, both from the workspace test
           # runner_checks_python_suites_with_a_typed_pytest_command and from `autospec validate`
-          # below. Only the python workflow installed pytest, so both failed here.
-          python3 -m pip install --quiet pytest pyyaml
+          # below. Installed via apt, not pip: this job has no actions/setup-python, so pip would
+          # target the runner's externally-managed system Python (PEP 668) -- which hung this step
+          # for 87 minutes on bf70d66b instead of failing. apt needs no venv and cannot prompt.
+          sudo apt-get install -y bats ripgrep python3-pytest python3-yaml
           bash scripts/dev-bootstrap.sh
 
       - name: Clippy (lint)
