@@ -3925,29 +3925,9 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
     fresh_evidence_generation_digest(base_input_digest)
 }
 
-#[derive(Debug)]
-struct EvidenceAttemptLease {
-    _file: File,
-}
-
-fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLease, String> {
-    let path = lane_root.join("attempt.lock");
-    reject_symlink_path(&path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options
-        .open(&path)
-        .map_err(|error| format!("open evidence attempt lock: {error}"))?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            "another evidence attempt owns this exact lane".to_string()
-        }
-        std::fs::TryLockError::Error(error) => format!("lock evidence attempt: {error}"),
-    })?;
-    Ok(EvidenceAttemptLease { _file: file })
-}
+// The per-lane attempt lease; see the module header there.
+mod attempt_lease;
+use attempt_lease::acquire_evidence_attempt_lease;
 
 #[allow(clippy::too_many_arguments)]
 fn observed_evidence_bundle(

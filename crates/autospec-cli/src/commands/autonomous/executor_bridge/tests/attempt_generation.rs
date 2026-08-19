@@ -292,6 +292,45 @@ fn autonomous_executor_bridge_attempt_lock_serializes_root_pointer_publication()
     bridge::acquire_evidence_attempt_lease(&lane_root).expect("lease is recoverable after drop");
 }
 
+// The lane launcher forks a supervisor that never execs, so any lease open at that
+// moment is inherited -- and an flock belongs to the open file description, which fork
+// duplicates. Closing the owner's descriptor therefore released nothing, and the lane
+// stayed owned for the supervisor's whole life. This reproduces that deterministically
+// rather than waiting for a parallel test to fork inside the window, which is how it
+// first showed up: as a suite-only failure of the test above.
+#[cfg(unix)]
+#[test]
+fn autonomous_executor_bridge_attempt_lease_releases_despite_an_inherited_descriptor() {
+    let _environment = test_environment();
+    let fixture = GitFixture::new("evidence-attempt-lease-fork");
+    let lane_root = fixture.root.join("lane");
+    bridge::ensure_private_directory(&lane_root).expect("lane root");
+
+    let lease = bridge::acquire_evidence_attempt_lease(&lane_root).expect("lease");
+
+    // SAFETY: the child only sleeps and _exits. It never unwinds, allocates through the
+    // test harness, or touches the lock -- it exists solely to hold the inherited copy.
+    let holder = unsafe { nix::libc::fork() };
+    assert!(holder >= 0, "fork a descriptor holder");
+    if holder == 0 {
+        unsafe {
+            nix::libc::sleep(30);
+            nix::libc::_exit(0);
+        }
+    }
+
+    drop(lease);
+    let reacquired = bridge::acquire_evidence_attempt_lease(&lane_root);
+
+    unsafe {
+        nix::libc::kill(holder, nix::libc::SIGKILL);
+        let mut status = 0;
+        nix::libc::waitpid(holder, &mut status, 0);
+    }
+
+    reacquired.expect("a released lease must not stay owned by an inherited descriptor");
+}
+
 #[test]
 fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer() {
     let _environment = test_environment();
