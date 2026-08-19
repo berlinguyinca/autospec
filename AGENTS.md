@@ -290,11 +290,35 @@ tradeoff across the skill family.
 | Short edits (1-3 file modifications) | **Inline (Edit tool)** | Subagent boilerplate dominates cost |
 | Routing / control flow (stop, listen, classify-trigger) | **Inline** | Decision is the work |
 | Multi-area fan-out (specs / docs / tests / impl / QA) | **Parallel subagents, one per area** | Token cost per area is independent; main session aggregates findings |
+| Any fan-out whose children run on a **local** model | **Width capped by the capacity gate** | Token cost per area is NOT independent on one GPU: children share a fixed KV pool with no admission control, so over-subscribing it fails every live session rather than the newest |
 
 Each skill's `## Required capabilities & harness adapter` table carries a
 **Subagent dispatch policy** row pointing back to this matrix; the
 `autospec validate::check_agents_md_subagent_matrix` gate enforces lockstep
 across every adapter trio.
+
+### Capacity gate for local-model fan-out
+
+The matrix decides the fan-out a task *wants*. On a local model the host decides
+what it can *fund*, and the two are unrelated: a subagent costs no VRAM (that is
+committed once, when the server starts) but does claim a share of a fixed KV
+pool and one of a fixed number of slots. Over-subscribing that pool fails every
+live session, not the greedy one.
+
+Effective width is therefore `min(work-shape width, what the pool funds)`:
+
+```bash
+W=$(context-budget-check.py --width "$PLANNED" --json | jq -r .max_width)
+```
+
+Exit 0 fits, 1 does not, 2 could not tell. `W <= 1` means run inline. On exit 2
+— server unreachable, config unreadable — fall back to the cloud tier rather
+than guessing a width; a wrong guess here is not slower, it is a failed run for
+every session on that node.
+
+This is a client-side gate because the client's declared context limit is the
+only admission control that exists. Nothing on the server refuses a session it
+cannot fund.
 
 ## Implementation-quality contract
 
