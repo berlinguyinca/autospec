@@ -47,6 +47,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Quality / framework discipline
 
+- [Q5 vs Q8 measured, not assumed](feedback_quant_quality_measured_not_assumed.md) — 40/40 both with zero disagreements; separate infrastructure failures from wrong answers, and enable reasoning or the test has no power
+
 - [Generic failure diagnostics flow](feedback_generic_failure_diagnostics_flow.md) — separate state from reason, group correlated failures, and excerpt logs around high-signal anchors
 - [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
 - [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives

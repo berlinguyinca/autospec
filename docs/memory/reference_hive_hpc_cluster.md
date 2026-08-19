@@ -133,6 +133,15 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**llama.cpp's LCP slot selection crashed the model child.** Twice, a
+silent `exit(1)` — no signal, assert or CUDA error, serving at 45 tok/s
+one line earlier — immediately after
+`selected slot by LCP similarity, f_sim_best = ... (> 0.100 thold)`.
+Setting `slot-prompt-similarity = 0.0` in the preset fixed it: 40/40
+with zero child exits and zero LCP selections, against 11 and 8 failures
+on the two prior runs. A mitigation, not a diagnosis; the cost is losing
+cross-slot prompt-cache reuse.
+
 **Never build with `-march=native` on a heterogeneous cluster.** hive
 mixes zen3, zen4 and zen5, and the setup job and the serving job are
 scheduled independently — so a build landing on zen5 produces a binary

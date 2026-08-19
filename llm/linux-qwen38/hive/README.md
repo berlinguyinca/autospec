@@ -358,6 +358,33 @@ left for the recurrent-state cache, and the failure reads as
 `failed to allocate buffer for rs cache`, which looks like a corrupt model
 rather than a budget that was never checked.
 
+### A crash worth knowing about
+
+The model child died mid-session twice, silently — `instance ... exited with
+status 1`, no signal, no assert, no CUDA error, serving at 45 tok/s one line
+earlier. Each time it cost ~8 of 40 benchmark requests while `/health` kept
+returning 200.
+
+Both crashes followed the same log line:
+
+```
+slot get_availabl: ... selected slot by LCP similarity, f_sim_best = 0.349 (> 0.100 thold)
+```
+
+That threshold is `--slot-prompt-similarity` (default 0.10). The generated
+presets set it to **0.0**, and the next run completed 40/40 with zero child
+exits and zero LCP selections. Three runs, one variable:
+
+| build | `slot-prompt-similarity` | failures | child exits |
+|---|---|---:|---:|
+| master | 0.10 | 11 | yes |
+| v0.1.2, portable CPU | 0.10 | 8 | yes |
+| v0.1.2, portable CPU | **0.0** | **0** | **0** |
+
+This is a mitigation, not a diagnosis. The cost is losing cross-slot
+prompt-cache reuse, so some prefill is repeated; each slot still reuses its own
+prefix. Set it back to 0.1 to retest on a newer llama.cpp.
+
 ## What this hardware changes
 
 The 24 GiB reference build is one long fight with capacity. At 96 GiB, three of

@@ -692,6 +692,41 @@ each one its own slot.
 
 ---
 
+### 8.6b Does a bigger quantisation actually answer better? Measure it
+
+This project ran for a long time on the assumption that Q8 beats Q5, and that
+assumption decides which build to serve. It is testable, and on this workload it
+did not hold.
+
+`compare-quants.py` asks two live endpoints the same generated, exact-match
+questions — arithmetic, instruction-following, code reasoning, in-context
+retrieval — and counts disagreements. Local Q5_K_M on an RTX 4090 against
+UD-Q8_K_XL on a 96 GiB Blackwell, 40 items, temperature 0, reasoning enabled:
+
+| | Q5_K_M | UD-Q8_K_XL |
+|---|---:|---:|
+| total | 40/40 | 40/40 |
+| disagreements | — | **0** |
+
+Three things make that number worth reading, and one limits it:
+
+- **Reasoning has to be on.** With thinking disabled both builds scored 1/10 on
+  code reasoning, and a category both fail 90% of cannot tell them apart. That
+  was a defect in the instrument, not a finding about the models.
+- **Infrastructure failures must be separated from wrong answers.** Two earlier
+  runs showed the 8-bit build "losing" 8–11 items; every one was a `500` from a
+  crashed server child, and on every item where it answered it agreed. Counting
+  those as quality would have produced exactly the wrong conclusion.
+- **It replicated** across three runs on different allocations and nodes.
+- **It cannot resolve a small gap.** At n=40 a difference under ~7 items is
+  indistinguishable from noise, so this says "no visible degradation at Q5", not
+  "identical".
+
+The practical consequence: on this hardware the 5-bit build is not the
+compromise it looks like. Spend the bigger card on **context and concurrency**,
+which are measurable and large, rather than on quantisation quality, which here
+was not measurable at all.
+
 ### 8.7 Size the context from the work, not from the spec sheet
 
 "How much context do I need" is an empirical question, and for anyone who has
