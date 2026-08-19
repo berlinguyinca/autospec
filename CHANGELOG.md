@@ -9,6 +9,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### A crashed conductor no longer parks its repository for five minutes (2026-08-18)
+- `decide_conductor_lease` excluded the `claimed` state from dead-owner reclamation, so a
+  conductor killed inside the claim window left a lease that no replacement could take until
+  `STALE_LEASE_SECS` (300) elapsed, even though the owner was provably dead on the same host.
+  The store already disagreed: `release_terminated_owner` treats `status == "claimed"` with a
+  dead `lock_pid` as an abandoned claim it may release. A proven-dead local owner now reclaims
+  from any state; an unknown or foreign owner still reads as live. The owner's harness may still
+  be running, and the replacement adopts it rather than starting a second one.
 #### The frozen validation catalog records the reference-pointer gate (2026-08-18)
 - #3158 added `check_reference_pointer_integrity` to the catalog but not to the frozen fixture
   every count is pinned against, so five assertions across four test binaries were wrong: the
