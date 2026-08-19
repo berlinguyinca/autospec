@@ -488,6 +488,34 @@ exit 12 rather than silently reaching a cloud harness.
 | `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. |
 | `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. It is not consumed by Rust mainline health; `main_health.ignore_checks` does not alter premerge or auto-merge behavior. |
 
+### Merge-time CI gate
+
+`scripts/autospec-guarded-merge.sh` — the chokepoint every auto-implement merge
+routes through — refuses to merge while any **non-advisory** check on the PR is
+pending or not green, and reports `blocked checks_not_green` (exit 1, not
+merged).
+
+This exists because `main` carries no branch protection: with no *required*
+check, a PR whose checks are pending or failing reports `mergeStateStatus`
+`UNSTABLE`, which the Phase 4 rebase loop treats as ready to merge — so its
+`wait_for_ci_green` never runs on the normal path. Enforcing the wait at the
+merge chokepoint means skipping it requires deliberately passing a flag.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--no-require-checks` | gate on | Merge without waiting for checks. Use only when a failure is known-unrelated and accepted. |
+| `--checks-timeout SECS` | `1800` | Give up waiting and refuse (never merge) once exceeded. |
+| `--checks-poll SECS` | `30` | Interval between rollup polls. |
+
+`SKIPPED` and `NEUTRAL` count as green. A `null` conclusion means "still
+running" and is treated as pending, never as success. An **empty** rollup is
+not proof of green — checks may not have registered on a freshly pushed head —
+so it waits rather than merging. Checks matching `AUTOSPEC_PR_ADVISORY_CHECKS`
+are excluded from both the pending and the failing counts.
+
+The genuinely unbypassable fence is still branch protection with a required
+status check; this wrapper is the strongest per-diff gate available without it.
+
 ## Testing & QA
 | Var | Default | Effect |
 |---|---|---|

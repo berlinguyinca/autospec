@@ -1,6 +1,7 @@
 ---
 name: autospec-release
 description: Use when a repo needs an end-to-end release readiness sweep across specs, docs, implementation, tests, QA proof artifacts, legacy cleanup, and merge readiness using existing autospec skills.
+mode: primary
 ---
 
 # autospec-release workflow

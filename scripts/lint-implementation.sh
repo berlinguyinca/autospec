@@ -659,21 +659,18 @@ get_added_lines_with_lineno() {
     ' "$TMP_DIFF"
 }
 
-# is_test_file PATH — returns 0 if path is under tests/
-is_test_file() {
-    case "$1" in
-        tests/*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# is_doc_file PATH — returns 0 if path is a doc file
-is_doc_file() {
-    case "$1" in
-        README*|AGENTS.md|docs/*|*/SKILL.md|SKILL.md|skills/*/prompts/*.md|skills/*/references/*.md) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+# Path classifiers live in a sibling file: this one is past the size ratchet, and
+# the predicates are shared decision-making rather than detector internals. Sourced
+# from SCRIPT_DIR so the installed copy under ~/.autospec/scripts resolves it the
+# same way the checkout does; a missing sibling is fatal rather than silently
+# reclassifying every file.
+_classifiers="$SCRIPT_DIR/lint-path-classifiers.sh"
+if [ ! -r "$_classifiers" ]; then
+    printf 'lint-implementation.sh: missing %s\n' "$_classifiers" >&2
+    exit 2
+fi
+# shellcheck source=scripts/lint-path-classifiers.sh
+. "$_classifiers"
 
 # ── §3.1 issue implementation-contract adapter ────────────────────────────────
 # Delegates only OUT_OF_SCOPE and MISSING_TEST classification to the Rust CLI,
@@ -1060,6 +1057,7 @@ detect_todo_left() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" && continue
+        is_fixture_file "$diff_file" && continue
 
         while IFS=: read -r lineno content; do
             if [[ "$content" =~ $pat ]]; then
@@ -1083,6 +1081,7 @@ detect_mock_db() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" || continue
+        is_fixture_file "$diff_file" && continue
 
         while IFS=: read -r lineno content; do
             local is_mock=0 is_db=0
@@ -1133,9 +1132,10 @@ EOF
         is_test_file "$diff_file" && continue
         is_doc_file "$diff_file" && continue
 
-        # Skip binary-ish files, and Rust tests: is_test_file only matches a repo-root tests/
+        # Markdown joins the binary-ish skips: prose describes a public surface, it
+        # cannot introduce one. CHANGELOG.md is still not a doc (see is_doc_file).
         case "$diff_file" in
-            *.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
+            *.md|*.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
         esac
 
         while IFS=: read -r lineno content; do
