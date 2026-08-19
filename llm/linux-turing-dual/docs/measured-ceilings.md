@@ -325,6 +325,50 @@ inference outage.
 
 ---
 
+## The proxy, measured
+
+nginx 1.24.0 with `http_auth_request_module`. One public listener; both backends
+retreated to loopback.
+
+| | before | after |
+|---|---|---|
+| llama.cpp | `0.0.0.0:8080` | **`127.0.0.1:8090`** |
+| dashboard | `<node-addr>:8081` | **`127.0.0.1:8081`** |
+| nginx | — | **`0.0.0.0:80`** and `0.0.0.0:8080` |
+
+Verified through the proxy:
+
+| check | result |
+|---|---|
+| real completion | `'OK'` |
+| `X-Queue-*` on a normal response | 5 headers, `Slots: 2` |
+| **`X-Queue-*` on a STREAMED response** | **5 headers, 73 SSE chunks, `Transfer-Encoding: chunked`** |
+| 40k needle | retrieved, **43.7 s** |
+| one port serves both | `/` 200, `/status` 200, `/v1` 200 |
+| `/api/stats` unauthenticated | 401 |
+| `/models` (unsanitised twin) | **403** |
+| `/v1/models` | sanitised, contains no `/` |
+| `<node-addr>:8090` and `:8081` from off-host | **connection refused** |
+| **inference with the dashboard STOPPED** | **200** |
+| 6 concurrent via `auth_request` | all 200, 0.86–2.07 s |
+
+Two of those matter more than they look:
+
+**Inference survives a dead dashboard.** nginx turns a failed `auth_request` into
+a client error, so without the `@inference_no_headers` fallback a dashboard
+restart would have been an inference outage. The 200 above is that fallback
+working.
+
+**Headers and streaming were checked together, not separately.** `add_header`
+fires when response headers are sent, which for SSE is before the body flows —
+two tests each passing alone would not have proven the combination.
+
+A cold snapshot briefly reported `X-Queue-Slots: 0` before any model was resident.
+That is correct rather than a bug — slots are a property of the loaded instance —
+but it is why the header set is read after a warm-up when verifying.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.

@@ -138,6 +138,38 @@ if [ -r "$p" ]; then
   fi
 fi
 
+# --- 8: the proxy must not be able to sever long requests -----------------
+ngx="${NODE}/nginx/qwen-turing.conf"
+if [ -r "$ngx" ]; then
+  grep -qE '^[[:space:]]*proxy_buffering[[:space:]]+off' "$ngx" \
+    && ok "nginx: response buffering off" \
+    || bad "nginx must set proxy_buffering off -- streaming completions break otherwise"
+  grep -qE '^[[:space:]]*proxy_request_buffering[[:space:]]+off' "$ngx" \
+    && ok "nginx: request buffering off" \
+    || bad "nginx must set proxy_request_buffering off -- a 230 KB prompt would buffer whole"
+  t="$(sed -n 's/^[[:space:]]*proxy_read_timeout[[:space:]]*\([0-9]\{1,\}\)s;.*/\1/p' "$ngx" | sort -rn | head -1)"
+  if [ -n "$t" ] && [ "$t" -ge 600 ]; then
+    ok "nginx: proxy_read_timeout ${t}s covers a 100k prefill"
+  else
+    bad "nginx proxy_read_timeout must be >=600s (100k prefill is ~210s plus generation)"
+  fi
+  grep -qE '^[[:space:]]*location = /models \{ return 403' "$ngx" \
+    && ok "nginx: unsanitised /models denied" \
+    || bad "nginx must deny /models -- the unsanitised twin of /v1/models"
+  grep -q '@inference_no_headers' "$ngx" \
+    && ok "nginx: inference has a no-headers fallback" \
+    || bad "nginx must fall back when auth_request fails, or a dead dashboard kills inference"
+fi
+
+# --- 9: TLS must stay scaffolded, never half-enabled ----------------------
+if [ -r "$ngx" ]; then
+  if grep -qE '^[[:space:]]*(return[[:space:]]+301[[:space:]]+https|add_header[[:space:]]+Strict-Transport-Security)' "$ngx"; then
+    bad "nginx enables a redirect or HSTS before a certificate exists"
+  else
+    ok "nginx: no HTTPS redirect or HSTS until the cert lands"
+  fi
+fi
+
 # --- 10: every page under web/ must be installed by a glob, not by name ----
 # status.html was added after index.html and the installer named index.html
 # explicitly, so /status returned 500 on a fresh install. A glob ships whatever

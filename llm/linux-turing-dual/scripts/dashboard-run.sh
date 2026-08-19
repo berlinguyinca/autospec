@@ -12,7 +12,7 @@ KEY="${CREDENTIALS_DIRECTORY:-}/apikey"
 [ -r "$KEY" ] || { echo "no API key credential" >&2; exit 78; }
 
 exec /opt/qwen-turing/bin/dashboard.py \
-  --host "${QT_DASH_ADDR}" \
+  --host 127.0.0.1 \
   --port "${QT_DASH_PORT}" \
-  --metrics-url "http://127.0.0.1:${QT_PORT}/metrics" \
+  --metrics-url "http://127.0.0.1:${QT_LLAMA_PORT}/metrics" \
   --api-key-file "$KEY"

@@ -78,7 +78,7 @@ export HOME="${QT_STATE}"
 
 echo "starting profile=${PROFILE} version=${QT_PROFILE_VERSION} runtime=${QT_RUNTIME}"
 echo "  presets=${RENDERED} max-loaded=${QT_ROUTER_MAX_LOADED}"
-echo "  bind=${QT_NODE_ADDR}:${QT_PORT}"
+echo "  bind=127.0.0.1:${QT_LLAMA_PORT} (public port is nginx's business)"
 
 # --models-preset, NOT --models. There is no --models flag; the earlier value
 # was arrived at by grepping the docs for "--models", which matches inside
@@ -88,8 +88,8 @@ echo "  bind=${QT_NODE_ADDR}:${QT_PORT}"
 exec "${QT_LLAMA_DIR}/llama-server" \
   --models-preset "${RENDERED}" \
   --models-max "${QT_ROUTER_MAX_LOADED}" \
-  --host "${QT_NODE_ADDR}" \
-  --port "${QT_PORT}" \
+  --host 127.0.0.1 \
+  --port "${QT_LLAMA_PORT}" \
   --api-key-file "${API_KEY_FILE}" \
   --no-webui \
   --metrics \

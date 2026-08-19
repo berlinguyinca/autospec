@@ -122,6 +122,29 @@ echo "CUDA devices visible to llama-server: ${devs}"
 # status=203/EXEC -- a message that names no file and reads like a permissions
 # problem. Deriving the list from the units themselves means adding a helper to a
 # unit without shipping it fails here, loudly, instead of at first start.
+# --- install the nginx site --------------------------------------------------
+if [ -r "${NODE}/nginx/qwen-turing.conf" ] && command -v nginx >/dev/null 2>&1; then
+  say "install the nginx site and VALIDATE before reloading"
+  sudo install -m 0644 "${NODE}/nginx/qwen-turing.conf" \
+      /etc/nginx/sites-available/qwen-turing.conf
+  sudo ln -sf /etc/nginx/sites-available/qwen-turing.conf /etc/nginx/sites-enabled/
+  # The stock default site also claims :80 default_server, so both cannot be
+  # enabled at once.
+  sudo rm -f /etc/nginx/sites-enabled/default
+  # nginx -t BEFORE reload: a bad config after removing the default site would
+  # leave port 80 unserved.
+  sudo nginx -t || { echo "nginx config rejected -- NOT reloading" >&2; exit 78; }
+  # reload only works on a RUNNING nginx; on a first install it fails noisily and
+  # looks like a config error when it is merely a stopped service.
+  if systemctl is-active --quiet nginx; then
+    sudo systemctl reload nginx
+    echo "nginx site installed and reloaded"
+  else
+    sudo systemctl enable --now nginx
+    echo "nginx site installed and started"
+  fi
+fi
+
 say "verify unit ExecStart paths are installed"
 missing_exec=""
 for unit in "${NODE}"/systemd/*.service; do
