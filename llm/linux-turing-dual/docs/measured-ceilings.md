@@ -106,10 +106,23 @@ did not hold, and a barrier that holds only when you are lucky is not a barrier.
 
 ## Host cleanup — Tier B and C, measured
 
-| | before | after B/C |
+| | before Tier A | after B/C |
 |---|---:|---:|
-| root filesystem used | 251 G (78%) | **150 G (46%)** |
-| root filesystem free | 75 G | **177 G** |
+| root filesystem used | 272 G (84%) | **150 G (46%)** |
+| root filesystem free | 55 G | **177 G** |
+| bulk array used | 9.5 T (69%) | **4.4 T (33%)** |
+| Docker images | 97 (4.8 T) | **0** |
+| Docker containers | 2 (522 G) | **0** |
+| Docker volumes | 64 (70 G) | **64 (70 G) — untouched** |
+| human accounts | 5 | **1** |
+
+**122 GiB reclaimed on the root filesystem and 5.1 TiB on the bulk array.**
+The acceptance criterion was root below 50%; it finished at 46%.
+
+Docker volumes were deliberately not pruned. Sixty-four of them hold data, one is
+Postgres-shaped, and volumes are where databases live — reclaiming another 70 GB
+is not worth being the reason a database went missing. That is a separate,
+per-volume review, not part of a cleanup.
 
 Tier B moved the two 2019 libvirt qcow2 images (36 GiB) to
 `<bulk-array>/archive/libvirt-images` with all twelve domains left defined, and
