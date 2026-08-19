@@ -1,0 +1,13 @@
+diff --git a/crates/autospec-cli/src/commands/claim/refusals.rs b/crates/autospec-cli/src/commands/claim/refusals.rs
+--- a/crates/autospec-cli/src/commands/claim/refusals.rs
++++ b/crates/autospec-cli/src/commands/claim/refusals.rs
+@@ -1,2 +1,9 @@
+ use super::ConductorClaimError;
+ 
++/// Refuse an acquire whose predecessor heartbeat could not be retired.
++///
++/// Recovery is `claim release --claim-id <predecessor>`, so withholding the id
++/// forces the operator to scrape it out of the run-state comment history.
++pub(super) fn unavailable_predecessor_claim<T>() -> Result<T, ConductorClaimError> {
++    Err(ConductorClaimError::Deferred { exit_code: 2 })
++}

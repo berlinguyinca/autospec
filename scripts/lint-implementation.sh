@@ -1132,14 +1132,14 @@ EOF
         is_test_file "$diff_file" && continue
         is_doc_file "$diff_file" && continue
 
-        # Markdown joins the binary-ish skips: prose describes a public surface, it
-        # cannot introduce one. CHANGELOG.md is still not a doc (see is_doc_file).
+        # Markdown is described-in, not scanned; CHANGELOG.md is still not a doc (is_doc_file).
         case "$diff_file" in
             *.md|*.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
         esac
 
         while IFS=: read -r lineno content; do
-            # CLI flag pattern: --flag-name with at least 3 chars (avoid -f style short flags in comments)
+            is_comment_line "$content" && continue
+            # CLI flag pattern: --flag-name with 3+ chars, followed by whitespace or `=`.
             if [[ "$content" =~ $cli_pat ]]; then
                 emit_capped "DOC_OUT_OF_SYNC" "$diff_file" "$lineno" "CLI long-flag introduced without touching a doc file"
                 break
