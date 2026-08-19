@@ -18,12 +18,6 @@
     "justification": "This parser validates shell operators, owned artifact suffixes, and Closeout labels; serde is unrelated to those protocol strings."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/launch.rs",
-    "function": "validate_launch_mode",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The branches enforce distinct incompatible CLI option combinations and return different diagnostics; a table would obscure the validation contract."
-  },
-  {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -34,6 +28,12 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_permission.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module: every substring match is an assertion on a codex argument vector or a permission string it must contain (\"permissions.autospec-network-executor.filesystem=\", \"danger-full-access\", per-path read/deny entries). Those are the CLI surface under test, not a domain representation. Same situation as the codex_sandbox.rs row above."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_sandbox.rs",
@@ -78,6 +78,12 @@
     "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
   },
   {
+    "file": "crates/autospec-cli/src/commands/autonomous/launch.rs",
+    "function": "validate_launch_mode",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The branches enforce distinct incompatible CLI option combinations and return different diagnostics; a table would obscure the validation contract."
+  },
+  {
     "file": "crates/autospec-cli/src/commands/queue.rs",
     "function": "read_issue",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
@@ -85,21 +91,15 @@
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
-  },
-  {
-    "file": "crates/autospec-cli/tests/support/autonomous_recovery_accountability.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "The test fixture asserts exact managed-marker and recovery-event protocol strings rather than encoding application domain meaning."
-  },
-  {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
     "function": "executor_result_rejects_malformed_protocol_input_without_mutating_claim_state",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
@@ -127,15 +127,21 @@
   },
   {
     "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "status_json_reports_persisted_lifecycle_counts",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
+  },
+  {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
   },
   {
-    "file": "crates/autospec-cli/tests/cli_commands.rs",
-    "function": "status_json_reports_persisted_lifecycle_counts",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
+    "file": "crates/autospec-cli/tests/support/autonomous_recovery_accountability.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The test fixture asserts exact managed-marker and recovery-event protocol strings rather than encoding application domain meaning."
   },
   {
     "file": "crates/autospec-core/src/validation/structural.rs",

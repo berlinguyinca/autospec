@@ -97,7 +97,12 @@ run_install_with_star_reply() {
     fake_bin="$(setup_fake_bin "$log_file")"
     : > "$log_file"
 
-    cmd="cd '$SCRIPT_DIR' && HOME='$fake_home' GH_LOG='$log_file' PATH='$fake_bin':\$PATH bash '$SCRIPT_DIR/install.sh' --skill autospec --harness claude"
+    # HOME is replaced to sandbox what the install WRITES. The Rust toolchain must not be
+    # sandboxed with it: rustup reads its default-toolchain from $HOME/.rustup, so a fake HOME
+    # made `cargo` inside install.sh fail with "could not choose a version of cargo to run"
+    # and the whole install exit 1 on error:runtime-install:build-failed. Pin both homes to
+    # the caller's real ones, defaulting the way rustup itself does.
+    cmd="cd '$SCRIPT_DIR' && HOME='$fake_home' AUTOSPEC_NO_SHELL_RC_PROMPT=1 AUTOSPEC_SKIP_RUNTIME_BINARY=1 RUSTUP_HOME='${RUSTUP_HOME:-$HOME/.rustup}' CARGO_HOME='${CARGO_HOME:-$HOME/.cargo}' GH_LOG='$log_file' PATH='$fake_bin':\$PATH bash '$SCRIPT_DIR/install.sh' --skill autospec --harness claude"
 
     # Write answers to a file; printf inside $() would strip trailing newlines,
     # leaving the last read -r in install.sh blocked on the pty (issue #854).
@@ -148,7 +153,12 @@ non_tty_log="$tmp_root/non-tty-gh.log"
 non_tty_bin="$(setup_fake_bin "$non_tty_log")"
 : > "$non_tty_log"
 non_tty_output="$tmp_root/non-tty.out"
-printf 'y\n' | HOME="$non_tty_home" GH_LOG="$non_tty_log" PATH="$non_tty_bin:$PATH" \
+# Same environment as the pty case above: sandbox what the install writes, but leave the Rust
+# toolchain and the runtime build alone. Without this, install.sh exits 1 and set -e aborts the
+# script before either assertion below runs -- a silent failure with no output.
+printf 'y\n' | HOME="$non_tty_home" AUTOSPEC_NO_SHELL_RC_PROMPT=1 AUTOSPEC_SKIP_RUNTIME_BINARY=1 \
+    RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+    GH_LOG="$non_tty_log" PATH="$non_tty_bin:$PATH" \
     bash "$SCRIPT_DIR/install.sh" --skill autospec --harness claude >"$non_tty_output" 2>&1
 if grep -q "Would you like to star" "$non_tty_output"; then
     echo "FAIL: non-TTY install prompted"

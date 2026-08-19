@@ -9,6 +9,19 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### Five validate checks that were red for reasons unrelated to their subject (2026-08-19)
+- `lint-implementation.sh` resolved `SCRIPT_DIR` with `dirname`, so on the deliberately stripped
+  PATH two reuse-triage cases build, the sibling classifier file could not be found and the linter
+  exited 2 instead of linting. Resolved with builtins now.
+- Four assertions still demanded prose at paths #3213 and #3156 had moved it away from; they now
+  check the single source it moved to, plus that the trio still points there.
+- `tests/dogfood/allowlist/qa-brute-force-sweep.json` gained the row #2977 forgot when it split
+  the executor-bridge test file: `codex_permission.rs` arrived allow-listed nowhere while its
+  sibling `codex_sandbox.rs` was covered.
+- `tests/install/test_star_prompt.sh` substituted `HOME` to sandbox the install, which also hid
+  rustup's toolchain and made the build inside `install.sh` fail. It now pins `RUSTUP_HOME`/
+  `CARGO_HOME` and skips the runtime build outright via a new `AUTOSPEC_SKIP_RUNTIME_BINARY=1`.
+
 #### build-test no longer hangs in its bootstrap step (2026-08-19)
 - #3241 added `python3 -m pip install pytest pyyaml` to `build-test`, which has no
   `actions/setup-python`. That targets the runner's externally-managed system Python (PEP 668);
