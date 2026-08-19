@@ -283,5 +283,18 @@ else
   ok "no pre-rename 'hive' reference remains"
 fi
 
+# 26 — within-slot prefix reuse must be on in every launch path. Subagents share
+# a large identical preamble; reprocessing it per request is the one waste here
+# that costs nothing to avoid. Distinct from the cross-slot selection that is
+# deliberately OFF -- if a future edit conflates them, this check still passes
+# while the crash mitigation is silently lost, so both are asserted.
+grep -q '^cache-reuse = ' "${HERE}/config/router-presets.ini" \
+  && grep -q 'cache-reuse' "${HERE}/slurm/gen-preset.py" \
+  && grep -q 'cache-reuse' "${HERE}/scripts/serve-profile.sh"
+check $? "prefix reuse is enabled in the preset, the generator and the launcher"
+
+grep -q '^slot-prompt-similarity = 0.0' "${HERE}/config/router-presets.ini"
+check $? "cross-slot selection stays disabled (the crash mitigation)"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

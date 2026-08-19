@@ -223,6 +223,25 @@ deny it `task` so fan-out cannot nest, and retire the operator-facing skills fro
 `mode: all` to `mode: primary` so an 11k-21k skill body is never spawnable as a
 child.
 
+### Reusing the prefix every session shares
+
+Autospec subagents open with the same large skill preamble, so most of a short
+request is a prefix the slot has already seen. `cache-reuse = 256` reuses it by
+KV shifting instead of reprocessing, in the preset, the generator and the
+launcher alike. 256 is the smallest chunk worth moving; below that, shifting
+costs more than recomputing.
+
+This is **within-slot** reuse. The cross-slot variant —
+`slot-prompt-similarity`, which lets one session's prefix serve another — is
+deliberately disabled: the model child died twice immediately after taking that
+path. That is a mitigation, not a diagnosis, and the cost is exactly the reuse
+you would most want across a fan-out. Set it back to `0.1` to retest on a newer
+llama.cpp.
+
+The effect of `cache-reuse` here is **unmeasured**. Compare prompt-eval time
+with `scripts/bench-concurrency.py` before and after on your own workload before
+claiming a number.
+
 ### Before the server starts: does it fit at all?
 
 `scripts/capacity-preflight.py` prices weights + KV + buffers against the
