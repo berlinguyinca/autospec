@@ -537,6 +537,73 @@ answers.
 
 ---
 
+## Unsloth Dynamic quants
+
+### The 27B was already on Dynamic v3.0
+
+No migration was needed. The pinned revision `27af057ecb38` **is** repository HEAD,
+and that revision's model card states *"Introducing Dynamic V3.0 GGUFs"*. The `UD-`
+prefix on `Qwen3.8-27B-UD-Q4_K_M` **is** Unsloth Dynamic — pinning current HEAD
+landed on v3.0 by itself.
+
+What v3.0 changes, per Unsloth: a higher-quality imatrix calibration set refined
+for agentic coding, chat and multilingual use; improved per-layer quant selection;
+purely post-training quantisation with no QAT or QAD; and a claimed >10% better
+top-1% accuracy at the same size than other providers.
+
+### The 9B was NOT on a Dynamic quant, and now is
+
+It was the one served model on a plain `Q4_K_M`. Now `UD-Q4_K_XL`.
+
+| | plain `Q4_K_M` | `UD-Q4_K_XL` |
+|---|---:|---:|
+| on disk | 5.29 GiB | **5.56 GiB** |
+| resident VRAM (one card) | 7,237 MiB | **7,998 MiB** |
+| generation | 77.92 tok/s | **75.76 tok/s** |
+| % of roofline | 71.8% | **73.4%** |
+
+**The 2.8% throughput cost is measured; the quality gain is not.** A larger file is
+more bytes to read per token, so slightly slower is the expected and honest
+outcome. Roofline efficiency actually improved, which is what you would expect if
+the extra bytes are doing useful work rather than being overhead. Whether the
+quality is better *here* is Unsloth's claim, not this node's measurement —
+`compare-quants.py` is how that would be settled.
+
+Still pinned to a single card: with the 9B resident, GPU1 holds 160 MiB.
+
+### Two candidates rejected, with reasons
+
+**`Qwen3.8-27B-UD-Q4_K_XL`** (16.35 GiB, also v3.0) keeps more precision in the
+embedding and output tensors, but it costs 1.02 GiB and drops free VRAM from ~3,826
+to ~2,782 MiB. Not adopted on an assumed gain: this project's own recorded finding
+is that Q5 and Q8 were indistinguishable here at 40/40 with zero disagreements.
+Spending a gigabyte of headroom on an unmeasured improvement is exactly what that
+lesson warns against. Revisit with `compare-quants.py`, or at three cards.
+
+**`MTP/mtp-Qwen3.8-27B-Q4_0.gguf`** (1.28 GiB) is the separate multi-token-
+prediction module, and it explains the `unused tensor blk.64.nextn.*` warnings at
+every load — the served quant carries MTP tensors llama.cpp ignores. It could
+enable speculative decoding, but llama.cpp support for Qwen3.8 MTP at the pinned
+tag is unverified, and speculative decoding competes with continuous batching for
+the same compute. Measure before adopting.
+
+---
+
+## Reboot survival, verified
+
+A real reboot, not a `systemctl restart` — unattended start is the claim:
+
+| check | result |
+|---|---|
+| `nginx`, `qwen-turing@router`, `qwen-turing-dashboard`, `ufw` | all **active** |
+| listeners | nginx `0.0.0.0:80` + `:8080`; backends `127.0.0.1` only |
+| GPUs | both present, 10,818 / 10,817 MiB free |
+| `/`, `/status`, `/api/queue` | 200 / 200 / 200 |
+| a real completion, nothing pre-warmed | **`'OK'`** |
+| root filesystem | 47% used |
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.

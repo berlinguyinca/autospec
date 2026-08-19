@@ -29,7 +29,7 @@ real completion.
 | `qwen3.8-27b-vision` (+ `-40k`) | vision | 81,920 | 2 | pool pays for the projector |
 | `qwen3.8-27b-uncensored` (+ `-50k`, `-40k`) | uncensored | 102,400 | 2 | abliterated |
 | `qwen3.8-27b-uncensored-vision` | uncensored + vision | 81,920 | 2 | Q8_0 projector, cheaper |
-| `qwen3.5-9b` (+ `-80k`, `-40k`) | text | 81,920 | 2 | one card, ~2.7× faster |
+| `qwen3.5-9b` (+ `-80k`, `-40k`) | text | 81,920 | 2 | one card, ~2.6× faster |
 | `qwen3.5-9b-vision` | vision | 81,920 | 2 | one card |
 
 **One model is resident at a time** (`--models-max 1`). Asking for a different id
@@ -85,13 +85,19 @@ Or derive it from the server so client and server cannot drift:
 | | |
 |---|---|
 | 27B generation, both cards | **28.7 tok/s** (roofline predicted 29.9) |
-| 9B generation, one card | **77.9 tok/s** (predicted 86.8) |
+| 9B generation, one card | **75.8 tok/s** on `UD-Q4_K_XL` (77.9 on the plain quant it replaced) |
 | prompt processing, single session | **594–637 tok/s**, decaying with depth |
 | context verified by retrieval | **99,710 tokens** (needle at 60% depth) |
 | two concurrent 40k sessions | clean, **zero** KV evictions |
 | model switch (reload) | 27B **7.0 s**, 9B 4.2 s |
 | context-tier switch (alias) | **538 ms** — free, same resident weights |
 | prefix cache hit | **19.8 s → 2.1 s**, 19,425 cached tokens |
+
+Both models use **Unsloth Dynamic** quants: the 27B is `UD-Q4_K_M` at Dynamic
+**v3.0** (the pinned revision is repository HEAD and its card says so), and the 9B
+moved from a plain `Q4_K_M` to `UD-Q4_K_XL` — 2.8% slower because the file is
+larger, with the quality gain being Unsloth's claim rather than this node's
+measurement.
 
 **Layer split does not sum bandwidth.** The 27B figure is what one card's
 616 GB/s yields against 16.46 GB of weights; the second card adds capacity, not

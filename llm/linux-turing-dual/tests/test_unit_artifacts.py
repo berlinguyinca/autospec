@@ -24,10 +24,28 @@ def plan():
     return load().artifact_fetch_plan(YAML.read_text())
 
 
-def test_plan_covers_the_served_weights():
-    files = {e["file"] for e in plan()}
-    assert "Qwen3.8-27B-UD-Q4_K_M.gguf" in files
-    assert "Qwen3.5-9B-Q4_K_M.gguf" in files
+def test_plan_covers_every_served_artifact():
+    """Assert the INVARIANT, not the filenames.
+
+    An earlier version pinned specific quant filenames and broke the moment the 9B
+    moved to a Dynamic quant -- a test that fails on an intended change teaches
+    people to edit tests rather than to read them. What must hold is that every
+    artifact declared in the yaml appears in the fetch plan, whatever it is called.
+    """
+    import yaml as _yaml
+    doc = _yaml.safe_load(YAML.read_text())
+    declared = {a["file"] for a in doc["artifacts"] if a.get("file")}
+    declared |= {a["projector"]["file"] for a in doc["artifacts"]
+                 if isinstance(a.get("projector"), dict)}
+    assert {e["file"] for e in plan()} == declared
+
+
+def test_plan_includes_weights_for_every_served_id():
+    import yaml as _yaml
+    doc = _yaml.safe_load(YAML.read_text())
+    served = [a["served_as"] for a in doc["artifacts"] if a.get("served_as")]
+    assert len(served) == len(set(served)), "two artifacts claim the same served_as"
+    assert len(plan()) >= len(served), "an artifact has no file to fetch"
 
 
 def test_every_entry_has_a_revision_not_a_branch():

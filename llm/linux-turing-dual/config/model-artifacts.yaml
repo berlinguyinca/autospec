@@ -25,6 +25,12 @@ artifacts:
     quantization:
       method: gguf
       variant: UD-Q4_K_M
+      # Unsloth Dynamic v3.0. The pinned revision IS repository HEAD and its model
+      # card states "Introducing Dynamic V3.0 GGUFs", so no migration is needed --
+      # pinning current HEAD landed on v3.0. v3.0 uses a higher-quality imatrix
+      # calibration set (agentic coding, chat, multilingual) and improved per-layer
+      # quant selection; purely post-training, no QAT.
+      dynamic: "v3.0"
     # Served ONLY by the qwen3.8-27b-vision preset, never by the text presets.
     # A projector on a shared preset makes every text-only session pay ~885 MiB,
     # roughly 80k tokens of context, for a capability it never uses.
@@ -68,9 +74,13 @@ artifacts:
     runtime_version: "b10502"
     repository: unsloth/Qwen3.5-9B-GGUF
     revision: 3885219b6810b007914f3a7950a8d1b469d598a5
-    file: Qwen3.5-9B-Q4_K_M.gguf
-    size_bytes: 5680522464
-    on_disk_gib: 5.29
+    # UD- = Unsloth Dynamic. The plain Q4_K_M this replaced was NOT a Dynamic
+    # quant, which made the 9B the only served model not getting the improved
+    # per-layer quantisation and imatrix calibration. UD-Q4_K_XL costs 0.27 GiB
+    # more and still leaves ~3,710 MiB free on its single card.
+    file: Qwen3.5-9B-UD-Q4_K_XL.gguf
+    size_bytes: 5966095584
+    on_disk_gib: 5.56
     architecture: Qwen3_5ForConditionalGeneration
     served_as: qwen3.5-9b
     # Pinned to ONE card: it fits 11.0 GiB with ~3.9 GiB spare, so splitting it
@@ -78,7 +88,8 @@ artifacts:
     gpu_layout: single card (tensor-split 1,0)
     quantization:
       method: gguf
-      variant: Q4_K_M
+      variant: UD-Q4_K_XL
+      dynamic: true
     projector:
       file: mmproj-F16.gguf
       local_file: mmproj-9b-F16.gguf
@@ -141,6 +152,25 @@ artifacts:
 
 # Considered and rejected, so the decision is not re-litigated later.
 rejected:
+  - repository: unsloth/Qwen3.8-27B-GGUF
+    file: Qwen3.8-27B-UD-Q4_K_XL.gguf
+    reason: >
+      The XL variant keeps more precision in the embedding and output tensors and
+      is also Dynamic v3.0, but it is 16.35 GiB against 15.33 -- it would drop free
+      VRAM from ~3,826 to ~2,782 MiB. Not adopted on an ASSUMED quality gain: this
+      project's own recorded lesson is that Q5 and Q8 proved indistinguishable here
+      at 40/40 with zero disagreements. Revisit with compare-quants.py, or at three
+      cards where the gigabyte is free.
+
+  - file: MTP/mtp-Qwen3.8-27B-Q4_0.gguf
+    reason: >
+      The separate multi-token-prediction module, 1.28 GiB. It explains the
+      "unused tensor blk.64.nextn.*" warnings at load: the served quant carries MTP
+      tensors that llama.cpp ignores. Loading it could enable speculative decoding
+      for faster generation, but whether llama.cpp supports Qwen3.8 MTP at the
+      pinned tag is unverified, and speculative decoding competes with continuous
+      batching for the same compute. Measure before adopting.
+
   - repository: huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF
     reason: >
       Considered as the uncensored artifact. Ships an mmproj projector but no
