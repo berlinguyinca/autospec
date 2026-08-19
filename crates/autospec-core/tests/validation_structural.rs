@@ -507,7 +507,7 @@ fn phase4_static_policy_contracts_have_direct_rust_owners() {
 
     assert_eq!(
         failure,
-        "guardian lockstep: no guardian block found in skills/autospec/SKILL.md"
+        "guardian lockstep: no guardian block found in skills/autospec-run/SKILL.md"
     );
 }
 
