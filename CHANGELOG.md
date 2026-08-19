@@ -37,6 +37,48 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   288,970 tokens of peak against a 180,224-token KV pool and killed every live
   session with `Context size has been exceeded`.
 
+#### Prose is not a public-surface change (2026-08-18)
+- `DOC_OUT_OF_SYNC` scanned markdown for flag and env-var shapes, so a CHANGELOG
+  entry that *mentions* a flag was read as that flag's introduction -- and since
+  `CHANGELOG.md` is deliberately not a doc for the requirement half, a
+  changelog-only change could never satisfy the gate it had just tripped.
+  Markdown now joins `*.diff` in the scan exemption. `CHANGELOG.md` still earns no
+  credit as documentation: if it did, every commit would satisfy the rule and the
+  rule would be dead.
+
+#### Path classifiers extracted (2026-08-18)
+- The three predicates that decide whether a changed path is doc, test or fixture
+  data now live in `scripts/lint-path-classifiers.sh`, sourced from
+  `lint-implementation.sh`. That file is past the 600-line ratchet and may not
+  grow, and the ratchet's own advice is to move code out rather than add to it.
+  It ships through the existing top-level `scripts/*.sh` glob, so no installer
+  change is needed -- deliberately not `scripts/lib/`, which `copy_repo_scripts`
+  excludes.
+
+#### Fixture diffs are data, not source (2026-08-18)
+- `TODO_LEFT` and `MOCK_DB` scanned `*.diff` fixtures line by line, so a fixture
+  that exists to contain a violation was reported as the violation -- which
+  blocked landing one. `DOC_OUT_OF_SYNC` and the density scanner already skipped
+  `*.diff`; these two now do too. `SECURITY` deliberately still scans them: a
+  leaked key is a leaked key wherever it sits.
+
+#### Nested tests count as tests (2026-08-18)
+- `is_test_file` matched only the repo-root `tests/` tree, so the 826 test files
+  living elsewhere -- 381 under `crates/autospec-cli`, 75 under
+  `skills/autospec-shared`, 51 under `skills/autospec-test` -- were invisible to
+  `ASSERTION_DENSITY`, `MOCK_DB` and the gated `VACUOUS_*` detectors, while
+  `TODO_LEFT` and `DOC_OUT_OF_SYNC` fired on them as if they were production
+  source. Measured on three real commits that touch nested tests, widening the
+  glob adds no new findings; it removes false positives and closes the hole.
+
+#### Nested docs count as docs (2026-08-18)
+- `lint-implementation.sh`'s `is_doc_file` anchored `README*`, `docs/*` and
+  `AGENTS.md` at the repo root, so none of the 63 non-root README files and no
+  subproject `docs/` tree counted. A public-surface change documented in the right
+  place still tripped `DOC_OUT_OF_SYNC`, and the only way to satisfy the gate was
+  to touch an unrelated root doc. `SKILL.md` was already matched at any depth;
+  the rest now are too.
+
 ### Added
 
 #### V62-V74 final platform release candidate (2026-07-06)
