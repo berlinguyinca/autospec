@@ -8,13 +8,25 @@ use autospec_core::autonomous_lifecycle::{
 
 #[test]
 fn conductor_lease_reclaims_at_boundaries_and_for_dead_local_pid() {
+    // A dead owner on this host is reclaimable inside the claim window too. Asserting Held
+    // here parked the repository for STALE_LEASE_SECS after any conductor crash, and
+    // contradicted release_terminated_owner, which already releases a claimed lease whose
+    // lock_pid is dead.
     assert_eq!(
         decide_conductor_lease(ConductorLeaseInput::claimed(1, true)),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid),
+    );
+    // Still Held when the owner is not known-dead: only proven absence reclaims.
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::claimed(1, false)),
         ConductorLeaseDecision::Held,
     );
+    // Still reclaimed at the stale boundary, now attributed to the dead owner rather than the
+    // elapsed clock. The reason is diagnostic only -- nothing branches on it, it is rendered to
+    // a string for reporting -- and a proven-dead owner is the more precise explanation.
     assert_eq!(
         decide_conductor_lease(ConductorLeaseInput::claimed(300, true)),
-        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::ClaimedExpired),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid),
     );
     assert_eq!(
         decide_conductor_lease(ConductorLeaseInput::claimed(300, false)),

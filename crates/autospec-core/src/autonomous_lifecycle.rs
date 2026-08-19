@@ -6,68 +6,10 @@ pub const STALE_LEASE_SECS: u64 = 300;
 pub const ABANDONED_LEASE_SECS: u64 = 10_800;
 pub const ISSUE_FAILURE_CAP: u8 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConductorLeaseInput {
-    claimed: bool,
-    heartbeat_age_secs: Option<u64>,
-    same_host_pid_dead: bool,
-}
-
-impl ConductorLeaseInput {
-    pub fn claimed(heartbeat_age_secs: u64, same_host_pid_dead: bool) -> Self {
-        Self {
-            claimed: true,
-            heartbeat_age_secs: Some(heartbeat_age_secs),
-            same_host_pid_dead,
-        }
-    }
-
-    pub fn running(heartbeat_age_secs: u64, same_host_pid_dead: bool) -> Self {
-        Self {
-            claimed: false,
-            heartbeat_age_secs: Some(heartbeat_age_secs),
-            same_host_pid_dead,
-        }
-    }
-
-    pub fn missing_heartbeat(claimed: bool, same_host_pid_dead: bool) -> Self {
-        Self {
-            claimed,
-            heartbeat_age_secs: None,
-            same_host_pid_dead,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConductorLeaseReclaim {
-    DeadSameHostPid,
-    MissingHeartbeat,
-    Abandoned,
-    ClaimedExpired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConductorLeaseDecision {
-    Held,
-    Reclaim(ConductorLeaseReclaim),
-}
-
-pub fn decide_conductor_lease(input: ConductorLeaseInput) -> ConductorLeaseDecision {
-    if input.same_host_pid_dead && !input.claimed {
-        return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid);
-    }
-    let Some(age) = input.heartbeat_age_secs else {
-        return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::MissingHeartbeat);
-    };
-    if age >= ABANDONED_LEASE_SECS {
-        return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::Abandoned);
-    }
-    if input.claimed && age >= STALE_LEASE_SECS {
-        return ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::ClaimedExpired);
-    }
-    ConductorLeaseDecision::Held
-}
+mod conductor_lease;
+pub use conductor_lease::{
+    decide_conductor_lease, ConductorLeaseDecision, ConductorLeaseInput, ConductorLeaseReclaim,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityInput {
