@@ -11,10 +11,13 @@ use crate::commands::autonomous::executor_bridge as bridge;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::fs;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]

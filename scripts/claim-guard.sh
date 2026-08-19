@@ -282,8 +282,8 @@ write_claim() {
 lock_is_orphaned() {
     lock="$1"
     [ -d "$lock" ] || return 1
-    # Lock dir age via mtime epoch (BSD `stat -f %m`, GNU `stat -c %Y`).
-    mt="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0)"
+    # Lock dir age via mtime epoch (GNU `stat -c %Y` first, BSD `stat -f %m` fallback).
+    mt="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)"
     [ "$mt" -gt 0 ] || return 1
     age=$(( $(now_epoch) - mt ))
     [ "$age" -ge "$TTL_SECONDS" ]

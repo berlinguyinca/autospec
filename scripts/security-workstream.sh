@@ -531,11 +531,8 @@ def cmd_scan(args):
         rows.extend(unsafe_findings(root))
     return write_ranked(rows, args.out)
 
-
 def issue_body(row):
-    title = row["title"].rstrip(".")
-    file_line = f"{row.get('file','')}:{row.get('line',0)}"
-    cmd = "bash scripts/security-workstream.sh rank --findings .autospec/security/security-findings.jsonl --out .autospec/security/security-ranked.jsonl"
+    title = row["title"].rstrip("."); file_line = f"{row.get('file','')}:{row.get('line',0)}"; cmd = "bash scripts/security-workstream.sh rank --findings .autospec/security/security-findings.jsonl --out .autospec/security/security-ranked.jsonl"
     return f"""## Goal
 Remediate `{title}` at `{file_line}` and prove the security workstream no longer reports dedupe key `{row['dedupe_key']}`.
 
@@ -547,6 +544,9 @@ Remediate `{title}` at `{file_line}` and prove the security workstream no longer
 ## Files to read first
 - `{row.get('file','')}`
 - `scripts/security-workstream.sh`
+
+## Dependencies
+none
 
 ## Implementation outline
 - Inspect `{file_line}` and apply the smallest remediation for `{row.get('dimension','vuln')}`.

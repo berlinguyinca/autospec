@@ -12,6 +12,8 @@ use super::tier2_receipts_tests::{
     observation, proposal, seed_tier_two_cursor, store, survives, TempRoot, REPO,
 };
 
+const ISOLATED_DIRECT_POST_TEST: &str = "commands::autonomous::tier2_publisher_tests::tier2_publisher_builds_one_direct_post_with_all_queue_labels_isolated";
+
 fn seed_produced(root: &TempRoot, keys: &[&str]) {
     let proposals = keys.iter().map(|key| proposal(key)).collect::<Vec<_>>();
     let verdicts = keys.iter().map(|key| survives(key)).collect::<Vec<_>>();
@@ -211,6 +213,28 @@ fn tier2_publisher_confirms_every_remote_marker_before_acknowledging() {
 
 #[test]
 fn tier2_publisher_builds_one_direct_post_with_all_queue_labels() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            ISOLATED_DIRECT_POST_TEST,
+            "--nocapture",
+        ])
+        .output()
+        .expect("run isolated Tier 2 publication test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let receipt = format!("test {ISOLATED_DIRECT_POST_TEST} ... ok");
+    let receipt_count = stdout.lines().filter(|line| *line == receipt).count();
+    assert!(
+        output.status.success() && receipt_count == 1,
+        "isolated Tier 2 publication emitted {receipt_count} exact receipts: stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+#[ignore = "launched in isolation by the Tier 2 publication test"]
+fn tier2_publisher_builds_one_direct_post_with_all_queue_labels_isolated() {
     let root = TempRoot::new();
     seed_produced(&root, &["one-gap"]);
     let draft = publication_plan(root.path(), REPO, &[])

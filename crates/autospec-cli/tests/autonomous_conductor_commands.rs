@@ -7,6 +7,7 @@ use autospec_core::claim::{parse_remote_comments_json, parse_run_state_comment, 
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -14,21 +15,20 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-
 #[path = "support/autonomous_accountability_acquisition.rs"]
 mod autonomous_accountability_acquisition;
 #[path = "support/autonomous_conductor_process.rs"]
 mod autonomous_conductor_process;
+#[path = "support/autonomous_restart_dry_run.rs"]
+mod autonomous_restart_dry_run;
 use autonomous_conductor_process::{
     process_identity, process_is_running, terminate_process, terminate_process_group,
+    wait_for_process_exit,
 };
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
-
 #[cfg(target_os = "linux")]
 #[path = "support/foreground_fixture_git.rs"]
 mod foreground_fixture_git;
@@ -193,6 +193,7 @@ fn launch_modes_reject_non_start_subcommands_before_mutation() {
         .contains("launch modes are valid only with autospec autonomous start, not status"));
     assert!(!fixture.operator.exists());
 }
+
 
 #[test]
 fn foreground_source_has_no_legacy_shell_authority() {
@@ -682,7 +683,7 @@ fn foreground_closed_selected_issue_retires_before_receipt_recovery() {
 
 #[test]
 fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let review_launches = bridge.safe_root.join("review-launches");
@@ -841,7 +842,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
 
 #[test]
 fn foreground_accepts_fast_forwarded_explore_head() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let recorded_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
@@ -912,7 +913,7 @@ fn foreground_accepts_fast_forwarded_explore_head() {
 
 #[test]
 fn foreground_recovers_complete_bridge_after_transient_terminal_observation_failure() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("terminal-observation.failed");
@@ -1208,7 +1209,7 @@ fn foreground_dispatch_recovery_rejects_mismatched_terminal_claim() {
 
 #[test]
 fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1449,7 +1450,7 @@ fn foreground_closed_claim_phase_selection_retires_without_reacquisition() {
 
 #[test]
 fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_windows() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (name, state, seeded_claim_state) in [
         (
             "claim-before-acquire",
@@ -1665,7 +1666,7 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
 
 #[test]
 fn foreground_missing_failure_intent_requires_exact_retryable_release() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1827,7 +1828,7 @@ struct FreshHeartbeatRun {
 }
 
 fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecovery {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -1967,7 +1968,7 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecover
 
 #[test]
 fn foreground_recovers_active_claim_without_executor_invocation() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -2052,7 +2053,7 @@ fn foreground_recovers_active_claim_without_executor_invocation() {
 
 #[test]
 fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let started = fixture.root.join("slow-harness.started");
@@ -2110,6 +2111,15 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         ],
     );
     let before_claim = parse_run_state_comment(&before_message).expect("initial live claim");
+    let before_claim_oid = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "rev-parse",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
     first.kill().expect("kill conductor in live-harness window");
     let _ = first.wait();
 
@@ -2131,6 +2141,15 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     );
     let refreshed_claim =
         parse_run_state_comment(&refreshed_message).expect("refreshed adopted claim");
+    let refreshed_claim_oid = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "rev-parse",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
     assert_eq!(refreshed_claim.claim_id, before_claim.claim_id);
     let replacement_status = replacement.try_wait().expect("inspect replacement");
     let replacement_stderr = if replacement_status.is_some() {
@@ -2146,7 +2165,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         String::new()
     };
     assert_ne!(
-        refreshed_claim.updated_at, before_claim.updated_at,
+        refreshed_claim_oid, before_claim_oid,
         "replacement must renew the exact claim while the adopted harness remains live; status={replacement_status:?} stderr={replacement_stderr} invocation={} calls={}",
         fs::read_to_string(&invocation_path).unwrap_or_default(),
         fs::read_to_string(&fixture.calls).unwrap_or_default()
@@ -2201,7 +2220,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
 }
 
 fn assert_released_heartbeat_generation_handoff() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let zero_effect_once = fixture.root.join("harness.zero-effect");
@@ -2449,7 +2468,7 @@ fn released_heartbeat_generation_handoff() {
 
 #[test]
 fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2503,7 +2522,7 @@ fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
 
 #[test]
 fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2555,7 +2574,7 @@ fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
 
 #[test]
 fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("harness.failed");
@@ -2671,7 +2690,7 @@ fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation()
 
 #[test]
 fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let fail_once = fixture.root.join("bridge-gh-read.failed");
@@ -2726,7 +2745,7 @@ fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
 
 #[test]
 fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harness() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("draft-created-harness.launches");
@@ -2850,7 +2869,7 @@ fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harne
 
 #[test]
 fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("merged-draft-harness.launches");
@@ -3084,7 +3103,7 @@ fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
 
 #[test]
 fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let harness_launches = fixture.root.join("persistent-outage-harness.launches");
@@ -3146,7 +3165,7 @@ fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
 
 #[test]
 fn foreground_receipt_retirement_crash_windows_resume_without_replay() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (scenario, failpoint, fail_harness, expected_phase, receipt_remains) in [
         (
             "retry-before-clear",
@@ -3301,7 +3320,7 @@ fn foreground_normal_fourth_retry_pauses_after_three_completed_retries() {
 
 #[test]
 fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
@@ -3390,7 +3409,7 @@ fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
 
 #[test]
 fn foreground_ownership_retirement_recovers_across_receipt_clear_crashes() {
-    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     for (failpoint, receipt_remains) in [("before-clear", true), ("after-clear", false)] {
         let fixture = ForegroundFixture::new();
         let bridge = fixture.configure_real_bridge();
@@ -3721,171 +3740,11 @@ fn foreground_rejects_unsafe_released_predecessor_heartbeat_root_before_acquire(
     assert_eq!(fs::read_dir(&heartbeat_target).unwrap().count(), 0);
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
-    // Break caught: foreground acquisition skipped stale-startup recovery, replaced the
-    // stranded claim generation, and then failed to publish over its expired heartbeat.
-    let fixture = ForegroundFixture::new();
-    fixture.initialize_empty_local_remote();
-    let branch = "feat/autonomous-issue-42";
-    seed_preserved_issue_branch(&fixture, branch);
-    let branch_oid = git_fixture(&fixture.repo_dir, &["rev-parse", branch]);
-    let stale = RunStateRecord::new(
-        "test/repo",
-        42,
-        "successor-worker",
-        "claimed",
-        branch,
-        "",
-        "heartbeat-pending:none",
-        Vec::new(),
-        "2000-01-01T00:00:00Z",
-        "2000-01-01T00:00:00Z",
-        1,
-    )
-    .with_claim_id("successor-claim");
-    fixture.transition_claim_ref(&stale);
-    fixture.seed_expired_claim_heartbeat("prior-worker", branch, "prior-claim");
-    seed_foreground_state(&fixture, &selected_foreground_state());
-    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+#[path = "support/autonomous_recovery_accountability.rs"]
+mod autonomous_recovery_accountability;
 
-    let output = fixture.run_foreground();
-
-    assert!(
-        output.status.success(),
-        "stdout={} stderr={} calls={} claim={:?} heartbeat={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        fs::read_to_string(&fixture.calls).unwrap_or_default(),
-        fixture.claim_record(),
-        fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json")).unwrap_or_default(),
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("heartbeat_write_failed"),
-        "foreground attempted acquisition before stale-startup recovery"
-    );
-    let acquired = fixture.claim_record();
-    assert!(acquired.worker_id.starts_with("rust-foreground-conductor-"));
-    assert_ne!(acquired.claim_id.as_deref(), Some("successor-claim"));
-    assert_eq!(
-        git_fixture(&fixture.repo_dir, &["rev-parse", branch]),
-        branch_oid
-    );
-    let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
-        .expect("fresh foreground heartbeat");
-    assert!(heartbeat.contains(&format!("\"worker_id\":{:?}", acquired.worker_id)));
-    assert!(heartbeat.contains(&format!(
-        "\"claim_id\":{:?}",
-        acquired.claim_id.expect("fresh claim ID")
-    )));
-    assert!(fs::read_dir(
-        fixture
-            .heartbeats
-            .join("o4_test_r4_repo/quarantine/startup-heartbeat-handoffs")
-    )
-    .expect("prior heartbeat handoff")
-    .filter_map(Result::ok)
-    .filter_map(|entry| fs::read_to_string(entry.path()).ok())
-    .any(|document| document.contains("\"claim_id\":\"prior-claim\"")));
-
-    for (case, updated_at, heartbeat_worker, heartbeat_branch, heartbeat_claim, live) in [
-        (
-            "fresh-claim",
-            fresh_iso_timestamp(),
-            "prior-worker",
-            branch,
-            "prior-claim",
-            false,
-        ),
-        (
-            "current-generation",
-            "2000-01-01T00:00:00Z".to_string(),
-            "blocked-worker",
-            branch,
-            "blocked-claim",
-            false,
-        ),
-        (
-            "live-prior",
-            "2000-01-01T00:00:00Z".to_string(),
-            "prior-worker",
-            branch,
-            "prior-claim",
-            true,
-        ),
-        (
-            "wrong-branch",
-            "2000-01-01T00:00:00Z".to_string(),
-            "prior-worker",
-            "feat/foreign",
-            "prior-claim",
-            false,
-        ),
-    ] {
-        let fixture = ForegroundFixture::new();
-        fixture.initialize_empty_local_remote();
-        seed_preserved_issue_branch(&fixture, branch);
-        let blocked_branch_oid = git_fixture(&fixture.repo_dir, &["rev-parse", branch]);
-        let blocked = RunStateRecord::new(
-            "test/repo",
-            42,
-            "blocked-worker",
-            "claimed",
-            branch,
-            "",
-            "heartbeat-pending:none",
-            Vec::new(),
-            &updated_at,
-            &updated_at,
-            1,
-        )
-        .with_claim_id("blocked-claim");
-        fixture.transition_claim_ref(&blocked);
-        if live {
-            fixture.seed_claim_heartbeat(heartbeat_worker, heartbeat_branch, heartbeat_claim);
-        } else {
-            fixture.seed_expired_claim_heartbeat(
-                heartbeat_worker,
-                heartbeat_branch,
-                heartbeat_claim,
-            );
-        }
-        seed_foreground_state(&fixture, &selected_foreground_state());
-        fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
-        let heartbeat_path = fixture.heartbeats.join("o4_test_r4_repo/42.json");
-        let heartbeat_before = fs::read_to_string(&heartbeat_path).expect("blocked heartbeat");
-        let claim_before = fixture.claim_record();
-
-        let output = fixture.run_foreground();
-
-        assert!(
-            !output.status.success(),
-            "{case}: acquisition unexpectedly won"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"claim_lost\""),
-            "{case}: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            fixture.claim_record(),
-            claim_before,
-            "{case}: claim mutated"
-        );
-        assert_eq!(
-            fs::read_to_string(&heartbeat_path).expect("preserved blocked heartbeat"),
-            heartbeat_before,
-            "{case}: heartbeat mutated"
-        );
-        assert_eq!(
-            git_fixture(&fixture.repo_dir, &["rev-parse", branch]),
-            blocked_branch_oid,
-            "{case}: branch mutated"
-        );
-    }
-}
+#[path = "support/autonomous_stale_startup_recovery.rs"]
+mod autonomous_stale_startup_recovery;
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -4528,12 +4387,7 @@ fn immediate_stop_terminates_recorded_wrapper_descendants() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    for _ in 0..100 {
-        if !process_is_running(child_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(child_pid);
     let child_survived = process_is_running(child_pid);
     wrapper.terminate_and_wait();
 
@@ -4543,17 +4397,20 @@ fn immediate_stop_terminates_recorded_wrapper_descendants() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
+fn immediate_stop_refuses_unverified_descendants_after_the_recorded_leader_exits() {
     let fixture = ForegroundFixture::new();
     let child_pid_path = fixture.root.join("orphan-child.pid");
+    let leader_release = fixture.root.join("release-orphan-leader");
     let mut leader = Command::new("bash");
     leader
         .arg("-c")
         .arg(
-            "trap '' HUP; bash -c 'trap \"\" HUP; exec -a autospec-autonomous-supervisor sleep 300' & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"",
+            "trap '' HUP; bash -c 'trap \"\" HUP; exec -a autospec-autonomous-supervisor sleep 300' & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"; while [ ! -e \"$LEADER_RELEASE\" ]; do sleep 0.01; done",
         )
         .env("CHILD_PID_FILE", &child_pid_path)
+        .env("LEADER_RELEASE", &leader_release)
         .process_group(0);
     let mut leader = leader.spawn().expect("spawn short-lived group leader");
     let leader_pid = leader.id();
@@ -4564,7 +4421,8 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .trim()
         .parse::<u32>()
         .expect("parse orphan child pid");
-    assert!(leader.wait().expect("reap group leader").success());
+    fs::write(&leader_release, "release\n").expect("release short-lived group leader");
+    wait_for_process_exit(leader_pid);
     assert!(!process_is_running(leader_pid));
     assert!(process_is_running(child_pid));
     let scope = fixture.scoped_dir();
@@ -4582,24 +4440,16 @@ fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
         .args(["--immediate", "--json"])
         .output()
         .expect("stop orphaned process group");
-    for _ in 0..100 {
-        if !process_is_running(child_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
     let child_survived = process_is_running(child_pid);
     terminate_process_group(leader_pid);
     terminate_process(child_pid);
+    assert!(leader.wait().expect("reap group leader").success());
 
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ownership is unverified"));
     assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !child_survived,
-        "orphaned descendant {child_pid} survived immediate stop"
+        child_survived,
+        "unverified descendant {child_pid} was signaled by immediate stop"
     );
 }
 
@@ -4699,12 +4549,7 @@ fn forced_restart_releases_an_unknown_host_lease_after_the_conductor_is_gone() {
         .recorded_conductor_pid()
         .expect("original conductor");
     fixture.terminate_recorded_conductor();
-    for _ in 0..100 {
-        if !process_is_running(original_pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_process_exit(original_pid);
     assert!(!process_is_running(original_pid));
 
     let output = fixture
@@ -7458,6 +7303,30 @@ impl Drop for ForegroundFixture {
 }
 
 static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(path).expect("read fixture tree") {
+            let entry = entry.expect("read fixture entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .expect("fixture entry below root")
+                        .to_path_buf(),
+                    fs::read(path).expect("read fixture file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
 
 fn fresh_iso_timestamp() -> String {
     let seconds = SystemTime::now()

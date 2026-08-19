@@ -143,7 +143,7 @@ if [ -n "$ISSUE" ]; then
     for TARGET_DIR in $(_slug_dirs "$HEARTBEAT_BASE" "$REPO_FULL"); do
         HB_FILE="${TARGET_DIR}/${ISSUE}.json"
         [ -f "$HB_FILE" ] || continue
-        mtime="$(stat -f %m "$HB_FILE" 2>/dev/null || stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)"
+        mtime="$(stat -c %Y "$HB_FILE" 2>/dev/null || stat -f %m "$HB_FILE" 2>/dev/null || echo 0)"
         case "$mtime" in *[!0-9]*|'') mtime=0 ;; esac
         if [ "$mtime" -gt "$newest_mtime" ]; then
             newest_mtime="$mtime"

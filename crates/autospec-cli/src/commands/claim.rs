@@ -570,6 +570,12 @@ pub(crate) enum ConductorClaimError {
     Deferred { json: String, exit_code: i32 },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeartbeatPublicationDeferral {
+    pub(crate) issue: u64,
+    pub(crate) claim_id: String,
+}
+
 impl From<CommandFailure> for ConductorClaimError {
     fn from(error: CommandFailure) -> Self {
         Self::Diagnostic(error)
@@ -577,6 +583,26 @@ impl From<CommandFailure> for ConductorClaimError {
 }
 
 impl ConductorClaimError {
+    pub(crate) fn heartbeat_publication_deferral(&self) -> Option<HeartbeatPublicationDeferral> {
+        let Self::Deferred { json, .. } = self else {
+            return None;
+        };
+        let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+        (value.get("reason")?.as_str()? == "heartbeat_write_failed")
+            .then(|| HeartbeatPublicationDeferral {
+                issue: value
+                    .get("issue")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                claim_id: value
+                    .get("claim_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+            .filter(|evidence| evidence.issue > 0 && !evidence.claim_id.is_empty())
+    }
+
     fn into_command_failure(self) -> CommandFailure {
         match self {
             Self::Diagnostic(error) => error,
@@ -736,20 +762,35 @@ pub(crate) fn acquire_for_conductor(
     worker_id: &str,
     branch: &str,
     base_branch: &str,
-) -> Result<ClaimLease, ConductorClaimError> {
-    let recovered = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
-    if !recovered {
+) -> Result<ConductorClaimAcquisition, ConductorClaimError> {
+    let recovery_outcome = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
+    if !recovery_outcome.recovered {
         if let Some(owner) = lease::active_contesting_owner(repo, issue, worker_id, branch)? {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
     }
-    acquire_record(AcquireOptions {
+    let lease = acquire_record(AcquireOptions {
         issue,
         repo: Some(repo.to_string()),
         worker_id: Some(worker_id.to_string()),
         branch: branch.to_string(),
         session_id: None,
-    })
+    })?;
+    let recovery = startup_recovery_evidence(&recovery_outcome, &lease);
+    Ok(ConductorClaimAcquisition { lease, recovery })
+}
+
+fn startup_recovery_evidence(
+    outcome: &RecoveryOutcome,
+    lease: &ClaimLease,
+) -> Option<StartupRecoveryEvidence> {
+    outcome
+        .previous_claim_id
+        .as_ref()
+        .map(|previous_claim_id| StartupRecoveryEvidence {
+            previous_claim_id: previous_claim_id.clone(),
+            next_claim_id: lease.claim_id.clone(),
+        })
 }
 
 pub(crate) fn recover_for_conductor(
@@ -926,6 +967,15 @@ fn lifecycle_claim_evidence_from_record(
     record.claim_id.as_deref().ok_or_else(|| {
         CommandFailure::diagnostic("recorded lifecycle claim has no generation identity")
     })?;
+    if record.state == "claimed" && record.step == "heartbeat-pending:none" {
+        return Ok(ClaimEvidence::Observed(ClaimContext::active(
+            scope,
+            issue,
+            requested_worker,
+            requested_branch,
+            LeaseFreshness::Fresh,
+        )));
+    }
     if matches!(record.state.as_str(), "released" | "retryable") {
         return Ok(ClaimEvidence::Observed(ClaimContext::active(
             scope,
@@ -1160,17 +1210,23 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             let mut pending = head.record.clone();
             pending.step = heartbeat_claim_step("pending", options.session_id.as_deref());
             pending.updated_at = utc_now_iso()?;
-            if let ClaimRefAdvance::Won(pending) =
-                advance_claim_ref(&repo, options.issue, Some(&head), &pending)?
-            {
-                project_claim_ref_to_comments(&repo, &pending);
+            match advance_claim_ref(&repo, options.issue, Some(&head), &pending)? {
+                ClaimRefAdvance::Won(pending) => {
+                    project_claim_ref_to_comments(&repo, &pending);
+                }
+                ClaimRefAdvance::Lost => {
+                    let observed_owner = read_claim_ref(&repo, options.issue)?
+                        .map(|head| head.record.worker_id)
+                        .unwrap_or_default();
+                    return unavailable_claim_with_observed_owner(
+                        options.issue,
+                        &repo,
+                        &worker_id,
+                        &observed_owner,
+                    );
+                }
             }
-            return unavailable_claim(
-                options.issue,
-                &repo,
-                Some(&worker_id),
-                "heartbeat_write_failed",
-            );
+            return heartbeat_publication_deferred(options.issue, &repo, &worker_id, &claim_id);
         }
         let mut ready = head.record.clone();
         ready.step = heartbeat_claim_step("ready", options.session_id.as_deref());
@@ -1272,13 +1328,12 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn released_predecessor_heartbeat_evidence_exists(
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<bool, CommandFailure> {
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
-    use std::os::fd::AsRawFd;
 
     let root_path = heartbeat_root()?;
     let root = match open(
@@ -1309,42 +1364,52 @@ fn released_predecessor_heartbeat_evidence_exists(
             )))
         }
     }
-    let Some(quarantine) = open_optional_heartbeat_directory(&repo, Path::new("quarantine"))?
-    else {
-        return Ok(false);
-    };
-    let Some(handoff) =
-        open_optional_heartbeat_directory(&quarantine, Path::new("startup-heartbeat-handoffs"))?
-    else {
-        return Ok(false);
-    };
-    let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
-    for entry in fs::read_dir(directory).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "predecessor heartbeat handoff scan failed: {error}"
-        ))
-    })? {
-        let name = entry
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "predecessor heartbeat handoff entry failed: {error}"
-                ))
-            })?
-            .file_name()
-            .into_string()
-            .map_err(|_| CommandFailure::diagnostic("predecessor heartbeat handoff is unsafe"))?;
-        let pending = format!("pending-{}-", identity.issue);
-        let completed = format!("completed-{}-", identity.issue);
-        if (name.starts_with(&pending) || name.starts_with(&completed))
-            && (name.ends_with(".receipt") || name.ends_with(".json"))
-        {
-            return Ok(true);
+    #[cfg(not(target_os = "linux"))]
+    return Ok(false);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let Some(quarantine) = open_optional_heartbeat_directory(&repo, Path::new("quarantine"))?
+        else {
+            return Ok(false);
+        };
+        let Some(handoff) = open_optional_heartbeat_directory(
+            &quarantine,
+            Path::new("startup-heartbeat-handoffs"),
+        )?
+        else {
+            return Ok(false);
+        };
+        let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
+        for entry in fs::read_dir(directory).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "predecessor heartbeat handoff scan failed: {error}"
+            ))
+        })? {
+            let name = entry
+                .map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "predecessor heartbeat handoff entry failed: {error}"
+                    ))
+                })?
+                .file_name()
+                .into_string()
+                .map_err(|_| {
+                    CommandFailure::diagnostic("predecessor heartbeat handoff is unsafe")
+                })?;
+            let pending = format!("pending-{}-", identity.issue);
+            let completed = format!("completed-{}-", identity.issue);
+            if (name.starts_with(&pending) || name.starts_with(&completed))
+                && (name.ends_with(".receipt") || name.ends_with(".json"))
+            {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
-    Ok(false)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn open_optional_heartbeat_directory(
     parent: &fs::File,
     descendant: &Path,
@@ -1720,6 +1785,7 @@ fn recover_stale_startup(args: &[String]) -> Result<(), CommandFailure> {
 struct RecoveryOutcome {
     recovered: bool,
     reason: String,
+    previous_claim_id: Option<String>,
 }
 
 pub(crate) fn recover_active_issue(
@@ -1728,6 +1794,7 @@ pub(crate) fn recover_active_issue(
     timeout_seconds: u64,
 ) -> Result<bool, CommandFailure> {
     recover_active_issue_against(repo, issue, timeout_seconds, None)
+        .map(|outcome| outcome.recovered)
 }
 
 fn recover_active_issue_against(
@@ -1735,12 +1802,15 @@ fn recover_active_issue_against(
     issue: u64,
     timeout_seconds: u64,
     base_branch: Option<&str>,
-) -> Result<bool, CommandFailure> {
+) -> Result<RecoveryOutcome, CommandFailure> {
     let Some(selected) = read_claim_ref(repo, issue)? else {
-        return Ok(false);
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "missing_run_state".to_string(),
+            previous_claim_id: None,
+        });
     };
     recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected, base_branch)
-        .map(|outcome| outcome.recovered)
 }
 
 /// A newly-created claim without a heartbeat, branch, or PR is kept during its
@@ -1802,12 +1872,14 @@ fn recover_stale_startup_record(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "missing_run_state".to_string(),
+            previous_claim_id: None,
         });
     };
     if !selected.record.pr.is_empty() {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_has_pr".to_string(),
+            previous_claim_id: None,
         });
     }
     if startup_heartbeat_exists(repo, issue)
@@ -1818,6 +1890,7 @@ fn recover_stale_startup_record(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     release_stale_startup_labels(repo, issue)?;
@@ -1843,6 +1916,7 @@ fn recover_stale_startup_record(
     Ok(RecoveryOutcome {
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: None,
     })
 }
 
@@ -1854,11 +1928,13 @@ fn recover_authoritative_stale_startup(
     base_branch: Option<&str>,
 ) -> Result<RecoveryOutcome, CommandFailure> {
     if selected.record.state == "available" && selected.record.step == "stale_startup_recovered" {
+        let previous_claim_id = selected.record.claim_id.clone();
         release_stale_startup_labels(repo, issue)?;
         emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
         return Ok(RecoveryOutcome {
             recovered: true,
             reason: "released_stale_startup_claim".to_string(),
+            previous_claim_id,
         });
     }
     if selected.record.state != "claimed"
@@ -1870,9 +1946,19 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
-    let branch_blocked = branch_blocks_stale_recovery(&selected.record.branch, base_branch);
+    let branch_blocked = match branch_blocks_stale_recovery(&selected.record.branch, base_branch) {
+        Ok(blocked) => blocked,
+        Err(()) => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "claim_evidence_or_fresh_state".to_string(),
+                previous_claim_id: None,
+            });
+        }
+    };
     let authorized_prior = if branch_blocked {
         expired_prior_generation_heartbeat(repo, issue, &selected.record)?
     } else {
@@ -1882,6 +1968,7 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     if !quarantine_authoritative_stale_heartbeat(
@@ -1894,6 +1981,7 @@ fn recover_authoritative_stale_startup(
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
         });
     }
     let mut available = selected.record.clone();
@@ -1906,6 +1994,7 @@ fn recover_authoritative_stale_startup(
             return Ok(RecoveryOutcome {
                 recovered: false,
                 reason: "ownership_lost".to_string(),
+                previous_claim_id: None,
             })
         }
     };
@@ -1915,10 +2004,11 @@ fn recover_authoritative_stale_startup(
     Ok(RecoveryOutcome {
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
+        previous_claim_id: selected.record.claim_id.clone(),
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn expired_prior_generation_heartbeat(
     repo_name: &str,
     issue: u64,
@@ -2008,7 +2098,7 @@ fn expired_prior_generation_heartbeat(
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn expired_prior_generation_heartbeat(
     _repo: &str,
     _issue: u64,
@@ -2017,7 +2107,7 @@ fn expired_prior_generation_heartbeat(
     Ok(None)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn quarantine_authoritative_stale_heartbeat(
     repo_name: &str,
     issue: u64,
@@ -2189,6 +2279,7 @@ fn quarantine_authoritative_stale_heartbeat(
     Ok(true)
 }
 
+#[cfg(not(unix))]
 #[cfg(not(target_os = "linux"))]
 fn quarantine_authoritative_stale_heartbeat(
     _repo: &str,
@@ -3282,6 +3373,18 @@ pub(crate) struct ClaimLease {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupRecoveryEvidence {
+    pub(crate) previous_claim_id: String,
+    pub(crate) next_claim_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConductorClaimAcquisition {
+    pub(crate) lease: ClaimLease,
+    pub(crate) recovery: Option<StartupRecoveryEvidence>,
+}
+
 fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
     let mut issue = None;
     let mut repo = None;
@@ -4211,229 +4314,8 @@ pub(crate) fn write_startup_heartbeat_for_test(
     write_startup_heartbeat(repo, issue, worker_id, branch, claim_id, session_id)
 }
 
-#[cfg(target_os = "linux")]
-fn open_private_heartbeat_directory(path: &Path) -> Result<fs::File, CommandFailure> {
-    use nix::fcntl::{open, OFlag};
-    use nix::sys::stat::Mode;
-
-    prepare_heartbeat_root_parent_with_hook(&path.join(".publication-anchor"), |_| Ok(()))?;
-    let directory = fs::File::from(
-        open(
-            path,
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat dir open: {error}")))?,
-    );
-    private_heartbeat_directory_identity(&directory, "publication directory")?;
-    Ok(directory)
-}
-
-#[cfg(target_os = "linux")]
-fn inspect_heartbeat_target(
-    directory: &fs::File,
-    name: &str,
-    expected: &[u8],
-) -> Result<Option<HeartbeatPublication>, CommandFailure> {
-    use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
-
-    let blocking = || CommandFailure::diagnostic("heartbeat publication target conflicts");
-    let descriptor = match openat(
-        directory,
-        name,
-        OFlag::O_RDWR | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
-        Mode::empty(),
-    ) {
-        Err(nix::errno::Errno::ENOENT) => return Ok(None),
-        Ok(descriptor) => descriptor,
-        Err(_) => return Err(blocking()),
-    };
-    let file = fs::File::from(descriptor);
-    let stat = fstat(&file).map_err(|_| blocking())?;
-    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
-        || stat.st_uid != nix::unistd::geteuid().as_raw()
-        || stat.st_nlink != 1
-    {
-        return Err(blocking());
-    }
-    let snapshot = file
-        .try_clone()
-        .and_then(read_regular_file)
-        .map_err(|_| blocking())?;
-    if !same_startup_heartbeat_generation(&snapshot.document, expected) {
-        return Err(blocking());
-    }
-    if stat.st_mode & 0o7777 != 0o600
-        && (fchmod(&file, Mode::from_bits_truncate(0o600)).is_err() || file.sync_all().is_err())
-    {
-        return Err(blocking());
-    }
-    let current = fstat(&file).map_err(|_| blocking())?;
-    if current.st_mode & 0o7777 != 0o600 {
-        return Err(blocking());
-    }
-    if heartbeat_final_binding(&file, directory, name, (stat.st_dev, stat.st_ino)).ok()
-        == Some((HeartbeatFinalBinding::Exact, 1))
-    {
-        Ok(Some(HeartbeatPublication {
-            file,
-            device: stat.st_dev,
-            inode: stat.st_ino,
-            durability: HeartbeatPublicationDurability::Unconfirmed,
-        }))
-    } else {
-        Err(blocking())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn heartbeat_publication_error(error: HeartbeatPublicationFailure) -> CommandFailure {
-    match error {
-        HeartbeatPublicationFailure::PreCommit(error)
-        | HeartbeatPublicationFailure::PostCommit { error, .. } => error,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn publish_startup_heartbeat_transaction_with_hook(
-    root: &Path,
-    repo: &str,
-    issue: u64,
-    session_id: Option<&str>,
-    document: &[u8],
-    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<(), CommandFailure> {
-    let root_directory = open_private_heartbeat_directory(root)?;
-    let repo_name = super::autonomous::drain::repository_progress_key(repo);
-    let repo_path = root.join(&repo_name);
-    drop(open_private_heartbeat_directory(&repo_path)?);
-    let repo = open_heartbeat_directory_beneath(&root_directory, Path::new(&repo_name))?;
-    let issue_name = format!("{issue}.json");
-    let mut issue_guard = inspect_heartbeat_target(&repo, &issue_name, document)?;
-    let sessions = session_id
-        .map(|_| {
-            drop(open_private_heartbeat_directory(
-                &repo_path.join("sessions"),
-            )?);
-            open_heartbeat_directory_beneath(&repo, Path::new("sessions"))
-        })
-        .transpose()?;
-    let session_name = session_id.map(|value| format!("{}.json", heartbeat_session_key(value)));
-    let mut session_guard = match (&sessions, &session_name) {
-        (Some(directory), Some(name)) => inspect_heartbeat_target(directory, name, document)?,
-        _ => None,
-    };
-    let issue_file = issue_guard
-        .is_none()
-        .then(|| prepare_private_heartbeat_file(&repo, document, "issue", boundary))
-        .transpose()
-        .map_err(heartbeat_publication_error)?;
-    let session_file = (session_guard.is_none() && sessions.is_some())
-        .then(|| {
-            prepare_private_heartbeat_file(
-                sessions.as_ref().expect("session directory"),
-                document,
-                "session",
-                boundary,
-            )
-        })
-        .transpose()
-        .map_err(heartbeat_publication_error)?;
-    if let Some(prepared) = issue_file {
-        issue_guard = Some(
-            publish_prepared_heartbeat_file(&repo, &issue_name, prepared, "issue", boundary)
-                .map_err(heartbeat_publication_error)?,
-        );
-    }
-    if let (Some(directory), Some(name), Some(prepared)) =
-        (sessions.as_ref(), session_name.as_ref(), session_file)
-    {
-        session_guard = Some(
-            publish_prepared_heartbeat_file(directory, name, prepared, "session", boundary)
-                .map_err(heartbeat_publication_error)?,
-        );
-    }
-    boundary("issue", "transaction-fsync")?;
-    nix::unistd::fsync(&repo)
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat repo fsync: {error}")))?;
-    if let Some(directory) = sessions.as_ref() {
-        boundary("session", "transaction-fsync")?;
-        nix::unistd::fsync(directory)
-            .map_err(|error| CommandFailure::diagnostic(format!("session fsync: {error}")))?;
-    }
-    let exact = |directory: &fs::File, name: &str, guard: &HeartbeatPublication| {
-        let metadata = guard.file.metadata().ok();
-        let content = guard.file.try_clone().and_then(read_regular_file).ok();
-        metadata.is_some_and(|value| {
-            value.is_file()
-                && value.uid() == nix::unistd::geteuid().as_raw()
-                && value.mode() & 0o7777 == 0o600
-        }) && content
-            .is_some_and(|value| same_startup_heartbeat_generation(&value.document, document))
-            && heartbeat_final_binding(&guard.file, directory, name, (guard.device, guard.inode))
-                .ok()
-                == Some((HeartbeatFinalBinding::Exact, 1))
-    };
-    if !exact(
-        &repo,
-        &issue_name,
-        issue_guard.as_ref().expect("issue guard"),
-    ) || sessions
-        .as_ref()
-        .zip(session_name.as_deref())
-        .zip(session_guard.as_ref())
-        .is_some_and(|((directory, name), guard)| !exact(directory, name, guard))
-    {
-        return Err(CommandFailure::diagnostic("heartbeat binding changed"));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn same_startup_heartbeat_generation(left: &[u8], right: &[u8]) -> bool {
-    let normalize = |document: &[u8]| {
-        parse_startup_heartbeat(document).map(|mut evidence| {
-            evidence.ts = 0;
-            evidence.pid = 0;
-            evidence.process_start.clear();
-            evidence
-        })
-    };
-    normalize(left) == normalize(right)
-}
-
-fn startup_heartbeat_nonce(repo: &str, issue: u64, claim_id: &str) -> String {
-    let mut identity = b"autospec-startup-heartbeat-nonce-v1".to_vec();
-    for field in [repo, &issue.to_string(), claim_id] {
-        identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
-        identity.extend_from_slice(field.as_bytes());
-    }
-    autospec_core::autonomous::waterfall::sha256_hex(&identity)
-}
-
-#[cfg(target_os = "linux")]
-fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
-    let host = fs::read_to_string("/proc/sys/kernel/hostname")
-        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?
-        .trim()
-        .to_string();
-    let (boot_id, process_start) = super::autonomous::process_birth_identity(pid)
-        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat process: {error}")))?
-        .ok_or_else(|| CommandFailure::diagnostic("heartbeat process identity disappeared"))?;
-    if host.is_empty() || boot_id.is_empty() || process_start.is_empty() {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat process identity is incomplete",
-        ));
-    }
-    Ok((host, boot_id, process_start))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
-    heartbeat_portable::process_identity(pid)
-}
-
+mod heartbeat_transaction;
+use heartbeat_transaction::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 struct SessionBindingIdentity {
@@ -4528,289 +4410,8 @@ fn publish_session_binding(
     Ok(true)
 }
 
-#[cfg(unix)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeartbeatPublicationDurability {
-    Unconfirmed,
-    Durable,
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-#[derive(Debug)]
-struct HeartbeatPublication {
-    file: fs::File,
-    device: u64,
-    inode: u64,
-    durability: HeartbeatPublicationDurability,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-struct PreparedHeartbeat {
-    file: fs::File,
-    identity: (u64, u64),
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-#[derive(Debug)]
-enum HeartbeatPublicationFailure {
-    PreCommit(CommandFailure),
-    PostCommit {
-        publication: HeartbeatPublication,
-        error: CommandFailure,
-    },
-}
-
-#[cfg(unix)]
-fn validate_heartbeat_final_name(final_name: &str) -> Result<(), HeartbeatPublicationFailure> {
-    use std::path::Component;
-
-    let mut components = Path::new(final_name).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(final_name) => Ok(()),
-        _ => Err(HeartbeatPublicationFailure::PreCommit(
-            CommandFailure::diagnostic("heartbeat final name must be one normal component"),
-        )),
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeartbeatFinalBinding {
-    Missing,
-    Exact,
-    Other,
-}
-
-#[cfg(target_os = "linux")]
-fn heartbeat_final_binding(
-    file: &fs::File,
-    directory: &impl std::os::fd::AsFd,
-    final_name: &str,
-    identity: (u64, u64),
-) -> Result<(HeartbeatFinalBinding, u64), CommandFailure> {
-    use nix::fcntl::AtFlags;
-    use nix::sys::stat::{fstat, fstatat};
-
-    let links = fstat(file)
-        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fstat: {error}")))?
-        .st_nlink;
-    let binding = match fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-        Err(nix::errno::Errno::ENOENT) => HeartbeatFinalBinding::Missing,
-        Ok(stat) if (stat.st_dev, stat.st_ino) == identity => HeartbeatFinalBinding::Exact,
-        Ok(_) => HeartbeatFinalBinding::Other,
-        Err(error) => {
-            return Err(CommandFailure::diagnostic(format!(
-                "could not inspect heartbeat final binding: {error}"
-            )))
-        }
-    };
-    Ok((binding, links))
-}
-
-#[cfg(target_os = "linux")]
-fn post_commit_failure(
-    file: fs::File,
-    identity: (u64, u64),
-    durability: HeartbeatPublicationDurability,
-    error: CommandFailure,
-) -> HeartbeatPublicationFailure {
-    HeartbeatPublicationFailure::PostCommit {
-        publication: HeartbeatPublication {
-            file,
-            device: identity.0,
-            inode: identity.1,
-            durability,
-        },
-        error,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn prepare_private_heartbeat_file(
-    directory: &impl std::os::fd::AsFd,
-    document: &[u8],
-    role: &str,
-    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<PreparedHeartbeat, HeartbeatPublicationFailure> {
-    use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fchmod, fstat, Mode};
-
-    let pre = HeartbeatPublicationFailure::PreCommit;
-    private_heartbeat_directory_identity(directory, "publication").map_err(pre)?;
-    let descriptor = openat(
-        directory,
-        ".",
-        OFlag::O_TMPFILE | OFlag::O_RDWR | OFlag::O_CLOEXEC,
-        Mode::from_bits_truncate(0o600),
-    )
-    .map_err(|error| {
-        pre(CommandFailure::diagnostic(format!(
-            "anonymous heartbeat staging is unavailable: {error}"
-        )))
-    })?;
-    let mut file = fs::File::from(descriptor);
-    let fail = |message| pre(CommandFailure::diagnostic(message));
-    boundary(role, "chmod").map_err(pre)?;
-    fchmod(&file, Mode::from_bits_truncate(0o600))
-        .map_err(|error| fail(format!("heartbeat chmod: {error}")))?;
-    boundary(role, "write").map_err(pre)?;
-    file.write_all(document)
-        .map_err(|error| fail(format!("heartbeat write: {error}")))?;
-    boundary(role, "file-fsync").map_err(pre)?;
-    file.sync_all()
-        .map_err(|error| fail(format!("heartbeat fsync: {error}")))?;
-    let stat = fstat(&file).map_err(|error| fail(format!("heartbeat fstat: {error}")))?;
-    boundary(role, "before-link").map_err(pre)?;
-    Ok(PreparedHeartbeat {
-        file,
-        identity: (stat.st_dev as u64, stat.st_ino as u64),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn publish_prepared_heartbeat_file(
-    directory: &impl std::os::fd::AsFd,
-    final_name: &str,
-    prepared: PreparedHeartbeat,
-    role: &str,
-    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
-    use nix::fcntl::{AtFlags, AT_FDCWD};
-    use nix::unistd::{fsync, linkat};
-    use std::os::fd::AsRawFd;
-
-    validate_heartbeat_final_name(final_name)?;
-    let PreparedHeartbeat { file, identity } = prepared;
-    let mut link_error = linkat(&file, "", directory, final_name, AtFlags::AT_EMPTY_PATH).err();
-    let (mut binding, mut link_count) =
-        match heartbeat_final_binding(&file, directory, final_name, identity) {
-            Ok(state) => state,
-            Err(error) => {
-                return Err(post_commit_failure(
-                    file,
-                    identity,
-                    HeartbeatPublicationDurability::Unconfirmed,
-                    error,
-                ))
-            }
-        };
-    let unavailable = matches!(
-        link_error,
-        Some(
-            nix::errno::Errno::EPERM
-                | nix::errno::Errno::EINVAL
-                | nix::errno::Errno::ENOENT
-                | nix::errno::Errno::EOPNOTSUPP
-        )
-    );
-    if unavailable && binding == HeartbeatFinalBinding::Missing && link_count == 0 {
-        let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
-        link_error = linkat(
-            AT_FDCWD,
-            proc_path.as_str(),
-            directory,
-            final_name,
-            AtFlags::AT_SYMLINK_FOLLOW,
-        )
-        .err();
-        (binding, link_count) =
-            match heartbeat_final_binding(&file, directory, final_name, identity) {
-                Ok(state) => state,
-                Err(error) => {
-                    return Err(post_commit_failure(
-                        file,
-                        identity,
-                        HeartbeatPublicationDurability::Unconfirmed,
-                        error,
-                    ))
-                }
-            };
-    }
-    if (binding, link_count) != (HeartbeatFinalBinding::Exact, 1) {
-        let error = CommandFailure::diagnostic(format!(
-            "heartbeat link failed or lost identity: {}",
-            link_error.map_or_else(
-                || "final binding changed".to_string(),
-                |error| error.to_string()
-            )
-        ));
-        if link_error.is_none() || binding == HeartbeatFinalBinding::Exact || link_count > 0 {
-            return Err(post_commit_failure(
-                file,
-                identity,
-                HeartbeatPublicationDurability::Unconfirmed,
-                error,
-            ));
-        }
-        return Err(HeartbeatPublicationFailure::PreCommit(error));
-    }
-
-    if let Err(error) = boundary(role, "directory-fsync").and_then(|()| {
-        fsync(directory).map_err(|error| CommandFailure::diagnostic(error.to_string()))
-    }) {
-        return Err(post_commit_failure(
-            file,
-            identity,
-            HeartbeatPublicationDurability::Unconfirmed,
-            error,
-        ));
-    }
-    if let Err(error) = boundary(role, "revalidate").and_then(|()| {
-        (heartbeat_final_binding(&file, directory, final_name, identity)?
-            == (HeartbeatFinalBinding::Exact, 1))
-            .then_some(())
-            .ok_or_else(|| CommandFailure::diagnostic("heartbeat final identity changed"))
-    }) {
-        return Err(post_commit_failure(
-            file,
-            identity,
-            HeartbeatPublicationDurability::Unconfirmed,
-            error,
-        ));
-    }
-    Ok(HeartbeatPublication {
-        file,
-        device: identity.0,
-        inode: identity.1,
-        durability: HeartbeatPublicationDurability::Durable,
-    })
-}
-
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-fn publish_private_heartbeat_file(
-    directory: &impl std::os::fd::AsFd,
-    final_name: &str,
-    document: &[u8],
-    role: &str,
-    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
-    validate_heartbeat_final_name(final_name)?;
-    let prepared = prepare_private_heartbeat_file(directory, document, role, boundary)?;
-    publish_prepared_heartbeat_file(directory, final_name, prepared, role, boundary)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-#[allow(dead_code)]
-fn publish_private_heartbeat_file(
-    _directory: &impl std::os::fd::AsFd,
-    final_name: &str,
-    _document: &[u8],
-    _role: &str,
-    _boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
-    validate_heartbeat_final_name(final_name)?;
-    Err(HeartbeatPublicationFailure::PreCommit(
-        CommandFailure::diagnostic(
-            "identity-bound heartbeat publication is unavailable on this platform",
-        ),
-    ))
-}
-
+mod heartbeat_publication;
+use heartbeat_publication::*;
 fn heartbeat_session_key(session_id: &str) -> String {
     session_id
         .as_bytes()
@@ -4839,12 +4440,12 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
                 CommandFailure::diagnostic("could not resolve heartbeat directory: HOME is not set")
             })
     })?;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     prepare_heartbeat_root_parent_with_hook(&root, |_| Ok(()))?;
     Ok(root)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn terminal_heartbeat_snapshot(
     directory: &fs::File,
     name: &std::ffi::OsStr,
@@ -4889,7 +4490,7 @@ fn terminal_heartbeat_snapshot(
         .ok_or_else(|| CommandFailure::diagnostic("terminal heartbeat evidence is absent"))?;
     Ok(snapshot)
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn handoff_terminal_heartbeat(
     state_root: &Path,
     directory: &fs::File,
@@ -4920,7 +4521,7 @@ fn handoff_terminal_heartbeat(
     )
     .map(|_| ())
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn retire_released_startup_heartbeat_with_hook(
     identity: ClaimMutationIdentity<'_>,
     require_dead_process: bool,
@@ -4932,7 +4533,7 @@ fn retire_released_startup_heartbeat_with_hook(
     let root = fs::File::from(
         open(
             &root_path,
-            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
         .map_err(|error| CommandFailure::diagnostic(format!("heartbeat root open: {error}")))?,
@@ -4961,12 +4562,7 @@ fn retire_released_startup_heartbeat_with_hook(
             .session_id
             .as_ref()
             .is_none_or(|value| !value.is_empty())
-        && evidence
-            .process_start
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value > 0)
-            .is_some_and(|value| value.to_string() == evidence.process_start);
+        && valid_startup_process_identity(&evidence.process_start);
     if !exact {
         return Err(CommandFailure::diagnostic(
             "terminal heartbeat does not match prepared claim",
@@ -4979,10 +4575,10 @@ fn retire_released_startup_heartbeat_with_hook(
         &evidence.boot_id,
         &evidence.process_start,
     );
-    if liveness == StartupPidLiveness::Unknown
-        || (require_dead_process
-            && liveness != StartupPidLiveness::Dead
-            && evidence.pid != std::process::id())
+    let completed_handoff = heartbeat_predecessor::completed_handoff(&repo, identity);
+    if !completed_handoff
+        && (liveness == StartupPidLiveness::Unknown
+            || (require_dead_process && liveness != StartupPidLiveness::Dead))
     {
         return Err(CommandFailure::diagnostic(
             "terminal heartbeat process identity is ambiguous",
@@ -5135,7 +4731,235 @@ fn prepare_heartbeat_root_parent_with_hook(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+fn prepare_heartbeat_root_parent_with_hook(
+    root: &Path,
+    mut after_sync: impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmod, fstatat, mkdirat, Mode};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let invalid = || CommandFailure::diagnostic("heartbeat root must have a named parent");
+    let parent_path = root.parent().ok_or_else(&invalid)?;
+    let ancestor_path = parent_path.parent().ok_or_else(&invalid)?;
+    let component = parent_path.file_name().ok_or_else(invalid)?;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let ancestor = open(ancestor_path, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat parent ancestor: {error}"))
+    })?;
+    match openat(&ancestor, component, flags, Mode::empty()) {
+        Ok(parent) => {
+            let opened =
+                private_heartbeat_directory_identity(&parent, "root parent").or_else(|_| {
+                    after_sync("chmod")?;
+                    fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
+                        CommandFailure::diagnostic(format!(
+                            "could not protect heartbeat root parent: {error}"
+                        ))
+                    })?;
+                    nix::unistd::fsync(&parent).map_err(|error| {
+                        CommandFailure::diagnostic(format!(
+                            "could not sync heartbeat root parent: {error}"
+                        ))
+                    })?;
+                    after_sync("parent")?;
+                    private_heartbeat_directory_identity(&parent, "root parent")
+                })?;
+            sync_heartbeat_parent_ancestor(&ancestor, &mut after_sync)?;
+            let current =
+                fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "could not revalidate heartbeat root parent: {error}"
+                    ))
+                })?;
+            if (
+                current.st_dev as u64,
+                current.st_ino as u64,
+                current.st_uid as u32,
+                current.st_mode as u32 & 0o7777,
+            ) != (opened.device, opened.inode, opened.owner, opened.mode)
+            {
+                return Err(CommandFailure::diagnostic(
+                    "heartbeat root parent identity changed during preparation",
+                ));
+            }
+            return Ok(());
+        }
+        Err(nix::errno::Errno::ENOENT) => {}
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open heartbeat root parent: {error}"
+            )))
+        }
+    }
+
+    let staging = format!(
+        ".autospec-heartbeat-stage-{}-{}",
+        std::process::id(),
+        UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    mkdirat(&ancestor, staging.as_str(), Mode::from_bits_truncate(0o700)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not stage heartbeat root parent: {error}"))
+    })?;
+    let mut published = false;
+    let prepared = (|| {
+        let expected =
+            normalize_staged_heartbeat_root_parent_macos(&ancestor, &staging, &mut after_sync)?;
+        after_sync("before-publish")?;
+        let staging_c = std::ffi::CString::new(staging.as_bytes()).map_err(|_| {
+            CommandFailure::diagnostic("staged heartbeat parent name contains a NUL byte")
+        })?;
+        let component_c = std::ffi::CString::new(component.as_bytes()).map_err(|_| {
+            CommandFailure::diagnostic("heartbeat root parent name contains a NUL byte")
+        })?;
+        // SAFETY: both names are single-component C strings and the bound ancestor stays open.
+        let result = unsafe {
+            nix::libc::renameatx_np(
+                ancestor.as_raw_fd(),
+                staging_c.as_ptr(),
+                ancestor.as_raw_fd(),
+                component_c.as_ptr(),
+                nix::libc::RENAME_EXCL,
+            )
+        };
+        if result != 0 {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not publish heartbeat root parent: {}",
+                nix::errno::Errno::last()
+            )));
+        }
+        published = true;
+        sync_heartbeat_parent_ancestor(&ancestor, &mut after_sync)?;
+        let current =
+            fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not revalidate heartbeat root parent: {error}"
+                ))
+            })?;
+        if (
+            current.st_dev as u64,
+            current.st_ino as u64,
+            current.st_uid as u32,
+            current.st_mode as u32 & 0o7777,
+        ) != (
+            expected.device,
+            expected.inode,
+            expected.owner,
+            expected.mode,
+        ) {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat root parent identity changed during publication",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        if published {
+            return Err(error);
+        }
+        return Err(cleanup_staged_heartbeat_parent(
+            &ancestor,
+            &staging,
+            error,
+            &mut after_sync,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn prepare_heartbeat_root_parent_with_hook(
+    root: &Path,
+    mut after_sync: impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmod, fstatat, mkdirat, Mode};
+
+    let invalid = || CommandFailure::diagnostic("heartbeat root must have a named parent");
+    let parent_path = root.parent().ok_or_else(&invalid)?;
+    let ancestor_path = parent_path.parent().ok_or_else(&invalid)?;
+    let component = parent_path.file_name().ok_or_else(invalid)?;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let ancestor = open(ancestor_path, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat parent ancestor: {error}"))
+    })?;
+    let before = nix::sys::stat::fstat(&ancestor).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not inspect heartbeat parent ancestor: {error}"
+        ))
+    })?;
+    let created = match openat(&ancestor, component, flags, Mode::empty()) {
+        Ok(_) => false,
+        Err(nix::errno::Errno::ENOENT) => {
+            after_sync("before-publish")?;
+            match mkdirat(&ancestor, component, Mode::from_bits_truncate(0o700)) {
+                Ok(()) => true,
+                Err(nix::errno::Errno::EEXIST) => false,
+                Err(error) => {
+                    return Err(CommandFailure::diagnostic(format!(
+                        "could not publish heartbeat root parent: {error}"
+                    )))
+                }
+            }
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open heartbeat root parent: {error}"
+            )))
+        }
+    };
+    let after = nix::sys::stat::fstat(&ancestor).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not revalidate heartbeat parent ancestor: {error}"
+        ))
+    })?;
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino) {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat root parent ancestor identity changed",
+        ));
+    }
+    let parent = openat(&ancestor, component, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat root parent: {error}"))
+    })?;
+    let opened = private_heartbeat_directory_identity(&parent, "root parent").or_else(|_| {
+        after_sync("chmod")?;
+        fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not protect heartbeat root parent: {error}"))
+        })?;
+        nix::unistd::fsync(&parent).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
+        })?;
+        after_sync("parent")?;
+        private_heartbeat_directory_identity(&parent, "root parent")
+    })?;
+    if created {
+        nix::unistd::fsync(&ancestor).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat parent ancestor: {error}"))
+        })?;
+        after_sync("ancestor")?;
+    }
+    let current = fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not revalidate heartbeat root parent: {error}"
+        ))
+    })?;
+    if (
+        current.st_dev as u64,
+        current.st_ino as u64,
+        current.st_uid as u32,
+        current.st_mode as u32 & 0o7777,
+    ) != (opened.device, opened.inode, opened.owner, opened.mode)
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat root parent identity changed during preparation",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sync_heartbeat_parent_ancestor(
     ancestor: &impl std::os::fd::AsFd,
     boundary: &mut impl FnMut(&'static str) -> Result<(), CommandFailure>,
@@ -5147,7 +4971,7 @@ fn sync_heartbeat_parent_ancestor(
     boundary("ancestor")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cleanup_staged_heartbeat_parent(
     ancestor: &impl std::os::fd::AsFd,
     staging: &str,
@@ -5172,6 +4996,76 @@ fn cleanup_staged_heartbeat_parent(
         ));
     }
     original
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_staged_heartbeat_root_parent_macos(
+    ancestor: &impl std::os::fd::AsFd,
+    staging: &str,
+    boundary: &mut impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
+    use nix::fcntl::{openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmodat, fstatat, FchmodatFlags, Mode, SFlag};
+
+    let before = fstatat(ancestor, staging, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not inspect staged heartbeat root parent: {error}"
+        ))
+    })?;
+    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR)
+        || before.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent must be owned by the effective user",
+        ));
+    }
+    boundary("chmod")?;
+    fchmodat(
+        ancestor,
+        staging,
+        Mode::from_bits_truncate(0o700),
+        FchmodatFlags::NoFollowSymlink,
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not make staged heartbeat root parent accessible: {error}"
+        ))
+    })?;
+    let normalized = fstatat(ancestor, staging, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not revalidate staged heartbeat root parent: {error}"
+        ))
+    })?;
+    if (normalized.st_dev, normalized.st_ino) != (before.st_dev, before.st_ino)
+        || normalized.st_uid != before.st_uid
+        || normalized.st_mode & 0o7777 != 0o700
+    {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent identity changed during normalization",
+        ));
+    }
+    let parent = openat(
+        ancestor,
+        staging,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not open staged heartbeat root parent: {error}"
+        ))
+    })?;
+    let opened = private_heartbeat_directory_identity(&parent, "root parent")?;
+    if (opened.device, opened.inode) != (before.st_dev as u64, before.st_ino as u64) {
+        return Err(CommandFailure::diagnostic(
+            "staged heartbeat root parent identity changed before descriptor binding",
+        ));
+    }
+    nix::unistd::fsync(&parent).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
+    })?;
+    boundary("parent")?;
+    Ok(opened)
 }
 
 #[cfg(target_os = "linux")]
@@ -5228,7 +5122,7 @@ fn normalize_heartbeat_root_parent(
     private_heartbeat_directory_identity(&parent, "root parent")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use open_beneath::open_heartbeat_directory_beneath;
 #[cfg(all(test, unix))]
 use open_beneath::open_heartbeat_directory_portable_unix_with_hook;
@@ -5236,7 +5130,7 @@ use open_beneath::open_heartbeat_directory_portable_unix_with_hook;
 use open_beneath::private_heartbeat_directory_identity;
 #[cfg(all(test, target_os = "linux"))]
 use open_beneath::{heartbeat_openat2_resolve_flags, open_heartbeat_directory_beneath_with_hook};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use open_beneath::{private_heartbeat_name_identity, HeartbeatDirectoryIdentity};
 
 // These primitives remain inert until the guarded recovery activation slice.
@@ -5444,7 +5338,7 @@ fn classify_startup_heartbeat(
     classify_startup_heartbeat_snapshot(file, expected, now, observe_pid)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn classify_startup_heartbeat_at(
     directory: &impl std::os::fd::AsFd,
     name: &std::ffi::OsStr,
@@ -5485,12 +5379,7 @@ fn classify_startup_heartbeat_snapshot(
             == startup_heartbeat_nonce(expected.repo, expected.issue, expected.claim_id)
         && !evidence.host.is_empty()
         && !evidence.boot_id.is_empty()
-        && evidence
-            .process_start
-            .parse::<u64>()
-            .ok()
-            .filter(|start| *start > 0)
-            .is_some_and(|start| start.to_string() == evidence.process_start);
+        && valid_startup_process_identity(&evidence.process_start);
     // Liveness decides this, not the clock: a crash loop rewrites the heartbeat and
     // pushes expiry out forever. `exact` plus observe_pid's host/boot/start match is
     // what keeps the takeover safe.
@@ -5514,7 +5403,7 @@ fn classify_startup_heartbeat_snapshot(
 }
 
 // These descriptor-only primitives remain inert until guarded recovery integrates them.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatReceiptDecision {
@@ -5523,7 +5412,7 @@ enum HeartbeatReceiptDecision {
     Pending,
     Completed,
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatReceiptEntry {
@@ -5531,14 +5420,14 @@ enum HeartbeatReceiptEntry {
     Exact,
     Unsafe,
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 struct HeartbeatReceiptTransaction {
     handoff: fs::File,
     pending: String,
     completed: String,
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn heartbeat_receipt_names(expected: StartupHeartbeatExpectation<'_>) -> (String, String) {
     let issue = expected.issue.to_string();
@@ -5561,7 +5450,7 @@ fn heartbeat_receipt_names(expected: StartupHeartbeatExpectation<'_>) -> (String
         format!("completed-{}-{digest}.receipt", expected.issue),
     )
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn open_receipt_anchors_with_hook(
     trusted_repo: &fs::File,
     mut after_open: impl FnMut(&str),
@@ -5583,7 +5472,7 @@ fn open_receipt_anchors_with_hook(
     private_heartbeat_directory_identity(&handoff, "receipt handoff")?;
     Ok(handoff)
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn ensure_receipt_directory(parent: &fs::File, name: &str) -> Result<fs::File, CommandFailure> {
     use nix::sys::stat::{mkdirat, Mode};
     let created = match mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
@@ -5605,7 +5494,7 @@ fn ensure_receipt_directory(parent: &fs::File, name: &str) -> Result<fs::File, C
     }
     Ok(directory)
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn inspect_heartbeat_receipt(
     directory: &fs::File,
@@ -5630,7 +5519,7 @@ fn inspect_heartbeat_receipt(
         HeartbeatReceiptEntry::Unsafe
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn heartbeat_receipt_retry_decision(
     trusted_repo: &fs::File,
@@ -5638,7 +5527,7 @@ fn heartbeat_receipt_retry_decision(
 ) -> HeartbeatReceiptDecision {
     heartbeat_receipt_retry_decision_with_hook(trusted_repo, expected, |_| {})
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn heartbeat_receipt_retry_decision_with_hook(
     trusted_repo: &fs::File,
     expected: StartupHeartbeatExpectation<'_>,
@@ -5784,7 +5673,17 @@ fn classify_retained_prior_generation(
         None => StartupHeartbeatClassification::Absent,
     })
 }
-#[cfg(target_os = "linux")]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn classify_retained_prior_generation(
+    _trusted_repo: &fs::File,
+    _repo_name: &str,
+    _issue: u64,
+    _record: &RunStateRecord,
+    _now: u64,
+) -> Result<StartupHeartbeatClassification, CommandFailure> {
+    Ok(StartupHeartbeatClassification::Blocking)
+}
+#[cfg(unix)]
 #[allow(dead_code)]
 fn begin_heartbeat_receipt(
     trusted_repo: &fs::File,
@@ -5792,7 +5691,7 @@ fn begin_heartbeat_receipt(
 ) -> Result<HeartbeatReceiptTransaction, CommandFailure> {
     begin_heartbeat_receipt_with_hook(trusted_repo, expected, || {})
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn begin_heartbeat_receipt_with_hook(
     trusted_repo: &fs::File,
     expected: StartupHeartbeatExpectation<'_>,
@@ -5846,18 +5745,17 @@ fn begin_heartbeat_receipt_with_hook(
         completed,
     })
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn retire_heartbeat_receipt_with_sync(
     transaction: HeartbeatReceiptTransaction,
     sync: impl FnOnce(&fs::File) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
-    nix::fcntl::renameat2(
+    rename_heartbeat_no_clobber(
         &transaction.handoff,
-        transaction.pending.as_str(),
+        std::ffi::OsStr::new(&transaction.pending),
         &transaction.handoff,
         transaction.completed.as_str(),
-        nix::fcntl::RenameFlags::RENAME_NOREPLACE,
     )
     .map_err(|error| {
         CommandFailure::diagnostic(format!("could not retire heartbeat receipt: {error}"))
@@ -6062,25 +5960,70 @@ enum HeartbeatHandoffSyncBoundary {
 
 #[cfg(unix)]
 fn rename_heartbeat_no_clobber(
-    source: &std::os::fd::OwnedFd,
+    source: &impl std::os::fd::AsFd,
     source_name: &std::ffi::OsStr,
-    target: &std::os::fd::OwnedFd,
+    target: &impl std::os::fd::AsFd,
     target_name: &str,
 ) -> Result<(), CommandFailure> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(target_os = "linux")]
     {
-        nix::fcntl::renameat2(
-            source,
-            source_name,
-            target,
-            target_name,
-            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-        )
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not hand off startup heartbeat: {error}"))
-        })
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source_name = std::ffi::CString::new(source_name.as_bytes())
+            .map_err(|_| CommandFailure::diagnostic("heartbeat source name contains a NUL byte"))?;
+        let target_name = std::ffi::CString::new(target_name)
+            .map_err(|_| CommandFailure::diagnostic("heartbeat target name contains a NUL byte"))?;
+        // SAFETY: Linux exposes renameat2 as a syscall on both GNU and musl targets; names and
+        // descriptors remain valid for the call and RENAME_NOREPLACE preserves no-clobber.
+        let result = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_renameat2,
+                source.as_fd().as_raw_fd(),
+                source_name.as_ptr(),
+                target.as_fd().as_raw_fd(),
+                target_name.as_ptr(),
+                nix::libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(CommandFailure::diagnostic(format!(
+                "could not hand off startup heartbeat: {}",
+                nix::errno::Errno::last()
+            )))
+        }
     }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source_name = std::ffi::CString::new(source_name.as_bytes())
+            .map_err(|_| CommandFailure::diagnostic("heartbeat source name contains a NUL byte"))?;
+        let target_name = std::ffi::CString::new(target_name)
+            .map_err(|_| CommandFailure::diagnostic("heartbeat target name contains a NUL byte"))?;
+        // SAFETY: both names are valid C strings and both descriptors remain open for the call.
+        let result = unsafe {
+            nix::libc::renameatx_np(
+                source.as_fd().as_raw_fd(),
+                source_name.as_ptr(),
+                target.as_fd().as_raw_fd(),
+                target_name.as_ptr(),
+                nix::libc::RENAME_EXCL,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(CommandFailure::diagnostic(format!(
+                "could not hand off startup heartbeat: {}",
+                nix::errno::Errno::last()
+            )))
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (source, source_name, target, target_name);
         Err(CommandFailure::diagnostic(
@@ -6128,7 +6071,7 @@ fn restore_moved_heartbeat(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn persist_heartbeat_copy_anchored(
     state_root: &Path,
     repo: &fs::File,
@@ -6174,7 +6117,7 @@ fn persist_heartbeat_copy_anchored(
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn handoff_stale_heartbeat(
     state_root: &Path,
@@ -6185,7 +6128,7 @@ fn handoff_stale_heartbeat(
     mut after_sync: impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
     mut cleanup_sync: impl FnMut(&fs::File) -> Result<(), CommandFailure>,
 ) -> Result<std::path::PathBuf, CommandFailure> {
-    use nix::fcntl::{renameat2, AtFlags, RenameFlags};
+    use nix::fcntl::AtFlags;
     use nix::sys::stat::fstatat;
     use nix::unistd::{fsync, linkat, unlinkat, UnlinkatFlags};
 
@@ -6214,14 +6157,9 @@ fn handoff_stale_heartbeat(
         heartbeat_session_key(&snapshot.evidence.nonce),
         unique_operation_id("handoff")?
     );
-    renameat2(
-        repo,
-        live_name,
-        handoff,
-        moved_name.as_str(),
-        RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|error| CommandFailure::diagnostic(format!("could not move heartbeat: {error}")))?;
+    rename_heartbeat_no_clobber(repo, live_name, handoff, moved_name.as_str()).map_err(
+        |error| CommandFailure::diagnostic(format!("could not move heartbeat: {error}")),
+    )?;
     let source_sync = fsync(repo)
         .map_err(|error| {
             CommandFailure::diagnostic(format!("could not sync heartbeat source: {error}"))
@@ -6289,7 +6227,7 @@ fn handoff_stale_heartbeat(
     Ok(copy)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn held_heartbeat_at(
     directory: &fs::File,
     name: &std::ffi::OsStr,
@@ -6346,11 +6284,10 @@ fn with_retained_bridge_predecessor_authority<T>(
     use nix::sys::stat::{fstatat, Mode};
 
     let root_path = heartbeat_root()?;
-    let root = match open(
-        &root_path,
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    ) {
+    let root_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    #[cfg(target_os = "linux")]
+    let root_flags = root_flags | OFlag::O_PATH;
+    let root = match open(&root_path, root_flags, Mode::empty()) {
         Err(nix::errno::Errno::ENOENT) => return Ok(None),
         Err(error) => {
             return Err(CommandFailure::diagnostic(format!(
@@ -6467,7 +6404,7 @@ fn with_retained_bridge_predecessor_authority<T>(
     operation().map(Some)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(dead_code)]
 fn handoff_retained_heartbeat(
     state_root: &Path,
@@ -6477,7 +6414,6 @@ fn handoff_retained_heartbeat(
     mut boundary: impl FnMut(&str, &fs::File, &fs::File, &str),
     mut after_sync: impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
 ) -> Result<std::path::PathBuf, CommandFailure> {
-    use nix::fcntl::RenameFlags;
     use nix::unistd::fsync;
 
     let issue = snapshot
@@ -6565,16 +6501,9 @@ fn handoff_retained_heartbeat(
             return Err(CommandFailure::diagnostic("heartbeat source changed"));
         }
         boundary("before-rename", repo, handoff, &archive_name);
-        nix::fcntl::renameat2(
-            repo,
-            live_name,
-            handoff,
-            archive_name.as_str(),
-            RenameFlags::RENAME_NOREPLACE,
-        )
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not retain heartbeat: {error}"))
-        })?;
+        rename_heartbeat_no_clobber(repo, live_name, handoff, archive_name.as_str()).map_err(
+            |error| CommandFailure::diagnostic(format!("could not retain heartbeat: {error}")),
+        )?;
         if heartbeat_final_binding(
             &source,
             handoff,
@@ -6614,7 +6543,7 @@ fn handoff_retained_heartbeat(
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn validate_retained_heartbeat(
     state_root: &Path,
@@ -6870,9 +6799,9 @@ fn branch_ref_exists(branch: &str) -> bool {
     }
 }
 
-fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> bool {
+fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> Result<bool, ()> {
     if branch.trim().is_empty() {
-        return false;
+        return Ok(false);
     }
     let local = format!("refs/heads/{branch}");
     match Command::new("git")
@@ -6881,31 +6810,31 @@ fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> bool
     {
         Ok(status) if status.success() => {
             let Some(base_branch) = base_branch else {
-                return true;
+                return Ok(true);
             };
             if !local_branch_is_integrated_and_inactive(&local, base_branch) {
-                return true;
+                return Ok(true);
             }
         }
         Ok(status) if status.code() == Some(1) => {}
-        Ok(_) | Err(_) => return true,
+        Ok(_) | Err(_) => return Err(()),
     }
     for reference in [format!("refs/remotes/origin/{branch}")] {
         match Command::new("git")
             .args(["show-ref", "--verify", "--quiet", &reference])
             .status()
         {
-            Ok(status) if status.success() => return true,
+            Ok(status) if status.success() => return Ok(true),
             Ok(status) if status.code() == Some(1) => {}
-            Ok(_) | Err(_) => return true,
+            Ok(_) | Err(_) => return Err(()),
         }
     }
     match Command::new("git")
         .args(["ls-remote", "--heads", "origin", branch])
         .output()
     {
-        Ok(output) if output.status.success() => !output.stdout.is_empty(),
-        Ok(_) | Err(_) => true,
+        Ok(output) if output.status.success() => Ok(!output.stdout.is_empty()),
+        Ok(_) | Err(_) => Err(()),
     }
 }
 
@@ -7185,6 +7114,23 @@ fn unavailable_claim<T>(
             "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
             json_escape(repo),
             json_escape(reason),
+        ),
+        exit_code: 2,
+    })
+}
+
+fn heartbeat_publication_deferred<T>(
+    issue: u64,
+    repo: &str,
+    worker_id: &str,
+    claim_id: &str,
+) -> Result<T, ConductorClaimError> {
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"heartbeat_write_failed\"}}",
+            json_escape(repo),
+            json_escape(worker_id),
+            json_escape(claim_id),
         ),
         exit_code: 2,
     })

@@ -5,7 +5,6 @@
 use super::super::{
     supervise_harness, HarnessKind, MutationSnapshot, SupervisionConfig, SupervisionOutcome,
 };
-#[cfg(not(target_os = "linux"))]
 use super::support_base::test_environment;
 use super::support_base::GitFixture;
 use super::support_invocation::{shell_invocation, supervision_config, supervision_state};
@@ -18,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn autonomous_executor_bridge_frames_split_utf8_and_bounds_sustained_output() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-split-utf8");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -93,6 +93,7 @@ fn autonomous_executor_bridge_frames_split_utf8_and_bounds_sustained_output() {
 
 #[test]
 fn autonomous_executor_bridge_closed_streams_live_child_transitions_to_stall() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-closed-streams");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -116,6 +117,7 @@ fn autonomous_executor_bridge_closed_streams_live_child_transitions_to_stall() {
 
 #[test]
 fn autonomous_executor_bridge_stall_reports_actual_durable_progress_timestamp() {
+    let _environment = test_environment();
     // Break caught: subsecond stalls synthesizing "last progress" from the timeout after the
     // durable timestamp had already been overwritten.
     while SystemTime::now()

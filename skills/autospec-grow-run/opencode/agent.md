@@ -1,6 +1,7 @@
 ---
 name: autospec-grow-run
 description: Drain the growth backlog — implement growth:artifact issues via /autospec-run with a content-quality gate, run the growth:outbound draft→ethics→approval-queue pipeline (package-only, never auto-post), and measure/attribute via live adapters that re-weight the next define cycle. Use after /autospec-grow-define has filed issues.
+mode: primary
 ---
 
 # autospec-grow-run workflow (harness-neutral)

@@ -50,9 +50,11 @@ use accountability_runtime::*;
 mod blocked_cycle;
 mod foreground_failure;
 mod launch;
+mod launch_preview;
 mod lifecycle_stop_notice;
 use foreground_failure::ForegroundFailure;
 use launch::*;
+use launch_preview::*;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
 mod main_health_output;
@@ -63,12 +65,17 @@ use one_shot_selector::{
 };
 #[allow(dead_code)]
 mod executor_bridge;
-pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
+#[allow(unused_imports)]
+pub(crate) use executor_bridge::{
+    current_boot_identity, observe_expected_process, process_birth_identity, ProcessObservation,
+};
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
 mod premerge;
+#[cfg(test)]
+mod recovery_metadata_tests;
 mod resilience;
 #[cfg(test)]
 mod restart_policy_tests;
@@ -277,6 +284,13 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
     let launch_mode = validate_launch_mode(&options).map_err(CommandFailure::diagnostic)?;
+    if is_launch_preview(&options) {
+        return preview_launch(&options, launch_mode);
+    }
+    if requires_autonomous_runtime_support(&options, launch_mode) {
+        executor_bridge::ensure_autonomous_runtime_supported()
+            .map_err(CommandFailure::diagnostic)?;
+    }
     if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
         return run_foreground(options);
     }
@@ -1024,35 +1038,6 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
 }
 
 fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
-    if options.dry_run {
-        let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
-        let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
-        if options.json {
-            let mut body = format!(
-                "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
-                json_escape(&options.repo),
-                json_escape(&options.repo_dir),
-                json_escape(&foreground.display()),
-                json_escape(&commands.monitor.display()),
-                json_escape(&commands.supervisor.display())
-            );
-            if launch_mode == LaunchMode::Follow {
-                body.pop();
-                body.push_str(",\"follow\":\"scoped conductor log\"}");
-            }
-            println!("{body}");
-        } else {
-            println!("autospec autonomous start: dry-run");
-            println!("conductor: {}", foreground.display());
-            println!("monitor: {}", commands.monitor.display());
-            println!("supervisor: {}", commands.supervisor.display());
-            if launch_mode == LaunchMode::Follow {
-                println!("follow: scoped conductor log");
-            }
-        }
-        return Ok(());
-    }
-
     toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
@@ -3188,6 +3173,19 @@ fn dispatch_foreground(
     )
 }
 
+fn observe_recovery_accountability_event(
+    layout: &RunLayout,
+    event: Result<accountability::AccountabilityEvent, CommandFailure>,
+) {
+    let result = event.and_then(|event| record_accountability_event_once(layout, event, true));
+    if let Err(error) = result {
+        eprintln!(
+            "autospec autonomous recovery accountability degraded: {}; authoritative claim state is unchanged",
+            error.message
+        );
+    }
+}
+
 fn execute_foreground_dispatch(
     layout: &RunLayout,
     options: &Options,
@@ -3229,13 +3227,60 @@ fn execute_foreground_dispatch(
                     )?,
                     false,
                 )?;
-                let lease = claim::acquire_for_conductor(
+                let acquisition = match claim::acquire_for_conductor(
                     &layout.repo,
                     selection.issue,
                     &worker_id,
                     &branch,
                     base_branch,
-                )?;
+                ) {
+                    Ok(acquisition) => acquisition,
+                    Err(error) => {
+                        if let Some(deferred) = error.heartbeat_publication_deferral() {
+                            observe_recovery_accountability_event(
+                                layout,
+                                accountability_event(
+                                    accountability::EventKind::HeartbeatPublicationDeferred {
+                                        issue: deferred.issue,
+                                        claim_id: deferred.claim_id.clone(),
+                                    },
+                                    format!(
+                                        "Heartbeat publication deferred for issue {}",
+                                        deferred.issue
+                                    ),
+                                    "The authoritative claim remains pending because startup ownership was not published",
+                                    format!(
+                                        "repository {} issue {} generation {} returned heartbeat_write_failed",
+                                        layout.repo, deferred.issue, deferred.claim_id
+                                    ),
+                                ),
+                            );
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let Some(recovery) = acquisition.recovery.as_ref() {
+                    observe_recovery_accountability_event(
+                        layout,
+                        accountability_event(
+                            accountability::EventKind::StartupClaimRecovered {
+                                issue: selection.issue,
+                                previous_claim_id: recovery.previous_claim_id.clone(),
+                                next_claim_id: recovery.next_claim_id.clone(),
+                            },
+                            format!("Startup claim recovered for issue {}", selection.issue),
+                            "The authoritative recovery CAS advanced the stale generation before reacquisition",
+                            format!(
+                                "repository {} issue {} advanced generation {} to {}",
+                                layout.repo,
+                                selection.issue,
+                                recovery.previous_claim_id,
+                                recovery.next_claim_id
+                            ),
+                        ),
+                    );
+                }
+                let lease = acquisition.lease;
                 record_accountability_event(
                     layout,
                     accountability_event(
@@ -5382,21 +5427,38 @@ fn read_launch_json(state_dir: &Path) -> String {
 }
 
 fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
+    read_unit_with_process_observer(name, layout, observe_unit_process_identity)
+}
+
+fn read_unit_with_process_observer(
+    name: &str,
+    layout: &RunLayout,
+    observe_identity: impl FnOnce(&str) -> Result<Option<ProcessIdentity>, String>,
+) -> UnitStatus {
     let pid_file = layout.state_dir.join(format!("{name}.pid"));
     let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
     let raw_pid = fs::read_to_string(&pid_file).unwrap_or_default();
     let raw_pid = raw_pid.trim();
     let pid = metadata_pid(raw_pid).unwrap_or_else(|| raw_pid.to_string());
     let recorded_identity = metadata_process_identity(raw_pid);
-    let current_identity = process_identity(&pid);
+    let current_identity = if pid.is_empty() {
+        Ok(None)
+    } else {
+        observe_identity(&pid)
+    };
+    let process_probe = match &current_identity {
+        Ok(Some(_)) => ProcessProbe::Alive,
+        Ok(None) => ProcessProbe::Missing,
+        Err(_) => ProcessProbe::Indeterminate,
+    };
     let identity_mismatch = recorded_identity
-        .zip(current_identity)
+        .zip(current_identity.as_ref().ok().copied().flatten())
         .is_some_and(|(recorded, current)| recorded != current);
     let logpath = fs::read_to_string(&logpath_file)
         .unwrap_or_default()
         .trim()
         .to_string();
-    let metadata_state = if identity_mismatch {
+    let metadata_state = if current_identity.is_err() || identity_mismatch {
         UnitMetadataState::Ambiguous
     } else if raw_pid.is_empty() {
         if logpath.is_empty() {
@@ -5405,7 +5467,7 @@ fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
             UnitMetadataState::Ambiguous
         }
     } else {
-        classify_unit_metadata(raw_pid, &layout.repo, &layout.scope, probe_process(&pid))
+        classify_unit_metadata(raw_pid, &layout.repo, &layout.scope, process_probe)
     };
     let running = metadata_state == UnitMetadataState::Live;
     let stale_pid = metadata_state == UnitMetadataState::Stale;
@@ -5595,43 +5657,19 @@ fn record_json_object_key(
     object_keys.last_mut().is_some_and(|keys| keys.insert(key))
 }
 
-#[cfg(unix)]
 fn probe_process(pid: &str) -> ProcessProbe {
-    let Some(pid) = pid.parse::<i32>().ok().filter(|pid| *pid > 0) else {
+    if pid.parse::<u32>().ok().filter(|pid| *pid > 0).is_none() {
         return ProcessProbe::Indeterminate;
-    };
-    if process_is_zombie(pid) {
-        return ProcessProbe::Missing;
     }
-    match kill(Pid::from_raw(pid), None) {
-        Ok(()) => ProcessProbe::Alive,
-        Err(Errno::ESRCH) => ProcessProbe::Missing,
+    match observe_unit_process_identity(pid) {
+        Ok(Some(_)) => ProcessProbe::Alive,
+        Ok(None) => ProcessProbe::Missing,
         Err(_) => ProcessProbe::Indeterminate,
     }
 }
 
-#[cfg(not(unix))]
-fn probe_process(_pid: &str) -> ProcessProbe {
-    ProcessProbe::Indeterminate
-}
-
 fn process_alive(pid: &str) -> bool {
     probe_process(pid) == ProcessProbe::Alive
-}
-
-#[cfg(target_os = "linux")]
-fn process_is_zombie(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
-        .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
-        .as_deref()
-        == Some("Z")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_is_zombie(_pid: i32) -> bool {
-    false
 }
 
 #[cfg(unix)]
@@ -5660,6 +5698,14 @@ fn reap_terminated_child(_pid: &str) -> Result<(), String> {
 }
 
 fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
+    terminate_unit_with_process_observer(name, unit, observe_unit_process_identity)
+}
+
+fn terminate_unit_with_process_observer(
+    name: &str,
+    unit: &UnitStatus,
+    observe_identity: impl FnOnce(&str) -> Result<Option<ProcessIdentity>, String>,
+) -> Result<bool, String> {
     if unit.identity_mismatch {
         return Err(format!(
             "refusing to terminate {name} pid {}: process identity mismatch",
@@ -5679,11 +5725,23 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
             "refusing to terminate {name}: ambiguous scoped process metadata"
         )),
         UnitMetadataState::Live | UnitMetadataState::Stale => {
-            let owned = unit
+            let recorded = unit
                 .recorded_identity
-                .is_some_and(|identity| identity.pgid.to_string() == unit.pid && group_alive)
-                || (unit.recorded_identity.is_none()
-                    && legacy_process_group_matches(name, &unit.pid));
+                .ok_or_else(|| {
+                    format!(
+                        "refusing to terminate {name} pid {}: process group ownership is unverified: exact process identity is unavailable",
+                        unit.pid
+                    )
+                })?;
+            let observed = observe_identity(&unit.pid).map_err(|error| {
+                format!(
+                    "refusing to terminate {name} pid {}: ambiguous process identity observation: {error}",
+                    unit.pid
+                )
+            })?;
+            let owned = observed.is_some_and(|observed| {
+                recorded == observed && recorded.pgid.to_string() == unit.pid && group_alive
+            });
             if !owned {
                 return Err(format!(
                     "refusing to terminate {name} pid {}: process group ownership is unverified",
@@ -5696,95 +5754,28 @@ fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
 }
 
 fn process_identity(pid: &str) -> Option<ProcessIdentity> {
-    #[cfg(target_os = "linux")]
-    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-        let (_, fields) = stat.rsplit_once(") ")?;
-        let fields = fields.split_whitespace().collect::<Vec<_>>();
-        return Some(ProcessIdentity {
-            pgid: fields.get(2)?.parse().ok()?,
-            start_time_ticks: fields.get(19)?.parse().ok()?,
-        });
-    }
-
-    let output = Command::new("ps")
-        .args(["-o", "pgid=,lstart=", "-p", pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let line = String::from_utf8(output.stdout).ok()?;
-    let mut fields = line.split_whitespace();
-    let pgid = fields.next()?.parse().ok()?;
-    let started = fields.collect::<Vec<_>>().join(" ");
-    let digest = sha256_hex(started.as_bytes());
-    Some(ProcessIdentity {
-        pgid,
-        start_time_ticks: u64::from_str_radix(digest.get(..16)?, 16).ok()?,
-    })
+    observe_unit_process_identity(pid).ok().flatten()
 }
 
-#[cfg(target_os = "linux")]
-fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
-    let Ok(expected_pgid) = pid.parse::<i32>() else {
-        return false;
-    };
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let member_pid = entry.file_name().to_string_lossy().to_string();
-        process_identity(&member_pid).is_some_and(|identity| identity.pgid == expected_pgid)
-            && read_process_argv(&entry.path().join("cmdline"))
-                .is_some_and(|argv| legacy_unit_argv_matches(name, &argv))
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn read_process_argv(path: &Path) -> Option<Vec<String>> {
-    Some(
-        fs::read(path)
-            .ok()?
-            .split(|byte| *byte == 0)
-            .filter(|argument| !argument.is_empty())
-            .map(|argument| String::from_utf8_lossy(argument).to_string())
-            .collect(),
-    )
-}
-
-#[cfg(not(target_os = "linux"))]
-fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
-    let Ok(expected_pgid) = pid.parse::<i32>() else {
-        return false;
-    };
-    let Ok(output) = Command::new("ps").args(["-eo", "pgid=,args="]).output() else {
-        return false;
-    };
-    output.status.success()
-        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            fields.next().and_then(|value| value.parse::<i32>().ok()) == Some(expected_pgid)
-                && legacy_unit_argv_matches(name, &fields.map(str::to_string).collect::<Vec<_>>())
-        })
-}
-
-fn legacy_unit_argv_matches(name: &str, argv: &[String]) -> bool {
-    let autospec_program = argv.iter().any(|argument| {
-        Path::new(argument)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| matches!(value, "autospec" | "autospec-autonomous.sh"))
-    });
-    if !autospec_program {
-        return false;
+fn observe_unit_process_identity(pid: &str) -> Result<Option<ProcessIdentity>, String> {
+    let pid = pid
+        .parse::<u32>()
+        .map_err(|_| "autonomous process PID is invalid".to_string())?;
+    if executor_bridge::process_is_terminated(pid)? {
+        return Ok(None);
     }
-    let has_argument = |expected: &str| argv.iter().any(|argument| argument == expected);
-    match name {
-        "conductor" => has_argument("run-foreground"),
-        "monitor" => has_argument("monitor"),
-        "supervisor" => has_argument("supervise") || has_argument("supervisor"),
-        _ => false,
-    }
+    let Some((container_id, _boot_id, process_start)) =
+        executor_bridge::observe_runtime_process_identity(pid)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProcessIdentity {
+        pgid: i32::try_from(container_id)
+            .map_err(|_| "autonomous process container is out of range".to_string())?,
+        start_time_ticks: process_start
+            .parse()
+            .map_err(|_| "autonomous process start identity is invalid".to_string())?,
+    }))
 }
 
 #[cfg(unix)]

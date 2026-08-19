@@ -166,6 +166,10 @@ Add a regression test that kills the surviving mutant in `{file_path}`.
 - `{file_path}`
 - The nearest existing test file for `{crate}`.
 
+## Dependencies
+
+none
+
 ## Implementation outline
 
 - Surviving mutant: `{mutant}`.
@@ -183,7 +187,7 @@ Add a regression test that kills the surviving mutant in `{file_path}`.
 
 - [ ] `{file_path}` has a focused regression test for surviving mutant `{mutant}`.
 - [ ] `{test_cmd}` fails while the mutant is present and passes after restore.
-- [ ] No existing assertion is weakened or deleted in test files.
+- [ ] No existing assertion is weakened or deleted under `tests/`.
 
 ## Smoke test
 
@@ -235,6 +239,10 @@ Stabilize `{args.test}` without weakening its assertions.
 
 - The test file containing `{args.test}`.
 - The production code exercised by `{args.test}`.
+
+## Dependencies
+
+none
 
 ## Context
 

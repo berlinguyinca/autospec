@@ -1,6 +1,7 @@
 ---
 name: autospec-e2e-clone
 description: Use when you need to provision an isolated, scaled-down, anonymized clone of a production environment for autospec-test E2E testing (Mode II). Handles snapshot capture, PII anonymization, edge-case data seeding, and URL exposure.
+mode: primary
 ---
 
 # autospec-e2e-clone — Clone Environment Provisioner

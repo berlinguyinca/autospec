@@ -1,6 +1,7 @@
 ---
 name: autospec-qa
 description: Use when the user wants to revalidate a running app against a spec, regenerate missing or weak tests, audit UI controls/forms/validation/dropdowns/API behavior/accessibility, or prove implemented features actually work after autospec-run.
+mode: primary
 ---
 
 # autospec-qa workflow

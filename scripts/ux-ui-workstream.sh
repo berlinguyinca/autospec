@@ -244,6 +244,10 @@ Restore CWV/Lighthouse UX budgets for `{commit}` in `scripts/ux-ui-workstream.sh
 - `.autospec/ux-ui/snapshots.jsonl`
 - The dashboard source files changed by `{commit}`.
 
+## Dependencies
+
+none
+
 ## Implementation outline
 
 - Reproduce the failing UX/UI gate and identify the dashboard change that caused the regression.

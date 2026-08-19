@@ -17,12 +17,27 @@
 
 use super::*;
 
+#[cfg(target_os = "linux")]
+fn raw_errno() -> i32 {
+    nix::errno::Errno::last_raw()
+}
+
+#[cfg(target_os = "linux")]
+/// # Safety
+///
+/// `descriptor` must be a pre-opened, exclusively owned regular-file descriptor captured before
+/// `fork` and remain valid for this call. `fdatasync` is async-signal-safe and performs no Rust
+/// allocation or locking, so it is valid in the post-fork child under those invariants.
+unsafe fn raw_sync(descriptor: i32) -> i32 {
+    // SAFETY: descriptor names an owned regular file.
+    unsafe { nix::libc::fdatasync(descriptor) }
+}
+
 /// # Safety
 ///
 /// `descriptor` must be a writable file descriptor owned by this process, and
 /// `bytes` must remain valid for the duration of the call. Short writes are
 /// retried and EINTR is resumed, so the caller sees all-or-nothing.
-#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offset: u64) -> bool {
     while !bytes.is_empty() {
         // SAFETY: the caller owns descriptor and the slice remains valid for this syscall.
@@ -36,7 +51,7 @@ pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offse
         };
         if count < 0 {
             // SAFETY: errno is thread-local process state.
-            if unsafe { *nix::libc::__errno_location() } == nix::libc::EINTR {
+            if raw_errno() == nix::libc::EINTR {
                 continue;
             }
             return false;
@@ -56,7 +71,6 @@ pub(super) unsafe fn raw_pwrite_all(descriptor: i32, mut bytes: &[u8], mut offse
 /// `descriptor` must be a writable descriptor whose ring slot layout matches
 /// `encode_output_cursor`; the record is fixed-size and written at a slot offset
 /// derived from `generation`, so it never runs past the region reserved for it.
-#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_persist_output_cursor(
     descriptor: i32,
     generation: u64,
@@ -73,7 +87,7 @@ pub(super) unsafe fn raw_persist_output_cursor(
     // SAFETY: descriptor and record are owned by the supervisor child.
     (unsafe { raw_pwrite_all(descriptor, &record, slot * OUTPUT_CURSOR_SLOT_BYTES) })
         // SAFETY: fdatasync operates on the same owned regular file descriptor.
-        && unsafe { nix::libc::fdatasync(descriptor) } == 0
+        && unsafe { raw_sync(descriptor) } == 0
 }
 
 /// # Safety
@@ -81,7 +95,6 @@ pub(super) unsafe fn raw_persist_output_cursor(
 /// `pipe_fd` and `ring_fd` must be owned readable and writable descriptors. The
 /// buffer is stack-allocated here and sized before the fork, so the pump performs
 /// no allocation on the post-fork path.
-#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_pump_stream(
     pipe_fd: i32,
     ring_fd: i32,
@@ -97,8 +110,7 @@ pub(super) unsafe fn raw_pump_stream(
             if launch_child_failpoint() == LaunchFailpoint::RingReadInterrupted as u8
                 && RAW_READ_INTERRUPTED_ONCE.swap(1, Ordering::SeqCst) == 0
             {
-                // SAFETY: errno is thread-local process state in this post-fork supervisor.
-                unsafe { *nix::libc::__errno_location() = nix::libc::EINTR };
+                nix::errno::Errno::EINTR.set();
                 -1
             } else {
                 // SAFETY: buffer is a live stack array and len() is its exact capacity, so the
@@ -116,7 +128,7 @@ pub(super) unsafe fn raw_pump_stream(
             break count;
         }
         // SAFETY: errno is thread-local process state.
-        let error = unsafe { *nix::libc::__errno_location() };
+        let error = raw_errno();
         if error == nix::libc::EINTR {
             continue;
         }
@@ -141,7 +153,7 @@ pub(super) unsafe fn raw_pump_stream(
     }
     if launch_child_failpoint() == LAUNCH_FAILPOINT_RING_BEFORE_SYNC
         // SAFETY: the ring descriptor is the preopened private regular file just modified.
-        || unsafe { nix::libc::fdatasync(ring_fd) } != 0
+        || unsafe { raw_sync(ring_fd) } != 0
     {
         return -2;
     }
@@ -159,7 +171,6 @@ pub(super) unsafe fn raw_pump_stream(
 ///
 /// `descriptor` must be a writable descriptor owned by this process and `bytes`
 /// must stay valid for the call. Retries on EINTR and partial writes.
-#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
     let mut offset = 0;
     while offset < bytes.len() {
@@ -175,7 +186,7 @@ pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
             offset += count as usize;
         } else if count < 0
             // SAFETY: errno is thread-local process state.
-            && unsafe { *nix::libc::__errno_location() } == nix::libc::EINTR
+            && raw_errno() == nix::libc::EINTR
         {
             continue;
         } else {
@@ -189,7 +200,6 @@ pub(super) unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
 ///
 /// Must run in the forked supervisor, which is the subreaper for the process
 /// group it is polling; waitpid is called with WNOHANG so it never blocks.
-#[cfg(target_os = "linux")]
 pub(super) unsafe fn raw_children_quiescent() -> i32 {
     loop {
         let mut status = 0_i32;
@@ -202,7 +212,7 @@ pub(super) unsafe fn raw_children_quiescent() -> i32 {
             return 0;
         }
         // SAFETY: errno is thread-local process state.
-        let error = unsafe { *nix::libc::__errno_location() };
+        let error = raw_errno();
         if error == nix::libc::EINTR {
             continue;
         }
@@ -234,7 +244,7 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
         };
         if observed < 0 {
             // SAFETY: errno is thread-local process state.
-            let error = unsafe { *nix::libc::__errno_location() };
+            let error = raw_errno();
             if error == nix::libc::EINTR {
                 continue;
             }
@@ -253,7 +263,7 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
         }
         if waited < 0 {
             // SAFETY: errno is thread-local process state.
-            let error = unsafe { *nix::libc::__errno_location() };
+            let error = raw_errno();
             if error == nix::libc::EINTR || error == nix::libc::ECHILD {
                 continue;
             }
@@ -267,7 +277,6 @@ pub(super) unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) ->
 /// Must be called only on the child side of fork, with every descriptor argument
 /// owned and every buffer sized before the fork. It never returns to Rust: all
 /// exits go through terminate_post_fork.
-#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn raw_supervisor_loop(
     harness_pid: nix::libc::pid_t,
@@ -379,10 +388,11 @@ pub(super) unsafe fn raw_supervisor_loop(
                 exit_code = Some(code);
             } else if waited < 0
                 // SAFETY: errno is thread-local process state.
-                && unsafe { *nix::libc::__errno_location() } != nix::libc::EINTR
+                && raw_errno() != nix::libc::EINTR
             {
                 terminate_post_fork(127);
             }
+            #[cfg(target_os = "linux")]
             if exit_code.is_none()
                 // SAFETY: the exact harness is excluded from this adopted-child reap.
                 && unsafe { raw_reap_adopted_children(harness_pid) } < 0
@@ -418,11 +428,11 @@ pub(super) unsafe fn raw_supervisor_loop(
                 // SAFETY: ordered records are written to the preopened private status file.
                 if !unsafe { raw_pwrite_all(exit_status, &data, 0) }
                     // SAFETY: exit_status is an owned descriptor; fdatasync only flushes it.
-                    || unsafe { nix::libc::fdatasync(exit_status) } != 0
+                    || unsafe { raw_sync(exit_status) } != 0
                     // SAFETY: exit_status is owned and commit is a live 8-byte local.
                     || !unsafe { raw_pwrite_all(exit_status, &commit, 8) }
                     // SAFETY: exit_status is an owned descriptor; fdatasync only flushes it.
-                    || unsafe { nix::libc::fdatasync(exit_status) } != 0
+                    || unsafe { raw_sync(exit_status) } != 0
                 {
                     terminate_post_fork(127);
                 }

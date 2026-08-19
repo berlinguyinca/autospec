@@ -33,10 +33,10 @@ cd skills/autospec-resume
 
 | Flag | Behaviour |
 |---|---|
-| (none) | Scan the current repo's durable run-state + heartbeats; if the pre-conditions pass, relaunch via the durably-captured command (clean-restart off `origin/main`). |
+| (none) | Scan `in-progress-by-bot` and open `auto-implement` issues; recover exact stale-startup claims through Rust, then relaunch via the durably-captured command (clean-restart off `origin/main`). |
 | `--resume-partial` | Additionally re-attach `/tmp/wt-<branch>` only when `heartbeat.host == $(hostname)`; cross-host or missing host clean-restarts. |
 | `--repo <owner/name>` | Target a specific repo (used by the boot supervisor iterating the registry). |
-| `--dry-run` | Print the decision and the command that would run; change nothing; exit 0. |
+| `--dry-run` | Print the recovery and relaunch actions that would run; invoke neither action; change nothing; exit 0. |
 
 ## How it stays safe
 
@@ -46,6 +46,13 @@ cd skills/autospec-resume
 - **Crash-vs-live.** Eligibility is computed from run-state **server**
   `updated_at` (never a local clock): `step=claimed && age>=300` OR `age>=10800`.
   A fresh claimed issue is never stolen.
+- **Stranded startup recovery.** The scan includes both relevant labels, but an
+  `auto-implement` issue is eligible only for the exact stale `claimed` /
+  `heartbeat-pending:none` sentinel. Rust owns the recovery CAS through
+  `autospec claim state recover-stale-startup`, and only an exact matching
+  `recovered: true` result becomes a relaunch candidate.
+- **Read-only dry-run.** `--dry-run` reports both prospective actions before
+  exiting and invokes neither recovery nor relaunch.
 - **Cross-host.** `--resume-partial` only re-attaches a worktree whose heartbeat
   `host` matches `$(hostname)`; otherwise it clean-restarts off `origin/main`.
 - **Durable relaunch command.** `/autospec-run` records the relaunch command in

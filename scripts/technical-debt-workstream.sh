@@ -161,6 +161,10 @@ Reduce the churn×complexity hotspot in `{file_path}` without changing behavior.
 - `{file_path}`
 - The nearest tests that exercise `{file_path}`.
 
+## Dependencies
+
+none
+
 ## Context
 
 Debt ranking evidence: {evidence}. The top item becomes a verified refactor PR, not a blind rewrite.
@@ -225,6 +229,10 @@ Remove test-only dead code `{symbol}` from `{file_path}` after proving no produc
 
 - `{file_path}`
 - `tests/`
+
+## Dependencies
+
+none
 
 ## Context
 
@@ -305,6 +313,10 @@ Patch `{pkg}` for `{cve}` in `{manifest}` to the fixed version `{fixed}`.
 - `{manifest}`
 - `Cargo.lock`
 - `package-lock.json`
+
+## Dependencies
+
+none
 
 ## Context
 

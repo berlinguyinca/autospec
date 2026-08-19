@@ -4015,7 +4015,7 @@ fn run_python_suites(id: &str, required: bool, root: &Path) -> CheckResult {
         ],
     )
     .expect("pytest suites use a direct Python argument vector")
-    .with_env("PYTHONPATH", "packages/autospec_context_monitor")
+    .with_isolated_pytest("packages/autospec_context_monitor")
     .execute_in(id, required, root);
     aggregate(id, required, vec![availability, suites])
 }

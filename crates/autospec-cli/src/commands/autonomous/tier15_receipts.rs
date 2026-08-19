@@ -49,10 +49,11 @@ fn record_tier15_fenced(
     scan: Tier15Scan,
 ) -> Result<Tier15Progress, String> {
     let root = state_root.join("waterfall");
-    let store = match WaterfallStore::acquire(&root, repo).map_err(store_error)? {
-        StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => return Ok(Tier15Progress::Pending),
-    };
+    let store =
+        match WaterfallStore::acquire_for_receipts(&root, repo, None).map_err(store_error)? {
+            StoreAcquisition::Acquired(store) => store,
+            StoreAcquisition::Held => return Ok(Tier15Progress::Pending),
+        };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier15Progress::Pending);
     };
@@ -86,7 +87,7 @@ fn replay_tier15_fenced(
     state_root: &Path,
     repo: &str,
 ) -> Result<ReceiptPreflight<Tier15Progress>, String> {
-    let store = match WaterfallStore::acquire(state_root.join("waterfall"), repo)
+    let store = match WaterfallStore::acquire_for_receipts(state_root.join("waterfall"), repo, None)
         .map_err(store_error)?
     {
         StoreAcquisition::Acquired(store) => store,
@@ -291,7 +292,7 @@ mod tests {
     }
 
     fn store(root: &TempRoot) -> WaterfallStore {
-        match WaterfallStore::acquire(root.path().join("waterfall"), REPO)
+        match WaterfallStore::acquire_for_receipts(root.path().join("waterfall"), REPO, None)
             .expect("store acquisition")
         {
             StoreAcquisition::Acquired(store) => store,

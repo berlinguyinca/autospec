@@ -9,6 +9,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+const SEMGREP_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[test]
 fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
     let _environment = test_environment();
@@ -259,7 +261,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
     // Break caught: a repository-wide scan blocking a feature on findings already present
     // in its claimed base commit, instead of evaluating only feature-introduced findings.
     let fixture = GitFixture::new("semgrep-baseline");
-    let rule = fixture.root.join("semgrep-rule.yml");
+    let rule = fixture.repo.join("semgrep-rule.yml");
     fs::write(
         &rule,
         r#"rules:
@@ -274,7 +276,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
     .expect("deterministic Semgrep rule");
     fs::write(fixture.repo.join("old.js"), "dangerous_call('old');\n")
         .expect("pre-existing finding");
-    git(&fixture.repo, &["add", "old.js"]);
+    git(&fixture.repo, &["add", "old.js", "semgrep-rule.yml"]);
     git(&fixture.repo, &["commit", "-m", "baseline finding"]);
     let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
     fs::write(
@@ -292,7 +294,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
             semgrep.display().to_string(),
             "scan".to_string(),
             "--config".to_string(),
-            rule.display().to_string(),
+            "semgrep-rule.yml".to_string(),
             "--metrics".to_string(),
             "off".to_string(),
             "--error".to_string(),
@@ -316,7 +318,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
             },
             &fixture.root.join(artifact),
             None,
-            Duration::from_secs(30),
+            SEMGREP_INTEGRATION_TIMEOUT,
         )
         .expect("Semgrep process observation");
         let command = &observed[0];

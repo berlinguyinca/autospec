@@ -367,7 +367,7 @@ fn classify_startup_heartbeat_marks_missing_evidence_absent() {
     std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn startup_heartbeat_process_identity() {
     use claim::{StartupHeartbeatClassification::ExpiredDead, StartupPidLiveness};

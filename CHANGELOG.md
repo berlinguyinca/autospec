@@ -7,6 +7,121 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ## [Unreleased]
 
+### Fixed
+
+#### `install.sh --update` no longer exits non-zero on 12 skill pairs (2026-08-18)
+- `install.sh` appends `--update` to every `skills/<skill>/install.sh` invocation, but four
+  installers — `autospec-monitor`, `autospec-quality`, `autospec-rollover-status` and
+  `autospec-test` — had no `--update` arm, so their argument parsers exited 2 on
+  `unknown argument: --update`. That failed all three harness pairs for each of them: 12 of
+  117 pairs red and a non-zero exit on every update run, while the skills themselves stayed
+  stale. Their writes were already unconditional overwrites, so the flag needed no behaviour
+  of its own, only parity. `tests/unit/skill-installer-flag-surface.bats` now drives every
+  installer with `--dry-run --update` so a fifth cannot drift, and carries a negative control
+  proving the check can fail.
+
+#### One failing conductor test no longer takes six others with it (2026-08-18)
+- The integration tests that drive the real bridge serialize on a `Mutex`, taken with
+  `lock().expect(..)`. A panicking test poisons that mutex, so every later test died on
+  the lock rather than running: a CI run showed one real assertion failure followed by
+  six `real bridge E2E lock` panics that said nothing about anything. The guard is now
+  poison-tolerant, matching `test_environment()` in the executor-bridge tests. The data
+  it protects is `()`, so no invariant can have been broken by the earlier panic.
+
+#### Conductor lease releases despite an inherited descriptor (2026-08-18)
+- `LeaseTransaction` released its flock by closing the descriptor, the same way the
+  evidence-attempt lease did before #3225. `with_current_lifecycle_lease` holds a
+  transaction across an arbitrary operation, and a fork duplicates the descriptor into
+  a child that shares the open file description the lock belongs to — so a child forked
+  during that window pins the lease for its own lifetime and the next conductor is told
+  the lease is `Held` (exit 20). It now unlocks explicitly. Latent: no observed symptom
+  is attributed to it, unlike #3225.
+- Moved `LeaseTransaction` to `resilience/lease_transaction.rs` beside
+  `heartbeat_tests.rs`, because `resilience.rs` is past the size ratchet and the fix
+  could not be added to it. 1,187 -> 1,147.
+
+### Fixed
+
+#### Evidence-attempt lease survives a fork (2026-08-18)
+- An evidence-attempt lease was released by closing its descriptor. The lane launcher
+  forks a supervisor that never execs, so a lease open at that moment is inherited --
+  and an flock belongs to the open file description, which fork duplicates, so closing
+  the owner's copy released nothing. The lane stayed owned for the supervisor's whole
+  life and the next attempt was told `another evidence attempt owns this exact lane`.
+  The lease now unlocks explicitly before closing, which reaches the shared
+  description. This had been failing `check_block_expansion`'s sibling suite in CI on
+  every PR since #3148.
+
+#### autospec trio goldens regenerated (2026-08-18)
+- `check_block_expansion` has been failing on `main` since #3213 changed the
+  `autospec` trio without regenerating its three block-expansion goldens; they
+  were last written by #3182 two days earlier. The bodies themselves are fine --
+  `derive-trio.sh --check skills/autospec` passes -- so this is the missed
+  regeneration, nothing more. Re-expanding all 113 goldens now finds zero
+  mismatches.
+
+#### Heartbeat renewal is waited for, not slept through (2026-08-18)
+- `heartbeat_survives_owned_transaction_contention_and_renews_later` slept a fixed
+  100 ms for a renewal published by a thread on a 10 ms interval, so a loaded machine
+  missed the window and the test failed on an assertion about the code under test.
+  It now polls for the renewal with a deadline, the same shape as the `wait_for`
+  helper beside it. Observed as a 1-of-811 failure locally.
+- Moved those ten tests into `resilience/heartbeat_tests.rs`, `include!`d the way
+  `policy_tests.rs` and its siblings already are: `resilience.rs` was 1,607 lines and
+  past the size ratchet, so the fix could not be added to it. Now 1,187.
+
+### Fixed
+
+#### OpenCode subagent mode (2026-08-18)
+- Declared `mode: primary` on the 14 OpenCode agent adapters that omitted it. An
+  absent `mode:` means `all`, which made every one of them spawnable through the
+  task tool: a child would then carry an 11k-21k-token skill body on top of its
+  own preamble. Measured on a 24 GiB llama.cpp node, four such children summed
+  288,970 tokens of peak against a 180,224-token KV pool and killed every live
+  session with `Context size has been exceeded`.
+
+#### Prose is not a public-surface change (2026-08-18)
+- `DOC_OUT_OF_SYNC` scanned markdown for flag and env-var shapes, so a CHANGELOG
+  entry that *mentions* a flag was read as that flag's introduction -- and since
+  `CHANGELOG.md` is deliberately not a doc for the requirement half, a
+  changelog-only change could never satisfy the gate it had just tripped.
+  Markdown now joins `*.diff` in the scan exemption. `CHANGELOG.md` still earns no
+  credit as documentation: if it did, every commit would satisfy the rule and the
+  rule would be dead.
+
+#### Path classifiers extracted (2026-08-18)
+- The three predicates that decide whether a changed path is doc, test or fixture
+  data now live in `scripts/lint-path-classifiers.sh`, sourced from
+  `lint-implementation.sh`. That file is past the 600-line ratchet and may not
+  grow, and the ratchet's own advice is to move code out rather than add to it.
+  It ships through the existing top-level `scripts/*.sh` glob, so no installer
+  change is needed -- deliberately not `scripts/lib/`, which `copy_repo_scripts`
+  excludes.
+
+#### Fixture diffs are data, not source (2026-08-18)
+- `TODO_LEFT` and `MOCK_DB` scanned `*.diff` fixtures line by line, so a fixture
+  that exists to contain a violation was reported as the violation -- which
+  blocked landing one. `DOC_OUT_OF_SYNC` and the density scanner already skipped
+  `*.diff`; these two now do too. `SECURITY` deliberately still scans them: a
+  leaked key is a leaked key wherever it sits.
+
+#### Nested tests count as tests (2026-08-18)
+- `is_test_file` matched only the repo-root `tests/` tree, so the 826 test files
+  living elsewhere -- 381 under `crates/autospec-cli`, 75 under
+  `skills/autospec-shared`, 51 under `skills/autospec-test` -- were invisible to
+  `ASSERTION_DENSITY`, `MOCK_DB` and the gated `VACUOUS_*` detectors, while
+  `TODO_LEFT` and `DOC_OUT_OF_SYNC` fired on them as if they were production
+  source. Measured on three real commits that touch nested tests, widening the
+  glob adds no new findings; it removes false positives and closes the hole.
+
+#### Nested docs count as docs (2026-08-18)
+- `lint-implementation.sh`'s `is_doc_file` anchored `README*`, `docs/*` and
+  `AGENTS.md` at the repo root, so none of the 63 non-root README files and no
+  subproject `docs/` tree counted. A public-surface change documented in the right
+  place still tripped `DOC_OUT_OF_SYNC`, and the only way to satisfy the gate was
+  to touch an unrelated root doc. `SKILL.md` was already matched at any depth;
+  the rest now are too.
+
 ### Added
 
 #### V62-V74 final platform release candidate (2026-07-06)

@@ -110,6 +110,7 @@ fn autonomous_executor_bridge_ring_sync_failure_never_advances_durable_cursor() 
 
 #[test]
 fn autonomous_executor_bridge_launches_once_and_streams_bounded_progress() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-progress");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -154,6 +155,7 @@ fn autonomous_executor_bridge_launches_once_and_streams_bounded_progress() {
 
 #[test]
 fn autonomous_executor_bridge_waits_for_delayed_descendant_stderr_before_success() {
+    let _environment = test_environment();
     // Break caught: publishing terminal success after the leader exits but before an inherited
     // stderr writer emits and closes its durable tail.
     let fixture = GitFixture::new("supervise-delayed-tail");

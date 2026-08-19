@@ -1,0 +1,14 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,5 @@
+ # Changelog
+ 
++- Regenerated the goldens after verifying the trio with
++  `derive-trio.sh --check skills/autospec`.
+diff --git a/scripts/thing.sh b/scripts/thing.sh
+--- a/scripts/thing.sh
++++ b/scripts/thing.sh
+@@ -1,2 +1,3 @@
+ #!/usr/bin/env bash
++thing --new-flag "$1"

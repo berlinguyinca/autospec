@@ -266,10 +266,18 @@ fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux lacks unprivileged user/network namespaces; macOS CI supplies live containment evidence"
+)]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential_files() {
     let _environment = test_environment();
-    let root = test_root("codex-permission-profile");
+    let root = std::env::temp_dir().join(format!(
+        "autospec-autonomous-executor-bridge-codex-permission-profile-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
     let home = root.join("home");
     let codex_home = root.join("custom-codex-home");
     let workspace = root.join("workspace");
@@ -287,53 +295,73 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
         fs::create_dir_all(codex_home.join(path)).expect("custom Codex state directory");
     }
     fs::create_dir_all(&workspace).expect("workspace");
-    fs::write(home.join(".aws/credentials"), "aws-secret\n").expect("AWS credential");
-    fs::write(home.join(".codex/auth.json"), "codex-secret\n").expect("Codex credential");
+    fs::write(
+        home.join(".aws/credentials"),
+        "autospec-sensitive-fixture\n",
+    )
+    .expect("AWS credential");
+    fs::write(
+        home.join(".codex/auth.json"),
+        "autospec-sensitive-fixture\n",
+    )
+    .expect("Codex credential");
     fs::write(
         home.join(".codex/config.toml"),
-        "model_reasoning_effort = \"high\"\n",
+        "# autospec-sensitive-fixture\nmodel_reasoning_effort = \"high\"\n",
     )
     .expect("Codex config");
-    fs::write(home.join(".codex/history.jsonl"), "history-secret\n").expect("Codex history");
+    fs::write(
+        home.join(".codex/history.jsonl"),
+        "autospec-sensitive-fixture\n",
+    )
+    .expect("Codex history");
     fs::write(
         home.join(".codex/archived_sessions/session.jsonl"),
-        "archive-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("Codex archived session");
     fs::write(
         home.join(".codex/sessions/session.jsonl"),
-        "session-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("Codex session");
     fs::write(
         home.join(".codex/shell_snapshots/snapshot.sh"),
-        "snapshot-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("Codex shell snapshot");
-    fs::write(home.join(".config/gh/hosts.yml"), "gh-secret\n").expect("GitHub credential");
-    fs::write(home.join(".ssh/id_ed25519"), "ssh-secret\n").expect("SSH credential");
-    fs::write(codex_home.join("auth.json"), "custom-codex-secret\n")
+    fs::write(
+        home.join(".config/gh/hosts.yml"),
+        "autospec-sensitive-fixture\n",
+    )
+    .expect("GitHub credential");
+    fs::write(home.join(".ssh/id_ed25519"), "autospec-sensitive-fixture\n")
+        .expect("SSH credential");
+    fs::write(codex_home.join("auth.json"), "autospec-sensitive-fixture\n")
         .expect("custom Codex credential");
     fs::write(
         codex_home.join("config.toml"),
-        "model_reasoning_effort = \"high\"\n",
+        "# autospec-sensitive-fixture\nmodel_reasoning_effort = \"high\"\n",
     )
     .expect("custom Codex config");
-    fs::write(codex_home.join("history.jsonl"), "custom-history-secret\n")
-        .expect("custom Codex history");
+    fs::write(
+        codex_home.join("history.jsonl"),
+        "autospec-sensitive-fixture\n",
+    )
+    .expect("custom Codex history");
     fs::write(
         codex_home.join("archived_sessions/session.jsonl"),
-        "custom-archive-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("custom Codex archived session");
     fs::write(
         codex_home.join("sessions/session.jsonl"),
-        "custom-session-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("custom Codex session");
     fs::write(
         codex_home.join("shell_snapshots/snapshot.sh"),
-        "custom-snapshot-secret\n",
+        "autospec-sensitive-fixture\n",
     )
     .expect("custom Codex shell snapshot");
     git(&workspace, &["init"]);
@@ -343,11 +371,26 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
     let codex = bridge::safe_executable(Path::new("codex"), &env)
         .expect("Codex CLI is required for its permission-profile regression");
     let policy = bridge::CodexSandboxPolicy::NetworkPermissionProfile;
-    let previous_codex_home = std::env::var_os("CODEX_HOME");
-    std::env::set_var("CODEX_HOME", &codex_home);
     let profile_args = policy
-        .permission_profile_args(&codex)
+        .permission_profile_args_for_roots(&codex, &home, Some(&codex_home))
         .expect("permission profile arguments");
+    let credential_paths = [
+        home.join(".aws/credentials"),
+        home.join(".codex/auth.json"),
+        home.join(".codex/config.toml"),
+        home.join(".codex/history.jsonl"),
+        home.join(".codex/archived_sessions/session.jsonl"),
+        home.join(".codex/sessions/session.jsonl"),
+        home.join(".codex/shell_snapshots/snapshot.sh"),
+        home.join(".config/gh/hosts.yml"),
+        home.join(".ssh/id_ed25519"),
+        codex_home.join("auth.json"),
+        codex_home.join("config.toml"),
+        codex_home.join("history.jsonl"),
+        codex_home.join("archived_sessions/session.jsonl"),
+        codex_home.join("sessions/session.jsonl"),
+        codex_home.join("shell_snapshots/snapshot.sh"),
+    ];
     let mut command = Command::new(&codex);
     command
         .arg("sandbox")
@@ -360,8 +403,10 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
             "--",
             "/bin/sh",
             "-c",
-            "set -eu\nprintf written > workspace-proof\nfor path in \"$HOME/.aws/credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.codex/history.jsonl\" \"$HOME/.codex/archived_sessions/session.jsonl\" \"$HOME/.codex/sessions/session.jsonl\" \"$HOME/.codex/shell_snapshots/snapshot.sh\" \"$HOME/.config/gh/hosts.yml\" \"$HOME/.ssh/id_ed25519\" \"$CODEX_HOME/auth.json\" \"$CODEX_HOME/config.toml\" \"$CODEX_HOME/history.jsonl\" \"$CODEX_HOME/archived_sessions/session.jsonl\" \"$CODEX_HOME/sessions/session.jsonl\" \"$CODEX_HOME/shell_snapshots/snapshot.sh\"; do if /bin/cat \"$path\" >/dev/null 2>&1; then exit 41; fi; done\ntest -z \"${CODEX_API_KEY:-}\"\ntest -z \"${OPENAI_API_KEY:-}\"",
+            "set -eu\nprintf written > workspace-proof\nfor path in \"$@\"; do if /bin/grep -F autospec-sensitive-fixture \"$path\" >/dev/null 2>&1; then printf 'credential readable: %s\\n' \"$path\" >&2; exit 41; fi; done\nif test -n \"${CODEX_API_KEY:-}\"; then printf 'CODEX_API_KEY leaked\\n' >&2; exit 42; fi\nif test -n \"${OPENAI_API_KEY:-}\"; then printf 'OPENAI_API_KEY leaked\\n' >&2; exit 42; fi",
+            "autospec-credential-probe",
         ])
+        .args(&credential_paths)
         .env("HOME", &home)
         .env("CODEX_HOME", &codex_home)
         .env("CODEX_API_KEY", "host-only-codex-key")
@@ -369,14 +414,11 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
     let output = command
         .output()
         .expect("run Codex permission-profile sandbox");
-    match previous_codex_home {
-        Some(value) => std::env::set_var("CODEX_HOME", value),
-        None => std::env::remove_var("CODEX_HOME"),
-    }
 
     assert!(
         output.status.success(),
-        "permission profile failed: stdout={} stderr={}",
+        "permission profile failed with {}: stdout={} stderr={}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -384,14 +426,22 @@ fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential
         fs::read_to_string(workspace.join("workspace-proof")).expect("workspace write"),
         "written"
     );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("autospec-sensitive-fixture"),
+        "sandbox stdout disclosed credential fixture content"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("autospec-sensitive-fixture"),
+        "sandbox stderr disclosed credential fixture content"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
     let root = test_root("codex-sandbox-loopback-blocked");
-    let codex = root.join("codex");
-    for (stderr, expected) in [
+    for (index, (stderr, expected)) in [
         (
             "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
             "RTM_NEWADDR",
@@ -404,7 +454,8 @@ fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
             "thread 'main' panicked at sandbox.rs:1\nbwrap: setting up uid map: Operation not permitted\nnote: run with backtrace",
             "setting up uid map",
         ),
-    ] {
+    ].into_iter().enumerate() {
+        let codex = root.join(format!("codex-{index}"));
         write_executable(
             &codex,
             &format!("#!/bin/sh\nprintf '%s\\n' '{}' >&2\nexit 1\n", stderr),
@@ -420,6 +471,7 @@ fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_blocks_non_loopback_probe_failures() {
     let root = test_root("codex-sandbox-unsupported");
