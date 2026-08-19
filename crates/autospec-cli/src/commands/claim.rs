@@ -7124,98 +7124,6 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-fn unavailable_claim<T>(
-    issue: u64,
-    repo: &str,
-    worker_id: Option<&str>,
-    reason: &str,
-) -> Result<T, ConductorClaimError> {
-    let worker_id = worker_id
-        .map(|value| format!(",\"worker_id\":\"{}\"", json_escape(value)))
-        .unwrap_or_default();
-    Err(ConductorClaimError::Deferred {
-        json: format!(
-            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
-            json_escape(repo),
-            json_escape(reason),
-        ),
-        exit_code: 2,
-    })
-}
-
-fn heartbeat_publication_deferred<T>(
-    issue: u64,
-    repo: &str,
-    worker_id: &str,
-    claim_id: &str,
-) -> Result<T, ConductorClaimError> {
-    Err(ConductorClaimError::Deferred {
-        json: format!(
-            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"heartbeat_write_failed\"}}",
-            json_escape(repo),
-            json_escape(worker_id),
-            json_escape(claim_id),
-        ),
-        exit_code: 2,
-    })
-}
-
-/// Refuse an acquire whose predecessor heartbeat could not be retired, naming
-/// the predecessor's claim id.
-///
-/// Recovery is `claim release --claim-id <predecessor>`, so withholding the id
-/// forces the operator to scrape it out of the run-state comment history.
-fn unavailable_predecessor_claim<T>(
-    issue: u64,
-    repo: &str,
-    worker_id: &str,
-    claim_id: &str,
-) -> Result<T, ConductorClaimError> {
-    Err(ConductorClaimError::Deferred {
-        json: format!(
-            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\",\"reason\":\"predecessor_heartbeat_retirement_failed\"}}",
-            json_escape(repo),
-            json_escape(worker_id),
-            json_escape(claim_id),
-        ),
-        exit_code: 2,
-    })
-}
-
-fn unavailable_safety_claim<T>(
-    issue: u64,
-    repo: &str,
-    worker_id: &str,
-    safety_reason: &str,
-) -> Result<T, ConductorClaimError> {
-    Err(ConductorClaimError::Deferred {
-        json: format!(
-            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"safety_gate_failed\",\"safety_gate\":{{\"ok\":false,\"reason\":\"{}\"}}}}",
-            json_escape(repo),
-            json_escape(worker_id),
-            json_escape(safety_reason),
-        ),
-        exit_code: 2,
-    })
-}
-
-fn unavailable_claim_with_observed_owner<T>(
-    issue: u64,
-    repo: &str,
-    worker_id: &str,
-    observed_owner: &str,
-) -> Result<T, ConductorClaimError> {
-    Err(ConductorClaimError::Deferred {
-        json: format!(
-            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"claim_lost\",\"observed_owner\":\"{}\"}}",
-            json_escape(repo),
-            json_escape(worker_id),
-            json_escape(observed_owner),
-        ),
-        exit_code: 2,
-    })
-}
-
 fn print_help() {
     println!(
         "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
@@ -7228,6 +7136,11 @@ fn print_state_help() {
     );
 }
 
+mod refusals;
+use refusals::{
+    heartbeat_publication_deferred, unavailable_claim, unavailable_claim_with_observed_owner,
+    unavailable_predecessor_claim, unavailable_safety_claim,
+};
 mod heartbeat_liveness;
 #[cfg(any(not(target_os = "linux"), test))]
 mod heartbeat_portable;
