@@ -82,10 +82,30 @@ def pump(src: socket.socket, dst: socket.socket) -> None:
             pass
 
 
+# When the wait finally expires, say so in a way a client can report. Closing
+# the connection silently is indistinguishable from a crash, a firewall, or a
+# bug in the client -- and this is the one moment the operator most needs to
+# know it is the cluster and not their editor.
+GAVE_UP = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Retry-After: 60\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+    b'{"error":{"type":"upstream_unavailable","message":'
+    b'"the hive tunnel has had no upstream for the whole hold window; '
+    b'check `opencode_hive status` -- the job is probably queued"}}'
+)
+
+
 def handle(client: socket.socket, upstream_port: int, wait_s: int) -> None:
     up = connect_upstream(upstream_port, time.time() + wait_s)
     if up is None:
-        log("gave up waiting for upstream; dropping a client connection")
+        log("gave up waiting for upstream; answering 503")
+        try:
+            client.sendall(GAVE_UP)
+        except OSError:
+            pass
         client.close()
         return
     with client, up:

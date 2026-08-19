@@ -198,13 +198,24 @@ do_status() {
 
 do_stop() {
   stop_proxy
-  if [ -s "${STATE}/tunnel.pid" ]; then
-    stop_tunnel
-    say "tunnel and proxy closed"
-  fi
+  # Unconditionally, not only when a pid file exists. stop_tunnel is also what
+  # reaps an ORPHANED ssh forward -- one whose supervisor is already gone -- and
+  # an orphan keeps holding the local port. Skipping this when the pid file is
+  # missing is precisely how a later reconnect finds the port taken, backs off,
+  # and takes 24 seconds instead of 4.
+  stop_tunnel
+  say "tunnel and proxy closed"
+
+  # Cancel anything queued as well as running: a `stop` that leaves a PENDING
+  # job behind means the next `up` silently adopts an allocation the operator
+  # believed they had released.
   local jid; jid="$(job_id || true)"
   if [ -n "$jid" ]; then
-    hssh <<< "scancel ${jid}" && say "cancelled job ${jid}"
+    hssh <<< "scancel ${jid}" && say "cancelled running job ${jid}"
+  fi
+  local queued; queued="$(job_any | awk '{print $1}' | tail -1 || true)"
+  if [ -n "$queued" ]; then
+    hssh <<< "scancel ${queued}" && say "cancelled queued job ${queued}"
   fi
 }
 
