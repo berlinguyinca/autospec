@@ -174,6 +174,21 @@ rejects `="$1"` / `="$2"` in the block; put the shell in a `.sh` file instead.
 
 Generated child issues are sized for 32B-class local LLMs. Pre-staged context, sectional spec anchors, checkbox AC, one Primary smoke test per inner loop.
 
+The nodes that serve those models live in [`llm/`](llm/) — start at
+[`llm/README.md`](llm/README.md). `llm/QWEN-NODE-SPEC.md` is the portable
+method (hardware audit, quantisation from memory rather than name, measuring a
+context ceiling that survives a prompt actually filling it, serving concurrent
+sessions); `llm/linux-qwen38/` is the measured RTX 4090 build and its operator
+toolkit; `llm/linux-qwen38/hive/` deploys the same stack onto the UC Davis
+Slurm cluster with one command.
+
+Two results from that work bind anything that sizes a local context window:
+the usable window is **client-specific** — the context present before any work
+begins was 14,492 tokens median on OpenCode and 39,655 on Claude Code, so a
+tier below the client's p90 floor cannot start a session at all — and a shared
+KV pool has **no admission control**, so over-subscribing it fails every live
+session rather than the greedy one.
+
 ## Anti-loop guardrails
 
 Per spec §5.1, both the Phase 1 research subagent and the Phase 4

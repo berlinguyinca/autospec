@@ -47,6 +47,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Quality / framework discipline
 
+- [Q5 vs Q8 measured, not assumed](feedback_quant_quality_measured_not_assumed.md) — 40/40 both with zero disagreements; separate infrastructure failures from wrong answers, and enable reasoning or the test has no power
+
 - [Generic failure diagnostics flow](feedback_generic_failure_diagnostics_flow.md) — separate state from reason, group correlated failures, and excerpt logs around high-signal anchors
 - [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
 - [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives
@@ -61,6 +63,14 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
 
 # Infrastructure gotchas
+
+- [GPU capability registry](reference_gpu_capability_registry.md) — self-populating record of every GPU run on; observed/measured/assumed kept apart, and roofline x 0.80 predicts an untouched card to ~10%
+
+- [hive HPC cluster layout](reference_hive_hpc_cluster.md) — GPU jobs go to `-p low -A publicgrp --gres=...`; the gpu-* partitions reject everything and metabolomicsgrp has gres/gpu=0
+
+- [Context floor kills small tiers](feedback_context_floor_kills_small_tiers.md) — measure the before-any-work floor (OpenCode p90 37,873) before picking a window; it is client-specific and invisible in conversation length
+
+- [Shared KV pool has no admission control](feedback_shared_kv_pool_has_no_admission_control.md) — llama.cpp `kv-unified` lets sessions differ in size but over-subscription kills every live session; ration client-side
 
 - [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`
 - [No tree mutation during background validate](feedback_no_tree_mutation_during_bg_validate.md) — switching/deleting branches while a background validate.sh runs corrupts its checkout mid-run → false "required file missing"; run it in a dedicated detached worktree and confirm the gate's OK line, not just the (echo-masked) exit code

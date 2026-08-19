@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "GPUs this project has actually run on, keyed by the name nvidia-smi",
+    "reports. Populated by scripts/gpu-registry.py, which every serving job",
+    "calls -- so a card nobody has seen before is recorded the first time a",
+    "job lands on it, rather than being guessed at later.",
+    "",
+    "vram_mib and compute_cap are OBSERVED on the device. bandwidth_gbs is the",
+    "vendor figure and is the one number here that is not measured; it is what",
+    "the roofline prediction divides into the weight size. measured_tps holds",
+    "real single-stream decode rates per quantisation, which is what turns the",
+    "prediction into a calibration: this project has hit 79.7% and 80.0% of the",
+    "roofline on two very different cards, so bandwidth / weight_bytes * 0.8",
+    "predicts an untouched machine to within about 10%."
+  ],
+  "roofline_efficiency": 0.8,
+  "gpus": {
+    "NVIDIA GeForce RTX 4090": {
+      "vram_mib": 24564,
+      "compute_cap": "8.9",
+      "bandwidth_gbs": 1008,
+      "fp8": true,
+      "nvfp4": false,
+      "measured_tps": {
+        "Qwen3.8-27B-Q5_K_M.gguf": 40.55
+      },
+      "seen_at": [
+        "local-workstation"
+      ]
+    },
+    "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": {
+      "vram_mib": 97887,
+      "compute_cap": "12.0",
+      "bandwidth_gbs": 1792,
+      "fp8": true,
+      "nvfp4": true,
+      "measured_tps": {
+        "Qwen3.8-27B-UD-Q8_K_XL.gguf": 44.99
+      },
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA L40S": {
+      "vram_mib": 46068,
+      "compute_cap": "8.9",
+      "bandwidth_gbs": 864,
+      "fp8": true,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA A100-SXM4-80GB": {
+      "vram_mib": 81920,
+      "compute_cap": "8.0",
+      "bandwidth_gbs": 2039,
+      "fp8": false,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA A100 80GB PCIe": {
+      "vram_mib": 81920,
+      "compute_cap": "8.0",
+      "bandwidth_gbs": 1935,
+      "fp8": false,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA A100-PCIE-40GB": {
+      "vram_mib": 40960,
+      "compute_cap": "8.0",
+      "bandwidth_gbs": 1555,
+      "fp8": false,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA RTX A6000": {
+      "vram_mib": 49140,
+      "compute_cap": "8.6",
+      "bandwidth_gbs": 768,
+      "fp8": false,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    },
+    "NVIDIA RTX 5000 Ada Generation": {
+      "vram_mib": 32760,
+      "compute_cap": "8.9",
+      "bandwidth_gbs": 576,
+      "fp8": true,
+      "nvfp4": false,
+      "measured_tps": {},
+      "seen_at": [
+        "hive.hpc.ucdavis.edu"
+      ]
+    }
+  }
+}
