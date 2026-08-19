@@ -9,6 +9,12 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### build-test no longer hangs in its bootstrap step (2026-08-19)
+- #3241 added `python3 -m pip install pytest pyyaml` to `build-test`, which has no
+  `actions/setup-python`. That targets the runner's externally-managed system Python (PEP 668);
+  instead of failing, the step hung for 87 minutes on `bf70d66b` and the job was killed before
+  reaching a single test. Installed through apt now, which needs no venv and cannot prompt.
+
 #### build-test reports every failing test, and can run the python gate (2026-08-18)
 - `cargo test --workspace` is fail-fast, so the job stopped at the first failing binary. One
   long-standing failure hid four other test binaries entirely — `main` reported a single failing
