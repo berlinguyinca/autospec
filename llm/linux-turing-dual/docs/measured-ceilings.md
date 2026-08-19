@@ -266,12 +266,75 @@ the bearer key and compares it with `hmac.compare_digest`. Counters are cumulati
 since the server started and reset when a model switch reloads it — which is why
 the page says so in its own footer rather than looking like data loss.
 
-## Model switch cost
+## Model switch cost, measured
 
-_Filled by Task 12 Step 7._
+`--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.
+
+| action | measured |
+|---|---:|
+| 9B cold (includes reload) | **4.2 s** |
+| 9B warm | 183 ms |
+| 27B cold (includes reload) | **7.0 s** |
+| 27B warm | 520 ms |
+| `qwen3.8-27b-40k` **alias** | 538 ms |
+
+The alias figure is the point: it matches the warm 27B, so switching context tier
+costs nothing because it resolves to the same resident weights. Switching *model*
+costs one reload, which is seconds rather than minutes.
+
+VRAM confirms the layouts are doing what the presets claim:
+
+| resident | GPU0 | GPU1 |
+|---|---:|---:|
+| 27B (layer-split, `tensor-split 1,1`) | 8628 MiB | 9714 MiB |
+| 9B (pinned, `tensor-split 1,0`) | 6600 MiB | **160 MiB** |
 
 ## Measured throughput and verified ceilings
 
-_Filled by Task 13. Until then the only figures available are roofline
-predictions at the project's calibrated 0.8 efficiency: ~30 tok/s for the 27B at
-UD-Q4_K_M and ~87 tok/s for the 9B at Q4_K_M, from 616 GB/s per card._
+Predictions replaced by measurements. The roofline was `616 GB/s / weight_bytes
+x 0.8`.
+
+| model | predicted | **measured** | % of prediction | % of roofline |
+|---|---:|---:|---:|---:|
+| 27B UD-Q4_K_M, both cards | 29.9 | **28.70 tok/s** | 96% | 76.7% |
+| 9B Q4_K_M, one card | 86.8 | **77.92 tok/s** | 90% | 71.8% |
+
+Prompt processing was 50-64 tok/s for the 27B and 157-195 tok/s for the 9B.
+
+Turing lands a little under the project's 0.8 calibration, where a 4090 and an
+RTX PRO 6000 both hit ~80%. Recorded rather than explained away: the roofline
+constant is a calibration across cards, and this is a data point that it is
+slightly optimistic for sm_75.
+
+**Layer split does not sum bandwidth.** The 27B figure is what one card's
+616 GB/s yields against 16.46 GB of weights; the second card adds capacity, not
+speed. That is why the 9B — which fits one card and is a third of the size — is
+2.7x faster.
+
+### Context, verified at length
+
+| claim | result |
+|---|---|
+| needle at ~14k tokens (control) | retrieved |
+| needle at **39,910** tokens | **retrieved**, answer exact |
+| **two concurrent** 39,909-token sessions | **both retrieved**, HTTP 200 |
+| KV-cache evictions during the concurrent run | **zero** |
+
+The concurrent pair used 79,818 of the 81,920-token pool. The failure mode this
+design guarded against — a shared pool with no admission control killing every
+live session at once — did not occur, because two 40k seats is exactly one full
+pool by arithmetic rather than by luck. Wall clock was 114 s for both.
+
+VRAM at 40k depth was 18,342 of 22,528 MiB, leaving ~4.1 GiB free — more headroom
+than the 2.9 GiB the budget predicted, because a headless host returns ~444 MiB
+per card.
+
+### Hybrid reasoning changes what a client must send
+
+Both models emit reasoning before content. A request with `max_tokens: 16`
+returned **empty content** having spent all 16 tokens reasoning; the same request
+with `max_tokens: 400` returned `OK` after 91 characters of reasoning, and with
+`chat_template_kwargs: {enable_thinking: false}` returned `OK` in **2 tokens**.
+
+This is not a defect, but a client with a tight token cap will see empty replies
+and conclude the node is broken. Either allow headroom or disable thinking.

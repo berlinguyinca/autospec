@@ -24,7 +24,12 @@
 # the smallest thing on the box.
 : "${QT_MODELS_DIR:=<nvme-array>/qwen-gguf}"
 
-# The inference port, and the stats dashboard's port. Distinct, because the
-# dashboard is a separate unit that must be firewalled separately.
+# The inference port.
 : "${QT_PORT:=8080}"
+
+# The dashboard binds its OWN address and port. Kept separate from
+# QT_NODE_ADDR because the two are exposed to different audiences: the
+# inference endpoint may need to be reachable more widely than a page that
+# shows what the node is doing.
+: "${QT_DASH_ADDR:=<dash-addr>}"
 : "${QT_DASH_PORT:=8081}"

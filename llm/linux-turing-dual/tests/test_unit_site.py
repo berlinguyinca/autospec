@@ -20,6 +20,7 @@ COMPLETE = textwrap.dedent('''
     : "${QT_UPLINK_IF:=eth1}"
     : "${QT_MODELS_DIR:=/srv/models}"
     : "${QT_PORT:=8080}"
+    : "${QT_DASH_ADDR:=192.0.2.6}"
     : "${QT_DASH_PORT:=8081}"
 ''')
 
@@ -95,3 +96,26 @@ def test_example_config_is_itself_rejected(tmp_path):
         ["bash", "-c", f'QT_SITE_CONF="{example}"; . "{SITE}"; require_site'],
         capture_output=True, text=True)
     assert r.returncode == 78
+
+
+def test_system_path_is_preferred_over_home(tmp_path, monkeypatch):
+    """The service runs with ProtectHome=true and cannot see /home at all."""
+    etc = tmp_path / "etc"; etc.mkdir()
+    home = tmp_path / "home" / ".config" / "qwen-turing"; home.mkdir(parents=True)
+    (home / "site.conf").write_text(COMPLETE.replace("8080", "1111"))
+    # No /etc file here, so the home one must be found via XDG.
+    r = subprocess.run(
+        ["bash", "-c", f'unset QT_SITE_CONF; XDG_CONFIG_HOME="{tmp_path}/home/.config"; '
+                       f'. "{SITE}"; require_site && echo "$QT_PORT"'],
+        capture_output=True, text=True)
+    assert r.stdout.strip() == "1111", r.stderr
+
+
+def test_error_names_the_system_path_when_nothing_is_readable(tmp_path):
+    """An unactionable error is worse than none; it must say where to write."""
+    r = subprocess.run(
+        ["bash", "-c", f'unset QT_SITE_CONF; XDG_CONFIG_HOME="{tmp_path}/nowhere"; '
+                       f'HOME="{tmp_path}/nowhere"; . "{SITE}"; require_site'],
+        capture_output=True, text=True)
+    assert r.returncode == 78
+    assert "/etc/qwen-turing/site.conf" in r.stderr

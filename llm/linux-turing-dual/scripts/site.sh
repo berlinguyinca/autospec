@@ -16,7 +16,27 @@
 # trap: both leak into the caller's shell. require_site() returns 78
 # (EX_CONFIG) and callers use `require_site || exit $?`.
 
-QT_SITE_CONF="${QT_SITE_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-turing/site.conf}"
+# Search order, first readable wins:
+#   1. $QT_SITE_CONF          explicit override, and what the tests use
+#   2. /etc/qwen-turing/      SYSTEM config -- this is the one the service reads
+#   3. ~/.config/qwen-turing/ per-operator, for running the tools by hand
+#
+# The system path is not a nicety. The unit sets ProtectHome=true, so the service
+# user cannot see /home at all; a config that lives only in an operator's home
+# works from the shell and then fails inside systemd with an empty bind address.
+if [ -z "${QT_SITE_CONF:-}" ]; then
+  for _qt_cand in \
+      "/etc/qwen-turing/site.conf" \
+      "${XDG_CONFIG_HOME:-$HOME/.config}/qwen-turing/site.conf"; do
+    if [ -r "$_qt_cand" ]; then
+      QT_SITE_CONF="$_qt_cand"
+      break
+    fi
+  done
+  # Nothing readable: still name the system path, so the error is actionable.
+  QT_SITE_CONF="${QT_SITE_CONF:-/etc/qwen-turing/site.conf}"
+  unset _qt_cand
+fi
 
 if [ -r "$QT_SITE_CONF" ]; then
   # shellcheck disable=SC1090
@@ -24,7 +44,10 @@ if [ -r "$QT_SITE_CONF" ]; then
 fi
 
 # Every value the node cannot start without.
-QT_REQUIRED_VARS="QT_NODE_ADDR QT_UPLINK_IF QT_MODELS_DIR QT_PORT QT_DASH_PORT"
+# QT_DASH_ADDR is separate from QT_NODE_ADDR on purpose: the inference endpoint
+# and the stats dashboard are exposed to different audiences, so they must be
+# able to bind different interfaces rather than sharing one address.
+QT_REQUIRED_VARS="QT_NODE_ADDR QT_UPLINK_IF QT_MODELS_DIR QT_PORT QT_DASH_ADDR QT_DASH_PORT"
 
 require_site() {
   local missing="" v val
@@ -49,6 +72,6 @@ require_site() {
     return 78
   fi
 
-  export QT_NODE_ADDR QT_UPLINK_IF QT_MODELS_DIR QT_PORT QT_DASH_PORT
+  export QT_NODE_ADDR QT_UPLINK_IF QT_MODELS_DIR QT_PORT QT_DASH_ADDR QT_DASH_PORT
   return 0
 }

@@ -81,13 +81,15 @@ def parse_nvidia_csv(text: str) -> list[dict]:
     return gpus
 
 
-def summarise(metrics: dict[str, float], gpus: list[dict]) -> dict:
+def summarise(metrics: dict[str, float], gpus: list[dict],
+              model: str | None = None) -> dict:
     """Join the two sources into what the page renders."""
     def m(name: str, default: float = 0.0) -> float:
         return metrics.get(f"llamacpp:{name}", default)
 
     return {
         "llama_up": bool(metrics),
+        "model": model,
         "prompt_tokens_total": int(m("prompt_tokens_total")),
         "generated_tokens_total": int(m("tokens_predicted_total")),
         "tokens_per_second": m("predicted_tokens_seconds"),
@@ -100,6 +102,31 @@ def summarise(metrics: dict[str, float], gpus: list[dict]) -> dict:
         "gpu_used_mem_mib": sum(g["mem_used_mib"] or 0 for g in gpus),
         "gpus": gpus,
     }
+
+
+def pick_loaded_model(models: dict) -> str | None:
+    """Which model id is currently resident.
+
+    In router mode /metrics REQUIRES ?model=<id> and returns HTTP 400 without it,
+    so there is no single endpoint that just reports the node's throughput. The
+    router publishes each preset with a status.value of "loaded" or "unloaded";
+    with --models-max 1 at most one is loaded at a time.
+    """
+    for m in (models or {}).get("data", []):
+        if (m.get("status") or {}).get("value") == "loaded":
+            return m.get("id")
+    return None
+
+
+def read_models(base: str, api_key: str | None, timeout: float = 4.0) -> dict:
+    req = urllib.request.Request(base.rstrip("/") + "/v1/models")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return {}
 
 
 def read_metrics(url: str, api_key: str | None, timeout: float = 4.0) -> dict[str, float]:
@@ -138,7 +165,12 @@ def main() -> int:
         except OSError:
             key = None
 
-    payload = summarise(read_metrics(args.metrics_url, key), read_gpus())
+    # Two steps, because router mode has no unqualified /metrics: discover the
+    # resident model, then ask for that model's metrics.
+    base = args.metrics_url.rsplit("/metrics", 1)[0]
+    model = pick_loaded_model(read_models(base, key))
+    url = f"{args.metrics_url}?model={model}" if model else args.metrics_url
+    payload = summarise(read_metrics(url, key), read_gpus(), model)
     json.dump(payload, sys.stdout, indent=2)
     print()
     return 0

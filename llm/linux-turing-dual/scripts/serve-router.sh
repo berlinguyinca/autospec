@@ -80,8 +80,13 @@ echo "starting profile=${PROFILE} version=${QT_PROFILE_VERSION} runtime=${QT_RUN
 echo "  presets=${RENDERED} max-loaded=${QT_ROUTER_MAX_LOADED}"
 echo "  bind=${QT_NODE_ADDR}:${QT_PORT}"
 
+# --models-preset, NOT --models. There is no --models flag; the earlier value
+# was arrived at by grepping the docs for "--models", which matches inside
+# --models-preset, --models-dir and --models-max. The binary rejected it with
+# "invalid argument: --models" and restart-looped. Verify long options against
+# the BUILT BINARY by exact match -- install-node.sh now does exactly that.
 exec "${QT_LLAMA_DIR}/llama-server" \
-  --models "${RENDERED}" \
+  --models-preset "${RENDERED}" \
   --models-max "${QT_ROUTER_MAX_LOADED}" \
   --host "${QT_NODE_ADDR}" \
   --port "${QT_PORT}" \

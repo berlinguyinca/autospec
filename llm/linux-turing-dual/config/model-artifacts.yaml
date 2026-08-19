@@ -41,9 +41,11 @@ artifacts:
       bytes_per_token_q4_0: 18432
     context:
       n_ctx_train: 262144
-      # Null until a real prompt retrieves something at length. "Allocates",
-      # "starts" and "works at length" are three different claims.
-      verified_max: null
+      # Verified by retrieval, not by allocation: a needle placed at 60% depth
+      # was returned from a 39,910-token prompt. Two concurrent 39,909-token
+      # sessions also completed cleanly (79,818 of the 81,920 pool) with no
+      # KV-cache eviction.
+      verified_max: 39910
 
   - id: turing-dual-9b-q4km-v1
     role: fast-tier
@@ -73,6 +75,8 @@ artifacts:
       bytes_per_token_q4_0: 9216
     context:
       n_ctx_train: 262144
+      # Not yet probed at length on this node -- the 27B is the primary and got
+      # the measurement budget. Stays null rather than inheriting the 27B's.
       verified_max: null
 
 # Considered and rejected, so the decision is not re-litigated later.

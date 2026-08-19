@@ -79,18 +79,36 @@
       <tr><td>Processing now</td><td id="rp">–</td></tr>
       <tr><td>Deferred (queued)</td><td id="rd">–</td></tr>
       <tr><td>VRAM used / total</td><td id="vram">–</td></tr>
+      <tr><td>Resident model</td><td id="model">–</td></tr>
     </table>
   </div>
 </main>
 
 <footer>
-  Polls <code>/api/stats</code> every 2 s. Counters are cumulative since the
+  Polls <code>/api/stats</code> every 2 s using a key held in this browser's
+  local storage &mdash; <a href="#" id="rekey">change it</a>. Counters are cumulative since the
   server started and reset when a model switch reloads it. A gap here usually
   means a model is loading, not that anything failed.
 </footer>
 
 <script>
 const $ = id => document.getElementById(id);
+
+// The API key lives in localStorage so the page stays authenticated without
+// the server growing a session/cookie story. /api/stats is key-protected; this
+// is only about giving a browser a way to present the key it already has.
+const KEYNAME = 'qt-api-key';
+function getKey(){ return localStorage.getItem(KEYNAME) || ''; }
+function askKey(msg){
+  const k = window.prompt((msg || 'Node API key') +
+    '\n\nRetrieve it on the node with:\n  sudo cat /etc/qwen-turing.key', getKey());
+  if(k !== null) localStorage.setItem(KEYNAME, k.trim());
+  return getKey();
+}
+function authHeaders(){
+  const k = getKey();
+  return k ? {'Authorization': 'Bearer ' + k} : {};
+}
 const n = v => (v ?? 0).toLocaleString();
 
 function gpuCard(g){
@@ -110,11 +128,17 @@ function gpuCard(g){
 
 async function tick(){
   try{
-    const r = await fetch('/api/stats', {cache:'no-store'});
+    const r = await fetch('/api/stats', {cache:'no-store', headers: authHeaders()});
     if(r.status === 401){
-      $('err').textContent = 'Unauthorised — this dashboard needs the node API key.';
-      $('err').classList.remove('hide');
       $('dot').className = 'dot down'; $('state').textContent = 'unauthorised';
+      $('err').innerHTML = 'Unauthorised — the node API key is missing or wrong. ' +
+        '<a href="#" id="setkey">Enter it</a>.';
+      $('err').classList.remove('hide');
+      const a = $('setkey');
+      if(a) a.onclick = e => { e.preventDefault();
+        if(askKey('Wrong or missing key')) tick(); };
+      if(!getKey() && !window.__qtAsked){ window.__qtAsked = true;
+        if(askKey()) tick(); }
       return;
     }
     if(!r.ok) throw new Error('HTTP ' + r.status);
@@ -122,7 +146,7 @@ async function tick(){
     $('err').classList.add('hide');
 
     $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
-    $('state').textContent = d.llama_up ? 'model resident' : 'model not loaded';
+    $('state').textContent = d.llama_up ? (d.model || 'model resident') : 'model not loaded';
 
     $('pt').textContent  = n(d.prompt_tokens_total);
     $('gt').textContent  = n(d.generated_tokens_total);
@@ -133,6 +157,7 @@ async function tick(){
     $('rp').textContent = n(d.requests_processing);
     $('rd').textContent = n(d.requests_deferred);
     $('vram').textContent = n(d.gpu_used_mem_mib) + ' / ' + n(d.gpu_total_mem_mib) + ' MiB';
+    $('model').textContent = d.model || 'none loaded';
     $('gpus').innerHTML = (d.gpus || []).map(gpuCard).join('') ||
       '<div class="card"><div class="meta">no GPUs reported</div></div>';
     $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
@@ -143,6 +168,8 @@ async function tick(){
     $('err').classList.remove('hide');
   }
 }
+const rk = $('rekey');
+if(rk) rk.onclick = e => { e.preventDefault(); askKey('Node API key'); tick(); };
 tick(); setInterval(tick, 2000);
 </script>
 </body>

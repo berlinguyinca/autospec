@@ -131,3 +131,41 @@ def test_summarise_survives_a_dead_server():
 def test_summarise_marks_llama_up_when_metrics_present():
     m = load()
     assert m.summarise(m.parse_prometheus(PROM), [])["llama_up"] is True
+
+
+# --- router-mode model discovery -------------------------------------------
+# /metrics returns HTTP 400 without ?model=<id> in router mode, so the collector
+# has to find the resident model first. With --models-max 1 at most one is loaded.
+
+MODELS = {"data": [
+    {"id": "qwen3.5-9b",  "status": {"value": "unloaded"}},
+    {"id": "qwen3.8-27b", "status": {"value": "loaded"}},
+]}
+
+
+def test_picks_the_loaded_model():
+    assert load().pick_loaded_model(MODELS) == "qwen3.8-27b"
+
+
+def test_none_loaded_returns_none_rather_than_guessing():
+    m = load()
+    idle = {"data": [{"id": "a", "status": {"value": "unloaded"}}]}
+    assert m.pick_loaded_model(idle) is None
+
+
+def test_empty_or_malformed_model_list_is_none():
+    m = load()
+    assert m.pick_loaded_model({}) is None
+    assert m.pick_loaded_model({"data": []}) is None
+    assert m.pick_loaded_model({"data": [{"id": "x"}]}) is None
+
+
+def test_summarise_reports_the_model_name():
+    m = load()
+    s = m.summarise(m.parse_prometheus(PROM), [], "qwen3.8-27b")
+    assert s["model"] == "qwen3.8-27b"
+
+
+def test_summarise_model_defaults_to_none():
+    m = load()
+    assert m.summarise({}, [])["model"] is None

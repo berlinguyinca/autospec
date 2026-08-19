@@ -72,9 +72,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorised():
                 self._send(401, b'{"error":"unauthorised"}', "application/json")
                 return
+            # Router mode has no unqualified /metrics -- it returns HTTP 400
+            # without ?model=<id>. So discover the resident model first.
+            base = self.metrics_url.rsplit("/metrics", 1)[0]
+            model = COLLECT.pick_loaded_model(
+                COLLECT.read_models(base, self.api_key))
+            url = (f"{self.metrics_url}?model={model}" if model
+                   else self.metrics_url)
             payload = COLLECT.summarise(
-                COLLECT.read_metrics(self.metrics_url, self.api_key),
-                COLLECT.read_gpus())
+                COLLECT.read_metrics(url, self.api_key),
+                COLLECT.read_gpus(), model)
             self._send(200, json.dumps(payload).encode(), "application/json")
             return
 
