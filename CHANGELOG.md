@@ -9,6 +9,17 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### `install.sh --update` no longer exits non-zero on 12 skill pairs (2026-08-18)
+- `install.sh` appends `--update` to every `skills/<skill>/install.sh` invocation, but four
+  installers — `autospec-monitor`, `autospec-quality`, `autospec-rollover-status` and
+  `autospec-test` — had no `--update` arm, so their argument parsers exited 2 on
+  `unknown argument: --update`. That failed all three harness pairs for each of them: 12 of
+  117 pairs red and a non-zero exit on every update run, while the skills themselves stayed
+  stale. Their writes were already unconditional overwrites, so the flag needed no behaviour
+  of its own, only parity. `tests/unit/skill-installer-flag-surface.bats` now drives every
+  installer with `--dry-run --update` so a fifth cannot drift, and carries a negative control
+  proving the check can fail.
+
 #### One failing conductor test no longer takes six others with it (2026-08-18)
 - The integration tests that drive the real bridge serialize on a `Mutex`, taken with
   `lock().expect(..)`. A panicking test poisons that mutex, so every later test died on
