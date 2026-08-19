@@ -9,6 +9,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### The frozen validation catalog records the reference-pointer gate (2026-08-18)
+- #3158 added `check_reference_pointer_integrity` to the catalog but not to the frozen fixture
+  every count is pinned against, so five assertions across four test binaries were wrong: the
+  fixture id list, its length in two tests, the legacy top-level call totals, and both plan
+  counts. #3230 separately moved the canonical guardian file to `skills/autospec-run/SKILL.md`
+  while the expected error message still named `skills/autospec/SKILL.md`. None of it showed up
+  in CI, because `cargo test --workspace` is fail-fast and stopped at an earlier failing binary.
+
 #### DOC_OUT_OF_SYNC no longer reads a comment as a new CLI surface (2026-08-18)
 - The rule scans added lines for a long flag and demands a touched doc file. It scanned
   comments too, so moving a doc comment that mentions `claim release --claim-id` between

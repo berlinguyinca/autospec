@@ -36,13 +36,14 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
 
     let full = ValidationPlan::build(&catalog, &ValidationOptions::default())
         .expect("full direct plan builds");
-    assert_eq!(full.ids().len(), 143);
-    assert_eq!(full.unique_ids().len(), 138);
+    // +1 for check_reference_pointer_integrity (#3158); see validation_runner.rs.
+    assert_eq!(full.ids().len(), 144);
+    assert_eq!(full.unique_ids().len(), 139);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");
     let fast = ValidationPlan::build(&catalog, &fast_options).expect("fast direct plan builds");
-    assert_eq!(fast.ids().len(), 135);
+    assert_eq!(fast.ids().len(), 136);
     assert_eq!(fast.parallelism(), 4);
     assert_eq!(fast_options.jobs, Jobs::Fixed(4));
     assert!(!fast.ids().contains(&"check_python_suites"));
