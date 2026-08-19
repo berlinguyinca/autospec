@@ -94,6 +94,22 @@ model is not `dispatch_recommended`, or when no wall-clock bound can be applied 
 refusal, keep the cloud tier. The local GPU is capacity-1, so the helper serializes
 dispatches; never run two local dispatches concurrently.
 
+**Capping fan-out on a local model.** Serialization covers `local-dispatch.sh`; it does
+NOT cover subagents you spawn in this harness, which reach the same node as ordinary
+sessions. Children cost no VRAM — that is committed when the server starts — but each
+claims a share of a fixed KV pool that has no admission control, so over-subscribing it
+fails every live session rather than the newest. Before any parallel dispatch whose
+children run on a local model, cap the width by what the pool funds:
+
+```bash
+W=$(context-budget-check.py --width "$PLANNED" --json 2>/dev/null | jq -r .max_width)
+```
+
+Use `min($PLANNED, $W)`. `W <= 1` means run the work inline. If the checker exits 2 —
+server unreachable, client config unreadable — keep the cloud tier rather than guessing
+a width; a wrong guess is not a slower run, it is a failed one for every session on that
+node. See the capacity-gate section of AGENTS.md.
+
 1. **Discover local supply with the probe — never enumerate models yourself.**
    ```bash
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/discover-model-supply.sh" --profiles

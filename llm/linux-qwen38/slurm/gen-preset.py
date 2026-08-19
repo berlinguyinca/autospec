@@ -104,6 +104,10 @@ def main() -> int:
     print("[*]")
     print("n-gpu-layers = 999\nflash-attn = auto\njinja = true")
     print("no-context-shift = true\nkv-unified = true")
+    # Within-slot prefix reuse. Subagents share a large identical skill
+    # preamble, which is exactly what this avoids reprocessing. Distinct
+    # from the cross-slot selection disabled below, and not on that path.
+    print("cache-reuse = 256")
     # Slot selection by prompt similarity is disabled because the model child
     # died twice immediately after taking that path, both times with the
     # preceding line

@@ -23,6 +23,11 @@ import sys
 import time
 from pathlib import Path
 
+# Shared with context-budget-check.py so the pinner and the pricer cannot
+# disagree about which agents inherit the parent tier.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agentmodes import spawnable  # noqa: E402
+
 # A "-NNk" alias is a context TIER: the same loaded model, offered to the client
 # under a smaller declared limit. It exists because llama.cpp shares one KV pool
 # across slots with no admission control -- over-subscribe it and every
@@ -33,6 +38,7 @@ TIER_RE = re.compile(r"-(\d+)k$")
 
 DEFAULT_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 DEFAULT_PRESETS = Path("/opt/qwen-vllm/etc/router-presets.ini")
+DEFAULT_AGENTS = Path.home() / ".config" / "opencode" / "agent"
 
 
 def read_presets(path: Path) -> dict[str, dict]:
@@ -101,6 +107,22 @@ def pick_default(models: dict, entries: dict, owner: dict, args) -> str:
     if not text:
         text = entries
 
+    # A variant is never the default, and this has to be an exclusion rather
+    # than a tie-break. An abliterated preset loads no projector, so it is given
+    # MORE pool than the plain model -- 163840 against 131072 on a 46 GiB card.
+    # The seat filter below then drops the plain model for funding fewer
+    # sessions and keeps the variant, and the "prefer the plainest section"
+    # ranking never runs because there is no tie left to break. That silently
+    # made an abliterated model the default for every new session.
+    #
+    # The base is the shortest section name: every variant is that name plus a
+    # suffix. Callers who want a variant name it with --default-model.
+    base = min((owner[mid] for mid in text), key=lambda n: (len(n), n),
+               default=None)
+    plain = {mid: e for mid, e in text.items() if owner[mid] == base}
+    if plain:
+        text = plain
+
     def pool_of(model_id: str) -> int:
         return models[owner[model_id]]["context"] or 0
 
@@ -119,6 +141,57 @@ def pick_default(models: dict, entries: dict, owner: dict, args) -> str:
         return max(roomy, key=lambda m: rank(m, text[m]["limit"]["context"]))
     # No tier is small enough to seat that many; fall back to the smallest.
     return min(text, key=lambda m: (text[m]["limit"]["context"], len(owner[m])))
+
+
+def fit_child_tier(text_tiers: dict[str, int], models: dict, owner: dict,
+                   entries: dict, default_model: str, provider: str,
+                   fanout: int | None) -> tuple[str | None, int]:
+    """Largest child tier a full fan-out still fits inside the pool.
+
+        parent + width * child  <=  pool
+
+    Everything here comes from the server's own numbers -- `c` and `parallel`,
+    which gen-preset.py sized to whatever this host has, be it 24 GiB, 96 GiB,
+    an H100 or a MacBook's unified memory. The client never learns which.
+
+    Slot count is a ceiling on width, not a target: a card can have more slots
+    than the pool can fund at any useful tier. So width walks down from the
+    slots until some tier fits, and the width actually priced is returned with
+    it. If even width 1 leaves nothing, the smallest tier is still better than
+    leaving children unpinned -- unpinned means inheriting the parent, which is
+    never smaller.
+    """
+    if not text_tiers:
+        return None, 0
+    parent_id = default_model.split("/", 1)[-1] if default_model else ""
+    section = owner.get(parent_id)
+    pool = models[section]["context"] if section else None
+    slots = models[section]["parallel"] if section else 1
+    if not pool:
+        return min(text_tiers,
+                   key=lambda m: (text_tiers[m], len(owner[m]), len(m))), 0
+    parent_ctx = entries.get(parent_id, {}).get("limit", {}).get("context", 0)
+
+    # Children stay in the parent's family, and this is a restriction rather
+    # than a preference. Only tiers of one LOADED model switch for free;
+    # crossing families costs a full reload of the weights. Preferring the
+    # parent's section on a tie is not enough, because the families do not have
+    # equal pools -- an abliterated preset loads no projector and is given more,
+    # so a width can exist where only its tier fits and every child silently
+    # moves onto it. That is the same asymmetry that made it the default.
+    own = {mid: ctx for mid, ctx in text_tiers.items() if owner[mid] == section}
+    if own:
+        text_tiers = own
+
+    def rank(mid: str) -> tuple:
+        # Within the family, biggest that fits; ties to the plainest id.
+        return (text_tiers[mid], -len(owner[mid]), -len(mid))
+
+    for width in range(max(1, slots - 1) if fanout is None else fanout, 0, -1):
+        fits = [m for m in text_tiers if parent_ctx + width * text_tiers[m] <= pool]
+        if fits:
+            return max(fits, key=rank), width
+    return min(text_tiers, key=lambda m: (text_tiers[m], len(m))), 1
 
 
 def main() -> int:
@@ -152,6 +225,21 @@ def main() -> int:
                          "below it, which leaves the pool room for fan-out")
     ap.add_argument("--provider-name",
                     help="human-readable provider label in the client")
+    ap.add_argument("--no-pin-subagents", action="store_true",
+                    help="leave spawnable agents without a model. They then "
+                         "inherit the parent's tier, so a parent that picked a "
+                         "big window by hand hands the same window to every "
+                         "child it spawns -- width multiplies the largest "
+                         "window instead of a chosen one")
+    ap.add_argument("--fanout", type=int,
+                    help="how many children may be live at once when choosing "
+                         "the child tier (default: the server's slot count "
+                         "minus the parent's own slot)")
+    ap.add_argument("--child-tier",
+                    help="model id to pin spawnable agents to "
+                         "(default: the smallest text tier offered)")
+    ap.add_argument("--agents", type=Path, default=DEFAULT_AGENTS,
+                    help="directory of agent definitions to pin")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -223,6 +311,52 @@ def main() -> int:
     if args.set_default or "model" not in cfg:
         cfg["model"] = f"{args.provider}/{pick_default(models, entries, owner, args)}"
 
+    # Pin the children. A spawnable agent with no model of its own inherits the
+    # parent's, so the worst case is width x whatever the parent happened to
+    # pick -- including the whole pool, which the TUI remembers per session and
+    # no config file records. Pinning does not shrink today's windows; it makes
+    # them independent of a choice made elsewhere, which is what makes the
+    # budget in context-budget-check.py enforceable rather than advisory.
+    pin_summary = ""
+    if not args.no_pin_subagents:
+        # Derived from the server, never from a guess about the hardware.
+        # gen-preset.py already sized `c` and `parallel` to whatever card this
+        # host has -- 24 GiB, 96 GiB, an H100, or a MacBook's unified memory --
+        # so solving the budget against those two numbers is correct on all of
+        # them without the client knowing which one it is. Taking the SMALLEST
+        # tier would be safe everywhere and wasteful on a big card: a 96 GiB
+        # pool can fund 64k children where a 24 GiB pool cannot.
+        text_tiers = {mid: e["limit"]["context"] for mid, e in entries.items()
+                      if not models[owner[mid]]["vision"]
+                      and mid in owner and TIER_RE.search(mid)}
+        child, priced_width = fit_child_tier(
+            text_tiers, models, owner, entries, cfg.get("model", ""),
+            args.provider, args.fanout)
+        if args.child_tier:
+            child, priced_width = args.child_tier, 0
+        if child and child not in entries:
+            print(f"--child-tier {child} is not a served id", file=sys.stderr)
+            return 1
+        if child:
+            agent_cfg = cfg.setdefault("agent", {})
+            pinned = []
+            for kid in spawnable(args.agents, agent_cfg, None):
+                # Never override a deliberate choice -- only fill the gap that
+                # inheritance would otherwise fill for us.
+                if kid["model"]:
+                    continue
+                agent_cfg.setdefault(kid["name"], {})["model"] = \
+                    f"{args.provider}/{child}"
+                pinned.append(kid["name"])
+            # Reported after the dry-run branch below: --dry-run's stdout is
+            # parsed as JSON by callers and by the test suite, so nothing may
+            # precede it there.
+            pin_summary = (f"pinned    : {len(pinned)} spawnable agent(s) to "
+                           f"{child} ({', '.join(sorted(pinned)[:4])}"
+                           f"{', ...' if len(pinned) > 4 else ''})"
+                           f"{f' — priced for {priced_width} concurrent' if priced_width else ''}"
+                           ) if pinned else ""
+
     rendered = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if args.dry_run:
         print(rendered)
@@ -236,6 +370,8 @@ def main() -> int:
         print(f"backup    : {backup}")
     args.config.write_text(rendered)
 
+    if pin_summary:
+        print(pin_summary)
     print(f"config    : {args.config}")
     print(f"endpoint  : http://{args.host}:{args.port}/v1")
     print(f"default   : {cfg['model']}")

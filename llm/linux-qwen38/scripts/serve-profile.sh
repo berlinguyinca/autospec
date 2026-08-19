@@ -76,6 +76,12 @@ if [ "${QWEN38_RUNTIME:-vllm}" = "llama.cpp" ]; then
     --cache-type-v "${QWEN38_KV_TYPE}"
     --jinja
     --no-context-shift
+    # Reuse a matching prefix already resident in the slot instead of
+    # reprocessing it. Within-slot only; unrelated to cross-slot selection.
+    --cache-reuse "${QWEN38_CACHE_REUSE:-256}"
+    # Cross-slot selection off: the model child died twice right after taking
+    # that path. A mitigation, not a diagnosis -- see config/router-presets.ini.
+    --slot-prompt-similarity "${QWEN38_SLOT_PROMPT_SIMILARITY:-0.0}"
     --host "${QWEN38_HOST}"
     --port "${QWEN38_PORT}"
   )
