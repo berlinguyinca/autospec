@@ -163,7 +163,42 @@ cleaning will always report success.
 
 ## Reboot: what it proved
 
-_Filled by Task 7 Step 5 — kernel, driver, both cards, topology, NVLink presence._
+| | value |
+|---|---|
+| kernel | `6.8.0-138-generic` (first boot of it on this host) |
+| default target | `multi-user.target` |
+| driver / CUDA | 580.173.02 / 13.0 — `nvidia-smi` works, the NVML mismatch is gone |
+| cards | 2 x NVIDIA GeForce RTX 2080 Ti, 11264 MiB each, **compute_cap 7.5** |
+| free VRAM | **10820 MiB on each card**, 1 MiB used |
+| Xorg / compute apps | none |
+| topology | `PHB` — both on one host bridge, NUMA node 0 |
+| NVLink | **not fitted** (`nvidia-smi nvlink -s`: all links inActive) |
+
+**Usable total is 21640 MiB = 21.13 GiB**, slightly more than the ~20.5 GiB the
+budget assumed, because a headless host leaves only ~444 MiB per card to the
+driver.
+
+`--split-mode row` is therefore out of scope for good: with no bridge, cross-card
+traffic crosses PCIe, where row-split typically costs more than it returns.
+
+### The multi-GPU guard, proven on the real cards
+
+This is the whole defect family, measured rather than argued:
+
+| read | value | against the 19000 MiB floor |
+|---|---:|---|
+| sum across both cards | 21640 MiB | **PASS** |
+| first card only (the old code) | 10820 MiB | **REFUSE** |
+
+The unfixed launcher would have refused to start this node, and the message
+would have blamed VRAM — the one thing that was fine.
+
+### Barrier 2, in the end
+
+Moot rather than exercised: `6.8.0-101` had already been lost to autoremove
+before the reboot, so the fallback that actually stood behind this boot was
+`6.8.0-111` — running, proven, pinned `manual`, and still installed. The boot
+succeeded first time, so nothing needed it.
 
 ## Model switch cost
 
