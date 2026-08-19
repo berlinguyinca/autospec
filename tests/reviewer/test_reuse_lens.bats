@@ -166,8 +166,10 @@ _baseline_output() {
 # ---------------------------------------------------------------------------
 
 # Case 12: refute pass prose is present in both SKILL.md guardian blocks
-@test "refute-pass: SKILL.md describes the reuse-BLOCK refute pass" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+@test "refute-pass: the trio describes the reuse-BLOCK refute pass" {
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF 'Reuse-BLOCK refute pass' "$f" \
       || { echo "FAIL: refute pass prose missing in $f"; return 1; }
     grep -qF 'Majority rules' "$f" \
@@ -207,7 +209,9 @@ _baseline_output() {
 # Case 12d: ledger record fires at the refute-pass decision point, not the LGTM-only
 # branch (which produced phantom BLOCK rows and never recorded upheld BLOCKs).
 @test "ledger: record is gated by _reuse_block_raised and carries _reuse_upheld" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF '"${_reuse_block_raised:-0}" = "1"' "$f" \
       || { echo "FAIL: ledger record not gated by _reuse_block_raised in $f"; return 1; }
     grep -qF -- '--upheld "${_reuse_upheld:-true}"' "$f" \
@@ -219,8 +223,10 @@ _baseline_output() {
 }
 
 # Case 13: simplicity axis is documented as ADVISE-only (anti-gold-plating)
-@test "anti-gold-plating: simplicity axis is ADVISE-only in SKILL.md" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+@test "anti-gold-plating: simplicity axis is ADVISE-only" {
+  # autospec's copy moved to references/monitor-recovery.md in #3213; see case 14.
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+           "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
     grep -qF 'Simplicity axis is ADVISE-only' "$f" \
       || { echo "FAIL: ADVISE-only simplicity prose missing in $f"; return 1; }
     grep -qF 'never halt the commit' "$f" \
@@ -228,18 +234,32 @@ _baseline_output() {
   done
 }
 
-# Case 14: refute pass + ADVISE-only prose propagated to all 6 trio mirrors
-@test "trio: refute-pass + ADVISE-only prose present in all 6 trio files" {
+# Case 14: refute pass + ADVISE-only prose reachable from every trio.
+#
+# The autospec trio no longer carries this prose inline: #3213 extracted the Phase 4 cold
+# tail to skills/autospec/references/monitor-recovery.md, which its three members point at.
+# Asserting the text sits in all six files would force the extraction to be undone, so the
+# autospec side is checked once at its single source instead of three times at mirrors.
+@test "trio: refute-pass + ADVISE-only prose present in all trio surfaces" {
   for f in \
     "$REPO_ROOT/skills/autospec-run/SKILL.md" \
     "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec-run/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec/references/monitor-recovery.md"; do
+    grep -qF 'Reuse-BLOCK refute pass' "$f" \
+      || { echo "FAIL: refute pass prose missing in trio surface $f"; return 1; }
+    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
+      || { echo "FAIL: ADVISE-only prose missing in trio surface $f"; return 1; }
+  done
+
+  # Dropping the three autospec mirrors from the loop above loses real coverage unless
+  # something still proves each member reaches the reference the prose moved to. That
+  # pointer is what makes one source equivalent to the old six-way check.
+  for m in \
     "$REPO_ROOT/skills/autospec/SKILL.md" \
     "$REPO_ROOT/skills/autospec/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec/opencode/agent.md"; do
-    grep -qF 'Reuse-BLOCK refute pass' "$f" \
-      || { echo "FAIL: refute pass prose missing in mirror $f"; return 1; }
-    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
-      || { echo "FAIL: ADVISE-only prose missing in mirror $f"; return 1; }
+    grep -qF 'references/monitor-recovery.md' "$m" \
+      || { echo "FAIL: $m no longer points at the reference holding this prose"; return 1; }
   done
 }
