@@ -133,6 +133,17 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**llama.cpp's router answers /health while its model child is dead.**
+Observed twice: a benchmark failed 11 of 40 items with `500 proxy error:
+Could not establish connection` while the supervisor reported health
+throughout. The cluster log said `instance name=... exited with status
+1` — healthy at 44.7 tok/s one line earlier, no OOM, no diagnostic
+(built from llama.cpp master; pinning a release is worth trying). From
+outside, a dead child looks exactly like an idle one: `/health` is 200
+and every model reports `unloaded`. So probe **capability** (ask for one
+token) on a schedule, not just once per connection — the probe also
+heals it, because the request makes the router reload the model.
+
 **If the server sizes itself dynamically, the client must be
 configured from what it PUBLISHES, not from a template.** Once
 `opencode_hive` chose the GPU by earliest start, the preset became

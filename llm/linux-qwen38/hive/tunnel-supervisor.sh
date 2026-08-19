@@ -44,6 +44,13 @@ MAX_BACKOFF="${MAX_BACKOFF:-30}"
 # How long to wait for a replacement allocation before trying again. The queue
 # is the slow part here, not us.
 REACQUIRE_WAIT="${REACQUIRE_WAIT:-2400}"
+# How often to re-check that the MODEL, not just the router, still answers.
+# Once per connection is not enough: the child can die mid-session -- observed,
+# "instance name=qwen3.8-27b exited with status 1" with no other diagnostic --
+# and from outside that is indistinguishable from health, because /health keeps
+# returning 200. A probe also heals it, since the request makes the router load
+# the model again.
+DEEP_PROBE_EVERY="${DEEP_PROBE_EVERY:-180}"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 
@@ -203,6 +210,7 @@ trap 'stop_forward; exit 0' TERM INT
 gone=0
 sick=0
 reconnects=0
+last_deep=0
 start_forward
 
 while true; do
@@ -210,14 +218,24 @@ while true; do
 
   if probe; then
     sick=0; gone=0
-    # Confirm ONCE per connection that the model itself answers, not just the
-    # router in front of it.
+    now=$(date +%s)
+    # Re-verify on a schedule as well as after each connect: a child that dies
+    # mid-session leaves /health answering 200 and every request failing.
+    if [ "${verified:-0}" = 1 ] \
+       && [ $((now - last_deep)) -ge "$DEEP_PROBE_EVERY" ]; then
+      verified=0
+    fi
     if [ "${verified:-0}" = 0 ]; then
+      last_deep=$now
       if deep_probe; then
+        if [ "${announced_ok:-0}" = 0 ]; then
+          log "endpoint verified: the model answers"
+          announced_ok=1
+        fi
         verified=1
-        log "endpoint verified: the model answers"
         printf 'up' > "${STATE}/tunnel.state"
       else
+        announced_ok=0
         log "router answers but the model does not; treating as a dead job"
         printf 'degraded' > "${STATE}/tunnel.state"
         gone=$((gone + 1))
