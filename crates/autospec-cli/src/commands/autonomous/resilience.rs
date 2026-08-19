@@ -149,51 +149,11 @@ pub(super) enum LifecycleLeaseError {
 }
 
 #[allow(dead_code)] // Acquisition/adoption/release are intentionally not public command actions.
-struct LeaseTransaction {
-    _file: fs::File,
-}
+// The lease transaction; see the module header there.
+#[path = "resilience/lease_transaction.rs"]
+mod lease_transaction;
+use lease_transaction::LeaseTransaction;
 
-#[allow(dead_code)] // Task 3 calls this only through the store transaction primitives.
-impl LeaseTransaction {
-    #[cfg(unix)]
-    fn try_open(path: &Path) -> Result<Self, StoreError> {
-        let parent = path.parent().expect("lease lock path has a parent");
-        fs::create_dir_all(parent).map_err(|error| {
-            StoreError::Diagnostic(format!(
-                "cannot create resilience lease directory {}: {error}",
-                parent.display()
-            ))
-        })?;
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|error| {
-                StoreError::Diagnostic(format!(
-                    "cannot open resilience lease lock {}: {error}",
-                    path.display()
-                ))
-            })?;
-
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(StoreError::Held),
-            Err(fs::TryLockError::Error(error)) => Err(StoreError::Diagnostic(format!(
-                "cannot lock resilience lease {}: {error}",
-                path.display()
-            ))),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn try_open(_path: &Path) -> Result<Self, StoreError> {
-        Err(StoreError::Diagnostic(
-            "resilience lease transactions require Unix flock support".to_string(),
-        ))
-    }
-}
 
 impl ResilienceStore {
     fn from_env(repo: &str) -> Result<Self, String> {
