@@ -6,7 +6,7 @@ use super::super::{claim_settle_millis, publish_session_binding, SessionBindingI
 #[cfg(target_os = "linux")]
 use super::support::{
     anchored_startup_heartbeat_fixture, expected_startup_heartbeat, expired_heartbeat_snapshot,
-    mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+    mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture, lock_heartbeat_env,
 };
 use super::support::{claim_record, lifecycle_evidence};
 use crate::commands::claim;
@@ -165,7 +165,7 @@ fn retained_bridge_predecessor_authority_is_exact_and_boundary_bound() {
     use nix::sys::stat::Mode;
     use std::cell::Cell;
 
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+    let _guard = lock_heartbeat_env();
     let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
     let (sandbox, _) = startup_heartbeat_fixture("retained-bridge-authority");
     let root = sandbox.join("heartbeats");

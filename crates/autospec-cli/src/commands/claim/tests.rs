@@ -3,6 +3,7 @@
 #[cfg(unix)]
 mod bridge_terminal;
 mod conductor_lease_takeover;
+mod env_boundary;
 #[cfg(unix)]
 mod heartbeat_classify;
 #[cfg(unix)]
