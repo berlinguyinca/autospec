@@ -1,11 +1,30 @@
 use super::*;
 
 const HARNESS_HELPER: &str = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_noop_harness_helper";
+const ADMISSION_HELPER: &str = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_admission_helper";
+const PREDECESSOR_HEARTBEAT_HELPER: &str = "commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_predecessor_heartbeat_helper";
+const PREDECESSOR_REPOSITORY: &str = "AUTOSPEC_TEST_PREDECESSOR_REPOSITORY";
 
 #[test]
 #[ignore = "launched as the production harness child by the supported-host admission test"]
 fn supported_host_noop_harness_helper() {
     std::process::exit(17);
+}
+
+#[test]
+#[ignore = "launched as the released predecessor heartbeat owner"]
+fn supported_host_predecessor_heartbeat_helper() {
+    let repository =
+        std::env::var(PREDECESSOR_REPOSITORY).expect("released predecessor repository identity");
+    crate::commands::claim::write_startup_heartbeat_for_test(
+        &repository,
+        42,
+        "worker-predecessor",
+        "feat/autonomous-issue-42",
+        "claim-predecessor",
+        Some("session-predecessor"),
+    )
+    .expect("publish predecessor heartbeat from isolated owner");
 }
 
 struct RestoreEnvironment(Vec<(&'static str, Option<OsString>)>);
@@ -35,6 +54,23 @@ fn git(directory: &Path, args: &[&str]) {
 
 #[test]
 fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt() {
+    let output = Command::new(
+        std::env::current_exe().expect("resolve supported-host admission helper executable"),
+    )
+    .args(["--ignored", "--exact", ADMISSION_HELPER, "--nocapture"])
+    .output()
+    .expect("run isolated supported-host admission");
+    assert!(
+        output.status.success(),
+        "supported-host admission failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "launched in isolation by the supported-host admission test"]
+fn supported_host_admission_helper() {
     // Break caught: a supported host compiling the bridge while skipping released
     // predecessor retirement, successor heartbeat ownership, real OS child ownership, or
     // terminal receipt publication.
@@ -192,15 +228,24 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
         300,
     )
     .with_claim_id("claim-predecessor");
-    crate::commands::claim::write_startup_heartbeat_for_test(
-        &repository,
-        42,
-        "worker-predecessor",
-        "feat/autonomous-issue-42",
-        "claim-predecessor",
-        Some("session-predecessor"),
+    let predecessor_writer = Command::new(
+        std::env::current_exe().expect("resolve predecessor heartbeat helper executable"),
     )
-    .expect("publish predecessor heartbeat");
+    .args([
+        "--ignored",
+        "--exact",
+        PREDECESSOR_HEARTBEAT_HELPER,
+        "--nocapture",
+    ])
+    .env(PREDECESSOR_REPOSITORY, &repository)
+    .output()
+    .expect("run isolated predecessor heartbeat owner");
+    assert!(
+        predecessor_writer.status.success(),
+        "predecessor heartbeat helper failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&predecessor_writer.stdout),
+        String::from_utf8_lossy(&predecessor_writer.stderr)
+    );
     assert!(
         crate::commands::claim::advance_claim_ref_for_test(&repo, &predecessor_claimed)
             .expect("publish claimed predecessor")
@@ -210,7 +255,7 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
             .expect("publish released predecessor claim")
     );
 
-    let lease = crate::commands::claim::acquire_for_conductor(
+    let acquisition = crate::commands::claim::acquire_for_conductor(
         &repository,
         42,
         "worker-successor",
@@ -225,6 +270,7 @@ fn supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt()
             panic!("production successor acquisition deferred ({exit_code}): {json}")
         }
     });
+    let lease = acquisition.lease;
     let issue_heartbeat = heartbeat
         .join(crate::commands::autonomous::drain::repository_progress_key(
             &repository,

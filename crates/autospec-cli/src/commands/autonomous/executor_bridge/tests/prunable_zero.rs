@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::{provision_issue_worktree, resolve_base, ResolvedBase};
-use super::support_base::{git, git_stdout, GitFixture, TEST_SEQUENCE};
+use super::support_base::{git, git_stdout, test_environment, GitFixture, TEST_SEQUENCE};
 use super::support_invocation::prunable_zero_effect_branch_fixture;
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 
 #[test]
 fn autonomous_executor_bridge_prunable_zero_effect_branch_resumes_both_crash_boundaries() {
+    let _environment = test_environment();
     for (mode, boundary) in ["prunable", "orphan"]
         .into_iter()
         .flat_map(|mode| [1, 2].map(move |boundary| (mode, boundary)))

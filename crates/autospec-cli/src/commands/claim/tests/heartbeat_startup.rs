@@ -55,6 +55,63 @@ fn portable_publication_is_idempotent_but_rejects_another_generation() {
     std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
 }
 
+fn startup_document(ts: u64, pid: u32, process_start: &str) -> Vec<u8> {
+    format!(
+        "{{\"issue\":\"42\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":{ts},\"ttl_seconds\":300,\"pid\":{pid},\"nonce\":\"nonce\",\"host\":\"host-a\",\"boot_id\":\"boot-a\",\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn heartbeat_startup_existing_generation_allows_timestamp_drift_only() {
+    let expected = startup_document(100, 4242, "12345");
+    let timestamp_drift = startup_document(101, 4242, "12345");
+    let pid_drift = startup_document(100, 4343, "12345");
+    let process_start_drift = startup_document(100, 4242, "12346");
+
+    assert!(claim::same_startup_heartbeat_generation(
+        &timestamp_drift,
+        &expected
+    ));
+    assert!(!claim::same_startup_heartbeat_generation(
+        &pid_drift, &expected
+    ));
+    assert!(!claim::same_startup_heartbeat_generation(
+        &process_start_drift,
+        &expected
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn heartbeat_startup_existing_permissive_file_is_rejected_without_chmod_repair() {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+
+    let (fixture, issue) = startup_heartbeat_fixture("existing-permissive");
+    let document = startup_document(100, 4242, "12345");
+    std::fs::write(&issue, &document).unwrap();
+    std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let directory = std::fs::File::from(
+        open(
+            &fixture,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+
+    claim::inspect_heartbeat_target(&directory, "42.json", &document)
+        .expect_err("permissive existing heartbeat must block publication");
+    assert_eq!(
+        std::fs::metadata(&issue).unwrap().permissions().mode() & 0o7777,
+        0o640,
+        "inspection must not chmod-repair pre-existing heartbeat state"
+    );
+    std::fs::remove_dir_all(fixture).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn startup_heartbeat_atomic_publication() {
@@ -246,12 +303,19 @@ fn startup_heartbeat_atomic_publication() {
     let transaction_umask = umask(Mode::from_bits_truncate(0o777));
     write().unwrap();
     umask(transaction_umask);
-    assert_eq!(
-        [&issue, &session]
-            .map(|path| { std::fs::metadata(path).unwrap().permissions().mode() & 0o7777 }),
-        [0o600; 2]
-    );
     let expected = std::fs::read(&issue).unwrap();
+    for path in [&issue, &session] {
+        let stored = std::fs::read(path).unwrap();
+        assert!(claim::same_startup_heartbeat_generation(
+            &stored,
+            expected.as_slice()
+        ));
+        assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o600);
+        assert!(!std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
     let mut stable_drift: serde_json::Value = serde_json::from_slice(&expected).unwrap();
     stable_drift["nonce"] = "foreign-generation".into();
     let stable_drift = serde_json::to_vec(&stable_drift).unwrap();
@@ -349,7 +413,7 @@ fn startup_heartbeat_restrictive_umask() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "commands::claim::tests::startup_heartbeat_restrictive_umask",
+                "commands::claim::tests::heartbeat_startup::startup_heartbeat_restrictive_umask",
                 "--nocapture",
             ])
             .env(CHILD, "1")

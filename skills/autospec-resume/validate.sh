@@ -34,6 +34,7 @@ done
 SKILL_MD="$SKILL_DIR/SKILL.md"
 CODEX_PROMPT="$SKILL_DIR/codex/prompt.md"
 OPENCODE_AGENT="$SKILL_DIR/opencode/agent.md"
+SCAN="$SKILL_DIR/scripts/resume-scan.sh"
 REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
 
 # ── 1. Required files exist ───────────────────────────────────────────────────
@@ -91,11 +92,25 @@ first_char="$(od -An -tx1 -N1 "$CODEX_PROMPT" | tr -d ' \n')"
 # ── 5. resume-scan.sh writes no run-state comment / adds no new lock ──────────
 info "checking resume-scan.sh adds no second lock"
 if grep -E 'autospec[[:space:]]+claim[[:space:]]+state[[:space:]]+(upsert|clear)|gh issue comment' \
-        "$SKILL_DIR/scripts/resume-scan.sh"; then
+        "$SCAN"; then
     fail "resume-scan.sh must NOT write a run-state comment or add a lock (found a mutation call)"
 fi
-grep -q 'claim state read' "$SKILL_DIR/scripts/resume-scan.sh" \
+grep -q 'claim state read' "$SCAN" \
     || fail "resume-scan.sh must READ run-state through autospec claim, never re-implement it"
+grep -q 'claim state recover-stale-startup' "$SCAN" \
+    || fail "resume-scan.sh must delegate stale-startup recovery to autospec claim state recover-stale-startup"
+while IFS= read -r claim_state_command; do
+    case "$claim_state_command" in
+        read|recover-stale-startup) ;;
+        *) fail "resume-scan.sh uses forbidden claim state command: $claim_state_command" ;;
+    esac
+done < <(sed -nE 's/.*claim[[:space:]]+state[[:space:]]+([[:alnum:]-]+).*/\1/p' "$SCAN")
+
+dry_line="$(grep -n 'if \[ "$DRY_RUN" -eq 1 \]' "$SCAN" | cut -d: -f1)"
+recover_line="$(grep -n 'claim state recover-stale-startup' "$SCAN" | cut -d: -f1)"
+[ -n "$dry_line" ] || fail "resume-scan.sh missing dry-run boundary"
+[ "$recover_line" -gt "$dry_line" ] \
+    || fail "stale-startup recovery must follow the dry-run boundary"
 
 # ── 6. bash -n on all scripts ─────────────────────────────────────────────────
 info "checking bash -n on all scripts"

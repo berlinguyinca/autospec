@@ -16,12 +16,15 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 pub(super) fn prunable_zero_effect_branch_fixture(
     label: &str,
@@ -124,7 +127,7 @@ pub(super) fn reviewer_request(
     }
 }
 
-pub(super) fn persisted_invocation() -> PersistedInvocation {
+pub(crate) fn persisted_invocation() -> PersistedInvocation {
     PersistedInvocation {
         schema: 1,
         identity: BridgeIdentity {
@@ -185,7 +188,7 @@ pub(super) fn supervision_state(fixture: &GitFixture) -> PersistedInvocation {
     state
 }
 
-pub(super) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocation {
+pub(crate) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocation {
     HarnessInvocation {
         program: PathBuf::from("/bin/sh"),
         supervised_executable: PathBuf::from("/bin/sh"),
@@ -195,7 +198,7 @@ pub(super) fn shell_invocation(directory: &Path, script: &str) -> HarnessInvocat
     }
 }
 
-pub(super) fn supervision_config(stall_millis: u64) -> SupervisionConfig {
+pub(crate) fn supervision_config(stall_millis: u64) -> SupervisionConfig {
     SupervisionConfig {
         stall_timeout: Duration::from_millis(stall_millis),
         poll_interval: Duration::from_millis(10),
@@ -400,10 +403,23 @@ impl NonDescendantDirectFixture {
     }
 }
 
-pub(super) fn implementation_proof_fixture(
+pub(crate) fn implementation_proof_fixture(
     label: &str,
 ) -> (GitFixture, PersistedInvocation, MutationSnapshot, PathBuf) {
     let fixture = GitFixture::new(label);
+    #[cfg(target_os = "macos")]
+    {
+        let hooks = fixture.root.join("trusted-hooks");
+        fs::create_dir(&hooks).expect("create deterministic Darwin hook directory");
+        git(
+            &fixture.repo,
+            &[
+                "config",
+                "core.hooksPath",
+                hooks.to_str().expect("hook path"),
+            ],
+        );
+    }
     let worktree = fixture.root.join("issue-worktree");
     git(
         &fixture.repo,

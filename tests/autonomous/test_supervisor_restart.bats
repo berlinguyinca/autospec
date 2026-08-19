@@ -8,6 +8,7 @@ setup() {
   FIXTURE_SCRIPTS="$TEST_TMP/scripts"
   mkdir -p "$HOME" "$FIXTURE_SCRIPTS/lib"
   cp "$SOURCE_SCRIPT" "$FIXTURE_SCRIPTS/autospec-autonomous.sh"
+  cp "$REPO_ROOT/scripts/lib/autospec-status-accountability.sh" "$FIXTURE_SCRIPTS/lib/"
   cat > "$FIXTURE_SCRIPTS/lib/autospec-loop.sh" <<'EOF_LOOP'
 autospec_conductor_run() {
   printf 'run-foreground\n' > "$AUTOSPEC_TEST_RUN_MARKER"

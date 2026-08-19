@@ -15,6 +15,92 @@ pub(crate) enum CodexSandboxPolicy {
 
 pub(super) const CODEX_NETWORK_PERMISSION_PROFILE: &str = "autospec-network-executor";
 
+const SENSITIVE_HOME_SUFFIXES: [&str; 26] = [
+    ".aws",
+    ".azure",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".codex/archived_sessions",
+    ".codex/auth.json",
+    ".codex/config.toml",
+    ".codex/history.jsonl",
+    ".codex/sessions",
+    ".codex/shell_snapshots",
+    ".config/containers",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/pip",
+    ".docker",
+    ".git-credentials",
+    ".gnupg",
+    ".gradle",
+    ".kube",
+    ".m2",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".ssh",
+    ".terraform.d",
+    ".vault-token",
+];
+
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\u{000C}' => escaped.push_str("\\f"),
+            '\r' => escaped.push_str("\\r"),
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            character if character <= '\u{001F}' || character == '\u{007F}' => {
+                escaped.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn validated_permission_roots(variable: &str, root: &Path) -> Result<Vec<PathBuf>, String> {
+    if !root.is_absolute() {
+        return Err(format!(
+            "{variable} must be absolute for executor credential isolation"
+        ));
+    }
+    if root
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(format!(
+            "{variable} must not contain parent-directory components for executor credential isolation"
+        ));
+    }
+    root.to_str()
+        .ok_or_else(|| format!("{variable} must be UTF-8 for executor credential isolation"))?;
+
+    let mut roots = vec![root.to_path_buf()];
+    match fs::canonicalize(root) {
+        Ok(canonical) => {
+            canonical.to_str().ok_or_else(|| {
+                format!("canonical {variable} must be UTF-8 for executor credential isolation")
+            })?;
+            if canonical != root {
+                roots.push(canonical);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "canonicalize {variable} for executor credential isolation: {error}"
+            ));
+        }
+    }
+    Ok(roots)
+}
+
 impl CodexSandboxPolicy {
     pub(super) fn invocation_args(self, codex: &Path) -> Result<Vec<String>, String> {
         match self {
@@ -31,71 +117,69 @@ impl CodexSandboxPolicy {
         match self {
             Self::Default => Ok(Vec::new()),
             Self::NetworkPermissionProfile => {
+                let home = std::env::var_os("HOME").ok_or_else(|| {
+                    "HOME must be set for executor credential isolation".to_string()
+                })?;
+                let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+                self.permission_profile_args_for_roots(
+                    codex,
+                    Path::new(&home),
+                    codex_home.as_deref(),
+                )
+            }
+        }
+    }
+
+    pub(super) fn permission_profile_args_for_roots(
+        self,
+        codex: &Path,
+        home: &Path,
+        codex_home: Option<&Path>,
+    ) -> Result<Vec<String>, String> {
+        match self {
+            Self::Default => Ok(Vec::new()),
+            Self::NetworkPermissionProfile => {
                 let codex = codex
                     .to_str()
                     .ok_or_else(|| "validated Codex executable path must be UTF-8".to_string())?;
-                let codex = codex.replace('\\', "\\\\").replace('"', "\\\"");
+                let codex = toml_basic_string(codex);
                 let mut filesystem = format!(
                     "permissions.{CODEX_NETWORK_PERMISSION_PROFILE}.filesystem={{\
                      \":minimal\"=\"read\",\
                      \":workspace_roots\"={{\".\"=\"write\"}},\
-                     \"{codex}\"=\"read\",\
-                     \"~/.aws\"=\"deny\",\
-                     \"~/.azure\"=\"deny\",\
-                     \"~/.cargo/credentials\"=\"deny\",\
-                     \"~/.cargo/credentials.toml\"=\"deny\",\
-                     \"~/.codex/archived_sessions\"=\"deny\",\
-                     \"~/.codex/auth.json\"=\"deny\",\
-                     \"~/.codex/config.toml\"=\"deny\",\
-                     \"~/.codex/history.jsonl\"=\"deny\",\
-                     \"~/.codex/sessions\"=\"deny\",\
-                     \"~/.codex/shell_snapshots\"=\"deny\",\
-                     \"~/.config/containers\"=\"deny\",\
-                     \"~/.config/gcloud\"=\"deny\",\
-                     \"~/.config/gh\"=\"deny\",\
-                     \"~/.config/pip\"=\"deny\",\
-                     \"~/.docker\"=\"deny\",\
-                     \"~/.git-credentials\"=\"deny\",\
-                     \"~/.gnupg\"=\"deny\",\
-                     \"~/.gradle\"=\"deny\",\
-                     \"~/.kube\"=\"deny\",\
-                     \"~/.m2\"=\"deny\",\
-                     \"~/.netrc\"=\"deny\",\
-                     \"~/.npmrc\"=\"deny\",\
-                     \"~/.pypirc\"=\"deny\",\
-                     \"~/.ssh\"=\"deny\",\
-                     \"~/.terraform.d\"=\"deny\",\
-                     \"~/.vault-token\"=\"deny\""
+                     \"{codex}\"=\"read\""
                 );
-                if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-                    let codex_home = PathBuf::from(codex_home);
-                    if !codex_home.is_absolute() {
-                        return Err(
-                            "CODEX_HOME must be absolute for executor credential isolation"
-                                .to_string(),
-                        );
+
+                let mut denied = BTreeSet::new();
+                for suffix in SENSITIVE_HOME_SUFFIXES {
+                    denied.insert(format!("~/{suffix}"));
+                }
+                for home in validated_permission_roots("HOME", home)? {
+                    for suffix in SENSITIVE_HOME_SUFFIXES {
+                        let path = home.join(suffix);
+                        let path = path.to_str().ok_or_else(|| {
+                            "HOME credential path must be UTF-8 for executor credential isolation"
+                                .to_string()
+                        })?;
+                        denied.insert(path.to_string());
                     }
-                    let default_codex_home =
-                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"));
-                    if default_codex_home.as_ref() != Some(&codex_home) {
-                        for sensitive_path in [
-                            "archived_sessions",
-                            "auth.json",
-                            "config.toml",
-                            "history.jsonl",
-                            "sessions",
-                            "shell_snapshots",
-                        ] {
-                            let sensitive_path = codex_home.join(sensitive_path);
-                            let sensitive_path = sensitive_path.to_str().ok_or_else(|| {
-                                "CODEX_HOME must be UTF-8 for executor credential isolation"
-                                    .to_string()
-                            })?;
-                            let sensitive_path =
-                                sensitive_path.replace('\\', "\\\\").replace('"', "\\\"");
-                            filesystem.push_str(&format!(",\"{sensitive_path}\"=\"deny\""));
+                }
+                if let Some(codex_home) = codex_home {
+                    for codex_home in validated_permission_roots("CODEX_HOME", codex_home)? {
+                        for suffix in SENSITIVE_HOME_SUFFIXES {
+                            if let Some(suffix) = suffix.strip_prefix(".codex/") {
+                                let path = codex_home.join(suffix);
+                                let path = path.to_str().ok_or_else(|| {
+                                    "CODEX_HOME credential path must be UTF-8 for executor credential isolation"
+                                        .to_string()
+                                })?;
+                                denied.insert(path.to_string());
+                            }
                         }
                     }
+                }
+                for path in denied {
+                    filesystem.push_str(&format!(",\"{}\"=\"deny\"", toml_basic_string(&path)));
                 }
                 filesystem.push('}');
                 Ok(vec![

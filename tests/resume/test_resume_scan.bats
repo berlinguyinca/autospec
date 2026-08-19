@@ -45,8 +45,15 @@ setup() {
 
     # Claim-state mock returns controlled JSON for `autospec claim state read`.
     export RS_STEP="claimed"
+    export RS_STATE="claimed"
     export RS_UPDATED_AGE="600"    # seconds ago (server updated_at)
     export RS_BRANCH="feat/x"
+    export RS_REPO="o/n"
+    export RS_ISSUE="42"
+    export RS_RAW=""
+    export RECOVERY_RECOVERED="true"
+    export RECOVERY_REPO="o/n"
+    export RECOVERY_ISSUE="42"
 
     write_gh_mock
     write_hostname_mock
@@ -96,13 +103,23 @@ write_claim_mock() {
     local autospec="$MOCK_DIR/autospec"
     cat > "$autospec" <<'EOF'
 #!/usr/bin/env bash
-# Mocked Rust claim reader: emits server `updated_at` state. Any mutation is a
-# resume violation because resume must not write a lock or run-state comment.
+# Mocked Rust claim command: emits server `updated_at` state and owns the one
+# permitted resume mutation, exact stale-startup recovery.
 if [ "${1:-}" = "claim" ] && [ "${2:-}" = "state" ] && [ "${3:-}" = "read" ]; then
-        updated="$(date -u -v-"${RS_UPDATED_AGE:-600}"S +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-            || date -u -d "-${RS_UPDATED_AGE:-600} seconds" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
-        printf '{"schema":1,"repo":"%s","issue":%s,"step":"%s","state":"%s","branch":"%s","updated_at":"%s"}\n' \
-            "${GH_REPO}" "42" "${RS_STEP}" "${RS_STEP}" "${RS_BRANCH}" "$updated"
+    if [ -n "${RS_RAW:-}" ]; then
+        printf '%s\n' "$RS_RAW"
+        exit 0
+    fi
+    updated="$(date -u -v-"${RS_UPDATED_AGE:-600}"S +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d "-${RS_UPDATED_AGE:-600} seconds" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
+    printf '{"schema":1,"repo":"%s","issue":%s,"step":"%s","state":"%s","branch":"%s","updated_at":"%s"}\n' \
+            "${RS_REPO:-$GH_REPO}" "${RS_ISSUE:-42}" "${RS_STEP}" "${RS_STATE:-claimed}" "${RS_BRANCH}" "$updated"
+    exit 0
+fi
+if [ "${1:-}" = "claim" ] && [ "${2:-}" = "state" ] && [ "${3:-}" = "recover-stale-startup" ]; then
+    [ -z "${RECOVERY_LOG:-}" ] || printf 'RECOVER\n' >> "$RECOVERY_LOG"
+    printf '{"recovered":%s,"issue":%s,"repo":"%s","reason":"test"}\n' \
+        "${RECOVERY_RECOVERED:-true}" "${RECOVERY_ISSUE:-42}" "${RECOVERY_REPO:-$GH_REPO}"
     exit 0
 fi
 echo "VIOLATION: autospec $* (lock mutation) called" >>"${VIOLATION_LOG:-/dev/null}"
@@ -229,6 +246,195 @@ register_command() {
     register_command
     run bash "$SCAN" --repo o/n
     [ "$status" -eq 0 ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+# ── Failed startup before label swap ─────────────────────────────────────────
+
+@test "stale heartbeat-pending:none claim on auto-implement recovers before relaunch" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = $'RECOVER\nRELAUNCH' ]
+    [[ "$output" == *"resuming o/n"* ]]
+}
+
+@test "heartbeat-pending:none on in-progress retains ordinary relaunch without recovery" {
+    export GH_IN_PROGRESS="42"
+    export GH_OPEN_AUTO=""
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="11000"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RELAUNCH" ]
+    [[ "$output" == *"resuming o/n"* ]]
+}
+
+@test "terminal local heartbeat cannot block Rust startup recovery" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    write_heartbeat 42 merged host-A
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = $'RECOVER\nRELAUNCH' ]
+    [[ "$output" == *"resuming o/n"* ]]
+}
+
+@test "terminal local heartbeat cannot override Rust recovery refusal" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_RECOVERED="false"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    write_heartbeat 42 failed host-A
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RECOVER" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "dry-run reports stale startup recovery and relaunch without mutation" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n --dry-run
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
+    [[ "$output" == *"would recover"* ]]
+    [[ "$output" == *"would resume"* ]]
+}
+
+@test "fresh heartbeat-pending:none claim is untouched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="120"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "live heartbeat-pending:none claim refused by CAS recovery is not relaunched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_RECOVERED="false"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RECOVER" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "mismatched stale-startup recovery result is not relaunched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_REPO="other/repo"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$RECOVERY_LOG")" = "RECOVER" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "malformed startup claim is untouched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_RAW='{not-json'
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "mismatched startup claim identity is untouched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:none"
+    export RS_UPDATED_AGE="600"
+    export RS_REPO="other/repo"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "startup claim with non-numeric issue identity is untouched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    updated="$(date -u -v-600S +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '-600 seconds' +'%Y-%m-%dT%H:%M:%SZ')"
+    export RS_RAW="{\"state\":\"claimed\",\"step\":\"heartbeat-pending:none\",\"repo\":\"o/n\",\"issue\":\"42\",\"updated_at\":\"$updated\"}"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
+    [[ "$output" != *"resuming"* ]]
+}
+
+@test "non-exact heartbeat-pending step is untouched" {
+    export GH_IN_PROGRESS=""
+    export GH_OPEN_AUTO="42"
+    export RS_STEP="heartbeat-pending:worker-a"
+    export RS_UPDATED_AGE="600"
+    export RECOVERY_LOG="$TEST_TMP/events.log"
+    register_command "printf 'RELAUNCH\\n' >>'$RECOVERY_LOG'"
+
+    run bash "$SCAN" --repo o/n
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$RECOVERY_LOG" ]
     [[ "$output" != *"resuming"* ]]
 }
 

@@ -104,6 +104,14 @@ const MAX_DIRECT_COMMAND_ARGS: usize = 128;
 const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
 const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+mod test_coordination;
+#[cfg(test)]
+use test_coordination::LaunchFailpoint;
+#[cfg(all(test, target_os = "linux"))]
+use test_coordination::{
+    lock_test_fork_lifecycle, test_fork_lifecycle_is_available, TestForkLifecycleGuard,
+};
 
 mod review_evidence;
 use review_evidence::*;
@@ -3917,29 +3925,9 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
     fresh_evidence_generation_digest(base_input_digest)
 }
 
-#[derive(Debug)]
-struct EvidenceAttemptLease {
-    _file: File,
-}
-
-fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLease, String> {
-    let path = lane_root.join("attempt.lock");
-    reject_symlink_path(&path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options
-        .open(&path)
-        .map_err(|error| format!("open evidence attempt lock: {error}"))?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            "another evidence attempt owns this exact lane".to_string()
-        }
-        std::fs::TryLockError::Error(error) => format!("lock evidence attempt: {error}"),
-    })?;
-    Ok(EvidenceAttemptLease { _file: file })
-}
+// The per-lane attempt lease; see the module header there.
+mod attempt_lease;
+use attempt_lease::acquire_evidence_attempt_lease;
 
 #[allow(clippy::too_many_arguments)]
 fn observed_evidence_bundle(
@@ -9844,8 +9832,8 @@ fn commit_sandboxed_executor_diff_inner(
             )
         }
     }
-
     let subject = executor_commit_subject(state.identity.issue, issue_title);
+    hook_bundle.revalidate_launch()?;
     let commit = binding
         .command()
         .arg("-c")
@@ -14725,6 +14713,9 @@ where
         .map_err(|_| "executor draft release temporary path contains NUL".to_string())?;
     let receipt_path_c = CString::new(receipt_path.as_os_str().as_bytes())
         .map_err(|_| "executor draft release path contains NUL".to_string())?;
+    // Keep sibling test forks out until every parent-owned pipe has reached cleanup or EOF.
+    #[cfg(test)]
+    let _fork_lifecycle = lock_test_fork_lifecycle();
     let (release_read, release_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft release pipe: {error}"))?;
     let (digest_read, digest_write) =
@@ -15763,56 +15754,6 @@ pub(crate) struct HarnessLaunch<'a> {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaunchFailpoint {
-    None = 0,
-    PersistAfterSpawn = 1,
-    LogAfterSpawn = 2,
-    BeforeSnapshotVerification = 3,
-    NeverReady = 4,
-    NeverCloseExecStatus = 5,
-    AdoptedPoll = 6,
-    AdoptedFlush = 7,
-    AdoptedLog = 8,
-    DirectPoll = 9,
-    CleanupSignal = 10,
-    CleanupLiveness = 11,
-    ParentAfterPidfd = 12,
-    ParentHarnessCapture = 13,
-    ParentBirthRefresh = 14,
-    RingBeforeSync = 15,
-    DirectSetup = 16,
-    PostReturnIdentity = 17,
-    CleanupFreezeWindow = 18,
-    ParentHarnessPidRead = 19,
-    ParentHarnessBirth = 20,
-    ParentHarnessPidfd = 21,
-    ParentReadiness = 22,
-    JournalCreate = 23,
-    JournalWrite = 24,
-    JournalSync = 25,
-    JournalRename = 26,
-    JournalDirectorySync = 27,
-    DescendantCapture = 28,
-    RingReadInterrupted = 29,
-    ArchiveAfterManifest = 30,
-    ArchiveMidMove = 31,
-    ArchiveBeforeComplete = 32,
-    RetireAfterProof = 33,
-    RetireMidDelete = 34,
-    RetireAfterLaunchDelete = 35,
-    BeforeEvidenceBundle = 36,
-    RecoveryAfterAnchorClear = 37,
-    RecoveryBeforeSnapshot = 38,
-    RetireAfterPendingRemoval = 39,
-    RotationAfterArchive = 40,
-    RotationAfterActive = 41,
-    EvidenceAfterGenerationSelect = 42,
-    OwnershipBeforeMarker = 43,
-    OwnershipAfterMarker = 44,
-}
-
-#[cfg(test)]
 static LAUNCH_FAILPOINT: AtomicU8 = AtomicU8::new(LaunchFailpoint::None as u8);
 #[cfg(test)]
 static CLEANUP_FAILPOINT: AtomicU8 = AtomicU8::new(LaunchFailpoint::None as u8);
@@ -16826,7 +16767,7 @@ struct ChildExit {
 }
 
 #[cfg(test)]
-const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
+const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -17643,6 +17584,9 @@ struct ForkedChild {
     exec_status: Option<File>,
     harness_exit: Option<File>,
     reaped: Option<ChildExit>,
+    // This field is last so descriptor owners above are dropped before the test lock is released.
+    #[cfg(test)]
+    _fork_lifecycle: Option<TestForkLifecycleGuard>,
 }
 
 #[cfg(target_os = "linux")]
@@ -17784,7 +17728,13 @@ impl ForkedChild {
             LAUNCH_HANDSHAKE_TIMEOUT,
             "executor exec-status",
         )? {
-            None => Ok(()),
+            None => {
+                #[cfg(test)]
+                {
+                    self._fork_lifecycle = None;
+                }
+                Ok(())
+            }
             Some(_) => Err("executor child failed before exact harness exec".to_string()),
         }
     }
@@ -18282,6 +18232,9 @@ fn spawn_blocked_harness(
         .map(|value| value.as_ptr())
         .collect::<Vec<_>>();
     environment_pointers.push(std::ptr::null());
+    // On success this moves into ForkedChild; on failure it outlives parent cleanup locals.
+    #[cfg(test)]
+    let mut fork_lifecycle = Some(lock_test_fork_lifecycle());
     let (barrier_read, barrier_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create launch barrier: {error}"))?;
     let (ready_read, ready_write) =
@@ -18456,6 +18409,10 @@ fn spawn_blocked_harness(
                     exec_status: Some(File::from(status_read)),
                     harness_exit: Some(File::from(harness_exit_read)),
                     reaped: None,
+                    #[cfg(test)]
+                    _fork_lifecycle: Some(
+                        fork_lifecycle.take().expect("test fork lifecycle guard"),
+                    ),
                 })
             })();
             match setup {
@@ -20024,7 +19981,7 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
     {
         let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if process_disappeared_error(&error) => return Ok(None),
             Err(error) => return Err(format!("read executor process stat: {error}")),
         };
         let close = stat
@@ -20046,6 +20003,11 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
             start_identity,
         }))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_disappeared_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(nix::libc::ESRCH)
 }
 
 #[cfg(target_os = "linux")]
@@ -20285,14 +20247,20 @@ pub(crate) fn resolve_base(
     if let Some(branch) = configured_base_branch(repo)? {
         return fetch_and_resolve_base(repo, &branch, false);
     }
-    let reference = git_stdout(
+    let branch = match git_stdout(
         repo,
         &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )?;
-    let branch = reference
-        .strip_prefix("refs/remotes/origin/")
-        .ok_or_else(|| format!("unexpected remote default reference: {reference}"))?;
-    fetch_and_resolve_base(repo, branch, false)
+    ) {
+        Ok(reference) => reference
+            .strip_prefix("refs/remotes/origin/")
+            .ok_or_else(|| format!("unexpected remote default reference: {reference}"))?
+            .to_string(),
+        // The conductor's working repo is a worktree/clone that never ran
+        // `git remote set-head`, so refs/remotes/origin/HEAD is absent. Fall
+        // back to the conventional default so base-branch resolution still works.
+        Err(_) => "main".to_string(),
+    };
+    fetch_and_resolve_base(repo, &branch, false)
 }
 
 fn configured_base_branch(repo: &Path) -> Result<Option<String>, String> {
@@ -22952,7 +22920,7 @@ use direct_executable::*;
 mod direct_io;
 use direct_io::*;
 mod platform_identity;
-pub(crate) use platform_identity::{current_boot_identity, process_birth_identity};
+pub(crate) use platform_identity::*;
 mod reviewer_capture;
 use reviewer_capture::*;
 mod worktree_root;

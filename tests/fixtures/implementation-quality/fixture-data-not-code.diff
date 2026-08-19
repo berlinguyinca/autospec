@@ -1,0 +1,8 @@
+diff --git a/tests/fixtures/implementation-quality/example.diff b/tests/fixtures/implementation-quality/example.diff
+new file mode 100644
+--- /dev/null
++++ b/tests/fixtures/implementation-quality/example.diff
+@@ -0,0 +1,3 @@
++    db = mock(sqlite3.connect(":memory:"))
++    # TODO cover the failure path
++    assert True

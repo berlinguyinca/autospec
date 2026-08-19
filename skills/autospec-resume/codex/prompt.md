@@ -54,17 +54,18 @@ Dispatches directly to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/r
 
 | Flag | Behaviour |
 |---|---|
-| (none) | Scan the current repo's durable run-state + heartbeats, apply the auto-resume pre-conditions, and if all pass relaunch via the durably-captured command (clean-restart off `origin/main`). |
+| (none) | Scan `in-progress-by-bot` and open `auto-implement` issues, apply the auto-resume pre-conditions, recover only exact stale-startup claims through Rust, and if all pass relaunch via the durably-captured command (clean-restart off `origin/main`). |
 | `--resume-partial` | Additionally re-attach `/tmp/wt-<branch>` **only when** `heartbeat.host == $(hostname)`; cross-host or missing host silently clean-restarts off `origin/main`. |
 | `--repo <owner/name>` | Target a specific repo (used by the boot supervisor, which iterates the registry). |
-| `--dry-run` | Print the decision and the command that *would* run; change nothing; exit 0. |
+| `--dry-run` | Print the recovery and relaunch actions that *would* run; invoke neither action; change nothing; exit 0. |
 
 **Exit codes:** `0` = nothing to resume / `--dry-run` / resumed (one-line reason printed); `1` = hard error (bad args, no `gh`).
 
 ## Auto-resume contract (enforced by the helper)
 
 - **No second lock / idempotency.** Resume relaunches the *run*; the relaunched monitor reads the existing GitHub CAS lock-comment through `autospec claim state read` (lowest-comment-id wins, loser self-cleans). Resume itself never writes a run-state comment and never adds any new lock. Two concurrent resumes (supervisor + human, or two hosts) converge to exactly one claim per issue at the existing CAS boundary.
-- **Pre-conditions (ALL required, else exit 0, no relaunch):** (a) ≥1 issue with run-state labeled `in-progress-by-bot` whose heartbeat step ∉ {`merged`,`failed`}; (b) no `~/.autospec/stop.flag`; (c) no issue labeled `paused-by-user`; (d) not all issues closed.
+- **Pre-conditions (ALL required, else exit 0, no relaunch):** (a) ≥1 crashed `in-progress-by-bot` issue or exact stale-startup candidate from open `auto-implement`; (b) no `~/.autospec/stop.flag`; (c) no issue labeled `paused-by-user`; (d) not all issues closed.
+- **Stranded startup recovery.** Scan both relevant labels, but accept `auto-implement` only when Rust run-state is the exact stale `claimed` / `heartbeat-pending:none` sentinel for the requested repository and issue. Delegate every ownership mutation to `autospec claim state recover-stale-startup`; relaunch only when Rust returns an exact matching `recovered: true` result.
 - **Crash-vs-live.** Treat an issue as crashed (eligible) only when its age, computed from run-state **server** `updated_at` (never a local clock — mirrors `autospec-watchdog.sh:386-405`), satisfies `step=claimed && age>=300` OR `age>=10800`. Otherwise assume a live/slow worker elsewhere and do **not** steal.
 - **Cross-host.** `--resume-partial` re-attaches `/tmp/wt-<branch>` only when `heartbeat.host == $(hostname)`; cross-host or missing `host` MUST clean-restart off `origin/main` (the crashed worktree is on a dead machine's local `/tmp`).
 - **Durable relaunch command.** The command comes from the registry `~/.autospec/active-runs/<repo-slug>.json` written by `/autospec-run` at monitor launch — never an attacker-supplied path. After a reboot (env cleared) the registry alone yields a runnable command.
@@ -100,6 +101,7 @@ and exit non-zero.
 ## Hard rules
 
 - Never write a run-state comment from this skill and never add a new lock. The relaunched monitor claims through the existing GitHub CAS lock only.
+- Never invoke stale-startup recovery or the relaunch command under `--dry-run`.
 - Never re-attach a cross-host or missing-host worktree under `--resume-partial`; clean-restart off `origin/main`.
 - Never exceed `AUTOSPEC_RESUME_MAX_ATTEMPTS` consecutive auto-resume attempts; halt and surface at the cap.
 - This skill is a thin wrapper. All behaviour is in the helper script.

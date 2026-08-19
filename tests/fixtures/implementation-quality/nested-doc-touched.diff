@@ -1,0 +1,16 @@
+diff --git a/llm/linux-qwen38/README.md b/llm/linux-qwen38/README.md
+--- a/llm/linux-qwen38/README.md
++++ b/llm/linux-qwen38/README.md
+@@ -1,2 +1,5 @@
+ # node
+ 
++On a node that fans out, generate the client config so the pool-sized model id is
++not offered at all: pass --no-solo-tier and the largest selectable window becomes
++the -160k tier.
+diff --git a/llm/linux-qwen38/scripts/install-node.sh b/llm/linux-qwen38/scripts/install-node.sh
+--- a/llm/linux-qwen38/scripts/install-node.sh
++++ b/llm/linux-qwen38/scripts/install-node.sh
+@@ -10,2 +10,3 @@
+ configure_client() {
++  python3 "${HERE}/scripts/configure-opencode.py" --no-solo-tier --port "${port}"
+ }

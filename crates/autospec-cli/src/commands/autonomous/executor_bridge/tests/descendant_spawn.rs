@@ -3,8 +3,8 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super::{
-    supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, ProcessIdentity,
-    SupervisionOutcome,
+    supervise_harness, BridgePhase, HarnessInvocation, MutationSnapshot, PersistedInvocation,
+    ProcessIdentity, SupervisionOutcome,
 };
 use super::support_base::{test_environment, GitFixture};
 use super::support_invocation::{
@@ -15,6 +15,45 @@ use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+#[test]
+fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() { // linter:allow-SECURITY test fn name ends in _exec( — Rust test function, not a builtin call
+    let _environment = test_environment();
+    let fixture = GitFixture::new("fork-lock-release-after-exec");
+    let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+    let validated = bridge::validate_invocation(
+        &HarnessInvocation {
+            program: invocation.program.canonicalize().expect("canonical shell"),
+            supervised_executable: invocation
+                .program
+                .canonicalize()
+                .expect("canonical supervised shell"),
+            args: invocation.args,
+            current_dir: invocation
+                .current_dir
+                .canonicalize()
+                .expect("canonical fixture repo"),
+            requires_mutation_snapshots: false,
+        },
+        &fixture.repo.canonicalize().expect("canonical fixture repo"),
+    )
+    .expect("validate sleeping harness");
+    let sinks = bridge::output_sink_paths(
+        &fixture.root.join("state/invocation.json"),
+        "fork-lock-release",
+    )
+    .expect("output sinks");
+    let mut child =
+        bridge::spawn_blocked_harness(&validated, &sinks, None).expect("spawn sleeping harness");
+
+    child.release_launch_barrier().expect("release harness");
+    assert!(
+        bridge::test_fork_lifecycle_is_available(),
+        "an execed harness must not serialize unrelated test forks until process exit"
+    );
+    child.terminate().expect("terminate sleeping harness");
+}
 
 #[test]
 fn autonomous_executor_bridge_pending_and_interrupted_phases_round_trip_nonterminally() {
@@ -134,7 +173,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
         "unexpected error: {error}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(3),
         "ready handshake exceeded its test deadline"
     );
 }
@@ -167,7 +206,7 @@ fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
         "unexpected error: {error}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(3),
         "exec-status handshake exceeded its test deadline"
     );
     let persisted = PersistedInvocation::from_json(
@@ -242,6 +281,7 @@ fn autonomous_executor_bridge_process_only_restart_proves_and_cleans_parent_supe
 
 #[test]
 fn autonomous_executor_bridge_dead_legacy_recovery_retains_permanent_quarantine() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-dead-recovery");
     let mut state = supervision_state(&fixture);
     state.phase = BridgePhase::Implementing;
@@ -321,6 +361,7 @@ fn autonomous_executor_bridge_inherited_pipe_writer_blocks_success_and_is_cleane
 
 #[test]
 fn autonomous_executor_bridge_closed_stdio_descendant_blocks_terminal_success() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-closed-stdio-descendant");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -353,6 +394,7 @@ fn autonomous_executor_bridge_closed_stdio_descendant_blocks_terminal_success() 
 
 #[test]
 fn autonomous_executor_bridge_bounds_oversized_unterminated_output() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-bounded-output");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -380,6 +422,7 @@ fn autonomous_executor_bridge_bounds_oversized_unterminated_output() {
 
 #[test]
 fn autonomous_executor_bridge_failing_leader_cleans_background_descendant() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-daemon-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =

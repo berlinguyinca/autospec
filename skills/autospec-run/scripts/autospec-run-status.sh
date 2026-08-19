@@ -95,7 +95,7 @@ if [ -n "$repo" ]; then
     [ -d "$_dir" ] || continue
     for _file in "$_dir"/*.json; do
       [ -f "$_file" ] || continue
-      _mtime="$(stat -f %m "$_file" 2>/dev/null || stat -c %Y "$_file" 2>/dev/null || echo 0)"
+      _mtime="$(stat -c %Y "$_file" 2>/dev/null || stat -f %m "$_file" 2>/dev/null || echo 0)"
       printf '%s' "${_mtime:-}" | grep -Eq '^[0-9]+$' || _mtime=0
       hb_candidates="${hb_candidates}${_mtime}	${_file}
 "

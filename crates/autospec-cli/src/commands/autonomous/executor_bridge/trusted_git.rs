@@ -1,19 +1,26 @@
-// executor_bridge/trusted_git.rs — binding to the worktree's git so the executor cannot
-// subvert it.
-//
-// One concern, extracted whole: the worktree binding, the hook bundle that neutralises
-// repo-supplied hooks for the duration of a run, resolution of the trusted codex executable
-// and linter, the signing attestation, and the rejection of external filters. Every item here
-// exists to make git operations trustworthy while untrusted code is running beside them, and
-// nothing else in the bridge is about that.
-//
-// The cfg-gated pairs (two TrustedHookBundle definitions, two TrustedHookContext) travel
-// together because they are the same abstraction under different platform support.
+// Binds Rust-owned Git operations to trusted worktree metadata and contained hooks.
+// Resolver, launch-identity, signing, and hook-context details live in sibling modules.
 
 use super::*;
 
+#[cfg(unix)]
+mod codex_launch;
+#[cfg(unix)]
+mod hook_bundle_lifecycle;
+#[cfg(unix)]
+mod hook_context;
 mod hook_directory;
 mod signing_program;
+#[cfg(all(unix, test))]
+pub(super) use codex_launch::contained_hook_profile_paths;
+#[cfg(unix)]
+pub(super) use codex_launch::{
+    contained_hook_profile, trusted_codex_launch_from, TrustedCodexLaunch,
+};
+#[cfg(unix)]
+use hook_bundle_lifecycle::HOOK_BUNDLE_NONCE;
+#[cfg(unix)]
+pub(super) use hook_context::{trusted_linter_from, TrustedHookContext};
 use hook_directory::resolve_hooks_directory;
 use signing_program::resolve_signing_program;
 
@@ -195,165 +202,10 @@ pub(super) fn trusted_worktree_git_paths(
 }
 
 #[cfg(unix)]
-pub(super) static HOOK_BUNDLE_NONCE: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(unix)]
 pub(super) struct TrustedHookBundle {
     pub(super) path: PathBuf,
     pub(super) temporary: bool,
-}
-
-#[cfg(unix)]
-pub(super) struct TrustedHookContext {
-    pub(super) environment: BTreeMap<String, OsString>,
-    pub(super) autospec: PathBuf,
-}
-
-#[cfg(unix)]
-impl TrustedHookContext {
-    pub(super) fn current() -> Result<Self, String> {
-        Ok(Self {
-            environment: std::env::vars_os()
-                .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
-                .collect(),
-            autospec: std::env::current_exe()
-                .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
-        })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for TrustedHookBundle {
-    fn drop(&mut self) {
-        if self.temporary {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-}
-
-#[cfg(unix)]
-pub(super) fn toml_path_entry(path: &Path, permission: &str) -> Result<String, String> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| "contained Git hook path must be UTF-8".to_string())?
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    Ok(format!("\"{path}\"=\"{permission}\""))
-}
-
-#[cfg(unix)]
-pub(super) fn trusted_codex_executable_from(
-    binding: &TrustedWorktreeGit,
-    environment: &BTreeMap<String, OsString>,
-) -> Result<PathBuf, String> {
-    let codex = safe_executable(Path::new("codex"), environment)
-        .map_err(|error| format!("resolve contained Git hook sandbox: {error}"))?;
-    if codex.starts_with(&binding.worktree) {
-        return Err(
-            "contained Git hook sandbox executable is writable by the implementer".to_string(),
-        );
-    }
-    Ok(codex)
-}
-
-#[cfg(unix)]
-pub(super) fn trusted_linter_from(
-    binding: &TrustedWorktreeGit,
-    environment: &BTreeMap<String, OsString>,
-) -> Result<(PathBuf, PathBuf), String> {
-    let home = environment
-        .get("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
-    let scripts_dir = environment
-        .get("AUTOSPEC_SCRIPTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".autospec/scripts"));
-    let scripts_dir = fs::canonicalize(&scripts_dir)
-        .map_err(|error| format!("canonicalize contained hook scripts: {error}"))?;
-    let candidate = scripts_dir.join("lint-implementation.sh");
-    let metadata = fs::symlink_metadata(&candidate)
-        .map_err(|error| format!("inspect contained hook linter: {error}"))?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err("contained hook linter must be a regular non-symlink file".to_string());
-    }
-    let linter = fs::canonicalize(&candidate)
-        .map_err(|error| format!("canonicalize contained hook linter: {error}"))?;
-    if scripts_dir.starts_with(&binding.worktree)
-        || linter.parent() != Some(scripts_dir.as_path())
-        || linter.starts_with(&binding.worktree)
-    {
-        return Err("contained hook linter must not be writable by the implementer".to_string());
-    }
-    Ok((scripts_dir, linter))
-}
-
-#[cfg(unix)]
-pub(super) fn contained_hook_profile(
-    binding: &TrustedWorktreeGit,
-    bundle: &Path,
-    codex: &Path,
-    linter: &Path,
-    autospec: &Path,
-) -> Result<String, String> {
-    let mut entries = vec![
-        "\":minimal\"=\"read\"".to_string(),
-        "\":workspace_roots\"={}".to_string(),
-        toml_path_entry(&binding.worktree, "write")?,
-        toml_path_entry(&binding.worktree.join(".git"), "read")?,
-        toml_path_entry(
-            &binding.worktree.join(".autospec/executor-closeout.md"),
-            "read",
-        )?,
-        toml_path_entry(&binding.worktree.join(".autospec/local-git"), "read")?,
-        toml_path_entry(
-            &binding.worktree.join(".autospec/original-git-pointer"),
-            "read",
-        )?,
-        toml_path_entry(&binding.common_dir, "read")?,
-        toml_path_entry(&binding.git_dir, "read")?,
-        toml_path_entry(&binding.hooks_dir, "read")?,
-        toml_path_entry(linter, "read")?,
-        toml_path_entry(bundle, "read")?,
-        toml_path_entry(&bundle.join("tmp"), "write")?,
-        toml_path_entry(codex, "read")?,
-        toml_path_entry(autospec, "read")?,
-    ];
-    for path in [
-        "~/.aws",
-        "~/.azure",
-        "~/.cargo/credentials",
-        "~/.cargo/credentials.toml",
-        "~/.codex/archived_sessions",
-        "~/.codex/auth.json",
-        "~/.codex/config.toml",
-        "~/.codex/history.jsonl",
-        "~/.codex/sessions",
-        "~/.codex/shell_snapshots",
-        "~/.config/containers",
-        "~/.config/gcloud",
-        "~/.config/gh",
-        "~/.config/pip",
-        "~/.docker",
-        "~/.git-credentials",
-        "~/.gnupg",
-        "~/.gradle",
-        "~/.kube",
-        "~/.m2",
-        "~/.netrc",
-        "~/.npmrc",
-        "~/.pypirc",
-        "~/.ssh",
-        "~/.terraform.d",
-        "~/.vault-token",
-    ] {
-        entries.push(format!("\"{path}\"=\"deny\""));
-    }
-    Ok(format!(
-        "permissions.autospec-git-hook.filesystem={{{}}}",
-        entries.join(",")
-    ))
+    launch: Option<TrustedCodexLaunch>,
 }
 
 #[cfg(unix)]
@@ -372,9 +224,10 @@ impl TrustedHookBundle {
             return Ok(Self {
                 path: binding.hooks_dir.clone(),
                 temporary: false,
+                launch: None,
             });
         }
-        let codex = trusted_codex_executable_from(binding, &context.environment)?;
+        let codex = trusted_codex_launch_from(binding, &context.environment)?;
         let home = context
             .environment
             .get("HOME")
@@ -408,6 +261,8 @@ impl TrustedHookBundle {
             "contained hook issue body",
         )?;
         let profile = contained_hook_profile(binding, &path, &codex, &linter, &autospec)?;
+        codex.revalidate()?;
+        let codex_words = codex.shell_words();
         for hook in &binding.active_hooks {
             let name = hook
                 .file_name()
@@ -423,7 +278,7 @@ impl TrustedHookBundle {
                 posix_shell_quote(scripts_dir.to_string_lossy().as_ref()),
                 posix_shell_quote(autospec.to_string_lossy().as_ref()),
                 posix_shell_quote(issue_body_path.to_string_lossy().as_ref()),
-                posix_shell_quote(codex.to_string_lossy().as_ref()),
+                codex_words,
                 posix_shell_quote(binding.worktree.to_string_lossy().as_ref()),
                 posix_shell_quote(&profile),
                 posix_shell_quote(hook.to_string_lossy().as_ref()),
@@ -443,7 +298,14 @@ impl TrustedHookBundle {
         Ok(Self {
             path,
             temporary: true,
+            launch: Some(codex),
         })
+    }
+
+    pub(super) fn revalidate_launch(&self) -> Result<(), String> {
+        self.launch
+            .as_ref()
+            .map_or(Ok(()), TrustedCodexLaunch::revalidate)
     }
 }
 
@@ -476,6 +338,10 @@ impl TrustedHookBundle {
         _context: &TrustedHookContext,
     ) -> Result<Self, String> {
         Self::create(binding, issue_body)
+    }
+
+    pub(super) fn revalidate_launch(&self) -> Result<(), String> {
+        Ok(())
     }
 }
 

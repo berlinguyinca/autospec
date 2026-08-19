@@ -279,6 +279,10 @@ Restore benchmark `{benchmark}` metric `{metric}` below regression threshold for
 - `scripts/performance-workstream.sh`
 - `.autospec/benchmarks/performance.jsonl`
 
+## Dependencies
+
+none
+
 ## Context
 
 Offending metric: `{metric}` regressed from `{baseline}` to `{candidate}` with delta `{delta}%` and significance `{z}`. Fitness guard: {fitness}.

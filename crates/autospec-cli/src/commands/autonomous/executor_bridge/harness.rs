@@ -10,6 +10,13 @@
 
 use super::*;
 
+#[cfg(unix)]
+mod trusted_executable;
+#[cfg(all(unix, test))]
+pub(super) use trusted_executable::trusted_executable_owner_allowed;
+#[cfg(unix)]
+pub(super) use trusted_executable::TrustedExecutable;
+
 #[cfg(test)]
 thread_local! {
     static TEST_EXECUTOR_HARNESS_EXACT: RefCell<Option<String>> = const { RefCell::new(None) };

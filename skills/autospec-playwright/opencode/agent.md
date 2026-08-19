@@ -1,6 +1,7 @@
 ---
 name: autospec-playwright
 description: Use when you want to run disciplined no-mock Playwright UI-test authoring (Stage 2A) for a project. Detects the .autospec/test.yml authoring blocks, invokes autospec-test Stage 2A, and prints the coverage report.
+mode: primary
 ---
 
 # autospec-playwright — Disciplined Playwright Authoring Dispatcher

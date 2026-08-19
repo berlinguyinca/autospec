@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
 @test "explore drain isolates and kills the harness process group" {
-  grep -q 'setsid "\$HARNESS_DISPATCHER" exec' \
+  grep -q 'run_in_new_session "\$HARNESS_DISPATCHER" exec' \
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-explore-drain.sh"
   grep -q 'kill -TERM -- "-\$_pgid"' \
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-explore-drain.sh"

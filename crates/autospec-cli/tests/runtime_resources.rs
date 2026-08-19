@@ -1250,17 +1250,17 @@ fn gc_treats_an_already_absent_container_as_deleted() {
 }
 
 #[test]
+#[cfg(unix)]
 fn gc_reuses_guarded_maven_purge_and_rejects_a_wrong_effective_root() {
     let fixture = RuntimeFixture::with_manifest(
         "version: 2\nresources:\n  maven:\n    isolation: split-local\n  compose:\n    isolation: off\nmodes:\n  local:\n    command: true\n",
     );
-    std::fs::write(
-        fixture.root.join("pom.xml"),
-        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>test</groupId><artifactId>gc</artifactId><version>1</version></project>\n",
-    )
-    .unwrap();
+    std::fs::write(fixture.root.join("pom.xml"), "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>test</groupId><artifactId>gc</artifactId><version>1</version></project>\n").unwrap();
+    let bin = fixture.install_fake_maven();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let up = fixture
         .command()
+        .env("PATH", &path)
         .args(["runtime", "env", "up", "--repo"])
         .arg(&fixture.root)
         .output()
@@ -1293,9 +1293,9 @@ fn gc_reuses_guarded_maven_purge_and_rejects_a_wrong_effective_root() {
     let mut inventory: ResourceInventory = read_json(&inventory_path).unwrap();
     inventory.maven_local_prefix = Some(wrong_prefix.clone());
     autospec_core::runtime_env::write_json_atomic(&inventory_path, &inventory).unwrap();
-
     let output = fixture
         .command()
+        .env("PATH", path)
         .args(["runtime", "env", "gc", "--repo"])
         .arg(&fixture.root)
         .output()

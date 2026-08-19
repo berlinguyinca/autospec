@@ -301,6 +301,7 @@ fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker(
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair() {
+    let _environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-scope-parent-sync", false, true);
     let scope_root = state.identity.worktree.parent().expect("scope root");
@@ -341,6 +342,7 @@ fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair()
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_hardens_root_only_after_zero_effect_marker() {
+    let _environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-root-hardening", false, true);
     let scope_root = state.identity.worktree.parent().expect("scope root");
@@ -438,6 +440,7 @@ fn autonomous_executor_bridge_rejects_symlinked_executor_root_before_hardening()
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_provisioning_hardens_root_before_scope_creation() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("provision-root-hardening");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let repository_scope = format!(

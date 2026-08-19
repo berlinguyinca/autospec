@@ -1,6 +1,7 @@
 ---
 name: autospec-upgrade
 description: Use when the user wants to upgrade an Angular, Next.js, or React project to the latest official versions safely — by locking observable behavior before touching versions, upgrading one major at a time with official codemods, and gating completion on mutation score rather than coverage theater.
+mode: primary
 ---
 
 # autospec-upgrade workflow

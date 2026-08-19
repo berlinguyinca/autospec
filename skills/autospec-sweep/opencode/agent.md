@@ -1,6 +1,7 @@
 ---
 name: autospec-sweep
 description: Use when a project needs first-run autospec configuration, recurring spec-vs-reality sweeps, or continuous improvement across docs, tests, and code health.
+mode: primary
 ---
 
 # autospec-sweep (harness-neutral)

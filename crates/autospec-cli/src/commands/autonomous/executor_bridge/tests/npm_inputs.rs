@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::support_base::{git, git_stdout, GitFixture};
+use super::support_base::{git, git_stdout, test_environment, GitFixture};
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
@@ -418,6 +418,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_open() {
+    let _environment = test_environment();
     // Break caught: validating package.json by path and reopening it lets a symlink swap
     // redirect the classifier to attacker-controlled dependency data.
     let fixture = GitFixture::new("npm-dependency-inputs-open-swap");

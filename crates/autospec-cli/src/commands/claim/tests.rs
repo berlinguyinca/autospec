@@ -5,7 +5,7 @@ mod bridge_terminal;
 mod conductor_lease_takeover;
 #[cfg(unix)]
 mod heartbeat_classify;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod heartbeat_liveness;
 mod heartbeat_prior;
 #[cfg(target_os = "linux")]

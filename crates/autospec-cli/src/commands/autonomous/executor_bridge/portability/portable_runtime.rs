@@ -407,69 +407,79 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
         return Err("injected portable failure after cleanup proof".to_string());
     }
 
-    let terminal = operation?;
-    if matches!(
-        &terminal,
-        PortableTerminal::Exited(_) | PortableTerminal::Stalled { .. }
-    ) {
-        match readers.drain_after_exit(state_path, event_log, state, &mut renewal)? {
-            CompletionDrainOutcome::Drained => {}
-            CompletionDrainOutcome::OwnershipLost => {
-                record_claim_ownership_loss(state_path, event_log, state)?;
-                fs::remove_file(&sinks.supervisor_identity)
-                    .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
-                return Ok(SupervisionOutcome::OwnershipLost);
+    let post_cleanup = (|| -> Result<SupervisionOutcome, String> {
+        let terminal = operation?;
+        if matches!(
+            &terminal,
+            PortableTerminal::Exited(_) | PortableTerminal::Stalled { .. }
+        ) {
+            match readers.drain_after_exit(state_path, event_log, state, &mut renewal)? {
+                CompletionDrainOutcome::Drained => {}
+                CompletionDrainOutcome::OwnershipLost => {
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+                CompletionDrainOutcome::TransientFailure(error) => {
+                    return Ok(SupervisionOutcome::TransientFailure(error));
+                }
             }
-            CompletionDrainOutcome::TransientFailure(error) => {
+        }
+        let outcome = match terminal {
+            PortableTerminal::Exited(exit_code) => {
+                fail_launch_at("pre-verify")?;
+                snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+                state.phase = if exit_code == 0 {
+                    BridgePhase::ImplementationComplete
+                } else {
+                    BridgePhase::Interrupted
+                };
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_exited",
+                    Some(serde_json::json!({"exit_code": exit_code, "adopted": false})),
+                )?;
+                SupervisionOutcome::Exited { exit_code }
+            }
+            PortableTerminal::OwnershipLost => {
+                record_claim_ownership_loss(state_path, event_log, state)?;
+                SupervisionOutcome::OwnershipLost
+            }
+            PortableTerminal::Transient(error) => {
                 return Ok(SupervisionOutcome::TransientFailure(error));
             }
+            PortableTerminal::Stalled { last_progress_at } => {
+                state.phase = BridgePhase::Interrupted;
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_stalled",
+                    Some(serde_json::json!({
+                        "stall_timeout_ms": config.stall_timeout.as_millis(),
+                        "last_progress_at": last_progress_at,
+                    })),
+                )?;
+                SupervisionOutcome::Stalled
+            }
+        };
+        Ok(outcome)
+    })();
+    let retirement = match fs::remove_file(&sinks.supervisor_identity) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("retire portable executor owner journal: {error}")),
+    };
+    match (post_cleanup, retirement) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(retirement_error)) => {
+            Err(format!("{operation_error}; {retirement_error}"))
         }
     }
-    let outcome = match terminal {
-        PortableTerminal::Exited(exit_code) => {
-            fail_launch_at("pre-verify")?;
-            snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
-            state.phase = if exit_code == 0 {
-                BridgePhase::ImplementationComplete
-            } else {
-                BridgePhase::Interrupted
-            };
-            state.progress_at = unix_now()?;
-            write_invocation_atomic(state_path, state)?;
-            append_executor_event(
-                event_log,
-                state,
-                "child_exited",
-                Some(serde_json::json!({"exit_code": exit_code, "adopted": false})),
-            )?;
-            SupervisionOutcome::Exited { exit_code }
-        }
-        PortableTerminal::OwnershipLost => {
-            record_claim_ownership_loss(state_path, event_log, state)?;
-            SupervisionOutcome::OwnershipLost
-        }
-        PortableTerminal::Transient(error) => {
-            return Ok(SupervisionOutcome::TransientFailure(error));
-        }
-        PortableTerminal::Stalled { last_progress_at } => {
-            state.phase = BridgePhase::Interrupted;
-            state.progress_at = unix_now()?;
-            write_invocation_atomic(state_path, state)?;
-            append_executor_event(
-                event_log,
-                state,
-                "child_stalled",
-                Some(serde_json::json!({
-                    "stall_timeout_ms": config.stall_timeout.as_millis(),
-                    "last_progress_at": last_progress_at,
-                })),
-            )?;
-            SupervisionOutcome::Stalled
-        }
-    };
-    fs::remove_file(&sinks.supervisor_identity)
-        .map_err(|error| format!("retire portable executor owner journal: {error}"))?;
-    Ok(outcome)
 }
 
 pub(in crate::commands::autonomous::executor_bridge) fn resolve_executor_supervisor_executable(

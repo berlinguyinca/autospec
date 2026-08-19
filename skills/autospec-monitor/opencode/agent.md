@@ -1,6 +1,7 @@
 ---
 name: autospec-monitor
 description: Observe a live autospec-autonomous conductor read-only by summarizing typed status, timeline, launch, heartbeat, tier, and discovery artifact surfaces.
+mode: primary
 ---
 # autospec-monitor
 

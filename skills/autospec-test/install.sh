@@ -3,6 +3,7 @@ set -eu
 
 SKILL_NAME=autospec-test
 RAW_BASE="${AUTOSPEC_TEST_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/autospec/${AUTOSPEC_TEST_REF:-main}/skills/$SKILL_NAME}"
+SHARED_RAW_BASE="${AUTOSPEC_TEST_SHARED_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/autospec/${AUTOSPEC_TEST_REF:-main}/skills/autospec-shared/scripts}"
 SCRIPT_PATH=${0:-}
 if [ -n "$SCRIPT_PATH" ] && [ -f "$SCRIPT_PATH" ]; then
     SKILL_DIR=$(CDPATH= cd -- "$(dirname "$SCRIPT_PATH")" && pwd)
@@ -39,10 +40,12 @@ if [ -z "$SKILL_DIR" ]; then
     command -v curl >/dev/null 2>&1 || { printf 'error: curl is required\n' >&2; exit 1; }
     TMP_DIR=$(mktemp -d)
     SKILL_DIR=$TMP_DIR
-    mkdir -p "$SKILL_DIR/codex" "$SKILL_DIR/opencode"
+    mkdir -p "$SKILL_DIR/codex" "$SKILL_DIR/opencode" "$SKILL_DIR/shared-scripts"
     for rel in SKILL.md codex/prompt.md opencode/agent.md; do
         curl -fsSL "$RAW_BASE/$rel" -o "$SKILL_DIR/$rel"
     done
+    curl -fsSL "$SHARED_RAW_BASE/loop-classifier-docs-extension.mjs" \
+        -o "$SKILL_DIR/shared-scripts/loop-classifier-docs-extension.mjs"
 fi
 
 copy_file() {
@@ -59,6 +62,14 @@ copy_file() {
 CLAUDE_ROOT=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 OPENCODE_ROOT=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}
 CODEX_ROOT=${CODEX_HOME:-$HOME/.codex}
+AUTOSPEC_SCRIPTS_DIR=${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}
+
+if [ -f "$SKILL_DIR/shared-scripts/loop-classifier-docs-extension.mjs" ]; then
+    shared_helper="$SKILL_DIR/shared-scripts/loop-classifier-docs-extension.mjs"
+else
+    shared_helper="$SKILL_DIR/../autospec-shared/scripts/loop-classifier-docs-extension.mjs"
+fi
+copy_file "$shared_helper" "$AUTOSPEC_SCRIPTS_DIR/loop-classifier-docs-extension.mjs"
 
 if [ "$HARNESS" = claude ] || [ "$HARNESS" = all ]; then
     copy_file "$SKILL_DIR/SKILL.md" "$CLAUDE_ROOT/skills/$SKILL_NAME/SKILL.md"

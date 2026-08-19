@@ -54,6 +54,7 @@ extern "C" {
 
 fn install_signal_handlers() {
     RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    // SAFETY: SIGINT/SIGTERM are fixed and the handler only writes an atomic.
     unsafe {
         signal(2, record_signal);
         signal(15, record_signal);
@@ -85,7 +86,7 @@ fn duplicated_signal_registration() {
 RS
     run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/duplicated.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/duplicated.jsonl")" -eq 2 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/duplicated.jsonl")" -eq 1 ]
 
     cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
 const DECLARATION: &str = r#"extern "C" {
@@ -226,13 +227,13 @@ RS
     local base
     base="$(git -C "$repo" rev-parse HEAD)"
 
-    sed -i 's/fn existing/fn renamed/' "$repo/src/lib.rs"
-    sed -i 's/unsafe{/unsafe {/' "$repo/src/format.rs"
+    perl -pi -e 's/fn existing/fn renamed/' "$repo/src/lib.rs"
+    perl -pi -e 's/unsafe\{/unsafe {/' "$repo/src/format.rs"
     printf '%s\n' \
         'fn anchor() {}' \
         'fn moved(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/internal-move.rs"
     printf '%s\n' 'unsafe fn z() {}' > "$repo/src/deletion-before-add.rs"
-    sed -i '2s/cfg(any())/unsafe(no_mangle)/' "$repo/src/attribute.rs"
+    perl -pi -e 'if ($. == 2) { s/cfg\(any\(\)\)/unsafe(no_mangle)/ }' "$repo/src/attribute.rs"
     printf '%s\n' 'fn replacement(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/replacement.rs"
     git -C "$repo" mv src/rename.rs src/moved.rs
     git -C "$repo" rm -q src/deleted.rs

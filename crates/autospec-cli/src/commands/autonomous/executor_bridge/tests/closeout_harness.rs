@@ -4,7 +4,7 @@
 
 use super::super::{resolve_base, BridgePhase};
 use super::support_base::{
-    git, git_stdout, zero_effect_classifier_fixture, GitFixture, TEST_SEQUENCE,
+    git, git_stdout, test_environment, zero_effect_classifier_fixture, GitFixture, TEST_SEQUENCE,
 };
 use super::support_invocation::supervision_state;
 use crate::commands::autonomous::executor_bridge as bridge;
@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_repairs_prunable_post_child_worktree() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("missing-post-child-worktree");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(

@@ -1,6 +1,7 @@
 ---
 name: autospec-grow-define
 description: Use when the user wants /autospec-grow-define to run the planning half of the autospec-growth pipeline for a product opted into `.autospec/growth.yml` — sync/measure current metrics, fan out the 6-lens growth researcher roster (technical-seo, keyword-gap, content-opportunity, community, directory, backlink), adversarially verify + ROI/severity-rank candidates through the deterministic pipeline, then decompose survivors into linked GitHub issues (growth:artifact / growth:outbound). Stops after decomposition and hands off to /autospec-grow-run for autonomous drain.
+mode: primary
 ---
 
 # autospec-grow-define workflow (harness-neutral)

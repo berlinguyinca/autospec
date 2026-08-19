@@ -196,11 +196,11 @@ autospec_runtime_tuple_digest() {
 }
 
 autospec_runtime_stat_mode() {
-    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 
 autospec_runtime_stat_owner() {
-    stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
+    stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
 }
 
 autospec_runtime_private_dir() {

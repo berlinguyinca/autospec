@@ -1,5 +1,21 @@
 use super::*;
 
+#[cfg(unix)]
+pub(super) fn completed_handoff(repo: &fs::File, identity: ClaimMutationIdentity<'_>) -> bool {
+    heartbeat_receipt_retry_decision(
+        repo,
+        StartupHeartbeatExpectation {
+            repo: identity.repo,
+            issue: identity.issue,
+            worker_id: identity.worker_id,
+            branch: identity.branch,
+            pull_request: "",
+            claim_id: identity.claim_id,
+            step: "claimed",
+        },
+    ) == HeartbeatReceiptDecision::Completed
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn retire(
     repo: &str,
@@ -63,7 +79,7 @@ pub(super) fn retire(
     })
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(unix)))]
 mod tests {
     use super::*;
 

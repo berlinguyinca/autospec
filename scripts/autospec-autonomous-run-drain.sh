@@ -158,7 +158,7 @@ newest_heartbeat_mtime() {
         [ -d "$_dir" ] || continue
         for _file in "$_dir"/*.json; do
             [ -f "$_file" ] || continue
-            _mtime="$(stat -f %m "$_file" 2>/dev/null || stat -c %Y "$_file" 2>/dev/null || printf '0')"
+            _mtime="$(stat -c %Y "$_file" 2>/dev/null || stat -f %m "$_file" 2>/dev/null || printf '0')"
             case "$_mtime" in *[!0-9]*|'') _mtime=0 ;; esac
             if [ "$_mtime" -gt "$_newest" ]; then
                 _newest="$_mtime"

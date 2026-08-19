@@ -5,7 +5,7 @@
 use super::super::{
     BridgePhase, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
 };
-use super::support_base::{git, git_stdout, zero_effect_classifier_fixture};
+use super::support_base::{git, git_stdout, test_environment, zero_effect_classifier_fixture};
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
@@ -308,6 +308,7 @@ fn process_group_observation_treats_esrch_as_absent() {
 
 #[test]
 fn autonomous_executor_bridge_recovers_commit_before_proof_persistence() {
+    let _environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("implementation-commit-before-proof", false, false);
     let protected =

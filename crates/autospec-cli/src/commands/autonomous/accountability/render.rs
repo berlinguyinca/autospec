@@ -1,4 +1,5 @@
 use super::{sanitize_text, AccountabilityEvent, EventKind, EventRecord, LaunchDescriptor};
+use std::collections::BTreeMap;
 
 pub(super) const MAX_MARKDOWN_BYTES: usize = 48 * 1024;
 const MAX_WORK_NODES: usize = 25;
@@ -30,6 +31,8 @@ fn build_flow(events: &[EventRecord]) -> String {
                 EventKind::WorkSelected { .. }
                     | EventKind::ClaimStarted { .. }
                     | EventKind::IssueClaimed { .. }
+                    | EventKind::HeartbeatPublicationDeferred { .. }
+                    | EventKind::StartupClaimRecovered { .. }
                     | EventKind::ImplementationStarted { .. }
                     | EventKind::PullRequestOpened { .. }
                     | EventKind::ReviewStarted { .. }
@@ -59,6 +62,39 @@ fn build_flow(events: &[EventRecord]) -> String {
         let number = index + usize::from(aggregate);
         let label = sanitize_text(&record.event.what, 80);
         graph.push_str(&format!("    goal --> work_{number}[{label}]\n"));
+    }
+    let mut deferred_by_generation = BTreeMap::new();
+    for record in events {
+        match &record.kind {
+            EventKind::HeartbeatPublicationDeferred { issue, claim_id } => {
+                graph.push_str(&format!(
+                    "    deferred_{issue}_{}[{}]\n",
+                    record.seq,
+                    sanitize_text(&record.event.what, 80)
+                ));
+                deferred_by_generation.insert((*issue, claim_id.as_str()), record.seq);
+            }
+            EventKind::StartupClaimRecovered {
+                issue,
+                previous_claim_id,
+                ..
+            } => {
+                graph.push_str(&format!(
+                    "    recovered_{issue}_{}[{}]\n",
+                    record.seq,
+                    sanitize_text(&record.event.what, 80)
+                ));
+                if let Some(deferred_seq) =
+                    deferred_by_generation.get(&(*issue, previous_claim_id.as_str()))
+                {
+                    graph.push_str(&format!(
+                        "    deferred_{issue}_{deferred_seq} --> recovered_{issue}_{}\n",
+                        record.seq
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
     graph.push_str("```\n\n");
     graph

@@ -428,7 +428,7 @@ fn queue_ready_fails_closed_per_candidate_when_pull_request_evidence_is_malforme
 }
 
 #[test]
-fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
+fn queue_ready_requeues_legacy_stale_claim_through_authoritative_git_state() {
     let fixture = QueueFixture::new();
     let claim_remote = fixture.root.join("claim-remote.git");
     let init = Command::new("git")
@@ -455,7 +455,6 @@ fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
         r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"test/repo\",\"issue\":99,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800,\"claim_id\":\"claim-generation-a\"}\n<!-- autospec-run-state:end -->"}]"#,
     )
     .expect("write stale state fixture");
-    let active_before = fs::read(&fixture.active).expect("read active state before planning");
     let comments_before = fs::read(&fixture.comments).expect("read comments before planning");
 
     let mut command = fixture.command();
@@ -476,17 +475,14 @@ fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"active_count\":1"));
-    assert_eq!(
-        fs::read(&fixture.active).expect("read active state after planning"),
-        active_before
-    );
+    assert!(stdout.contains("\"active_count\":0"));
+    assert_eq!(fs::read(&fixture.active).unwrap(), b"[]\n");
     assert_eq!(
         fs::read(&fixture.comments).expect("read comments after planning"),
         comments_before
     );
     let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
-    assert!(!calls.contains("issue\nedit\n99"));
+    assert!(calls.contains("issue\nedit\n99"));
     assert!(!calls.contains("repos/test/repo/issues/comments/100\n-X\nDELETE"));
     let refs = Command::new("git")
         .args([
@@ -499,7 +495,7 @@ fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
         .output()
         .expect("inspect claim refs");
     assert!(refs.status.success());
-    assert!(refs.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&refs.stdout).contains("refs/autospec/claims/issue-99"));
 }
 
 #[test]

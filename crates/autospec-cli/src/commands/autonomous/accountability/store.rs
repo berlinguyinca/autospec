@@ -333,6 +333,8 @@ impl AccountabilityStore {
             EventKind::WorkSelected { issue: Some(issue) }
             | EventKind::ClaimStarted { issue }
             | EventKind::IssueClaimed { issue }
+            | EventKind::HeartbeatPublicationDeferred { issue, .. }
+            | EventKind::StartupClaimRecovered { issue, .. }
             | EventKind::ImplementationStarted { issue }
             | EventKind::Quarantined { issue } => {
                 insert_link(&mut self.state.linked_issues, *issue)

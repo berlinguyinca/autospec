@@ -13,9 +13,9 @@ pub(super) fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
 
 /// True only when the heartbeat's owning process is provably gone.
 ///
-/// Proof requires a heartbeat from this boot and either an absent PID or a live PID whose start
-/// identity differs from the recorded owner. Unreadable evidence and failed probes keep blocking
-/// recovery so a live worker's claim is never stolen.
+/// Proof requires a heartbeat from this boot whose PID is natively observed as absent. Unreadable
+/// evidence, identity mismatches, and failed probes keep blocking recovery so ambiguity never
+/// transfers cleanup authority.
 pub(super) fn startup_heartbeat_owner_is_gone(path: &Path) -> bool {
     let Ok(document) = std::fs::read(path) else {
         return false;
@@ -23,15 +23,11 @@ pub(super) fn startup_heartbeat_owner_is_gone(path: &Path) -> bool {
     let Some(evidence) = super::parse_startup_heartbeat(&document) else {
         return false;
     };
-    let Ok(boot_id) = super::super::autonomous::current_boot_identity() else {
-        return false;
-    };
-    if evidence.boot_id != boot_id {
-        return false;
-    }
-    match super::super::autonomous::process_birth_identity(evidence.pid) {
-        Ok(None) => true,
-        Ok(Some((_, start_identity))) => start_identity != evidence.process_start,
-        Err(_) => false,
+    use super::super::autonomous::{observe_expected_process, ProcessObservation};
+    match observe_expected_process(evidence.pid, &evidence.boot_id, &evidence.process_start) {
+        ProcessObservation::Dead => true,
+        ProcessObservation::Exact
+        | ProcessObservation::Mismatch
+        | ProcessObservation::Unknown(_) => false,
     }
 }
