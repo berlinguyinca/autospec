@@ -1,0 +1,35 @@
+[Unit]
+Description=Qwen node stats dashboard (dual Turing)
+Documentation=file:///opt/qwen-turing/etc/common.conf
+# Not Requires=: the dashboard's job is to show that the node is down, so it
+# must survive the inference unit being stopped.
+Wants=network-online.target qwen-turing@router.service
+After=network-online.target
+
+[Service]
+Type=exec
+User=qwen-turing
+Group=qwen-turing
+WorkingDirectory=/var/lib/qwen-turing
+Environment=QT_CONF_DIR=/opt/qwen-turing/etc
+LoadCredential=apikey:/etc/qwen-turing.key
+ExecStart=/opt/qwen-turing/bin/dashboard-run.sh
+
+Restart=on-failure
+RestartSec=5
+
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Same CUDA ceiling as the inference unit: this process shells out to
+# nvidia-smi, so PrivateDevices / DevicePolicy=closed would blind it.
+ReadWritePaths=/var/lib/qwen-turing
+
+[Install]
+WantedBy=multi-user.target

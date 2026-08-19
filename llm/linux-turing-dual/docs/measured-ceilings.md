@@ -239,6 +239,33 @@ will read the unit, not this document.
 The API key arrives via `LoadCredential`, not `Environment=`. Any local user can
 read an `Environment=` value out of `systemctl show`.
 
+## The stats surface
+
+Two units. `qwen-turing@router` serves inference; `qwen-turing-dashboard` serves
+the page. The dashboard `Wants=` but does not `Require=` the inference unit,
+because showing that the node is *down* is part of its job.
+
+```
+dashboard.py --host H --port P --metrics-url URL --api-key-file FILE
+collect-stats.py [--metrics-url URL] [--api-key-file FILE]     # prints JSON
+```
+
+`dashboard-run.sh` is the unit's entry point and exists only so the unit does not
+need to know about `site.conf`; it resolves the bind address and both ports from
+the site config and the credential from `LoadCredential`.
+
+| shown | source |
+|---|---|
+| prompt tokens, generated tokens, tok/s | llama.cpp `/metrics` |
+| KV-pool utilisation, requests processing/deferred | llama.cpp `/metrics` |
+| per-card utilisation, VRAM, temperature, power | `nvidia-smi --query-gpu` |
+| whether a model is resident at all | presence of `/metrics` output |
+
+`GET /` is public; every number on it comes from `GET /api/stats`, which requires
+the bearer key and compares it with `hmac.compare_digest`. Counters are cumulative
+since the server started and reset when a model switch reloads it — which is why
+the page says so in its own footer rather than looking like data loss.
+
 ## Model switch cost
 
 _Filled by Task 12 Step 7._

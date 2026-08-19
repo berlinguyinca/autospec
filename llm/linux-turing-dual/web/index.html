@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qwen node — dual Turing</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672;
+    --line:#e3e7ec; --accent:#2f6feb; --warn:#c2410c; --ok:#15803d;
+    --bar:#e9edf2;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad;
+           --line:#242b33; --accent:#5b8cf7; --warn:#fb923c; --ok:#4ade80;
+           --bar:#232a32; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:20px 24px 8px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  .dot.up{background:var(--ok)} .dot.down{background:var(--warn)}
+  .sub{color:var(--muted);font-size:12px}
+  main{padding:8px 24px 32px;max-width:1100px}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .v{font-size:26px;font-weight:640;margin-top:4px;
+     font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+     color:var(--muted);margin:26px 0 10px;font-weight:600}
+  .bar{height:6px;background:var(--bar);border-radius:99px;overflow:hidden;margin-top:9px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;
+         transition:width .4s ease}
+  .gpu{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .gpu .n{font-weight:600}
+  .meta{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  td{padding:5px 0;border-bottom:1px solid var(--line);font-size:13px}
+  td:last-child{text-align:right;font-weight:600}
+  tr:last-child td{border-bottom:0}
+  footer{color:var(--muted);font-size:11px;padding:0 24px 28px;max-width:1100px}
+  .err{background:var(--panel);border:1px solid var(--warn);color:var(--warn);
+       border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:13px}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Qwen node <span class="sub">· dual RTX 2080 Ti · sm_75</span></h1>
+  <span class="sub"><span id="dot" class="dot"></span> <span id="state">connecting…</span></span>
+  <span class="sub" id="stamp" style="margin-left:auto"></span>
+</header>
+
+<main>
+  <div id="err" class="err hide"></div>
+
+  <div class="grid">
+    <div class="card"><div class="k">Prompt tokens</div>
+      <div class="v" id="pt">–</div></div>
+    <div class="card"><div class="k">Generated tokens</div>
+      <div class="v" id="gt">–</div></div>
+    <div class="card"><div class="k">Throughput</div>
+      <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
+    <div class="card"><div class="k">KV pool used</div>
+      <div class="v"><span id="kv">–</span><span class="u">%</span></div>
+      <div class="bar"><i id="kvbar" style="width:0"></i></div></div>
+  </div>
+
+  <h2>GPUs</h2>
+  <div class="grid" id="gpus"></div>
+
+  <h2>Requests</h2>
+  <div class="card">
+    <table>
+      <tr><td>Processing now</td><td id="rp">–</td></tr>
+      <tr><td>Deferred (queued)</td><td id="rd">–</td></tr>
+      <tr><td>VRAM used / total</td><td id="vram">–</td></tr>
+    </table>
+  </div>
+</main>
+
+<footer>
+  Polls <code>/api/stats</code> every 2 s. Counters are cumulative since the
+  server started and reset when a model switch reloads it. A gap here usually
+  means a model is loading, not that anything failed.
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const n = v => (v ?? 0).toLocaleString();
+
+function gpuCard(g){
+  const used = g.mem_used_mib ?? 0, tot = g.mem_total_mib ?? 1;
+  const pct = Math.min(100, Math.round(used / tot * 100));
+  return `<div class="card">
+    <div class="gpu"><span class="n">GPU ${g.index}</span>
+      <span class="meta">${g.util_pct ?? '–'}% util</span></div>
+    <div class="meta">${g.name ?? ''}</div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="meta" style="margin-top:7px">
+      ${n(used)} / ${n(tot)} MiB
+      ${g.temp_c != null ? ' · ' + g.temp_c + '°C' : ''}
+      ${g.power_w != null ? ' · ' + g.power_w.toFixed(0) + ' W' : ''}
+    </div></div>`;
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/stats', {cache:'no-store'});
+    if(r.status === 401){
+      $('err').textContent = 'Unauthorised — this dashboard needs the node API key.';
+      $('err').classList.remove('hide');
+      $('dot').className = 'dot down'; $('state').textContent = 'unauthorised';
+      return;
+    }
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    $('err').classList.add('hide');
+
+    $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
+    $('state').textContent = d.llama_up ? 'model resident' : 'model not loaded';
+
+    $('pt').textContent  = n(d.prompt_tokens_total);
+    $('gt').textContent  = n(d.generated_tokens_total);
+    $('tps').textContent = (d.tokens_per_second ?? 0).toFixed(1);
+    const kv = Math.round((d.kv_cache_usage_ratio ?? 0) * 100);
+    $('kv').textContent = kv;
+    $('kvbar').style.width = kv + '%';
+    $('rp').textContent = n(d.requests_processing);
+    $('rd').textContent = n(d.requests_deferred);
+    $('vram').textContent = n(d.gpu_used_mem_mib) + ' / ' + n(d.gpu_total_mem_mib) + ' MiB';
+    $('gpus').innerHTML = (d.gpus || []).map(gpuCard).join('') ||
+      '<div class="card"><div class="meta">no GPUs reported</div></div>';
+    $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  }catch(e){
+    $('dot').className = 'dot down';
+    $('state').textContent = 'dashboard unreachable';
+    $('err').textContent = 'Could not read /api/stats: ' + e.message;
+    $('err').classList.remove('hide');
+  }
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>
