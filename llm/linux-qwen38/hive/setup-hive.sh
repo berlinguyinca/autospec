@@ -50,6 +50,18 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>/de
 #   80  A100        86  A6000        89  L40S / RTX 5000 Ada      120  Blackwell
 ARCHS="80;86;89;120"
 
+# A RELEASE, not master. The previous build was `--depth 1` of whatever master
+# happened to be that day -- unrecorded, unreproducible, and bleeding edge. A
+# child process crashed mid-session with `instance ... exited with status 1`,
+# healthy at 44.7 tok/s one line earlier and no diagnostic, which is the kind of
+# thing a release tag exists to avoid.
+#
+# v0.1.2 was checked for every flag this deployment relies on: --models-preset,
+# --models-max, --kv-unified, --image-min-tokens. Override to chase a fix or to
+# go back to master deliberately.
+LLAMA_REF="${LLAMA_REF:-v0.1.2}"
+STAMP="${PREFIX}/BUILD_REF"
+
 # Runtime linkage, needed by anything that EXECUTES a built binary. llama.cpp
 # splits each tool into a thin driver plus a libllama-<tool>-impl.so beside it,
 # and CUDA's own runtime comes from the module -- so both paths are required.
@@ -57,17 +69,23 @@ ARCHS="80;86;89;120"
 # libraries: libllama-server-impl.so") when the build was in fact fine.
 export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-if [ -x "${PREFIX}/bin/llama-server" ] && "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1; then
-  echo "== llama.cpp already built and runnable, skipping rebuild =="
+# Skip only if the existing build both RUNS and is the ref we were asked for.
+# Testing runnability alone meant changing LLAMA_REF silently kept the old
+# binary, which is the sort of thing that makes a pin worthless.
+if [ -x "${PREFIX}/bin/llama-server" ] \
+   && "${PREFIX}/bin/llama-server" --version >/dev/null 2>&1 \
+   && [ "$(cat "${STAMP}" 2>/dev/null)" = "${LLAMA_REF}" ]; then
+  echo "== llama.cpp ${LLAMA_REF} already built and runnable, skipping rebuild =="
   SKIP_BUILD=1
 fi
 
 # BUILD_ROOT is per-job scratch, so this is always a fresh shallow clone --
 # no reuse to invalidate and nothing in the tree to reset.
 if [ -z "${SKIP_BUILD:-}" ]; then
-git clone --depth 1 https://github.com/ggml-org/llama.cpp "${SRC}"
+git clone --depth 1 --branch "${LLAMA_REF}" \
+    https://github.com/ggml-org/llama.cpp "${SRC}"
 cd "${SRC}"
-echo "llama.cpp at $(git rev-parse --short HEAD)"
+echo "llama.cpp ${LLAMA_REF} at $(git rev-parse --short HEAD)"
 
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
@@ -77,6 +95,11 @@ cmake -B build \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}"
 cmake --build build --config Release -j "$(nproc)"
 cmake --install build
+# Record the provenance next to the binary, so a later run can tell whether it
+# is looking at the build it asked for.
+printf '%s' "${LLAMA_REF}" > "${STAMP}"
+printf '%s %s\n' "${LLAMA_REF}" "$(git -C "${SRC}" rev-parse HEAD)" \
+    >> "${ROOT}/logs/build-history.txt"
 fi
 
 echo "== built =="

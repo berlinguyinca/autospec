@@ -133,6 +133,15 @@ one 885 MiB projector instead of the 29 GiB asked for. Pass exact
 filenames positionally, and assert a size floor afterwards: "the command
 exited 0" is not the claim "the weights are here".
 
+**Build a pinned llama.cpp release, not master.** `git clone --depth 1`
+of master is unrecorded and unreproducible, and post-release master is
+the likeliest source of the mid-session child crash below. `v0.1.2`
+carries every flag this deployment needs (`--models-preset`,
+`--models-max`, `--kv-unified`, `--image-min-tokens`). Record the ref
+next to the binary — and make *reuse* require the recorded ref to match,
+otherwise bumping the pin silently keeps serving the old build and the
+pin is decoration.
+
 **llama.cpp's router answers /health while its model child is dead.**
 Observed twice: a benchmark failed 11 of 40 items with `500 proxy error:
 Could not establish connection` while the supervisor reported health

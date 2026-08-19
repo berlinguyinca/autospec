@@ -61,10 +61,21 @@ avail_gib="$(df -BG --output=avail /var/lib | tail -1 | tr -dc '0-9')"
 # --------------------------------------------------------------------------
 step "2/8 llama.cpp ${LLAMA_TAG}"
 LLAMA_DIR="${QWEN38_LLAMA_DIR:-/opt/qwen-local/llama.cpp/current}"
-if [ -x "${LLAMA_DIR}/llama-server" ]; then
-  echo "reusing : ${LLAMA_DIR}"
+# Reuse only a build that IS the pinned tag. Reusing whatever happens to be
+# installed makes the pin decorative: bumping LLAMA_TAG would keep serving the
+# old binary and the operator would have no way to tell from the outside.
+LLAMA_STAMP="${LLAMA_DIR}/BUILD_TAG"
+if [ -x "${LLAMA_DIR}/llama-server" ] \
+   && [ "$(cat "${LLAMA_STAMP}" 2>/dev/null)" = "${LLAMA_TAG}" ]; then
+  echo "reusing : ${LLAMA_DIR} (${LLAMA_TAG})"
   "${LLAMA_DIR}/llama-server" --version 2>&1 | head -1 | sed 's/^/version : /' || true
+elif [ -x "${LLAMA_DIR}/llama-server" ]; then
+  echo "replacing: ${LLAMA_DIR} holds $(cat "${LLAMA_STAMP}" 2>/dev/null || echo 'an unrecorded build'), want ${LLAMA_TAG}"
+  install_llama=1
 else
+  install_llama=1
+fi
+if [ "${install_llama:-0}" = 1 ]; then
   # There is NO prebuilt Linux CUDA binary in llama.cpp releases -- only CPU,
   # Vulkan, SYCL and OpenVINO. CUDA must be compiled. Everything else can be
   # fetched, which is why this branches on the accelerator rather than the OS.
@@ -100,6 +111,8 @@ else
   esac
   sudo ln -sfn "/opt/qwen-local/llama.cpp/${LLAMA_TAG}" "/opt/qwen-local/llama.cpp/current"
   [ -x "${LLAMA_DIR}/llama-server" ] || die "llama-server still missing at ${LLAMA_DIR}"
+  # Record which tag this is, so the reuse check above can be trusted.
+  echo "${LLAMA_TAG}" | sudo tee "${LLAMA_STAMP}" >/dev/null
 fi
 # The router is not in every build; fail here rather than at first request.
 "${LLAMA_DIR}/llama-server" --help 2>&1 | grep -q -- "--models-preset" \
