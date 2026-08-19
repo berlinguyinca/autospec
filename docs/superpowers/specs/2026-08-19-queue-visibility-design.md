@@ -82,27 +82,38 @@ in-flight requests instead.
 ## 2. Architecture
 
 ```
-client ──▶ nginx :<QT_PORT>            ──▶ llama.cpp 127.0.0.1:8090
-             │  (adds queue headers)
-             └─▶ auth_request ─▶ dashboard :<QT_DASH_PORT>/api/queue-headers
-                                    │
-dashboard :<QT_DASH_PORT> ───────────┴─▶ /metrics?model=… + nvidia-smi
-   ├─ /            key-gated page (full stats)
-   ├─ /api/stats   key-gated JSON
-   ├─ /api/queue   PUBLIC, load only
-   └─ /status      PUBLIC page, load only
+                       ONE public port
+client ──▶ nginx :80 (and :8080 for compatibility; :443 when the cert lands)
+             │
+             ├─ /v1/*  /completion  /health  /props  /metrics  /slots
+             │        ──▶ llama.cpp 127.0.0.1:8090
+             │
+             ├─ /v1/models ──▶ dashboard (SANITISED -- see §4.1)
+             │
+             ├─ /  /status  /api/*  ──▶ dashboard 127.0.0.1:8081
+             │
+             └─ auth_request ──▶ dashboard /api/queue-headers  (adds X-Queue-*)
+
+dashboard 127.0.0.1:8081 ──▶ llama.cpp /metrics?model=… + nvidia-smi
 ```
 
-**llama.cpp moves to `127.0.0.1:8090`.** It no longer listens on any public
-interface, which is what the parent spec wanted and the port remap now delivers
-for free. nginx owns the public port.
+**Only nginx listens publicly.** llama.cpp moves to `127.0.0.1:8090` and the
+dashboard to `127.0.0.1:8081`, so the firewall has exactly one port to reason
+about and neither backend can be reached directly even from inside the LAN.
 
-That is also the cost: **nginx becomes a single point of failure for
-inference.** It is `Restart=on-failure` with `After=`/`Wants=` ordering, and the
-node README says plainly that a dead proxy means a dead endpoint. This was
-accepted deliberately in exchange for the headers.
+The endpoint namespaces do not collide, which is what makes one port viable:
+llama.cpp owns `/v1/*`, `/completion`, `/health`, `/props`, `/metrics`,
+`/slots`; the dashboard owns `/`, `/status`, `/api/*`. So users get one URL for
+everything:
 
----
+| URL | what |
+|---|---|
+| `http://<node-host>/` | the dashboard |
+| `http://<node-host>/status` | public load page, no key |
+| `http://<node-host>/v1` | OpenAI-compatible API base |
+
+`:8080` stays served by the same server block so anything already configured
+against it keeps working; `:80` is the address to publish.
 
 ## 3. The proxy
 
@@ -125,6 +136,27 @@ error-prone to write and this one carries every inference request.
   endpoint always returns 204, and nginx is configured so a subrequest failure
   is non-fatal.
 - Authorization passes straight through; nginx never sees or needs the key.
+- Binding `:80` needs the master process to start as root; workers drop to an
+  unprivileged user as nginx does by default. The backends stay unprivileged.
+
+### TLS, prepared but not enabled
+
+A campus certificate is being requested, so the config is written to make
+enabling it a two-line change rather than a redesign:
+
+- The `server` block for `:443 ssl` ships **commented out**, with
+  `ssl_certificate` / `ssl_certificate_key` pointing at
+  `/etc/ssl/qwen-turing/`, and a note that the paths are what the campus CA
+  issues into.
+- **No HTTP-to-HTTPS redirect and no HSTS until the certificate exists.**
+  Shipping a redirect to a port that is not listening breaks the endpoint, and
+  HSTS before a valid certificate makes it unreachable from browsers that have
+  cached the header.
+- `ufw` gains `443` only when the cert is installed, not in advance.
+
+Until then the API key crosses the campus network in cleartext. That was already
+the accepted position in the parent spec; port 80 does not change it, and the
+`:443` scaffolding is what shortens the window once the cert arrives.
 
 Headers emitted: `X-Queue-Slots`, `X-Queue-Processing`, `X-Queue-Depth`,
 `X-Queue-Fullness`, `X-Queue-Est-Wait-Seconds`.
@@ -148,6 +180,22 @@ that allow-list exactly, so a future field cannot leak by being added to a
 shared serialiser.
 
 `/api/stats` and `/` keep requiring the key and may show everything.
+
+### 4.1 Sanitising `/v1/models`
+
+llama.cpp's router publishes each preset's **full child argv** on `/v1/models`
+without authentication — binary path, model paths, and the API key's *file
+location*. On a single public port that is the most exposed thing on the node.
+
+Clients genuinely need `/v1/models` for discovery, so it is not blocked. nginx
+routes it to the dashboard, which fetches the upstream list and returns only
+`id`, `object`, `owned_by`, `created` and `aliases` — dropping `status` entirely.
+A test asserts the sanitised payload contains no `/` character in any value, so a
+path cannot reappear by way of a new upstream field.
+
+llama.cpp's non-standard `/models` alias is **denied at nginx** rather than
+sanitised: nothing needs it, and leaving an unsanitised twin reachable would make
+the sanitising pointless.
 
 ---
 
@@ -188,13 +236,15 @@ from the router presets, so client and server cannot drift.
 
 | surface | before | after |
 |---|---|---|
-| llama.cpp | `0.0.0.0:<QT_PORT>` | **`127.0.0.1:8090`** |
-| nginx | — | `0.0.0.0:<QT_PORT>`, ufw: `<campus-cidr>` + internal |
-| dashboard | internal only | `0.0.0.0:<QT_DASH_PORT>`, ufw: **`<campus-cidr>`** + internal |
+| llama.cpp | `0.0.0.0:8080` | **`127.0.0.1:8090`** |
+| dashboard | `<node-addr>:8081` | **`127.0.0.1:8081`** |
+| nginx | — | **`0.0.0.0:80` + `:8080`**, ufw: `<campus-cidr>` + internal |
+| nginx TLS | — | `:443` prepared, enabled with the campus cert |
 
-The dashboard becomes campus-reachable because colleagues need to see load.
-That is precisely why `/status` and `/api/queue` are built to expose load and
-nothing else.
+The dashboard becomes campus-reachable **through nginx**, not by binding a public
+interface itself. That is precisely why `/status` and `/api/queue` are built to
+expose load and nothing else, and why `/v1/models` is sanitised: on one public
+port, every unauthenticated route is the node's attack surface.
 
 ---
 
@@ -286,7 +336,13 @@ The tier is verified the same way as the others: a needle retrieved from a real
 10. **A needle is retrieved from a real ~100k prompt** through the proxy, and the
     request is not severed by a timeout.
 11. `check_presets.py` passes with the 102,400 pool and all three tier aliases.
-12. Both units and nginx survive a reboot.
+12. `http://<node-host>/` serves the dashboard and `http://<node-host>/v1`
+    serves the API — one port, both.
+13. **Neither backend is reachable directly**: `<node-addr>:8090` and
+    `<node-addr>:8081` refuse connections from off-host.
+14. `/v1/models` through nginx contains **no filesystem paths**, and `/models`
+    is refused.
+15. Both units and nginx survive a reboot.
 
 ---
 
