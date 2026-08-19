@@ -43,6 +43,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
+SKILL_REFERENCE_FILES="end-of-run.md"
 SHARED_SCRIPT_FILES="autospec-runtime-config.sh autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh ci-status-compare.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
 
 # ---------- helpers --------------------------------------------------------
@@ -101,6 +102,15 @@ fetch_source_files() {
             exit 1
         fi
     done
+    for rel in $SKILL_REFERENCE_FILES; do
+        # dirname, not a flat references/: a nested declaration such as
+        # "sub/deep.md" is valid, and curl -o will not create the parent.
+        mkdir -p "$TMP_FETCH_DIR/references/$(dirname "$rel")"
+        if ! curl -fsSL "$SKILL_RAW_BASE/references/$rel" -o "$TMP_FETCH_DIR/references/$rel"; then
+            err "failed to download $SKILL_RAW_BASE/references/$rel"
+            exit 1
+        fi
+    done
     for rel in $SHARED_SCRIPT_FILES; do
         if ! curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel"; then
             err "failed to download $RAW_REPO_BASE/scripts/$rel"
@@ -132,6 +142,31 @@ install_shared_scripts() {
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
+    done
+}
+
+# Ship the skill's references/ files. The trio body carries
+# `**MUST** read skills/<skill>/references/<file>` pointers, and nothing installed
+# that directory: an installed skill running against a target repo had no such
+# path, so a MUST-read phase was silently unreachable. Install to a
+# harness-neutral root every harness can resolve, plus beside the installed
+# SKILL.md for the harnesses that keep a per-skill directory — opencode installs a
+# flat agent file and has no such directory, so it relies on the neutral root.
+install_reference_files() {
+    [ -n "$SKILL_REFERENCE_FILES" ] || return 0
+    info ""
+    info "$SKILL_NAME reference files:"
+    for rel in $SKILL_REFERENCE_FILES; do
+        install_one "$SKILL_DIR/references/$rel" \
+            "$HOME/.autospec/skills/$SKILL_NAME/references/$rel" || return 1
+        if [ "$HARNESS" = "claude" ] || [ "$HARNESS" = "all" ]; then
+            install_one "$SKILL_DIR/references/$rel" \
+                "$CLAUDE_DIR/skills/$SKILL_NAME/references/$rel" || return 1
+        fi
+        if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
+            install_one "$SKILL_DIR/references/$rel" \
+                "$CODEX_DIR/skills/$SKILL_NAME/references/$rel" || return 1
+        fi
     done
 }
 
@@ -333,6 +368,8 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     installed_paths="${installed_paths}  Codex CLI:   ${CODEX_DEST}\n"
     installed_paths="${installed_paths}  Codex skill: ${CODEX_DIR}/skills/${SKILL_NAME}/SKILL.md\n"
 fi
+
+install_reference_files
 
 # ---------- final summary --------------------------------------------------
 

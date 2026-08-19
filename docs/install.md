@@ -1,5 +1,26 @@
 # Installation
 
+## Reference files
+
+A skill body may delegate a phase to a file under `skills/<skill>/references/`,
+using a `**MUST** read skills/<skill>/references/<file>` pointer. Those pointers
+name repository-relative paths, so they resolve during development but not on a
+machine that only has the skill installed — and a run normally happens inside a
+target repository, not inside an autospec checkout.
+
+The installers therefore ship each reference file to three places:
+
+| destination | applies to |
+|---|---|
+| `~/.autospec/skills/<skill>/references/` | always — harness-neutral, and the only copy OpenCode can reach, since it installs a flat `agent/<skill>.md` with no per-skill directory |
+| `$CLAUDE_CONFIG_DIR/skills/<skill>/references/` | `--harness claude` or `all` |
+| `$CODEX_HOME/skills/<skill>/references/` | `--harness codex` or `all` |
+
+Each skill declares its own list in `skills/<skill>/install.sh` as
+`SKILL_REFERENCE_FILES`, and `check_reference_pointer_integrity` fails the build
+when a file under `references/` is missing from that list. Hidden entries such as
+`.gitkeep` are placeholders and are not shipped.
+
 ## Ubuntu AppArmor support for Codex
 
 On Linux, the installer probes the network-enabled Codex permission profile

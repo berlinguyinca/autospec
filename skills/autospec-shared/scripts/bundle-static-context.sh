@@ -4,6 +4,7 @@
 # Usage:
 #   bundle-static-context.sh --role implementer|reviewer|decomposer|classifier
 #                            [--issue-labels "label1,label2,..."]
+#                            [--static-body <file>]
 #
 # Output (stdout): static blob framed by <!-- CACHE BOUNDARY --> markers.
 #
@@ -11,10 +12,17 @@
 #   --- inside the CACHE BOUNDARY (byte-stable prefix, safe to cache) ---
 #   1. implementer-contract.md (curated <=24KB extract — NOT the 70KB SKILL.md)
 #   2. AGENTS.md ## Implementation-quality contract section (canonical RULE_ID)
+#   3. Lockstep paragraph
+#   4. Role-specific implementer scaffolding
+#   5. --static-body file when given (the Phase 4 implementer template)
 #   --- below the closing CACHE BOUNDARY (per-issue, NOT cached) ---
-#   3. Tag-filtered saved-memory files
-#   4. Lockstep paragraph
-#   5. Role-specific implementer scaffolding
+#   6. Tag-filtered saved-memory files
+#
+# Only saved-memory is per-issue: it is label-filtered, so it cannot sit in a
+# byte-stable prefix. The lockstep paragraph and the role scaffolding are fixed
+# strings, and --static-body is one fixed file, so all three belong above the
+# closing marker. Leaving the 8.9k-token Phase 4 template below it meant the
+# implementer re-sent it uncached on every dispatch and every retry.
 #
 # Composition order (reviewer role — prompt-cache reclaim Phase 1 prefix slim):
 #   --- inside the CACHE BOUNDARY (byte-stable prefix, safe to cache) ---
@@ -105,13 +113,16 @@ REPO_ROOT="$(autospec_bsc_resolve_repo_root)" || REPO_ROOT="$SCRIPT_DIR/../../..
 HELP_TEXT='Usage:
   bundle-static-context.sh --role implementer|reviewer|decomposer|classifier
                             [--issue-labels "label1,label2,..."]
+                            [--static-body <file>]
   bundle-static-context.sh --help
 
 Emit static LLM prompt prefix framed by <!-- CACHE BOUNDARY --> markers.
-Composition: SKILL.md + AGENTS.md + RULE_ID table + tag-filtered memory + lockstep + role scaffolding.'
+Composition: curated role contract + AGENTS.md RULE_ID table + lockstep +
+role scaffolding + --static-body inside the boundary; tag-filtered memory below it.'
 
 ROLE=""
 ISSUE_LABELS=""
+STATIC_BODY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -127,6 +138,17 @@ while [ $# -gt 0 ]; do
     --issue-labels)
       if [ $# -lt 2 ]; then printf 'bundle-static-context.sh: --issue-labels requires an argument\n' >&2; exit 1; fi
       ISSUE_LABELS="$2"
+      shift 2
+      ;;
+    --static-body)
+      if [ $# -lt 2 ]; then printf 'bundle-static-context.sh: --static-body requires an argument\n' >&2; exit 1; fi
+      # Fail loudly. A silently dropped body dispatches an implementer with the
+      # contract but no procedure, which reads like a normal run.
+      if [ ! -f "$2" ]; then
+        printf 'bundle-static-context.sh: --static-body file not found: %s\n' "$2" >&2
+        exit 1
+      fi
+      STATIC_BODY="$2"
       shift 2
       ;;
     -*)
@@ -154,10 +176,47 @@ case "$ROLE" in
     ;;
 esac
 
+# --static-body is emitted only by the implementer branch below. Accepting it for
+# another role would silently drop a whole procedure, which is the exact failure
+# this option was added to prevent.
+if [ -n "$STATIC_BODY" ] && [ "$ROLE" != "implementer" ]; then
+  printf 'bundle-static-context.sh: --static-body is only supported for --role implementer (got %s)\n' "$ROLE" >&2
+  exit 1
+fi
+
 # ── resolve paths ─────────────────────────────────────────────────────────────
 
-WHOAMI=$(whoami 2>/dev/null || echo "$(id -un)")
-MEMORY_DIR="${AUTOSPEC_MEMORY_DIR:-$HOME/.claude/projects/-Users-${WHOAMI}-IdeaProjects-autospec/memory}"
+# Claude Code names its per-project directory after the absolute repo path with
+# the separators rewritten, and the exact rewrite has changed between releases —
+# this host carries both `-autospec--claude-worktrees-...` and
+# `-go-modules-.worktrees-...` — so probe candidates instead of reproducing it.
+#
+# The hardcoded `-Users-${WHOAMI}-IdeaProjects-autospec` prefix this replaced could
+# only ever match one macOS layout. On Linux the directory never existed, so every
+# implementer, decomposer, and classifier dispatch injected nothing and still
+# printed the ordinary "(No memory files matched the issue labels.)" line — the
+# failure was indistinguishable from "this issue has no relevant memory". The
+# committed `docs/memory` store carries the same manifest filenames as the harness
+# store, so it is a harness-independent last resort. Their contents are not
+# identical, so which one answers is observable — the harness store wins when it
+# exists. Note REPO_ROOT is usually a per-session worktree, whose slug has no
+# harness directory, so the committed store is what most runs resolve to.
+if [ -n "${AUTOSPEC_MEMORY_DIR:-}" ]; then
+  MEMORY_DIR="$AUTOSPEC_MEMORY_DIR"
+else
+  _bsc_slug="$(printf '%s' "$REPO_ROOT" | tr '/' '-')"
+  _bsc_harness_dir="$HOME/.claude/projects/${_bsc_slug}/memory"
+  # Default to the harness path so a debug dump still names something meaningful
+  # when neither candidate exists.
+  MEMORY_DIR="$_bsc_harness_dir"
+  for _bsc_candidate in "$_bsc_harness_dir" "$REPO_ROOT/docs/memory"; do
+    if [ -d "$_bsc_candidate" ]; then
+      MEMORY_DIR="$_bsc_candidate"
+      break
+    fi
+  done
+  unset _bsc_slug _bsc_harness_dir _bsc_candidate
+fi
 SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 # Allow explicit override for testing; fall back to scripts dir
 MANIFEST="${AUTOSPEC_MANIFEST:-$SCRIPTS_DIR/memory-tags.yml}"
@@ -287,8 +346,8 @@ emit_memory() {
   fi
 }
 
-# Emit the lockstep paragraph (static, but kept below the boundary alongside the
-# other per-role scaffolding for the implementer role).
+# Emit the lockstep paragraph. Fixed strings, so it rides inside the cache
+# boundary for the implementer role.
 emit_lockstep() {
   printf '## Lockstep rules\n\n'
   printf 'All SKILL.md edits must be byte-identically mirrored to codex/prompt.md and opencode/agent.md.\n'
@@ -297,7 +356,8 @@ emit_lockstep() {
   printf '\n'
 }
 
-# Emit role-specific scaffolding (per-issue acting instructions).
+# Emit role-specific scaffolding. Fixed per-role strings with no per-issue data,
+# despite the "per-issue" label this carried before.
 emit_scaffolding() {
   # Output discipline (all roles): a subagent's final message flows back into the
   # orchestrator's context, so verbose returns bloat context + burn tokens. Keep
@@ -337,6 +397,14 @@ emit_scaffolding() {
   esac
 }
 
+# Emit the --static-body file, if given. One fixed file per role, so it belongs
+# inside the cache boundary; see the composition note in the header.
+emit_static_body() {
+  [ -n "$STATIC_BODY" ] || return 0
+  cat "$STATIC_BODY"
+  printf '\n'
+}
+
 # Emit the repo's adopted design language (DESIGN.md at repo root), if present, so
 # the implementer honors design tokens/constraints instead of hardcoding values.
 # Repo-wide and byte-stable across issues, so it lives inside the cache boundary.
@@ -351,9 +419,9 @@ emit_design() {
 # ── emit output ───────────────────────────────────────────────────────────────
 
 if [ "$ROLE" = "implementer" ]; then
-  # D3 prefix slim: the implementer prefix is byte-stable across issues. Only
-  # the curated contract + AGENTS.md quality-contract section live inside the
-  # cache boundary; per-issue memory + scaffolding go BELOW the closing marker.
+  # D3 prefix slim: the implementer prefix is byte-stable across issues, so every
+  # fixed section lives inside the cache boundary. Only label-filtered memory,
+  # which varies per issue, goes BELOW the closing marker.
 
   printf '<!-- CACHE BOUNDARY -->\n'
 
@@ -376,12 +444,16 @@ if [ "$ROLE" = "implementer" ]; then
   #    byte-stable, so it stays inside the cache boundary.
   emit_design
 
-  printf '<!-- CACHE BOUNDARY -->\n'
-
-  # Below the boundary: per-issue, NOT part of the cached prefix.
-  emit_memory
+  # 4-6. Fixed strings and the one fixed body file. Order matches the pre-#3228
+  #      output so only memory changes position.
   emit_lockstep
   emit_scaffolding
+  emit_static_body
+
+  printf '<!-- CACHE BOUNDARY -->\n'
+
+  # Below the boundary: label-filtered, so not part of the cached prefix.
+  emit_memory
 elif [ "$ROLE" = "reviewer" ]; then
   # Phase 1 (prompt-cache reclaim): the reviewer prefix is byte-stable across
   # issues. Only the curated reviewer-contract + the AGENTS.md quality-contract

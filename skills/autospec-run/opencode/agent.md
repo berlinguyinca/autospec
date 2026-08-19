@@ -815,7 +815,7 @@ do not fall back to an inline label-swap path.
 > labels=$(gh issue view <ISSUE> --json labels --jq '[.labels[].name] | join(",")')
 > ```
 >
-> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. **Wire the D3 cached prefix (spec Phase 2 child C):** do NOT send the `phase4-implementer.md` body alone — prepend the `gen-implementer-prompt.sh` static cached prefix so the default v2 path stops re-reading SKILL.md + AGENTS.md + the RULE_ID table uncached. Assemble the combined v2 prompt by passing the `phase4-implementer.md` body as the dynamic body that rides BELOW the cached prefix:
+> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. **Wire the D3 cached prefix (spec Phase 2 child C):** do NOT send the `phase4-implementer.md` body alone — prepend the `gen-implementer-prompt.sh` static cached prefix so the default v2 path stops re-reading SKILL.md + AGENTS.md + the RULE_ID table uncached. Assemble the combined v2 prompt by handing `phase4-implementer.md` to `--body-file`, which forwards it to `bundle-static-context.sh --static-body` so it lands INSIDE the cached prefix. It is one fixed template, so emitting it below the boundary re-sent it uncached on every dispatch and every retry:
 >   ```bash
 >   # Reuse the single body fetch written at process(ISSUE) start (D5).
 >   v2_combined_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-implementer-prompt.sh" \
@@ -865,9 +865,12 @@ do not fall back to an inline label-swap path.
 >      --dynamic-suffix-file "$_suffix_file")
 >    ```
 >    `bundle-and-dispatch.sh` calls `bundle-static-context.sh` internally to emit the static cached
->    prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID
->    table + tag-filtered saved-memory + lockstep rules + implementer scaffolding), then appends the
->    dynamic suffix verbatim after the closing marker.
+>    prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing implementer-contract.md +
+>    the AGENTS.md quality-contract section with the RULE_ID table + lockstep rules +
+>    implementer scaffolding + the --static-body template), then appends the tag-filtered
+>    saved-memory and the dynamic suffix after the closing marker. The prefix does NOT hold
+>    SKILL.md itself, and saved-memory is deliberately below the marker because it is
+>    label-filtered and so cannot be byte-stable.
 >    Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with
 >    `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across
 >    dispatches in the same monitor session (5-min TTL).
@@ -1651,6 +1654,8 @@ Post a one-paragraph delta to the user (newly closed issues, newly merged PRs, f
 - the user explicitly stops.
 
 If your harness lacks self-paced wakeup: register a local `cron`/`launchd` job that runs the same status-check prompt at the chosen cadence, OR ask the user to invoke `status-update` manually.
+
+**Resolving `references/` paths.** The reference pointers below are written relative to the autospec repo root, which is where the validation gate resolves them. Inside a target repo that path does not exist: resolve against this skill's own installed directory instead — `~/.claude/skills/autospec-run/references/`, `$CODEX_HOME/skills/autospec-run/references/`, or `$HOME/.autospec/skills/autospec-run/references/` — and fall back to the `~/.autospec/repo` checkout. A pointer that will not resolve is a stop-and-report condition, never a skipped step.
 
 ## Phase 6 — Final report
 

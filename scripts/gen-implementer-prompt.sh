@@ -18,9 +18,15 @@
 #
 # --body-file (autospec:v2-flow cache wiring, spec Phase 2 child C): when given,
 # the file's content (e.g. skills/autospec-run/prompts/phase4-implementer.md) is
-# emitted as the dynamic body that rides BELOW the cached prefix, ahead of the
-# issue assignment block. This lets the v2-flow path realize the D3 cached prefix
-# without re-reading the static context uncached inside the implementer prompt.
+# handed to bundle-static-context.sh as --static-body, so it is emitted INSIDE the
+# cached prefix, ahead of the issue assignment block.
+#
+# It used to be catted below the closing boundary. The file is one fixed template
+# that never varies by issue, so that placement re-sent ~8.9k tokens uncached on
+# every dispatch and every retry — 9,241 of the v2 prompt's 16,092 tokens sat
+# outside the cache. Only the per-issue suffix belongs below the marker. When
+# bundle-static-context.sh is missing, the fallback below still emits the body so
+# a degraded install keeps the procedure.
 #
 # Dependencies:
 #   skills/autospec-shared/scripts/bundle-static-context.sh (or $AUTOSPEC_SCRIPTS_DIR)
@@ -72,7 +78,7 @@ Required:
 Optional:
   --issue-labels <csv>  Comma-separated issue labels (for cache-prefix tagging)
   --repo <owner/repo>   Repository slug (default: from AUTOSPEC_REPO env)
-  --body-file <file>    Prompt body emitted below the cached prefix, ahead of the
+  --body-file <file>    Prompt body emitted inside the cached prefix, ahead of the
                         issue assignment (e.g. the v2-flow phase4-implementer.md).
   --stack-profile <f>  Read ui_capabilities.gaps from this stack profile and add a
     UI adoption directive when gaps exist, so missing accessible primitives are not
@@ -135,14 +141,21 @@ fi
 # ---------------------------------------------------------------------------
 # Emit static cached prefix via bundle-static-context.sh
 # ---------------------------------------------------------------------------
+# Tracks whether the prefix already carried the body, so the fallback path below
+# emits it exactly once.
+BODY_IN_PREFIX=0
 if [ -f "$BUNDLE_STATIC" ]; then
   # Never swallow this. A silently empty prefix dispatches an implementer with
   # no AGENTS.md and no RULE_ID contract, which looks like a normal run.
+  BUNDLE_ARGS=(--role implementer)
   if [ -n "$ISSUE_LABELS" ]; then
-    bash "$BUNDLE_STATIC" --role implementer --issue-labels "$ISSUE_LABELS"
-  else
-    bash "$BUNDLE_STATIC" --role implementer
+    BUNDLE_ARGS+=(--issue-labels "$ISSUE_LABELS")
   fi
+  if [ -n "$BODY_FILE" ]; then
+    BUNDLE_ARGS+=(--static-body "$BODY_FILE")
+    BODY_IN_PREFIX=1
+  fi
+  bash "$BUNDLE_STATIC" "${BUNDLE_ARGS[@]}"
 else
   # Graceful fallback: emit a minimal cache boundary stub
   printf '<!-- CACHE BOUNDARY -->\n'
@@ -159,10 +172,10 @@ WT_PATH="/tmp/wt-$(echo "$BRANCH" | tr '/' '-' | tr '_' '-')"
 
 printf '\n\n'
 
-# v2-flow cache wiring (spec Phase 2 child C): the prompt body (e.g.
-# phase4-implementer.md) rides below the cached prefix, ahead of the issue
-# assignment, so the v2 path realizes the D3 cached prefix.
-if [ -n "$BODY_FILE" ]; then
+# v2-flow cache wiring (spec Phase 2 child C): the body normally rides inside the
+# cached prefix via --static-body. This path only runs when
+# bundle-static-context.sh was absent, so the body would otherwise be lost.
+if [ -n "$BODY_FILE" ] && [ "$BODY_IN_PREFIX" -eq 0 ]; then
   cat "$BODY_FILE"
   printf '\n\n'
 fi
