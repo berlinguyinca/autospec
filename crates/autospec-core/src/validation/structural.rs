@@ -646,7 +646,7 @@ impl StructuralValidator {
     }
 
     pub fn validate_existing_spec_mode(root: &Path) -> Result<(), String> {
-        for skill in ["autospec", "autospec-split", "autospec-define"] {
+        for skill in ["autospec-split", "autospec-define"] {
             for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
                 let path = root.join("skills").join(skill).join(member);
                 let display = format!("skills/{skill}/{member}");
@@ -791,9 +791,6 @@ impl StructuralValidator {
 
     pub fn validate_phase1_bounded_context_contract(root: &Path) -> Result<(), String> {
         for member in [
-            "skills/autospec/SKILL.md",
-            "skills/autospec/codex/prompt.md",
-            "skills/autospec/opencode/agent.md",
             "skills/autospec-define/SKILL.md",
             "skills/autospec-define/codex/prompt.md",
             "skills/autospec-define/opencode/agent.md",
@@ -996,7 +993,8 @@ impl StructuralValidator {
             ("`kanban`", "Mermaid work-queue chart guidance"),
         ];
 
-        for skill in ["autospec", "autospec-define"] {
+        // Router delegates Phase 2 (incl. Documentation visualization) to /autospec-define.
+        for skill in ["autospec-define"] {
             for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
                 let display = format!("skills/{skill}/{member}");
                 let path = root.join(&display);
@@ -1292,7 +1290,8 @@ impl StructuralValidator {
     }
 
     pub fn validate_team_personality_selection_contract(root: &Path) -> Result<(), String> {
-        for skill in ["autospec", "autospec-define"] {
+        // Router delegates Phase 2 to /autospec-define.
+        for skill in ["autospec-define"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
             for (required, failure) in [
@@ -1341,7 +1340,8 @@ impl StructuralValidator {
 
     pub fn validate_team_personality_issue_template_contract(root: &Path) -> Result<(), String> {
         const TEMPLATE_GATE: &str = "body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`";
-        for skill in ["autospec", "autospec-define", "autospec-split"] {
+        // Router delegates Phase 3 to /autospec-define.
+        for skill in ["autospec-define", "autospec-split"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
             for (required, failure) in [
@@ -1362,7 +1362,8 @@ impl StructuralValidator {
     }
 
     pub fn validate_team_personality_phase4_and_docs_contract(root: &Path) -> Result<(), String> {
-        for skill in ["autospec", "autospec-run"] {
+        // Router delegates Phase 4 to /autospec-run.
+        for skill in ["autospec-run"] {
             let display = format!("skills/{skill}/SKILL.md");
             let path = root.join(&display);
             for (required, failure) in [
@@ -1648,9 +1649,8 @@ impl StructuralValidator {
                 "guardian lockstep: no guardian block found in {canonical_relative}"
             ));
         }
+        // Router delegates Phase 4 to /autospec-run; only the run trio is checked.
         for relative in [
-            "skills/autospec/codex/prompt.md",
-            "skills/autospec/opencode/agent.md",
             "skills/autospec-run/SKILL.md",
             "skills/autospec-run/codex/prompt.md",
             "skills/autospec-run/opencode/agent.md",
@@ -1671,7 +1671,7 @@ impl StructuralValidator {
     pub fn validate_phase4_issue_start_summary(root: &Path) -> Result<(), String> {
         require_literal_contract(
             root,
-            &PHASE4_ADAPTER_FILES,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
             &[
                 ("Issue start summary", "Issue start summary directive"),
                 (
@@ -1688,7 +1688,7 @@ impl StructuralValidator {
     pub fn validate_phase4_immediate_next_issue_pickup(root: &Path) -> Result<(), String> {
         require_literal_contract(
             root,
-            &PHASE4_ADAPTER_FILES,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
             &[
                 (
                     "Immediate next-issue pickup: NO SLEEP after process(ISSUE)",
@@ -1767,7 +1767,7 @@ impl StructuralValidator {
     pub fn validate_phase4_full_test_suite_gate(root: &Path) -> Result<(), String> {
         require_literal_contract(
             root,
-            &PHASE4_ADAPTER_FILES,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
             &[
                 ("Full test suite gate", "Full test suite gate section"),
                 (
@@ -1868,7 +1868,7 @@ impl StructuralValidator {
     pub fn validate_docs_drift_gate_regen_conditional_parity(root: &Path) -> Result<(), String> {
         require_literal_contract(
             root,
-            &PHASE4_ADAPTER_FILES,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
             &[
                 (
                     "_REGEN",
