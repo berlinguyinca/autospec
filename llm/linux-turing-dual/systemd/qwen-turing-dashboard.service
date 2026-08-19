@@ -13,6 +13,17 @@ Group=qwen-turing
 WorkingDirectory=/var/lib/qwen-turing
 Environment=QT_CONF_DIR=/opt/qwen-turing/etc
 LoadCredential=apikey:/etc/qwen-turing.key
+
+# Read access to the journal, so the config-health panel can report model
+# evictions and silently-disabled options from the router's own log.
+#
+# TRADEOFF, stated because it is wider than it needs to be: systemd-journal grants
+# read access to ALL units' logs, not just qwen-turing@router -- systemd has no
+# per-unit journal ACL. The dashboard only greps for three specific patterns and
+# only exposes counts and model names on the KEY-GATED page, never on /status or
+# /api/queue. Without this the panel degrades to "event feed unavailable", which
+# is correct but useless.
+SupplementaryGroups=systemd-journal
 ExecStart=/opt/qwen-turing/bin/dashboard-run.sh
 
 Restart=on-failure

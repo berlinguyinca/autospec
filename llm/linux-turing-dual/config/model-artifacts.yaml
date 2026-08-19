@@ -45,7 +45,10 @@ artifacts:
       # was returned from a 39,910-token prompt. Two concurrent 39,909-token
       # sessions also completed cleanly (79,818 of the 81,920 pool) with no
       # KV-cache eviction.
-      verified_max: 39910
+      # 99,710 tokens retrieved on the one-slot qwen3.8-27b-100k preset (needle at
+      # 60% depth), and 39,910 on the two-slot preset. The 100k figure is the
+      # ceiling this artifact is verified to.
+      verified_max: 99710
 
   - id: turing-dual-9b-q4km-v1
     role: fast-tier

@@ -369,6 +369,81 @@ but it is why the header set is read after a warm-up when verifying.
 
 ---
 
+## The 100k tier and prefix caching, measured
+
+### Prefix caching is worth ~10x, and one slot is what secures it
+
+A controlled comparison, same ~20k shared prefix, three sequential calls:
+
+| | call 1 | call 2 | call 3 |
+|---|---|---|---|
+| **one slot** (`qwen3.8-27b-100k`) | 20.0 s, cached 0 | **2.1 s, cached 19,425** | 2.0 s, cached 19,425 |
+| two slots (`qwen3.8-27b`) | 27.2 s, cached 0 | 20.8 s, **cached 0** | 2.4 s, cached 19,425 |
+| control, `cache_prompt: false` | 20.4 s, cached 0 | — | — |
+
+This **confirms** the round-robin explanation rather than inferring it. With two
+slots a single sequential user hits the warm slot every other turn; with one slot
+every turn after the first hits it. `slot-prompt-similarity` would steer requests
+to the warm slot and is exactly what commit `1cd8c1f4` disabled for crashing the
+model child, so it stays at `0.0` and the preset carries the fix instead.
+
+### `cache-reuse` was never doing anything
+
+Removed rather than tuned. The node logged
+`cache_reuse is not supported by this context, it will be disabled` at every load
+— `--cache-reuse` reuses chunks across a *changed* prefix, and this hybrid model's
+Gated-DeltaNet layers hold recurrent state that cannot be partially rewound. After
+removal: **zero such warnings**. Ordinary prefix caching, which does work, is what
+the table above measures.
+
+### 100k verified at length
+
+| | measured |
+|---|---|
+| prompt tokens retrieved | **99,710** |
+| needle | **retrieved, exact** |
+| wall clock, cold (includes a model reload) | **3 m 04 s** |
+| `total_slots` / `n_ctx` | **1 / 102,400** |
+| VRAM resident | 18,870 MiB of 22,528 (**3,658 free**) |
+| predicted resident | 18,702 MiB — within 168 MiB |
+
+**Prefill is faster than first estimated.** The router logs per-chunk progress:
+**594–637 tok/s** single-session, decaying with depth as attention cost grows. The
+earlier 475 tok/s figure came from the *concurrent* 40k run where two sessions
+shared the cards, so it understated single-session prefill. A cold 100k prompt is
+therefore ~2.8 minutes of prefill, not 3.5.
+
+Two concurrent 40k sessions on the enlarged 102,400 pool: both HTTP 200 with the
+needle, **zero** KV-cache failures, 117 s wall clock.
+
+---
+
+## Config health, measured
+
+The panel reports what the operator asked for — when models are offloading —
+from the router's own log:
+
+| signal | observed on this node |
+|---|---|
+| evictions in the last 2 h | **8**, e.g. `qwen3.5-9b -> qwen3.8-27b`, `qwen3.8-27b-100k -> qwen3.8-27b` |
+| unloads | 11 |
+| silently disabled options | `cache_reuse` — historical, from loads before its removal; ages out of the 2 h window |
+| prompt-cache hit rate | `null` until the current instance has been prompted |
+
+Eight evictions came from this session's own testing, which is the point: with
+`--models-max 1` every model switch is a reload, and the counter makes thrashing
+visible instead of merely slow.
+
+**The journal needs a group.** The unprivileged service user cannot read it by
+default, so the panel degraded — correctly — to `journal_readable: false` and
+`events: null`, rendering "event feed unavailable" rather than "0 evictions". The
+dashboard unit now carries `SupplementaryGroups=systemd-journal`, which is wider
+than needed (systemd has no per-unit journal ACL) and is recorded as a tradeoff in
+the unit itself: the dashboard greps three patterns and exposes counts only on the
+key-gated page, never on `/status` or `/api/queue`.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.

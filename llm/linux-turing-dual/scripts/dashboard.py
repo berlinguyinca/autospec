@@ -33,6 +33,9 @@ STATUS_PAGE = HERE.parent / "web" / "status.html"
 # cadence. Feeding it once per inference request would add irregular samples and
 # corrupt the completion counting every ETA depends on.
 REFRESH_SECONDS = 1.0
+# read_journal FORKS a process, so it must not run on the 1 s tick and must never
+# be reachable from /api/queue-headers, which gates every inference request.
+JOURNAL_SECONDS = 30.0
 
 
 def _load_collector():
@@ -100,6 +103,32 @@ def _refresher() -> None:
             # freeze the cache at a stale value and look like a quiet node.
             pass
         time.sleep(REFRESH_SECONDS)
+
+
+def _journal_refresher() -> None:
+    """Slow timer: the journal scrape forks, so it gets its own cadence.
+
+    The cheap cache hit-rate still updates every second via _poll_once's metrics;
+    only the event scrape is throttled.
+    """
+    while True:
+        try:
+            text, readable = COLLECT.read_journal()
+            events = COLLECT.parse_journal_events(text) if readable else None
+            with _CACHE_LOCK:
+                metrics = _CACHE.get("_metrics") or {}
+                _CACHE["config_health"] = {
+                    "journal_readable": readable,
+                    # None, NOT an empty structure: "unreadable" and "no
+                    # evictions" must never render the same, because no evictions
+                    # is exactly the good news an operator would act on.
+                    "events": events,
+                    "cache": COLLECT.cache_health(metrics),
+                    "window": "since -2h",
+                }
+        except Exception:
+            pass
+        time.sleep(JOURNAL_SECONDS)
 
 
 def snapshot() -> dict:
@@ -221,6 +250,7 @@ def main() -> int:
     Handler.metrics_url = args.metrics_url
 
     threading.Thread(target=_refresher, daemon=True).start()
+    threading.Thread(target=_journal_refresher, daemon=True).start()
     # Give the first tick a moment so the very first request sees real numbers
     # rather than an empty cache.
     time.sleep(1.2)

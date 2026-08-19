@@ -272,3 +272,60 @@ def sanitise_models(upstream: dict) -> dict:
             if isinstance(m, dict):
                 out.append({k: m[k] for k in _MODEL_FIELDS if k in m})
     return {"object": "list", "data": out}
+
+
+# --- config health ---------------------------------------------------------
+# Three signals the operator can act on, each a misconfiguration rather than a
+# fault. The patterns are deliberately narrow: a broad "unload" match would also
+# catch the ordinary shutdown of the only resident model, which is not a
+# misconfiguration and would make the eviction count meaningless.
+import re  # noqa: E402  (kept beside the code it serves)
+
+_EVICT_RE = re.compile(
+    r"ensure_model:\s*evicting idle LRU name=(?P<frm>\S+)\s+to make room for name=(?P<to>\S+)")
+_UNLOAD_RE = re.compile(r"unload(?:_all)?:\s*stopping model instance name=(?P<name>\S+)")
+_DISABLED_RE = re.compile(
+    r"(?P<opt>\w+) is not supported by this context, it will be disabled")
+
+
+def parse_journal_events(text: str) -> dict:
+    ev: dict = {"evictions": [], "unloads": [], "disabled": []}
+    for line in (text or "").splitlines():
+        m = _EVICT_RE.search(line)
+        if m:
+            ev["evictions"].append({"from": m.group("frm"), "to": m.group("to"),
+                                    "raw": line.strip()})
+            continue
+        m = _UNLOAD_RE.search(line)
+        if m:
+            ev["unloads"].append(m.group("name"))
+            continue
+        m = _DISABLED_RE.search(line)
+        if m and m.group("opt") not in ev["disabled"]:
+            # Logged on every load; the panel should say it once.
+            ev["disabled"].append(m.group("opt"))
+    return ev
+
+
+def cache_health(metrics: dict) -> dict:
+    """Prompt-cache hit rate. None -- not 0.0 -- when nothing has been prompted.
+
+    The difference matters: one says "idle", the other says "you are thrashing
+    slots and losing the 9x that prefix caching is worth".
+    """
+    total = int(metrics.get("llamacpp:prompt_tokens_total", 0) or 0)
+    cached = int(metrics.get("llamacpp:prompt_tokens_cached_total", 0) or 0)
+    return {"prompt_tokens": total, "cached_tokens": cached,
+            "hit_rate": (cached / total) if total > 0 else None}
+
+
+def read_journal(unit: str = "qwen-turing@router.service", since: str = "-2h",
+                 timeout: float = 6.0) -> tuple[str, bool]:
+    """Return (text, READABLE). The bool must never be collapsed into "no events"."""
+    try:
+        r = subprocess.run(["journalctl", "-u", unit, "--since", since,
+                            "-o", "cat", "--no-pager"],
+                           capture_output=True, text=True, timeout=timeout)
+        return (r.stdout, True) if r.returncode == 0 else ("", False)
+    except (OSError, subprocess.SubprocessError):
+        return "", False

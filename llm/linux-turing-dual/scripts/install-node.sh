@@ -79,6 +79,52 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
       -exec install -m 0755 {} "${QT_LLAMA_DIR}/" \; 2>/dev/null || true
 fi
 
+# --- phase 3.5: weights ------------------------------------------------------
+# The repository must be able to rebuild this node, not merely describe it. This
+# phase existed only as a --skip-weights flag until now; the checkpoints were
+# fetched by hand.
+#
+# Driven by model-artifacts.yaml, which already records provenance, so a new model
+# is added in ONE place. Pinned revisions, never branches: the 27B repository was
+# modified on the same day these weights were first downloaded.
+if [ "$SKIP_WEIGHTS" -eq 0 ]; then
+  say "fetch weights into ${QT_MODELS_DIR} (pinned revisions)"
+  sudo install -d -m 0755 "${QT_MODELS_DIR}"
+  plan="$(python3 "${HERE}/artifacts.py" --plan "${NODE}/config/model-artifacts.yaml")"
+  if [ -z "$plan" ]; then
+    echo "no artifacts in model-artifacts.yaml" >&2
+    exit 78
+  fi
+  printf '%s\n' "$plan" | while IFS=$'\t' read -r file repo rev size; do
+    [ -n "$file" ] || continue
+    dest="${QT_MODELS_DIR}/${file}"
+    have="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+    if [ "$have" = "$size" ]; then
+      echo "  present at expected size: ${file}"
+      continue
+    fi
+    echo "  fetching ${file} from ${repo} @ ${rev:0:12}"
+    # -C - resumes a partial file; a revision URL is immutable, so resuming is safe.
+    sudo curl -fL --retry 3 --retry-delay 5 -C - -o "$dest" \
+      "https://huggingface.co/${repo}/resolve/${rev}/${file}" || {
+        echo "  DOWNLOAD FAILED: ${file}" >&2; exit 70; }
+    got="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+    if [ "$got" != "$size" ]; then
+      # Fatal, not a warning. A truncated GGUF loads, answers, and is subtly wrong.
+      echo "  SIZE MISMATCH ${file}: got ${got}, expected ${size}" >&2
+      exit 70
+    fi
+    echo "  ok ${file} ${got} bytes"
+  done
+  # The subshell created by the pipe cannot fail the script, so re-verify here.
+  printf '%s\n' "$plan" | while IFS=$'\t' read -r file repo rev size; do
+    [ -n "$file" ] || continue
+    got="$(stat -c%s "${QT_MODELS_DIR}/${file}" 2>/dev/null || echo 0)"
+    [ "$got" = "$size" ] || { echo "weights incomplete: ${file}" >&2; exit 70; }
+  done || exit 70
+  echo "every artifact present at its pinned size"
+fi
+
 # --- phase 4: install config and helpers -----------------------------------
 say "install config, helpers and units"
 sudo install -d "${QT_PREFIX}/bin" "${QT_PREFIX}/etc/profiles.d" "${QT_STATE}"
