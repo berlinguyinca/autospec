@@ -36,10 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    // check_reference_pointer_integrity (#3158) added one legacy top-level call, and it is a
-    // call no other gate makes, so both the total and the distinct count move by one.
-    assert_eq!(calls.len(), 144);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 139);
+    assert_eq!(calls.len(), 144); // +1: check_reference_pointer_integrity (#3158)
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 139); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
