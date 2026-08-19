@@ -78,7 +78,7 @@ Required:
 Optional:
   --issue-labels <csv>  Comma-separated issue labels (for cache-prefix tagging)
   --repo <owner/repo>   Repository slug (default: from AUTOSPEC_REPO env)
-  --body-file <file>    Prompt body emitted below the cached prefix, ahead of the
+  --body-file <file>    Prompt body emitted inside the cached prefix, ahead of the
                         issue assignment (e.g. the v2-flow phase4-implementer.md).
   --stack-profile <f>  Read ui_capabilities.gaps from this stack profile and add a
     UI adoption directive when gaps exist, so missing accessible primitives are not
