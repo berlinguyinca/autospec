@@ -18,9 +18,6 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   The lease now unlocks explicitly before closing, which reaches the shared
   description. This had been failing `check_block_expansion`'s sibling suite in CI on
   every PR since #3148.
-- `heartbeat_survives_owned_transaction_contention_and_renews_later` waited a fixed
-  100 ms for an asynchronous renewal from a thread on a 10 ms interval, which a loaded
-  machine can miss entirely. It now polls for the renewal with a deadline.
 
 ### Fixed
 
