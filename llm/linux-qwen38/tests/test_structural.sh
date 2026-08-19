@@ -219,5 +219,46 @@ check $? "conftest keeps pytest out of the standalone script suites"
 grep -q 'reconnects="\$(cat "\${STATE}/tunnel.reconnects"' "${HERE}/hive/tunnel-supervisor.sh"
 check $? "the reconnect counter survives a supervisor restart"
 
+# 22 — this repository is public, so no real site identifier may be committed.
+# The values live in a local site.conf; the placeholders here are what a reader
+# is supposed to see. Scoped to the trees this project owns, and one pattern per
+# check so a leak names itself.
+root="$(cd "${HERE}/../.." && pwd)"
+leaked=""
+# This file is excluded because it necessarily contains every pattern it looks
+# for; without that it reports itself as the leak. Everything else is in scope.
+self=':!llm/linux-qwen38/tests/test_structural.sh'
+for pat in 'ucdavis' 'metabolomicsgrp' 'publicgrp' '/quobyte' 'hive-dc-' 'hive\.hpc'; do
+  if git -C "$root" grep -qIE "$pat" -- llm docs/memory "$self" 2>/dev/null; then
+    leaked="${leaked} ${pat}"
+  fi
+done
+if [ -n "$leaked" ]; then
+  bad "a real site identifier is committed:${leaked}"
+  for pat in $leaked; do
+    git -C "$root" grep -nIE "$pat" -- llm docs/memory "$self" 2>/dev/null | sed 's/^/        /' | head -3
+  done
+else
+  ok "no real site identifier is committed"
+fi
+
+# 23 — the example must actually cover what require_site() demands, or the
+# message tells you to copy a file that does not answer it.
+ex="${HERE}/hive/site.conf.example"
+missing_ex=""
+for v in OPENCODE_HIVE_HOST OPENCODE_HIVE_USER OPENCODE_HIVE_ROOT OPENCODE_HIVE_ACCOUNT; do
+  grep -q "^: \"\${${v}:=" "$ex" 2>/dev/null || missing_ex="${missing_ex} ${v}"
+done
+if [ -n "$missing_ex" ]; then
+  bad "site.conf.example does not set:${missing_ex}"
+else
+  ok "site.conf.example covers every value require_site() demands"
+fi
+
+# 24 — an unconfigured driver must fail with EX_CONFIG, not wander off to ssh.
+OPENCODE_HIVE_SITE_CONF=/nonexistent "${HERE}/hive/opencode_hive" status >/dev/null 2>&1
+[ "$?" = 78 ]
+check $? "opencode_hive refuses to run unconfigured (EX_CONFIG)"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

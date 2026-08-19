@@ -26,9 +26,22 @@ set -euo pipefail
 # with NO message at all. That is what "waiting for the scheduler" followed by a
 # bare `exit 2` was, twice.
 
-HIVE_HOST="${OPENCODE_HIVE_HOST:-hive.hpc.ucdavis.edu}"
-HIVE_USER="${OPENCODE_HIVE_USER:-gw}"
-ROOT="${OPENCODE_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
+# Which cluster, as whom, and where the weights live are properties of a site,
+# not of this script, and this repository is public -- so they are not committed.
+# They come from a local file, or from the environment, which wins over it.
+SITE_CONF="${OPENCODE_HIVE_SITE_CONF:-${XDG_CONFIG_HOME:-${HOME}/.config}/opencode-hive/site.conf}"
+if [ -r "$SITE_CONF" ]; then
+  # shellcheck source=/dev/null
+  . "$SITE_CONF"
+fi
+
+# The defaults below are placeholders, deliberately in <angle-bracket> form so
+# that an unconfigured value is caught by require_site() with one actionable
+# message, rather than reaching ssh and failing as a name-resolution error that
+# names nothing useful.
+HIVE_HOST="${OPENCODE_HIVE_HOST:-<login-host>}"
+HIVE_USER="${OPENCODE_HIVE_USER:-<user>}"
+ROOT="${OPENCODE_HIVE_ROOT:-<shared-storage>/llm}"
 # "auto" asks the scheduler which of these can start soonest. Type matters far
 # more than it looks: measured within one minute, the earliest start ranged from
 # 15 minutes (a6000) to over four hours (6000_blackwell) to the next day
@@ -42,7 +55,9 @@ GPU="${OPENCODE_HIVE_GPU:-auto}"
 GPU_CANDIDATES="${OPENCODE_HIVE_GPU_CANDIDATES:-6000_blackwell,nvidia_a100-sxm4-80gb,nvidia_a100_80gb_pcie,a100,a6000,nvidia_l40s}"
 NGPU="${OPENCODE_HIVE_NGPU:-1}"
 WALLTIME="${OPENCODE_HIVE_TIME:-12:00:00}"
-ACCOUNT="${OPENCODE_HIVE_ACCOUNT:-publicgrp}"
+ACCOUNT="${OPENCODE_HIVE_ACCOUNT:-<slurm-account>}"
+# A partition name is not identifying, but which one takes GPU jobs is still a
+# per-site fact; this is the one that does here.
 PARTITION="${OPENCODE_HIVE_PARTITION:-low}"
 REMOTE_PORT="${OPENCODE_HIVE_REMOTE_PORT:-8080}"
 # NOT 8080: the local llama.cpp router already owns that port on this machine,
@@ -346,7 +361,9 @@ REMOTE
     say "requesting ${NGPU}x ${GPU} for ${WALLTIME}"
     hssh <<REMOTE
 cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
-  -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+  -p ${PARTITION} -A ${ACCOUNT} \
+  --export=ALL,QWEN_LOGIN_HOST=${HIVE_HOST},QWEN_SITE=${OPENCODE_HIVE_SITE:-hpc-cluster} \
+  -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
     say "waiting for the scheduler"
     # A --test-only estimate is made once, and the queue moves under it. One
@@ -370,7 +387,9 @@ REMOTE
           GPU="$alt"; switches=$((switches + 1))
           hssh <<REMOTE
 cd ${ROOT} && sbatch --gres=gpu:${GPU}:${NGPU} --time=${WALLTIME} \
-  -p ${PARTITION} -A ${ACCOUNT} -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
+  -p ${PARTITION} -A ${ACCOUNT} \
+  --export=ALL,QWEN_LOGIN_HOST=${HIVE_HOST},QWEN_SITE=${OPENCODE_HIVE_SITE:-hpc-cluster} \
+  -o ${ROOT}/logs/serve-%j.out serve-qwen.sbatch
 REMOTE
         fi
       fi
@@ -434,6 +453,32 @@ REMOTE
   say "ready — pick a '${PROVIDER}/...' model inside OpenCode"
   if [ "$LAUNCH" = 1 ]; then exec opencode; fi
 }
+
+# Every subcommand talks to the cluster, so nothing can usefully run with a
+# placeholder still in place. Fail here, naming the file to write, instead of
+# letting ssh report "Could not resolve hostname <login-host>".
+require_site() {
+  local missing=""
+  local v
+  for v in HIVE_HOST HIVE_USER ROOT ACCOUNT; do
+    case "${!v}" in *'<'*'>'*) missing="${missing} ${v}" ;; esac
+  done
+  [ -z "$missing" ] && return 0
+  {
+    echo "opencode_hive is not configured for a site yet:${missing}"
+    echo
+    echo "Write ${SITE_CONF} -- start from the example in this checkout:"
+    echo "  mkdir -p \"$(dirname "${SITE_CONF}")\""
+    echo "  cp ${HERE}/site.conf.example \"${SITE_CONF}\" && \${EDITOR:-vi} \"${SITE_CONF}\""
+    echo
+    echo "Or pass them for one run:"
+    echo "  OPENCODE_HIVE_HOST=login.example.edu OPENCODE_HIVE_USER=you \\"
+    echo "  OPENCODE_HIVE_ROOT=/shared/you/llm OPENCODE_HIVE_ACCOUNT=your-account \\"
+    echo "  opencode_hive ${CMD}"
+  } >&2
+  exit 78   # EX_CONFIG
+}
+require_site
 
 case "$CMD" in
   up)     do_up ;;

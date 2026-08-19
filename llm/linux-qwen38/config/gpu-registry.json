@@ -38,7 +38,7 @@
         "Qwen3.8-27B-UD-Q8_K_XL.gguf": 44.99
       },
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA L40S": {
@@ -49,7 +49,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA A100-SXM4-80GB": {
@@ -60,7 +60,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA A100 80GB PCIe": {
@@ -71,7 +71,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA A100-PCIE-40GB": {
@@ -82,7 +82,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA RTX A6000": {
@@ -93,7 +93,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     },
     "NVIDIA RTX 5000 Ada Generation": {
@@ -104,7 +104,7 @@
       "nvfp4": false,
       "measured_tps": {},
       "seen_at": [
-        "hive.hpc.ucdavis.edu"
+        "hpc-cluster"
       ]
     }
   }

@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qwen-setup
 #SBATCH --partition=low
-#SBATCH --account=publicgrp
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
@@ -11,21 +10,28 @@
 #
 #   sbatch setup-hive.sh
 #
-# Run once. Everything it produces lives on /quobyte and survives the job, so
-# the serving job (serve-qwen.sbatch) starts in seconds afterwards.
+# opencode_hive submits this with -A/-p from your site config, which override
+# the directives above; a manual `sbatch` needs `-A <your-account>`.
+#
+# Run once. Everything it produces lives on shared storage and survives the job,
+# so the serving job (serve-qwen.sbatch) starts in seconds afterwards.
 #
 # Deliberately requests NO GPU. Compiling CUDA code needs nvcc, not a device,
 # and downloading weights needs neither -- so this schedules against all 168
 # nodes in `low` instead of queueing for one of the 86 GPUs that the serving
 # job actually wants.
 #
-# Account note: GPUs must be charged to publicgrp. The metabolomicsgrp
-# association carries gres/gpu=0 and a GPU request under it is rejected at
-# submit time with QOSGrpGRES.
+# Account note, worth checking at any site: the association you would expect to
+# use may carry gres/gpu=0, and a GPU request under it is then rejected at submit
+# time with QOSGrpGRES -- a message about QOS, not about GPUs. Confirm with
+# `sacctmgr show assoc user=$USER format=account,partition,qos,grptres`.
 set -euo pipefail
 
-ROOT="${QWEN_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
-# Build on node-local NVMe, install to /quobyte. A source checkout is tens of
+# Where this script was submitted from IS the shared root -- opencode_hive
+# copies it there and submits from there -- so there is nothing site-specific to
+# hard-code. The last fallback covers running it by hand from the checkout.
+ROOT="${QWEN_HIVE_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
+# Build on node-local NVMe, install to shared storage. A source checkout is tens of
 # thousands of small files and a parallel filesystem is the worst possible place
 # for that -- the first run spent minutes inside `git clone` alone. Only the
 # installed binaries need to persist.
