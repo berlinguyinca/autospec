@@ -9,6 +9,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Fixed
 
+#### build-test reports every failing test, and can run the python gate (2026-08-18)
+- `cargo test --workspace` is fail-fast, so the job stopped at the first failing binary. One
+  long-standing failure hid four other test binaries entirely — `main` reported a single failing
+  test while the workspace carried seven — and hid every later step in the job, so
+  `Validate repository` and `Build` had not run in CI for as long. Now `--no-fail-fast`.
+- The job also never installed pytest, which `check_python_suites` shells out to from both the
+  workspace suite and `autospec validate`. Only the python workflow installed it.
+
 #### A crashed conductor no longer parks its repository for five minutes (2026-08-18)
 - `decide_conductor_lease` excluded the `claimed` state from dead-owner reclamation, so a
   conductor killed inside the claim window left a lease that no replacement could take until

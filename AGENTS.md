@@ -7,7 +7,7 @@
 - **Never bypass hooks** (`--no-verify`) or signing flags.
 - **Never amend** committed PRs; create a new commit instead.
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
-- **Validation and tests**: run the Rust test suite with `cargo test --workspace`. Also run the shell validation scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
+- **Validation and tests**: run the Rust test suite with `cargo test --workspace --no-fail-fast`. Without `--no-fail-fast` cargo stops at the first failing test binary, so one failure hides every later binary -- that masked six failures on `main`. Also run the shell validation scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
 
 ## Runtime resource isolation
 
