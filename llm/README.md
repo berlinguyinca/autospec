@@ -7,6 +7,7 @@ that justify each choice. Start with whichever matches your situation.
 |---|---|---|
 | a single GPU workstation | [`linux-qwen38/README.md`](linux-qwen38/README.md) | `linux-qwen38/scripts/install-node.sh --with-opencode` |
 | time on an HPC cluster | [`linux-qwen38/slurm/README.md`](linux-qwen38/slurm/README.md) | `linux-qwen38/slurm/opencode_slurm` |
+| two or more consumer NVIDIA cards | [`linux-turing-dual/README.md`](linux-turing-dual/README.md) | `linux-turing-dual/scripts/install-node.sh` |
 | different hardware entirely | [`QWEN-NODE-SPEC.md`](QWEN-NODE-SPEC.md) | `linux-qwen38/scripts/select-quant.py --platform ...` |
 
 [`QWEN-NODE-SPEC.md`](QWEN-NODE-SPEC.md) is the portable spec: the method, not
@@ -30,6 +31,11 @@ linux-qwen38/
   scripts/*                          the operator toolkit (see below)
   tests/                             structural checks, smoke, vision, presets
   slurm/                             the Slurm cluster deployment
+linux-turing-dual/
+  README.md                          the 2 x RTX 2080 Ti build, as measured
+  nginx/                             the single public listener, with queue headers
+  web/                               dashboard and a public load page
+  ops/                               host cleanup, headless prep, firewall
 ```
 
 ## The toolkit, and what each tool answers
