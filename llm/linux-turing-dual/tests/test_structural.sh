@@ -103,24 +103,47 @@ fi
 
 # --- 7: no literal IPv4 anywhere in the node tree ------------------------
 # A secret-free companion to check 3. The pattern-based guard needs the real
-# identifiers, which must never appear in a workflow file -- putting them there
-# would publish exactly what the guard exists to keep out. This check needs no
-# secret: any literal dotted quad under the node directory is wrong, because
-# every address this node uses comes from site.conf at runtime.
+# identifiers, which must never appear in a committed workflow -- putting them
+# there would publish precisely what the guard exists to keep out. This check
+# needs no secret: any literal dotted quad under the node directory is wrong,
+# because every address this node uses comes from site.conf at runtime.
 #
-# Documentation ranges are allowed so examples can show a shape:
-#   192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (RFC 5737), 0.0.0.0, and
-#   loopback 127.0.0.0/8 -- a loopback default is the SAFE choice for a
-#   listener and can never identify a site.
-# The quad must be delimited by whitespace or punctuation, NOT merely by a
-# non-digit. Matching any non-digit made "monero-gui-v0.11.1.0" a leak, because
-# that version string is a perfectly valid dotted quad preceded by a "v". leak-guard-allow
-addrs="$(grep -rInE '(^|[[:space:]"'"'"'=:(,])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' \
-           --include='*.sh' --include='*.conf' --include='*.ini' \
-           --include='*.py' --include='*.example' --include='*.service' \
-           "$NODE" 2>/dev/null \
-         | grep -vE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0|127\.[0-9]+\.[0-9]+\.[0-9]+' \
-         | grep -v 'leak-guard-allow' || true)"
+# The filter is Python, not awk: Ubuntu's default awk is mawk, which does not
+# support {1,3} interval expressions, so an awk version silently matched nothing
+# useful while appearing to work.
+#
+# Octets are RANGE-CHECKED, because llama.cpp's own log timestamps look like
+# dotted quads. A real IPv4 octet is 0-255, which excludes them precisely instead
+# of needing a carve-out per fixture. Documentation ranges (RFC 5737), 0.0.0.0 and
+# loopback are allowed so examples can show a shape.
+addrs="$(
+  grep -rIn --include='*.sh' --include='*.conf' --include='*.ini' \
+       --include='*.py' --include='*.example' --include='*.service' \
+       --include='*.html' --include='*.yaml' \
+       -e . "$NODE" 2>/dev/null \
+  | grep -v 'leak-guard-allow' \
+  | python3 -c '
+# Two guards, because either alone lets something through: the octet range kills
+# log timestamps like 3.00.332.657, and the leading delimiter kills version
+# strings like monero-gui-v0.11.1.0 whose octets are all <=255. leak-guard-allow
+import re, sys
+QUAD = re.compile(r"(?<![0-9.A-Za-z_-])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![0-9.])")
+ALLOW = (("192","0","2"), ("198","51","100"), ("203","0","113"))
+for line in sys.stdin:
+    for m in QUAD.finditer(line):
+        o = m.groups()
+        if any(int(x) > 255 for x in o):
+            continue                      # a log timestamp, not an address
+        if o[:3] in ALLOW or o == ("0","0","0","0") or o[0] == "127":
+            continue
+        sys.stdout.write(line)
+        break
+'
+)"
+# No `|| true` above: this script runs without `set -e`, and the check keys on the
+# CONTENT of $addrs, not on the pipeline's status. grep exiting 1 because it found
+# nothing is the SUCCESS case here, so masking the status would only hide a real
+# failure of python or grep itself.
 if [ -n "$addrs" ]; then
   bad "a literal IPv4 address is committed under the node directory:"
   echo "$addrs" | sed 's/^/        /' | head -5 >&2
