@@ -288,10 +288,16 @@ fi
 # that costs nothing to avoid. Distinct from the cross-slot selection that is
 # deliberately OFF -- if a future edit conflates them, this check still passes
 # while the crash mitigation is silently lost, so both are asserted.
-grep -q '^cache-reuse = ' "${HERE}/config/router-presets.ini" \
-  && grep -q 'cache-reuse' "${HERE}/slurm/gen-preset.py" \
-  && grep -q 'cache-reuse' "${HERE}/scripts/serve-profile.sh"
-check $? "prefix reuse is enabled in the preset, the generator and the launcher"
+# cache-reuse is NOT set, and the check is inverted on purpose: llama.cpp
+# disables it on this model in every configuration we can build, so a setting
+# here would read like an optimisation that is running when it is not. The
+# reason has to stay next to the absence or someone re-adds it.
+! grep -q '^cache-reuse = ' "${HERE}/config/router-presets.ini"
+check $? "no inert cache-reuse setting in the preset"
+
+grep -q 'cache_reuse is not supported\|No cache-reuse\|NO cache-reuse' \
+  "${HERE}/config/router-presets.ini" "${HERE}/slurm/gen-preset.py"
+check $? "the reason cache-reuse is absent is recorded where it would go"
 
 grep -q '^slot-prompt-similarity = 0.0' "${HERE}/config/router-presets.ini"
 check $? "cross-slot selection stays disabled (the crash mitigation)"

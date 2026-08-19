@@ -104,10 +104,12 @@ def main() -> int:
     print("[*]")
     print("n-gpu-layers = 999\nflash-attn = auto\njinja = true")
     print("no-context-shift = true\nkv-unified = true")
-    # Within-slot prefix reuse. Subagents share a large identical skill
-    # preamble, which is exactly what this avoids reprocessing. Distinct
-    # from the cross-slot selection disabled below, and not on that path.
-    print("cache-reuse = 256")
+    # No cache-reuse: llama.cpp disables it on this model in every
+    # configuration we can build (multimodal, text-only, q4_0 KV, f16 KV, with
+    # and without context shift). The recurrent state Qwen3.8 keeps alongside
+    # its attention KV cannot be shifted, and shifting is what cache-reuse is.
+    # Exact-prefix caching still applies and is worth far more: 388 ms instead
+    # of 14.6 s on a 37k preamble. See config/router-presets.ini.
     # Slot selection by prompt similarity is disabled because the model child
     # died twice immediately after taking that path, both times with the
     # preceding line

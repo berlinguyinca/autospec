@@ -172,7 +172,7 @@ for tool in long-prompt-probe.py measure-ceiling.sh measure-slot-frontier.sh \
             bench-concurrency.py bench-context-sweep.sh benchmark.py \
             select-quant.py add-gguf-model.sh configure-opencode.py \
             analyze-session-contexts.py context-budget-check.py \
-            agentmodes.py capacity-preflight.py \
+            agentmodes.py capacity-preflight.py bench-cache-reuse.py \
             gpu-registry.py compare-quants.py; do
   sudo install -m 0755 "${HERE}/scripts/${tool}" "${QWEN38_PREFIX}/bin/${tool}"
 done
