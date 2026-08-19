@@ -1966,6 +1966,461 @@ name models and the public surfaces carry load only."
 
 ---
 
+### Task 10: Reproducible weights — `install-node.sh` fetches from `model-artifacts.yaml`
+
+**The repository is not currently a rebuild recipe.** `install-node.sh` accepts
+`--skip-weights` but has no weights phase; the checkpoints on the node were
+fetched by hand. This closes that.
+
+**Files:**
+- Modify: `llm/linux-turing-dual/scripts/install-node.sh`
+- Modify: `llm/linux-turing-dual/config/model-artifacts.yaml` (add the new artifacts)
+- Create: `llm/linux-turing-dual/tests/test_unit_artifacts.py`
+
+**Interfaces:**
+- Consumes: `QT_MODELS_DIR` from `site.sh`.
+- Produces: `artifact_fetch_plan(yaml_text: str) -> list[dict]` in a small helper
+  (`scripts/artifacts.py`) returning
+  `[{"file": str, "repository": str, "revision": str, "size_bytes": int}]`,
+  used by the installer and asserted by the test.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# llm/linux-turing-dual/tests/test_unit_artifacts.py
+# A truncated model is worse than a missing one: it loads, answers, and is subtly
+# wrong. So the plan must carry an exact byte count for every artifact, and a
+# revision rather than a branch -- the 27B repository was modified on the same day
+# these weights were first fetched.
+import importlib.util
+import pathlib
+
+HERE = pathlib.Path(__file__).resolve().parents[1]
+SRC = HERE / "scripts" / "artifacts.py"
+
+
+def load():
+    spec = importlib.util.spec_from_file_location("artifacts", SRC)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_plan_covers_every_artifact_in_the_real_file():
+    plan = load().artifact_fetch_plan((HERE / "config" / "model-artifacts.yaml").read_text())
+    files = {e["file"] for e in plan}
+    assert "Qwen3.8-27B-UD-Q4_K_M.gguf" in files
+    assert "Qwen3.5-9B-Q4_K_M.gguf" in files
+    assert any("ABLITERATED" in f for f in files), "uncensored weights missing"
+    assert any("mmproj" in f for f in files), "vision projector missing"
+
+
+def test_every_entry_has_a_revision_and_a_byte_count():
+    for e in load().artifact_fetch_plan((HERE / "config" / "model-artifacts.yaml").read_text()):
+        assert len(e["revision"]) >= 12, e
+        assert e["revision"] not in ("main", "master"), e
+        assert isinstance(e["size_bytes"], int) and e["size_bytes"] > 0, e
+
+
+def test_no_two_entries_write_the_same_filename():
+    plan = load().artifact_fetch_plan((HERE / "config" / "model-artifacts.yaml").read_text())
+    files = [e["file"] for e in plan]
+    assert len(files) == len(set(files)), "two artifacts would overwrite each other"
+
+
+def test_empty_yaml_is_an_empty_plan_not_an_exception():
+    assert load().artifact_fetch_plan("") == []
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_artifacts.py -q`
+Expected: FAIL — `artifacts.py` does not exist.
+
+- [ ] **Step 3: Record the new artifacts**
+
+Add to `model-artifacts.yaml`, each with `repository`, `revision`, `file`,
+`size_bytes`, `on_disk_gib`, `served_as` and a `projector` block where relevant:
+
+| file | repository @ revision | bytes |
+|---|---|---:|
+| `mmproj-F16.gguf` (27B) | `unsloth/Qwen3.8-27B-GGUF` @ `27af057ecb382ddfea5d12837360a8980560e3ed` | fetch and record |
+| `Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf` | `Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF` @ `4f6732ce2123…` | fetch and record |
+| `mmproj-Qwen3.8-27B-ABLITERATED-Q8_0.gguf` | same repo/revision | fetch and record |
+| `mmproj-F16.gguf` (9B) | `unsloth/Qwen3.5-9B-GGUF` @ `3885219b6810b007914f3a7950a8d1b469d598a5` | fetch and record |
+
+Get the exact sizes and the full revision hashes from the API rather than
+transcribing them:
+```bash
+for r in unsloth/Qwen3.8-27B-GGUF unsloth/Qwen3.5-9B-GGUF Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF; do
+  curl -sfL "https://huggingface.co/api/models/$r?blobs=true" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); print(d["id"], d["sha"])
+for f in d.get("siblings",[]):
+    n=f.get("rfilename","")
+    if "mmproj" in n or ("Q4_K_M" in n and n.endswith(".gguf")):
+        print("   ", n, f.get("size"))'
+done
+```
+**Note the two 27B `mmproj-F16.gguf` and 9B `mmproj-F16.gguf` share a filename.**
+Give each a distinct local name (`mmproj-27b-F16.gguf`, `mmproj-9b-F16.gguf`) — the
+duplicate-filename test exists because otherwise the second download silently
+overwrites the first and the 9B would load the 27B's projector.
+
+- [ ] **Step 4: Write the helper and the installer phase**
+
+`scripts/artifacts.py` parses the YAML with `yaml.safe_load` and flattens
+artifacts plus their projectors into one list. The installer phase then:
+
+```bash
+if [ "$SKIP_WEIGHTS" -eq 0 ]; then
+  say "fetch weights into ${QT_MODELS_DIR} (pinned revisions)"
+  sudo install -d -m 0755 "${QT_MODELS_DIR}"
+  python3 "${HERE}/artifacts.py" --plan "${NODE}/config/model-artifacts.yaml" \
+  | while IFS=$'\t' read -r file repo rev size; do
+      dest="${QT_MODELS_DIR}/${file}"
+      have="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+      if [ "$have" = "$size" ]; then
+        echo "  present at expected size: ${file}"
+        continue
+      fi
+      echo "  fetching ${file} from ${repo} @ ${rev:0:12}"
+      # -C - resumes a partial file; a revision URL is immutable so resuming is safe.
+      sudo curl -fL --retry 3 --retry-delay 5 -C - -o "$dest" \
+        "https://huggingface.co/${repo}/resolve/${rev}/${file}"
+      got="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+      if [ "$got" != "$size" ]; then
+        echo "  SIZE MISMATCH ${file}: got ${got}, expected ${size}" >&2
+        exit 70
+      fi
+      echo "  ok ${file} ${got} bytes"
+    done
+fi
+```
+
+A truncated GGUF is worse than a missing one — it loads and answers subtly wrong —
+so a mismatch is fatal rather than a warning.
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests/test_unit_artifacts.py -q`
+Expected: 4 passed
+
+- [ ] **Step 6: Prove the rebuild claim — acceptance criterion 22**
+
+A recipe nobody has run is a description. Delete one artifact and make the
+installer restore it:
+
+```bash
+sudo mv /path/to/models/Qwen3.5-9B-Q4_K_M.gguf /tmp/9b.bak
+cd ~/qwen-turing-src/llm/linux-turing-dual && bash scripts/install-node.sh --skip-build
+ls -l "$(. scripts/site.sh; require_site; echo "$QT_MODELS_DIR")" | grep 9B
+```
+Expected: exactly that one file re-fetched at the right byte count, the others
+reported "present at expected size", and the 9B serves a completion afterwards.
+Then `rm /tmp/9b.bak`.
+
+- [ ] **Step 7: Prove a truncated file is refused**
+
+```bash
+sudo truncate -s -1024 /path/to/models/Qwen3.5-9B-Q4_K_M.gguf
+bash scripts/install-node.sh --skip-build; echo "exit=$?"
+```
+Expected: a `SIZE MISMATCH` line and a **non-zero exit**. The installer must then
+re-fetch it cleanly on the next run.
+
+- [ ] **Step 8: Commit**
+
+```bash
+cd /tmp/wt-turing
+git add llm/linux-turing-dual/scripts/artifacts.py \
+        llm/linux-turing-dual/scripts/install-node.sh \
+        llm/linux-turing-dual/config/model-artifacts.yaml \
+        llm/linux-turing-dual/tests/test_unit_artifacts.py \
+        llm/linux-turing-dual/docs/measured-ceilings.md
+git commit -m "feat(llm): make the repository an actual rebuild recipe
+
+install-node.sh accepted --skip-weights and had no weights phase: the checkpoints
+on this node were fetched by hand, so the repository described the node rather
+than being able to reproduce it. The phase now reads model-artifacts.yaml -- the
+file that already holds provenance, so a new model is added in one place -- and
+fetches by pinned revision, never by branch, because the 27B repository was
+modified on the same day these weights were first downloaded.
+
+A byte-count mismatch is fatal rather than a warning. A truncated GGUF is worse
+than a missing one: it loads, it answers, and it is subtly wrong.
+
+Two projectors ship as mmproj-F16.gguf in different repositories, so they get
+distinct local names and a test refuses any plan where two artifacts write the
+same filename. Without that the 9B would silently load the 27B's projector.
+
+The rebuild claim is tested by deleting one artifact and watching exactly that one
+come back, because a recipe nobody has run is a description."
+```
+
+---
+
+### Task 11: The seven-model roster and the catalog panel
+
+**Files:**
+- Modify: `llm/linux-turing-dual/config/router-presets.ini`
+- Modify: `llm/linux-turing-dual/web/index.html`
+- Modify: `llm/linux-turing-dual/scripts/collect-stats.py`
+- Create: `llm/linux-turing-dual/tests/test_unit_catalog.py`
+
+**Interfaces:**
+- Consumes: Task 10's artifacts, Task 3's `sanitise_models`.
+- Produces: `model_catalog(models: dict, presets_text: str) -> list[dict]`
+  returning `[{"id", "aliases", "kind", "context", "slots", "resident"}]` where
+  `kind` is one of `text`, `vision`, `uncensored`, `uncensored-vision`.
+
+- [ ] **Step 1: Add the five new presets**
+
+Each is a separate section. **Vision is never an option on a text preset** — the
+4090 node showed a projector on the shared preset costs every text-only session
+~885 MiB, roughly 80k tokens of context, for a capability it never uses. Vision
+presets therefore also drop to an 81,920 pool, which is how the projector is paid
+for.
+
+```ini
+; --- vision: pool drops to 81,920 to pay for the 881 MiB projector -----------
+; Resident 19,223 MiB of 22,528, leaving ~3,305 free.
+[qwen3.8-27b-vision]
+model = <QT_MODELS_DIR>/Qwen3.8-27B-UD-Q4_K_M.gguf
+mmproj = <QT_MODELS_DIR>/mmproj-27b-F16.gguf
+image-min-tokens = 1024
+c = 81920
+parallel = 2
+split-mode = layer
+tensor-split = 1,1
+alias = qwen3.8-27b-vision-40k
+
+; --- uncensored: Blackfrost-AI ABLITERATED, the artifact the 4090 node serves
+; Abliterated builds are third-party modifications, NOT vendor artifacts: the
+; revision is pinned, the size is checked, and quality is re-measured rather than
+; assumed to have survived the edit. Resident 19,040 MiB, ~3,488 free.
+[qwen3.8-27b-uncensored]
+model = <QT_MODELS_DIR>/Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf
+c = 102400
+parallel = 2
+split-mode = layer
+tensor-split = 1,1
+alias = qwen3.8-27b-uncensored-50k,qwen3.8-27b-uncensored-40k
+
+; --- uncensored + vision: its Q8_0 projector is 604 MiB against 881 for F16,
+; which is why this costs LESS than the standard vision preset.
+[qwen3.8-27b-uncensored-vision]
+model = <QT_MODELS_DIR>/Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf
+mmproj = <QT_MODELS_DIR>/mmproj-uncensored-Q8_0.gguf
+image-min-tokens = 1024
+c = 81920
+parallel = 2
+split-mode = layer
+tensor-split = 1,1
+
+; --- 9B vision: still one card. 8,118 MiB of 11,264, ~3,146 free.
+[qwen3.5-9b-vision]
+model = <QT_MODELS_DIR>/Qwen3.5-9B-Q4_K_M.gguf
+mmproj = <QT_MODELS_DIR>/mmproj-9b-F16.gguf
+image-min-tokens = 1024
+c = 81920
+parallel = 2
+split-mode = layer
+tensor-split = 1,0
+```
+
+- [ ] **Step 2: Verify the preset gate accepts all seven**
+
+Run: `cd /tmp/wt-turing && python3 llm/linux-qwen38/tests/check_presets.py --config llm/linux-turing-dual/config/router-presets.ini`
+Expected: pass. If it does not understand `mmproj`, extend it — a preset gate that
+silently ignores the projector is not pricing the pool correctly.
+
+- [ ] **Step 3: Write the failing catalog test**
+
+```python
+# llm/linux-turing-dual/tests/test_unit_catalog.py
+import importlib.util
+import pathlib
+
+HERE = pathlib.Path(__file__).resolve().parents[1]
+SRC = HERE / "scripts" / "collect-stats.py"
+
+
+def load():
+    spec = importlib.util.spec_from_file_location("collect_stats", SRC)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+PRESETS = HERE / "config" / "router-presets.ini"
+MODELS = {"data": [
+    {"id": "qwen3.8-27b", "aliases": ["qwen3.8-27b-40k"], "status": {"value": "loaded"}},
+    {"id": "qwen3.8-27b-vision", "aliases": [], "status": {"value": "unloaded"}},
+    {"id": "qwen3.8-27b-uncensored", "aliases": [], "status": {"value": "unloaded"}},
+    {"id": "qwen3.5-9b-vision", "aliases": [], "status": {"value": "unloaded"}},
+]}
+
+
+def test_classifies_each_kind():
+    cat = {e["id"]: e for e in load().model_catalog(MODELS, PRESETS.read_text())}
+    assert cat["qwen3.8-27b"]["kind"] == "text"
+    assert cat["qwen3.8-27b-vision"]["kind"] == "vision"
+    assert cat["qwen3.8-27b-uncensored"]["kind"] == "uncensored"
+
+
+def test_reads_context_and_slots_from_the_presets():
+    cat = {e["id"]: e for e in load().model_catalog(MODELS, PRESETS.read_text())}
+    assert cat["qwen3.8-27b"]["context"] == 102400
+    assert cat["qwen3.8-27b"]["slots"] == 2
+    # Vision pays for its projector out of the pool, and the panel must say so.
+    assert cat["qwen3.8-27b-vision"]["context"] == 81920
+
+
+def test_marks_exactly_one_resident():
+    cat = load().model_catalog(MODELS, PRESETS.read_text())
+    assert [e["id"] for e in cat if e["resident"]] == ["qwen3.8-27b"]
+
+
+def test_hundred_k_preset_reports_one_slot():
+    cat = {e["id"]: e for e in load().model_catalog(
+        {"data": [{"id": "qwen3.8-27b-100k", "status": {"value": "unloaded"}}]},
+        PRESETS.read_text())}
+    assert cat["qwen3.8-27b-100k"]["slots"] == 1
+
+
+def test_unknown_id_does_not_crash_the_catalog():
+    cat = load().model_catalog({"data": [{"id": "not-a-preset"}]}, PRESETS.read_text())
+    assert cat[0]["context"] is None and cat[0]["slots"] is None
+```
+
+- [ ] **Step 4: Implement `model_catalog`**
+
+Parse the rendered presets with `configparser`, join on the served id, and derive
+`kind` from the presence of an `mmproj` key and `uncensored` in the section name.
+An id with no matching section yields `None` context and slots rather than a
+guess — the panel then shows `—`, which is honest.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `cd /tmp/wt-turing && python3 -m pytest llm/linux-turing-dual/tests -q`
+Expected: all pass, including the earlier suites.
+
+- [ ] **Step 6: Add the catalog panel to the key-gated page**
+
+A table: id (with aliases), kind badge, context, slots, resident marker, and an
+expandable copy-paste block per id built from `location.origin`:
+
+```javascript
+function modelSnippet(origin, id, ctx){
+  return `# ${id}  —  context ${ctx ? ctx.toLocaleString() : 'unknown'} tokens
+curl ${origin}/v1/chat/completions \\
+  -H "Authorization: Bearer $QWEN_KEY" -H 'Content-Type: application/json' \\
+  -d '{"model":"${id}","messages":[{"role":"user","content":"Hello"}],"max_tokens":512}'
+
+// ~/.config/opencode/opencode.json
+{"provider":{"qwen-turing":{
+  "npm":"@ai-sdk/openai-compatible",
+  "options":{"baseURL":"${origin}/v1","apiKey":"<your key>"},
+  "models":{"${id}":{}}}}}`;
+}
+```
+
+Each row must state: **selecting a different id costs a reload** (~7 s for a 27B),
+because with `--models-max 1` only one is resident. Vision rows note that an image
+costs ~1,026 prompt tokens at `image-min-tokens 1024`.
+
+The catalog stays on the **key-gated** page. It is **not** added to
+`PUBLIC_FIELDS`: an inventory of which uncensored and vision models a node serves
+is configuration, not load.
+
+- [ ] **Step 7: Verify every one of the seven actually answers**
+
+```bash
+KEY=$(sudo cat /etc/qwen-turing.key)
+for m in qwen3.8-27b qwen3.8-27b-100k qwen3.8-27b-vision qwen3.8-27b-uncensored \
+         qwen3.8-27b-uncensored-vision qwen3.5-9b qwen3.5-9b-vision; do
+  printf '%-32s ' "$m"
+  curl -sf --max-time 600 -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    http://127.0.0.1/v1/chat/completions \
+    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"max_tokens\":32,\"chat_template_kwargs\":{\"enable_thinking\":false}}" \
+    | python3 -c 'import json,sys; print(repr(json.load(sys.stdin)["choices"][0]["message"]["content"])[:40])' \
+    || echo "FAILED"
+done
+```
+Expected: `'OK'` from all seven. Each cold call includes a reload, so this loop
+takes a few minutes — and every one of those reloads should appear as an eviction
+in the config-health panel.
+
+- [ ] **Step 8: Verify the vision presets with a real image**
+
+A vision preset that has never been sent an image is not verified.
+
+```bash
+python3 -c "
+import base64,struct,zlib,json
+# 8x8 red PNG, built here so the test needs no fixture file
+def png():
+    raw=b''.join(b'\x00'+b'\xff\x00\x00'*8 for _ in range(8))
+    def ch(t,d):
+        c=t+d; return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c))
+    return (b'\x89PNG\r\n\x1a\n'+ch(b'IHDR',struct.pack('>IIBBBBB',8,8,8,2,0,0,0))
+            +ch(b'IDAT',zlib.compress(raw))+ch(b'IEND',b''))
+print(json.dumps({'b64': base64.b64encode(png()).decode()}))" > /tmp/img.json
+B64=$(python3 -c 'import json;print(json.load(open("/tmp/img.json"))["b64"])')
+for m in qwen3.8-27b-vision qwen3.8-27b-uncensored-vision qwen3.5-9b-vision; do
+  printf '%-32s ' "$m"
+  curl -sf --max-time 600 -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    http://127.0.0.1/v1/chat/completions \
+    -d "{\"model\":\"$m\",\"max_tokens\":48,\"chat_template_kwargs\":{\"enable_thinking\":false},
+         \"messages\":[{\"role\":\"user\",\"content\":[
+            {\"type\":\"text\",\"text\":\"What colour is this image? One word.\"},
+            {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,$B64\"}}]}]}" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(repr(d["choices"][0]["message"]["content"])[:40], "prompt_tokens=", d["usage"]["prompt_tokens"])'
+done
+```
+Expected: each names the colour, and `prompt_tokens` is ~1,026 higher than a
+text-only request — the proof the projector actually ran rather than the image
+being silently dropped.
+
+- [ ] **Step 9: Record and commit**
+
+Record in `docs/measured-ceilings.md`: the roster table with measured resident
+VRAM per preset, the image token cost, and the reload cost between presets.
+
+```bash
+cd /tmp/wt-turing
+git add llm/linux-turing-dual/config/router-presets.ini \
+        llm/linux-turing-dual/scripts/collect-stats.py \
+        llm/linux-turing-dual/web/index.html \
+        llm/linux-turing-dual/tests/test_unit_catalog.py \
+        llm/linux-turing-dual/docs/measured-ceilings.md
+git commit -m "feat(llm): serve seven models, and show what each one costs
+
+Text, 100k, vision, uncensored, uncensored-vision, and the 9B in text and vision.
+Every combination was priced against the measured non-KV footprint before being
+configured, and the tightest leaves 3,146 MiB free.
+
+Vision is a separate preset in every case, never an option on a text preset: the
+4090 node established that a projector on the shared preset makes every text-only
+session pay ~885 MiB -- roughly 80k tokens of context -- for a capability it never
+uses. Vision presets drop to an 81,920 pool, which is how the projector is paid
+for rather than pretended to be free. The uncensored projector is Q8_0 at 604 MiB,
+which is why uncensored-vision costs less than standard vision.
+
+The catalog is generated from the presets joined to the live model list, so the
+context sizes and slot counts on the page cannot drift from what is served, and an
+id with no matching section shows an em dash rather than a guess. It stays on the
+key-gated page: an inventory of which uncensored models a node serves is
+configuration, not load.
+
+Vision presets are verified with an actual image and by prompt_tokens rising ~1,026
+-- a projector that is silently dropping the image still returns a plausible
+sentence about colour."
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage**
@@ -1992,7 +2447,12 @@ name models and the public surfaces carry load only."
 | §5.1 config-health panel | **9** |
 | §7.6 prefix caching + one-slot 100k preset | **6** |
 | §8 acceptance 15-17 (eviction shown, cache hit on call 2, journal degradation) | **9**, 6 Step 5b |
-| §8 acceptance 18 (reboot) | 8 |
+| §5.2 model catalog panel | **11** |
+| §7.7 seven-model roster | **11** |
+| §7.8 reproducible weights | **10** |
+| §8 acceptance 18-20 (all seven answer, catalog vs public, eviction) | **11** |
+| §8 acceptance 21-22 (pinned fetch, rebuild proven) | **10** |
+| §8 acceptance 23 (reboot) | 8 |
 
 **Gap found and closed:** acceptance criterion 9 (two concurrent 40k sessions
 still clean after the pool change) had no task. It is now Task 6 Step 5's

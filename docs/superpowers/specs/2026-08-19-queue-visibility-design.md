@@ -410,6 +410,104 @@ between the 100k and the 2-slot tier evicts on every switch.
 **one** session. That is the trade the operator accepted, and it is now enforced by
 the preset rather than trusted to a client-side alias.
 
+## 5.2 Model catalog panel
+
+Every served id, **generated from the presets and `/v1/models`** rather than
+written by hand, so the page cannot drift from what the node serves:
+
+| column | source |
+|---|---|
+| served id, and its aliases | `/v1/models` |
+| kind — text / vision / uncensored | preset name and whether it declares `mmproj` |
+| context (`c`) and slots (`parallel`) | the rendered presets file |
+| resident right now | `status.value == "loaded"` |
+| copy-paste snippet | built from `location.origin` and that id |
+
+Each entry states its context size, because that is the number a client has to
+match, and warns that selecting a different id costs a reload — with seven
+presets against `--models-max 1` that is the most common surprise.
+
+The catalog is on the **key-gated** page, not the public one: an inventory of
+which uncensored and vision models a node serves is configuration, not load.
+
+---
+
+## 7.7 The full roster
+
+Every combination was priced against the measured non-KV footprint (16,902 MiB
+for the 27B at an 81,920 pool → 15,698 MiB of weights and ~1,204 MiB of per-card
+compute buffers and CUDA contexts) before any of it was configured.
+
+| served id | weights | projector | KV | resident | free | slots |
+|---|---:|---:|---:|---:|---:|---:|
+| `qwen3.8-27b` (+ `-50k`, `-40k`) | 15,698 | — | 1,800 | 18,702 | 3,826 | 2 |
+| `qwen3.8-27b-100k` | 15,698 | — | 1,800 | 18,702 | 3,826 | 1 |
+| `qwen3.8-27b-vision` | 15,698 | 881 | 1,440 | 19,223 | 3,305 | 2 |
+| `qwen3.8-27b-uncensored` | 16,036 | — | 1,800 | 19,040 | 3,488 | 2 |
+| `qwen3.8-27b-uncensored-vision` | 16,036 | 604 | 1,440 | 19,284 | 3,244 | 2 |
+| `qwen3.5-9b` | 5,417 | — | 720 | 7,237 | 4,027 | 2 |
+| `qwen3.5-9b-vision` | 5,417 | 881 | 720 | 8,118 | 3,146 | 2 |
+
+All figures MiB. The 9B rows are against **one** card (11,264 MiB); the rest
+against the pair (22,528 MiB). Total weights on disk: **38.6 GiB**.
+
+### Vision is always a separate preset
+
+Never an option on a text preset. The 4090 node established why: a projector on
+the shared preset made every text-only session pay ~885 MiB, costing them roughly
+80k tokens of context for a capability they never used. Vision presets also drop
+to an 81,920 pool, which is how the projector is paid for rather than pretending
+it is free.
+
+### Uncensored provenance
+
+`Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF` @ `4f6732ce2123` — the same artifact
+the 4090 node serves, so its quality is already characterised rather than assumed.
+Its `mmproj-Q8_0` is 604 MiB against 881 for F16, which is why the
+uncensored-vision row costs less than the standard vision row.
+
+**Rejected:** `huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF` — ships a projector
+but no `Q4_K_M` weights, so it cannot be served here at all.
+
+Abliterated builds are third-party modifications of the base weights. They are
+ordinary model choices for a local node, but they are **not vendor artifacts**:
+the revision is pinned, the size is checked, and quality is re-measured rather
+than assumed to have survived the edit.
+
+### The cost is eviction churn, and it is now visible
+
+Seven presets against `--models-max 1` means one resident model at a time and a
+reload (~7 s measured for a 27B) on every switch between them. Two people wanting
+different models will thrash, and nothing prevents it. This is the primary reason
+§5.1's eviction counter exists, and the catalog panel says so next to every id.
+
+---
+
+## 7.8 Reproducibility: the repository must rebuild the node
+
+The operator asked to be able to regenerate and reinstall. That was **not true
+when this section was written**: `install-node.sh` accepted `--skip-weights` but
+contained no weights phase at all — the checkpoints on the node were fetched by
+hand with `curl`. The repository was therefore not a complete recipe, which is
+exactly the failure this section closes.
+
+`install-node.sh` gains a weights phase that:
+
+- reads `config/model-artifacts.yaml` as the single source of what to fetch —
+  the same file that already records provenance, so a new model is added in one
+  place rather than two;
+- fetches **by pinned revision**, never by branch, because the 27B repository was
+  modified on the same day these weights were first downloaded;
+- verifies each file's exact byte count against `size_bytes` and **fails rather
+  than serving a truncated model**;
+- skips any artifact already present at the right size, so re-running is cheap
+  and interrupted downloads resume;
+- writes into `${QT_MODELS_DIR}` from `site.conf`, never the root filesystem.
+
+After that, on a bare host with the drivers in place,
+`install-node.sh` reproduces the whole node: build, weights, config, units,
+verification. That claim is itself tested — see acceptance criterion 22.
+
 ---
 
 ## 8. Acceptance criteria
@@ -444,7 +542,17 @@ the preset rather than trusted to a client-side alias.
     **non-zero `cached_tokens` on the second call**, not merely on the third.
 17. An unreadable journal degrades the panel to "event feed unavailable" rather
     than to "zero evictions".
-18. Both units and nginx survive a reboot.
+18. Every one of the seven served ids returns a **real completion**, and each
+    vision preset answers a request containing an actual image.
+19. The catalog panel lists all seven with their context sizes, and the public
+    `/status` page lists **none** of them.
+20. Switching between two presets produces an eviction event in the panel.
+21. `install-node.sh` fetches every artifact in `model-artifacts.yaml` by pinned
+    revision and **refuses to proceed on a byte-count mismatch**.
+22. **The rebuild claim is tested**: with `${QT_MODELS_DIR}` emptied of one
+    artifact, `install-node.sh` re-fetches exactly that one and the node serves it
+    again — proving the repository is a recipe rather than a description.
+23. Both units and nginx survive a reboot.
 
 ---
 
