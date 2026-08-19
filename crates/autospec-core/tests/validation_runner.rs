@@ -154,8 +154,10 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 143);
-    assert_eq!(full.unique_ids().len(), 138);
+    // Both move by one with check_reference_pointer_integrity (#3158), which the plan reaches
+    // directly and which no other gate duplicates.
+    assert_eq!(full.ids().len(), 144);
+    assert_eq!(full.unique_ids().len(), 139);
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));

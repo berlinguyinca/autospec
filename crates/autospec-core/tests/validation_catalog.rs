@@ -36,8 +36,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 143);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 138);
+    // check_reference_pointer_integrity (#3158) added one legacy top-level call, and it is a
+    // call no other gate makes, so both the total and the distinct count move by one.
+    assert_eq!(calls.len(), 144);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 139);
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +68,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 154);
+    assert_eq!(frozen_catalog_ids().len(), 155);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 154);
+    assert_eq!(ids.len(), 155);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
