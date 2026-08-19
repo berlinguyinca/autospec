@@ -19,6 +19,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   description. This had been failing `check_block_expansion`'s sibling suite in CI on
   every PR since #3148.
 
+#### autospec trio goldens regenerated (2026-08-18)
+- `check_block_expansion` has been failing on `main` since #3213 changed the
+  `autospec` trio without regenerating its three block-expansion goldens; they
+  were last written by #3182 two days earlier. The bodies themselves are fine --
+  `derive-trio.sh --check skills/autospec` passes -- so this is the missed
+  regeneration, nothing more. Re-expanding all 113 goldens now finds zero
+  mismatches.
+
 ### Fixed
 
 #### OpenCode subagent mode (2026-08-18)
