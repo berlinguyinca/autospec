@@ -95,32 +95,34 @@ if [ "$SKIP_WEIGHTS" -eq 0 ]; then
     echo "no artifacts in model-artifacts.yaml" >&2
     exit 78
   fi
-  printf '%s\n' "$plan" | while IFS=$'\t' read -r file repo rev size; do
-    [ -n "$file" ] || continue
-    dest="${QT_MODELS_DIR}/${file}"
+  # dest is the LOCAL name and file the REMOTE one: two projectors share the
+  # remote name mmproj-F16.gguf across repositories.
+  printf '%s\n' "$plan" | while IFS=$'\t' read -r local file repo rev size; do
+    [ -n "$local" ] || continue
+    dest="${QT_MODELS_DIR}/${local}"
     have="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
     if [ "$have" = "$size" ]; then
-      echo "  present at expected size: ${file}"
+      echo "  present at expected size: ${local}"
       continue
     fi
-    echo "  fetching ${file} from ${repo} @ ${rev:0:12}"
+    echo "  fetching ${local} <- ${file} from ${repo} @ ${rev:0:12}"
     # -C - resumes a partial file; a revision URL is immutable, so resuming is safe.
     sudo curl -fL --retry 3 --retry-delay 5 -C - -o "$dest" \
       "https://huggingface.co/${repo}/resolve/${rev}/${file}" || {
-        echo "  DOWNLOAD FAILED: ${file}" >&2; exit 70; }
+        echo "  DOWNLOAD FAILED: ${local}" >&2; exit 70; }
     got="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
     if [ "$got" != "$size" ]; then
       # Fatal, not a warning. A truncated GGUF loads, answers, and is subtly wrong.
-      echo "  SIZE MISMATCH ${file}: got ${got}, expected ${size}" >&2
+      echo "  SIZE MISMATCH ${local}: got ${got}, expected ${size}" >&2
       exit 70
     fi
-    echo "  ok ${file} ${got} bytes"
+    echo "  ok ${local} ${got} bytes"
   done
   # The subshell created by the pipe cannot fail the script, so re-verify here.
-  printf '%s\n' "$plan" | while IFS=$'\t' read -r file repo rev size; do
-    [ -n "$file" ] || continue
-    got="$(stat -c%s "${QT_MODELS_DIR}/${file}" 2>/dev/null || echo 0)"
-    [ "$got" = "$size" ] || { echo "weights incomplete: ${file}" >&2; exit 70; }
+  printf '%s\n' "$plan" | while IFS=$'\t' read -r local file repo rev size; do
+    [ -n "$local" ] || continue
+    got="$(stat -c%s "${QT_MODELS_DIR}/${local}" 2>/dev/null || echo 0)"
+    [ "$got" = "$size" ] || { echo "weights incomplete: ${local}" >&2; exit 70; }
   done || exit 70
   echo "every artifact present at its pinned size"
 fi

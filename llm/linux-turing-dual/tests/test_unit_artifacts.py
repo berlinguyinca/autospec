@@ -41,14 +41,26 @@ def test_every_entry_has_a_positive_byte_count():
         assert isinstance(e["size_bytes"], int) and e["size_bytes"] > 0, e
 
 
-def test_no_two_entries_write_the_same_filename():
+def test_no_two_entries_write_the_same_local_file():
     """Two projectors ship as mmproj-F16.gguf in different repositories.
 
-    Without distinct local names the second download silently overwrites the
-    first and a model loads the wrong projector.
+    Without distinct LOCAL names the second download silently overwrites the first
+    and a model loads the wrong projector -- which still answers, plausibly.
     """
-    files = [e["file"] for e in plan()]
-    assert len(files) == len(set(files)), "two artifacts would overwrite each other"
+    dests = [e["dest"] for e in plan()]
+    assert len(dests) == len(set(dests)), "two artifacts would overwrite each other"
+
+
+def test_remote_and_local_names_may_differ():
+    """The collision is resolved by local_file, so a remote name may repeat."""
+    for e in plan():
+        assert e["dest"], e
+        assert e["file"], e
+
+
+def test_every_entry_has_a_local_destination():
+    for e in plan():
+        assert "/" not in e["dest"], "dest must be a bare filename: %r" % e
 
 
 def test_every_entry_has_a_repository():

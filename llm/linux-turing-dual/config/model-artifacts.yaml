@@ -25,6 +25,18 @@ artifacts:
     quantization:
       method: gguf
       variant: UD-Q4_K_M
+    # Served ONLY by the qwen3.8-27b-vision preset, never by the text presets.
+    # A projector on a shared preset makes every text-only session pay ~885 MiB,
+    # roughly 80k tokens of context, for a capability it never uses.
+    #
+    # local_file is mandatory here: the 9B's projector is ALSO called
+    # mmproj-F16.gguf, and downloading both under their remote names would make
+    # the second overwrite the first.
+    projector:
+      file: mmproj-F16.gguf
+      local_file: mmproj-27b-F16.gguf
+      size_bytes: 927607488
+      on_disk_gib: 0.86
     source_model:
       repository: Qwen/Qwen3.8-27B
       revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
@@ -67,6 +79,11 @@ artifacts:
     quantization:
       method: gguf
       variant: Q4_K_M
+    projector:
+      file: mmproj-F16.gguf
+      local_file: mmproj-9b-F16.gguf
+      size_bytes: 918166080
+      on_disk_gib: 0.855
     source_model:
       repository: Qwen/Qwen3.5-9B
       revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
@@ -82,8 +99,54 @@ artifacts:
       # the measurement budget. Stays null rather than inheriting the 27B's.
       verified_max: null
 
+  - id: turing-dual-27b-abliterated-q4km-v1
+    role: uncensored
+    runtime: llama.cpp
+    runtime_version: "b10502"
+    # The same artifact the 24 GiB node serves, so its quality is already
+    # characterised rather than assumed. Abliterated builds are third-party
+    # modifications of the base weights: ordinary model choices for a local node,
+    # but NOT vendor artifacts -- hence the pinned revision, the checked size, and
+    # quality that is re-measured rather than assumed to have survived the edit.
+    repository: Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF
+    revision: 4f6732ce2123ced5d9df722a934f700619e066a8
+    file: Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf
+    size_bytes: 16810716384
+    on_disk_gib: 15.66
+    architecture: Qwen3_5ForConditionalGeneration
+    served_as: qwen3.8-27b-uncensored
+    gpu_layout: layer-split across both cards (tensor-split 1,1)
+    quantization:
+      method: gguf
+      variant: Q4_K_M
+    # Q8_0 rather than F16: 604 MiB against 881, which is why the
+    # uncensored-vision preset costs LESS than the standard vision preset.
+    projector:
+      file: mmproj-Qwen3.8-27B-ABLITERATED-Q8_0.gguf
+      local_file: mmproj-uncensored-Q8_0.gguf
+      size_bytes: 629247488
+      on_disk_gib: 0.586
+    source_model:
+      repository: Qwen/Qwen3.8-27B
+      revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    kv:
+      full_attention_layers: 16
+      total_layers: 64
+      kv_heads: 4
+      head_dim: 256
+      bytes_per_token_q4_0: 18432
+    context:
+      n_ctx_train: 262144
+      verified_max: null
+
 # Considered and rejected, so the decision is not re-litigated later.
 rejected:
+  - repository: huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF
+    reason: >
+      Considered as the uncensored artifact. Ships an mmproj projector but no
+      Q4_K_M weights at all, so it cannot be served on this hardware -- the
+      projector alone is useless without a checkpoint to attach it to.
+
   - repository: lmstudio-community/Qwen3.5-9B-GGUF
     reason: >
       Was already present in an LM Studio store on this host, which would have

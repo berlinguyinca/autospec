@@ -329,3 +329,60 @@ def read_journal(unit: str = "qwen-turing@router.service", since: str = "-2h",
         return (r.stdout, True) if r.returncode == 0 else ("", False)
     except (OSError, subprocess.SubprocessError):
         return "", False
+
+
+# --- model catalog ---------------------------------------------------------
+def model_catalog(models: dict, presets_text: str) -> list[dict]:
+    """Join the live model list to the presets file.
+
+    Generated rather than hand-written so the context sizes and seat counts shown
+    to users cannot drift from what the node actually serves. An id with no
+    matching section yields None rather than a guess -- the page shows an em dash.
+    """
+    import configparser
+
+    sections: dict[str, dict] = {}
+    if presets_text:
+        cp = configparser.ConfigParser(strict=False)
+        try:
+            # The presets file has bare top-level keys ("version = 1"), which
+            # configparser rejects without a synthetic section header.
+            cp.read_string("[__top__]\n" + presets_text)
+            for name in cp.sections():
+                if name in ("__top__", "*"):
+                    continue
+                sections[name] = dict(cp.items(name))
+        except configparser.Error:
+            sections = {}
+
+    def kind_of(name: str, sec: dict) -> str:
+        vision = "mmproj" in sec
+        unc = "uncensored" in name or "abliterated" in name
+        if unc and vision:
+            return "uncensored-vision"
+        if unc:
+            return "uncensored"
+        if vision:
+            return "vision"
+        return "text"
+
+    out = []
+    for m in (models or {}).get("data", []) or []:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        mid = m["id"]
+        sec = sections.get(mid, {})
+        def num(key):
+            try:
+                return int(sec[key])
+            except (KeyError, ValueError, TypeError):
+                return None
+        out.append({
+            "id": mid,
+            "aliases": m.get("aliases") or [],
+            "kind": kind_of(mid, sec),
+            "context": num("c"),
+            "slots": num("parallel"),
+            "resident": (m.get("status") or {}).get("value") == "loaded",
+        })
+    return out

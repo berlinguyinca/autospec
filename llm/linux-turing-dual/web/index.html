@@ -5,52 +5,64 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Qwen node — dual Turing</title>
 <style>
-  :root{
-    --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672;
-    --line:#e3e7ec; --accent:#2f6feb; --warn:#c2410c; --ok:#15803d;
-    --bar:#e9edf2;
-  }
+  :root{ --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672; --line:#e3e7ec;
+         --accent:#2f6feb; --warn:#c2410c; --ok:#15803d; --bar:#e9edf2; --code:#f2f4f7; }
   @media (prefers-color-scheme:dark){
-    :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad;
-           --line:#242b33; --accent:#5b8cf7; --warn:#fb923c; --ok:#4ade80;
-           --bar:#232a32; }
+    :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad; --line:#242b33;
+           --accent:#5b8cf7; --warn:#fb923c; --ok:#4ade80; --bar:#232a32; --code:#0d1116; }
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
-       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  header{padding:20px 24px 8px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+       font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:22px 24px 6px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
   .dot.up{background:var(--ok)} .dot.down{background:var(--warn)}
   .sub{color:var(--muted);font-size:12px}
-  main{padding:8px 24px 32px;max-width:1100px}
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  main{padding:6px 24px 40px;max-width:1120px}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+     margin:26px 0 10px;font-weight:600}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
   .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-  .v{font-size:26px;font-weight:640;margin-top:4px;
-     font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .v{font-size:26px;font-weight:640;margin-top:4px;font-variant-numeric:tabular-nums;
+     letter-spacing:-.02em}
   .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
-  h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;
-     color:var(--muted);margin:26px 0 10px;font-weight:600}
-  .bar{height:6px;background:var(--bar);border-radius:99px;overflow:hidden;margin-top:9px}
-  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;
-         transition:width .4s ease}
-  .gpu{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
-  .gpu .n{font-weight:600}
-  .meta{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+  .note{color:var(--muted);font-size:11.5px;margin-top:6px}
+  .bar{height:7px;background:var(--bar);border-radius:99px;overflow:hidden;margin-top:9px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
+  .bar>i.over{background:var(--warn)}
   table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-  td{padding:5px 0;border-bottom:1px solid var(--line);font-size:13px}
-  td:last-child{text-align:right;font-weight:600}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+     color:var(--muted);font-weight:600;padding:0 8px 6px 0}
+  td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
   tr:last-child td{border-bottom:0}
-  footer{color:var(--muted);font-size:11px;padding:0 24px 28px;max-width:1100px}
-  .err{background:var(--panel);border:1px solid var(--warn);color:var(--warn);
-       border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:13px}
+  .num{text-align:right}
+  .badge{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:99px;
+         border:1px solid var(--line);color:var(--muted)}
+  .badge.on{border-color:var(--ok);color:var(--ok)}
+  .badge.v{border-color:var(--accent);color:var(--accent)}
+  .badge.u{border-color:var(--warn);color:var(--warn)}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:11px 13px;
+      overflow-x:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
+  .tab{font-size:12px;padding:4px 10px;border:1px solid var(--line);border-radius:99px;
+       background:none;color:var(--muted);cursor:pointer;font-family:inherit}
+  .tab.sel{border-color:var(--accent);color:var(--accent)}
+  .warnbox{background:var(--panel);border:1px solid var(--warn);border-left-width:3px;
+           border-radius:8px;padding:10px 13px;margin-bottom:10px;font-size:12.5px}
+  .err{background:var(--panel);border:1px solid var(--warn);color:var(--warn);border-radius:10px;
+       padding:12px 14px;margin-bottom:12px;font-size:13px}
   .hide{display:none}
+  a{color:var(--accent)}
+  code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  select{font:inherit;font-size:12px;background:var(--panel);color:var(--ink);
+         border:1px solid var(--line);border-radius:6px;padding:3px 6px}
 </style>
 </head>
 <body>
 <header>
-  <h1>Qwen node <span class="sub">· dual RTX 2080 Ti · sm_75</span></h1>
+  <h1>Qwen node <span class="sub">· 2× RTX 2080 Ti · sm_75</span></h1>
   <span class="sub"><span id="dot" class="dot"></span> <span id="state">connecting…</span></span>
   <span class="sub" id="stamp" style="margin-left:auto"></span>
 </header>
@@ -58,118 +70,292 @@
 <main>
   <div id="err" class="err hide"></div>
 
+  <!-- ============ QUEUE ============ -->
+  <h2>Queue</h2>
   <div class="grid">
+    <div class="card"><div class="k">In progress</div>
+      <div class="v"><span id="qproc">–</span><span class="u">of <span id="qslots">–</span> seats</span></div></div>
+    <div class="card"><div class="k">Waiting</div>
+      <div class="v" id="qqueued">–</div></div>
+    <div class="card"><div class="k">Capacity</div>
+      <div class="v"><span id="qpct">–</span><span class="u">%</span></div>
+      <div class="bar"><i id="qbar" style="width:0"></i></div>
+      <div class="note" id="qover"></div></div>
+    <div class="card"><div class="k">Estimated wait</div>
+      <div class="v" id="qwait">–</div>
+      <div class="note" id="qwaitnote"></div></div>
+  </div>
+  <div class="grid" style="margin-top:12px">
+    <div class="card"><div class="k">Typical request</div>
+      <div class="v" id="qmean">–</div><div class="note" id="qsamples"></div></div>
+    <div class="card"><div class="k">Generated</div>
+      <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
     <div class="card"><div class="k">Prompt tokens</div>
       <div class="v" id="pt">–</div></div>
-    <div class="card"><div class="k">Generated tokens</div>
-      <div class="v" id="gt">–</div></div>
-    <div class="card"><div class="k">Throughput</div>
-      <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
     <div class="card"><div class="k">KV pool used</div>
       <div class="v"><span id="kv">–</span><span class="u">%</span></div>
       <div class="bar"><i id="kvbar" style="width:0"></i></div></div>
   </div>
 
+  <!-- ============ CONFIG HEALTH ============ -->
+  <h2>Configuration health</h2>
+  <div id="health"></div>
+
+  <!-- ============ GPUS ============ -->
   <h2>GPUs</h2>
   <div class="grid" id="gpus"></div>
 
-  <h2>Requests</h2>
-  <div class="card">
-    <table>
-      <tr><td>Processing now</td><td id="rp">–</td></tr>
-      <tr><td>Deferred (queued)</td><td id="rd">–</td></tr>
-      <tr><td>VRAM used / total</td><td id="vram">–</td></tr>
-      <tr><td>Resident model</td><td id="model">–</td></tr>
+  <!-- ============ MODELS ============ -->
+  <h2>Models served</h2>
+  <div class="card" style="overflow-x:auto">
+    <table id="catalog">
+      <thead><tr>
+        <th>Served id</th><th>Kind</th><th class="num">Context</th>
+        <th class="num">Seats</th><th>State</th><th>Aliases</th>
+      </tr></thead>
+      <tbody id="catbody"></tbody>
     </table>
+    <div class="note">Only one model is resident at a time
+      (<code>--models-max 1</code>). Asking for a different id costs a reload —
+      about 7&nbsp;s for a 27B off NVMe. Every reload shows up as an eviction above.</div>
+  </div>
+
+  <!-- ============ HOW TO CONNECT ============ -->
+  <h2>How to connect</h2>
+  <div class="warnbox">
+    <strong>Reasoning tokens.</strong> These models emit reasoning before content, so
+    <code>max_tokens: 16</code> returns <em>empty</em> content — all of it went to
+    reasoning. Either allow headroom (512+) or send
+    <code>"chat_template_kwargs": {"enable_thinking": false}</code>.
+  </div>
+  <div class="warnbox">
+    <strong>Context tiers are a contract, not a limit.</strong> Nothing enforces them.
+    A <code>-100k</code> id means <em>run solo</em>; <code>-40k</code>/<code>-50k</code>
+    mean two sessions. A 100k session beside a 40k one over-subscribes the shared pool
+    and both die together.
+  </div>
+  <div class="card">
+    <div class="tabs" id="tabs"></div>
+    <div style="margin-bottom:9px">
+      <span class="sub">Model:</span> <select id="msel"></select>
+    </div>
+    <pre id="snippet">…</pre>
+    <div class="note">Get the key on the node with
+      <code>sudo cat /etc/qwen-turing.key</code>. Or generate the OpenCode config
+      from the server so client and server cannot drift:
+      <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code>.</div>
   </div>
 </main>
 
-<footer>
-  Polls <code>/api/stats</code> every 2 s using a key held in this browser's
-  local storage &mdash; <a href="#" id="rekey">change it</a>. Counters are cumulative since the
-  server started and reset when a model switch reloads it. A gap here usually
-  means a model is loading, not that anything failed.
-</footer>
-
 <script>
 const $ = id => document.getElementById(id);
-
-// The API key lives in localStorage so the page stays authenticated without
-// the server growing a session/cookie story. /api/stats is key-protected; this
-// is only about giving a browser a way to present the key it already has.
+const n = v => (v === null || v === undefined) ? '–' : v.toLocaleString();
 const KEYNAME = 'qt-api-key';
-function getKey(){ return localStorage.getItem(KEYNAME) || ''; }
+const getKey = () => localStorage.getItem(KEYNAME) || '';
 function askKey(msg){
   const k = window.prompt((msg || 'Node API key') +
     '\n\nRetrieve it on the node with:\n  sudo cat /etc/qwen-turing.key', getKey());
   if(k !== null) localStorage.setItem(KEYNAME, k.trim());
   return getKey();
 }
-function authHeaders(){
-  const k = getKey();
-  return k ? {'Authorization': 'Bearer ' + k} : {};
+const authHeaders = () => { const k = getKey(); return k ? {'Authorization':'Bearer '+k} : {}; };
+function secs(v){
+  if(v === null || v === undefined) return '—';
+  return v < 90 ? Math.round(v)+'s' : Math.round(v/60)+' min';
 }
-const n = v => (v ?? 0).toLocaleString();
 
+// ---------- queue ----------
+function renderQueue(q){
+  q = q || {};
+  const slots = q.slots || 0, out = (q.processing||0) + (q.queued||0);
+  $('qproc').textContent = n(q.processing); $('qslots').textContent = n(slots);
+  $('qqueued').textContent = n(q.queued);
+  // Clamp the BAR, never the label: a queue at 300% must read as 300%.
+  const pct = slots ? Math.round(out/slots*100) : null;
+  $('qpct').textContent = pct === null ? '–' : pct;
+  $('qbar').style.width = pct === null ? '0' : Math.min(100,pct)+'%';
+  $('qbar').className = (pct !== null && pct > 100) ? 'over' : '';
+  $('qover').textContent = (pct !== null && pct > 100)
+    ? 'More requests than seats — the excess is queued, not rejected.' : '';
+  // null is "not measured yet" and must never render as 0.
+  const w = q.est_wait_seconds;
+  $('qwait').textContent = (w === null || w === undefined) ? '—' : secs(w);
+  $('qwaitnote').textContent = (w === null || w === undefined)
+    ? 'not enough completions observed yet'
+    : 'from ' + n(q.completions) + ' completions';
+  $('qmean').textContent = q.mean_service_seconds ? secs(q.mean_service_seconds) : '—';
+  $('qsamples').textContent = n(q.samples) + ' samples · ' + n(q.completions) + ' completions';
+}
+
+// ---------- config health ----------
+function renderHealth(h){
+  if(!h){ $('health').innerHTML = '<div class="card"><div class="note">no data yet</div></div>'; return; }
+  const rows = [];
+  if(!h.journal_readable || h.events === null){
+    // "unavailable" must never look like "zero evictions" -- no evictions is
+    // exactly the good news someone would act on.
+    rows.push(['Model evictions','<span class="badge">event feed unavailable</span>',
+      'The dashboard cannot read the journal. Add SupplementaryGroups=systemd-journal to its unit.']);
+  }else{
+    const ev = h.events;
+    rows.push(['Model evictions', n(ev.evictions.length) + ' <span class="sub">' + (h.window||'') + '</span>',
+      ev.evictions.length
+        ? 'Clients are asking for different models against --models-max 1. Last: ' +
+          ev.evictions[ev.evictions.length-1].from + ' → ' +
+          ev.evictions[ev.evictions.length-1].to +
+          '. Pin clients to one id, or add a third card to raise --models-max.'
+        : 'No thrashing.']);
+    rows.push(['Options silently disabled',
+      ev.disabled.length ? '<span class="badge u">' + ev.disabled.join(', ') + '</span>' : '<span class="badge on">none</span>',
+      ev.disabled.length
+        ? 'The config asks for something this model cannot do; remove it rather than leave it looking effective.'
+        : 'Every configured option is in effect.']);
+  }
+  const c = h.cache || {};
+  const hr = c.hit_rate;
+  rows.push(['Prompt cache hit rate',
+    hr === null || hr === undefined ? '<span class="badge">not prompted yet</span>'
+      : (Math.round(hr*100) + '%'),
+    hr === null || hr === undefined ? 'No prompts on the current instance.'
+      : (hr < 0.2
+        ? 'Low. Repeated long prefixes are being re-processed — a warm slot is worth ~10×. Use a single-seat preset for iterative work.'
+        : 'Prefixes are being reused.')]);
+  $('health').innerHTML = '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
+    '<th>Signal</th><th>Value</th><th>What to change</th></tr></thead><tbody>' +
+    rows.map(r => '<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="sub">'+r[2]+'</td></tr>').join('') +
+    '</tbody></table></div>';
+}
+
+// ---------- gpus ----------
 function gpuCard(g){
   const used = g.mem_used_mib ?? 0, tot = g.mem_total_mib ?? 1;
-  const pct = Math.min(100, Math.round(used / tot * 100));
+  const pct = Math.min(100, Math.round(used/tot*100));
   return `<div class="card">
-    <div class="gpu"><span class="n">GPU ${g.index}</span>
-      <span class="meta">${g.util_pct ?? '–'}% util</span></div>
-    <div class="meta">${g.name ?? ''}</div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-weight:600">GPU ${g.index}</span>
+      <span class="sub">${g.util_pct ?? '–'}% util</span></div>
+    <div class="sub">${g.name ?? ''}</div>
     <div class="bar"><i style="width:${pct}%"></i></div>
-    <div class="meta" style="margin-top:7px">
-      ${n(used)} / ${n(tot)} MiB
-      ${g.temp_c != null ? ' · ' + g.temp_c + '°C' : ''}
-      ${g.power_w != null ? ' · ' + g.power_w.toFixed(0) + ' W' : ''}
-    </div></div>`;
+    <div class="sub" style="margin-top:7px">${n(used)} / ${n(tot)} MiB
+      ${g.temp_c != null ? ' · '+g.temp_c+'°C' : ''}
+      ${g.power_w != null ? ' · '+g.power_w.toFixed(0)+' W' : ''}</div></div>`;
 }
 
+// ---------- catalog + snippets ----------
+let CATALOG = [], TAB = 'curl';
+function kindBadge(k){
+  const cls = k === 'vision' ? 'v' : (k && k.indexOf('uncensored') === 0 ? 'u' : '');
+  return '<span class="badge '+cls+'">'+(k||'text')+'</span>';
+}
+function renderCatalog(cat){
+  CATALOG = cat || [];
+  $('catbody').innerHTML = CATALOG.map(m => `<tr>
+      <td><code>${m.id}</code></td>
+      <td>${kindBadge(m.kind)}</td>
+      <td class="num">${m.context ? m.context.toLocaleString() : '—'}</td>
+      <td class="num">${m.slots ?? '—'}</td>
+      <td>${m.resident ? '<span class="badge on">resident</span>' : '<span class="badge">reload needed</span>'}</td>
+      <td class="sub">${(m.aliases||[]).join(', ') || '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="sub">no models reported</td></tr>';
+  const sel = $('msel'), prev = sel.value;
+  sel.innerHTML = CATALOG.map(m => `<option value="${m.id}">${m.id}</option>`).join('');
+  if(prev && CATALOG.some(m => m.id === prev)) sel.value = prev;
+  renderSnippet();
+}
+function snippetFor(kind, id, ctx){
+  const o = location.origin;
+  const c = ctx ? ctx.toLocaleString() : 'unknown';
+  if(kind === 'curl') return `# ${id} — context ${c} tokens
+curl ${o}/v1/chat/completions \\
+  -H "Authorization: Bearer $QWEN_KEY" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"model":"${id}",
+       "messages":[{"role":"user","content":"Hello"}],
+       "max_tokens":512}'`;
+  if(kind === 'python') return `# ${id} — context ${c} tokens
+from openai import OpenAI
+client = OpenAI(base_url="${o}/v1", api_key="<your key>")
+r = client.chat.completions.create(
+    model="${id}",
+    messages=[{"role": "user", "content": "Hello"}],
+    max_tokens=512,                     # headroom: reasoning runs first
+)
+print(r.choices[0].message.content)`;
+  if(kind === 'node') return `// ${id} — context ${c} tokens
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "${o}/v1", apiKey: process.env.QWEN_KEY });
+const r = await client.chat.completions.create({
+  model: "${id}",
+  messages: [{ role: "user", content: "Hello" }],
+  max_tokens: 512,
+});
+console.log(r.choices[0].message.content);`;
+  return `// ~/.config/opencode/opencode.json   —  ${id}, context ${c} tokens
+{
+  "provider": {
+    "qwen-turing": {
+      "name": "Qwen (dual Turing node)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "${o}/v1", "apiKey": "<your key>" },
+      "models": {
+${CATALOG.map(m => '        "' + m.id + '": {}').join(',\n')}
+      }
+    }
+  }
+}`;
+}
+function renderSnippet(){
+  const id = $('msel').value || (CATALOG[0] && CATALOG[0].id) || 'qwen3.8-27b';
+  const m = CATALOG.find(x => x.id === id) || {};
+  $('snippet').textContent = snippetFor(TAB, id, m.context);
+}
+const TABS = [['curl','curl'],['python','Python (OpenAI SDK)'],['node','Node (OpenAI SDK)'],['opencode','OpenCode']];
+$('tabs').innerHTML = TABS.map(([k,l]) =>
+  `<button class="tab${k===TAB?' sel':''}" data-k="${k}">${l}</button>`).join('');
+$('tabs').onclick = e => {
+  const k = e.target.dataset && e.target.dataset.k; if(!k) return;
+  TAB = k;
+  [...$('tabs').children].forEach(b => b.className = 'tab' + (b.dataset.k===k?' sel':''));
+  renderSnippet();
+};
+$('msel').onchange = renderSnippet;
+
+// ---------- poll ----------
 async function tick(){
   try{
     const r = await fetch('/api/stats', {cache:'no-store', headers: authHeaders()});
     if(r.status === 401){
-      $('dot').className = 'dot down'; $('state').textContent = 'unauthorised';
+      $('dot').className='dot down'; $('state').textContent='unauthorised';
       $('err').innerHTML = 'Unauthorised — the node API key is missing or wrong. ' +
         '<a href="#" id="setkey">Enter it</a>.';
       $('err').classList.remove('hide');
       const a = $('setkey');
-      if(a) a.onclick = e => { e.preventDefault();
-        if(askKey('Wrong or missing key')) tick(); };
-      if(!getKey() && !window.__qtAsked){ window.__qtAsked = true;
-        if(askKey()) tick(); }
+      if(a) a.onclick = e => { e.preventDefault(); if(askKey('Wrong or missing key')) tick(); };
+      if(!getKey() && !window.__qtAsked){ window.__qtAsked = true; if(askKey()) tick(); }
       return;
     }
-    if(!r.ok) throw new Error('HTTP ' + r.status);
+    if(!r.ok) throw new Error('HTTP '+r.status);
     const d = await r.json();
     $('err').classList.add('hide');
 
     $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
     $('state').textContent = d.llama_up ? (d.model || 'model resident') : 'model not loaded';
-
-    $('pt').textContent  = n(d.prompt_tokens_total);
-    $('gt').textContent  = n(d.generated_tokens_total);
+    $('pt').textContent = n(d.prompt_tokens_total);
     $('tps').textContent = (d.tokens_per_second ?? 0).toFixed(1);
-    const kv = Math.round((d.kv_cache_usage_ratio ?? 0) * 100);
-    $('kv').textContent = kv;
-    $('kvbar').style.width = kv + '%';
-    $('rp').textContent = n(d.requests_processing);
-    $('rd').textContent = n(d.requests_deferred);
-    $('vram').textContent = n(d.gpu_used_mem_mib) + ' / ' + n(d.gpu_total_mem_mib) + ' MiB';
-    $('model').textContent = d.model || 'none loaded';
-    $('gpus').innerHTML = (d.gpus || []).map(gpuCard).join('') ||
-      '<div class="card"><div class="meta">no GPUs reported</div></div>';
+    const kvp = Math.round((d.kv_cache_usage_ratio ?? 0)*100);
+    $('kv').textContent = kvp; $('kvbar').style.width = kvp+'%';
+    renderQueue(d.queue);
+    renderHealth(d.config_health);
+    $('gpus').innerHTML = (d.gpus||[]).map(gpuCard).join('') ||
+      '<div class="card"><div class="sub">no GPUs reported</div></div>';
+    renderCatalog(d.catalog);
     $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
   }catch(e){
-    $('dot').className = 'dot down';
-    $('state').textContent = 'dashboard unreachable';
+    $('dot').className='dot down'; $('state').textContent='dashboard unreachable';
     $('err').textContent = 'Could not read /api/stats: ' + e.message;
     $('err').classList.remove('hide');
   }
 }
-const rk = $('rekey');
-if(rk) rk.onclick = e => { e.preventDefault(); askKey('Node API key'); tick(); };
 tick(); setInterval(tick, 2000);
 </script>
 </body>

@@ -6,8 +6,13 @@ what to download too -- a new model is then added in one place rather than two.
 
     artifacts.py --plan config/model-artifacts.yaml
 
-prints one tab-separated line per file: file, repository, revision, size_bytes.
-Consumed by install-node.sh's weights phase.
+prints one tab-separated line per file: LOCAL name, remote name, repository,
+revision, size_bytes. Consumed by install-node.sh's weights phase.
+
+Local and remote names differ on purpose. Two different projectors both ship as
+"mmproj-F16.gguf" -- one in the 27B repository, one in the 9B's -- so downloading
+them under their remote names would make the second silently overwrite the first
+and a model would load the wrong projector.
 
 Revisions, never branches: the 27B repository was modified on the same day these
 weights were first fetched, so a branch download is already irreproducible.
@@ -36,13 +41,18 @@ def artifact_fetch_plan(yaml_text: str) -> list[dict]:
         rev = a.get("revision")
         # The weights themselves.
         if a.get("file") and repo and rev and a.get("size_bytes"):
-            out.append({"file": a["file"], "repository": repo,
+            out.append({"file": a["file"],
+                        "dest": a.get("local_file") or a["file"],
+                        "repository": repo,
                         "revision": str(rev), "size_bytes": int(a["size_bytes"])})
         # An optional projector, which may live in the same repository or another.
         proj = a.get("projector")
         if isinstance(proj, dict) and proj.get("file") and proj.get("size_bytes"):
             out.append({
                 "file": proj["file"],
+                # local_file is REQUIRED for a projector in practice: see the
+                # module docstring on the mmproj-F16.gguf collision.
+                "dest": proj.get("local_file") or proj["file"],
                 "repository": proj.get("repository") or repo,
                 "revision": str(proj.get("revision") or rev),
                 "size_bytes": int(proj["size_bytes"]),
@@ -55,8 +65,8 @@ def main() -> int:
     ap.add_argument("--plan", required=True)
     args = ap.parse_args()
     for e in artifact_fetch_plan(open(args.plan).read()):
-        print("%s\t%s\t%s\t%d" % (e["file"], e["repository"], e["revision"],
-                                  e["size_bytes"]))
+        print("%s\t%s\t%s\t%s\t%d" % (e["dest"], e["file"], e["repository"],
+                                     e["revision"], e["size_bytes"]))
     return 0
 
 

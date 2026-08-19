@@ -22,6 +22,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = pathlib.Path(__file__).resolve().parent
 PAGE = HERE.parent / "web" / "index.html"
 STATUS_PAGE = HERE.parent / "web" / "status.html"
+# The RENDERED presets carry real paths; the installed copy still has the
+# <QT_MODELS_DIR> placeholder. Either serves for c/parallel/mmproj, but prefer
+# the rendered one so the catalog reflects what the server was actually started
+# with rather than what the repository says.
+PRESETS_CANDIDATES = (
+    pathlib.Path("/var/lib/qwen-turing/router-presets.rendered.ini"),
+    pathlib.Path("/opt/qwen-turing/etc/router-presets.ini"),
+    HERE.parent / "config" / "router-presets.ini",
+)
+
+
+def _presets_text() -> str:
+    for c in PRESETS_CANDIDATES:
+        try:
+            return c.read_text()
+        except OSError:
+            continue
+    return ""
 
 # One timer polls; every handler reads a cache.
 #
@@ -84,6 +102,7 @@ def _poll_once() -> dict:
         "est_wait_seconds": WINDOW.est_wait_seconds(q["queued"]),
     })
     summary["queue"] = q
+    summary["catalog"] = COLLECT.model_catalog(models, _presets_text())
     summary["_metrics"] = metrics
     summary["_models"] = models
     return summary

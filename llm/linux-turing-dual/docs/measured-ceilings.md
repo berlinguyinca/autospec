@@ -444,6 +444,40 @@ key-gated page, never on `/status` or `/api/queue`.
 
 ---
 
+## The dashboard
+
+Key-gated at `/`, public load-only at `/status`. Panels:
+
+| panel | what it answers |
+|---|---|
+| Queue | seats in use, waiting, capacity %, estimated wait, typical request |
+| Configuration health | evictions, silently disabled options, prompt-cache hit rate |
+| GPUs | per-card utilisation, VRAM, temperature, power |
+| Models served | every id with kind, context, seats, and whether it is resident |
+| How to connect | curl, Python SDK, Node SDK and OpenCode, per model id |
+
+Two display rules exist because getting them wrong would mislead:
+
+- **The capacity bar clamps its width but never its label.** A queue at 300% reads
+  as 300%; a bar pinned at 100% would hide exactly the state worth seeing.
+- **A null estimate renders as an em dash**, never `0s`, with "not enough
+  completions observed yet" beneath it. Every derived figure carries its sample and
+  completion counts, so a number from three observations does not look like one
+  from three hundred.
+
+The connection examples are built from `location.origin` and the live model list,
+so they cannot drift from what the node serves, and each carries its model's
+context size. Two gotchas sit next to them rather than only in prose, because they
+are what make a working node look broken: reasoning tokens consuming a small
+`max_tokens`, and context tiers being a client-side contract nothing enforces.
+
+The catalog joins `/v1/models` to the presets file, preferring the **rendered**
+presets so it reflects what the server was started with rather than what the
+repository says. An id with no matching section shows an em dash rather than a
+guess.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.
