@@ -34,5 +34,5 @@ measurable at all. State the resolution limit: at n=40 a difference under
 ~7 items is indistinguishable from noise, so this says "no visible
 degradation", not "identical".
 
-Related: [[reference_hive_hpc_cluster]] for the crash that polluted the
+Related: [[reference_slurm_hpc_cluster]] for the crash that polluted the
 first two runs.

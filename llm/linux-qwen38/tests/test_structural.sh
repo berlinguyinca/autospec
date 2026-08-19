@@ -127,31 +127,31 @@ else
   ok "install-node.sh ships every operator tool"
 fi
 
-# 15 — every hive artefact parses
-for f in "${HERE}"/hive/*.sh "${HERE}"/hive/opencode_hive "${HERE}"/hive/*.sbatch; do
+# 15 — every cluster artefact parses
+for f in "${HERE}"/slurm/*.sh "${HERE}"/slurm/opencode_slurm "${HERE}"/slurm/*.sbatch; do
   bash -n "$f" 2>/dev/null
-  check $? "bash -n hive/$(basename "$f")"
+  check $? "bash -n slurm/$(basename "$f")"
 done
-for f in "${HERE}"/hive/*.py; do
+for f in "${HERE}"/slurm/*.py; do
   python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$f" 2>/dev/null
-  check $? "python -m ast hive/$(basename "$f")"
+  check $? "python -m ast slurm/$(basename "$f")"
 done
 
 # 16 — under `set -e` with pipefail, an unguarded substitution containing a pipe
 # kills the script with no message when a remote helper legitimately fails while
 # polling. This exact bug stopped the driver dead twice, reported only as a bare
 # `exit 2`, and it is invisible on inspection.
-if grep -nE '="\$\(.*\|' "${HERE}/hive/opencode_hive" | grep -qv '|| true'; then
-  bad "hive/opencode_hive has a pipe in a command substitution without || true"
-  grep -nE '="\$\(.*\|' "${HERE}/hive/opencode_hive" | grep -v '|| true' | sed 's/^/        /'
+if grep -nE '="\$\(.*\|' "${HERE}/slurm/opencode_slurm" | grep -qv '|| true'; then
+  bad "slurm/opencode_slurm has a pipe in a command substitution without || true"
+  grep -nE '="\$\(.*\|' "${HERE}/slurm/opencode_slurm" | grep -v '|| true' | sed 's/^/        /'
 else
-  ok "hive/opencode_hive guards every piped command substitution"
+  ok "slurm/opencode_slurm guards every piped command substitution"
 fi
 
 # 17 — a preset generated for any supported card must satisfy the same
 # invariants the static ones do, or the client is told about context the pool
 # cannot fund. 24564 stands for a card too small, which must produce nothing.
-gp="${HERE}/hive/gen-preset.py"
+gp="${HERE}/slurm/gen-preset.py"
 gen_ok=0
 for vram in 97887 81920 46068 40960; do
   tmp="$(mktemp)"
@@ -179,10 +179,10 @@ rm -f "$tmp"
 # a template written for the largest card. Advertising a model the server does
 # not have is a 400; advertising more context than the pool funds kills every
 # live session, not just the greedy one.
-grep -q 'router-presets.active.ini' "${HERE}/hive/opencode_hive"
-check $? "opencode_hive configures from the job's published active preset"
-! grep -q 'router-presets-hive.ini' "${HERE}/hive/opencode_hive"
-check $? "opencode_hive does not read the per-card-agnostic template"
+grep -q 'router-presets.active.ini' "${HERE}/slurm/opencode_slurm"
+check $? "opencode_slurm configures from the job's published active preset"
+! grep -q 'router-presets-cluster.ini' "${HERE}/slurm/opencode_slurm"
+check $? "opencode_slurm does not read the per-card-agnostic template"
 
 # 19 — the GPU registry must stay machine-readable and honest about what is
 # measured. A prediction for a machine nobody has touched rests on it.
@@ -216,7 +216,7 @@ check $? "conftest keeps pytest out of the standalone script suites"
 # 21 — the reconnect counter is what an operator reads to decide whether the
 # tunnel has been stable. Seeded from zero it forgets every restart of the
 # supervisor itself and reports a quiet night that did not happen.
-grep -q 'reconnects="\$(cat "\${STATE}/tunnel.reconnects"' "${HERE}/hive/tunnel-supervisor.sh"
+grep -q 'reconnects="\$(cat "\${STATE}/tunnel.reconnects"' "${HERE}/slurm/tunnel-supervisor.sh"
 check $? "the reconnect counter survives a supervisor restart"
 
 # 22 — this repository is public, so no real site identifier may be committed.
@@ -228,15 +228,17 @@ leaked=""
 # This file is excluded because it necessarily contains every pattern it looks
 # for; without that it reports itself as the leak. Everything else is in scope.
 self=':!llm/linux-qwen38/tests/test_structural.sh'
-for pat in 'ucdavis' 'metabolomicsgrp' 'publicgrp' '/quobyte' 'hive-dc-' 'hive\.hpc'; do
-  if git -C "$root" grep -qIE "$pat" -- llm docs/memory "$self" 2>/dev/null; then
+# 'ucdavis' alone missed "UC Davis" with a space, which is how three references
+# survived the first scrub -- hence the separator class.
+for pat in 'ucdavis' 'uc[ -]davis' 'metabolomicsgrp' 'publicgrp' '/quobyte'; do
+  if git -C "$root" grep -qiIE "$pat" -- llm docs/memory "$self" 2>/dev/null; then
     leaked="${leaked} ${pat}"
   fi
 done
 if [ -n "$leaked" ]; then
   bad "a real site identifier is committed:${leaked}"
   for pat in $leaked; do
-    git -C "$root" grep -nIE "$pat" -- llm docs/memory "$self" 2>/dev/null | sed 's/^/        /' | head -3
+    git -C "$root" grep -niIE "$pat" -- llm docs/memory "$self" 2>/dev/null | sed 's/^/        /' | head -3
   done
 else
   ok "no real site identifier is committed"
@@ -244,9 +246,9 @@ fi
 
 # 23 — the example must actually cover what require_site() demands, or the
 # message tells you to copy a file that does not answer it.
-ex="${HERE}/hive/site.conf.example"
+ex="${HERE}/slurm/site.conf.example"
 missing_ex=""
-for v in OPENCODE_HIVE_HOST OPENCODE_HIVE_USER OPENCODE_HIVE_ROOT OPENCODE_HIVE_ACCOUNT; do
+for v in OPENCODE_SLURM_HOST OPENCODE_SLURM_USER OPENCODE_SLURM_ROOT OPENCODE_SLURM_ACCOUNT; do
   grep -q "^: \"\${${v}:=" "$ex" 2>/dev/null || missing_ex="${missing_ex} ${v}"
 done
 if [ -n "$missing_ex" ]; then
@@ -256,9 +258,30 @@ else
 fi
 
 # 24 — an unconfigured driver must fail with EX_CONFIG, not wander off to ssh.
-OPENCODE_HIVE_SITE_CONF=/nonexistent "${HERE}/hive/opencode_hive" status >/dev/null 2>&1
+OPENCODE_SLURM_SITE_CONF=/nonexistent "${HERE}/slurm/opencode_slurm" status >/dev/null 2>&1
 [ "$?" = 78 ]
-check $? "opencode_hive refuses to run unconfigured (EX_CONFIG)"
+check $? "opencode_slurm refuses to run unconfigured (EX_CONFIG)"
+
+# 25 — the tooling is named for the scheduler, not for one institution's cluster.
+# Kept separate from the site-identifier check above because it is a naming
+# concern, not a privacy one, and unlike that one it has a legitimate exception:
+# adopting a pre-rename state directory requires naming it. Patterns are anchored
+# so they cannot match "archive".
+allow='leak-guard-allow'
+stale=""
+for pat in '\bhive\b' 'hive[-_]' '[-_]hive'; do
+  hits="$(git -C "$root" grep -niIE "$pat" -- llm docs/memory "$self" 2>/dev/null | grep -v "$allow" || true)"
+  if [ -n "$hits" ]; then stale="${stale} ${pat}"; fi
+done
+if [ -n "$stale" ]; then
+  bad "a pre-rename 'hive' reference remains:${stale}"
+  for pat in $stale; do
+    git -C "$root" grep -niIE "$pat" -- llm docs/memory "$self" 2>/dev/null \
+      | grep -v "$allow" | sed 's/^/        /' | head -3
+  done
+else
+  ok "no pre-rename 'hive' reference remains"
+fi
 
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

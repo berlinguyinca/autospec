@@ -97,7 +97,7 @@ model, not of the card. The prediction for this machine was ~49 t/s against
 45.57 measured, about 7% optimistic — the Max-Q part is power-limited, and the
 tunnel adds a little.
 
-Concurrency, measured on hive at a ~4,000-token prompt:
+Concurrency, measured on the cluster at a ~4,000-token prompt:
 
 | clients | per-stream | aggregate | worst TTFT |
 |---:|---:|---:|---:|
@@ -164,7 +164,7 @@ Two traps:
   loading shared libraries" — when the build was fine.
 - **Compute nodes have outbound internet** — `huggingface.co` returns 200, DNS
   resolves, no proxy needed. Weights can be fetched inside the job.
-- There is no prebuilt llama.cpp; `setup-hive.sh` builds it for
+- There is no prebuilt llama.cpp; `setup-slurm.sh` builds it for
   `sm_80;86;89;120` so the binary runs on any GPU here.
 
 ## Running it
@@ -181,23 +181,23 @@ key.
 They live in one local file:
 
 ```bash
-mkdir -p ~/.config/opencode-hive
-cp site.conf.example ~/.config/opencode-hive/site.conf
-$EDITOR ~/.config/opencode-hive/site.conf
+mkdir -p ~/.config/opencode-slurm
+cp site.conf.example ~/.config/opencode-slurm/site.conf
+$EDITOR ~/.config/opencode-slurm/site.conf
 ```
 
 Any subcommand run before that stops with `EX_CONFIG` and prints what is
 missing, rather than reaching `ssh` and failing on a hostname that does not
 resolve. An environment variable wins over the file, so
-`OPENCODE_HIVE_PARTITION=high opencode_hive up` is a one-off, not an edit.
+`OPENCODE_SLURM_PARTITION=high opencode_slurm up` is a one-off, not an edit.
 
 ### Then, one command from the workstation
 
 ```bash
-opencode_hive                  # acquire a GPU, serve, tunnel, configure, launch
-opencode_hive status           # where things stand
-opencode_hive stop             # drop the tunnel, cancel the job
-opencode_hive --gpu nvidia_a100-sxm4-80gb --time 04:00:00
+opencode_slurm                  # acquire a GPU, serve, tunnel, configure, launch
+opencode_slurm status           # where things stand
+opencode_slurm stop             # drop the tunnel, cancel the job
+opencode_slurm --gpu nvidia_a100-sxm4-80gb --time 04:00:00
 ```
 
 It reuses a running job rather than starting a second one, and runs the setup
@@ -208,7 +208,7 @@ job for you if llama.cpp or the weights are missing.
 Three processes, because the middle one is allowed to fail:
 
 ```
-OpenCode -> 127.0.0.1:11111   hive-proxy.py      always listening
+OpenCode -> 127.0.0.1:11111   slurm-proxy.py      always listening
          -> 127.0.0.1:11112   ssh forward        comes and goes
          -> login node -> compute node:8080      llama-server
 ```
@@ -220,7 +220,7 @@ onto it would either refuse to bind or silently shadow the local node, so every
 **The proxy exists so an outage is latency, not an error.** If the listening
 socket were the ssh forward itself — as it was — then a reconnect, a preempted
 job landing on another node, or an expired allocation all reach OpenCode as
-`Connection refused`. `hive-proxy.py` owns 11111 permanently and simply *holds*
+`Connection refused`. `slurm-proxy.py` owns 11111 permanently and simply *holds*
 a client until the upstream returns. Measured: kill the forward, send a request
 immediately, get an answer 6 s later.
 
@@ -271,19 +271,19 @@ trusted network. What that means concretely, since it is not nothing:
   model**.
 
 `QWEN_REQUIRE_KEY=1` turns it back on. The key is generated per deployment and
-`opencode_hive` picks it up and configures the client automatically, so it costs
+`opencode_slurm` picks it up and configures the client automatically, so it costs
 no manual step either way; when it is off, any stale key file is removed so a
 client cannot send a token the server no longer expects.
 
-The hive provider is added to OpenCode as `qwen-hive/...` **without** becoming
+The cluster provider is added to OpenCode as `qwen-slurm/...` **without** becoming
 the default: the local 4090 stays default, so losing the cluster job never
-leaves the client pointed at a dead endpoint. Pick a `qwen-hive/` model when you
+leaves the client pointed at a dead endpoint. Pick a `qwen-slurm/` model when you
 want the cluster.
 
 ### Setup jobs ask for no GPU
 
 Compiling CUDA needs `nvcc`, not a device, and downloading weights needs
-neither. `setup-hive.sh` therefore requests **no** `--gres`, so it schedules
+neither. `setup-slurm.sh` therefore requests **no** `--gres`, so it schedules
 against all 168 nodes in `low` instead of queueing behind the 86 GPUs that the
 serving job actually wants. The first version asked for a Blackwell and sat
 `PENDING`; without it, the same job started immediately.
@@ -314,7 +314,7 @@ cache from copying 57 GB of weights to local NVMe — reclaimable, and charged t
 job that died after 68 seconds without loading a model. The serving job now asks
 for 8 GB and 8 CPUs.
 
-**Let the scheduler pick the GPU.** `opencode_hive` defaults to `--gpu auto`,
+**Let the scheduler pick the GPU.** `opencode_slurm` defaults to `--gpu auto`,
 which probes each candidate with `sbatch --test-only` (allocating nothing) and
 takes the earliest start. Measured inside one minute:
 
@@ -344,7 +344,7 @@ congested.
 ### The client is configured from what the server publishes
 
 The serving job copies the preset it generated to
-`logs/router-presets.active.ini`, and `opencode_hive` configures OpenCode from
+`logs/router-presets.active.ini`, and `opencode_slurm` configures OpenCode from
 **that**, never from a template. Configuring from a template written for the
 largest card is not a cosmetic mismatch: against a smaller one it advertises
 models the server does not have (`400 model 'qwen3.8-27b-256k' not found`) and,
@@ -410,9 +410,10 @@ prefix. Set it back to 0.1 to retest on a newer llama.cpp.
 ## What this hardware changes
 
 The 24 GiB reference build is one long fight with capacity. At 96 GiB, three of
-its compromises are simply dropped — see `router-presets-hive.ini`:
+its compromises are simply dropped — `gen-preset.py` emits the preset below
+for a 96 GiB card:
 
-| | RTX 4090 (24 GiB) | hive Blackwell (96 GiB) |
+| | RTX 4090 (24 GiB) | RTX 6000 Blackwell (96 GiB) |
 |---|---|---|
 | quantisation | Q5_K_M | **UD-Q8_K_XL** |
 | KV cache | q4_0 | **f16** |

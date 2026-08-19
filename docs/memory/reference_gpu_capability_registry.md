@@ -56,5 +56,5 @@ runtime and the model rather than the card, and
 to within ~10%. Asked to predict the Blackwell it returns 45.6 against
 45.57 observed.
 
-Related: [[reference_hive_hpc_cluster]] — the cluster where dynamic GPU
+Related: [[reference_slurm_hpc_cluster]] — the cluster where dynamic GPU
 selection made this necessary.

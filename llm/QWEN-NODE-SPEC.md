@@ -1131,7 +1131,7 @@ make the rest of the configuration derivable instead of guessed.
 
 **Confirm at your site before writing the job script**, and expect the answers
 to be surprising. A worked example with every value measured rather than assumed
-is in `linux-qwen38/hive/README.md`; on that cluster the findings that mattered
+is in `linux-qwen38/slurm/README.md`; on that cluster the findings that mattered
 were not in any documentation:
 
 - **Partitions you can see are not partitions you can use.** Six `gpu-*`

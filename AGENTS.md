@@ -179,7 +179,7 @@ The nodes that serve those models live in [`llm/`](llm/) — start at
 method (hardware audit, quantisation from memory rather than name, measuring a
 context ceiling that survives a prompt actually filling it, serving concurrent
 sessions); `llm/linux-qwen38/` is the measured RTX 4090 build and its operator
-toolkit; `llm/linux-qwen38/hive/` deploys the same stack onto the UC Davis
+toolkit; `llm/linux-qwen38/slurm/` deploys the same stack onto the the cluster
 Slurm cluster with one command.
 
 Two results from that work bind anything that sizes a local context window:
