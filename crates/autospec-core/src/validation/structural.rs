@@ -2433,28 +2433,16 @@ fn require_literal_contract(
 fn guardian_block(document: &str) -> String {
     let mut depth = 0i32;
     let mut lines = Vec::new();
-    let mut done = false;
     for line in document.lines() {
-        if done {
-            break;
-        }
         if line.contains("<!-- guardian-block:begin -->") {
             depth += 1;
-            if depth == 1 {
-                continue;
-            }
+            if depth == 1 { continue; }
         }
         if line.contains("<!-- guardian-block:end -->") {
-            if depth == 1 {
-                depth = 0;
-                done = true;
-                continue;
-            }
+            if depth == 1 { break; }
             depth -= 1;
         }
-        if depth >= 1 {
-            lines.push(line);
-        }
+        if depth >= 1 { lines.push(line); }
     }
     lines.join("\n")
 }
