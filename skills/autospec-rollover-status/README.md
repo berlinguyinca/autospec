@@ -17,6 +17,13 @@ the one-line bootstrap, then update with the suite:
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
 ```
 
+Already installed? Re-run the suite installer with `--update`, which reinstalls every
+skill in place:
+
+```bash
+./install.sh --update
+```
+
 ## Invocation
 
 ```text
