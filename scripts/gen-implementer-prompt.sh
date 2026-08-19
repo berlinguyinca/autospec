@@ -136,10 +136,12 @@ fi
 # Emit static cached prefix via bundle-static-context.sh
 # ---------------------------------------------------------------------------
 if [ -f "$BUNDLE_STATIC" ]; then
+  # Never swallow this. A silently empty prefix dispatches an implementer with
+  # no AGENTS.md and no RULE_ID contract, which looks like a normal run.
   if [ -n "$ISSUE_LABELS" ]; then
-    bash "$BUNDLE_STATIC" --role implementer --issue-labels "$ISSUE_LABELS" 2>/dev/null || true
+    bash "$BUNDLE_STATIC" --role implementer --issue-labels "$ISSUE_LABELS"
   else
-    bash "$BUNDLE_STATIC" --role implementer 2>/dev/null || true
+    bash "$BUNDLE_STATIC" --role implementer
   fi
 else
   # Graceful fallback: emit a minimal cache boundary stub
@@ -153,7 +155,7 @@ fi
 # ---------------------------------------------------------------------------
 ISSUE_BODY="$(cat "$ISSUE_BODY_FILE")"
 REPO_SLUG="${REPO:-berlinguyinca/autospec}"
-WT_PATH="/private/tmp/wt-$(echo "$BRANCH" | tr '/' '-' | tr '_' '-')"
+WT_PATH="/tmp/wt-$(echo "$BRANCH" | tr '/' '-' | tr '_' '-')"
 
 printf '\n\n'
 

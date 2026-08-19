@@ -69,7 +69,38 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve repo root: scripts live at skills/autospec-shared/scripts/ — 3 levels up
-REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+# Resolve the root that carries AGENTS.md and the skills/*/prompts contracts.
+# install.sh flattens helpers into ~/.autospec/scripts, so "three levels up is
+# the repo root" only holds for the in-repo layout. Probing for AGENTS.md keeps
+# the in-repo answer identical while giving flat installs a real answer instead
+# of /home.
+autospec_bsc_resolve_repo_root() {
+  _bsc_candidate=""
+  if [ -n "${AUTOSPEC_REPO_ROOT:-}" ]; then
+    printf '%s\n' "$AUTOSPEC_REPO_ROOT"
+    return 0
+  fi
+  # In-repo layout: skills/autospec-shared/scripts/<this script>.
+  _bsc_candidate="$(cd "$SCRIPT_DIR/../../.." 2>/dev/null && pwd)" || _bsc_candidate=""
+  if [ -n "$_bsc_candidate" ] && [ -f "$_bsc_candidate/AGENTS.md" ]; then
+    printf '%s\n' "$_bsc_candidate"
+    return 0
+  fi
+  # Flat install: the repository the caller is actually working in.
+  _bsc_candidate="$(git rev-parse --show-toplevel 2>/dev/null)" || _bsc_candidate=""
+  if [ -n "$_bsc_candidate" ] && [ -f "$_bsc_candidate/AGENTS.md" ]; then
+    printf '%s\n' "$_bsc_candidate"
+    return 0
+  fi
+  # Flat install outside any repo: the canonical checkout install.sh maintains.
+  _bsc_candidate="${AUTOSPEC_HOME:-$HOME/.autospec}/repo"
+  if [ -f "$_bsc_candidate/AGENTS.md" ]; then
+    printf '%s\n' "$_bsc_candidate"
+    return 0
+  fi
+  return 1
+}
+REPO_ROOT="$(autospec_bsc_resolve_repo_root)" || REPO_ROOT="$SCRIPT_DIR/../../.."
 
 HELP_TEXT='Usage:
   bundle-static-context.sh --role implementer|reviewer|decomposer|classifier
