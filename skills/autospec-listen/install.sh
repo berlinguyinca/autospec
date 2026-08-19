@@ -103,7 +103,9 @@ fetch_source_files() {
         fi
     done
     for rel in $SKILL_REFERENCE_FILES; do
-        mkdir -p "$TMP_FETCH_DIR/references"
+        # dirname, not a flat references/: a nested declaration such as
+        # "sub/deep.md" is valid, and curl -o will not create the parent.
+        mkdir -p "$TMP_FETCH_DIR/references/$(dirname "$rel")"
         if ! curl -fsSL "$SKILL_RAW_BASE/references/$rel" -o "$TMP_FETCH_DIR/references/$rel"; then
             err "failed to download $SKILL_RAW_BASE/references/$rel"
             exit 1

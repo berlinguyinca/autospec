@@ -866,9 +866,12 @@ do not fall back to an inline label-swap path.
 >      --dynamic-suffix-file "$_suffix_file")
 >    ```
 >    `bundle-and-dispatch.sh` calls `bundle-static-context.sh` internally to emit the static cached
->    prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID
->    table + tag-filtered saved-memory + lockstep rules + implementer scaffolding), then appends the
->    dynamic suffix verbatim after the closing marker.
+>    prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing implementer-contract.md +
+>    the AGENTS.md quality-contract section with the RULE_ID table + lockstep rules +
+>    implementer scaffolding + the --static-body template), then appends the tag-filtered
+>    saved-memory and the dynamic suffix after the closing marker. The prefix does NOT hold
+>    SKILL.md itself, and saved-memory is deliberately below the marker because it is
+>    label-filtered and so cannot be byte-stable.
 >    Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with
 >    `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across
 >    dispatches in the same monitor session (5-min TTL).
