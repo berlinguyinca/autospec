@@ -1,0 +1,107 @@
+# Model artifact provenance for the dual-Turing node.
+#
+# Every artifact this node can serve is recorded here with an IMMUTABLE
+# revision. A bit-width nickname is not an identity -- "Q4_K_M" from two
+# uploaders are different files with different quality. Changing weights or
+# quantisation is a NEW profile version, never an edit in place.
+#
+# This is not theoretical for the 27B: its repository was modified on the same
+# day these weights were fetched, so an unpinned download would already be
+# irreproducible.
+
+artifacts:
+  - id: turing-dual-27b-q4km-v1
+    role: primary
+    runtime: llama.cpp
+    runtime_version: "b10502"
+    repository: unsloth/Qwen3.8-27B-GGUF
+    revision: 27af057ecb382ddfea5d12837360a8980560e3ed
+    file: Qwen3.8-27B-UD-Q4_K_M.gguf
+    size_bytes: 16464440224
+    on_disk_gib: 15.33
+    architecture: Qwen3_5ForConditionalGeneration
+    served_as: qwen3.8-27b
+    gpu_layout: layer-split across both cards (tensor-split 1,1)
+    quantization:
+      method: gguf
+      variant: UD-Q4_K_M
+    source_model:
+      repository: Qwen/Qwen3.8-27B
+      revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    # KV is derived from config.json, not from the parameter count:
+    #   64 layers, of which 16 are full_attention; kv_heads 4, head_dim 256
+    #   2 x 16 x 4 x 256 = 32 KiB/token at q8 -> 18.0 KiB/token at q4_0
+    # 81,920 tokens therefore costs 1.41 GiB, not the ~10 GiB a dense model of
+    # the same width would want. That is what makes two 40k seats affordable.
+    kv:
+      full_attention_layers: 16
+      total_layers: 64
+      kv_heads: 4
+      head_dim: 256
+      bytes_per_token_q4_0: 18432
+    context:
+      n_ctx_train: 262144
+      # Null until a real prompt retrieves something at length. "Allocates",
+      # "starts" and "works at length" are three different claims.
+      verified_max: null
+
+  - id: turing-dual-9b-q4km-v1
+    role: fast-tier
+    runtime: llama.cpp
+    runtime_version: "b10502"
+    repository: unsloth/Qwen3.5-9B-GGUF
+    revision: 3885219b6810b007914f3a7950a8d1b469d598a5
+    file: Qwen3.5-9B-Q4_K_M.gguf
+    size_bytes: 5680522464
+    on_disk_gib: 5.29
+    architecture: Qwen3_5ForConditionalGeneration
+    served_as: qwen3.5-9b
+    # Pinned to ONE card: it fits 11.0 GiB with ~3.9 GiB spare, so splitting it
+    # would buy nothing but cross-card overhead.
+    gpu_layout: single card (tensor-split 1,0)
+    quantization:
+      method: gguf
+      variant: Q4_K_M
+    source_model:
+      repository: Qwen/Qwen3.5-9B
+      revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+    kv:
+      full_attention_layers: 8
+      total_layers: 32
+      kv_heads: 4
+      head_dim: 256
+      bytes_per_token_q4_0: 9216
+    context:
+      n_ctx_train: 262144
+      verified_max: null
+
+# Considered and rejected, so the decision is not re-litigated later.
+rejected:
+  - repository: lmstudio-community/Qwen3.5-9B-GGUF
+    reason: >
+      Was already present in an LM Studio store on this host, which would have
+      saved a 5.68 GB download. Rejected because the operator asked for a clean
+      slate, and because a same-named Q4_K_M from a different uploader is a
+      different file -- adopting it would have made the pinned revision above a
+      fiction.
+
+  - repository: lmstudio-community/Qwen3.5-35B-A3B-GGUF
+    file: Qwen3.5-35B-A3B-Q4_K_M.gguf
+    reason: >
+      A ~3B-active MoE would decode far faster than the 27B dense-hybrid, which
+      makes it the most interesting candidate for this hardware on paper. It does
+      not fit: 21.17 GB is 19.71 GiB of roughly 20.5 GiB usable across two 11 GiB
+      cards, leaving under 1 GiB for the KV pool plus compute buffers that are
+      paid on each card. Revisit at three cards, where 33 GiB makes it viable.
+
+  - repository: Qwen/Qwen3.8-2.4T-A95B
+    reason: >
+      The only other official Qwen3.8 size. Two orders of magnitude too large for
+      22 GiB; recorded so "why not the bigger one" has an answer.
+
+  - approach: vLLM with W4A16 / compressed-tensors
+    reason: >
+      Rejected for this node, not for the project. These are Turing (sm_75)
+      cards: no bf16, no FP8, no NVFP4, and the 4-bit kernel paths plus the
+      hybrid Gated-DeltaNet layers carry architecture floors above sm_75. The
+      4090 node keeps its vLLM profiles; this one is llama.cpp only.

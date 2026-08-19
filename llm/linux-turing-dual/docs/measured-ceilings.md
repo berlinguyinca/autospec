@@ -200,6 +200,20 @@ before the reboot, so the fallback that actually stood behind this boot was
 `6.8.0-111` — running, proven, pinned `manual`, and still installed. The boot
 succeeded first time, so nothing needed it.
 
+## Toolchain: why CUDA 12.0 and gcc-12
+
+Ubuntu 24.04 ships `nvidia-cuda-toolkit` 12.0.140, and that `nvcc` refuses gcc
+13 (it supports up to 12.2) — while gcc 13 is the distribution default. So the
+build installs `gcc-12` and passes it as `CMAKE_CUDA_HOST_COMPILER`.
+
+An older toolkit against a newer driver is the safe direction: the 580 driver
+provides a CUDA 13 runtime and runs code built by 12.0 without complaint. `sm_75`
+is old enough that no recent toolkit feature is wanted, so adding NVIDIA's own
+repository to get CUDA 13 would be complexity bought for nothing.
+
+`GGML_NATIVE=OFF` is set deliberately — a native build targets the build host's
+CPU and produces a binary that runs only on the machine that compiled it.
+
 ## Model switch cost
 
 _Filled by Task 12 Step 7._
