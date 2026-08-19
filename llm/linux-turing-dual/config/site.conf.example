@@ -1,0 +1,30 @@
+# Dual-Turing node: this site's own coordinates.
+#
+# Copy to ${XDG_CONFIG_HOME:-~/.config}/qwen-turing/site.conf and fill in, then
+#     chmod 600 ~/.config/qwen-turing/site.conf
+#
+# These are properties of a site, not of this tooling, and this repository is
+# public. Nothing here is a secret -- the API key lives elsewhere, in a
+# root-only file -- but an address and an interface name are your network's
+# details to publish, not ours.
+#
+# The `: "${VAR:=value}"` form means an environment variable already set wins
+# over this file.
+
+# The address the inference endpoint binds. Nothing else may bind it, and it
+# should be the narrowest interface that your clients can still reach.
+: "${QT_NODE_ADDR:=<node-addr>}"
+
+# The interface that address lives on. Recorded so the firewall and any NIC
+# tuning act on the same device the service is actually using.
+: "${QT_UPLINK_IF:=<uplink-if>}"
+
+# Where GGUF weights live. Must be fast and roomy, and must NOT be the root
+# filesystem -- two models are ~22 GB together and a root filesystem is usually
+# the smallest thing on the box.
+: "${QT_MODELS_DIR:=<nvme-array>/qwen-gguf}"
+
+# The inference port, and the stats dashboard's port. Distinct, because the
+# dashboard is a separate unit that must be firewalled separately.
+: "${QT_PORT:=8080}"
+: "${QT_DASH_PORT:=8081}"

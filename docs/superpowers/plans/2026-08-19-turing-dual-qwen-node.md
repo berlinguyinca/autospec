@@ -598,13 +598,14 @@ A guard that has never fired is a guard you do not know works.
 Run:
 ```bash
 cd /tmp/wt-turing
-echo "# scratch 203.0.113.99" >> llm/linux-turing-dual/README.md 2>/dev/null || \
-  echo "# scratch 203.0.113.99" > llm/linux-turing-dual/README.md
-git add llm/linux-turing-dual/README.md
-QT_LEAK_PATTERNS='203\.0\.113\.99' bash llm/linux-turing-dual/tests/test_structural.sh; echo "exit=$?"
+echo "# probe zzunique-marker-token" > llm/linux-turing-dual/LEAKTEST.md
+git add llm/linux-turing-dual/LEAKTEST.md
+QT_LEAK_PATTERNS='zzunique-marker-token' bash llm/linux-turing-dual/tests/test_structural.sh; echo "exit=$?"
 ```
 Expected: `FAIL -- a real site identifier is committed` and `exit=1`.
-Then undo: `git rm -q --cached llm/linux-turing-dual/README.md && rm llm/linux-turing-dual/README.md`
+Then undo: `git rm -q --cached llm/linux-turing-dual/LEAKTEST.md && rm llm/linux-turing-dual/LEAKTEST.md`
+A non-IP token is used deliberately: a sample address in the plan would itself
+match a future leak-guard run and read as a leak.
 
 - [ ] **Step 9: Commit**
 
