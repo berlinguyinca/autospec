@@ -25,6 +25,9 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   during that window pins the lease for its own lifetime and the next conductor is told
   the lease is `Held` (exit 20). It now unlocks explicitly. Latent: no observed symptom
   is attributed to it, unlike #3225.
+- Moved `LeaseTransaction` to `resilience/lease_transaction.rs` beside
+  `heartbeat_tests.rs`, because `resilience.rs` is past the size ratchet and the fix
+  could not be added to it. 1,187 -> 1,147.
 
 ### Fixed
 
