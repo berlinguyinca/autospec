@@ -5,6 +5,7 @@
     gpu-registry.py merge OBSERVED.jsonl                fold observations in
     gpu-registry.py show [--name NAME]                  what do we know
     gpu-registry.py predict --weights-gib N [--name X]  expected tok/s
+    gpu-registry.py benchmark --base URL --model ID ...  measure and record
 
 Every serving job calls `record`, so a card nobody has seen before is captured
 the first time a job lands on it instead of being reconstructed from memory
@@ -207,6 +208,87 @@ def cmd_predict(args) -> int:
     return 0
 
 
+def cmd_benchmark(args) -> int:
+    """Measure single-stream decode against a live endpoint and record it.
+
+    A registry of spec sheets predicts; a registry with measurements calibrates.
+    The efficiency constant only means something because two cards were actually
+    benchmarked, so every new card should contribute one.
+    """
+    import urllib.error
+    import urllib.request
+
+    tps = args.tps
+    if tps is None:
+        body = json.dumps({
+            "model": args.model, "temperature": 0,
+            "max_tokens": args.max_tokens, "stream": True,
+            # Fixed-length decode: a model that stops after three tokens
+            # reports a fine-looking rate computed over nothing.
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "user", "content": "Count upward from one."}],
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if args.api_key:
+            headers["Authorization"] = f"Bearer {args.api_key}"
+        req = urllib.request.Request(f"{args.base}/v1/chat/completions",
+                                     data=body, headers=headers)
+        first = None
+        n = 0
+        try:
+            with urllib.request.urlopen(req, timeout=1800) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    ch = (chunk.get("choices") or [{}])[0]
+                    d = ch.get("delta") or {}
+                    if not (d.get("content") or d.get("reasoning_content")):
+                        continue
+                    if first is None:
+                        first = time.perf_counter()
+                    n += 1
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            print(f"benchmark failed: {exc}", file=sys.stderr)
+            return 1
+        if first is None or n < 2:
+            print("no tokens decoded", file=sys.stderr)
+            return 1
+        # Timed from the FIRST token, so prefill and queueing do not contaminate
+        # a decode-rate figure.
+        tps = (n - 1) / (time.perf_counter() - first)
+
+    reg = load(args.registry)
+    gpus = reg.setdefault("gpus", {})
+    name = args.gpu or (observe() or [{}])[0].get("name")
+    if not name:
+        print("could not determine the GPU; pass --gpu", file=sys.stderr)
+        return 1
+    entry = gpus.get(name)
+    if entry is None:
+        print(f"{name} is not in the registry; run `record` there first",
+              file=sys.stderr)
+        return 1
+    entry.setdefault("measured_tps", {})[args.quant] = round(tps, 2)
+    args.registry.write_text(json.dumps(reg, indent=2) + "\n")
+
+    bw = entry.get("bandwidth_gbs")
+    print(f"{name}\n  {args.quant}: {tps:.2f} tok/s recorded")
+    if bw and args.weights_gib:
+        roof = bw / (args.weights_gib * 1.073741824)
+        print(f"  roofline {roof:.1f} -> {tps / roof:.1%} of it "
+              f"(the registry assumes {reg.get('roofline_efficiency', 0.8):.0%})")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--registry", type=Path, default=DEFAULT)
@@ -217,6 +299,19 @@ def main() -> int:
     m.set_defaults(fn=cmd_merge)
     s = sub.add_parser("show"); s.add_argument("--name")
     s.set_defaults(fn=cmd_show)
+    b = sub.add_parser("benchmark")
+    b.add_argument("--base", default="http://127.0.0.1:8080")
+    b.add_argument("--model", required=True)
+    b.add_argument("--quant", required=True,
+                   help="weights filename this rate belongs to")
+    b.add_argument("--api-key", default="")
+    b.add_argument("--max-tokens", type=int, default=128)
+    b.add_argument("--tps", type=float, help="record an externally measured rate")
+    b.add_argument("--gpu", help="GPU name, if not benchmarking locally")
+    b.add_argument("--weights-gib", type=float,
+                   help="weight size, to report efficiency against the roofline")
+    b.set_defaults(fn=cmd_benchmark)
+
     p = sub.add_parser("predict")
     p.add_argument("--weights-gib", type=float, required=True)
     p.add_argument("--name")

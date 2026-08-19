@@ -35,7 +35,7 @@
       "fp8": true,
       "nvfp4": true,
       "measured_tps": {
-        "Qwen3.8-27B-UD-Q8_K_XL.gguf": 45.57
+        "Qwen3.8-27B-UD-Q8_K_XL.gguf": 44.99
       },
       "seen_at": [
         "hive.hpc.ucdavis.edu"

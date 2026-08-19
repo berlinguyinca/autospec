@@ -30,6 +30,19 @@ places with nothing recording what any of them actually achieved.
 
 A card that is not recognised gets `bandwidth_gbs: null`, never a guess.
 
+**Benchmarks belong in it too.** `gpu-registry.py benchmark --base URL
+--model ID --quant FILE` measures single-stream decode and records it
+under the weights filename. It times from the FIRST token (prefill and
+queueing must not contaminate a decode rate) and forces a fixed length
+with `ignore_eos` (a model that stops after three tokens reports a
+fine-looking rate computed over nothing). `--tps` records a figure
+measured elsewhere; `--gpu` names the card when driving the benchmark
+through a tunnel.
+
+**Reproducibility check:** the Blackwell measured 45.57 tok/s (80.0% of
+roofline) and, hours later through a different allocation on a different
+node, 44.99 (79.0%). Two independent measurements 1.3% apart.
+
 **Self-populating:** every serving job runs `record --out` (a compute
 node cannot write the repo, so observations append to a JSONL on shared
 storage) and the driver `merge`s them on the next run.
