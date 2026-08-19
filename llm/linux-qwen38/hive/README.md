@@ -1,6 +1,6 @@
-# hive.hpc.ucdavis.edu — site playbook
+# Slurm GPU cluster — site playbook
 
-Measured on 2026-08-18 from `gw@hive.hpc.ucdavis.edu`. Everything here was read
+Measured on 2026-08-18 from `<user>@<login-host>`. Everything here was read
 off the live cluster, not from documentation.
 
 ## The three facts that decide everything
@@ -9,7 +9,7 @@ off the live cluster, not from documentation.
 `AllowAccounts=ALL`, and every request is still rejected:
 
 ```
-sbatch --test-only -p gpu-a100 -A publicgrp --gres=gpu:1 ...
+sbatch --test-only -p gpu-a100 -A <gpu-account> --gres=gpu:1 ...
   -> allocation failure: Invalid account or account/partition combination
 ```
 
@@ -17,24 +17,24 @@ Your associations cover only `high` and `low`:
 
 | account | partition | QOS |
 |---|---|---|
-| metabolomicsgrp | high | metabolomicsgrp-high-qos |
-| publicgrp | high | publicgrp-high-qos |
-| publicgrp | low | publicgrp-low-qos |
+| `<group-account>` | high | `<group-account>-high-qos` |
+| `<gpu-account>` | high | `<gpu-account>-high-qos` |
+| `<gpu-account>` | low | `<gpu-account>-low-qos` |
 
 GPUs are reached through `low` (86 GPUs) or `high` (12 GPUs) with `--gres`.
 
-**2. GPUs must be charged to `publicgrp`.** The metabolomics QOS carries
+**2. GPUs must be charged to `<gpu-account>`.** The group's own QOS carries
 `gres/gpu=0`, so a GPU request under it is rejected at submit time:
 
 ```
-sbatch -p high -A metabolomicsgrp --gres=gpu:1 ...  -> error: QOSGrpGRES
+sbatch -p high -A <group-account> --gres=gpu:1 ...  -> error: QOSGrpGRES
 ```
 
 | QOS | limits |
 |---|---|
-| publicgrp-low-qos | **none** |
-| publicgrp-high-qos | cpu=128, gres/gpu=5, mem=2000G |
-| metabolomicsgrp-high-qos | cpu=512, **gres/gpu=0**, mem=8000G |
+| `<gpu-account>-low-qos` | **none** |
+| `<gpu-account>-high-qos` | cpu=128, gres/gpu=5, mem=2000G |
+| `<group-account>-high-qos` | cpu=512, **gres/gpu=0**, mem=8000G |
 
 **3. `low` is preemptible; `high` is unreachable in practice.**
 
@@ -127,21 +127,21 @@ Ask for Blackwell unless you need the last 15% of speed.
 
 | path | size | notes |
 |---|---:|---|
-| `/home/gw` | 20 GB | **3.3 GB free — will not hold a model** |
-| `/quobyte/metabolomicsgrp` | 8.5 PB | shared, writable, visible from compute nodes |
+| `/home/<user>` | 20 GB | **3.3 GB free — will not hold a model** |
+| `<shared-storage>` | 8.5 PB | shared, writable, visible from compute nodes |
 | `/scratch`, `/tmp` on compute | 3.5 TB NVMe | node-local, per-job, fast |
 
-Work lives in `/quobyte/metabolomicsgrp/it/llm`.
+Work lives in `<shared-storage>/llm`.
 
 Two traps:
 
 - **The login node's `/tmp` is not the compute node's `/tmp`.** A script written
   to `/tmp` on login2 fails with `No such file or directory` inside the job.
-  Stage scripts on `/quobyte`.
-- **`/quobyte` takes a few seconds to propagate between nodes.** A file a
+  Stage scripts on `<shared-storage>`.
+- **`<shared-storage>` takes a few seconds to propagate between nodes.** A file a
   compute node has just written and can `ls` is briefly absent from the login
   node. Don't read a job's output the instant it claims to have written it.
-- **Stage weights to node-local NVMe at job start.** `/quobyte` is fine for one
+- **Stage weights to node-local NVMe at job start.** `<shared-storage>` is fine for one
   sequential read but every other user shares it; the node has 3.5 TB of idle
   local flash.
 
@@ -169,7 +169,29 @@ Two traps:
 
 ## Running it
 
-One command, from the workstation:
+### First, name your site
+
+Every placeholder in this document — `<login-host>`, `<user>`,
+`<shared-storage>`, `<gpu-account>` — is a real value that is deliberately not
+committed, because this repository is public and a login host, an account name
+and a group's storage path are your institution's details to publish rather than
+ours. None of them is a secret; the tunnel authenticates with your existing SSH
+key.
+
+They live in one local file:
+
+```bash
+mkdir -p ~/.config/opencode-hive
+cp site.conf.example ~/.config/opencode-hive/site.conf
+$EDITOR ~/.config/opencode-hive/site.conf
+```
+
+Any subcommand run before that stops with `EX_CONFIG` and prints what is
+missing, rather than reaching `ssh` and failing on a hostname that does not
+resolve. An environment variable wins over the file, so
+`OPENCODE_HIVE_PARTITION=high opencode_hive up` is a one-off, not an edit.
+
+### Then, one command from the workstation
 
 ```bash
 opencode_hive                  # acquire a GPU, serve, tunnel, configure, launch
@@ -274,7 +296,7 @@ set globally — so HTTPS GitHub URLs are rewritten to SSH and authenticate with
 CLI and no credential helper.
 
 `user.name` and `user.email` were **unset**, which fails any commit made on the
-cluster; they are now configured. Clone work into `/quobyte/metabolomicsgrp/it`,
+cluster; they are now configured. Clone work into `<shared-storage>`,
 never `$HOME` (3.3 GB free).
 
 ### Scheduling

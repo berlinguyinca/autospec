@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qwen-serve
 #SBATCH --partition=low
-#SBATCH --account=publicgrp
 #SBATCH --gres=gpu:6000_blackwell:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
@@ -26,8 +25,10 @@
 # reclaimable under a cgroup limit, so a small --mem makes the copy do more
 # reclaiming rather than making it fail.
 #
-# 7 days is the cap on `low`; `high` allows 30 but has 12 GPUs against low's 86
-# and a queue measured in weeks, and its association still charges publicgrp.
+# 7 days is the cap on `low` here; `high` allows 30 but has 12 GPUs against low's
+# 86 and a queue measured in weeks. opencode_hive passes -A/-p from your site
+# config, which override the directives above; a manual `sbatch` needs
+# `-A <your-account>`.
 #
 # THIS JOB CAN BE PREEMPTED. `low` is PriorityTier=10 with PreemptMode=REQUEUE
 # and GraceTime=130s, so a `high` job wanting the node will requeue this one
@@ -37,7 +38,9 @@
 # re-read endpoint.txt after a requeue rather than assuming the old tunnel.
 set -euo pipefail
 
-ROOT="${QWEN_HIVE_ROOT:-/quobyte/metabolomicsgrp/it/llm}"
+# Submitted from the shared root by opencode_hive, so the submit directory IS
+# the root and there is nothing site-specific to hard-code here.
+ROOT="${QWEN_HIVE_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}"
 PREFIX="${ROOT}/opt/llama.cpp"
 MODELS="${ROOT}/models"
 PORT="${QWEN_PORT:-8080}"
@@ -71,7 +74,7 @@ fi
 # and let the job that owns it be the one that publishes.
 rm -f "${ROOT}/logs/endpoint.txt"
 
-# Stage the weights onto the node's local NVMe. /quobyte is a shared parallel
+# Stage the weights onto the node's local NVMe. The shared root is a parallel
 # filesystem: fine for a one-time read, but 30 GiB of it competes with everyone
 # else's I/O, and the node has 3.5 TB of local scratch sitting idle.
 LOCAL="${SLURM_TMPDIR:-/scratch/${USER}-${SLURM_JOB_ID}}"
@@ -92,7 +95,10 @@ echo "GPU has ${VRAM_MIB} MiB"
 # thing this project ever runs on a given model -- and a compute node cannot
 # write the repo, so observations are appended to a log on shared storage and
 # folded into the registry from the workstation.
-python3 "${ROOT}/gpu-registry.py" record --site hive.hpc.ucdavis.edu \
+# A generic site label: the registry is committed, and which cluster a card was
+# seen on is not the useful part -- that it was a cluster rather than a
+# workstation is.
+python3 "${ROOT}/gpu-registry.py" record --site "${QWEN_SITE:-hpc-cluster}" \
         --out "${ROOT}/logs/gpu-observed.jsonl" 2>/dev/null || true
 PRESETS="${LOCAL}/router-presets.ini"
 python3 "${ROOT}/gen-preset.py" --vram-mib "${VRAM_MIB}" \
@@ -147,7 +153,7 @@ port    : ${PORT}
 started : $(date -Is)
 
 # from your workstation:
-ssh -N -L ${PORT}:${NODE}:${PORT} ${USER}@hive.hpc.ucdavis.edu
+ssh -N -L ${PORT}:${NODE}:${PORT} ${USER}@${QWEN_LOGIN_HOST:-<login-host>}
 # then point the client at http://127.0.0.1:${PORT}/v1
 $([ -n "${API_KEY}" ] && echo "# an API key is required; see ${ROOT}/logs/api-key.txt")
 EOF

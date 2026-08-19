@@ -33,7 +33,9 @@ GPU_CANDIDATES="${GPU_CANDIDATES:-${GPU}}"
 # capability probe below omits the header entirely when it is empty.
 API_KEY="${API_KEY:-}"
 WALLTIME="${WALLTIME:-12:00:00}"
-ACCOUNT="${ACCOUNT:-publicgrp}"; PARTITION="${PARTITION:-low}"
+# Both are passed in by opencode_hive from the site config; the defaults exist
+# only so this can be run by hand for debugging.
+ACCOUNT="${ACCOUNT:-<slurm-account>}"; PARTITION="${PARTITION:-low}"
 
 # How many times the scheduler must AUTHORITATIVELY report no running job
 # before we believe it. The previous version exited on the first empty answer,

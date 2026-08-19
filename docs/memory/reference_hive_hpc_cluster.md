@@ -1,26 +1,26 @@
 ---
-name: hive.hpc.ucdavis.edu — GPU access, queues and layout
-description: Measured layout of the UC Davis hive cluster; GPU jobs must go to partition low with account publicgrp, and the gpu-* partitions are not submittable
+name: `<login-host>` — GPU access, queues and layout
+description: Measured layout of the UC Davis hive cluster; GPU jobs must go to partition low with account `<gpu-account>`, and the gpu-* partitions are not submittable
 type: reference
 wing: synthesis
 drawer_class: fact
 ---
-Measured 2026-08-18 from `gw@hive.hpc.ucdavis.edu`. Full playbook:
+Measured 2026-08-18 from `<user>@<login-host>`. Full playbook:
 `llm/linux-qwen38/hive/README.md`.
 
 **Submitting a GPU job:**
 
 ```bash
-sbatch -p low -A publicgrp --gres=gpu:6000_blackwell:1 -t 01:00:00 ...
+sbatch -p low -A <gpu-account> --gres=gpu:6000_blackwell:1 -t 01:00:00 ...
 ```
 
 - The six `gpu-*` partitions (`gpu-a100`, `gpu-6000-blackwell`, ...) are
   `AllowAccounts=ALL` and still reject everything: *"Invalid account or
   account/partition combination"*. The associations only cover `high`
   and `low`. GPUs are reached from those with `--gres`.
-- **`metabolomicsgrp` cannot have a GPU** — its QOS carries
-  `gres/gpu=0` and requests fail with `QOSGrpGRES`. Use `publicgrp`.
-  `publicgrp-low-qos` has no limits; `publicgrp-high-qos` allows 5 GPUs.
+- **`<group-account>` cannot have a GPU** — its QOS carries
+  `gres/gpu=0` and requests fail with `QOSGrpGRES`. Use `<gpu-account>`.
+  `<gpu-account>-low-qos` has no limits; `<gpu-account>-high-qos` allows 5 GPUs.
 - `low` = 7 days, 86 GPUs, **preemptible** (PriorityTier=10,
   PreemptMode=REQUEUE, GraceTime=130s). `high` = 30 days but only 12
   GPUs and `--gres=gpu:1` estimated a start **a month out**.
@@ -56,13 +56,13 @@ aggregate (56.72): the cluster card buys 8-bit weights at the full
   fails; `ssh host 'bash -lc "sinfo"'` works. This breaks automation
   that shells in non-interactively.
 - `$HOME` is 20 GB with ~3 GB free — it cannot hold a model. Group space
-  is `/quobyte/metabolomicsgrp`; this user's work lives in
-  `/quobyte/metabolomicsgrp/it/llm`.
+  is `<shared-storage>`; this user's work lives in
+  `<shared-storage>/llm`.
 - **The login node's `/tmp` is not the compute node's `/tmp`** — a
   script staged there fails with `No such file or directory` in the job.
 - Compute nodes **do** have outbound internet (huggingface.co returns
-  200, no proxy) and see `/quobyte`, plus 3.5 TB of node-local NVMe at
-  `/scratch`. Clone and build there, install to `/quobyte`: a source
+  200, no proxy) and see `<shared-storage>`, plus 3.5 TB of node-local NVMe at
+  `/scratch`. Clone and build there, install to `<shared-storage>`: a source
   checkout on the parallel filesystem spends minutes in `git clone`.
 - Modules: `cuda/13.3.0` (default), `gcc/13.2.0`, `cmake/3.28.1`,
   `python/3.11.9`. `uv` is at `~/.local/bin`; `apptainer` exists; there
@@ -257,8 +257,8 @@ perfectly good build and leave nothing staged.
 **Git** already has `url.git@github.com:.insteadOf https://github.com/`
 globally, so HTTPS GitHub URLs authenticate over SSH with `~/.ssh/id_rsa`
 (verified: *Hi berlinguyinca!*). No `gh` CLI, no credential helper.
-`user.name`/`user.email` were unset — now set to Gert Wohlgemuth
-<wohlgemuth@ucdavis.edu>. Clone into `/quobyte/metabolomicsgrp/it`, never
+`user.name`/`user.email` were unset — set them, or commits made on the
+cluster are attributed to nobody. Clone into `<shared-storage>`, never
 `$HOME`.
 
 **Both routers publish the same four-way matrix**, as context tiers
