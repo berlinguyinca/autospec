@@ -147,5 +147,45 @@ with tempfile.TemporaryDirectory() as d:
     report("kid" not in off,
            "--no-pin-subagents leaves children inheriting", str(off))
 
+# --- a variant is never the default -------------------------------------------
+# An abliterated preset loads no projector, so gen-preset.py gives it MORE pool
+# than the plain model. The seat filter then drops the plain model for funding
+# fewer sessions and keeps the variant -- and the "prefer the plainest section"
+# ranking never runs, because there is no tie left to break. Observed on a
+# 46 GiB card: the default came out abliterated.
+VARIANTS = """version = 1
+
+[testmodel]
+model = /nonexistent/weights.gguf
+c = 131072
+parallel = 4
+alias = testmodel-128k,testmodel-64k,testmodel-40k
+
+[testmodel-uncensored]
+model = /nonexistent/abliterated.gguf
+c = 163840
+parallel = 4
+alias = testmodel-uncensored-128k,testmodel-uncensored-64k,testmodel-uncensored-40k
+"""
+
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    pf = tmp / "variants.ini"
+    pf.write_text(VARIANTS)
+
+    cfg = generate(pf, tmp / "v.json")
+    chosen = cfg.get("model", "")
+    report("uncensored" not in chosen,
+           "the default is the plain model even when a variant has more pool",
+           chosen)
+    report(chosen.split("/")[-1].startswith("testmodel-"),
+           "and it is still a tier of that model, not the whole pool", chosen)
+
+    named = generate(pf, tmp / "n.json",
+                     "--default-model", "testmodel-uncensored-64k")
+    report(named.get("model", "").endswith("testmodel-uncensored-64k"),
+           "a variant is still reachable by naming it explicitly",
+           named.get("model", ""))
+
 print(f"== configure-opencode: {passed} passed, {failed} failed ==")
 sys.exit(1 if failed else 0)

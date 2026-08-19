@@ -107,6 +107,22 @@ def pick_default(models: dict, entries: dict, owner: dict, args) -> str:
     if not text:
         text = entries
 
+    # A variant is never the default, and this has to be an exclusion rather
+    # than a tie-break. An abliterated preset loads no projector, so it is given
+    # MORE pool than the plain model -- 163840 against 131072 on a 46 GiB card.
+    # The seat filter below then drops the plain model for funding fewer
+    # sessions and keeps the variant, and the "prefer the plainest section"
+    # ranking never runs because there is no tie left to break. That silently
+    # made an abliterated model the default for every new session.
+    #
+    # The base is the shortest section name: every variant is that name plus a
+    # suffix. Callers who want a variant name it with --default-model.
+    base = min((owner[mid] for mid in text), key=lambda n: (len(n), n),
+               default=None)
+    plain = {mid: e for mid, e in text.items() if owner[mid] == base}
+    if plain:
+        text = plain
+
     def pool_of(model_id: str) -> int:
         return models[owner[model_id]]["context"] or 0
 
