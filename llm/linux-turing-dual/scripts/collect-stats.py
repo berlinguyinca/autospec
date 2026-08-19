@@ -21,6 +21,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 NVIDIA_QUERY = ("index,name,utilization.gpu,memory.used,"
@@ -178,3 +179,96 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --- queue depth -----------------------------------------------------------
+def read_slot_total(base: str, api_key: str | None, model: str | None,
+                    timeout: float = 4.0) -> int:
+    """total_slots for the resident model. 0 when unknown, never a guess."""
+    if not model:
+        return 0
+    req = urllib.request.Request(
+        base.rstrip("/") + "/props?model=" + urllib.parse.quote(model))
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        return int(d.get("total_slots") or 0)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return 0
+
+
+def queue_state(metrics: dict, slots_total: int) -> dict:
+    """Queue depth and capacity. Missing metrics read as zero, not unknown."""
+    def m(name: str) -> int:
+        return int(metrics.get("llamacpp:" + name, 0) or 0)
+
+    processing = m("requests_processing")
+    queued = m("requests_deferred")
+    slots = int(slots_total or 0)
+    outstanding = processing + queued
+    return {
+        "slots": slots,
+        "processing": processing,
+        "queued": queued,
+        "outstanding": outstanding,
+        # May exceed 1.0 -- that is the point of showing it. None when the slot
+        # count is unknown, because 0 would read as "empty".
+        "fullness": (outstanding / slots) if slots > 0 else None,
+    }
+
+
+# --- the unauthenticated surface -------------------------------------------
+# An explicit allow-list, not a deny-list. /api/queue and /status are reachable
+# without a key on a single public port, so a field added to the full payload
+# later must not be able to appear here by default.
+PUBLIC_FIELDS = frozenset({
+    "slots", "processing", "queued", "fullness", "est_wait_seconds",
+    "service_rate", "mean_service_seconds", "samples", "completions",
+    "model_loaded",
+})
+
+
+def public_payload(full: dict) -> dict:
+    """Project the full summary onto the public allow-list.
+
+    Built by iterating PUBLIC_FIELDS rather than by deleting private keys, so the
+    failure mode of a forgotten field is a MISSING value, never a leak.
+    """
+    q = full.get("queue") or {}
+    src = {
+        "slots": q.get("slots", 0),
+        "processing": q.get("processing", 0),
+        "queued": q.get("queued", 0),
+        "fullness": q.get("fullness"),
+        "est_wait_seconds": q.get("est_wait_seconds"),
+        "service_rate": q.get("service_rate"),
+        "mean_service_seconds": q.get("mean_service_seconds"),
+        "samples": q.get("samples", 0),
+        "completions": q.get("completions", 0),
+        # A boolean, never the model name: which model is loaded is node
+        # configuration, not load.
+        "model_loaded": bool(full.get("llama_up")),
+    }
+    return {k: src[k] for k in sorted(PUBLIC_FIELDS)}
+
+
+_MODEL_FIELDS = ("id", "aliases", "object", "owned_by", "created")
+
+
+def sanitise_models(upstream: dict) -> dict:
+    """Strip llama.cpp's /v1/models down to what a client needs.
+
+    Upstream publishes each child instance's full argv WITHOUT authentication,
+    including the API key's file location. Clients genuinely need this endpoint
+    for discovery, so it is cleaned rather than blocked -- and `status` is dropped
+    wholesale rather than filtered, because that is where argv lives.
+    """
+    out = []
+    data = (upstream or {}).get("data")
+    if isinstance(data, list):
+        for m in data:
+            if isinstance(m, dict):
+                out.append({k: m[k] for k in _MODEL_FIELDS if k in m})
+    return {"object": "list", "data": out}

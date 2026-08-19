@@ -266,6 +266,41 @@ the bearer key and compares it with `hmac.compare_digest`. Counters are cumulati
 since the server started and reset when a model switch reloads it — which is why
 the page says so in its own footer rather than looking like data loss.
 
+## Queue observability — resolved
+
+The design rested on a metric that had not been checked: a six-request burst
+queued demonstrably (completions arrived in pairs) yet one-second sampling never
+saw `requests_deferred` above zero.
+
+Re-probed at **200 ms** with **40k-token prompts** — a short prompt starts and
+finishes between two samples and makes an unusable metric look merely quiet:
+
+| t | `requests_processing` | `requests_deferred` | slots busy |
+|---:|---:|---:|---:|
+| +0.03 s | 0 | 0 | 0 |
+| +7.93 s | 1 | 0 | 2 |
+| **+8.16 s** | **2** | **4** | **2** |
+| +54.61 s | 2 | 3 | 2 |
+| +67.04 s | 2 | 2 | 2 |
+| +79.11 s | 2 | 1 | 2 |
+| +81.21 s | 2 | 0 | 2 |
+
+**Verdict: `requests_deferred` is usable.** It peaked at 4 — six requests against
+two slots — and drained monotonically. `requests_processing` caps at the slot
+count and `requests_deferred` carries the overflow, so
+`outstanding = processing + queued` tracks every in-flight request and the
+`/slots` fallback written into the plan is not needed.
+
+The original miss was the *sampling*, not the metric. Recorded because the
+instinct to blame the instrument would have led to building a worse design on a
+fallback that was never required.
+
+Completions observed at +53.6, +66.9, +78.8, +81.0, +81.3, +81.4 s: six
+completions, which is what the rolling window counts as decreases in
+`outstanding`.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.
