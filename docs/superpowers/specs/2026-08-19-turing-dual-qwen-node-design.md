@@ -119,6 +119,60 @@ Net effect on root: **84% -> ~44%**.
 
 ---
 
+## 2.0 Execution order and safety barriers
+
+Cleanup is not a flat list. Three barriers order it, because several Tier A
+items are coupled to the reboot and several Tier C items are irreversible.
+
+**The reboot is an explicit barrier.** Everything destructive that can wait
+until after a confirmed-good boot, does.
+
+### Barrier 1 -- immediately before the reboot: re-verify DKMS
+
+`dkms status` was checked *before* the package work and reported
+`580.173.02` built for both kernels. That is a **pre-purge fact and does not
+survive the purge on its own**: swapping `nvidia-driver-580` for
+`nvidia-headless-580` in the same transaction that removes `xserver-xorg-core`
+can change how `libnvidia-compute-580` resolves, or let apt autoremove
+something the DKMS build needs.
+
+So `dkms status` and `ls /lib/modules/*/updates/dkms/nvidia.ko*` are re-run
+**after all package changes and before the reboot**. If the module for the
+next boot target is missing, the reboot does not happen.
+
+### Barrier 2 -- kernel removal waits for a successful boot
+
+Keep `6.8.0-101` in addition to 111 (running) and 138 (next boot target).
+`6.8.0-138` has **never been booted on this host**. Removing 101 before 138
+proves itself shrinks the fallback set at exactly the wrong moment. 101 is
+removed only after 138 has booted cleanly with working GPUs.
+
+### Barrier 3 -- firewall comes after the reboot, never during
+
+`ufw` is **not** enabled in the cleanup phase. The host default is
+`INPUT ACCEPT`, three operator SSH sessions are live, and the box carries
+Docker and VLAN bridges. Enabling a default-deny firewall on a machine that is
+minutes from a reboot is how a host becomes unreachable.
+
+Sequence: reboot first, confirm GPUs, then add rules with the SSH allow
+verified **from a second, independent connection before the first is dropped**,
+and a scheduled `ufw disable` timer armed as a dead-man switch until the rules
+are confirmed good.
+
+### Barrier 4 -- array health re-checked inside the delete step
+
+`userdel -r leon` destroys `/home/leon`, whose only other copy is
+`<bulk-array>/backup/leon`. Array state from an earlier phase is not
+sufficient: `cat /proc/mdstat` must show the array clean **and** the backup
+path must be readable **in the same step, immediately before** the delete. If
+either check fails, the account is left alone.
+
+Order within Tier C: prune Docker (frees `<bulk-array>`, reversible only via
+re-pull) *after* the accounts are handled, so an array problem surfaces on the
+cheaper operation first.
+
+---
+
 ## 3. Phase 2 -- runtime
 
 **llama.cpp**, built from a pinned release tag, `-DGGML_CUDA=ON`
@@ -198,6 +252,24 @@ llama.cpp router mode: one endpoint, `--models-max 1`.
 |---|---|---|---|---|
 | `qwen3.8-27b` (+ `-40k`, `-80k`) | UD-Q4_K_M, 16.46 GB | both cards | 81,920 | 2 |
 | `qwen3.5-9b` (+ `-40k`) | Q4_K_M, 5.68 GB | one card | 81,920 | 2 |
+
+The 9B is the one figure above that is derived rather than measured, so its
+budget is shown explicitly. Its `config.json` gives 32 layers of which **8 are
+`full_attention`**, `kv_heads 4`, `head_dim 256` -> `2 x 8 x 4 x 256` =
+16 KiB/token at q8, **9.0 KiB/token at q4_0**. On a **single 11.0 GiB card**:
+
+| item | GiB |
+|---|---:|
+| One card | 11.00 |
+| CUDA context | -0.30 |
+| Weights, Q4_K_M (5.68 GB) | -5.29 |
+| KV pool, 81,920 tokens @ q4_0 | -0.70 |
+| Compute buffers (one card only) | -0.80 |
+| **Margin** | **~3.9** |
+
+`check_presets.py` prices this against the **loaded** server and is the gate
+that must pass before the preset is trusted; until it does, the 9B pool figure
+is a prediction like any other.
 
 Switching **tiers** of one model is free -- an alias resolves to the same
 resident weights. Switching **models** costs one reload, seconds from NVMe.
