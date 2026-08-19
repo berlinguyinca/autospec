@@ -300,7 +300,14 @@ grep -q 'cache_reuse is not supported\|No cache-reuse\|NO cache-reuse' \
 check $? "the reason cache-reuse is absent is recorded where it would go"
 
 grep -q '^slot-prompt-similarity = 0.0' "${HERE}/config/router-presets.ini"
-check $? "cross-slot selection stays disabled (the crash mitigation)"
+check $? "cross-slot selection stays disabled"
+
+# The value alone does not say why, and "mitigation, retest later" invited
+# someone to flip it back on a schedule. Measured, the feature never engages
+# here at all, so the reasoning has to travel with the setting.
+grep -q '#22083' "${HERE}/config/router-presets.ini" \
+  && grep -q '264 by LRU' "${HERE}/config/router-presets.ini"
+check $? "and the measurement and upstream reference sit next to it"
 
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

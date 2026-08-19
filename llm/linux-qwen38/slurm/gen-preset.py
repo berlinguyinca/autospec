@@ -110,17 +110,13 @@ def main() -> int:
     # its attention KV cannot be shifted, and shifting is what cache-reuse is.
     # Exact-prefix caching still applies and is worth far more: 388 ms instead
     # of 14.6 s on a 37k preamble. See config/router-presets.ini.
-    # Slot selection by prompt similarity is disabled because the model child
-    # died twice immediately after taking that path, both times with the
-    # preceding line
-    #     slot get_availabl: ... selected slot by LCP similarity, f_sim_best = ...
-    # and no signal, assert or CUDA error -- a silent exit(1) while serving
-    # happily at 45 tok/s. Each crash cost ~8 of 40 benchmark requests.
-    #
-    # The cost of turning it off is losing cross-slot prompt-cache reuse, so
-    # some prefill is repeated; slots still reuse their own prefix. A stable
-    # server is worth more than that, and this is a mitigation rather than a
-    # diagnosis -- set slot-prompt-similarity back to 0.1 to test a newer build.
+    # Cross-slot selection off as a decision, not a workaround. It was first
+    # disabled because the model child died twice right after taking that path;
+    # measuring the cost later showed there is none. On b10434 with --parallel 4
+    # and the feature ENABLED at 0.1, 240 concurrent similar-prefix requests
+    # produced 0 LCP selections and 264 LRU -- it never engaged. Upstream wants
+    # it off in common configs too (llama.cpp PR #22083, issue #17673). Revisit
+    # if the upstream default changes, not on a schedule.
     print("slot-prompt-similarity = 0.0")
     if kv != "f16":
         print(f"cache-type-k = {kv}\ncache-type-v = {kv}")
