@@ -2070,87 +2070,6 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
 }
 
 #[test]
-fn claim_release_records_terminal_merge_before_removing_the_active_label() {
-    let fixture = temp_dir("autospec-claim-release");
-    let bin = fixture.join("bin");
-    let log = fixture.join("gh.log");
-    let comments = fixture.join("comments.json");
-    std::fs::create_dir_all(&bin).expect("fake bin directory");
-    let repo = claim_git_repo(&fixture);
-    let claim = RunStateRecord::new(
-        "testorg/testrepo",
-        42,
-        "worker-a",
-        "claimed",
-        "feat/test",
-        "",
-        "claimed",
-        Vec::new(),
-        "2026-07-14T00:00:00Z",
-        "2026-07-14T00:00:00Z",
-        10_800,
-    )
-    .with_claim_id("claim-a");
-    transition_claim_ref(&repo, &claim);
-    write_executable(
-        &bin.join("gh"),
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id: ((map(.id)|max) + 1),updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then exit 0; fi\nexit 17\n",
-    );
-    std::fs::write(
-        &comments,
-        r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#,
-    )
-    .expect("comments fixture");
-
-    let output = autospec()
-        .args([
-            "claim",
-            "release",
-            "--issue",
-            "42",
-            "--repo",
-            "testorg/testrepo",
-            "--worker-id",
-            "worker-a",
-            "--claim-id",
-            "claim-a",
-            "--state",
-            "merged",
-            "--branch",
-            "feat/test",
-            "--pr",
-            "99",
-        ])
-        .env(
-            "AUTOSPEC_CLAIM_GIT_REMOTE",
-            fixture.join("claim-remote.git"),
-        )
-        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
-        .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
-        .env("AUTOSPEC_CLAIM_LOG", &log)
-        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
-        .output()
-        .expect("autospec claim release starts");
-
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"released\":true"));
-    assert!(stdout.contains("\"state\":\"merged\""));
-    let calls = std::fs::read_to_string(log).expect("gh call log");
-    let terminal = calls.find("issue\ncomment\n42").unwrap();
-    let successor = calls[terminal + 1..]
-        .find("issue\ncomment\n42")
-        .map(|offset| terminal + 1 + offset)
-        .unwrap();
-    let labels = calls
-        .find("issue\nedit\n42\n--repo\ntestorg/testrepo\n--remove-label\nin-progress-by-bot")
-        .unwrap();
-    assert!(terminal < successor && successor < labels);
-}
-
-#[test]
 fn claim_acquire_refuses_an_unreviewed_issue_before_label_mutation() {
     let fixture = temp_dir("autospec-claim-acquire-safety");
     let bin = fixture.join("bin");
@@ -2726,3 +2645,7 @@ fn claim_option_parsers_reject_duplicates_even_when_the_value_is_empty_or_defaul
     assert!(!release.status.success());
     assert!(String::from_utf8_lossy(&release.stderr).contains("--state accepts exactly one state"));
 }
+
+// Split out of this file, which is past the size ratchet: see the module for what it owns.
+#[path = "claim_commands/retirement.rs"]
+mod retirement;
