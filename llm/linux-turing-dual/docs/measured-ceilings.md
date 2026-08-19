@@ -301,6 +301,30 @@ completions, which is what the rolling window counts as decreases in
 
 ---
 
+## The stats surfaces, measured
+
+| surface | auth | verified |
+|---|---|---|
+| `/` | key | 200 |
+| `/api/stats` | key | **401 without, 200 with** |
+| `/api/queue` | none | 200, and contains no `/` and no model name |
+| `/status` | none | 200 |
+| `/v1/models` | none | sanitised — no `/`, `status` dropped |
+| `/api/queue-headers` | none, internal | **204 + 5 `X-Queue-*` headers** |
+
+**The header endpoint costs 10.8 ms.** 200 sequential calls completed in 2.16 s,
+which is the proof that it reads a cached snapshot and performs no I/O. nginx runs
+it before every inference request, so anything that scaled with backend latency
+here would add that latency to every completion.
+
+**It survives a dead backend.** With `qwen-turing@router` stopped it still returns
+204 with all five headers, and `/api/queue` and `/status` still return 200
+reporting `model_loaded: false`. nginx treats a non-2xx `auth_request` as a
+rejection, so this property is what stops a dashboard restart from becoming an
+inference outage.
+
+---
+
 ## Model switch cost, measured
 
 `--models-max 1`, so a model change is a reload. Weights come off the NVMe RAID0.

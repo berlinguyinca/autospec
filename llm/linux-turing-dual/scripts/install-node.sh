@@ -85,14 +85,21 @@ sudo install -d "${QT_PREFIX}/bin" "${QT_PREFIX}/etc/profiles.d" "${QT_STATE}"
 sudo install -m 0755 "${HERE}/vram-guard.sh"    "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/serve-router.sh"  "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/collect-stats.py" "${QT_PREFIX}/bin/"
+sudo install -m 0755 "${HERE}/queue_window.py"  "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/dashboard.py"     "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/dashboard-run.sh" "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/site.sh"          "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/common.conf" "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/router-presets.ini" "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/profiles.d/router.conf" "${QT_PREFIX}/etc/profiles.d/"
+# Install EVERY page, not a named one. The status page was added later and a
+# hardcoded index.html left /status returning 500 -- a missing file is exactly
+# what a glob would have shipped for free.
 sudo install -d "${QT_PREFIX}/web"
-sudo install -m 0644 "${NODE}/web/index.html" "${QT_PREFIX}/web/" 2>/dev/null || true
+for page in "${NODE}"/web/*.html; do
+  [ -r "$page" ] || continue
+  sudo install -m 0644 "$page" "${QT_PREFIX}/web/"
+done
 
 say "verify the toolchain produced a usable binary"
 [ -x "${QT_LLAMA_DIR}/llama-server" ] || { echo "llama-server missing" >&2; exit 70; }

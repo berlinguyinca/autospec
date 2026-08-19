@@ -138,6 +138,19 @@ if [ -r "$p" ]; then
   fi
 fi
 
+# --- 10: every page under web/ must be installed by a glob, not by name ----
+# status.html was added after index.html and the installer named index.html
+# explicitly, so /status returned 500 on a fresh install. A glob ships whatever
+# exists; a hardcoded name ships whatever someone remembered.
+inst="${NODE}/scripts/install-node.sh"
+if [ -r "$inst" ]; then
+  if grep -qE 'web/\*\.html' "$inst"; then
+    ok "installer ships web pages by glob"
+  else
+    bad "install-node.sh must install web/*.html by glob, or a new page is silently omitted"
+  fi
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "OK -- all structural checks passed"

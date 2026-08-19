@@ -15,10 +15,24 @@ import importlib.util
 import json
 import pathlib
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = pathlib.Path(__file__).resolve().parent
 PAGE = HERE.parent / "web" / "index.html"
+STATUS_PAGE = HERE.parent / "web" / "status.html"
+
+# One timer polls; every handler reads a cache.
+#
+# This is load-bearing, not an optimisation. nginx runs auth_request against
+# /api/queue-headers BEFORE EVERY INFERENCE REQUEST. If that handler polled, each
+# completion would wait on three HTTP round-trips and an nvidia-smi fork.
+#
+# It also protects the arithmetic: QueueWindow.add() must be fed on a fixed
+# cadence. Feeding it once per inference request would add irregular samples and
+# corrupt the completion counting every ETA depends on.
+REFRESH_SECONDS = 1.0
 
 
 def _load_collector():
@@ -30,7 +44,67 @@ def _load_collector():
     return mod
 
 
+def _load_window():
+    spec = importlib.util.spec_from_file_location(
+        "queue_window", HERE / "queue_window.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 COLLECT = _load_collector()
+WINDOW = _load_window().QueueWindow(window_seconds=300.0)
+
+_CACHE: dict = {"llama_up": False, "gpus": [], "queue": {}}
+_CACHE_LOCK = threading.Lock()
+
+
+def _base_url() -> str:
+    return Handler.metrics_url.rsplit("/metrics", 1)[0]
+
+
+def _poll_once() -> dict:
+    """The ONLY place that talks to the backend or forks. Never per request."""
+    models = COLLECT.read_models(_base_url(), Handler.api_key)
+    model = COLLECT.pick_loaded_model(models)
+    url = (f"{Handler.metrics_url}?model={model}" if model else Handler.metrics_url)
+    metrics = COLLECT.read_metrics(url, Handler.api_key)
+    slots = COLLECT.read_slot_total(_base_url(), Handler.api_key, model)
+    summary = COLLECT.summarise(metrics, COLLECT.read_gpus(), model)
+    q = COLLECT.queue_state(metrics, slots)
+    WINDOW.add(time.time(), q["outstanding"])      # exactly once per tick
+    q.update({
+        "samples": WINDOW.samples,
+        "completions": WINDOW.completions,
+        "service_rate": WINDOW.service_rate(),
+        "mean_service_seconds": WINDOW.mean_service_seconds(),
+        "est_wait_seconds": WINDOW.est_wait_seconds(q["queued"]),
+    })
+    summary["queue"] = q
+    summary["_metrics"] = metrics
+    summary["_models"] = models
+    return summary
+
+
+def _refresher() -> None:
+    while True:
+        try:
+            snap = _poll_once()
+            with _CACHE_LOCK:
+                # Preserve whatever a slower timer last wrote.
+                snap["config_health"] = _CACHE.get("config_health")
+                _CACHE.clear()
+                _CACHE.update(snap)
+        except Exception:
+            # A refresh failure must never kill the timer: a dead thread would
+            # freeze the cache at a stale value and look like a quiet node.
+            pass
+        time.sleep(REFRESH_SECONDS)
+
+
+def snapshot() -> dict:
+    with _CACHE_LOCK:
+        return dict(_CACHE)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -72,17 +146,55 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorised():
                 self._send(401, b'{"error":"unauthorised"}', "application/json")
                 return
-            # Router mode has no unqualified /metrics -- it returns HTTP 400
-            # without ?model=<id>. So discover the resident model first.
-            base = self.metrics_url.rsplit("/metrics", 1)[0]
-            model = COLLECT.pick_loaded_model(
-                COLLECT.read_models(base, self.api_key))
-            url = (f"{self.metrics_url}?model={model}" if model
-                   else self.metrics_url)
-            payload = COLLECT.summarise(
-                COLLECT.read_metrics(url, self.api_key),
-                COLLECT.read_gpus(), model)
+            full = {k: v for k, v in snapshot().items() if not k.startswith("_")}
+            self._send(200, json.dumps(full).encode(), "application/json")
+            return
+
+        if path == "/api/queue":                  # PUBLIC -- load only
+            payload = COLLECT.public_payload(snapshot())
             self._send(200, json.dumps(payload).encode(), "application/json")
+            return
+
+        if path == "/status":                     # PUBLIC page -- load only
+            try:
+                self._send(200, STATUS_PAGE.read_bytes(), "text/html; charset=utf-8")
+            except OSError:
+                self._send(500, b"status page missing", "text/plain")
+            return
+
+        if path == "/v1/models":                  # PUBLIC, SANITISED
+            # llama.cpp's own /v1/models leaks the child argv including the API
+            # key's file location. This serves the cleaned list instead.
+            up = snapshot().get("_models") or {}
+            self._send(200, json.dumps(COLLECT.sanitise_models(up)).encode(),
+                       "application/json")
+            return
+
+        if path == "/api/queue-headers":          # for nginx auth_request
+            # ALWAYS 204, never a body, and NEVER any I/O -- this gates every
+            # inference request. nginx treats a non-2xx auth_request as a
+            # rejection, so an endpoint that could be slow or fail would turn a
+            # busy dashboard into a refusal of service.
+            try:
+                q = snapshot().get("queue") or {}
+            except Exception:
+                q = {}
+
+            def h(v):
+                return "" if v is None else str(v)
+
+            self.send_response(204)
+            self.send_header("X-Queue-Slots", h(q.get("slots")))
+            self.send_header("X-Queue-Processing", h(q.get("processing")))
+            self.send_header("X-Queue-Depth", h(q.get("queued")))
+            self.send_header("X-Queue-Fullness",
+                             h(round(q["fullness"], 3)
+                               if q.get("fullness") is not None else None))
+            self.send_header("X-Queue-Est-Wait-Seconds",
+                             h(round(q["est_wait_seconds"])
+                               if q.get("est_wait_seconds") is not None else None))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
 
         self._send(404, b"not found", "text/plain")
@@ -107,6 +219,11 @@ def main() -> int:
             print(f"cannot read {args.api_key_file}", file=sys.stderr)
             return 78
     Handler.metrics_url = args.metrics_url
+
+    threading.Thread(target=_refresher, daemon=True).start()
+    # Give the first tick a moment so the very first request sees real numbers
+    # rather than an empty cache.
+    time.sleep(1.2)
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"dashboard on http://{args.host}:{args.port} "
