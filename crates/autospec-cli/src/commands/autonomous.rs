@@ -4431,7 +4431,9 @@ fn persist_claim_acquisition_receipt(
     state_path: &Path,
     lease: &claim::ClaimLease,
 ) -> Result<(), String> {
-    if let Some(existing) = load_claim_acquisition_receipt(state_path, &lease.repo, lease.issue)? {
+    if let Some(existing) =
+        recover_claim_acquisition_receipt_for_selection(state_path, &lease.repo, lease.issue)?
+    {
         return if existing == *lease {
             Ok(())
         } else {

@@ -12,6 +12,14 @@ an older executor outcome, and the next cycle retries after its polling interval
 The conductor does not overwrite, stash, or delete operator work. To restore Tier
 1 immediately, restart it with `--repo-dir` pointing at a clean dedicated clone.
 
+## Stale claim receipt recovery
+
+A fresh issue selection may encounter a private local claim receipt left by an
+older issue in the same repository. Before persisting the new claim generation,
+the conductor removes that stale receipt and continues in the same process. A
+receipt for another repository, malformed JSON, or a different generation of
+the same issue remains fail-closed.
+
 ## Continuation-aware merge recovery
 
 When an executor restarts from `BridgePhase::Merged`, recovery completes in this
