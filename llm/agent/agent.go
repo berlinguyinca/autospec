@@ -41,7 +41,7 @@ func runControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) {
 			return
 		default:
 		}
-		err := oneControl(cfg, stop, pipes)
+		attached, err := oneControl(cfg, stop, pipes)
 		if err != nil && !stopped(stop) {
 			// Not logged during shutdown: closing the connection is HOW a
 			// blocked read is ended, so the resulting error is expected and
@@ -53,16 +53,30 @@ func runControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) {
 			return
 		case <-time.After(jitter(backoff)):
 		}
-		if backoff < 60*time.Second {
+		if attached {
+			// A connection that WORKED resets the delay. Without this the
+			// backoff only ever grew: after a handful of node restarts it pinned
+			// at the 60 s ceiling and STAYED there for the life of the process,
+			// so every later redeploy cost a full minute of this server being
+			// registered but unusable. Measured at 65 s on an agent that had
+			// simply been running a while -- and it would never have improved.
+			//
+			// Growth is still right for a node that is genuinely down: that case
+			// never attaches, so it never takes this branch.
+			backoff = time.Second
+		} else if backoff < 60*time.Second {
 			backoff *= 2
 		}
 	}
 }
 
-func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) error {
+// oneControl reports whether it ever attached, so the caller can tell a node
+// that is down (keep backing off) from a node that restarted under a healthy
+// agent (come straight back).
+func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) (bool, error) {
 	c, err := Dial(cfg.wsURL("/api/agent/control"), cfg.Credential, 20*time.Second)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer c.Close()
 	// A read blocks until a frame or a deadline, so checking `stop` between reads
@@ -76,7 +90,7 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) error {
 	msg, _ := json.Marshal(hello{Type: "hello", AgentVersion: version,
 		ServerID: cfg.ServerID, GPUs: cfg.GPUs, Slots: cfg.Slots})
 	if err := c.WriteFrame(opText, msg); err != nil {
-		return err
+		return true, err
 	}
 
 	// Pipes are opened only while the control connection is up, so a node that
@@ -88,23 +102,23 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) error {
 	for {
 		select {
 		case <-stop:
-			return nil
+			return true, nil
 		default:
 		}
 		// Comfortably longer than the node's heartbeat: if two of those pass in
 		// silence the connection is gone, and reconnecting is cheaper than
 		// waiting to find out.
 		if err := c.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
-			return err
+			return true, err
 		}
 		op, payload, _, err := c.ReadFrame()
 		if err != nil {
-			return err
+			return true, err
 		}
 		switch op {
 		case opPing:
 			if err := c.WriteFrame(opPong, payload); err != nil {
-				return err
+				return true, err
 			}
 		case opClose:
 			code := uint16(0)
@@ -112,11 +126,13 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) error {
 				code = uint16(payload[0])<<8 | uint16(payload[1])
 			}
 			if code == 4409 {
-				// Another process is already attached under this name. Retrying
-				// in a tight loop would fight it; the caller's backoff handles it.
-				return fmt.Errorf("this server id is already connected elsewhere")
+				// Another process is already attached under this name.
+				// Reported as NOT attached so the backoff keeps growing:
+				// resetting it here would put this process in a one-second
+				// loop fighting the one that legitimately holds the name.
+				return false, fmt.Errorf("this server id is already connected elsewhere")
 			}
-			return fmt.Errorf("node closed the control connection (code %d)", code)
+			return true, fmt.Errorf("node closed the control connection (code %d)", code)
 		}
 	}
 }

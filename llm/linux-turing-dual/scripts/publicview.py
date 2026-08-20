@@ -38,8 +38,12 @@ GPU_FIELDS = ("index", "name", "mem_total_mib", "mem_used_mib",
 # --- the fleet --------------------------------------------------------------
 SERVER_FIELDS = (
     "id", "kind", "enabled", "state", "models", "priority", "pool_member",
-    "in_flight", "idle_pipes", "route", "measured", "note", "gpus", "last_seen",
+    "in_flight", "idle_pipes", "route", "note", "gpus", "slots", "last_seen",
+    # Measured, never declared: what this node has actually seen the server do.
+    "prefill_rate", "mean_service", "samples",
 )
+# `agent_version` is deliberately NOT here. It is software inventory, which is
+# operator information rather than capability.
 FLEET_FIELDS = ("poll_seconds", "default_route", "auto_route",
                 "balanced_paths", "peek_bytes", "pipe_wait_seconds",
                 "heartbeat_seconds")

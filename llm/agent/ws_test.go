@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -240,5 +241,77 @@ func TestTheTargetIsNeverTakenFromTheNode(t *testing.T) {
 		// Nothing listening is fine; the point is only that the address came
 		// from the config.
 		t.Log("something answered on the default target")
+	}
+}
+
+// --- reconnect pacing -------------------------------------------------------
+//
+// The control loop's backoff grew and never shrank, so after a handful of node
+// restarts it pinned at the 60 s ceiling and STAYED there for the life of the
+// process. A registered server was then unusable for a full minute after every
+// redeploy -- measured at 65 s on an agent that had merely been running a while,
+// and it would never have got better on its own.
+//
+// The fix hinges entirely on oneControl distinguishing "never got in" from "was
+// in and got dropped", so that is what these pin.
+
+func controlServer(t *testing.T, after func(net.Conn)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		conn, buf, _ := hj.Hijack()
+		defer conn.Close()
+		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+			"Connection: Upgrade\r\nSec-WebSocket-Accept: " +
+			acceptKey(r.Header.Get("Sec-WebSocket-Key")) + "\r\n\r\n")
+		buf.Flush()
+		after(conn)
+	}))
+}
+
+func controlConfig(url string) *Config {
+	// Insecure so the agent dials ws:// rather than wss:// -- httptest serves
+	// plain HTTP, and the scheme is derived from this flag rather than set.
+	return &Config{Node: strings.TrimPrefix(url, "http://"), Insecure: true,
+		ServerID: "test-box", Credential: "qts_abcdefghijkl_secret"}
+}
+
+func TestADroppedControlConnectionCountsAsAttached(t *testing.T) {
+	// The redeploy case: the node restarts under a healthy agent. This must come
+	// straight back rather than waiting out a grown backoff.
+	srv := controlServer(t, func(conn net.Conn) { /* hang up at once */ })
+	defer srv.Close()
+	attached, err := oneControl(controlConfig(srv.URL), make(chan struct{}), &pipeKeeper{})
+	if !attached {
+		t.Fatalf("a connection that was established must report attached (err %v)", err)
+	}
+}
+
+func TestANodeThatIsDownCountsAsNotAttached(t *testing.T) {
+	// Nothing listening: the backoff SHOULD keep growing here.
+	cfg := controlConfig("http://127.0.0.1:1")
+	attached, err := oneControl(cfg, make(chan struct{}), &pipeKeeper{})
+	if attached || err == nil {
+		t.Fatalf("a failed dial must report not attached, got attached=%v err=%v",
+			attached, err)
+	}
+}
+
+func TestBeingReplacedCountsAsNotAttached(t *testing.T) {
+	// 4409 means another process legitimately holds this name. Resetting the
+	// backoff here would put this one in a one-second loop fighting it.
+	srv := controlServer(t, func(conn net.Conn) {
+		// Derived, not hand-encoded: the first attempt at these two bytes was
+		// 4425 and the test passed for the wrong reason until it did not.
+		writeServerFrame(conn, opClose, []byte{byte(4409 >> 8), byte(4409 & 0xff)})
+		time.Sleep(30 * time.Millisecond)
+	})
+	defer srv.Close()
+	attached, err := oneControl(controlConfig(srv.URL), make(chan struct{}), &pipeKeeper{})
+	if attached {
+		t.Fatalf("a 4409 must report not attached, so the backoff keeps growing")
+	}
+	if err == nil || !strings.Contains(err.Error(), "already connected") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

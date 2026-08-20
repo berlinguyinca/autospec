@@ -321,6 +321,11 @@ def _state_view(servers) -> dict:
         row["state"] = agent.get("state", "unknown")
         row["last_seen"] = agent.get("last_seen") or row.get("last_seen")
         row["error"] = agent.get("error") or row.get("error")
+        # What the server said about ITSELF in its hello. Carried through here so
+        # the panel can report a remote's seat count and agent build: the hello
+        # already sent both and they were being dropped on the floor.
+        row["slots"] = agent.get("slots") or row.get("slots")
+        row["agent_version"] = agent.get("agent_version") or row.get("agent_version")
         row.setdefault("models", [])
         view[u.id] = row
     return view
@@ -1020,6 +1025,8 @@ class Handler(BaseHTTPRequestHandler):
                        # which is a different statement from having none free.
                        idle_pipes=(POOL.idle(u.id) if u.kind == _ups.KIND_TUNNEL
                                    else None),
+                       slots=st.get("slots"),
+                       agent_version=st.get("agent_version"),
                        **measured(u.id))
             out.append(row)
         full = {

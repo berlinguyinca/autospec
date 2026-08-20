@@ -113,6 +113,27 @@ def test_the_public_fleet_never_says_where_a_server_lives():
             assert forbidden not in row
 
 
+def test_the_public_fleet_publishes_measured_speed_and_seats():
+    """Capability as EVIDENCE. The first version of the allow-list named a
+    `measured` key that does not exist -- the figures are flattened onto the row
+    -- so the public panel silently reported no speed for any server.
+    """
+    out = pub.servers({"servers": [{
+        "id": "bender", "state": "online", "prefill_rate": 3410.18,
+        "mean_service": 1.49, "samples": 16, "slots": 2,
+        "gpus": "one RTX 4090 (24 GB)", "note": "the workstation"}]})
+    row = out["servers"][0]
+    assert round(row["prefill_rate"]) == 3410
+    assert row["samples"] == 16 and row["slots"] == 2
+    assert row["gpus"] == "one RTX 4090 (24 GB)"
+
+
+def test_the_agent_build_is_not_capability():
+    """A version string is software inventory, which is the operator's business."""
+    out = pub.servers({"servers": [{"id": "x", "agent_version": "1"}]})
+    assert "agent_version" not in out["servers"][0]
+
+
 def test_the_public_fleet_does_not_say_who_is_asking():
     out = pub.servers(FULL_FLEET)
     assert "you" not in out
