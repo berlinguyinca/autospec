@@ -1,174 +1,328 @@
-<!doctype html>
-<html lang="en">
-<head>
+<!-- The node dashboard.
+     Sidebar navigation rather than one long scroll: nine stacked sections read
+     as a wall, and the reader almost always wants exactly one of them. The
+     status block stays pinned so "is it alive" never costs a click.
+     Every request is a RELATIVE url -- origin-relative by construction, so the
+     page works under whatever name it was loaded as and bakes in no hostname. -->
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Qwen node — dual Turing</title>
+<title>Qwen inference node</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{ --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672; --line:#e3e7ec;
-         --accent:#2f6feb; --warn:#c2410c; --ok:#15803d; --bar:#e9edf2; --code:#f2f4f7; }
-  @media (prefers-color-scheme:dark){
+         --accent:#2f6feb; --ok:#1a7f4b; --warn:#b4530a; --side:#fbfcfd; }
+  @media (prefers-color-scheme: dark){
     :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad; --line:#242b33;
-           --accent:#5b8cf7; --warn:#fb923c; --ok:#4ade80; --bar:#232a32; --code:#0d1116; }
+           --accent:#6ea8fe; --ok:#4bd08b; --warn:#e8a049; --side:#12161b; }
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-       font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  header{padding:22px 24px 6px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-  h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* ---- shell ---- */
+  .shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100%}
+  .side{background:var(--side);border-right:1px solid var(--line);
+        display:flex;flex-direction:column;gap:2px;padding:18px 14px;
+        position:sticky;top:0;height:100vh;overflow-y:auto}
+  .main{padding:26px 30px 60px;min-width:0}
+
+  /* ---- sidebar identity + live status ---- */
+  .brand{font-weight:670;letter-spacing:-.01em;margin-bottom:14px}
+  .brand .sub{font-weight:400}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+        padding:10px 11px;margin-bottom:16px}
+  .statline{display:flex;align-items:center;gap:7px;font-weight:600}
+  .statnums{display:flex;gap:10px;margin-top:6px;font-variant-numeric:tabular-nums;
+            font-size:12px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
   .dot.up{background:var(--ok)} .dot.down{background:var(--warn)}
-  .sub{color:var(--muted);font-size:12px}
-  main{padding:6px 24px 40px;max-width:1120px}
-  h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
-     margin:26px 0 10px;font-weight:600}
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+
+  /* ---- sidebar nav ---- */
+  nav{display:flex;flex-direction:column;gap:1px}
+  .nav{display:flex;align-items:center;justify-content:space-between;gap:8px;
+       font:inherit;font-size:13px;text-align:left;cursor:pointer;
+       background:none;border:0;border-radius:7px;padding:7px 10px;color:var(--muted)}
+  .nav:hover{background:var(--panel);color:var(--ink)}
+  .nav[aria-selected="true"]{background:var(--panel);color:var(--ink);font-weight:600;
+       box-shadow:inset 2px 0 0 var(--accent)}
+  .nav:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .pill{font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;
+        background:var(--line);color:var(--muted)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  .sidefoot{margin-top:auto;padding-top:14px;font-size:11px;color:var(--muted)}
+
+  /* ---- content ---- */
+  h1{font-size:20px;margin:0 0 3px;letter-spacing:-.01em}
+  .lede{color:var(--muted);margin:0 0 20px;max-width:66ch}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+     margin:26px 0 10px;font-weight:650}
+  h2:first-of-type{margin-top:0}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-  .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-  .v{font-size:26px;font-weight:640;margin-top:4px;font-variant-numeric:tabular-nums;
+  .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  .v{font-size:27px;font-weight:660;margin-top:3px;font-variant-numeric:tabular-nums;
      letter-spacing:-.02em}
-  .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
-  .note{color:var(--muted);font-size:11.5px;margin-top:6px}
-  .bar{height:7px;background:var(--bar);border-radius:99px;overflow:hidden;margin-top:9px}
-  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
+  .v.idle{color:var(--muted);font-weight:500}
+  .v .u{font-size:13px;font-weight:500;color:var(--muted);margin-left:3px}
+  .sub{color:var(--muted);font-size:12px}
+  .note{color:var(--muted);font-size:12px;margin-top:9px;max-width:74ch}
+  .bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:9px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;
+         transition:width .35s}
   .bar>i.over{background:var(--warn)}
   table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
-     color:var(--muted);font-weight:600;padding:0 8px 6px 0}
-  td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);font-size:13px}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+     font-weight:650}
   tr:last-child td{border-bottom:0}
-  .num{text-align:right}
-  .badge{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:99px;
-         border:1px solid var(--line);color:var(--muted)}
-  .badge.on{border-color:var(--ok);color:var(--ok)}
-  .badge.v{border-color:var(--accent);color:var(--accent)}
-  .badge.u{border-color:var(--warn);color:var(--warn)}
-  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:11px 13px;
-      overflow-x:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}
-  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
-  .tab{font-size:12px;padding:4px 10px;border:1px solid var(--line);border-radius:99px;
-       background:none;color:var(--muted);cursor:pointer;font-family:inherit}
-  .tab.sel{border-color:var(--accent);color:var(--accent)}
-  .warnbox{background:var(--panel);border:1px solid var(--warn);border-left-width:3px;
-           border-radius:8px;padding:10px 13px;margin-bottom:10px;font-size:12.5px}
-  .err{background:var(--panel);border:1px solid var(--warn);color:var(--warn);border-radius:10px;
-       padding:12px 14px;margin-bottom:12px;font-size:13px}
+  td.num,th.num{text-align:right}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;
+      padding:12px 13px;overflow-x:auto;font-size:12.5px;margin:0}
+  .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;
+         border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .badge.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+  .badge.u{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+  .badge.v{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .seg{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:11px}
+  .tab{font:inherit;font-size:12px;padding:5px 11px;border:1px solid var(--line);
+       border-radius:99px;background:var(--panel);color:var(--muted);cursor:pointer}
+  .tab:hover{color:var(--ink)}
+  .tab.sel{border-color:var(--accent);color:var(--accent);font-weight:600}
+  .tab[disabled]{opacity:.45;cursor:not-allowed}
+  .warnbox{background:var(--panel);border:1px solid var(--line);
+           border-left:3px solid var(--warn);border-radius:8px;padding:12px 14px;margin:12px 0}
+  .banner{background:var(--panel);border:1px solid var(--line);
+          border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;
+          margin-bottom:20px}
   .hide{display:none}
-  a{color:var(--accent)}
-  code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-  select{font:inherit;font-size:12px;background:var(--panel);color:var(--ink);
-         border:1px solid var(--line);border-radius:6px;padding:3px 6px}
+  input,select{font:inherit;font-size:12px;padding:5px 9px;border:1px solid var(--line);
+               border-radius:7px;background:var(--panel);color:var(--ink)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:13px}
+  .scroll{overflow-x:auto}
+
+  @media (max-width:880px){
+    .shell{grid-template-columns:1fr}
+    .side{position:static;height:auto;flex-direction:column;border-right:0;
+          border-bottom:1px solid var(--line)}
+    nav{flex-direction:row;overflow-x:auto;gap:4px}
+    .nav{white-space:nowrap}
+    .nav[aria-selected="true"]{box-shadow:inset 0 -2px 0 var(--accent)}
+    .sidefoot{margin-top:10px}
+    .main{padding:20px 18px 48px}
+  }
 </style>
-</head>
-<body>
-<header>
-  <h1>Qwen node <span class="sub">· 2× RTX 2080 Ti · sm_75</span></h1>
-  <span class="sub"><span id="dot" class="dot"></span> <span id="state">connecting…</span></span>
-  <span class="sub" id="stamp" style="margin-left:auto"></span>
-</header>
 
-<main>
-  <div id="err" class="err hide"></div>
+<div class="shell">
+<aside class="side">
+  <div class="brand">Qwen node<div class="sub">dual Turing</div></div>
 
-  <!-- ============ QUEUE ============ -->
-  <h2>Queue</h2>
-  <div class="grid">
-    <div class="card"><div class="k">In progress</div>
-      <div class="v"><span id="qproc">–</span><span class="u">of <span id="qslots">–</span> seats</span></div></div>
-    <div class="card"><div class="k">Waiting</div>
-      <div class="v" id="qqueued">–</div></div>
-    <div class="card"><div class="k">Capacity</div>
-      <div class="v"><span id="qpct">–</span><span class="u">%</span></div>
-      <div class="bar"><i id="qbar" style="width:0"></i></div>
-      <div class="note" id="qover"></div></div>
-    <div class="card"><div class="k">Estimated wait</div>
-      <div class="v" id="qwait">–</div>
-      <div class="note" id="qwaitnote"></div></div>
-  </div>
-  <div class="grid" style="margin-top:12px">
-    <div class="card"><div class="k">Typical request</div>
-      <div class="v" id="qmean">–</div><div class="note" id="qsamples"></div></div>
-    <div class="card"><div class="k">Generated</div>
-      <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
-    <div class="card"><div class="k">Prompt tokens</div>
-      <div class="v" id="pt">–</div></div>
-    <div class="card"><div class="k">KV pool used</div>
-      <div class="v"><span id="kv">–</span><span class="u">%</span></div>
-      <div class="bar"><i id="kvbar" style="width:0"></i></div></div>
+  <div class="stat">
+    <div class="statline"><span class="dot" id="dot"></span><span id="state">connecting…</span></div>
+    <div class="statnums">
+      <span><span id="stps">–</span> tok/s</span>
+      <span><span id="skv">–</span>% KV</span>
+      <span id="sseats">– seats</span>
+    </div>
   </div>
 
-  <!-- ============ CONFIG HEALTH ============ -->
-  <h2>Configuration health</h2>
-  <div id="health"></div>
+  <nav id="nav" role="tablist" aria-label="Sections"></nav>
+  <div class="sidefoot" id="stamp">…</div>
+</aside>
 
-  <!-- ============ GPUS ============ -->
-  <h2>GPUs</h2>
-  <div class="grid" id="gpus"></div>
+<main class="main">
+  <div class="banner hide" id="err"></div>
 
-  <!-- ============ MODELS ============ -->
-  <h2>Models served</h2>
-  <div class="card" style="overflow-x:auto">
-    <table id="catalog">
-      <thead><tr>
+  <!-- ===================== OVERVIEW ===================== -->
+  <section id="s-overview" role="tabpanel" aria-labelledby="n-overview">
+    <h1>Overview</h1>
+    <p class="lede">What the node is doing right now. One model is resident at a
+      time; asking for a different id costs a reload.</p>
+
+    <h2>Queue</h2>
+    <div class="grid">
+      <div class="card"><div class="k">In flight</div>
+        <div id="qidle" hidden>
+          <div class="v idle">no model resident</div>
+          <div class="sub" style="margin-top:7px">Nothing is queued because nothing
+            is loaded. The first request pays the reload.</div></div>
+        <div id="qlive">
+          <div class="v"><span id="qproc">–</span><span class="u">of <span id="qslots">–</span> seats</span></div>
+          <div class="bar"><i id="qbar" style="width:0"></i></div>
+          <div class="sub" style="margin-top:7px"><span id="qpct">–</span>% full ·
+            <span id="qqueued">–</span> waiting</div>
+          <div class="sub" id="qover" style="color:var(--warn)"></div></div></div>
+      <div class="card"><div class="k">Estimated wait</div>
+        <div class="v" id="qwait">–</div>
+        <div class="sub" id="qwaitnote"></div></div>
+      <div class="card"><div class="k">Typical request</div>
+        <div class="v" id="qmean">–</div>
+        <div class="sub" id="qsamples"></div></div>
+    </div>
+
+    <h2 id="gpuh">GPUs</h2>
+    <div class="grid" id="gpus"></div>
+
+    <h2>Served since start</h2>
+    <div class="grid">
+      <div class="card"><div class="k">Prompt tokens</div>
+        <div class="v" id="pt">–</div></div>
+      <div class="card"><div class="k">Decode rate</div>
+        <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
+      <div class="card"><div class="k">KV pool used</div>
+        <div class="v"><span id="kv">–</span><span class="u">%</span></div>
+        <div class="bar"><i id="kvbar" style="width:0"></i></div></div>
+    </div>
+  </section>
+
+  <!-- ===================== MODELS ===================== -->
+  <section id="s-models" role="tabpanel" aria-labelledby="n-models" hidden>
+    <h1>Models</h1>
+    <p class="lede">Seven presets, one resident at a time. A context tier is a
+      <em>contract</em>, not a limit: a <code>-100k</code> id means run solo, and a
+      100k session beside a 40k one over-subscribes the shared pool so both die.</p>
+    <div class="card scroll">
+      <table><thead><tr>
         <th>Served id</th><th>Kind</th><th class="num">Context</th>
         <th class="num">Seats</th><th>State</th><th>Aliases</th>
-      </tr></thead>
-      <tbody id="catbody"></tbody>
-    </table>
-    <div class="note">Only one model is resident at a time
-      (<code>--models-max 1</code>). Asking for a different id costs a reload —
-      about 7&nbsp;s for a 27B off NVMe. Every reload shows up as an eviction above.</div>
-  </div>
-
-
-  <!-- ============ ACCOUNT AND KEYS ============ -->
-  <h2>Your account and API keys</h2>
-  <div id="acct"></div>
-  <div id="keysbox"></div>
-
-  <!-- ============ USAGE ============ -->
-  <h2>Usage by key</h2>
-  <div id="usagebox"></div>
-
-  <!-- ============ HOW TO CONNECT ============ -->
-  <h2>How to connect</h2>
-  <div class="warnbox">
-    <strong>Reasoning tokens.</strong> These models emit reasoning before content, so
-    <code>max_tokens: 16</code> returns <em>empty</em> content — all of it went to
-    reasoning. Either allow headroom (512+) or send
-    <code>"chat_template_kwargs": {"enable_thinking": false}</code>.
-  </div>
-  <div class="warnbox">
-    <strong>Context tiers are a contract, not a limit.</strong> Nothing enforces them.
-    A <code>-100k</code> id means <em>run solo</em>; <code>-40k</code>/<code>-50k</code>
-    mean two sessions. A 100k session beside a 40k one over-subscribes the shared pool
-    and both die together.
-  </div>
-  <div class="card">
-    <div class="tabs" id="tabs"></div>
-    <div style="margin-bottom:9px">
-      <span class="sub">Model:</span> <select id="msel"></select>
+      </tr></thead><tbody id="catbody"></tbody></table>
     </div>
-    <pre id="snippet">…</pre>
-    <div class="note">Get a key by signing in above and creating one — each key is
-      yours, revocable on its own, and its usage is attributed to you. Or generate
-      the OpenCode config from the server so client and server cannot drift:
-      <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code>.</div>
-  </div>
+  </section>
+
+  <!-- ===================== CONNECT ===================== -->
+  <section id="s-connect" role="tabpanel" aria-labelledby="n-connect" hidden>
+    <h1>Connect</h1>
+    <p class="lede">An OpenAI-compatible endpoint. Pick a model, copy the snippet,
+      and use a key from the Keys section.</p>
+
+    <div class="warnbox"><strong>Allow token headroom.</strong> These models emit
+      reasoning before content, so <code>max_tokens: 16</code> returns
+      <em>empty</em> content — all of it went to reasoning. Either allow 512+ or
+      send <code>"chat_template_kwargs": {"enable_thinking": false}</code>.</div>
+
+    <div class="card">
+      <div class="seg" id="tabs"></div>
+      <div class="row" style="margin:0 0 11px">
+        <span class="sub">Model</span> <select id="msel"></select>
+        <span class="sub" id="mctx"></span>
+      </div>
+      <pre id="snippet">…</pre>
+      <div class="note">Or generate the OpenCode config from the server, so client
+        and server cannot drift:
+        <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code></div>
+    </div>
+  </section>
+
+  <!-- ===================== KEYS ===================== -->
+  <section id="s-keys" role="tabpanel" aria-labelledby="n-keys" hidden>
+    <h1>Keys</h1>
+    <p class="lede">Sign in to create keys that are yours: revocable on their own,
+      with every request attributed to you. Machines carry keys; people sign in.</p>
+    <div id="acct"></div>
+    <div id="keysbox"></div>
+  </section>
+
+  <!-- ===================== USAGE ===================== -->
+  <section id="s-usage" role="tabpanel" aria-labelledby="n-usage" hidden>
+    <h1>Usage</h1>
+    <p class="lede">Exact token counts, read from the model's own response rather
+      than estimated.</p>
+    <div id="usagebox"></div>
+  </section>
+
+  <!-- ===================== HEALTH ===================== -->
+  <section id="s-health" role="tabpanel" aria-labelledby="n-health" hidden>
+    <h1>Health</h1>
+    <p class="lede">Configuration problems the node can see in its own logs.
+      Everything that is fine is hidden by default.</p>
+    <div id="health"></div>
+  </section>
 </main>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
 const n = v => (v === null || v === undefined) ? '–' : v.toLocaleString();
 const KEYNAME = 'qt-api-key';
 const getKey = () => localStorage.getItem(KEYNAME) || '';
-function askKey(msg){
-  const k = window.prompt((msg || 'Node API key') +
-    '\n\nRetrieve it on the node with:\n  sudo cat /etc/qwen-turing.key', getKey());
-  if(k !== null) localStorage.setItem(KEYNAME, k.trim());
-  return getKey();
-}
 const authHeaders = () => { const k = getKey(); return k ? {'Authorization':'Bearer '+k} : {}; };
+function askKey(msg){
+  const k = prompt((msg ? msg+'\n\n' : '') + 'API key for this node:', getKey());
+  if(k !== null) localStorage.setItem(KEYNAME, k.trim());
+  return k !== null;
+}
+
+// ---------- sidebar navigation ----------
+// Hash-routed, so a link can point at a section and a refresh keeps you there.
+// Only the visible section fetches its own data; /api/stats feeds four sections
+// at once, so it is polled regardless.
+const SECTIONS = [
+  ['overview', 'Overview'],
+  ['models',   'Models'],
+  ['connect',  'Connect'],
+  ['keys',     'Keys'],
+  ['usage',    'Usage'],
+  ['health',   'Health'],
+];
+let SECTION = 'overview';
+
+$('nav').innerHTML = SECTIONS.map(([id,label]) =>
+  `<button class="nav" id="n-${id}" role="tab" data-s="${id}" aria-selected="false"
+           aria-controls="s-${id}">${label}<span class="pill hide" id="p-${id}"></span></button>`
+).join('');
+
+// Unauthenticated, the sections must be HIDDEN rather than rendered empty. A
+// "GPUs" heading with nothing under it and a grid of em dashes reads as a broken
+// page, not as "sign in" -- which is the opposite of what the banner says.
+let AUTHED = true;
+function setAuthed(ok){
+  AUTHED = ok;
+  document.querySelectorAll('main section').forEach(s => {
+    if(!ok) s.hidden = true;
+  });
+  $('nav').style.opacity = ok ? '' : '.45';
+  $('nav').style.pointerEvents = ok ? '' : 'none';
+  if(ok) show(SECTION, false);
+}
+
+function show(id, push){
+  if(!AUTHED) return;
+  if(!SECTIONS.some(s => s[0] === id)) id = 'overview';
+  SECTION = id;
+  SECTIONS.forEach(([s]) => {
+    $('s-'+s).hidden = (s !== id);
+    $('n-'+s).setAttribute('aria-selected', s === id ? 'true' : 'false');
+  });
+  if(push && location.hash !== '#'+id) history.replaceState(null, '', '#'+id);
+  if(id === 'keys' || id === 'usage') loadAccount();
+}
+$('nav').onclick = e => {
+  const b = e.target.closest('[data-s]'); if(b) show(b.dataset.s, true);
+};
+$('nav').onkeydown = e => {
+  const i = SECTIONS.findIndex(s => s[0] === SECTION);
+  let j = null;
+  if(e.key === 'ArrowDown' || e.key === 'ArrowRight') j = (i+1) % SECTIONS.length;
+  if(e.key === 'ArrowUp'   || e.key === 'ArrowLeft')  j = (i-1+SECTIONS.length) % SECTIONS.length;
+  if(j === null) return;
+  e.preventDefault(); show(SECTIONS[j][0], true); $('n-'+SECTIONS[j][0]).focus();
+};
+addEventListener('hashchange', () => show(location.hash.slice(1), false));
+
+function pill(id, text, warn){
+  const el = $('p-'+id);
+  if(!text){ el.classList.add('hide'); return; }
+  el.textContent = text; el.className = 'pill' + (warn ? ' warn' : '');
+}
+
+// The collector reports its window the way journalctl takes it ("-2h"). Printed
+// raw next to a count that reads "3 since -2h", which is not a sentence.
+function window_text(w){
+  if(!w) return '';
+  const m = String(w).trim().match(/^-(\d+)([a-z]+)$/);
+  return m ? 'in the last ' + m[1] + m[2] : String(w);
+}
+
 function secs(v){
   if(v === null || v === undefined) return '—';
   return v < 90 ? Math.round(v)+'s' : Math.round(v/60)+' min';
@@ -178,6 +332,13 @@ function secs(v){
 function renderQueue(q){
   q = q || {};
   const slots = q.slots || 0, out = (q.processing||0) + (q.queued||0);
+  // An idle node reports no seats, and "0 of 0 seats, -% full" reads as a fault.
+  // Say what is actually true: nothing is resident, so there is nothing to queue.
+  $('qidle').hidden = slots > 0;
+  $('qlive').hidden = slots === 0;
+  // No early return: the seat figures live inside the hidden block, so writing
+  // them is harmless -- and returning here would leave the wait and typical-request
+  // cards without their notes, which is less informative than before.
   $('qproc').textContent = n(q.processing); $('qslots').textContent = n(slots);
   $('qqueued').textContent = n(q.queued);
   // Clamp the BAR, never the label: a queue at 300% must read as 300%.
@@ -199,32 +360,38 @@ function renderQueue(q){
 
 // ---------- config health ----------
 function renderHealth(h){
+  LAST_HEALTH = h;
   if(!h){ $('health').innerHTML = '<div class="card"><div class="note">no data yet</div></div>'; return; }
+  // Each row carries whether it NEEDS ATTENTION. A health panel that lists
+  // everything trains you to skim it; one that lists only problems gets read.
   const rows = [];
   if(!h.journal_readable || h.events === null){
     // "unavailable" must never look like "zero evictions" -- no evictions is
     // exactly the good news someone would act on.
     rows.push(['Model evictions','<span class="badge">event feed unavailable</span>',
-      'The dashboard cannot read the journal. Add SupplementaryGroups=systemd-journal to its unit.']);
+      'The dashboard cannot read the journal. Add SupplementaryGroups=systemd-journal to its unit.',
+      true]);
   }else{
     const ev = h.events;
-    rows.push(['Model evictions', n(ev.evictions.length) + ' <span class="sub">' + (h.window||'') + '</span>',
+    rows.push(['Model evictions', n(ev.evictions.length) + ' <span class="sub">' + window_text(h.window) + '</span>',
       ev.evictions.length
         ? 'Clients are asking for different models against --models-max 1. Last: ' +
           ev.evictions[ev.evictions.length-1].from + ' → ' +
           ev.evictions[ev.evictions.length-1].to +
           '. Pin clients to one id, or add a third card to raise --models-max.'
-        : 'No thrashing.']);
+        : 'No thrashing.',
+      ev.evictions.length > 0]);
     // The window travels with the count. Without it, an empty list cannot be told
     // apart from a window that simply rolled over -- and "config is clean" is
     // exactly the conclusion someone would act on.
     rows.push(['Options silently disabled',
       (ev.disabled.length ? '<span class="badge u">' + ev.disabled.join(', ') + '</span>'
                           : '<span class="badge on">none</span>') +
-      ' <span class="sub">' + (h.window || '') + '</span>',
+      ' <span class="sub">' + window_text(h.window) + '</span>',
       ev.disabled.length
         ? 'The config asks for something this model cannot do; remove it rather than leave it looking effective.'
-        : 'No option was discarded in this window. Note that is a WINDOW, not all time: an option removed longer ago than the window will no longer appear.']);
+        : 'No option was discarded in this window. Note that is a WINDOW, not all time: an option removed longer ago than the window will no longer appear.',
+      ev.disabled.length > 0]);
   }
   const c = h.cache || {};
   const hr = c.hit_rate;
@@ -234,12 +401,26 @@ function renderHealth(h){
     hr === null || hr === undefined ? 'No prompts on the current instance.'
       : (hr < 0.2
         ? 'Low. Repeated long prefixes are being re-processed — a warm slot is worth ~10×. Use a single-seat preset for iterative work.'
-        : 'Prefixes are being reused.')]);
-  $('health').innerHTML = '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
-    '<th>Signal</th><th>Value</th><th>What to change</th></tr></thead><tbody>' +
-    rows.map(r => '<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="sub">'+r[2]+'</td></tr>').join('') +
-    '</tbody></table></div>';
+        : 'Prefixes are being reused.'),
+    hr !== null && hr !== undefined && hr < 0.2]);
+  const bad = rows.filter(r => r[3]);
+  pill('health', bad.length ? String(bad.length) : '', true);
+  const shown = HEALTH_ALL ? rows : bad;
+  const table = shown.length
+    ? '<div class="card scroll"><table><thead><tr>' +
+      '<th>Signal</th><th>Value</th><th>What to change</th></tr></thead><tbody>' +
+      shown.map(r => '<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="sub">'+r[2]+'</td></tr>').join('') +
+      '</tbody></table></div>'
+    : '<div class="card"><span class="badge on">nothing to act on</span>' +
+      '<div class="note">All ' + rows.length + ' checks are clean. That is a statement ' +
+      'about the current window, not about all time.</div></div>';
+  $('health').innerHTML = table +
+    '<div class="row"><button class="tab" id="halltoggle">' +
+    (HEALTH_ALL ? 'Show only problems' : 'Show all ' + rows.length + ' checks') +
+    '</button></div>';
+  $('halltoggle').onclick = () => { HEALTH_ALL = !HEALTH_ALL; renderHealth(LAST_HEALTH); };
 }
+let HEALTH_ALL = false, LAST_HEALTH = null;
 
 // ---------- gpus ----------
 function gpuCard(g){
@@ -323,9 +504,13 @@ function renderSnippet(){
   const id = $('msel').value || (CATALOG[0] && CATALOG[0].id) || 'qwen3.8-27b';
   const m = CATALOG.find(x => x.id === id) || {};
   $('snippet').textContent = snippetFor(TAB, id, m.context);
+  $('mctx').textContent = m.context
+    ? '· ' + m.context.toLocaleString() + ' token context, ' +
+      (m.slots === 1 ? 'run solo' : (m.slots || '?') + ' seats')
+    : '';
 }
-const TABS = [['curl','curl'],['python','Python (OpenAI SDK)'],['node','Node (OpenAI SDK)'],['opencode','OpenCode']];
-$('tabs').innerHTML = TABS.map(([k,l]) =>
+const CLIENTS = [['curl','curl'],['python','Python'],['node','Node'],['opencode','OpenCode']];
+$('tabs').innerHTML = CLIENTS.map(([k,l]) =>
   `<button class="tab${k===TAB?' sel':''}" data-k="${k}">${l}</button>`).join('');
 $('tabs').onclick = e => {
   const k = e.target.dataset && e.target.dataset.k; if(!k) return;
@@ -341,48 +526,59 @@ async function tick(){
     const r = await fetch('/api/stats', {cache:'no-store', credentials:'same-origin',
                                         headers: authHeaders()});
     if(r.status === 401){
-      // SIGN IN IS THE PRIMARY PATH. The old behaviour opened a prompt asking
-      // for a shared secret, which is exactly what per-user sign-in replaces --
-      // and it fired before the reader had even seen the sign-in panel. An API
-      // key stays available as a fallback for anyone without an account, but it
-      // is now an explicit choice rather than a modal you cannot avoid.
+      // SIGNING IN IS THE PRIMARY PATH. The old behaviour opened a prompt asking
+      // for a shared secret, which is the thing per-user sign-in replaces -- and
+      // it fired before the reader had even seen the sign-in panel. A key stays
+      // available as an explicit fallback, not an unavoidable modal.
       let cfg = {};
       try{ cfg = await (await fetch('/api/me', {cache:'no-store'})).json(); }catch(e){}
-      $('dot').className='dot down'; $('state').textContent='not signed in';
+      $('dot').className = 'dot down'; $('state').textContent = 'not signed in';
       $('err').innerHTML = (cfg.login_configured
-          ? '<strong>Sign in to see this page.</strong> ' +
-            '<a class="tab" href="/auth/login" style="margin-left:8px">Sign in</a>' +
-            '<span class="sub" style="margin-left:10px">or ' +
-            '<a href="#" id="setkey">use an API key</a> instead</span>'
-          : 'This page needs an API key. <a href="#" id="setkey">Enter it</a>.');
+        ? '<strong>Sign in to see this node.</strong>' +
+          '<div class="note">Your key, your usage. Machines carry keys; people sign in.</div>' +
+          '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a>' +
+          '<a class="tab" href="#" id="setkey">Use an API key instead</a></div>'
+        : '<strong>This node needs an API key.</strong>' +
+          '<div class="row"><a class="tab" href="#" id="setkey">Enter it</a></div>');
       $('err').classList.remove('hide');
+      setAuthed(false);
       const a = $('setkey');
-      if(a) a.onclick = e => { e.preventDefault(); if(askKey('API key')) tick(); };
+      if(a) a.onclick = ev => { ev.preventDefault(); if(askKey('API key')) tick(); };
       return;
     }
     if(!r.ok) throw new Error('HTTP '+r.status);
     const d = await r.json();
     $('err').classList.add('hide');
+    if(!AUTHED) setAuthed(true);
 
     $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
     $('state').textContent = d.llama_up ? (d.model || 'model resident') : 'model not loaded';
     $('pt').textContent = n(d.prompt_tokens_total);
-    $('tps').textContent = (d.tokens_per_second ?? 0).toFixed(1);
+    const tps = (d.tokens_per_second ?? 0).toFixed(1);
+    $('tps').textContent = tps; $('stps').textContent = tps;
     const kvp = Math.round((d.kv_cache_usage_ratio ?? 0)*100);
-    $('kv').textContent = kvp; $('kvbar').style.width = kvp+'%';
-    renderQueue(d.queue);
+    $('kv').textContent = kvp; $('skv').textContent = kvp; $('kvbar').style.width = kvp+'%';
+    const q = d.queue || {};
+    // With no model resident there are no seats to report, and "0 of 0 seats"
+    // reads like a fault rather than an idle node.
+    $('sseats').textContent = q.slots
+      ? (q.processing ?? 0) + ' of ' + q.slots + ' seats'
+      : 'idle';
+    renderQueue(q);
     renderHealth(d.config_health);
-    $('gpus').innerHTML = (d.gpus||[]).map(gpuCard).join('') ||
-      '<div class="card"><div class="sub">no GPUs reported</div></div>';
+    const gpus = d.gpus || [];
+    $('gpuh').hidden = gpus.length === 0;
+    $('gpus').innerHTML = gpus.map(gpuCard).join('');
     renderCatalog(d.catalog);
+    pill('models', String((d.catalog||[]).length));
     $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
   }catch(e){
-    $('dot').className='dot down'; $('state').textContent='dashboard unreachable';
-    $('err').textContent = 'Could not read /api/stats: ' + e.message;
+    $('dot').className = 'dot down'; $('state').textContent = 'unreachable';
+    $('err').innerHTML = '<strong>Could not read the node.</strong>' +
+      '<div class="note">' + esc(e.message) + '</div>';
     $('err').classList.remove('hide');
   }
 }
-tick(); setInterval(tick, 2000);
 
 // ---------- account, keys and usage ----------
 // Every request below uses a RELATIVE url, which is origin-relative by
@@ -491,6 +687,8 @@ async function loadKeys(){
     'and is stored only as a hash. Revoking takes effect on this node immediately.</div>' +
     '</div>';
 
+  const live = (d.keys||[]).filter(k => !k.revoked_at).length;
+  pill('keys', live ? String(live) : '');
   const mint = $('mint');
   if(mint) mint.onclick = doMint;
   [...document.querySelectorAll('[data-revoke]')].forEach(b => b.onclick = () => doRevoke(b.dataset.revoke));
@@ -569,9 +767,12 @@ async function loadUsage(){
     '</div></div>';
 }
 
-loadAccount();
-setInterval(() => { if(ME && ME.authenticated) loadUsage(); }, 15000);
 
+show(location.hash.slice(1) || 'overview', false);
+tick(); setInterval(tick, 2000);
+loadAccount();
+// Usage refreshes only while you are looking at it.
+setInterval(() => {
+  if(ME && ME.authenticated && (SECTION === 'usage' || SECTION === 'keys')) loadUsage();
+}, 15000);
 </script>
-</body>
-</html>

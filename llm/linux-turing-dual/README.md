@@ -80,6 +80,28 @@ Or derive it from the server so client and server cannot drift:
 
 ---
 
+## The dashboard
+
+Sections live behind sidebar navigation rather than one long scroll, because a
+reader almost always wants exactly one of them:
+
+| Section | Answers |
+|---|---|
+| Overview | is it alive, is there a free seat, what are the cards doing |
+| Models | what can I ask for, and what does each cost in context and seats |
+| Connect | how do I point my client at it |
+| Keys | sign in, create a key, revoke one |
+| Usage | what has each key actually spent |
+| Health | what is misconfigured, and what should I change |
+
+Two details worth knowing. The status block — resident model, decode rate, seats —
+is **pinned beside every section**, so checking that the node is alive never costs
+a click. And **Health shows only what needs acting on**, with the clean checks
+behind a toggle and a count on the nav item: a panel that lists everything trains
+you to skim it.
+
+Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
+
 ## Accounts and API keys
 
 Every user gets their own keys. **Sign in on the dashboard and create one** —
