@@ -255,12 +255,55 @@ def test_u_local_pins_this_node_even_when_a_remote_is_warm(fleet):
     assert runtime.seen[0]["path"] == "/v1/chat/completions"   # prefix stripped
 
 
-def test_pinning_a_named_server_bypasses_eligibility(fleet):
-    """An explicit pin is the caller's decision, including its consequences."""
+def test_pinning_a_server_that_lacks_the_model_is_still_refused(fleet):
+    """A pin names the MACHINE, not the model -- and the silent substitution does
+    not care how the destination was chosen. This test previously asserted the
+    opposite ("the caller's decision, including its consequences"), which left a
+    documented URL returning someone else's weights with a 200."""
     srv, runtime, remote, key = fleet
-    status, to, why, _ = infer(srv, key, MODEL_LOCAL,
-                               path="/u/remote/v1/chat/completions")
+    status, to, why, body = infer(srv, key, MODEL_LOCAL,
+                                  path="/u/remote/v1/chat/completions")
+    assert status == 404
+    msg = json.loads(body)["error"]["message"]
+    assert MODEL_LOCAL in msg and "remote" in msg
+    assert "X-Route-Force" in msg          # the refusal says how to override it
+    assert not remote.seen
+
+
+def test_a_pin_can_be_forced_when_the_caller_really_means_it(fleet):
+    srv, runtime, remote, key = fleet
+    raw = json.dumps({"model": MODEL_LOCAL, "messages": []}).encode()
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=15)
+    c.request("POST", "/u/remote/v1/chat/completions", raw,
+              {"Authorization": "Bearer " + key, "Content-Type": "application/json",
+               "Content-Length": str(len(raw)), "X-Route-Force": "1"})
+    r = c.getresponse()
+    r.read()
+    assert (r.status, r.getheader("X-Routed-To")) == (200, "remote")
+    assert r.getheader("X-Routed-Why") == "forced"
+    assert len(remote.seen) == 1
+    c.close()
+
+
+def test_pinning_a_server_whose_list_is_unknown_defers_to_it(fleet):
+    """An unknown list is not evidence of absence, and this node is not the
+    authority on someone else's models."""
+    srv, runtime, remote, key = fleet
+    gw.UP_STATE["remote"]["models"] = []
+    pinned = "/u/remote/v1/chat/completions"
+    status, to, why, _ = infer(srv, key, MODEL_LOCAL, path=pinned)
     assert (status, to, why) == (200, "remote", "pinned")
+    assert len(remote.seen) == 1 and not runtime.seen
+
+
+def test_pinning_a_non_model_endpoint_is_not_model_checked(fleet):
+    srv, runtime, remote, key = fleet
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    c.request("GET", "/u/remote/health", None, {"Authorization": "Bearer " + key})
+    r = c.getresponse()
+    r.read()
+    assert (r.status, r.getheader("X-Routed-To")) == (200, "remote")
+    c.close()
 
 
 def test_pinning_this_node_while_its_runtime_is_down_is_refused_at_once(fleet):
@@ -278,6 +321,41 @@ def test_the_virtual_server_is_also_addressable_by_name(fleet):
                                path="/u/auto/v1/chat/completions")
     assert (status, to, why) == (200, "remote", "model-only")
     assert remote.seen[0]["path"] == "/v1/chat/completions"
+
+
+def test_affinity_survives_a_restart_without_being_faked_by_a_health_poll(fleet):
+    """The in-memory guard is not enough: EVERY request is recorded, and the
+    /health polls all say "local". Recovering the last server from usage has to
+    ignore them, or a restart drags an agent off the warm remote it was using."""
+    srv, runtime, remote, key = fleet
+    infer(srv, key, MODEL_REMOTE)                       # the real routing decision
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    c.request("GET", "/health", None, {"Authorization": "Bearer " + key})
+    c.getresponse().read()
+    c.close()
+    _rows_within(2.0, 2)
+    gw.LAST_SERVER.clear()                              # as a restart would
+    status, to, why, _ = infer(srv, key, MODEL_BOTH)
+    assert (status, to, why) == (200, "remote", "last-used")
+
+
+def test_a_body_with_no_content_length_is_labelled_apart(fleet):
+    """Never scanned, so it must not hide inside `unnamed` and read as client
+    behaviour when it is really a framing case."""
+    srv, runtime, remote, key = fleet
+    raw = json.dumps({"model": MODEL_REMOTE, "messages": []}).encode()
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=15)
+    c.putrequest("POST", "/v1/chat/completions", skip_accept_encoding=True)
+    c.putheader("Authorization", "Bearer " + key)
+    c.putheader("Content-Type", "application/json")
+    c.putheader("Transfer-Encoding", "chunked")
+    c.endheaders()
+    c.send(b"%x\r\n" % len(raw) + raw + b"\r\n0\r\n\r\n")
+    r = c.getresponse()
+    r.read()
+    assert r.getheader("X-Routed-Why") == "unframed"
+    assert r.getheader("X-Routed-To") == "local"
+    c.close()
 
 
 # --- refusals, and the body they must drain ---------------------------------

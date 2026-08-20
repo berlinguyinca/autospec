@@ -186,6 +186,11 @@ that it prefers this node, then any other eligible server. Every reply carries
 without that, "the balancer quietly became local-always" looks exactly like a
 balancer that is working.
 
+Pinning `/u/<id>/v1` names the *machine*, not the model — so the same check
+applies there, and a pin for a model that server has not got is refused rather
+than silently answered by the wrong weights. `X-Route-Force: 1` sends it anyway
+for the cases where you mean it.
+
 **Reading the model does not mean parsing the body.** At most 8 KB of the request
 is buffered to find the top-level `model` field, then forwarded unchanged; a 100k
 prompt is ~400 KB and still streams straight through. If the field is not in that

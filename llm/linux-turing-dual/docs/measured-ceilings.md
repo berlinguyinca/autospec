@@ -760,6 +760,21 @@ The prefill figure is also the more trustworthy one of the two 100k samples --
 recorded at 40k, which is the shape to expect when full-attention layers are
 quadratic in context.
 
+**A chunked request body is still scanned.** The peek needs a `Content-Length`,
+so a client sending `Transfer-Encoding: chunked` looked like it would be pinned
+local forever. Measured instead of assumed: a chunked request through nginx came
+back `X-Routed-Why: last-used`, so nginx hands the gateway a framed body and the
+`unframed` label is a safety net that does not fire behind this proxy. It is
+counted separately anyway, because the day something bypasses nginx that label is
+the only thing that would say so.
+
+**The silent substitution, reproduced deliberately.** Pinning
+`/u/bender/v1` and asking for `qwen3.5-9b-vision` — which that box does not
+serve — is now refused with a `404`. Sent again with `X-Route-Force: 1` it
+returned `200` and `"model":"qwen3.8-27b"`: the wrong weights, no error, exactly
+as measured before. The failure is still there in llama.cpp; it is now only
+reachable on purpose.
+
 This run doubled as the live proof of the eligibility rule. The key's remembered
 server was the workstation, but `qwen3.8-27b-100k` exists only on this node, so
 the reply came back `X-Routed-Why: preferred` rather than `last-used`: being able

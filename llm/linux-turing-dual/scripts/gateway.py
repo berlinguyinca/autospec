@@ -70,7 +70,9 @@ FLUSH_SECONDS = 30
 # Paths this process owns. Everything else is proxied to the runtime.
 OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
          "/api/stats", "/api/servers")
-UPSTREAM_POLL_SECONDS = 60
+# NO SEPARATE POLL INTERVAL. The housekeeper's own period drives the probes, and
+# a second constant beside it was display-only and wrong by 2x -- the Servers
+# panel claimed a 60 s probe while the timer ran every 30. One timer, one number.
 
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
@@ -678,7 +680,11 @@ class Handler(BaseHTTPRequestHandler):
                        route="/u/" + u.id + "/v1")
             out.append(row)
         self._json(200, {
-            "servers": out, "poll_seconds": UPSTREAM_POLL_SECONDS,
+            # The interval that ACTUALLY runs, not a constant beside it: the
+            # housekeeper's own period is what re-probes these servers, and a
+            # panel whose job is honesty about what it knows must not overstate
+            # how stale its knowledge can be.
+            "servers": out, "poll_seconds": REFRESH_SECONDS,
             "registry_configured": bool(REGISTRY_PATH),
             # The plain path IS the virtual server, so the page can say so
             # rather than hard-coding a convention that might change.
@@ -823,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
         last = LAST_SERVER.get(kid)
         if last is None and kid and STORE:
             try:
-                last = STORE.last_upstream(kid)
+                last = STORE.last_upstream(kid, _ups.BALANCED_PATHS)
             except Exception:
                 last = None
             if last:
@@ -894,8 +900,42 @@ class Handler(BaseHTTPRequestHandler):
             self._err(503, f"{pinned.id} is not answering" + seen,
                       "upstream_offline")
             return ANSWERED
-        self._decided(pinned.id, "pinned")
+        why = self._pin_serves_it(pinned.id, st.get("models"))
+        if why is None:
+            return ANSWERED
+        self._decided(pinned.id, why)
         return pinned
+
+    def _pin_serves_it(self, server: str, models) -> str | None:
+        """Can the server the caller NAMED serve the model they named?
+
+        A pin says which machine, not which model -- and llama.cpp's silent
+        substitution does not care how the destination was chosen. Pinning
+        `/u/box/v1` and asking for a model that box has not got would return
+        someone else's weights with a 200, which is the exact failure this whole
+        routing change exists to prevent. So the same eligibility check applies,
+        with an explicit escape: `X-Route-Force: 1` sends it anyway.
+
+        Only checked when the server's own list is KNOWN and the endpoint is one
+        that names a model. An unknown list defers to the server.
+
+        Returns the reason to record, or None having already answered.
+        """
+        if not _ups.balanceable(self._route_path or ""):
+            return "pinned"
+        if not models:
+            return "pinned"
+        if self.headers.get("X-Route-Force", "").strip() in ("1", "true", "yes"):
+            return "forced"
+        model, _ = self._peek_body()
+        if model is None or model in models:
+            return "pinned"
+        self._decided(server, "refused")
+        self._err(404, f"{server} does not serve {model} -- it would answer with "
+                       f"a different model rather than refuse. Send it anyway "
+                       f"with X-Route-Force: 1, or use the default /v1.",
+                  "model_not_found")
+        return None
 
     def _decided(self, server: str, why: str) -> None:
         """Record a routing decision, for the response headers and the counters.
@@ -921,10 +961,13 @@ class Handler(BaseHTTPRequestHandler):
             local_online=self._local_online(),
             local_models=LOCAL_STATE.get("models"))
         if why == "blind" and conclusive:
-            # Told apart on purpose: `unnamed` means the request really has no
-            # model field, `blind` means the peek ran out of buffer. One is a
-            # client's choice, the other is a tuning problem here.
-            why = "unnamed"
+            # Three different problems, three different labels. `unnamed` is the
+            # client's choice, `blind` is a peek budget too small, and `unframed`
+            # is a body with no Content-Length -- which is never scanned, so it
+            # would otherwise hide inside `unnamed` and look like client
+            # behaviour instead of a framing case.
+            why = ("unframed" if self._body_left <= 0
+                   and self.headers.get("Transfer-Encoding") else "unnamed")
 
         if chosen is None:
             self._decided("none", "refused")

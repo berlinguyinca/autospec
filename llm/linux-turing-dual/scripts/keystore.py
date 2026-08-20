@@ -266,15 +266,27 @@ class KeyStore:
         with self._lock, self._conn() as c:
             return [dict(r) for r in c.execute(sql, args)]
 
-    def last_upstream(self, key_id: str) -> str | None:
+    def last_upstream(self, key_id: str,
+                      endpoints: "tuple[str, ...] | None" = None) -> str | None:
         """The server this key used most recently, for routing affinity.
 
         Read from recorded usage rather than kept only in memory, so a gateway
         restart does not scatter every caller onto a cold prefix cache.
+
+        `endpoints` restricts the answer to the endpoints that were actually
+        ROUTED. Every request is recorded, including the /health and /v1/models
+        polls that always say "local" -- so without this filter an agent's health
+        poll would, after a restart, look like its last routing decision and pull
+        it off a warm remote slot. The in-memory path already ignores those; this
+        is the same rule for the durable one.
         """
+        q = "SELECT upstream FROM usage_events WHERE key_id=?"
+        args: list = [key_id]
+        if endpoints:
+            q += " AND endpoint IN (%s)" % ",".join("?" * len(endpoints))
+            args.extend(endpoints)
         with self._lock, self._conn() as c:
-            r = c.execute("SELECT upstream FROM usage_events WHERE key_id=? "
-                          "ORDER BY ts DESC LIMIT 1", (key_id,)).fetchone()
+            r = c.execute(q + " ORDER BY ts DESC LIMIT 1", args).fetchone()
         return r["upstream"] if r and r["upstream"] else None
 
     def leaderboard(self) -> list[dict]:
