@@ -39,6 +39,9 @@ GPU_FIELDS = ("index", "name", "mem_total_mib", "mem_used_mib",
 SERVER_FIELDS = (
     "id", "kind", "enabled", "state", "models", "priority", "pool_member",
     "in_flight", "idle_pipes", "route", "note", "gpus", "slots", "last_seen",
+    # Per-card telemetry the server reported about itself. Projected through the
+    # same GPU_FIELDS as this node's own cards, below.
+    "cards",
     # Measured, never declared: what this node has actually seen the server do.
     "prefill_rate", "mean_service", "samples",
 )
@@ -80,8 +83,14 @@ def servers(payload: dict) -> dict:
     """
     payload = payload or {}
     out = _pick(payload, FLEET_FIELDS)
-    out["servers"] = [_pick(s or {}, SERVER_FIELDS)
-                      for s in payload.get("servers") or []]
+    out["servers"] = []
+    for s in payload.get("servers") or []:
+        row = _pick(s or {}, SERVER_FIELDS)
+        # A reported card is projected exactly like a local one: a server could
+        # otherwise volunteer a field -- a serial, a hostname in a name string --
+        # that this node then published on its behalf.
+        row["cards"] = [_pick(c or {}, GPU_FIELDS) for c in (row.get("cards") or [])]
+        out["servers"].append(row)
     out["routing"] = dict(payload.get("routing") or {})
     out["public"] = True
     return out

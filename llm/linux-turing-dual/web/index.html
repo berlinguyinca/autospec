@@ -514,18 +514,61 @@ function renderHealth(h){
 let HEALTH_ALL = false, LAST_HEALTH = null;
 
 // ---------- gpus ----------
-function gpuCard(g){
+// Every card in the fleet, each saying which server it belongs to. This panel
+// used to draw only THIS node's cards, so a fleet member's GPU appeared nowhere
+// -- the machine was listed as a server, and the hardware doing the work was
+// invisible.
+//
+// A local card comes from this node's nvidia-smi. A remote card comes from the
+// agent's, reported over the control connection in the same shape, so both are
+// drawn by the code below rather than by two renderers that could drift.
+function gpuCard(g, where){
   const used = g.mem_used_mib ?? 0, tot = g.mem_total_mib ?? 1;
   const pct = Math.min(100, Math.round(used/tot*100));
   return `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:baseline">
       <span style="font-weight:600">GPU ${g.index}</span>
       <span class="sub">${g.util_pct ?? '–'}% util</span></div>
-    <div class="sub">${g.name ?? ''}</div>
+    <div class="sub">${esc(g.name ?? '')}</div>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="sub" style="margin-top:7px">${n(used)} / ${n(tot)} MiB
       ${g.temp_c != null ? ' · '+g.temp_c+'°C' : ''}
-      ${g.power_w != null ? ' · '+g.power_w.toFixed(0)+' W' : ''}</div></div>`;
+      ${g.power_w != null ? ' · '+g.power_w.toFixed(0)+' W' : ''}</div>
+    <div class="sub" style="margin-top:5px">${where}</div></div>`;
+}
+
+// A server whose agent reports no card telemetry: no nvidia-smi, a different
+// vendor, or an older agent. Its operator's written description is shown and
+// LABELLED as written, because a description beside measured cards would
+// otherwise read as another measurement.
+function declaredCard(s){
+  return `<div class="card">
+    <div style="font-weight:600">${esc(s.id)}</div>
+    <div class="sub" style="margin-top:5px">${esc(s.gpus)}</div>
+    <div class="sub" style="margin-top:7px">declared by its operator, not measured</div>
+    </div>`;
+}
+
+function serverBadge(id, state){
+  const cls = state === 'online' ? 'on' : '';
+  return '<span class="badge ' + cls + '">' + esc(id === 'local' ? 'this node' : id)
+    + '</span>';
+}
+
+function renderGpus(){
+  const out = [];
+  // This node first, and from the stats poll rather than from the fleet payload:
+  // its cards refresh every two seconds there, against fifteen for the fleet.
+  (LAST_GPUS || []).forEach(g => out.push(gpuCard(g, serverBadge('local', 'online'))));
+  (FLEET || []).forEach(s => {
+    if(s.id === 'local') return;
+    const badge = serverBadge(s.id, s.state);
+    const cards = s.cards || [];
+    if(cards.length) cards.forEach(g => out.push(gpuCard(g, badge)));
+    else if(s.gpus) out.push(declaredCard(s));
+  });
+  $('gpuh').hidden = out.length === 0;
+  $('gpus').innerHTML = out.join('');
 }
 
 // ---------- catalog + snippets ----------
@@ -1167,8 +1210,7 @@ async function tick(){
     const gpusNewlyKnown = gpus.length > 0 && LAST_GPUS.length === 0;
     LAST_GPUS = gpus;
     if(gpusNewlyKnown && SECTION === 'servers') loadServers();
-    $('gpuh').hidden = gpus.length === 0;
-    $('gpus').innerHTML = gpus.map(gpuCard).join('');
+    renderGpus();
     renderCatalog(d.catalog);
     pill('models', String((d.catalog||[]).length));
     $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
@@ -1467,9 +1509,13 @@ tick(); setInterval(tick, 2000);
 loadAccount();
 // Once at boot so the Models table can say who holds what on the first draw,
 // then only while a panel that shows it is open.
-loadFleet().then(() => renderCatalog(CATALOG));
+loadFleet().then(() => { renderCatalog(CATALOG); renderGpus(); });
 setInterval(() => {
-  if(SECTION === 'models') loadFleet().then(() => renderCatalog(CATALOG));
+  if(SECTION === 'models'){ loadFleet().then(() => renderCatalog(CATALOG)); }
+  // The Overview's GPU panel draws remote cards from the same fleet payload, so
+  // it needs refreshing there too -- otherwise a fleet member's cards were as
+  // stale as whenever the fleet was last fetched for some other reason.
+  else if(SECTION === 'overview'){ loadFleet().then(renderGpus); }
 }, 15000);
 // Usage refreshes only while you are looking at it -- and it no longer waits for
 // a session, because the leaderboard is public. Gating this on authentication

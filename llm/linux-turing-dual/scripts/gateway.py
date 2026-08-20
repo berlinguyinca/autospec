@@ -326,6 +326,7 @@ def _state_view(servers) -> dict:
         # already sent both and they were being dropped on the floor.
         row["slots"] = agent.get("slots") or row.get("slots")
         row["agent_version"] = agent.get("agent_version") or row.get("agent_version")
+        row["cards"] = agent.get("cards") or row.get("cards")
         row.setdefault("models", [])
         view[u.id] = row
     return view
@@ -1027,6 +1028,7 @@ class Handler(BaseHTTPRequestHandler):
                                    else None),
                        slots=st.get("slots"),
                        agent_version=st.get("agent_version"),
+                       cards=st.get("cards"),
                        **measured(u.id))
             out.append(row)
         full = {
@@ -1383,22 +1385,35 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             return
         state = AGENT_STATE.setdefault(sid, {})
-        if msg.get("type") in ("hello", "capabilities"):
+        kind = msg.get("type")
+        if kind in ("hello", "capabilities"):
             state.update(state="online", last_seen=time.time(),
                          gpus=(str(msg.get("gpus"))[:120] if msg.get("gpus") else
                                state.get("gpus")),
                          slots=(int(msg["slots"]) if str(msg.get("slots", "")).isdigit()
                                 else state.get("slots")),
                          agent_version=str(msg.get("agent_version") or "")[:32])
+            if isinstance(msg.get("cards"), list):
+                # Per-card telemetry, in the same shape this node's own collector
+                # emits, so the panel draws a remote card with the code that
+                # already draws a local one. Bounded: this arrives from another
+                # machine, and an unbounded list would be a memory hole.
+                state["cards"] = [c for c in msg["cards"][:16] if isinstance(c, dict)]
             if STORE:
                 try:
                     STORE.touch_server(sid)
                 except Exception:
                     pass
+        if kind == "hello":
             # Ask what it serves NOW rather than at the next poll. Without this a
             # reconnected server is ineligible for the balanced route until the
             # timer comes round -- it is online, with an empty model list, which
             # reads as "serves nothing".
+            #
+            # HELLO ONLY. Capabilities arrive every 20 s for as long as the agent
+            # is attached, and probing on each of those would spawn a thread and
+            # take a pipe three times a minute, forever, to re-answer a question
+            # whose answer had not changed.
             threading.Thread(target=_probe_when_ready, args=(sid,),
                              daemon=True).start()
 

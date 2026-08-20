@@ -128,6 +128,30 @@ def test_the_public_fleet_publishes_measured_speed_and_seats():
     assert row["gpus"] == "one RTX 4090 (24 GB)"
 
 
+def test_reported_cards_are_projected_like_local_ones():
+    """A server volunteers this telemetry about itself, so it is projected through
+    the SAME allow-list as this node's own cards. Otherwise a server could
+    volunteer a field -- a serial, a hostname inside a name string -- that this
+    node then published on its behalf.
+    """
+    out = pub.servers({"servers": [{"id": "bender", "state": "online", "cards": [
+        {"index": 0, "name": "NVIDIA RTX 4090", "mem_total_mib": 24564,
+         "mem_used_mib": 20000, "util_pct": 97, "temp_c": 71, "power_w": 330,
+         "uuid": "GPU-deadbeef", "hostname": "gpu-box.invalid"}]}]})
+    cards = out["servers"][0]["cards"]
+    assert len(cards) == 1
+    assert cards[0]["name"] == "NVIDIA RTX 4090" and cards[0]["util_pct"] == 97
+    assert "uuid" not in cards[0] and "hostname" not in cards[0]
+    assert "gpu-box.invalid" not in repr(out)
+
+
+def test_a_server_with_no_cards_projects_an_empty_list():
+    """Not None: the panel distinguishes "reported none" from "never reported",
+    and an absent key would collapse those two into one."""
+    out = pub.servers({"servers": [{"id": "x", "state": "online"}]})
+    assert out["servers"][0]["cards"] == []
+
+
 def test_the_agent_build_is_not_capability():
     """A version string is software inventory, which is the operator's business."""
     out = pub.servers({"servers": [{"id": "x", "agent_version": "1"}]})

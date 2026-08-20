@@ -535,3 +535,55 @@ def test_a_pinned_remote_model_list_is_cleaned_on_the_way_out(node):
         assert "apikey" not in raw and "args" not in raw and "status" not in raw
     finally:
         leaky.shutdown()
+
+
+# --- capabilities: telemetry must not become a probe storm -------------------
+
+def _said(sid, msg, monkeypatch):
+    """Drive _agent_said with the model probe counted rather than run.
+
+    Called unbound: the method touches only module state, so this exercises the
+    real dispatch without standing up a socket for it.
+    """
+    fired = []
+    monkeypatch.setattr(gw.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda s: fired.append(k)})())
+    gw.Handler._agent_said(object(), sid, json.dumps(msg).encode())
+    return fired
+
+
+def test_a_hello_asks_what_the_server_now_serves(monkeypatch):
+    gw.AGENT_STATE.pop("box", None)
+    fired = _said("box", {"type": "hello", "server_id": "box", "slots": 2},
+                 monkeypatch)
+    assert len(fired) == 1, "a reconnect must re-learn the model list at once"
+    assert gw.AGENT_STATE["box"]["slots"] == 2
+
+
+def test_periodic_capabilities_do_not_re_probe(monkeypatch):
+    """Capabilities arrive every 20 s for as long as the agent is attached.
+    Probing on each would spawn a thread and TAKE A PIPE three times a minute,
+    forever, to re-answer a question whose answer had not changed.
+    """
+    gw.AGENT_STATE.pop("box", None)
+    cards = [{"index": 0, "name": "NVIDIA RTX 4090", "util_pct": 97}]
+    fired = _said("box", {"type": "capabilities", "cards": cards}, monkeypatch)
+    assert fired == [], "a capabilities report must not trigger a model probe"
+    assert gw.AGENT_STATE["box"]["cards"] == cards
+    assert gw.AGENT_STATE["box"]["state"] == "online"
+
+
+def test_a_reported_card_list_is_bounded(monkeypatch):
+    """It arrives from another machine. An unbounded list is a memory hole."""
+    gw.AGENT_STATE.pop("box", None)
+    _said("box", {"type": "capabilities",
+                  "cards": [{"index": i} for i in range(500)]}, monkeypatch)
+    assert len(gw.AGENT_STATE["box"]["cards"]) == 16
+
+
+def test_junk_where_cards_should_be_is_ignored(monkeypatch):
+    gw.AGENT_STATE.pop("box", None)
+    _said("box", {"type": "capabilities", "cards": "all of them"}, monkeypatch)
+    assert "cards" not in gw.AGENT_STATE["box"]
+    _said("box", {"type": "capabilities", "cards": [1, 2, {"index": 0}]}, monkeypatch)
+    assert gw.AGENT_STATE["box"]["cards"] == [{"index": 0}]

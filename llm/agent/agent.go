@@ -99,6 +99,13 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) (bool, err
 	pipes.start(cfg)
 	defer pipes.stop()
 
+	// Telemetry about this box, for as long as this connection lives. Writes are
+	// serialised by the Conn, so this runs beside the read loop's pongs rather
+	// than needing a channel between them. It stops when the connection closes:
+	// the write fails and the goroutine returns, so a reconnect starts a new one
+	// instead of leaking the old.
+	go sendCapabilities(c, stop)
+
 	for {
 		select {
 		case <-stop:
@@ -133,6 +140,28 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) (bool, err
 				return false, fmt.Errorf("this server id is already connected elsewhere")
 			}
 			return true, fmt.Errorf("node closed the control connection (code %d)", code)
+		}
+	}
+}
+
+// sendCapabilities reports this box's cards on attach and then periodically.
+//
+// Sent even when there are none: an empty list is the honest answer for a machine
+// with no NVIDIA cards, and it distinguishes "asked and there are none" from
+// "never reported". It is also why a failure here is not fatal -- losing GPU
+// telemetry must never cost the registration this connection represents.
+func sendCapabilities(c *Conn, stop <-chan struct{}) {
+	for {
+		msg, err := json.Marshal(capabilities{Type: "capabilities", Cards: readCards()})
+		if err == nil {
+			if err := c.WriteFrame(opText, msg); err != nil {
+				return // the connection is gone; runControl will rebuild it
+			}
+		}
+		select {
+		case <-stop:
+			return
+		case <-time.After(capabilityInterval):
 		}
 	}
 }

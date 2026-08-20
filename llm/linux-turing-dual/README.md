@@ -111,6 +111,23 @@ you to skim it.
 
 Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
 
+## Every GPU in the fleet, labelled by server
+
+The Overview's GPU panel draws every card the fleet has, each saying which server
+it belongs to. This node's cards come from its own `nvidia-smi` via the stats
+poll; a remote's come from its agent's, reported over the control connection in
+the same shape, so one renderer draws both.
+
+The agent execs `nvidia-smi` — it is not linked, so the binary stays
+dependency-free — and volunteers the result every 20 s. A box without it (a Mac,
+a CPU node, another vendor's cards) reports nothing, and the panel falls back to
+the operator's written description **labelled as declared, not measured**: a
+description sitting beside real readings would otherwise read as another reading.
+
+The node never asks for this and cannot. Nothing in the protocol lets it tell an
+agent what to run, which is the same reason a target address lives in the agent's
+own config rather than arriving over the wire.
+
 ## The Models page says who holds what
 
 Each model row names the servers currently serving it — `qwen3.8-27b` reads
