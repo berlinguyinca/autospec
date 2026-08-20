@@ -347,10 +347,10 @@ capacity, name logical slots rather than hardware: `cluster-alice-01`, not
 the agent reports the card it actually sees. Concurrent allocations require
 distinct ids and credentials because two live agents may not claim one name.
 
-The generic agent and gateway behavior below are implemented. The adapter that
-starts and stops that agent with each Slurm allocation and the nginx
+The generic agent and gateway behavior below are implemented. The nginx
 `/api/servers/` management-prefix route needed for new enrolment and promotion
-are approved but still pending.
+is also in place. The adapter that starts and stops that agent with each Slurm
+allocation is approved but still pending.
 
 A Slurm allocation runs the agent **inside the serving job**, beside a runtime
 bound to compute-node loopback:

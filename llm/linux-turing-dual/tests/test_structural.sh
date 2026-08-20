@@ -459,6 +459,18 @@ else
   ok "every path the gateway owns has an nginx route to the gateway"
 fi
 
+# The collection route above is exact-only, but enrolment and management actions
+# live below /api/servers/. They must reach the gateway too, with the same
+# forwarded headers as the collection endpoint.
+server_prefix=$(awk '/location \^~ \/api\/servers\//,/^    }/' "${NODE}/nginx/qwen-turing.conf")
+if ! printf '%s' "$server_prefix" | grep -q 'proxy_pass http://qwen_gateway' \
+  || ! printf '%s' "$server_prefix" | grep -q 'proxy_set_header Host \$host' \
+  || ! printf '%s' "$server_prefix" | grep -q 'proxy_set_header X-Forwarded-Proto \$scheme'; then
+  bad "nginx does not route the whole /api/servers/ management prefix to the gateway"
+else
+  ok "nginx routes the whole /api/servers/ management prefix to the gateway"
+fi
+
 # --- a streaming location must clear Connection -----------------------------
 # The qwen_gateway upstream declares `keepalive`, and nginx reuses a connection
 # only when the hop-by-hop Connection header is cleared. On a STREAMING response
