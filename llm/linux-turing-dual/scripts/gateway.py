@@ -245,6 +245,13 @@ def _load_registry() -> None:
                          f"one: {exc}\n")
         return
     UPSTREAMS = found
+    # Credentials for dashboard-attached servers arrive the same way as file ones,
+    # into the same map, so the relay never asks which route a key came by.
+    if STORE is not None:
+        try:
+            UP_KEYS.update(STORE.upstream_keys())
+        except Exception as exc:
+            sys.stderr.write(f"attached-server keys unavailable: {exc}\n")
     for u in found:
         if u.key_file and u.id not in UP_KEYS:
             try:
@@ -350,13 +357,19 @@ def _probe_tunnel(server_id: str) -> None:
 
 
 def _probe_when_ready(server_id: str, tries: int = 10) -> None:
-    """Probe as soon as the agent has offered a pipe.
+    """Probe as soon as the agent has a pipe to SPARE.
 
-    Called when a server says hello, which happens BEFORE its pipes arrive -- so
-    this waits for one rather than probing into an empty pool and giving up.
+    Called when a server says hello, which happens before its pipes arrive, so
+    this waits rather than probing into an empty pool.
+
+    It requires a spare -- more than one idle pipe -- because a model list is
+    telemetry and a request is not. Taking the last pipe for a poll would make a
+    real request wait for one, and this whole probe is only an optimisation: the
+    30 s timer asks the same question anyway. That rule also made the tests
+    deterministic, which is how the race was noticed at all.
     """
     for _ in range(tries):
-        if POOL.idle(server_id) > 0:
+        if POOL.idle(server_id) > 1:
             try:
                 _probe_tunnel(server_id)
             except Exception as exc:
@@ -393,6 +406,19 @@ def _poll_upstreams() -> None:
             r = conn.getresponse()
             body = r.read()
             conn.close()
+            if r.status in (401, 403):
+                # It is answering, so it is not offline -- it is refusing US. A
+                # server registered from the dashboard cannot carry a credential
+                # yet (only a registry-file entry can, via key_file), and without
+                # this the symptom is a server that looks online, reports no
+                # models, and is quietly ineligible forever.
+                UP_STATE[u.id] = {
+                    "state": "online", "models": [],
+                    "error": (f"this server wants a credential (HTTP {r.status}); "
+                              f"register it in the registry file with a key_file, "
+                              f"or bind it to loopback and attach it with the agent"),
+                    "last_seen": time.time(), "authenticated": False}
+                continue
             if r.status != 200:
                 raise RuntimeError(f"HTTP {r.status}")
             data = json.loads(body).get("data") or []
@@ -525,6 +551,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-turing-gateway"
     protocol_version = "HTTP/1.1"
     _auth_key_id = None
+    _auth_sub = None
     _auto_choice = None
     _route_why = None
     _route_est = None
@@ -909,6 +936,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": None, "last_seen": None}
             row = u.public()
             row["owner_name"] = names.get(u.owner)
+            # WHETHER a key is held, never the key. A dialled server with one is
+            # not the configuration fault an unauthenticated one is.
+            row["needs_key"] = row.get("needs_key") or bool(UP_KEYS.get(u.id))
             row.update(state=st.get("state", "unknown"), models=st.get("models") or [],
                        error=st.get("error"), last_seen=st.get("last_seen"),
                        # The path a client points at, so the page never has to
@@ -987,7 +1017,8 @@ class Handler(BaseHTTPRequestHandler):
                 session["sub"], server_id, kind=kind,
                 base_url=(body.get("base_url") or "").strip() or None,
                 note=(body.get("note") or "").strip()[:120] or None,
-                gpus=(body.get("gpus") or "").strip()[:120] or None)
+                gpus=(body.get("gpus") or "").strip()[:120] or None,
+                api_key=(body.get("api_key") or "").strip() or None)
         except ValueError as exc:
             return self._err(400, str(exc), "invalid_request")
         host = CFG.public_fqdn or "<this-node>"
@@ -1558,11 +1589,24 @@ class Handler(BaseHTTPRequestHandler):
                           and not by_id[s].pool_member]
             offline = [s for s in where if s not in unpromoted]
             if unpromoted:
-                pins = ", ".join(f"/u/{s}/v1" for s in unpromoted)
-                self._err(404, f"{model} is served by {', '.join(unpromoted)}, "
-                               f"which is not in the balanced pool -- reach it "
-                               f"directly at {pins}, or ask an administrator to "
-                               f"add it", "model_not_in_pool")
+                # The pin path is told only to the servers' OWNER. Handing a
+                # stranger the address of somebody's unvetted machine is exactly
+                # what admin-gated promotion exists to prevent -- they would be
+                # sending their prompts to hardware nobody has vetted.
+                mine = [s for s in unpromoted
+                        if by_id.get(s) is not None
+                        and by_id[s].owner
+                        and by_id[s].owner == getattr(self, "_auth_sub", None)]
+                if mine:
+                    pins = ", ".join(f"/u/{s}/v1" for s in mine)
+                    self._err(404, f"{model} is served by {', '.join(mine)}, "
+                                   f"which is not in the balanced pool -- your "
+                                   f"own server, so reach it directly at {pins}, "
+                                   f"or ask an administrator to add it",
+                              "model_not_in_pool")
+                else:
+                    self._err(404, f"no server in the balanced pool serves "
+                                   f"{model}", "model_not_in_pool")
             elif offline:
                 self._err(503, f"{model} is served by "
                                f"{', '.join(offline)}, which is not answering",
@@ -1613,6 +1657,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._refuse_key()
 
         self._auth_key_id = row.key_id
+        # Whose key this is, so a refusal can tell an owner about their own
+        # server without telling everyone else about it.
+        self._auth_sub = row.sub
         self._route_path = None
         plan = self._plan(remote)
         if plan is ANSWERED:

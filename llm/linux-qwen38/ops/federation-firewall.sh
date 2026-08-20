@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+#
+# SUPERSEDED FOR THIS FLEET, 2026-08-20. This script exists for a server the node
+# DIALS: it restricts an inference port to the node's address, and that rule is
+# then the only thing protecting an unauthenticated port. The workstation no
+# longer needs it -- it runs the agent, dials out, and its port is bound to
+# loopback, so there is nothing on the network to restrict.
+#
+# Kept because a `static` server is still a supported kind and still needs this.
+# But if you are here to "fix federation" by re-exposing a port, prefer the agent:
+# see llm/agent/README.md. Re-adding an accept rule for a box that has an agent
+# would undo the acceptance criterion of the tunnel design.
 # Restrict this node's inference port to the hosts allowed to federate with it.
 #
 # WHY THIS EXISTS

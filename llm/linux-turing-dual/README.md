@@ -173,6 +173,12 @@ is now bound to loopback with its firewall exception deleted, because nothing
 needs to reach it any more.
 See [the design](../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md).
 
+A **dialled** server may carry the credential it demands, given at attach time
+and stored on the node — reported as *held*, never returned. A **tunnelled** one
+cannot, and that is not a gap: a pipe carries bytes verbatim, so the agent would
+have to rewrite the request head to add a header. Bind that target to loopback
+instead; nothing can reach it, which is stronger than a key.
+
 Attaching is self-service for anyone who can sign in. Joining the **balanced**
 pool is an admin action, because a registered server declares its own model ids —
 attaching your own box is cheap, being inserted into everyone's default route is

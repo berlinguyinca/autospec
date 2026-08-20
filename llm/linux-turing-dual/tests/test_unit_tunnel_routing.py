@@ -240,6 +240,26 @@ def test_an_unpromoted_server_is_not_in_the_default_route_but_a_pin_reaches_it(f
     assert len(target.seen) == 1
 
 
+def test_a_stranger_is_not_told_where_to_find_someone_else_s_server(fleet):
+    """The pin path is a hint for the OWNER. Handing it to everyone would send
+    their prompts to unvetted hardware, which is the harm admin-gated promotion
+    exists to prevent."""
+    srv, store, agent, target, runtime, key = fleet
+    probe(agent, target)
+    offer(agent, target)
+    store.upsert_user("sub-b", email="b@example.org", name="B")
+    other, _ = store.mint("sub-b", label="theirs")
+
+    _s, _t, _w, _e, body = infer(srv, other, REMOTE_ONLY)
+    msg = json.loads(body)["error"]["message"]
+    assert "/u/box/v1" not in msg and "box" not in msg
+    assert "balanced pool" in msg
+
+    # The owner still gets the actionable version.
+    _s, _t, _w, _e, body = infer(srv, key, REMOTE_ONLY)
+    assert "/u/box/v1" in json.loads(body)["error"]["message"]
+
+
 def test_promotion_admits_it_to_the_default_route(fleet):
     srv, store, agent, target, runtime, key = fleet
     probe(agent, target)

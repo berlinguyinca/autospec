@@ -344,6 +344,39 @@ def test_the_model_list_comes_from_the_server_itself(node):
     agent.stop()
 
 
+def test_a_dialled_server_that_wants_a_credential_says_so(node):
+    """It is answering, so it is not offline -- it is refusing US. Without this it
+    sat `online` with an empty model list, permanently ineligible, and the panel
+    offered no reason at all."""
+    srv, store, _ = node
+
+    class Refuser(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    ref = ThreadingHTTPServer(("127.0.0.1", 0), Refuser)
+    threading.Thread(target=ref.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+    try:
+        attach(srv, session("sub-a"), "keyed", kind="static",
+               base_url=f"http://127.0.0.1:{ref.server_address[1]}/v1")
+        gw._poll_upstreams()
+        st = gw.UP_STATE["keyed"]
+        assert st["state"] == "online" and st["models"] == []
+        assert "credential" in st["error"] and "401" in st["error"]
+        # And it says what to do about it, rather than only what happened.
+        assert "key_file" in st["error"] or "loopback" in st["error"]
+    finally:
+        ref.shutdown()
+
+
 # --- promotion and detaching ------------------------------------------------
 
 def test_promotion_needs_an_admin(node):

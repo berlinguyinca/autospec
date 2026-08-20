@@ -171,6 +171,63 @@ def test_an_unknown_kind_is_refused(store):
         store.enrol_token("sub-a", "box", kind="file")
 
 
+def test_a_dialled_server_may_carry_the_key_it_demands(store):
+    """Otherwise the dashboard path is strictly weaker than the registry file for
+    the one kind of server that needs a credential -- and the symptom is a server
+    that looks online, reports its models, and then 401s on the first request."""
+    tok = store.enrol_token("sub-a", "keyed", kind="static",
+                            base_url="http://box.invalid:8000/v1", api_key="sk-abc")
+    store.redeem_token(tok)
+    assert store.upstream_keys() == {"keyed": "sk-abc"}
+    row = [r for r in store.servers() if r["server_id"] == "keyed"][0]
+    # Whether a key is held, never the key.
+    assert row["has_key"] is True
+    assert "sk-abc" not in str(store.servers())
+
+
+def test_a_tunnelled_server_may_not_carry_a_key(store):
+    """Not an oversight to be worked around: the pipe is an opaque byte stream, so
+    the agent would have to parse and rewrite the request head to add a header.
+    Binding the target to loopback is the answer, and it is stronger."""
+    with pytest.raises(ValueError) as exc:
+        store.enrol_token("sub-a", "box", api_key="sk-abc")
+    assert "loopback" in str(exc.value)
+    assert store.enrol_token("sub-a", "box").startswith("qte_")
+
+
+def test_revoking_a_server_withdraws_its_upstream_key(store):
+    tok = store.enrol_token("sub-a", "keyed", kind="static",
+                            base_url="http://box.invalid:8000/v1", api_key="sk-abc")
+    store.redeem_token(tok)
+    store.revoke_server("keyed", sub="sub-a")
+    assert store.upstream_keys() == {}
+
+
+def test_the_upstream_key_column_is_added_to_an_older_database(tmp_path):
+    """A node upgraded in place has the table already, and CREATE TABLE IF NOT
+    EXISTS does not add a column to it."""
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE servers (server_id TEXT PRIMARY KEY, sub TEXT, kind TEXT "
+        "NOT NULL, base_url TEXT, note TEXT, gpus TEXT, priority INTEGER NOT NULL "
+        "DEFAULT 0, pool_member INTEGER NOT NULL DEFAULT 0, secret_hash TEXT, "
+        "created_at TEXT NOT NULL, revoked_at TEXT, last_seen TEXT);")
+    con.commit()
+    con.close()
+    older = ks.KeyStore(path, dsn=None)
+    older.migrate_local()
+    with older._conn() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(servers)")}
+    assert "upstream_key" in cols
+    older.upsert_user("sub-a", email="a@example.org", name="A")
+    tok = older.enrol_token("sub-a", "keyed", kind="static",
+                            base_url="http://b.invalid/v1", api_key="sk-x")
+    assert older.redeem_token(tok) is not None
+    assert older.upstream_keys() == {"keyed": "sk-x"}
+
+
 # --- the pool and the tier --------------------------------------------------
 
 def test_a_new_server_is_not_in_the_default_pool(store):

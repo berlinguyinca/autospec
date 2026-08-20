@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS servers (
   priority     INTEGER NOT NULL DEFAULT 0,
   pool_member  INTEGER NOT NULL DEFAULT 0,
   secret_hash  TEXT,                          -- NULL for a file entry
+  -- The credential the NODE presents to a dialled server, when that server wants
+  -- one. A secret at rest in this mirror, which is why the file is 0600 and why
+  -- as_public() never returns it. A tunnelled server cannot use this: its pipe is
+  -- an opaque byte stream and the agent will not rewrite a request head.
+  upstream_key TEXT,
   created_at   TEXT NOT NULL,
   revoked_at   TEXT,
   last_seen    TEXT
@@ -106,6 +111,7 @@ CREATE TABLE IF NOT EXISTS enrol_tokens (
   note         TEXT,
   gpus         TEXT,
   secret_hash  TEXT NOT NULL,
+  upstream_key TEXT,
   created_at   TEXT NOT NULL,
   expires_at   TEXT NOT NULL,
   used_at      TEXT
@@ -156,6 +162,7 @@ class ServerRow:
     gpus: str | None = None
     priority: int = 0
     pool_member: bool = False
+    upstream_key: str | None = None
     created_at: str = ""
     revoked_at: str | None = None
     last_seen: str | None = None
@@ -165,6 +172,7 @@ class ServerRow:
         server no address either -- there is none, and inventing a field for it
         would invite someone to fill it in."""
         return {"server_id": self.server_id, "sub": self.sub, "kind": self.kind,
+                "has_key": bool(self.upstream_key),
                 "base_url": self.base_url if self.kind != "tunnel" else None,
                 "note": self.note, "gpus": self.gpus, "priority": self.priority,
                 "pool_member": self.pool_member, "created_at": self.created_at,
@@ -190,6 +198,15 @@ class KeyStore:
     def migrate_local(self) -> None:
         with self._lock, self._conn() as c:
             c.executescript(_SCHEMA)
+            # CREATE TABLE IF NOT EXISTS does not add a column to a table that
+            # already exists, so a node upgraded in place needs this. Guarded by
+            # what is actually there rather than by a version number, because a
+            # version number is a second thing to keep true.
+            for table in ("servers", "enrol_tokens"):
+                have = {r["name"] for r in
+                        c.execute(f"PRAGMA table_info({table})")}
+                if have and "upstream_key" not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN upstream_key TEXT")
 
     # --- users -------------------------------------------------------------
     def upsert_user(self, sub: str, email: str | None = None,
@@ -582,7 +599,8 @@ class KeyStore:
 
     def enrol_token(self, sub: str, server_id: str, *, kind: str = "tunnel",
                     base_url: str | None = None, note: str | None = None,
-                    gpus: str | None = None, now: float | None = None) -> str:
+                    gpus: str | None = None, api_key: str | None = None,
+                    now: float | None = None) -> str:
         """A single-use token for attaching one server. Shown once.
 
         A static server needs an address up front, because the node dials it; a
@@ -598,14 +616,22 @@ class KeyStore:
                              "http:// or https://")
         if kind == "tunnel" and base_url:
             raise ValueError("a tunnelled server has no address of its own")
+        if kind == "tunnel" and api_key:
+            # Not an oversight to be worked around: a pipe carries bytes
+            # verbatim, so the agent would have to parse and rewrite the request
+            # head to add a header. Bind the target to loopback instead -- nothing
+            # can reach it, which is stronger than a key.
+            raise ValueError("a tunnelled server cannot present a key; bind its "
+                             "target to loopback instead")
         self._validate_server_id(server_id)
         full, token_id, secret_hash = _keys.generate(_keys.PREFIX_ENROL)
         with self._lock, self._conn() as c:
             c.execute("INSERT INTO enrol_tokens (token_id, server_id, sub, kind, "
-                      "base_url, note, gpus, secret_hash, created_at, expires_at) "
-                      "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      "base_url, note, gpus, secret_hash, upstream_key, "
+                      "created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                       (token_id, server_id, sub, kind, base_url, note, gpus,
-                       secret_hash, _iso(at), _iso(at + ENROL_TTL_SECONDS)))
+                       secret_hash, api_key or None, _iso(at),
+                       _iso(at + ENROL_TTL_SECONDS)))
         return full
 
     def redeem_token(self, token: str, *,
@@ -647,10 +673,11 @@ class KeyStore:
             c.execute("DELETE FROM servers WHERE server_id=? "
                       "AND revoked_at IS NOT NULL", (row["server_id"],))
             c.execute("INSERT INTO servers (server_id, sub, kind, base_url, note, "
-                      "gpus, priority, pool_member, secret_hash, created_at) "
-                      "VALUES (?,?,?,?,?,?,0,0,?,?)",
+                      "gpus, priority, pool_member, secret_hash, upstream_key, "
+                      "created_at) VALUES (?,?,?,?,?,?,0,0,?,?,?)",
                       (row["server_id"], row["sub"], row["kind"], row["base_url"],
-                       row["note"], row["gpus"], secret_hash, _iso(at)))
+                       row["note"], row["gpus"], secret_hash,
+                       row["upstream_key"], _iso(at)))
         return row["server_id"], full
 
     def authenticate_server(self, presented: str,
@@ -675,6 +702,8 @@ class KeyStore:
                          base_url=r["base_url"], note=r["note"], gpus=r["gpus"],
                          priority=r["priority"],
                          pool_member=bool(r["pool_member"]),
+                         upstream_key=(r["upstream_key"]
+                                       if "upstream_key" in r.keys() else None),
                          created_at=r["created_at"], revoked_at=r["revoked_at"],
                          last_seen=r["last_seen"])
 
@@ -698,6 +727,20 @@ class KeyStore:
         with self._lock, self._conn() as c:
             rows = c.execute(q + " ORDER BY server_id", args).fetchall()
         return [self._server_row(r).as_public() for r in rows]
+
+    def upstream_keys(self) -> dict:
+        """server_id -> the credential this node presents to it.
+
+        Deliberately NOT part of as_public() or any payload: it is a secret the
+        owner entrusted to this node for their own server, and the panel has no
+        use for it. Read on the registry timer into the same map the registry file
+        feeds, so the relay does not care which way a key arrived.
+        """
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT server_id, upstream_key FROM servers "
+                             "WHERE upstream_key IS NOT NULL "
+                             "AND revoked_at IS NULL").fetchall()
+        return {r["server_id"]: r["upstream_key"] for r in rows}
 
     def set_pool_member(self, server_id: str, value: bool) -> bool:
         return self._update_server(server_id, "pool_member", 1 if value else 0)

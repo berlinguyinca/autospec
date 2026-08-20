@@ -42,6 +42,13 @@ Any OpenAI-compatible server works: llama.cpp, vLLM, Ollama, LM Studio, TGI, MLX
 llama.cpp is the one that is tested. The node asks the target itself what models
 it serves, so nothing depends on a naming convention.
 
+**The target must accept unauthenticated connections from this machine.** A pipe
+carries bytes verbatim, so the agent cannot add an `Authorization` header without
+parsing and rewriting the request head — which is the one thing it refuses to do.
+That is not a gap to work around: bind the target to loopback instead of putting a
+key on it. Nothing else can reach it, which is stronger than a key anyway, and it
+is why `vllm --api-key …` should simply be left off.
+
 ## Supervision
 
 `install` writes the right file for the platform it is running on and prints the
