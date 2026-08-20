@@ -272,6 +272,70 @@ else
   ok "the new-key reveal is rendered by the panel that owns it"
 fi
 
+# --- the agent endpoints, and the invariant that keeps them safe ------------
+conf="${NODE}/nginx/qwen-turing.conf"
+agent_block="$(awk '/location \^~ \/api\/agent\//,/^    }/' "$conf")"
+if [ -z "$agent_block" ]; then
+  bad "nginx has no /api/agent/ location, so no server could ever attach"
+elif ! printf '%s' "$agent_block" | grep -q "proxy_pass http://qwen_gateway"; then
+  # The dashboard has no idea what a server credential is; sending agent traffic
+  # there would fail in a way that looks like a protocol bug.
+  bad "nginx must proxy /api/agent/ to the gateway, not the dashboard"
+elif ! printf '%s' "$agent_block" | grep -q 'proxy_set_header Upgrade'; then
+  bad "nginx must pass the Upgrade header on /api/agent/, or no WebSocket forms"
+else
+  ok "nginx routes the agent endpoints to the gateway with an upgrade"
+fi
+
+# The idle-pipe keepalive must stay INSIDE nginx's read timeout, or a pipe that
+# sits unused dies and the first request after a quiet hour fails on a reset.
+# Both numbers are parsed rather than asserted as literals, so editing either one
+# is caught instead of the pair drifting apart.
+ka="$(sed -n 's/^PIPE_KEEPALIVE_SECONDS *= *\([0-9]*\).*/\1/p' "${NODE}/scripts/gateway.py")"
+rt="$(printf '%s' "$agent_block" | sed -n 's/.*proxy_read_timeout *\([0-9]*\)s.*/\1/p' | head -1)"
+if [ -z "$ka" ] || [ -z "$rt" ]; then
+  bad "could not read the pipe keepalive ($ka) or nginx read timeout ($rt)"
+elif [ "$ka" -ge "$rt" ]; then
+  bad "pipe keepalive ${ka}s must be well inside nginx's ${rt}s read timeout"
+else
+  ok "idle pipes are pinged (${ka}s) inside nginx's read timeout (${rt}s)"
+fi
+
+# THE NODE NEVER TELLS AN AGENT WHERE TO CONNECT. The agent's target comes from
+# its own config file, so a compromised node cannot turn every attached agent
+# into a port scanner inside its owner's network. The mechanism is that the node
+# sends no text frames at all on the control connection -- only ping, pong and
+# close -- so this asserts exactly that.
+# Matching the WRITE, not any mention: the control loop legitimately READS text
+# frames (that is how a server describes itself), and a grep for OP_TEXT alone
+# flagged that -- a check that fails on correct code gets deleted, not fixed.
+if grep -Eq "encode\(_ws\.OP_TEXT|encode\(OP_TEXT" "${NODE}/scripts/gateway.py"; then
+  bad "the gateway sends a text frame to an agent; it must send it no instructions"
+else
+  ok "the node sends an agent no instructions, so it cannot name a destination"
+fi
+
+# --- the agent builds everywhere, with nothing beside it -------------------
+# Skipped rather than failed when Go is absent: this suite must stay runnable on
+# a node that only serves inference. CI has Go and therefore runs it.
+agent="$(dirname "${NODE}")/agent"
+if [ ! -f "${agent}/go.mod" ]; then
+  bad "the agent source is missing"
+elif ! command -v go >/dev/null 2>&1; then
+  ok "agent build skipped (no Go toolchain here)"
+elif ! (cd "$agent" && go vet ./... >/dev/null 2>&1); then
+  bad "go vet fails in the agent"
+elif grep -Eq "^[[:space:]]*require" "${agent}/go.mod"; then
+  # Read from go.mod rather than from `go list -m all`: an UNRESOLVED require
+  # makes go list fail, so its output is empty -- and an empty list read as "no
+  # dependencies". The manifest cannot lie that way, and this works without a
+  # toolchain at all. One dependency is all it takes to stop being a single file
+  # you can copy onto a machine.
+  bad "the agent has grown a dependency; it must be standard library only"
+else
+  ok "the agent vets clean with no dependencies"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 

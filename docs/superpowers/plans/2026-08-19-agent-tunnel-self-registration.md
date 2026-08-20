@@ -984,7 +984,9 @@ for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64 darwin/amd64; do
     go build -trimpath -ldflags="-s -w" -o "dist/qwen-turing-agent-${t%/*}-${t#*/}${ext}" .
 done
 ```
-Measured baseline for the size assertion: 3.3–3.6 MB per target.
+Measured baseline for the size assertion: **5.6–6.2 MB** per target for the
+finished agent. (The 3.3–3.6 MB in the spec was a probe that imported less than
+the real thing needs; corrected there.)
 
 - [ ] **Step 2: `install` writes the right supervision file for the host OS** and prints it, including the `icacls` line on Windows — where the credential gets no DPAPI, which the README states plainly rather than implying otherwise.
 - [ ] **Step 3: CI runs `go vet`, `go test`, and the cross-build** (no GPU, seconds).

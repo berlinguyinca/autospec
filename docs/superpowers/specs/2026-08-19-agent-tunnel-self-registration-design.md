@@ -258,15 +258,23 @@ toolchain, and `go list -m all` reporting no dependency beyond the main module:
 
 | target | stripped size |
 |---|---|
-| linux/amd64 | 3412 KB |
-| linux/arm64 | 3264 KB |
-| windows/amd64 | 3561 KB |
-| darwin/arm64 | 3299 KB |
-| darwin/amd64 | 3522 KB |
+| linux/amd64 | 6080 KB |
+| linux/arm64 | 5632 KB |
+| windows/amd64 | 6229 KB |
+| darwin/arm64 | 5746 KB |
+| darwin/amd64 | 6197 KB |
 
-Built with `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`. Around 3.4 MB
-including a TLS stack, which is the whole point: one file to copy, nothing to
-install beside it.
+Built with `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`. Around 6 MB
+including a TLS stack, which is the point: one file to copy, nothing to install
+beside it.
+
+**Corrected after building the real thing.** The figures first recorded here were
+3.3–3.6 MB, from a probe that imported the packages this design expected to
+need. The finished agent also pulls in `net/http` for enrolment and the upgrade
+handshake, and `encoding/json` for its config and its `hello`, which is where the
+other ~2.5 MB comes from. Still one file with no dependencies; the number was
+simply wrong and is worth correcting rather than leaving as the version somebody
+quotes.
 
 The WebSocket client is written against RFC 6455 directly (~150 lines: the
 Upgrade handshake, client-side masking, ping/pong, close) rather than pulled in as
