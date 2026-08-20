@@ -161,6 +161,11 @@ being reconfigured, which is the only way a default can mean anything.
 Registration is one entry in `/etc/qwen-turing/upstreams.yaml` — see
 [`config/upstreams.yaml.example`](config/upstreams.yaml.example).
 
+A second way to join is being built: a server runs a small native agent, dials
+**out** to `wss://<node-host>/api/agent/…` and holds connections open that this
+node invokes inference over — so the box needs no inbound port and no edit here.
+See [the design](../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md).
+
 Balancing applies **only** to the endpoints that name a model — `chat/completions`,
 `completions`, `embeddings`, `rerank`. `/health`, `/slots`, `/metrics` and
 `/props` describe *this* box, so answering them from another machine would report
