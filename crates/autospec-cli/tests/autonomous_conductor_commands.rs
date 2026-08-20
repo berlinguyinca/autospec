@@ -744,6 +744,36 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
 }
 
 #[test]
+fn fresh_selection_retires_stale_claim_receipt_before_persisting_new_generation() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().expect("state parent"))
+        .expect("create state directory");
+    fixture.seed_claim_acquisition_receipt_for_issue(
+        41,
+        "stale-worker",
+        "feat/autonomous-issue-41",
+        "stale-claim-41",
+    );
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = fs::read_to_string(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json"),
+    )
+    .expect("read replacement claim receipt");
+    assert!(receipt.contains("\"issue\":42"), "{receipt}");
+    assert!(!receipt.contains("stale-claim-41"), "{receipt}");
+}
+
+#[test]
 fn foreground_closed_selected_issue_retires_before_receipt_recovery() {
     let fixture = ForegroundFixture::new();
     assert!(fixture.run_foreground().status.success());
@@ -6957,6 +6987,16 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn seed_claim_acquisition_receipt(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        self.seed_claim_acquisition_receipt_for_issue(42, worker_id, branch, claim_id);
+    }
+
+    fn seed_claim_acquisition_receipt_for_issue(
+        &self,
+        issue: u64,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) {
         let path = self.state_path().with_extension("claim-acquisition.json");
         fs::set_permissions(
             path.parent().expect("receipt parent"),
@@ -6966,8 +7006,8 @@ printf '%s\n' '[]' > "$report"
         fs::write(
             &path,
             format!(
-                "{{\"schema\":1,\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":{:?},\"branch\":{:?},\"claim_id\":{:?}}}\n",
-                worker_id, branch, claim_id
+                "{{\"schema\":1,\"repo\":\"test/repo\",\"issue\":{issue},\"worker_id\":{:?},\"branch\":{:?},\"claim_id\":{:?}}}\n",
+                worker_id, branch, claim_id,
             ),
         )
         .expect("seed claim acquisition receipt");
