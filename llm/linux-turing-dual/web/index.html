@@ -1183,7 +1183,18 @@ async function sendTurn(text){
       return;
     }
     const where = r.headers.get('X-Routed-To');
-    if(where) $('chatwhere').textContent = 'served by ' + where;
+    const waited = r.headers.get('X-Queued-Seconds');
+    if(where) $('chatwhere').textContent = 'served by ' + where +
+      (waited ? ' · held ' + waited + 's for a seat' : '');
+    // Reported separately: a response with no readable body is a different fault
+    // from a stream that broke mid-flight, and the generic message below used to
+    // make them indistinguishable.
+    if(!r.body){
+      $('chatnote').textContent = 'The node answered with no readable body ' +
+        '(content-type ' + (r.headers.get('Content-Type') || 'unset') + ').';
+      drawChat();
+      return;
+    }
     reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -1212,7 +1223,16 @@ async function sendTurn(text){
     if(ctl.signal.aborted){
       $('chatnote').textContent = 'Stopped.';
     }else{
-      $('chatnote').textContent = 'The node stopped answering.';
+      // SAY WHAT HAPPENED. The previous message was "The node stopped
+      // answering." for every possible fault, which threw away the only evidence
+      // there was: the node's own logs showed a 200 and nginx showed the browser
+      // hanging up, and nothing on this side could say why. A diagnostic that
+      // discards the diagnosis is worse than no diagnostic.
+      $('chatnote').textContent = 'The stream failed: ' +
+        (e && e.name ? e.name : 'Error') +
+        (e && e.message ? ' — ' + e.message : '') +
+        '. Sent ' + reply.content.length + ' characters before it stopped.';
+      if(window.console) console.error('chat stream failed', e);
     }
   }finally{
     // A reader that is abandoned holds the connection open exactly as an unread

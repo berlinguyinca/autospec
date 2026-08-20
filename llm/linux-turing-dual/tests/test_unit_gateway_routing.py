@@ -835,3 +835,100 @@ def test_a_lease_is_returned_even_when_the_upstream_fails(fleet):
     assert status in (502, 503)
     assert pool.used == 0, "the reservation must have been released"
     gw.POOL_SIZES.pop(MODEL_LOCAL, None)
+
+
+# --- the chat panel over a REAL stream --------------------------------------
+# The existing chat tests use a stand-in that answers with one JSON object, so
+# the streaming path -- which is what the panel actually uses, since /api/chat
+# sets stream:true -- was never exercised end to end.
+
+class _Streamer(BaseHTTPRequestHandler):
+    """An upstream that answers in SSE, the way llama.cpp does."""
+    protocol_version = "HTTP/1.1"
+
+    CHUNKS = [
+        # The first delta llama.cpp sends carries content: NULL, not a string.
+        '{"choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}',
+        '{"choices":[{"index":0,"delta":{"content":"Hel"}}]}',
+        '{"choices":[{"index":0,"delta":{"content":"lo"}}]}',
+        '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":3,"completion_tokens":2}}',
+    ]
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.server.seen.append({"path": self.path, "body": self.rfile.read(n)})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for c in self.CHUNKS:
+            body = ("data: " + c + "\n\n").encode()
+            self.wfile.write(b"%x\r\n" % len(body) + body + b"\r\n")
+            self.wfile.flush()
+        tail = b"data: [DONE]\n\n"
+        self.wfile.write(b"%x\r\n" % len(tail) + tail + b"\r\n")
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def streaming_node(tmp_path):
+    from keystore import KeyStore
+    up = ThreadingHTTPServer(("127.0.0.1", 0), _Streamer)
+    up.seen = []
+    threading.Thread(target=up.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+
+    store = KeyStore(str(tmp_path / "m.sqlite3"), dsn=None)
+    store.migrate_local()
+    store.upsert_user("sub-a", email="a@example.org", name="a")
+    gw.STORE = store
+    gw.CFG.user_group = "*"
+    gw.CFG.upstream_host = "127.0.0.1"
+    gw.CFG.upstream_port = up.server_address[1]
+    gw.UPSTREAMS = gw._ups.load("upstreams: []")
+    gw.UP_STATE.clear()
+    gw.LOCAL_STATE.update(state="online", models=[MODEL_LOCAL], error=None,
+                          last_seen=time.time())
+    gw.LAST_SERVER.clear()
+    gw.POOL_SIZES.clear()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), gw.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+    yield srv, up
+    srv.shutdown()
+    up.shutdown()
+
+
+def test_a_chat_turn_streams_all_of_its_deltas_to_the_browser(streaming_node):
+    """What the panel actually does. /api/chat sets stream:true, so the response
+    is SSE -- and the page reads it as it arrives. If the relay mangles the
+    framing, the browser sees a broken stream and reports a dead node."""
+    srv, up = streaming_node
+    sid = _sid("sub-a")
+    status, _routed, body = chat_post(srv, sid, {
+        "model": MODEL_LOCAL, "messages": [{"role": "user", "content": "hello?"}]})
+    assert status == 200
+    text = body.decode()
+    assert "data: " in text, "no SSE reached the client"
+    assert '"Hel"' in text and '"lo"' in text, text[:300]
+    assert "[DONE]" in text
+    # The upstream must have been asked to stream, or the panel would be reading
+    # a single blob and showing nothing until the end.
+    sent = json.loads(up.seen[-1]["body"])
+    assert sent["stream"] is True
+
+
+def test_the_first_delta_carrying_a_null_content_is_not_fatal(streaming_node):
+    """llama.cpp's opening chunk is `content: null`. Measured on this fleet."""
+    srv, up = streaming_node
+    status, _routed, body = chat_post(srv, _sid("sub-a"), {
+        "model": MODEL_LOCAL, "messages": [{"role": "user", "content": "x"}]})
+    assert status == 200
+    assert '"content":null' in body.decode()

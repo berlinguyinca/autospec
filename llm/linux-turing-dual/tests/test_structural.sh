@@ -459,6 +459,34 @@ else
   ok "every path the gateway owns has an nginx route to the gateway"
 fi
 
+# --- a streaming location must clear Connection -----------------------------
+# The qwen_gateway upstream declares `keepalive`, and nginx reuses a connection
+# only when the hop-by-hop Connection header is cleared. On a STREAMING response
+# the difference is fatal rather than cosmetic: /api/chat shipped without it and
+# the browser got headers with no body, reset the stream, and nginx logged 499
+# with zero bytes while the gateway logged a perfectly good 200. Nothing on
+# either side named the cause.
+#
+# Both streaming locations are checked by their own anchor text, because the
+# inference one is a regex location and cannot be matched by the path it serves.
+streamers_bad=""
+# Anchors include the opening brace: without it "location = /api/chat" also
+# matches "/api/chatx", so a renamed location would have passed as present.
+for anchor in "location = /api/chat {" "location ~ ^/(v1|"; do
+  block=$(awk -v a="$anchor" 'index($0, a){inside=1} inside{print} inside && /^    \}/{exit}' \
+          "${NODE}/nginx/qwen-turing.conf")
+  if [ -z "$block" ]; then
+    streamers_bad="${streamers_bad} [missing:${anchor}]"
+  elif ! printf '%s\n' "$block" | grep -q 'proxy_set_header Connection ""'; then
+    streamers_bad="${streamers_bad} [${anchor}]"
+  fi
+done
+if [ -n "$streamers_bad" ]; then
+  bad "a streaming location does not clear Connection for the keepalive upstream:${streamers_bad}"
+else
+  ok "both streaming locations clear Connection for the keepalive upstream"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 
