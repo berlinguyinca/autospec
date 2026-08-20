@@ -566,18 +566,29 @@ asserts that a newly added internal field does not appear publicly.
 
 ### 7.2 Login
 
-The identity pool has no hosted login domain configured; the operator's frontend
-authenticates against it directly. Phase 2 therefore requires, as operator
-action on the pool:
+The operator's frontend authenticates against the pool directly (SRP, with no
+OAuth configuration of its own), so this dashboard needs its own OAuth path. The
+pool-side prerequisites are **already in place** (§0.1); recorded here as the
+requirement an implementer is satisfying, not as work outstanding:
 
-1. A **separate app client** for this dashboard — public, no client secret, PKCE
-   required — leaving the existing frontend's app client untouched.
-2. A hosted login domain on the pool.
-3. A callback URL pointing at this node's `:443` dashboard path. **Ordering
-   constraint: the certificate and the `:443` listener must exist before this
-   app client is created**, or the redirect target does not resolve and login
-   fails in a way that looks like a pool misconfiguration.
+1. A **separate app client** for this dashboard — public, no client secret, PKCE,
+   `COGNITO` as the sole identity provider, and OAuth explicitly enabled for the
+   client. Omitting either the provider list or the enable flag produces an
+   opaque failure that reads like a broken login domain. The existing frontend's
+   app client is untouched.
+2. A hosted login domain. The pool already had one, so no pool-level change was
+   needed — check before proposing one.
+3. A callback URL that **matches the hostname on the TLS certificate**. This is
+   the constraint that actually bites, and it is not about ordering: the client
+   can be registered before the certificate exists, because the redirect target
+   need not resolve at registration time. But a callback on a name the
+   certificate does not cover fails at login, reported as `redirect_mismatch` —
+   which reads like a pool misconfiguration and is not one. The node's public
+   name changed once during this work, and the app client had to be repointed.
 4. The two groups from §2.3, and membership.
+
+Both directions are worth asserting in a smoke test: the registered callback
+redirects to the login page, and an unregistered one is refused.
 
 The gateway performs the authorization-code exchange with PKCE, verifies the
 returned token against cached JWKS, and holds a short server-side session. It
@@ -622,7 +633,10 @@ choice matters beyond cost:
   to the public internet on `:80`; the node is meant to be campus- and
   LAN-scoped, and DNS-01 removes the question entirely.
 - **Renewal is unattended**, through the ACME client's own timer, with a deploy
-  hook that reloads the proxy.
+  hook that reloads the proxy. Verify it with the hooks **actually enabled** — a
+  plain dry-run logs `Dry run: skipping deploy hook command` and proves only the
+  challenge path, so a broken reload hook would pass a "renewal verified" check
+  and then quietly serve an expired certificate until something else reloaded.
 - **Cost is zero.** The zone already exists; the certificate is free.
 
 The credential the node holds for DNS validation is scoped to a single record
