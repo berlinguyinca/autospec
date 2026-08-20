@@ -415,3 +415,123 @@ def test_the_owner_may_detach_and_a_stranger_may_not(node):
     assert gw.POOL.idle("box") == 0
     assert store.authenticate_server(cred) is None
     agent.stop()
+
+
+# --- discovery --------------------------------------------------------------
+
+def test_the_model_list_is_the_fleet_s_union_not_this_node_s(node):
+    """The gap this closes: a client pointed at /v1 could be routed to a remote
+    for a model its own model list had never offered it, and a model that WAS
+    reachable looked unavailable."""
+    srv, store, target = node
+    cred, _ = attach(srv, session("sub-a"))
+    agent = FakeAgent(srv.server_address[1], cred)
+    agent.control("box")
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    assert wait_for(lambda: gw.POOL.idle("box") >= 2)
+    gw._probe_tunnel("box")
+    store.set_pool_member("box", True)
+
+    code, d = call(srv, "GET", "/v1/models")
+    assert code == 200
+    ids = [m["id"] for m in d["data"]]
+    # The remote's models are there...
+    assert "llama-3.3-70b" in ids and "mixtral-8x7b" in ids
+    # ...and it is a union, not a replacement.
+    assert "local-model" in ids or gw.LOCAL_STATE.get("models") == []
+    # No duplicates, and nothing says where a model lives -- that is fleet
+    # composition, and it belongs in the authenticated /api/servers.
+    assert len(ids) == len(set(ids))
+    assert "box" not in json.dumps(d)
+    agent.stop()
+
+
+def test_discovery_needs_no_key(node):
+    """Clients need it before they have one, which is why it was public before
+    this change and stays public after it."""
+    srv, _, _ = node
+    code, d = call(srv, "GET", "/v1/models", https=False)
+    assert code == 200 and isinstance(d.get("data"), list)
+
+
+def test_an_unpromoted_server_s_models_are_not_advertised(node):
+    """Advertising them would promise something /v1 then refuses with a 404."""
+    srv, store, target = node
+    cred, _ = attach(srv, session("sub-a"))
+    agent = FakeAgent(srv.server_address[1], cred)
+    agent.control("box")
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    assert wait_for(lambda: gw.POOL.idle("box") >= 2)
+    gw._probe_tunnel("box")
+
+    ids = [m["id"] for m in call(srv, "GET", "/v1/models")[1]["data"]]
+    assert "llama-3.3-70b" not in ids
+    store.set_pool_member("box", True)
+    ids = [m["id"] for m in call(srv, "GET", "/v1/models")[1]["data"]]
+    assert "llama-3.3-70b" in ids
+    agent.stop()
+
+
+def test_an_offline_server_s_models_are_not_advertised(node):
+    srv, store, target = node
+    cred, _ = attach(srv, session("sub-a"))
+    agent = FakeAgent(srv.server_address[1], cred)
+    agent.control("box")
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    assert wait_for(lambda: gw.POOL.idle("box") >= 2)
+    gw._probe_tunnel("box")
+    store.set_pool_member("box", True)
+    assert "llama-3.3-70b" in [m["id"] for m in call(srv, "GET", "/v1/models")[1]["data"]]
+
+    agent.stop_control()
+    assert wait_for(lambda: (gw.AGENT_STATE.get("box") or {}).get("state") == "offline")
+    assert "llama-3.3-70b" not in [m["id"] for m in
+                                   call(srv, "GET", "/v1/models")[1]["data"]]
+    agent.stop()
+
+
+def test_a_pinned_remote_model_list_is_cleaned_on_the_way_out(node):
+    """llama.cpp's own list carries each child's argv, including the path to its
+    API key file. This node has always stripped its own; relaying someone else's
+    raw was the same disclosure with an extra hop."""
+    srv, store, _ = node
+
+    class Leaky(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            body = json.dumps({"object": "list", "data": [{
+                "id": "leaky-7b", "object": "model",
+                "status": {"value": "loaded",
+                           "args": ["--api-key-file", "/run/secrets/apikey"]}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    leaky = ThreadingHTTPServer(("127.0.0.1", 0), Leaky)
+    threading.Thread(target=leaky.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+    try:
+        attach(srv, session("sub-a"), "leaky", kind="static",
+               base_url=f"http://127.0.0.1:{leaky.server_address[1]}/v1")
+        user, _ = store.mint("sub-a", label="probe")
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+        c.request("GET", "/u/leaky/v1/models", None,
+                  {"Authorization": "Bearer " + user, "X-Forwarded-Proto": "https"})
+        r = c.getresponse()
+        raw = r.read().decode()
+        c.close()
+        assert r.status == 200
+        assert "leaky-7b" in raw
+        assert "apikey" not in raw and "args" not in raw and "status" not in raw
+    finally:
+        leaky.shutdown()

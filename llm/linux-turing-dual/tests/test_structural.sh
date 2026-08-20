@@ -183,6 +183,16 @@ if [ -r "$ngx" ]; then
   grep -qE '^[[:space:]]*location = /models \{ return 403' "$ngx" \
     && ok "nginx: unsanitised /models denied" \
     || bad "nginx must deny /models -- the unsanitised twin of /v1/models"
+
+# Discovery answers with the FLEET's union, which only the gateway can assemble.
+# Pointed at the dashboard it would silently answer with this node's list alone --
+# the exact gap this check exists to keep closed.
+models_block="$(awk '/location = \/v1\/models/,/^    }/' "${NODE}/nginx/qwen-turing.conf")"
+if printf '%s' "$models_block" | grep -q "proxy_pass http://qwen_gateway"; then
+  ok "nginx: /v1/models is answered by the gateway, so it can be the union"
+else
+  bad "nginx must send /v1/models to the gateway; the dashboard knows only this node"
+fi
   grep -q '@inference_no_headers' "$ngx" \
     && ok "nginx: inference has a no-headers fallback" \
     || bad "nginx must fall back when auth_request fails, or a dead dashboard kills inference"

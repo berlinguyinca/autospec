@@ -72,7 +72,10 @@ FLUSH_SECONDS = 30
 
 # Paths this process owns. Everything else is proxied to the runtime.
 OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
-         "/api/stats", "/api/servers", "/api/agent/")
+         "/api/stats", "/api/servers", "/api/agent/",
+         # Discovery is the fleet's union now, so this process owns it: it is the
+         # only one that knows what the other servers serve.
+         "/v1/models")
 # NO SEPARATE POLL INTERVAL. The housekeeper's own period drives the probes, and
 # a second constant beside it was display-only and wrong by 2x -- the Servers
 # panel claimed a 60 s probe while the timer ran every 30. One timer, one number.
@@ -162,6 +165,9 @@ HEARTBEAT_SECONDS = 20          # ping an agent's control connection this often
 HEARTBEAT_GRACE = 10            # and give up on it this long after the last pong
 PIPE_KEEPALIVE_SECONDS = 240    # ping idle pipes, well inside nginx's read timeout
 PIPE_WAIT_SECONDS = 5           # how long a request waits for a free pipe
+# A model list is read whole so it can be cleaned. Bounded because "read whole"
+# and "trust the other end about size" must never be the same sentence.
+MODEL_LIST_MAX = 1 << 20
 # What an agent is asked to keep open. Two slots plus headroom, so a request
 # never pays for a TLS handshake it could have prepaid.
 DEFAULT_PIPES_WANTED = 4
@@ -708,6 +714,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._health()
         if path == "/api/stats":
             return self._stats()
+        if path == "/v1/models":
+            return self._models()
         if path == "/api/servers":
             return self._servers()
         if path == "/api/servers/enrol" and method == "POST":
@@ -970,6 +978,83 @@ class Handler(BaseHTTPRequestHandler):
             # decides nothing: every action re-checks server-side.
             "you": {"sub": who["sub"], "is_admin": who["is_admin"]},
             "routing": dict(ROUTE_WHY)})
+
+    # --- discovery ----------------------------------------------------------
+    def _models(self) -> None:
+        """The models a client pointed at the default route can actually reach.
+
+        THE FLEET'S UNION, not this node's list. Until now this answered with
+        only local models, which was a lie of a specific and confusing kind: a
+        client would be routed to a remote for a model its own model list had
+        never offered it, and a model that WAS reachable looked unavailable.
+
+        Only servers that are online AND in the balanced pool are included,
+        because those are the ones `/v1` will actually use -- listing an
+        unpromoted server's models would produce a 404 for something this
+        endpoint had just advertised.
+
+        Deliberately kept PUBLIC and ids-only for remote entries. Clients
+        genuinely need discovery before they have a key, and naming which server
+        holds what is fleet composition -- that belongs in the authenticated
+        /api/servers, which already reports it.
+        """
+        local, status = self._local_models_payload()
+        data = list(local.get("data") or [])
+        seen = {m.get("id") for m in data if isinstance(m, dict)}
+        # The dashboard owns the sanitiser, but it does not own the FACT. If it is
+        # unreachable, this node's own probe of its runtime still knows what it
+        # serves, and discovery losing local models because a telemetry process
+        # restarted would be the wrong way round.
+        for mid in LOCAL_STATE.get("models") or []:
+            if mid and mid not in seen:
+                seen.add(mid)
+                data.append({"id": mid, "object": "model",
+                             "owned_by": "qwen-turing"})
+        state = _state_view(_servers_all())
+        extra = []
+        for u in _servers_all():
+            if not (u.usable and u.pool_member):
+                continue
+            if (state.get(u.id) or {}).get("state") != "online":
+                continue
+            for mid in (state.get(u.id) or {}).get("models") or []:
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    # The same shape as a local entry, minus anything that would
+                    # say where it lives.
+                    extra.append({"id": mid, "object": "model",
+                                  "owned_by": "qwen-turing"})
+        body = json.dumps({"object": "list", "data": data + extra}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _local_models_payload(self) -> tuple[dict, int]:
+        """This node's list, from the dashboard -- which is where the sanitiser
+        lives. Fetched rather than reimplemented: llama.cpp's own list carries
+        each child's argv, and two copies of that filter is one too many."""
+        try:
+            up = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=10)
+            up.putrequest("GET", "/v1/models", skip_host=True,
+                          skip_accept_encoding=True)
+            up.putheader("Host", f"127.0.0.1:{CFG.dash_port}")
+            if DASHBOARD_KEY:
+                up.putheader("Authorization", f"Bearer {DASHBOARD_KEY}")
+            up.endheaders()
+            r = up.getresponse()
+            raw = r.read()
+            up.close()
+            doc = json.loads(raw) if r.status == 200 else {}
+            return (doc if isinstance(doc, dict) else {}), r.status
+        except Exception as exc:
+            sys.stderr.write(f"local model list unavailable: {exc}\n")
+            # Degrade to the fleet's remote entries rather than to an error: a
+            # client asking what it can reach is better served by a partial answer
+            # than by a 502.
+            return {"object": "list", "data": []}, 200
 
     # --- attaching servers -------------------------------------------------
     def _json_body(self) -> dict:
@@ -1762,6 +1847,23 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._send_upstream_request(up, method, path, host, port, key)
             r = up.getresponse()
+            # A model list is the one response this proxy rewrites, and the only
+            # one it may: it is small, bounded, and carries a disclosure this node
+            # already strips from its own. Everything else streams untouched.
+            if path.split("?", 1)[0].endswith("/v1/models") and r.status == 200:
+                raw = r.read(MODEL_LIST_MAX)
+                clean = self._sanitised_model_list(raw)
+                out = clean if clean is not None else raw
+                self.send_response(200)
+                chosen = getattr(self, "_auto_choice", None)
+                if chosen:
+                    self.send_header("X-Routed-To", chosen)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(out)
+                return r.status, False
             chunked = self._mirror_response_headers(r)
             self._pump(r, acc, chunked)
             # "streamed" means the CLIENT asked for a stream, which the response
@@ -1836,6 +1938,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         return length is None
+
+    _MODEL_FIELDS = ("id", "aliases", "object", "owned_by", "created")
+
+    def _sanitised_model_list(self, body: bytes) -> bytes | None:
+        """A remote's own /v1/models, stripped to the fields a client needs.
+
+        A pinned `/u/<id>/v1/models` relays that server's answer -- and if it runs
+        llama.cpp, that answer carries each child's argv including the path to its
+        API key file. This node has always cleaned its OWN list; relaying someone
+        else's raw was the same disclosure with an extra hop. Returns None when
+        the body is not a model list, in which case it passes through untouched.
+        """
+        try:
+            doc = json.loads(body)
+        except Exception:
+            return None
+        if not isinstance(doc, dict) or not isinstance(doc.get("data"), list):
+            return None
+        out = [{k: m[k] for k in self._MODEL_FIELDS if k in m}
+               for m in doc["data"] if isinstance(m, dict)]
+        return json.dumps({"object": "list", "data": out}).encode()
 
     def _pump(self, r, acc, chunked: bool) -> None:
         """Relay the body downstream, flushing each chunk as it arrives -- that is

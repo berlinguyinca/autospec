@@ -222,7 +222,7 @@ def test_this_machines_own_endpoints_stay_here(fleet):
     """/health, /slots and /metrics describe THIS box. Answering them from
     another machine would report someone else's GPUs as ours."""
     srv, runtime, remote, key = fleet
-    for path in ("/health", "/slots", "/metrics", "/v1/models"):
+    for path in ("/health", "/slots", "/metrics"):
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
         c.request("GET", path, None, {"Authorization": "Bearer " + key})
         r = c.getresponse()
@@ -231,6 +231,22 @@ def test_this_machines_own_endpoints_stay_here(fleet):
         assert r.getheader("X-Routed-Why") == "not-balanced", path
         c.close()
     assert not remote.seen
+
+
+def test_discovery_is_answered_here_rather_than_routed(fleet):
+    """/v1/models is no longer proxied to anything: it is the fleet's union, which
+    only this process can assemble. So it carries no routing headers -- there was
+    no routing decision to report."""
+    srv, runtime, remote, key = fleet
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    c.request("GET", "/v1/models", None, {"Authorization": "Bearer " + key})
+    r = c.getresponse()
+    body = r.read()
+    assert r.status == 200
+    assert r.getheader("X-Routed-To") is None
+    ids = [m["id"] for m in json.loads(body)["data"]]
+    assert MODEL_LOCAL in ids            # from this node's own probe
+    c.close()
 
 
 def test_polling_an_unbalanced_endpoint_does_not_reset_affinity(fleet):

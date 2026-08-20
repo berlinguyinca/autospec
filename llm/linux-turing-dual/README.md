@@ -247,6 +247,14 @@ applies there, and a pin for a model that server has not got is refused rather
 than silently answered by the wrong weights. `X-Route-Force: 1` sends it anyway
 for the cases where you mean it.
 
+`/v1/models` answers with the **fleet's** models, not this node's: every model
+served by an online server in the balanced pool, which is exactly the set `/v1`
+can route to. Unpromoted and offline servers are left out, because advertising a
+model that the next request would refuse is worse than not advertising it. Remote
+entries are ids only — which server holds what is fleet composition, and that
+lives in the authenticated `/api/servers`. The endpoint stays public, because a
+client needs discovery before it has a key.
+
 **Reading the model does not mean parsing the body.** At most 8 KB of the request
 is buffered to find the top-level `model` field, then forwarded unchanged; a 100k
 prompt is ~400 KB and still streams straight through. If the field is not in that
