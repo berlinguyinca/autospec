@@ -1,6 +1,7 @@
 # Self-registering GPU servers over a held-open connection — design
 
-**Status:** design, approved in shape; awaiting spec review before planning.
+**Status:** approved; implementation under way. Amended in §11 after approval to
+cover static registration, measured priority, and non-Qwen model families.
 
 **Supersedes nothing; extends** `2026-08-19-multitenant-keys-usage-federation-design.md`
 §6, which assumes **the node can reach the server**. Everything here is the
@@ -406,7 +407,93 @@ is installed (the check that already exists).
 
 ---
 
-## 11. Out of scope
+## 11. Amendment: static servers, priority, and other model families
+
+Three requirements added after the design was approved. They change the schema
+and the scheduler, not the transport.
+
+### 11.1 A static server is registered the same way as a tunnelled one
+
+Editing `/etc/qwen-turing/upstreams.yaml` stays supported and stays the only way
+to configure a server before the gateway is running. But a directly reachable
+box must also be attachable **from the dashboard**, because "the operator edits a
+file" was half of the problem this design set out to remove.
+
+So a server record carries a `kind`:
+
+| kind | how the node reaches it | liveness | who may add it |
+|---|---|---|---|
+| `tunnel` | pipes the agent holds open | the control connection | any signed-in member |
+| `static` | a `base_url` it dials directly | the `/v1/models` probe | any signed-in member |
+| `file` | a `base_url` from the YAML | the `/v1/models` probe | whoever can edit the node |
+
+`file` entries are not owned by anyone and cannot be revoked from the panel —
+they are configuration, and the panel says so rather than offering a button that
+would be undone by the next reload. All three kinds merge into one list, are
+ranked by one scheduler, and are reported identically.
+
+A `static` entry carries the same warning a `file` entry does when it answers
+without a key: only a firewall protects it. A `tunnel` entry never does, because
+nothing can reach it.
+
+### 11.2 Priority from measured throughput and current load, not declared specs
+
+"Send this to the server that will answer soonest" is the actual requirement, and
+this node already records what is needed to compute it: `usage_events` holds
+exact `prompt_ms` and `predicted_ms` per request per upstream, from the model's
+own response. So capability is **measured**, not declared — a box that claims a
+4090 and delivers 40 tok/s is ranked by the 40.
+
+Selection becomes, in order:
+
+1. **Eligibility** (unchanged, and still absolute): the server advertises the
+   model. A server that would substitute a different model is not a slower
+   choice, it is a wrong one.
+2. **Tier**, from an admin-set integer `priority` (default 0). Only the highest
+   tier with an eligible member is considered. This is the operator's override
+   for "prefer this box" or "last resort only", and it is deliberately a hard
+   ordering rather than a weight, so its effect is predictable.
+3. **Estimated time to finish**, lowest first:
+   `queued_ahead x mean_service + prompt_tokens / prefill_rate`
+   where `prefill_rate` and `mean_service` are rolling means from this node's own
+   accounting for that server, `queued_ahead` comes from its in-flight count and
+   reported queue, and `prompt_tokens` is estimated from the request's
+   `Content-Length` — already known, since the body is being read anyway.
+4. **Prefix-cache affinity** enters as a *factor on the prefill term*, not as an
+   override: the same caller returning to the same server was measured at
+   roughly a tenfold saving on prompt processing, so it is worth about that much
+   and no more. A warm server that is ten times slower should still lose.
+
+A server with no measurements yet uses a conservative default and is therefore
+tried, which is how it acquires measurements. Without that, the first server to
+be measured would win forever.
+
+`X-Routed-Why` gains `fastest` and `priority`, and a new `X-Routed-Est` header
+carries the estimate in seconds — because a scheduler that cannot be
+second-guessed from outside is a scheduler nobody can debug. The Servers panel
+shows each server's measured prefill rate and mean service time beside its load.
+
+### 11.3 Any OpenAI-compatible server, not only llama.cpp
+
+Nothing in routing may assume a model family. Concretely:
+
+* Model ids come from each server's own `/v1/models`; the node never derives them
+  from a naming convention. Eligibility already works this way.
+* Liveness for a tunnelled server is its control connection, and for a static one
+  its `/v1/models` probe. Neither uses a llama.cpp-specific endpoint. The local
+  runtime keeps using `/health` because that is what it is.
+* The agent forwards to **any** OpenAI-compatible base URL — vLLM, Ollama, LM
+  Studio, MLX, TGI — and its `--target` is a URL rather than a port.
+* Where a server's `/v1/models` is unusable, the agent may declare a model list
+  explicitly. That declaration is the server's own, exactly like the probe.
+* The dashboard must not assume Qwen naming. The local catalog keeps its badges,
+  which come from this node's own presets; remote models are shown as reported.
+* llama.cpp remains the only tested target, and the panel says which server
+  reported what rather than implying the node verified it.
+
+---
+
+## 12. Out of scope
 
 * **Multiplexing.** Revisit only if socket count becomes a real limit, which at
   this fleet's size it is not.
