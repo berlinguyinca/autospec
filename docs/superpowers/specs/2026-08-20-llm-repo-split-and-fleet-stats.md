@@ -201,24 +201,61 @@ forward-iterating public allow-list — which already guarantees that a field
 added upstream is absent from public payloads rather than leaked into them —
 must not grow a fleet field. A test asserts it.
 
-### 6.4 The panel, and the honesty it needs
+### 6.4 "Stalled" does not mean what the panel would imply
 
-Sessions grouped by host, with what each was last doing; stalled agents first,
-since they are the reason to look; features filed and artifacts recorded; events
-per day.
+Measured against the live database before designing the panel, and it changed the
+design:
 
-**The load-bearing detail:** at the time of writing, the most recent event in
-that database is **two days old**. An idle fleet and a broken panel look
-identical unless the panel says which — so it leads with *"last event N ago"* and
-labels an empty fleet as quiet rather than rendering nothing. This is the same
-restraint that made the queue panel show an em dash instead of a fabricated zero,
-and the same reason the disabled-option count carries its window.
+| | |
+|---|---|
+| Sessions | 7,109 |
+| Flagged by the `stalled` view | **5,645 — 79%** |
+| Of those, last seen **within 24 h** | **0** |
+| Of those, last seen over 7 days ago | 4,331 |
+| Sessions that ever emitted a terminal event | **655 of 7,109 (9%)** |
 
-A stalled session is defined by the **view**, not by the panel. The threshold
-lives in autospec's own SQL, and duplicating it here would create two
-definitions of stalled that disagree at the boundary.
+So the view is behaving correctly and would still make a useless panel. It flags
+"no terminal event and no recent heartbeat", and **91% of all sessions never
+emitted a terminal event at all** — they were killed, parked, or simply ended
+without one. A panel headlining *5,645 stalled agents* would be noise, and noise
+teaches an operator to stop reading the panel.
 
----
+Requirements that follow:
+
+- **The headline is windowed: stalled AND last seen within 24 hours.** Right now
+  that number is **zero**, which is the true and useful answer — nothing is stuck.
+- The historical backlog is shown as history, clearly separated, or not at all.
+  It is not an alert.
+- **The window is the panel's; the threshold stays autospec's.** Stall detection
+  lives in `autospec.stalled_sessions()`, and reimplementing it here would create
+  two definitions that disagree at the boundary. The panel filters the view's
+  output by recency; it never decides what stalled means.
+
+### 6.5 An unreporting host is invisible, and invisible looks healthy
+
+Every session in that database comes from **two hosts, both Macs** — 7,053 from
+one, 56 from the other. Nothing from any Linux host, because the emitter binary
+is not installed on them; verified absent on both the inference node and the
+workstation.
+
+That is the failure mode this panel must not have. "Which of my agents, across
+all machines, is stalled?" cannot be answered by a view that only sees the
+machines that happen to be reporting, and a host that stopped emitting looks
+exactly like a host with nothing to do.
+
+Requirement: the panel lists **hosts and when each last reported**, and says
+plainly that it can only see hosts running the emitter. Coverage is part of the
+reading, not a footnote.
+
+### 6.6 The rest of the honesty
+
+**Leads with recency.** At the time of writing the newest event is two days old.
+An idle fleet and a broken panel look identical unless the panel says which, so
+it opens with *"last event N ago"* and labels quiet as quiet — the same restraint
+that made the queue panel show an em dash rather than a fabricated zero.
+
+Beyond the headline: sessions by host with what each was last doing, features
+filed, artifacts recorded, events per day.
 
 ## 7. Acceptance criteria
 
