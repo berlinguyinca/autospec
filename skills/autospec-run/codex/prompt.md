@@ -579,63 +579,35 @@ for same-host progress and compatibility, but they are not authoritative across
 machines. If the Rust command is unavailable, fail the monitor start visibly;
 do not fall back to an inline label-swap path.
 
->   all_open = [open auto-implement issues, sorted ascending by issue number]
->   all_open excludes every issue carrying `autospec:blocked-prerequisite`, even
->   if a stale or manual edit also left `auto-implement` attached.
->   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
->   blocked = [all_open issues with unmet Depends-on deps]
->
->   ready = []
->   for I in candidates:
->     ctx_lbl       = I.ctx_label or "ctx:64k"           # default if unlabeled
->     reasoning_lbl = I.reasoning_label or "reasoning:medium"
->     if ctx_lbl <= profile.ctx AND reasoning_lbl <= profile.reasoning:  # ordinal compare
->       ready.append(I)
->     else:
->       reason = []
->       if ctx_lbl > profile.ctx:             reason.append(f"{ctx_lbl} > profile.ctx={profile.ctx}")
->       if reasoning_lbl > profile.reasoning: reason.append(f"{reasoning_lbl} > profile.reasoning={profile.reasoning}")
->       deferred.append({"issue": I.number, "reason": ", ".join(reason)})
->
->   claimed_issue, claimed_step = [newest valid heartbeat issue/step, or "-" / "-"]
->   print "[monitor] queue scan: open=N ready=N blocked=N deferred=N claimed=#X step=Y order=ascending(oldest-first)"
->   # GitHub may display newer/high-numbered issues first; autospec intentionally processes ready issues ascending.
->
->   if ready is empty:
->     latest_close = most recent closedAt of any auto-implement issue
->     open_count   = count of open auto-implement issues
->     if open_count == 0 AND latest_close > 2h ago:
->       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
->         --phase 4 --event monitor-exit \
->         --body "Monitor ALL_DONE: batch=${batch_num:-1} processed=$batch_issue_count repo={repo}" \
->         2>/dev/null || true
->       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
->         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
->         > "$HOME/.autospec/batch-done.json"
+>   # Deterministic outer-loop decision: stop-sentinel check, ready-queue scan,
+>   # and ALL_DONE detection are handled by the monitor-outer-loop.sh script.
+>   # The monitor invokes it at the top of each iteration and follows the
+>   # emitted action. Issue details (title, URL, labels, body) are fetched
+>   # later via issue-snapshot.sh after the claim.
+>   OUTER_LOOP_OUT="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/monitor-outer-loop.sh" \
+>     --repo "{repo}" --batch-num "${batch_num:-1}" --batch-issue-count "$batch_issue_count")"
+>   ACTION="$(printf '%s' "$OUTER_LOOP_OUT" | awk '{print $1}' | cut -d= -f2)"
+>   case "$ACTION" in
+>     claim)
+>       ISSUE="$(printf '%s' "$OUTER_LOOP_OUT" | awk '{print $2}' | cut -d= -f2)"
+>       ;;
+>     sleep)
+>       REASON="$(printf '%s' "$OUTER_LOOP_OUT" | awk '{print $2}' | cut -d= -f2)"
+>       echo "[monitor] $REASON — sleeping 300s"
+>       sleep 300
+>       continue
+>       ;;
+>     all_done)
 >       echo "[monitor] all issues processed — writing ALL_DONE and exiting"
 >       HARD SHUTDOWN — emit final report (incl. deferred summary, see Phase 6)
->     else: print state ("blocked: N unmet deps" / "deferred: M off-profile" / "drained, waiting 2h idle"), sleep 300, continue
->   # autospec-stop sentinel check — outer loop, top of each iteration
->   if [ -f "$HOME/.autospec/stop.flag" ]; then
->     MODE=$(head -1 "$HOME/.autospec/stop.flag" 2>/dev/null || echo "")
->     TIMESTAMP=$(sed -n '2p' "$HOME/.autospec/stop.flag" 2>/dev/null | awk '{print $1}')
->     AGE_SECS=$(( $(date -u +%s) - $(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" +%s 2>/dev/null \
->       || date -u -d "$TIMESTAMP" +%s 2>/dev/null || echo 0) ))
->     if [ "$AGE_SECS" -gt 86400 ]; then
->       echo "WARN: stale stop.flag ($AGE_SECS s old); ignoring" >&2
->     elif [ "$MODE" = "graceful" ] || [ "$MODE" = "immediate" ]; then
->       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
->         --phase 4 --event monitor-exit \
->         --body "Monitor stopped ($MODE): batch=${batch_num:-1} processed=$batch_issue_count repo={repo}" \
->         2>/dev/null || true
->       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
->         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
->         > "$HOME/.autospec/batch-done.json"
+>       ;;
+>     stop)
+>       MODE="$(printf '%s' "$OUTER_LOOP_OUT" | awk '{print $2}' | cut -d= -f2)"
 >       echo "[monitor] stop signal received: $MODE — exiting"
->       # HARD SHUTDOWN with final report
+>       HARD SHUTDOWN with final report
 >       exit 0
->     fi
->   fi
+>       ;;
+>   esac
 >   # Service watch: heartbeat reconciliation already runs before each candidate scan; every 12 iterations also runs a cheap nudge/reclaim pass for long-lived workers.
 >   monitor_tick=$((monitor_tick + 1))
 >   if [ "$monitor_tick" -ge 12 ]; then
