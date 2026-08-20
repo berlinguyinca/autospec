@@ -262,6 +262,27 @@
 const $ = id => document.getElementById(id);
 const n = v => (v === null || v === undefined) ? '–' : v.toLocaleString();
 const KEYNAME = 'qt-api-key';
+// EVERY response body must be read, even one we do not want.
+//
+// An unread fetch body leaves the stream open -- the browser has not finished
+// with the response, so it holds the connection (an HTTP/2 stream) indefinitely.
+// tick() used to return early on 401 without reading, once every two seconds,
+// and the page appeared to hang: nine requests were "pending" after twenty
+// seconds and nothing ever updated again. Measured, not guessed: five unread
+// bodies stayed pending forever, and reading them freed all five at once.
+//
+// This is the same rule the gateway learned on the server side, where a reply
+// that did not drain the request body corrupted the NEXT request. Both ends of
+// an HTTP conversation owe the other a fully consumed body.
+async function req(url, opts){
+  const r = await fetch(url, opts);
+  let text = '';
+  try{ text = await r.text(); }catch(e){ /* aborted: nothing left to drain */ }
+  let data = null;
+  if(text){ try{ data = JSON.parse(text); }catch(e){ /* not JSON; keep text */ } }
+  return {ok: r.ok, status: r.status, data: data || {}, text: text};
+}
+
 const getKey = () => localStorage.getItem(KEYNAME) || '';
 const authHeaders = () => { const k = getKey(); return k ? {'Authorization':'Bearer '+k} : {}; };
 function askKey(msg){
@@ -740,10 +761,10 @@ async function doAttach(){
                 gpus: ($('agpus').value || '').trim()};
   let r, d;
   try{
-    r = await fetch('/api/servers/enrol', {method: 'POST', headers:
+    r = await req('/api/servers/enrol', {method: 'POST', headers:
       Object.assign({'Content-Type': 'application/json'}, authHeaders()),
       body: JSON.stringify(body)});
-    d = await r.json();
+    d = r.data;
   }catch(e){ ATTACH_ERR = 'Could not reach the node.'; return loadServers(); }
   if(!r.ok){
     ATTACH_ERR = (d.error && d.error.message) || ('HTTP ' + r.status);
@@ -754,11 +775,11 @@ async function doAttach(){
 }
 
 async function serverAction(url, body){
-  const r = await fetch(url, {method: body ? 'POST' : 'DELETE', headers:
+  const r = await req(url, {method: body ? 'POST' : 'DELETE', headers:
     Object.assign({'Content-Type': 'application/json'}, authHeaders()),
     body: body ? JSON.stringify(body) : null});
   if(!r.ok){
-    const d = await r.json().catch(() => ({}));
+    const d = r.data;
     alert((d.error && d.error.message) || ('HTTP ' + r.status));
   }
   loadServers();
@@ -770,8 +791,8 @@ async function loadServers(){
   // reason for it.
   let d = null, why = '';
   try{
-    const r = await fetch('/api/servers', {cache:'no-store', headers: authHeaders()});
-    if(r.ok) d = await r.json();
+    const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
+    if(r.ok) d = r.data;
     else why = r.status === 401 ? 'Sign in, or enter a key, to see the fleet.'
                                 : 'The node answered ' + r.status + '.';
   }catch(e){ why = 'The node is not answering.'; }
@@ -835,15 +856,15 @@ async function loadServers(){
 // ---------- poll ----------
 async function tick(){
   try{
-    const r = await fetch('/api/stats', {cache:'no-store', credentials:'same-origin',
-                                        headers: authHeaders()});
+    const r = await req('/api/stats', {cache:'no-store', credentials:'same-origin',
+                                      headers: authHeaders()});
     if(r.status === 401){
       // SIGNING IN IS THE PRIMARY PATH. The old behaviour opened a prompt asking
       // for a shared secret, which is the thing per-user sign-in replaces -- and
       // it fired before the reader had even seen the sign-in panel. A key stays
       // available as an explicit fallback, not an unavoidable modal.
       let cfg = {};
-      try{ cfg = await (await fetch('/api/me', {cache:'no-store'})).json(); }catch(e){}
+      try{ cfg = (await req('/api/me', {cache:'no-store'})).data; }catch(e){}
       $('dot').className = 'dot down'; $('state').textContent = 'not signed in';
       $('err').innerHTML = (cfg.login_configured
         ? '<strong>Sign in to see this node.</strong>' +
@@ -859,7 +880,7 @@ async function tick(){
       return;
     }
     if(!r.ok) throw new Error('HTTP '+r.status);
-    const d = await r.json();
+    const d = r.data;
     $('err').classList.add('hide');
     if(!AUTHED) setAuthed(true);
 
@@ -916,7 +937,7 @@ function when(iso){
 
 async function loadAccount(){
   let me;
-  try{ me = await (await fetch('/api/me', {cache:'no-store'})).json(); }
+  try{ me = (await req('/api/me', {cache:'no-store'})).data; }
   catch(e){
     $('acct').innerHTML = '<div class="card"><div class="sub">Key management is ' +
       'unavailable — the gateway is not answering.</div></div>';
@@ -959,7 +980,7 @@ async function loadAccount(){
     '<div style="margin-top:10px"><button class="tab" id="logout">Sign out</button></div>' +
     '</div>';
   $('logout').onclick = async () => {
-    await fetch('/auth/logout', {method:'POST'}); ME = null; loadAccount();
+    await req('/auth/logout', {method:'POST'}); ME = null; loadAccount();
   };
   await loadKeys();
 }
@@ -1003,7 +1024,7 @@ function wireMinted(){
 async function loadKeys(){
   const all = ME.is_admin ? '?all=1' : '';
   let d;
-  try{ d = await (await fetch('/api/keys'+all, {cache:'no-store'})).json(); }
+  try{ d = (await req('/api/keys'+all, {cache:'no-store'})).data; }
   catch(e){ $('keysbox').innerHTML = '<div class="err">Could not list keys.</div>'; return; }
 
   const rows = (d.keys||[]).map(k => {
@@ -1059,9 +1080,9 @@ async function doMint(){
   if(ttl) body.ttl_days = parseInt(ttl, 10);
   let r, d;
   try{
-    r = await fetch('/api/keys', {method:'POST',
+    r = await req('/api/keys', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    d = await r.json();
+    d = r.data;
   }catch(e){ MINT_ERR = 'Could not create a key.'; return loadKeys(); }
   if(!r.ok){
     MINT_ERR = (d.error && d.error.message) || ('HTTP ' + r.status);
@@ -1078,10 +1099,9 @@ async function doMint(){
 
 async function doRevoke(keyId){
   if(!confirm('Revoke ' + keyId + '? Anything using it stops working immediately.')) return;
-  const r = await fetch('/api/keys/' + encodeURIComponent(keyId), {method:'DELETE'});
+  const r = await req('/api/keys/' + encodeURIComponent(keyId), {method:'DELETE'});
   if(!r.ok){
-    const d = await r.json().catch(() => ({}));
-    alert('Could not revoke: ' + ((d.error && d.error.message) || r.status));
+    alert('Could not revoke: ' + ((r.data.error && r.data.error.message) || r.status));
   }
   loadKeys(); loadUsage();
 }
@@ -1100,8 +1120,8 @@ function personName(r){
 async function loadUsage(){
   let d;
   try{
-    d = await (await fetch('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
-                           {cache:'no-store'})).json();
+    d = (await req('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
+                   {cache:'no-store'})).data;
   }catch(e){ $('usagebox').innerHTML = '<div class="banner">Could not read usage.</div>'; return; }
 
   const board = d.leaderboard || [];

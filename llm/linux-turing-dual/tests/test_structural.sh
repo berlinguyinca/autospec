@@ -346,6 +346,28 @@ else
   ok "the agent vets clean with no dependencies"
 fi
 
+# --- no page may leave a response body unread -------------------------------
+# An unread fetch body leaves the stream open: the browser is not finished with
+# the response, so it holds an HTTP/2 stream indefinitely. The dashboard polls
+# every two seconds, and its 401 path used to return without reading -- nine
+# requests were stuck pending after twenty seconds and the page stopped updating.
+# It is the same rule the gateway learned server-side, where a reply that did not
+# drain the request body corrupted the NEXT request.
+#
+# Enforced by counting raw fetch() calls: index.html may have exactly one, inside
+# req(), and status.html exactly one, which reads text() before checking status.
+raw_index=$(grep -c "await fetch(" "${NODE}/web/index.html" || true)
+raw_status=$(grep -c "await fetch(" "${NODE}/web/status.html" || true)
+if [ "$raw_index" -gt 1 ]; then
+  bad "web/index.html calls fetch() directly ${raw_index} times; route it through req(), which drains"
+elif ! grep -q "async function req(url, opts)" "${NODE}/web/index.html"; then
+  bad "web/index.html must keep req(), the one place a response body is drained"
+elif [ "$raw_status" -gt 1 ] || ! grep -q "await r.text();" "${NODE}/web/status.html"; then
+  bad "web/status.html must read the body before acting on the status"
+else
+  ok "no page path leaves a response body unread"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 

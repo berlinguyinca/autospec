@@ -95,9 +95,14 @@ function secs(v){
 async function tick(){
   try{
     // No Authorization header: this endpoint is deliberately public.
+    // The body is read BEFORE deciding what to do with the status. An unread
+    // body leaves the stream open, and this page polls -- so a run of errors
+    // would accumulate one stalled request per interval until the page stopped
+    // updating entirely. Measured on the dashboard, fixed the same way here.
     const r = await fetch('/api/queue', {cache:'no-store'});
+    const text = await r.text();
     if(!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
+    const d = JSON.parse(text);
 
     $('dot').className = 'dot ' + (d.model_loaded ? 'up' : 'down');
     $('state').textContent = d.model_loaded ? 'serving' : 'idle — no model loaded';
