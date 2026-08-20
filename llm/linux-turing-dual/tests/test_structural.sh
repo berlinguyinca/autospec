@@ -197,6 +197,20 @@ if [ -r "$ngx" ]; then
   fi
 fi
 
+# --- 9b: NO client-reachable location may reach llama.cpp directly --------
+# The gateway is what authenticates inference. A location that proxies straight
+# to the runtime keeps working perfectly -- and unauthenticated. That is the
+# failure this check exists for, and it nearly shipped: the queue-header
+# fail-open fallback pointed at llama.cpp, so a gateway crash would have opened
+# the endpoint. Comments are stripped first, so documenting the upstream is fine.
+if [ -r "$ngx" ]; then
+  if sed 's/#.*$//' "$ngx" | grep -qE 'proxy_pass[[:space:]]+https?://qwen_llama'; then
+    bad "nginx proxies to llama.cpp directly -- that bypasses authentication"
+  else
+    ok "nginx: no location reaches llama.cpp directly"
+  fi
+fi
+
 # --- 10: every page under web/ must be installed by a glob, not by name ----
 # status.html was added after index.html and the installer named index.html
 # explicitly, so /status returned 500 on a fresh install. A glob ships whatever

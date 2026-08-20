@@ -676,3 +676,57 @@ with `max_tokens: 400` returned `OK` after 91 characters of reasoning, and with
 
 This is not a defect, but a client with a tight token cap will see empty replies
 and conclude the node is broken. Either allow headroom or disable thinking.
+
+---
+
+## The authenticating gateway costs nothing measurable
+
+Measured 2026-08-19, after inserting the gateway between nginx and llama.cpp.
+
+### Shape check at ~34k on the 9B (a throwaway stdlib pass-through)
+
+Two distinct prompts, so the prefix cache could not confound the comparison
+(`cache_n = 0` on both):
+
+| | Direct | Through the pass-through |
+|---|---|---|
+| Prefill | 1930.8 tok/s | **1927.6 tok/s** (−0.17%) |
+| Decode | 58.9 tok/s | 60.3 tok/s |
+| Prompt tokens | 33,783 | 33,770 |
+
+Delivery was confirmed **incremental**: 42 chunks spread over 0.77 s, not one
+block at the end.
+
+### The real thing at the 100k ceiling
+
+`qwen3.8-27b-100k`, a 112,205-byte request body, streamed:
+
+| | Through the gateway | Direct to llama.cpp |
+|---|---|---|
+| Prompt tokens | **97,909** | 97,842 |
+| Prefill | 521.4 tok/s | 310.0 tok/s |
+| Wall clock | 196.7 s | 319.7 s |
+| Time to first byte | 6.9 s | — |
+
+**Read this carefully rather than as a win.** The gateway run measured *faster*
+than the direct one on paired distinct prompts. That does not mean a proxy makes
+inference quicker; it means **run-to-run variance at 98k dwarfs any proxy cost**,
+so the honest conclusion is only that the gateway is not the bottleneck. Do not
+quote 521 tok/s as this node's 100k prefill figure — the 594–637 tok/s recorded
+elsewhere in this document was measured at **40k**, and prefill throughput falls
+as context grows because the full-attention layers are quadratic in it.
+
+### Memory is bounded, which is the property that mattered
+
+Gateway resident set across the 98k request, sampled every 5 s for 40 samples:
+
+| | |
+|---|---|
+| Before | 36,788 kB |
+| Peak | **38,488 kB** |
+| Growth | **1.7 MB**, for a 112 KB request body and a 98k-token exchange |
+
+That is the evidence that neither direction is buffered. A gateway that read the
+request body before forwarding it, or accumulated the response to read its final
+chunk, would have grown by the size of the exchange. Accounting for the request
+was exact and attributed: 97,909 prompt tokens, 24 completion, `truncated=false`.

@@ -86,10 +86,16 @@ QT_GATEWAY_REQUIRED_VARS="QT_PUBLIC_FQDN QT_COGNITO_REGION QT_COGNITO_POOL_ID QT
 # router -- so this checks both lists and reports every miss at once rather
 # than one per run.
 require_gateway_site() {
-  local saved="$QT_REQUIRED_VARS" rc
+  local saved="$QT_REQUIRED_VARS" rc v
   QT_REQUIRED_VARS="${QT_REQUIRED_VARS} ${QT_GATEWAY_REQUIRED_VARS}"
   require_site
   rc=$?
   QT_REQUIRED_VARS="$saved"
-  return $rc
+  [ "$rc" -ne 0 ] && return $rc
+  # Validating is not enough: the gateway reads these from its ENVIRONMENT, so
+  # they have to be exported. require_site exports only the core six.
+  for v in $QT_GATEWAY_REQUIRED_VARS; do
+    export "$v"
+  done
+  return 0
 }

@@ -107,3 +107,43 @@ def test_garbage_does_not_raise():
     acc.feed(b"data: {not json\n\ndata: [DONE]\n\n")
     u = acc.result()
     assert u.truncated is True
+
+
+def test_the_model_is_read_from_the_response_not_the_request():
+    """So attribution never needs the request body, which at 100k tokens is
+    ~400 KB and must stream straight through."""
+    assert _stream("stream_timings_only.sse").model == "qwen3.5-9b"
+    assert _stream("stream_with_usage.sse").model == "qwen3.5-9b"
+    body = json.loads((FIX / "nonstream.json").read_text())
+    assert usage.from_json_body(body).model == "qwen3.5-9b"
+
+
+def test_a_truncated_stream_can_still_name_the_model():
+    """Even when counts are unknown, the row should say which model it was --
+    the mid-stream chunks carry it."""
+    acc = usage.StreamAccountant()
+    acc.feed((FIX / "stream_truncated.sse").read_bytes())
+    u = acc.result()
+    assert u.truncated is True
+    assert u.model == "qwen3.5-9b"
+
+
+def test_the_accountant_also_handles_a_PLAIN_JSON_body():
+    """The gateway pipes BOTH response kinds through StreamAccountant -- it does
+    not know in advance whether a request was streamed. A non-streaming response
+    is raw JSON with no `data:` framing, and parsing only SSE silently recorded
+    every non-streaming request as truncated with no counts at all."""
+    acc = usage.StreamAccountant()
+    acc.feed((FIX / "nonstream.json").read_bytes())
+    u = acc.result()
+    assert u.truncated is False
+    assert (u.prompt_tokens, u.completion_tokens, u.cached_tokens) == (13, 12, 9)
+    assert u.model == "qwen3.5-9b"
+
+
+def test_a_plain_json_body_split_across_reads_still_parses():
+    raw = (FIX / "nonstream.json").read_bytes()
+    acc = usage.StreamAccountant()
+    for i in range(0, len(raw), 7):
+        acc.feed(raw[i:i + 7])
+    assert acc.result().prompt_tokens == 13

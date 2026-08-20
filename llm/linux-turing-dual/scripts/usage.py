@@ -32,6 +32,7 @@ class Usage:
     cached_tokens: int | None = None
     prompt_ms: float | None = None
     predicted_ms: float | None = None
+    model: str | None = None
     truncated: bool = False
 
     def as_row(self) -> dict:
@@ -41,6 +42,7 @@ class Usage:
             "cached_tokens": self.cached_tokens,
             "prompt_ms": self.prompt_ms,
             "predicted_ms": self.predicted_ms,
+            "model": self.model,
             "truncated": self.truncated,
         }
 
@@ -55,6 +57,11 @@ def _from_obj(obj: dict) -> Usage | None:
         return None
 
     out = Usage()
+    # The model is echoed on the response, so usage attribution never has to
+    # parse -- or buffer -- the client's REQUEST body. A 100k prompt is ~400 KB;
+    # reading it to learn one field would undo the whole pass-through design.
+    if isinstance(obj.get("model"), str):
+        out.model = obj["model"]
     if t:
         # Always present on this build; the fallback that makes pass-through work.
         out.prompt_tokens = t.get("prompt_n")
@@ -114,6 +121,7 @@ class StreamAccountant:
         because a truncated stream must fall through to `truncated=True` rather
         than pick up a mid-stream object that has none.
         """
+        model = None
         for line in reversed(bytes(self._tail).split(b"\n")):
             line = line.strip()
             if not line.startswith(_DATA):
@@ -130,4 +138,27 @@ class StreamAccountant:
             got = _from_obj(obj)
             if got is not None:
                 return got
-        return Usage(truncated=True)
+            # No accounting on this chunk, but mid-stream chunks still name the
+            # model. Keep it: a truncated request has unknown COUNTS, and that is
+            # no reason to also lose which model served it.
+            if model is None and isinstance(obj.get("model"), str):
+                model = obj["model"]
+
+        # No SSE framing found. A NON-STREAMING response is a plain JSON body,
+        # and the caller cannot know in advance which it will get -- so try the
+        # whole retained tail as one object before giving up. Without this every
+        # non-streaming request was recorded as truncated with no counts.
+        #
+        # If the body exceeded the retained tail the parse fails and the row is
+        # marked truncated, which is the honest answer: the counts really are not
+        # available from what was kept.
+        try:
+            obj = json.loads(bytes(self._tail))
+        except (ValueError, UnicodeDecodeError):
+            return Usage(truncated=True, model=model)
+        got = _from_obj(obj)
+        if got is not None:
+            return got
+        if model is None and isinstance(obj, dict) and isinstance(obj.get("model"), str):
+            model = obj["model"]
+        return Usage(truncated=True, model=model)
