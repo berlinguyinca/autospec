@@ -74,6 +74,10 @@ def _load_window():
 
 
 COLLECT = _load_collector()
+# Problem detection lives in its own module so it can be tested without a GPU, a
+# journal, or a socket -- and so this file does not grow a second job.
+sys.path.insert(0, str(HERE))
+import health as HEALTH        # noqa: E402
 WINDOW = _load_window().QueueWindow(window_seconds=300.0)
 
 _CACHE: dict = {"llama_up": False, "gpus": [], "queue": {}}
@@ -91,7 +95,12 @@ def _poll_once() -> dict:
     url = (f"{Handler.metrics_url}?model={model}" if model else Handler.metrics_url)
     metrics = COLLECT.read_metrics(url, Handler.api_key)
     slots = COLLECT.read_slot_total(_base_url(), Handler.api_key, model)
-    summary = COLLECT.summarise(metrics, COLLECT.read_gpus(), model)
+    cards, smi_stderr, smi_failed = COLLECT.read_gpus_with_faults()
+    summary = COLLECT.summarise(metrics, cards, model)
+    # Carried under private keys (stripped from every response) so the slow
+    # journal timer can turn them into problems without forking nvidia-smi again.
+    summary["_smi_stderr"] = smi_stderr
+    summary["_smi_failed"] = smi_failed
     q = COLLECT.queue_state(metrics, slots)
     WINDOW.add(time.time(), q["outstanding"])      # exactly once per tick
     q.update({
@@ -115,6 +124,9 @@ def _refresher() -> None:
             with _CACHE_LOCK:
                 # Preserve whatever a slower timer last wrote.
                 snap["config_health"] = _CACHE.get("config_health")
+                # Both written by the slow journal timer; the fast poll must not
+                # blank them between its ticks.
+                snap["problems"] = _CACHE.get("problems") or []
                 _CACHE.clear()
                 _CACHE.update(snap)
         except Exception:
@@ -136,6 +148,17 @@ def _journal_refresher() -> None:
             events = COLLECT.parse_journal_events(text) if readable else None
             with _CACHE_LOCK:
                 metrics = _CACHE.get("_metrics") or {}
+                # What is WRONG, on the slow timer beside the journal it reads.
+                # The runtime faults that matter -- a CUDA failure, an Xid -- are
+                # in the log and nowhere else: a process that cannot use a GPU
+                # still answers /metrics, which is how this node once reported
+                # seven healthy models it could not serve.
+                _CACHE["problems"] = (
+                    HEALTH.runtime_problems(bool(_CACHE.get("llama_up")),
+                                            text, readable)
+                    + HEALTH.gpu_problems(_CACHE.get("_smi_stderr") or "",
+                                          _CACHE.get("gpus") or [],
+                                          bool(_CACHE.get("_smi_failed"))))
                 _CACHE["config_health"] = {
                     "journal_readable": readable,
                     # None, NOT an empty structure: "unreadable" and "no

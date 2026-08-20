@@ -101,6 +101,12 @@
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:13px}
   textarea{font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);
     border-radius:7px;background:var(--card);color:var(--fg);flex:1;min-width:16ch;resize:vertical}
+  .prob{border:1px solid var(--line);border-left-width:3px;border-radius:8px;
+    padding:9px 11px;margin-top:9px;background:var(--card);font-size:13px}
+  .prob.down{border-left-color:#e5534b}
+  .prob.degraded{border-left-color:#d29922}
+  .prob.warning{border-left-color:#8b949e}
+  .prob .where{font-size:11px;color:var(--muted);display:block;margin-bottom:3px}
   .chatlog{margin-top:13px;display:flex;flex-direction:column;gap:9px;
     max-height:52vh;overflow-y:auto;padding-right:4px}
   .turn{border:1px solid var(--line);border-radius:9px;padding:9px 11px;
@@ -167,6 +173,8 @@
         <div class="v" id="qmean">–</div>
         <div class="sub" id="qsamples"></div></div>
     </div>
+
+    <div id="problems"></div>
 
     <h2 id="gpuh">GPUs</h2>
     <div class="grid" id="gpus"></div>
@@ -513,6 +521,52 @@ function renderHealth(h){
 }
 let HEALTH_ALL = false, LAST_HEALTH = null;
 
+// ---------- problems ----------
+// The node once reported itself healthy while it could not serve: both GPUs had
+// faulted, the runtime could not initialise CUDA, and six of seven models hung
+// every caller for 45 s. The page showed "online" and seven models, because the
+// only thing it asked was whether a process answered.
+//
+// So problems are drawn FIRST, above the numbers. A fault buried under a grid of
+// healthy-looking gauges is a fault nobody sees.
+const SEV_ORDER = {down: 0, degraded: 1, warning: 2};
+const SEV_WORD = {down: 'not working', degraded: 'degraded', warning: 'needs attention'};
+
+function problemRow(p){
+  const sev = SEV_WORD[p.severity] ? p.severity : 'warning';
+  return '<div class="prob ' + sev + '">' +
+    '<span class="where">' + esc(p.where || 'this node') + ' — ' +
+      esc(SEV_WORD[sev]) + '</span>' + esc(p.text) + '</div>';
+}
+
+function renderProblems(){
+  // Node problems come from the stats poll, fleet problems and per-server faults
+  // from /api/servers. Merged so the reader sees ONE list: two lists of problems
+  // side by side is how one of them stops being read.
+  const all = (LAST_PROBLEMS || []).concat(FLEET_PROBLEMS || []);
+  (FLEET || []).forEach(s => (s.faults || []).forEach(f => all.push(f)));
+  all.sort((a, b) => (SEV_ORDER[a.severity] ?? 3) - (SEV_ORDER[b.severity] ?? 3));
+
+  const box = $('problems');
+  if(!all.length){ box.innerHTML = ''; return; }
+  box.innerHTML = '<h2>Problems</h2>' + all.map(problemRow).join('');
+}
+
+// A badge for one server, for the fleet and Models panels.
+function faultBadge(s){
+  const sev = worstOf(s.faults);
+  if(!sev) return '';
+  return ' <span class="badge" title="' + esc((s.faults||[]).map(f=>f.text).join('; '))
+    + '" style="border-color:' + (sev === 'down' ? '#e5534b' : '#d29922') + '">'
+    + esc(SEV_WORD[sev]) + '</span>';
+}
+
+function worstOf(faults){
+  for(const level of ['down', 'degraded', 'warning'])
+    if((faults || []).some(f => f.severity === level)) return level;
+  return null;
+}
+
 // ---------- gpus ----------
 // Every card in the fleet, each saying which server it belongs to. This panel
 // used to draw only THIS node's cards, so a fleet member's GPU appeared nowhere
@@ -577,7 +631,7 @@ let CATALOG = [], TAB = 'curl', LAST_GPUS = [];
 // carries each server's model list, so "who holds what" needs no new endpoint --
 // and this must be a shared cache rather than a second fetch, or the two panels
 // could disagree about the same fleet in the same second.
-let FLEET = [];
+let FLEET = [], FLEET_PROBLEMS = [], LAST_PROBLEMS = [];
 function kindBadge(k){
   const cls = k === 'vision' ? 'v' : (k && k.indexOf('uncensored') === 0 ? 'u' : '');
   return '<span class="badge '+cls+'">'+(k||'text')+'</span>';
@@ -585,17 +639,27 @@ function kindBadge(k){
 
 async function loadFleet(){
   const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
-  if(r.ok) FLEET = r.data.servers || [];
+  if(r.ok){
+    FLEET = r.data.servers || [];
+    FLEET_PROBLEMS = r.data.problems || [];
+  }
+  renderProblems();
   return FLEET;
 }
 
 function serverLabel(s){
+  // The Models page's host badge says when its host is faulting: a model listed
+  // against a broken server is worse than no listing, because it reads as
+  // available.
   // The node's own card is "this node" everywhere else on the page; keeping the
   // raw id here would make the same machine read as two different servers.
   const name = s.id === 'local' ? 'this node' : s.id;
   const cls = s.state === 'online' ? 'on' : '';
-  return '<span class="badge ' + cls + '" title="' + esc(s.state || 'unknown') + '">'
-    + esc(name) + '</span>';
+  const bad = worstOf(s.faults);
+  return '<span class="badge ' + (bad ? '' : cls) + '" title="'
+    + esc((s.faults || []).map(f => f.text).join('; ') || s.state || 'unknown')
+    + '" style="' + (bad === 'down' ? 'border-color:#e5534b' : '') + '">'
+    + esc(name) + (bad === 'down' ? ' ⚠' : '') + '</span>';
 }
 
 // Which servers serve this id. Aliases count: a preset's alias IS a served id,
@@ -947,7 +1011,7 @@ async function loadServers(){
   let d = null, why = '';
   try{
     const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
-    if(r.ok){ d = r.data; FLEET = d.servers || []; }
+    if(r.ok){ d = r.data; FLEET = d.servers || []; FLEET_PROBLEMS = d.problems || []; }
     else why = r.status === 401 ? 'Sign in, or enter a key, to see the fleet.'
                                 : 'The node answered ' + r.status + '.';
   }catch(e){ why = 'The node is not answering.'; }
@@ -1210,6 +1274,8 @@ async function tick(){
     const gpusNewlyKnown = gpus.length > 0 && LAST_GPUS.length === 0;
     LAST_GPUS = gpus;
     if(gpusNewlyKnown && SECTION === 'servers') loadServers();
+    LAST_PROBLEMS = d.problems || [];
+    renderProblems();
     renderGpus();
     renderCatalog(d.catalog);
     pill('models', String((d.catalog||[]).length));
@@ -1516,6 +1582,7 @@ setInterval(() => {
   // it needs refreshing there too -- otherwise a fleet member's cards were as
   // stale as whenever the fleet was last fetched for some other reason.
   else if(SECTION === 'overview'){ loadFleet().then(renderGpus); }
+  else if(SECTION === 'health'){ loadFleet(); }
 }, 15000);
 // Usage refreshes only while you are looking at it -- and it no longer waits for
 // a session, because the leaderboard is public. Gating this on authentication

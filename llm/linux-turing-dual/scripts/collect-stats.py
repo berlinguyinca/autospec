@@ -143,14 +143,25 @@ def read_metrics(url: str, api_key: str | None, timeout: float = 4.0) -> dict[st
 
 
 def read_gpus(timeout: float = 6.0) -> list[dict]:
+    return read_gpus_with_faults(timeout)[0]
+
+
+def read_gpus_with_faults(timeout: float = 6.0) -> tuple[list[dict], str, bool]:
+    """Cards, nvidia-smi's STDERR, and whether it could be run at all.
+
+    The stderr is the point. When one card of a pair faults, nvidia-smi answers
+    for the survivor, exits ZERO, and explains the missing one on stderr -- so
+    discarding it (which this did) is how a node with half its GPUs gone reported
+    itself healthy. The text is the only signal there is.
+    """
     try:
-        out = subprocess.run(
+        r = subprocess.run(
             ["nvidia-smi", f"--query-gpu={NVIDIA_QUERY}",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=timeout, check=True).stdout
-        return parse_nvidia_csv(out)
+            capture_output=True, text=True, timeout=timeout)
+        return parse_nvidia_csv(r.stdout), (r.stderr or ""), False
     except (OSError, subprocess.SubprocessError):
-        return []
+        return [], "", True
 
 
 def main() -> int:

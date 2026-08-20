@@ -29,6 +29,9 @@ STATS_FIELDS = (
     "gpu_count", "gpu_total_mem_mib", "gpu_used_mem_mib",
     "kv_cache_usage_ratio", "requests_processing", "requests_deferred",
     "tokens_per_second", "prompt_tokens_total", "generated_tokens_total",
+    # What is wrong with this node. Public on purpose: someone deciding whether
+    # to point a client here should be able to see that it is faulting.
+    "problems",
 )
 # Per-card telemetry. `name` is a product name ("NVIDIA GeForce RTX 4090"), not
 # an identifier of this machine. No UUID or serial is carried, and none may be.
@@ -39,6 +42,9 @@ GPU_FIELDS = ("index", "name", "mem_total_mib", "mem_used_mib",
 SERVER_FIELDS = (
     "id", "kind", "enabled", "state", "models", "priority", "pool_member",
     "in_flight", "idle_pipes", "route", "note", "gpus", "slots", "last_seen",
+    # What is wrong with this server. Categories, never the probe's own error
+    # string -- those quote hosts and ports.
+    "faults",
     # Per-card telemetry the server reported about itself. Projected through the
     # same GPU_FIELDS as this node's own cards, below.
     "cards",
@@ -69,6 +75,9 @@ def stats(full: dict) -> dict:
     """
     out = _pick(full or {}, STATS_FIELDS)
     out["gpus"] = [_pick(g or {}, GPU_FIELDS) for g in (full or {}).get("gpus") or []]
+    # A LIST, never None, and the same shape the fleet view uses: the page merges
+    # the two, and "no problems" must not arrive as two different values.
+    out["problems"] = list((full or {}).get("problems") or [])
     out["public"] = True
     return out
 
@@ -92,6 +101,7 @@ def servers(payload: dict) -> dict:
         row["cards"] = [_pick(c or {}, GPU_FIELDS) for c in (row.get("cards") or [])]
         out["servers"].append(row)
     out["routing"] = dict(payload.get("routing") or {})
+    out["problems"] = list(payload.get("problems") or [])
     out["public"] = True
     return out
 

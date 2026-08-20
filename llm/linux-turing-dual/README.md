@@ -111,6 +111,40 @@ you to skim it.
 
 Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
 
+## Problems, said plainly and shown first
+
+The Overview opens with what is **wrong**, above every gauge. A fault buried under
+a grid of healthy-looking numbers is a fault nobody sees.
+
+This exists because of a measured failure. Both of this node's GPUs took an
+`Xid 154`, llama.cpp logged `failed to initialize CUDA`, and six of its seven
+models became black holes — requests hung for 45 s and then gave up. The dashboard
+showed `online`, seven models, no warning, because **liveness was measured at the
+process level**: `/health` answers 200 while CUDA is dead.
+
+`scripts/health.py` turns signals the node already collects into sentences:
+
+| signal | where it comes from |
+|---|---|
+| a GPU stopped answering the driver | `nvidia-smi` **stderr** — it exits zero and explains the missing card there, so the old collector discarded it |
+| the runtime could not initialise CUDA / hit a CUDA error / OOM'd | the router's journal |
+| the driver logged an `Xid` | the journal — reported as *usually needs a reboot* |
+| a server is offline, or online serving nothing | the fleet's own state |
+| **models with no healthy server** | the fleet, cross-checked — this is what a caller actually feels |
+
+Three rules hold: a problem names what it **means**, not what emitted it; severity
+is about capability (`down` / `degraded` / `warning`), not tone; and a signal that
+could not be **read** is reported as its own problem, because silence that looks
+like health is the failure this replaces.
+
+All of it is public. Someone deciding whether to point a client here should be able
+to see that it is faulting. Nothing quotes an address: an upstream probe's own
+error string names a host and port, so the category is reported instead.
+
+**Still process-level: routing.** A node whose runtime is dead keeps its place in
+the balancer, because taking it out on a false positive would be worse. The
+dashboard now says so loudly; making the scheduler act on it is a separate change.
+
 ## Every GPU in the fleet, labelled by server
 
 The Overview's GPU panel draws every card the fleet has, each saying which server

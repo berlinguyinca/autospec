@@ -62,6 +62,7 @@ import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
 import publicview as _public    # noqa: E402
 import chat as _chat            # noqa: E402
+import health as _health        # noqa: E402
 from keystore import KeyStore   # noqa: E402
 
 CHUNK = 65536
@@ -454,6 +455,39 @@ def _poll_upstreams() -> None:
                               "last_seen": prev.get("last_seen")}
 
 
+def _local_problems() -> list:
+    """This node's own faults, from the collector that reads its journal.
+
+    Fetched here rather than derived, because the signals are a GPU tool's stderr
+    and a systemd journal -- neither of which this process should be forking for.
+
+    It matters that this reaches the FLEET view and not just the node panel:
+    llama.cpp's /health answers 200 while CUDA is dead, so `local` sat in the
+    fleet as `online` with seven models it could not serve, and every request for
+    one of them hung until the caller gave up.
+    """
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=5)
+        conn.putrequest("GET", "/api/stats", skip_host=True,
+                        skip_accept_encoding=True)
+        conn.putheader("Host", f"127.0.0.1:{CFG.dash_port}")
+        if DASHBOARD_KEY:
+            conn.putheader("Authorization", f"Bearer {DASHBOARD_KEY}")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        if r.status != 200:
+            return []
+        got = json.loads(body).get("problems")
+        return got if isinstance(got, list) else []
+    except Exception:
+        # Never fatal: losing the fault list must not also lose the routing that
+        # depends on this timer. An absent list reads as "nothing known", which is
+        # what it is.
+        return []
+
+
 def _poll_local() -> None:
     """Probe the local runtime: is it up, and what does it serve?
 
@@ -476,7 +510,8 @@ def _poll_local() -> None:
     except Exception as exc:
         # Keep the last known model list: it describes what this node CAN serve,
         # which does not stop being true because the runtime is restarting.
-        LOCAL_STATE.update(state="offline", error=str(exc)[:120])
+        LOCAL_STATE.update(state="offline", error=str(exc)[:120],
+                           problems=_local_problems())
         return
 
     models = LOCAL_STATE.get("models") or []
@@ -498,6 +533,7 @@ def _poll_local() -> None:
     except Exception as exc:
         sys.stderr.write(f"local model list unavailable: {exc}\n")
     LOCAL_STATE.update(state="online", error=None, models=models,
+                       problems=_local_problems(),
                        last_seen=time.time())
 
 
@@ -996,6 +1032,9 @@ class Handler(BaseHTTPRequestHandler):
                      "pool_member": True, "owner": None,
                      "state": LOCAL_STATE.get("state") or "unknown",
                      "models": LOCAL_STATE.get("models") or [],
+                     # The node's own faults, so the fleet view and the
+                     # orphaned-model check see what the node panel already saw.
+                     "node_problems": LOCAL_STATE.get("problems") or [],
                      "error": LOCAL_STATE.get("error"),
                      "last_seen": LOCAL_STATE.get("last_seen"),
                      "in_flight": INFLIGHT.get(_ups.LOCAL, 0), "idle_pipes": None,
@@ -1049,6 +1088,15 @@ class Handler(BaseHTTPRequestHandler):
             # decides nothing: every action re-checks server-side.
             "you": {"sub": who["sub"], "is_admin": who["is_admin"]},
             "routing": dict(ROUTE_WHY)}
+        # What is wrong, per server and for the fleet. Computed from the rows
+        # just built rather than from a second query, so the panel and the
+        # problem list cannot describe different moments.
+        advertised = set()
+        for row in out:
+            row["faults"] = (row.pop("node_problems", None) or []) \
+                + _health.server_problems(row)
+            advertised.update(row.get("models") or [])
+        full["problems"] = _health.orphaned_models(advertised, out)
         if who["via"] == "public":
             # Capability and load, with nothing that says where anything lives.
             # Projected by allow-list in publicview.py, so a field added above

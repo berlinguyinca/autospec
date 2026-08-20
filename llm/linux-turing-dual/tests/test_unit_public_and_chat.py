@@ -358,3 +358,36 @@ def test_the_accounting_identity_is_a_sentinel_not_a_credential():
     for prefix in (keys.PREFIX, keys.PREFIX_SERVER, keys.PREFIX_ENROL):
         assert not chat.USAGE_KEY_ID.startswith(prefix)
     assert keys.parse(chat.USAGE_KEY_ID, keys.PREFIX) is None
+
+
+# --- problems reach a stranger ----------------------------------------------
+# Someone deciding whether to point a client at this node should be able to see
+# that it is faulting. That is the whole reason these are public.
+
+def test_node_problems_are_public():
+    out = pub.stats({"llama_up": False, "problems": [
+        {"severity": "down", "text": "the inference runtime is not answering",
+         "where": "this node"}]})
+    assert out["problems"][0]["severity"] == "down"
+
+
+def test_fleet_problems_are_public():
+    out = pub.servers({"servers": [], "problems": [
+        {"severity": "down", "text": "2 advertised model(s) have no healthy server",
+         "where": "the fleet"}]})
+    assert "no healthy server" in out["problems"][0]["text"]
+
+
+def test_per_server_faults_are_public():
+    out = pub.servers({"servers": [{"id": "box", "state": "offline", "faults": [
+        {"severity": "down", "text": "not answering", "where": "box"}]}]})
+    assert out["servers"][0]["faults"][0]["text"] == "not answering"
+
+
+def test_a_missing_problem_list_projects_as_empty_not_absent():
+    """The page renders `problems` unconditionally. Absent would be a silent
+    'no problems', which is the exact reading this work exists to prevent."""
+    assert pub.servers({"servers": []})["problems"] == []
+    # A list from BOTH, because the page merges them. Two spellings of "nothing"
+    # is how one of them ends up handled and the other does not.
+    assert pub.stats({"llama_up": True})["problems"] == []
