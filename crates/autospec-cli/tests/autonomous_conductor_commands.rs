@@ -461,6 +461,106 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
 }
 
 #[test]
+fn autonomous_integration_base_sync() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let remote = fixture.root.join("github.com/test/repo.git");
+    let advance = fixture.root.join("base-advance-clone");
+    git_fixture(
+        &fixture.root,
+        &["clone", remote.to_str().unwrap(), advance.to_str().unwrap()],
+    );
+    fs::write(advance.join("README.md"), "advanced integration base\n")
+        .expect("write advanced base content");
+    git_fixture(&advance, &["add", "README.md"]);
+    git_fixture(&advance, &["commit", "-m", "advance the integration base"]);
+    git_fixture(&advance, &["push", "origin", "HEAD:main"]);
+    let remote_oid = git_fixture(&remote, &["rev-parse", "refs/heads/main"]);
+    let local_before = git_fixture(&fixture.repo_dir, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(
+        local_before, remote_oid,
+        "the fixture must require a fast-forward synchronization"
+    );
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run foreground against an advanced integration base");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let local_after = git_fixture(&fixture.repo_dir, &["rev-parse", "refs/heads/main"]);
+    assert_eq!(
+        local_after, remote_oid,
+        "the implementation base must be the fetched remote OID"
+    );
+    git_fixture(
+        &fixture.repo_dir,
+        &["merge-base", "--is-ancestor", &local_before, &local_after],
+    );
+    assert_eq!(
+        git_fixture(&remote, &["rev-parse", "refs/heads/main"]),
+        remote_oid,
+        "synchronization must never push to the remote"
+    );
+}
+
+#[test]
+fn autonomous_integration_base_sync_conflict_precedes_selection() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let remote = fixture.root.join("github.com/test/repo.git");
+    fs::write(fixture.repo_dir.join("README.md"), "local divergence\n")
+        .expect("write local divergence content");
+    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+    git_fixture(&fixture.repo_dir, &["commit", "-m", "local divergence"]);
+    let local_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "refs/heads/main"]);
+    let diverge = fixture.root.join("base-divergence-clone");
+    git_fixture(
+        &fixture.root,
+        &["clone", remote.to_str().unwrap(), diverge.to_str().unwrap()],
+    );
+    fs::write(diverge.join("README.md"), "remote divergence\n")
+        .expect("write remote divergence content");
+    git_fixture(&diverge, &["add", "README.md"]);
+    git_fixture(&diverge, &["commit", "-m", "remote divergence"]);
+    git_fixture(&diverge, &["push", "origin", "HEAD:main"]);
+    let remote_oid = git_fixture(&remote, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(local_oid, remote_oid, "the fixture must diverge the integration bases");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run foreground against a diverged integration base");
+    assert!(
+        !output.status.success(),
+        "a diverged integration base must fail closed before selection; stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("diverged") || stderr.contains("integration base"),
+        "the failure must name the synchronization conflict; stderr={stderr}"
+    );
+    assert_eq!(
+        git_fixture(&fixture.repo_dir, &["rev-parse", "refs/heads/main"]),
+        local_oid,
+        "a synchronization conflict must leave the base unchanged"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(
+        !calls.contains("issue\nedit\n42") && !calls.contains("issue\nview\n42"),
+        "no selection or admission may follow a synchronization conflict\ncalls={calls}"
+    );
+}
+
+#[test]
 fn foreground_resumes_no_ready_pause() {
     let fixture = ForegroundFixture::new();
     let paused = no_ready_paused_state();
