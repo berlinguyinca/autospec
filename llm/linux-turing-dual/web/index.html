@@ -628,9 +628,22 @@ function defaultCard(d){
 }
 
 async function loadServers(){
-  let d = {servers: []};
-  try{ d = await (await fetch('/api/servers', {cache:'no-store'})).json(); }
-  catch(e){ /* rendered as unknown below */ }
+  // The key goes with it, like every other read on this page: a viewer holding
+  // a key rather than a session would otherwise be shown an empty fleet and no
+  // reason for it.
+  let d = null, why = '';
+  try{
+    const r = await fetch('/api/servers', {cache:'no-store', headers: authHeaders()});
+    if(r.ok) d = await r.json();
+    else why = r.status === 401 ? 'Sign in, or enter a key, to see the fleet.'
+                                : 'The node answered ' + r.status + '.';
+  }catch(e){ why = 'The node is not answering.'; }
+  if(!d){
+    // NOT "no servers are registered": that is a different fact, and printing
+    // it here would describe a fleet nobody could see as a fleet that is empty.
+    $('servers').innerHTML = '<div class="note">' + esc(why) + '</div>';
+    return;
+  }
 
   const all = (d.servers || []).map(s => s.id === 'local'
     // The GPUs are the page's own knowledge; everything else is the node's probe
@@ -702,7 +715,12 @@ async function tick(){
     renderQueue(q);
     renderHealth(d.config_health);
     const gpus = d.gpus || [];
+    // The Servers panel names this node's cards from here. It can be drawn
+    // before the first stats tick has arrived, so re-draw it once the GPUs are
+    // known rather than leaving that one card the only nameless machine.
+    const gpusNewlyKnown = gpus.length > 0 && LAST_GPUS.length === 0;
     LAST_GPUS = gpus;
+    if(gpusNewlyKnown && SECTION === 'servers') loadServers();
     $('gpuh').hidden = gpus.length === 0;
     $('gpus').innerHTML = gpus.map(gpuCard).join('');
     renderCatalog(d.catalog);

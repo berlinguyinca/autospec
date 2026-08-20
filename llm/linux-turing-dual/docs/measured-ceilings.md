@@ -730,3 +730,38 @@ That is the evidence that neither direction is buffered. A gateway that read the
 request body before forwarding it, or accumulated the response to read its final
 chunk, would have grown by the size of the exchange. Accounting for the request
 was exact and attributed: 97,909 prompt tokens, 24 completion, `truncated=false`.
+
+### Re-measured after the gateway began peeking the request body
+
+Routing by model means reading the model, so the gateway now buffers at most
+8 KB of each request before forwarding it. That invalidates the figure above, so
+it was measured again rather than argued about — same tier, a larger body:
+
+| | |
+|---|---|
+| Request body | 469,176 bytes |
+| Prompt tokens | **98,058** |
+| Prefill | 553.5 tok/s (`prompt_ms` 177,146) |
+| Wall clock | 185.7 s |
+| Time to first byte | 7.1 s |
+| Gateway RSS before → after | 42,260 kB → 44,844 kB |
+| Growth | **2.5 MB**, for a 469 KB body |
+
+**Do not read the 0.8 MB difference from the previous run as the peek's cost.**
+The buffer is bounded at 8 KB per in-flight request and there were two slots, so
+at most 16 kB of that growth can be the peek; the rest is allocator noise between
+two single samples, on a body four times larger than the earlier one. What the
+measurement establishes is the property that matters and nothing more: growth
+stayed in megabytes while the body grew to 469 KB, so the request is still
+streamed rather than assembled.
+
+The prefill figure is also the more trustworthy one of the two 100k samples --
+553.5 tok/s against the earlier 521.4 -- and both sit far below the 594-637 tok/s
+recorded at 40k, which is the shape to expect when full-attention layers are
+quadratic in context.
+
+This run doubled as the live proof of the eligibility rule. The key's remembered
+server was the workstation, but `qwen3.8-27b-100k` exists only on this node, so
+the reply came back `X-Routed-Why: preferred` rather than `last-used`: being able
+to serve the model dropped the warm-but-wrong server out before affinity was
+consulted.

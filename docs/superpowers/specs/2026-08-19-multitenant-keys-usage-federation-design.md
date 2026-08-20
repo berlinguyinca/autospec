@@ -482,23 +482,83 @@ client secret in the credential store.
 
 ## 6. Federation
 
-### 6.1 Route by model name
+### 6.1 The default base URL is the balancer
 
 An upstream registry — example committed, real file site-local — declares for
-each host: an id, a base URL, a credential name, a namespace prefix, and either a
-static model list or an instruction to poll the host's own model list.
+each host: an id, a base URL, a credential name, and whether it is enabled. The
+model list is **polled from the host itself**, because a static list in this file
+is a second copy of a fact the host already publishes.
 
-Routing is by **model name**, deterministically, not by load-balancing a pool.
-Pooling the same model across hosts would need capacity and queue-depth
-awareness on both sides and would make a request's destination
-unpredictable — which on hosts with different cards means unpredictable
-throughput too.
+`/v1` means **whichever machine should serve this**, not "this machine".
+`/u/local/v1` pins this node, `/u/<id>/v1` pins a named one, and `/u/auto/v1`
+names the balancer explicitly. The default has to be the balanced route or the
+default means nothing: every client already configured against this node — and
+every snippet on the dashboard — points at `/v1`, so this is what makes the fleet
+reachable without anyone reconfiguring anything.
 
-### 6.2 Namespacing preserves every existing client
+Balancing applies only to endpoints that name a model in the body:
+`chat/completions`, `completions`, `embeddings`, `rerank`. This is an
+**allow-list**. `/health`, `/props`, `/metrics` and `/slots` describe *this* box,
+and a deny-list would silently start balancing whatever llama.cpp adds next.
 
-Local models keep their bare names. Remote models are prefixed with their
-upstream's id. Both hosts run Qwen builds, so unprefixed remote names would
-collide; and every client configured today keeps working untouched.
+**Supersedes the original decision to route by model name with namespaced ids.**
+That design read better but required parsing the `model` field out of the request
+body, and not parsing the body is what makes this gateway free — a 100k prompt is
+~400 KB and streams straight through. A path prefix carries the same information
+in the part of the request already being read, and it lets two hosts serve the
+same model id without collision, which the workstation promptly did.
+
+### 6.2 A server is only ever sent a model it advertises
+
+This is the rule the rest of §6 depends on, and it exists because of a **measured
+silent failure**: llama.cpp does not refuse a request for a model it has not
+got — it answers with whatever is loaded. A request naming `qwen3.5-9b-vision`
+came back served by `qwen3.8-27b`, status 200, no error field. A vision request
+answered by a text model, or an uncensored one by the aligned model, is worse
+than any refusal.
+
+Requirements:
+
+- Eligibility is a **hard filter applied before preference**. A server is
+  eligible for a model only if that model appears in **its own** polled list.
+  Remote eligibility is therefore a positive check: a failed poll excludes a
+  server rather than including it.
+- Eligibility **outranks prefix-cache affinity**. The warm-cache preference is
+  worth ~10x on prompt processing, and it is still second: a warm server that
+  cannot serve the model is a wrong answer, not a slow one.
+- A model nothing here serves is a `404`, not a substitution. A model whose only
+  server is offline is a `503` **naming that server**.
+- This node is eligible when its own model list is *unknown* — it is the model
+  authority here, and a broken probe must not empty the fleet.
+
+Reading the model does not mean parsing the body. At most **8 KB** of the request
+is buffered to find the top-level `model` key and then forwarded unchanged. The
+scanner accepts `model` only as a key of the top-level object, so a `"model"`
+inside a user's own message text cannot steer routing. If the key is not in that
+prefix the request stays **local** and is labelled `blind` — never sent somewhere
+that might substitute.
+
+### 6.2a This node is probed like any other
+
+The gateway and the runtime are separate processes, so "local is up" is not
+something the gateway may assume: a live gateway in front of a dead runtime would
+pin every balanced request to a server that cannot answer. Local liveness comes
+from the runtime's own `/health`, and `unknown` counts as available — failing
+closed on a late telemetry probe would be the wrong direction for anything that
+is not authentication.
+
+`/health` was checked against a live model swap **before** being wired into
+routing, because a flapping signal would scatter callers onto cold slots and
+destroy the affinity balancing exists to protect. It answered 200 throughout a
+7.5 s swap.
+
+### 6.2b Every decision is reported and counted
+
+Each reply carries `X-Routed-To` and `X-Routed-Why`
+(`last-used | preferred | model-only | pinned | not-balanced | unnamed | blind`),
+and the dashboard tallies them. Without this, a balancer that quietly stopped
+balancing — every request falling to `blind` because the peek budget is too
+small — is indistinguishable from one that is working.
 
 ### 6.3 Intermittent by default
 
@@ -516,6 +576,14 @@ not serving when probed. Requirements:
   configured roster including offline entries with their `last_seen`, which is
   where a human wants that distinction. OpenAI-compatible clients have no field
   in which to express availability, so honesty there means omission.
+- **Deferred, deliberately: `/v1/models` is this node's list, not the fleet's
+  union.** Today the union would be byte-identical to it — the workstation's
+  single id is a subset — so publishing a union would change an unauthenticated
+  endpoint's contract for no present gain. The fleet view lives in the
+  authenticated `/api/servers`, which is where the server ids belong anyway. The
+  trigger to revisit is the first remote that serves an id this node does not:
+  from then on a client pointed at the default could be routed to a model its
+  own model list never offered it.
 - A remote host's queue depth is reported **as the remote reports it**, or shown
   as `unknown`. It is never inferred, and this node's own queue arithmetic is
   never presented as covering remote capacity.
