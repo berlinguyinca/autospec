@@ -152,7 +152,12 @@ func oneControl(cfg *Config, stop <-chan struct{}, pipes *pipeKeeper) (bool, err
 // telemetry must never cost the registration this connection represents.
 func sendCapabilities(c *Conn, stop <-chan struct{}) {
 	for {
-		msg, err := json.Marshal(capabilities{Type: "capabilities", Cards: readCards()})
+		cards := readCards()
+		msg, err := json.Marshal(capabilities{
+			Type:                "capabilities",
+			Cards:               cards,
+			HardwareFingerprint: hardwareFingerprint(cards),
+		})
 		if err == nil {
 			if err := c.WriteFrame(opText, msg); err != nil {
 				return // the connection is gone; runControl will rebuild it

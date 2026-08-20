@@ -25,6 +25,11 @@ qwen-turing-agent install
 * Forwards bytes. It does not read them, does not log them, and does not parse
   them.
 
+GPU capability messages include a stable `hardware_fingerprint` for non-empty
+NVIDIA observations. It changes when GPU model, memory capacity, or card count
+changes, while ignoring card order and volatile readings such as utilization and
+temperature.
+
 ## The target comes from here, never from the node
 
 `--target` is an OpenAI-compatible base on this machine — `scheme://host:port`,

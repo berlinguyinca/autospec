@@ -16,7 +16,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,8 +38,9 @@ type card struct {
 }
 
 type capabilities struct {
-	Type  string `json:"type"`
-	Cards []card `json:"cards"`
+	Type                string `json:"type"`
+	Cards               []card `json:"cards"`
+	HardwareFingerprint string `json:"hardware_fingerprint,omitempty"`
 }
 
 const smiFields = "index,name,memory.total,memory.used,utilization.gpu," +
@@ -45,6 +49,19 @@ const smiFields = "index,name,memory.total,memory.used,utilization.gpu," +
 // capabilityInterval is comfortably slower than the dashboard's own refresh: this
 // is telemetry about someone else's box, and forking nvidia-smi is not free.
 const capabilityInterval = 20 * time.Second
+
+func hardwareFingerprint(cards []card) string {
+	if len(cards) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(cards))
+	for _, c := range cards {
+		parts = append(parts, c.Name+"\x00"+strconv.Itoa(c.MemTotal))
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "v1:" + hex.EncodeToString(sum[:])
+}
 
 func readCards() []card {
 	// Bounded: nvidia-smi can hang on a wedged driver, and a telemetry fork must
