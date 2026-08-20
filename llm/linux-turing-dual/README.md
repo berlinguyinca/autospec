@@ -77,6 +77,14 @@ Or derive it from the server so client and server cannot drift:
    them. A `-100k` id means *run solo*. A 100k session beside a 40k one asks for
    140k of a 102,400-token pool and **both die together** — a shared KV pool has
    no admission control.
+3. **`HEAD` used to answer 501 on every path.** Fixed. Both listeners now answer
+   `HEAD` with the headers a `GET` would send — same status, same real
+   `Content-Length` — and no body. A monitor probing `HEAD /api/queue` or
+   `HEAD /api/gateway-health` is the cheap, key-free health check. `HEAD` on the
+   *inference* paths answers `405` with `Allow: GET, POST` rather than relaying:
+   a relayed `HEAD` would take a pipe from the tunnel pool and move the caller's
+   cache affinity, to collect a refusal from a runtime that speaks only GET and
+   POST.
 
 ---
 
@@ -398,6 +406,7 @@ either appears early. Until then the API key crosses the network in cleartext.
 systemctl status qwen-turing@router qwen-turing-dashboard nginx
 journalctl -u qwen-turing@router -f
 curl -s http://<node-host>/api/queue | python3 -m json.tool     # no key needed
+curl -sI https://<node-host>/api/gateway-health                 # HEAD: is it up?
 ```
 
 Site coordinates live in `/etc/qwen-turing/site.conf` (the units read that path;

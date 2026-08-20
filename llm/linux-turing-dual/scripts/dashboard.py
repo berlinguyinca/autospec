@@ -159,6 +159,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-turing-dashboard"
     api_key: str | None = None
     metrics_url: str = "http://127.0.0.1:8080/metrics"
+    # Set for the duration of one HEAD. A class attribute, not per-request
+    # state, because do_HEAD() reuses do_GET() wholesale.
+    _head = False
 
     def _authorised(self) -> bool:
         if not self.api_key:
@@ -177,7 +180,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(body)
+        # A HEAD gets the same headers and none of the bytes. The body is still
+        # built, so Content-Length stays the length a GET would report.
+        if not self._head:
+            self.wfile.write(body)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        """A HEAD is a GET with the body dropped, so it runs the same code.
+
+        The alternative -- letting BaseHTTPRequestHandler answer 501 -- is what
+        this served until now, so every monitor probing the page or /api/queue
+        with a HEAD saw a broken node.
+
+        Cleared in a `finally`: one handler instance serves every request on a
+        keep-alive connection, and a stuck flag would silence the next real GET.
+        """
+        self._head = True
+        try:
+            self.do_GET()
+        finally:
+            self._head = False
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]

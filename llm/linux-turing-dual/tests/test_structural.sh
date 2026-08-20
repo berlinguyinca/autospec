@@ -368,6 +368,31 @@ else
   ok "no page path leaves a response body unread"
 fi
 
+# --- every listener answers HEAD -------------------------------------------
+# BaseHTTPRequestHandler answers 501 to any method it has no do_<METHOD> for, and
+# neither handler had do_HEAD -- so a HEAD, which is the conventional cheap uptime
+# probe, reported this node broken on every public path while it served happily.
+# Measured before the fix: 501 on /, /status, /api/queue, /api/stats,
+# /api/gateway-health, /v1/models and /api/me.
+#
+# The body suppression is checked too. A HEAD that sent a body would have it read
+# as the start of the NEXT response on a keep-alive connection, so the write must
+# be guarded rather than merely intended.
+head_missing=""
+for f in gateway dashboard; do
+  grep -q "def do_HEAD" "${NODE}/scripts/${f}.py" || head_missing="${head_missing} ${f}.py"
+done
+if [ -n "$head_missing" ]; then
+  bad "no do_HEAD in:${head_missing}; BaseHTTPRequestHandler answers those 501"
+elif ! grep -q "if self._head:" "${NODE}/scripts/gateway.py" \
+  || ! grep -q "if not self._head:" "${NODE}/scripts/dashboard.py"; then
+  bad "a HEAD must be stopped from writing a body, not merely routed"
+elif grep -Eq "^[[:space:]]+self\.wfile\.write\((body|out)\)" "${NODE}/scripts/gateway.py"; then
+  bad "the gateway writes a response body outside _body(), which is where HEAD is honoured"
+else
+  ok "both listeners answer HEAD, with the body suppressed in one place"
+fi
+
 # --- the suites must collect TOGETHER, the way CI runs them -----------------
 # CI runs both node suites in ONE pytest invocation, which puts both tests
 # directories on sys.path. A test module importing the bare name `conftest` then

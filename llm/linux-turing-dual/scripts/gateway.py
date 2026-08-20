@@ -80,6 +80,13 @@ OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
 # a second constant beside it was display-only and wrong by 2x -- the Servers
 # panel claimed a 60 s probe while the timer ran every 30. One timer, one number.
 
+
+
+def owns(path: str) -> bool:
+    """Does THIS process answer `path` itself, rather than proxying it?"""
+    return any(path == p.rstrip("/") or path.startswith(p) for p in OWNED)
+
+
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
 _PENDING: dict[str, dict] = {}      # oauth state -> {verifier, created}
@@ -568,6 +575,11 @@ class Handler(BaseHTTPRequestHandler):
     # used for BOTH destinations: when auto picks this node the prefix still has
     # to go, or the local runtime is asked for a path it has never heard of.
     _route_path = None
+    # A HEAD is a GET whose body is thrown away. It is a CLASS attribute rather
+    # than per-request state reset in _route(), because _route() runs after
+    # do_HEAD() has set it -- resetting it there would clear the flag and send a
+    # body on every HEAD.
+    _head = False
 
     # --- helpers -----------------------------------------------------------
     def _read_body(self, n: int) -> bytes:
@@ -596,9 +608,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._body_left = 0
                 break
 
-    def _json(self, code: int, obj) -> None:
+    def _body(self, data: bytes) -> None:
+        """Write a response body -- unless this is a HEAD, which must carry the
+        headers a GET would carry and none of the bytes. The Content-Length is
+        therefore still the real length: the body is BUILT and then dropped,
+        never shortened to zero, or a monitor reading the header would learn the
+        wrong size."""
+        if self._head:
+            return
+        self.wfile.write(data)
+
+    def _json(self, code: int, obj, extra: dict | None = None) -> None:
         body = json.dumps(obj).encode()
         self.send_response(code)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         # If we are going to close, SAY so. Closing silently gives a client
@@ -608,14 +632,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(body)
+        self._body(body)
 
-    def _err(self, code: int, message: str, kind: str = "invalid_request") -> None:
+    def _err(self, code: int, message: str, kind: str = "invalid_request",
+             extra: dict | None = None) -> None:
         # OpenAI-compatible error shape, so a client library surfaces it.
         self._drain_body()
         self.close_connection = True
         self._json(code, {"error": {"message": message, "type": kind,
-                                    "code": code}})
+                                    "code": code}}, extra)
 
     def _secure(self) -> bool:
         """Did this request arrive over TLS? nginx sets X-Forwarded-Proto and
@@ -663,6 +688,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._route("GET")
 
+    def do_HEAD(self):
+        """The headers a GET would send, and none of the body.
+
+        Without this, BaseHTTPRequestHandler answers 501 -- so every uptime
+        monitor pointed at this node reported it broken while it was serving
+        happily. Measured before the fix: all seven public paths, 501.
+
+        The flag is cleared in a `finally` because ONE handler instance serves
+        every request on a keep-alive connection. Leaving it set would silence
+        the body of the next real GET on that connection -- headers arriving and
+        bodies never, which is exactly the hang this dashboard just had.
+        """
+        self._head = True
+        try:
+            self._route("HEAD")
+        finally:
+            self._head = False
+
     def do_POST(self):
         self._route("POST")
 
@@ -685,9 +728,17 @@ class Handler(BaseHTTPRequestHandler):
         self._route_why = None
         self._route_est = None
         path = self.path.split("?", 1)[0]
+        if method == "HEAD" and not owns(path):
+            # Only what this process answers itself. A HEAD relayed onward would
+            # take a pipe from the tunnel pool, move the caller's cache affinity
+            # and write a usage row -- all to collect a refusal from a runtime
+            # that registers Get and Post and nothing else. Refused here, above
+            # authentication, so an unauthenticated probe costs nothing at all.
+            return self._err(405, "HEAD is not supported on this endpoint",
+                             "method_not_allowed", {"Allow": "GET, POST"})
         if path.startswith("/u/"):
             return self._proxy(method, remote=True)
-        if any(path == p.rstrip("/") or path.startswith(p) for p in OWNED):
+        if owns(path):
             try:
                 self._owned(method, path)
             except BrokenPipeError:
@@ -898,7 +949,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        self._body(body)
 
     def _servers(self) -> None:
         """Every registered server and what it serves.
@@ -1030,7 +1081,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        self._body(body)
 
     def _local_models_payload(self) -> tuple[dict, int]:
         """This node's list, from the dashboard -- which is where the sanitiser
@@ -1733,7 +1784,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+        self._body(body)
 
     # --- the proxy ---------------------------------------------------------
     def _proxy(self, method: str, remote: bool = False) -> None:
@@ -1862,7 +1913,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(out)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(out)
+                self._body(out)
                 return r.status, False
             chunked = self._mirror_response_headers(r)
             self._pump(r, acc, chunked)
