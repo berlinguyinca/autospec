@@ -43,6 +43,30 @@ hold a 16 GiB model that may not be split. `per_card_ceiling()` and
 
 ---
 
+## Reconnect after a redeploy — measured
+
+The agent's control loop grew its backoff on every failure and never reset it, so
+after enough node restarts it pinned at the 60 s ceiling for the life of the
+process. Measured on this fleet, restarting the gateway under a long-running
+agent:
+
+| | bender usable again |
+|---|---|
+| backoff never reset | **65 s** — and it would never have improved |
+| reset after a connection that worked | **4 s** |
+
+The distinction that makes it safe: a failed *dial* still backs off (the node
+really is down), and a `4409` close still backs off (another process holds the
+name, and a one-second retry would fight it). Only "attached, then dropped" —
+which is what a redeploy looks like — resets.
+
+What bender advertises, unauthenticated, once back: one RTX 4090, 2 seats,
+`qwen3.8-27b`, and 2861 tok/s prefill measured over 21 samples. The `slots` field
+had been sent in every hello and stored by the gateway since the transport
+shipped, and surfaced nowhere.
+
+---
+
 ## What gates this node in CI
 
 `llm/` appeared in none of the twelve workflows before this node existed, so the

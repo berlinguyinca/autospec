@@ -111,6 +111,39 @@ you to skim it.
 
 Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
 
+## Who may see what
+
+Reading this node needs no credential. Signing in buys exactly two things.
+
+| | public | needs sign-in |
+|---|---|---|
+| health, queue, model catalog, connection instructions | ✅ | |
+| fleet: which server, what it serves, how loaded, how fast, its GPUs and seats | ✅ | |
+| leaderboard, by display name | ✅ | |
+| creating and revoking API keys | | ✅ |
+| the chat panel | | ✅ |
+| per-key usage detail, server addresses, owners | | ✅ |
+
+Every public payload is a projection in `scripts/publicview.py`, built by
+iterating an allow-list rather than by deleting private keys from a full one — so
+a field added upstream is invisible until someone names it, and the failure mode
+of forgetting one is a missing value rather than a disclosure. Two categories stay
+out by construction: **addresses** (`base_url`, and upstream error strings, which
+quote the host they failed to reach) and **identities** (emails and subjects).
+
+### The chat panel
+
+Signed in, `/api/chat` runs a conversation against the fleet. It is the one place
+here where a cookie pays for GPU time, so `Sec-Fetch-Site` is checked before the
+body is read — without that, any page on the internet could make a signed-in
+browser spend this node. After validation it is the ordinary balanced path: the
+same proxy, eligibility, scheduling, affinity and accounting as a key-holder's
+request. Usage is attributed to the person under the sentinel key id
+`dashboard-chat`, which is deliberately **not** a minted key: a real credential
+its owner could neither see nor revoke would invert the point of the key surface.
+
+The transcript lives in the page and nowhere else. Reload and it is gone.
+
 ## Accounts and API keys
 
 Every user gets their own keys. **Sign in on the dashboard and create one** —
