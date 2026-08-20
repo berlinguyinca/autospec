@@ -1223,16 +1223,41 @@ async function sendTurn(text){
     if(ctl.signal.aborted){
       $('chatnote').textContent = 'Stopped.';
     }else{
-      // SAY WHAT HAPPENED. The previous message was "The node stopped
-      // answering." for every possible fault, which threw away the only evidence
-      // there was: the node's own logs showed a 200 and nginx showed the browser
-      // hanging up, and nothing on this side could say why. A diagnostic that
-      // discards the diagnosis is worse than no diagnostic.
-      $('chatnote').textContent = 'The stream failed: ' +
-        (e && e.name ? e.name : 'Error') +
-        (e && e.message ? ' — ' + e.message : '') +
-        '. Sent ' + reply.content.length + ' characters before it stopped.';
+      // KEEP WHAT ARRIVED. The node finishes the answer and nginx logs a
+      // complete 200; what is lost is only the part of the stream this browser
+      // did not receive. Discarding the text we DID get -- as this used to --
+      // threw away good output and made a local connection drop look like a
+      // model failure.
+      //
+      // Measured cause on this workstation: 184 `docker0` carrier flaps in
+      // thirty minutes, from a test run creating a container per test. Chrome
+      // reports every one as ERR_NETWORK_CHANGED and cancels requests in flight,
+      // so a thirty-second stream cannot survive. Naming that beats blaming the
+      // node, which was innocent.
+      const local = /NETWORK_CHANGED|network error|Failed to fetch/i.test(
+        (e && e.message) || '');
+      if(reply.content) reply.content += '\n\n[the connection dropped here]';
+      $('chatnote').innerHTML =
+        esc((e && e.name ? e.name : 'Error') +
+            (e && e.message ? ': ' + e.message : '')) +
+        ' — kept ' + reply.content.length + ' characters. ' +
+        (local
+          ? 'Your browser lost the connection, not the node. A local network ' +
+            'change does this: a VPN, Wi-Fi switching, or containers starting ' +
+            'and stopping. '
+          : '') +
+        '<a href="#" id="chatretry">Ask again</a>';
       if(window.console) console.error('chat stream failed', e);
+      drawChat();
+      const again = $('chatretry');
+      if(again) again.onclick = ev => {
+        ev.preventDefault();
+        // Drop the truncated answer and re-ask the same question, rather than
+        // sending the broken turn back to the model as if it had said it.
+        CHAT.pop();
+        const last = CHAT.pop();
+        if(last && last.role === 'user') sendTurn(last.content);
+      };
     }
   }finally{
     // A reader that is abandoned holds the connection open exactly as an unread
