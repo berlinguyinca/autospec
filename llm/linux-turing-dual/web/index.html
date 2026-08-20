@@ -189,6 +189,15 @@
     </div>
   </section>
 
+  <!-- ===================== SERVERS ===================== -->
+  <section id="s-servers" role="tabpanel" aria-labelledby="n-servers" hidden>
+    <h1>Servers</h1>
+    <p class="lede">Every machine reachable through this endpoint, and which
+      models live on which GPUs. Each server has its own base URL, so pointing a
+      client at a particular box is a config change and nothing more.</p>
+    <div id="servers"></div>
+  </section>
+
   <!-- ===================== CONNECT ===================== -->
   <section id="s-connect" role="tabpanel" aria-labelledby="n-connect" hidden>
     <h1>Connect</h1>
@@ -225,8 +234,9 @@
   <!-- ===================== USAGE ===================== -->
   <section id="s-usage" role="tabpanel" aria-labelledby="n-usage" hidden>
     <h1>Usage</h1>
-    <p class="lede">Exact token counts, read from the model's own response rather
-      than estimated.</p>
+    <p class="lede">Who is using the node, ranked by tokens. Counts are exact —
+      read from the model's own response rather than estimated — and cover
+      everyone, because a scoreboard showing only your own row would not be one.</p>
     <div id="usagebox"></div>
   </section>
 
@@ -259,6 +269,7 @@ function askKey(msg){
 const SECTIONS = [
   ['overview', 'Overview'],
   ['models',   'Models'],
+  ['servers',  'Servers'],
   ['connect',  'Connect'],
   ['keys',     'Keys'],
   ['usage',    'Usage'],
@@ -294,7 +305,12 @@ function show(id, push){
     $('n-'+s).setAttribute('aria-selected', s === id ? 'true' : 'false');
   });
   if(push && location.hash !== '#'+id) history.replaceState(null, '', '#'+id);
-  if(id === 'keys' || id === 'usage') loadAccount();
+  // Keys needs a SESSION (minting is a browser action). Usage needs only a
+  // credential, so it must not be gated behind the account panel -- doing that
+  // left an API-key viewer staring at an empty Usage tab.
+  if(id === 'keys') loadAccount();
+  if(id === 'usage') loadUsage();
+  if(id === 'servers') loadServers();
 }
 $('nav').onclick = e => {
   const b = e.target.closest('[data-s]'); if(b) show(b.dataset.s, true);
@@ -438,7 +454,7 @@ function gpuCard(g){
 }
 
 // ---------- catalog + snippets ----------
-let CATALOG = [], TAB = 'curl';
+let CATALOG = [], TAB = 'curl', LAST_GPUS = [];
 function kindBadge(k){
   const cls = k === 'vision' ? 'v' : (k && k.indexOf('uncensored') === 0 ? 'u' : '');
   return '<span class="badge '+cls+'">'+(k||'text')+'</span>';
@@ -520,6 +536,88 @@ $('tabs').onclick = e => {
 };
 $('msel').onchange = renderSnippet;
 
+// ---------- servers ----------
+function ago(ts){
+  if(!ts) return 'never';
+  const s = Math.max(0, Math.round(Date.now()/1000 - ts));
+  if(s < 90) return s + 's ago';
+  if(s < 5400) return Math.round(s/60) + ' min ago';
+  return Math.round(s/3600) + 'h ago';
+}
+
+function serverCard(o){
+  const badge = {
+    online:   '<span class="badge on">online</span>',
+    offline:  '<span class="badge u">not answering</span>',
+    disabled: '<span class="badge">parked</span>',
+    unknown:  '<span class="badge">not probed yet</span>',
+  }[o.state] || '<span class="badge">' + esc(o.state) + '</span>';
+
+  const models = (o.models || []).length
+    ? '<div class="sub" style="margin-top:8px">' +
+      o.models.map(m => '<code>' + esc(m) + '</code>').join(' ') + '</div>'
+    : '<div class="sub" style="margin-top:8px">no models reported</div>';
+
+  return '<div class="card">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">' +
+      '<span style="font-weight:640">' + esc(o.name || o.id) + '</span>' + badge + '</div>' +
+    (o.note ? '<div class="sub">' + esc(o.note) + '</div>' : '') +
+    (o.gpus ? '<div class="sub">' + esc(o.gpus) + '</div>' : '') +
+    '<div class="sub" style="margin-top:8px">Base URL <code>' + esc(o.route) + '</code></div>' +
+    (o.state === 'offline'
+      ? '<div class="sub" style="color:var(--warn)">last seen ' + ago(o.last_seen) +
+        (o.error ? ' · ' + esc(o.error) : '') + '</div>' : '') +
+    (o.problems && o.problems.length
+      ? '<div class="sub" style="color:var(--warn)">' + esc(o.problems.join('; ')) + '</div>'
+      : '') +
+    (o.needs_key === false && o.id !== 'local' && o.state === 'online'
+      ? '<div class="sub" style="color:var(--warn)">reachable without a key — ' +
+        'restrict its port to this node</div>' : '') +
+    models + '</div>';
+}
+
+async function loadServers(){
+  let d = {servers: []};
+  try{ d = await (await fetch('/api/servers', {cache:'no-store'})).json(); }
+  catch(e){ /* rendered as local-only below */ }
+
+  // This node is always first, described from what the page already knows.
+  const local = {
+    id: 'local', name: 'This node', state: 'online', route: '/v1',
+    note: 'the machine serving this page',
+    gpus: (LAST_GPUS || []).map(g => g.name).filter(Boolean).join(' + ') || null,
+    models: (CATALOG || []).map(m => m.id), needs_key: true, problems: [],
+  };
+  const remotes = d.servers || [];
+
+  // The virtual server is described, not probed: it has no address of its own.
+  const auto = '<div class="card" style="border-left:3px solid var(--accent)">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
+      '<span style="font-weight:640">auto</span>' +
+      '<span class="badge v">virtual</span></div>' +
+    '<div class="sub">Picks a server for you.</div>' +
+    '<div class="sub" style="margin-top:8px">Base URL <code>/u/auto/v1</code></div>' +
+    '<div class="note">Prefers <strong>the server you used last</strong>, because a ' +
+    'warm prefix cache is worth roughly tenfold on prompt processing — being sent ' +
+    'elsewhere silently throws that away. Falls back to this node, then to any ' +
+    'other server that is online. The reply carries <code>X-Routed-To</code>, so ' +
+    'you can always tell where a request actually landed.</div></div>';
+
+  $('servers').innerHTML =
+    '<div class="grid">' + serverCard(local) +
+      remotes.map(serverCard).join('') + auto + '</div>' +
+    (remotes.length
+      ? '<div class="note">Remote servers are re-probed every ' +
+        n(d.poll_seconds) + ' seconds, never on the request path — a request for a ' +
+        'server that is not answering is refused at once rather than waiting out a ' +
+        'proxy timeout.</div>'
+      : '<div class="note">No other servers are registered. Add one to ' +
+        '<code>/etc/qwen-turing/upstreams.yaml</code> — see ' +
+        '<code>config/upstreams.yaml.example</code> — and it appears here with its ' +
+        'own base URL. Its inference port must be restricted to this node, or a ' +
+        'client could reach it directly and bypass authentication entirely.</div>');
+}
+
 // ---------- poll ----------
 async function tick(){
   try{
@@ -567,6 +665,7 @@ async function tick(){
     renderQueue(q);
     renderHealth(d.config_health);
     const gpus = d.gpus || [];
+    LAST_GPUS = gpus;
     $('gpuh').hidden = gpus.length === 0;
     $('gpus').innerHTML = gpus.map(gpuCard).join('');
     renderCatalog(d.catalog);
@@ -602,7 +701,7 @@ async function loadAccount(){
   catch(e){
     $('acct').innerHTML = '<div class="card"><div class="sub">Key management is ' +
       'unavailable — the gateway is not answering.</div></div>';
-    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = ''; return;
+    $('keysbox').innerHTML = ''; return;
   }
   ME = me;
 
@@ -616,7 +715,7 @@ async function loadAccount(){
           'usage is attributed to you rather than to a shared secret.</div>'
         : '<div class="sub">Sign-in is not configured on this node.</div>') +
       '</div>';
-    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = '';
+    $('keysbox').innerHTML = '';
     return;
   }
 
@@ -628,7 +727,7 @@ async function loadAccount(){
       ', but not authorised to create keys.</strong><div class="note">Your account ' +
       'is not a member of <code>' + esc(me.required_group || 'the required group') +
       '</code>. Ask an administrator to add you; nothing else is needed.</div></div>';
-    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = '';
+    $('keysbox').innerHTML = '';
     return;
   }
 
@@ -643,7 +742,7 @@ async function loadAccount(){
   $('logout').onclick = async () => {
     await fetch('/auth/logout', {method:'POST'}); ME = null; loadAccount();
   };
-  await Promise.all([loadKeys(), loadUsage()]);
+  await loadKeys();
 }
 
 async function loadKeys(){
@@ -733,41 +832,100 @@ async function doRevoke(keyId){
   loadKeys(); loadUsage();
 }
 
+let USAGE_MINE = false;
+
+function personName(r){
+  // A row should name a person, not an opaque subject id. Prefer the display
+  // name, then the local part of the email, and only then a subject prefix --
+  // a bare sub is unreadable and a full email is more than a scoreboard needs.
+  if(r.display_name) return esc(r.display_name);
+  if(r.email) return esc(String(r.email).split('@')[0]);
+  return '<span class="sub">' + esc(String(r.sub || '?').slice(0, 8)) + '…</span>';
+}
+
 async function loadUsage(){
-  const all = ME && ME.is_admin ? '?all=1' : '';
   let d;
-  try{ d = await (await fetch('/api/usage'+all, {cache:'no-store'})).json(); }
-  catch(e){ $('usagebox').innerHTML = '<div class="err">Could not read usage.</div>'; return; }
-  const rows = (d.usage||[]).map(u => {
+  try{
+    d = await (await fetch('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
+                           {cache:'no-store'})).json();
+  }catch(e){ $('usagebox').innerHTML = '<div class="banner">Could not read usage.</div>'; return; }
+
+  const board = d.leaderboard || [];
+  const top = board.length ? Math.max(1, board[0].total_tokens || 1) : 1;
+  const total = board.reduce((a,r) => a + (r.total_tokens||0), 0);
+
+  const boardRows = board.map((r,i) => {
+    const you = r.sub === d.you;
+    const share = r.prompt_tokens ? Math.round(100*(r.cached_tokens||0)/r.prompt_tokens) : null;
+    return '<tr' + (you ? ' style="background:color-mix(in srgb,var(--accent) 7%,transparent)"' : '') + '>' +
+      '<td class="num sub">' + (i+1) + '</td>' +
+      '<td>' + personName(r) + (you ? ' <span class="badge v">you</span>' : '') + '</td>' +
+      '<td class="num">' + n(r.total_tokens) + '</td>' +
+      '<td style="width:26%"><div class="bar" style="margin:0">' +
+        '<i style="width:' + Math.round(100*(r.total_tokens||0)/top) + '%"></i></div></td>' +
+      '<td class="num">' + n(r.requests) + '</td>' +
+      '<td class="num">' + (share === null ? '—' : share + '%') + '</td>' +
+      '<td class="num sub">' + n(r.keys) + '</td></tr>';
+  }).join('');
+
+  const detail = (d.usage || []).map((u,i) => {
     const share = u.prompt_tokens ? Math.round(100*(u.cached_tokens||0)/u.prompt_tokens) : null;
     return '<tr>' +
-      '<td><code>' + esc(u.key_id) + '</code></td>' +
-      (d.all_users ? '<td class="sub">' + esc(u.sub) + '</td>' : '') +
-      '<td>' + esc(u.model || '–') + '</td>' +
+      '<td class="num sub">' + (i+1) + '</td>' +
+      '<td><code>' + esc(u.key_id) + '</code>' +
+        (u.label ? '<div class="sub">' + esc(u.label) + '</div>' : '') + '</td>' +
+      '<td>' + personName(u) + '</td>' +
+      '<td>' + esc(u.model || '—') + '</td>' +
+      '<td class="num">' + n(u.total_tokens) + '</td>' +
       '<td class="num">' + n(u.requests) + '</td>' +
       '<td class="num">' + n(u.prompt_tokens) + '</td>' +
       '<td class="num">' + n(u.completion_tokens) + '</td>' +
-      '<td class="num">' + (share === null ? '–' : share + '%') + '</td>' +
+      '<td class="num">' + (share === null ? '—' : share + '%') + '</td>' +
       '<td class="num">' + (u.truncated_requests
         ? '<span class="badge u">' + n(u.truncated_requests) + '</span>' : '0') +
       '</td></tr>';
   }).join('');
-  $('usagebox').innerHTML = '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
-    '<th>Key id</th>' + (d.all_users ? '<th>Owner</th>' : '') + '<th>Model</th>' +
-    '<th class="num">Requests</th><th class="num">Prompt tokens</th>' +
-    '<th class="num">Completion tokens</th><th class="num">From cache</th>' +
-    '<th class="num">Unknown</th></tr></thead><tbody>' +
-    (rows || '<tr><td colspan="8" class="sub">No usage recorded yet.</td></tr>') +
-    '</tbody></table>' +
-    '<div class="note"><strong>Unknown</strong> counts requests whose client ' +
-    'disconnected before the response finished, so their token counts genuinely ' +
-    'are not known. They are counted separately rather than estimated or reported ' +
-    'as zero. <strong>From cache</strong> is the share of prompt tokens served from ' +
-    'the prefix cache — on this node that is worth roughly tenfold on a warm slot.' +
-    '</div></div>';
+
+  $('usagebox').innerHTML =
+    (board.length
+      ? '<div class="card scroll"><table><thead><tr>' +
+        '<th class="num">#</th><th>Who</th><th class="num">Tokens</th><th></th>' +
+        '<th class="num">Requests</th><th class="num">From cache</th>' +
+        '<th class="num">Keys</th></tr></thead><tbody>' + boardRows + '</tbody></table>' +
+        '<div class="note">' + n(total) + ' tokens across ' + board.length +
+        (board.length === 1 ? ' person' : ' people') +
+        '. Ranked by prompt plus completion tokens. <strong>From cache</strong> is the ' +
+        'share of prompt tokens served from the prefix cache — worth roughly tenfold ' +
+        'on a warm slot, so a high share is a cheap conversation rather than a small one.' +
+        '</div></div>'
+      : '<div class="card"><div class="v idle">nothing used yet</div>' +
+        '<div class="note">The scoreboard fills in as keys are used.</div></div>') +
+
+    '<h2>By key</h2>' +
+    '<div class="seg"><button class="tab' + (USAGE_MINE ? '' : ' sel') + '" id="u-all">Everyone</button>' +
+    '<button class="tab' + (USAGE_MINE ? ' sel' : '') + '" id="u-mine">Only mine</button></div>' +
+    (detail
+      ? '<div class="card scroll"><table><thead><tr>' +
+        '<th class="num">#</th><th>Key</th><th>Owner</th><th>Model</th>' +
+        '<th class="num">Tokens</th><th class="num">Requests</th>' +
+        '<th class="num">Prompt</th><th class="num">Completion</th>' +
+        '<th class="num">From cache</th><th class="num">Unknown</th>' +
+        '</tr></thead><tbody>' + detail + '</tbody></table>' +
+        '<div class="note"><strong>Unknown</strong> counts requests whose client ' +
+        'disconnected before the response finished, so their token counts genuinely ' +
+        'are not known. They are counted separately rather than estimated or ' +
+        'reported as zero.</div></div>'
+      : '<div class="card"><div class="sub">No usage recorded' +
+        (USAGE_MINE ? ' for your keys' : '') + ' yet.</div></div>');
+
+  const all = $('u-all'), mine = $('u-mine');
+  if(all)  all.onclick  = () => { USAGE_MINE = false; loadUsage(); };
+  if(mine) mine.onclick = () => { USAGE_MINE = true;  loadUsage(); };
 }
 
-
+// ---------- bootstrap ----------
+// These three lines were briefly lost to a careless slice, and the page simply
+// never initialised: no section shown, no polling, status stuck on "connecting".
 show(location.hash.slice(1) || 'overview', false);
 tick(); setInterval(tick, 2000);
 loadAccount();

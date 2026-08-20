@@ -1,0 +1,34 @@
+# Servers this node can route to.
+#
+# Copy to /etc/qwen-turing/upstreams.yaml. This file is committed and this
+# repository is public, so the real addresses live only in that copy.
+#
+# THE LOCAL RUNTIME IS NOT LISTED HERE. It is implicit, always present, and
+# always served at /v1.
+#
+# ROUTING IS BY PATH, NOT BY MODEL NAME.
+#   local   ->  https://<node>/v1/chat/completions
+#   remote  ->  https://<node>/u/<id>/v1/chat/completions
+#
+# The design first called for namespaced model names, which reads better -- until
+# you notice it requires the proxy to parse the `model` field out of the request
+# body. Not parsing the body is precisely what makes this gateway cost nothing
+# measurable: a 100k prompt is ~400 KB and streams straight through. A path
+# prefix carries the same information in the part of the request that is already
+# being read, and a client configures it as an ordinary base URL.
+#
+# Each entry:
+#   id        short name, used in the path and shown in the Servers panel
+#   base_url  the server's OpenAI-compatible base, INCLUDING /v1
+#   key_file  file holding that server's API key; omit if it needs none
+#   enabled   false parks an entry without deleting it
+#   note      what the box is, for the panel
+#   gpus      what cards it has, for the panel
+
+upstreams:
+  - id: <short-name>
+    base_url: http://<host>:<port>/v1
+    key_file: /etc/qwen-turing/<short-name>.key
+    enabled: false
+    note: <what this box is>
+    gpus: <what cards it has>

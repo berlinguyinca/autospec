@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import keys as _keys            # noqa: E402
 import oidc as _oidc            # noqa: E402
+import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
 from keystore import KeyStore   # noqa: E402
 
@@ -57,7 +58,8 @@ FLUSH_SECONDS = 30
 
 # Paths this process owns. Everything else is proxied to the runtime.
 OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
-         "/api/stats")
+         "/api/stats", "/api/servers")
+UPSTREAM_POLL_SECONDS = 60
 
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
@@ -100,6 +102,17 @@ CFG = Config()
 STORE: KeyStore | None = None
 INTERNAL_KEY = ""
 DASHBOARD_KEY = ""
+REGISTRY_PATH = ""
+UPSTREAMS: list = []
+# id -> {state, last_seen, models, error}. Sampled by the housekeeper, never on
+# the request path: probing per request would put another server's latency in
+# front of every call.
+UP_STATE: dict[str, dict] = {}
+UP_KEYS: dict[str, str] = {}
+# key_id -> the server it last used, for the affinity that keeps a prefix cache
+# warm. Seeded from recorded usage on first miss, so a gateway restart does not
+# scatter everybody onto cold slots.
+LAST_SERVER: dict[str, str] = {}
 # --- background work, never on the request path -----------------------------
 
 def _jwks(force: bool = False) -> dict:
@@ -124,6 +137,71 @@ def _jwks(force: bool = False) -> dict:
             return _JWKS
 
 
+def _load_registry() -> None:
+    """Re-read the registry. Called on a timer so adding a server does not need a
+    restart, and so a syntax error in the file cannot take the gateway down --
+    the previous registry stays in force and the problem is reported."""
+    global UPSTREAMS
+    if not REGISTRY_PATH:
+        return
+    try:
+        with open(REGISTRY_PATH) as fh:
+            found = _ups.load(fh.read())
+    except FileNotFoundError:
+        UPSTREAMS = []
+        return
+    except Exception as exc:
+        sys.stderr.write(f"upstream registry unreadable, keeping the previous "
+                         f"one: {exc}\n")
+        return
+    UPSTREAMS = found
+    for u in found:
+        if u.key_file and u.id not in UP_KEYS:
+            try:
+                UP_KEYS[u.id] = (open(u.key_file).readline() or "").strip()
+            except OSError as exc:
+                u.problems.append(f"key_file unreadable: {exc.strerror}")
+
+
+def _poll_upstreams() -> None:
+    """Ask each usable server what it serves.
+
+    `state` is online / offline / unknown -- never assumed online. A server that
+    has never answered is `unknown`, which is a different thing from one that
+    answered and then stopped.
+    """
+    for u in UPSTREAMS:
+        if not u.usable:
+            UP_STATE[u.id] = {"state": "disabled", "models": [],
+                              "error": "; ".join(u.problems) or "parked",
+                              "last_seen": UP_STATE.get(u.id, {}).get("last_seen")}
+            continue
+        scheme, host, port, path = _ups.target(u, "/v1/models")
+        try:
+            cls = (http.client.HTTPSConnection if scheme == "https"
+                   else http.client.HTTPConnection)
+            conn = cls(host, port, timeout=6)
+            headers = {}
+            if UP_KEYS.get(u.id):
+                headers["Authorization"] = "Bearer " + UP_KEYS[u.id]
+            conn.request("GET", path, headers=headers)
+            r = conn.getresponse()
+            body = r.read()
+            conn.close()
+            if r.status != 200:
+                raise RuntimeError(f"HTTP {r.status}")
+            data = json.loads(body).get("data") or []
+            models = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+            UP_STATE[u.id] = {"state": "online", "models": models, "error": None,
+                              "last_seen": time.time(),
+                              "authenticated": bool(UP_KEYS.get(u.id))}
+        except Exception as exc:
+            prev = UP_STATE.get(u.id, {})
+            UP_STATE[u.id] = {"state": "offline", "models": prev.get("models") or [],
+                              "error": str(exc)[:120],
+                              "last_seen": prev.get("last_seen")}
+
+
 def _housekeeper() -> None:
     """Registry sync and usage flush. Both are best-effort: a registry outage
     degrades to stale usage, never to a refused request."""
@@ -135,6 +213,11 @@ def _housekeeper() -> None:
                 STORE.flush()
         except Exception as exc:
             sys.stderr.write(f"housekeeping: {exc}\n")
+        try:
+            _load_registry()
+            _poll_upstreams()
+        except Exception as exc:
+            sys.stderr.write(f"upstream poll: {exc}\n")
         try:
             now = time.time()
             with _LOCK:
@@ -169,6 +252,12 @@ def _verify_identity(id_token: str) -> dict | None:
 class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-turing-gateway"
     protocol_version = "HTTP/1.1"
+    _auth_key_id = None
+    _auto_choice = None
+    # The path with any /u/<server> prefix removed. Set during resolution and
+    # used for BOTH destinations: when auto picks this node the prefix still has
+    # to go, or the local runtime is asked for a path it has never heard of.
+    _route_path = None
 
     # --- helpers -----------------------------------------------------------
     def _read_body(self, n: int) -> bytes:
@@ -240,10 +329,24 @@ class Handler(BaseHTTPRequestHandler):
         return s
 
     def _may(self, s: dict) -> tuple[bool, bool]:
-        """(may_mint, is_admin), from the VERIFIED token's groups only."""
+        """(may_mint, is_admin), from the VERIFIED token's groups only.
+
+        QT_COGNITO_USER_GROUP="*" (or empty) means EVERY authenticated member of
+        the pool may mint. That is the configured intent here: this node is a
+        shared lab resource and the pool is the lab.
+
+        The group mechanism is kept rather than deleted, because re-tightening
+        should be a config change rather than a code change -- set the variable
+        to a group name and minting narrows to that group again.
+
+        Admin is NOT opened by the same switch. It grants seeing and revoking
+        other people's keys, which is a different question from being allowed to
+        use the node.
+        """
         g = s.get("groups") or []
         is_admin = bool(CFG.admin_group) and CFG.admin_group in g
-        may_mint = is_admin or (bool(CFG.user_group) and CFG.user_group in g)
+        open_to_all = CFG.user_group in ("", "*")
+        may_mint = is_admin or open_to_all or CFG.user_group in g
         return may_mint, is_admin
 
     # --- routing -----------------------------------------------------------
@@ -268,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
         # not in __init__.
         self._body_left = int(self.headers.get("Content-Length") or 0)
         path = self.path.split("?", 1)[0]
+        if path.startswith("/u/"):
+            return self._proxy(method, remote=True)
         if any(path == p.rstrip("/") or path.startswith(p) for p in OWNED):
             try:
                 self._owned(method, path)
@@ -295,6 +400,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._health()
         if path == "/api/stats":
             return self._stats()
+        if path == "/api/servers":
+            return self._servers()
         if path == "/api/usage":
             return self._usage_api()
         if path == "/api/keys":
@@ -440,15 +547,8 @@ class Handler(BaseHTTPRequestHandler):
         page's only way in was pasting the shared key, which is precisely the
         thing per-user sign-in exists to replace.
         """
-        s = self._session()
-        if s is None:
-            if not self._authenticate_key(self._bearer()):
-                self._drain_body()
-                self.close_connection = True
-                return self._json(401, {"error": {
-                    "message": "sign in, or present an API key",
-                    "type": "not_authenticated", "code": 401},
-                    "login_configured": CFG.login_configured()})
+        if not self._viewer():
+            return
         try:
             up = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=15)
             up.putrequest("GET", "/api/stats", skip_host=True,
@@ -470,7 +570,54 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _servers(self) -> None:
+        """Every registered server and what it serves.
+
+        Session OR key, like /api/stats: this says which GPUs hold which models,
+        which is what someone needs before choosing a base URL. It is never
+        public -- it names internal hosts.
+        """
+        if not self._viewer():
+            return
+        out = []
+        for u in UPSTREAMS:
+            st = UP_STATE.get(u.id) or {"state": "unknown", "models": [],
+                                        "error": None, "last_seen": None}
+            row = u.public()
+            row.update(state=st.get("state", "unknown"), models=st.get("models") or [],
+                       error=st.get("error"), last_seen=st.get("last_seen"),
+                       # The path a client points at, so the page never has to
+                       # construct it and get it subtly wrong.
+                       route="/u/" + u.id + "/v1")
+            out.append(row)
+        self._json(200, {"servers": out, "poll_seconds": UPSTREAM_POLL_SECONDS,
+                         "registry_configured": bool(REGISTRY_PATH)})
+
     # --- keys --------------------------------------------------------------
+    def _viewer(self):
+        """Who is asking, from a session OR an API key, or None having answered.
+
+        One notion of "authenticated reader" for every read endpoint. Previously
+        /api/stats took either while /api/usage demanded a session, so a key
+        could read the node's numbers but not its own usage -- an arbitrary line.
+        Minting still requires a session, because that is a browser action.
+        """
+        s = self._session()
+        if s:
+            _, is_admin = self._may(s)
+            return {"sub": s["sub"], "is_admin": is_admin, "via": "session"}
+        row = self._authenticate_key(self._bearer())
+        if row:
+            # A key carries no group claims, so it reads as its owner and never
+            # as an admin.
+            return {"sub": row.sub, "is_admin": False, "via": "key"}
+        self._drain_body()
+        self.close_connection = True
+        self._json(401, {"error": {"message": "sign in, or present an API key",
+                                   "type": "not_authenticated", "code": 401},
+                         "login_configured": CFG.login_configured()})
+        return None
+
     def _require_session(self):
         s = self._session()
         if not s:
@@ -536,13 +683,89 @@ class Handler(BaseHTTPRequestHandler):
                          "other_nodes_within_seconds": REFRESH_SECONDS})
 
     def _usage_api(self) -> None:
-        s = self._require_session()
-        if not s:
+        """The scoreboard, and the per-key detail behind it.
+
+        Both span every user. This is a shared node and the point of a
+        leaderboard is comparison -- one that showed only your own row would not
+        be one. It stays behind authentication: a lab scoreboard, never a public
+        one, and the public payload allow-list cannot grow a field from here.
+
+        `mine=1` narrows the detail table to the caller, for someone who only
+        wants to audit their own keys.
+        """
+        who = self._viewer()
+        if not who:
             return
-        _, is_admin = self._may(s)
-        want_all = "all=1" in (self.path.split("?", 1)[1] if "?" in self.path else "")
-        rows = STORE.usage(sub=None if (want_all and is_admin) else s["sub"])
-        self._json(200, {"usage": rows, "all_users": bool(want_all and is_admin)})
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        mine = "mine=1" in query
+        self._json(200, {
+            "leaderboard": STORE.leaderboard(),
+            "usage": STORE.usage(sub=who["sub"] if mine else None),
+            "scope": "mine" if mine else "everyone",
+            "you": who["sub"],
+            "is_admin": who["is_admin"]})
+
+    def _resolve_target(self):
+        """Which server a /u/<id>/ request is for, or None having answered.
+
+        Refuses IMMEDIATELY when the server is unknown, parked or known-offline.
+        An agent must never sit through a 900 s proxy timeout because a
+        workstation is switched off, and the reply says which server and how long
+        it has been quiet.
+        """
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/u/" + _ups.AUTO + "/") or path == "/u/" + _ups.AUTO:
+            return self._resolve_auto(path)
+        resolved = _ups.route(path, UPSTREAMS)
+        if resolved is None:
+            self._err(503, "that server is not available on this node",
+                      "upstream_unavailable")
+            return None
+        target = resolved[0]
+        self._route_path = resolved[1]
+        st = UP_STATE.get(target.id) or {}
+        if st.get("state") == "offline":
+            seen = (f" (last seen {int(time.time() - st['last_seen'])}s ago)"
+                    if st.get("last_seen") else " and has not been seen")
+            self._err(503, f"{target.id} is not answering" + seen, "upstream_offline")
+            return None
+        return target
+
+    @staticmethod
+    def _strip_prefix(path: str) -> str:
+        """Drop the leading /u/<server> from a routed path, by SEGMENT COUNT
+        rather than by name -- the name may be a real server or the virtual one,
+        and both must strip identically."""
+        return "/" + path.split("/", 3)[3] if path.count("/") >= 3 else "/"
+
+    def _resolve_auto(self, path: str):
+        """Pick a server for /u/auto/, or answer and return None.
+
+        Returns the sentinel string "local" rather than an Upstream when this node
+        wins, because the relay already treats None as local -- and a caller that
+        cannot tell "auto chose local" from "auto failed" would route blind.
+        """
+        last = LAST_SERVER.get(self._auth_key_id or "")
+        if last is None and self._auth_key_id and STORE:
+            try:
+                last = STORE.last_upstream(self._auth_key_id)
+            except Exception:
+                last = None
+            if last:
+                LAST_SERVER[self._auth_key_id] = last
+        chosen = _ups.pick_auto(UPSTREAMS, UP_STATE, last, local_online=True)
+        if chosen is None:
+            self._err(503, "no server is available right now", "no_upstream")
+            return None
+        self._auto_choice = chosen
+        self._route_path = self._strip_prefix(path)
+        if chosen == _ups.LOCAL:
+            return _ups.LOCAL
+        for u in UPSTREAMS:
+            if u.id == chosen:
+                return u
+        self._err(503, "no server is available right now", "no_upstream")
+        return None
 
     def _refuse_key(self) -> None:
         """One answer for every authentication failure -- unknown key, wrong
@@ -562,17 +785,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # --- the proxy ---------------------------------------------------------
-    def _proxy(self, method: str) -> None:
+    def _proxy(self, method: str, remote: bool = False) -> None:
         row = self._authenticate_key(self._bearer())
         if row is None:
             return self._refuse_key()
+
+        self._auth_key_id = row.key_id
+        self._route_path = None
+        target = None                      # None == the local runtime
+        if remote:
+            target = self._resolve_target()
+            if target is None:
+                return                     # _resolve_target already answered
+            if target == _ups.LOCAL:
+                target = None              # auto chose this node
+        # Remember where this key went, so /u/auto/ can send it back to the same
+        # warm prefix cache next time.
+        LAST_SERVER[row.key_id] = target.id if target else _ups.LOCAL
 
         started = time.time()
         acc = _usage.StreamAccountant()
         status = 0
         streamed = False
         try:
-            status, streamed = self._relay(method, acc)
+            status, streamed = self._relay(method, acc, target)
         except (BrokenPipeError, ConnectionResetError):
             # The client went away mid-stream. The terminal chunk never arrived,
             # so the counts are UNKNOWN -- recorded as truncated, never zero.
@@ -589,7 +825,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 STORE.record_usage({
                     "ts": started, "key_id": row.key_id, "sub": row.sub,
-                    "model": u.model, "upstream": "local",
+                    "model": u.model,
+                    "upstream": target.id if target else "local",
                     "endpoint": self.path.split("?", 1)[0],
                     "prompt_tokens": u.prompt_tokens,
                     "completion_tokens": u.completion_tokens,
@@ -601,11 +838,25 @@ class Handler(BaseHTTPRequestHandler):
                 # Accounting must never break serving.
                 sys.stderr.write(f"usage not recorded: {exc}\n")
 
-    def _relay(self, method: str, acc) -> tuple[int, bool]:
-        up = http.client.HTTPConnection(CFG.upstream_host, CFG.upstream_port,
-                                        timeout=900)
+    def _relay(self, method: str, acc, target=None) -> tuple[int, bool]:
+        query = self.path.split("?", 1)
+        suffix = ("?" + query[1]) if len(query) == 2 else ""
+        if target is None:
+            scheme, host, port = "http", CFG.upstream_host, CFG.upstream_port
+            # _route_path is set whenever the request arrived under /u/, which
+            # includes auto choosing THIS node.
+            path = (self._route_path or query[0]) + suffix
+            key = INTERNAL_KEY
+        else:
+            scheme, host, port, base = _ups.target(
+                target, self._route_path or self._strip_prefix(query[0]))
+            path = base + suffix
+            key = UP_KEYS.get(target.id, "")
+        cls = (http.client.HTTPSConnection if scheme == "https"
+               else http.client.HTTPConnection)
+        up = cls(host, port, timeout=900)
         try:
-            self._send_upstream_request(up, method)
+            self._send_upstream_request(up, method, path, host, port, key)
             r = up.getresponse()
             chunked = self._mirror_response_headers(r)
             self._pump(r, acc, chunked)
@@ -618,17 +869,24 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             up.close()
 
-    def _send_upstream_request(self, up, method: str) -> None:
-        up.putrequest(method, self.path, skip_host=True, skip_accept_encoding=True)
+    def _send_upstream_request(self, up, method: str, path: str | None = None,
+                               host: str | None = None, port: int | None = None,
+                               key: str | None = None) -> None:
+        path = self.path if path is None else path
+        host = CFG.upstream_host if host is None else host
+        port = CFG.upstream_port if port is None else port
+        key = INTERNAL_KEY if key is None else key
+        up.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
         for k, v in self.headers.items():
             if k.lower() in ("connection", "keep-alive", "transfer-encoding",
                              "authorization", "cookie", "host"):
                 continue
             up.putheader(k, v)
-        up.putheader("Host", f"{CFG.upstream_host}:{CFG.upstream_port}")
-        # The client's credential is NEVER forwarded; the runtime has its own.
-        if INTERNAL_KEY:
-            up.putheader("Authorization", f"Bearer {INTERNAL_KEY}")
+        up.putheader("Host", f"{host}:{port}")
+        # The client's credential is NEVER forwarded. Each backend has its own,
+        # so a key that works here grants nothing on the machine behind it.
+        if key:
+            up.putheader("Authorization", f"Bearer {key}")
         up.endheaders()
 
         # Streamed up in bounded chunks: a 100k prompt is ~400 KB and must not
@@ -644,6 +902,11 @@ class Handler(BaseHTTPRequestHandler):
         be chunked, i.e. the upstream gave no Content-Length (every streamed
         completion)."""
         self.send_response(r.status)
+        # Which server actually served this. Without it, /u/auto/ is a black box
+        # and nobody can explain their own latency.
+        chosen = getattr(self, "_auto_choice", None)
+        if chosen:
+            self.send_header("X-Routed-To", chosen)
         length = None
         for k, v in r.getheaders():
             lk = k.lower()
@@ -725,6 +988,8 @@ def main() -> int:
                     help="the dashboard's own key, so the gateway can front its "
                          "stats behind one auth authority")
     ap.add_argument("--db-password-file")
+    ap.add_argument("--upstreams",
+                    help="registry of servers this node can route to")
     args = ap.parse_args()
 
     problem = _load_credentials(args)
@@ -738,6 +1003,11 @@ def main() -> int:
         print(f"cannot read the registry password: {exc}", file=sys.stderr)
         return 78
 
+    global REGISTRY_PATH
+    REGISTRY_PATH = args.upstreams or ""
+    _load_registry()
+    _poll_upstreams()
+
     STORE = KeyStore(args.mirror, dsn=dsn)
     STORE.migrate_local()
     if dsn:
@@ -749,7 +1019,9 @@ def main() -> int:
     print(f"gateway on http://{args.host}:{args.port} -> "
           f"{CFG.upstream_host}:{CFG.upstream_port} "
           f"(registry {'configured' if dsn else 'absent'}"
-          f"{', stats fronted' if DASHBOARD_KEY else ''})", flush=True)
+          f"{', stats fronted' if DASHBOARD_KEY else ''}"
+          f", {len([u for u in UPSTREAMS if u.usable])} routable server(s))",
+          flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -30,7 +30,7 @@ def node(tmp_path):
     store = KeyStore(str(tmp_path / "m.sqlite3"), dsn=None)
     store.migrate_local()
     gw.STORE = store
-    gw.CFG.user_group = "llm-users"
+    gw.CFG.user_group = "*"          # the configured policy: the pool is the audience
     gw.CFG.admin_group = "llm-admins"
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), gw.Handler)
@@ -73,15 +73,40 @@ def test_me_without_a_session_is_unauthenticated(node):
     assert code == 200 and d["authenticated"] is False
 
 
-def test_a_member_of_no_group_is_authenticated_but_authorised_for_nothing(node):
+def test_any_authenticated_pool_member_may_mint_when_open(node):
+    """QT_COGNITO_USER_GROUP="*": the pool is the audience, so group membership
+    is not consulted for minting."""
     srv, _ = node
     sid = _session("sub-nobody", [])
     code, d = call(srv, "GET", "/api/me", sid)
     assert code == 200
     assert d["authenticated"] is True
-    assert d["may_mint"] is False and d["is_admin"] is False
-    # The page must be able to tell the user WHICH group they need.
-    assert d["required_group"] == "llm-users"
+    assert d["may_mint"] is True
+    assert d["is_admin"] is False        # admin is NOT opened by the same switch
+
+
+def test_naming_a_group_narrows_minting_again(node):
+    """The mechanism has to still work when it is used -- re-tightening should be
+    a config change, not a code change."""
+    srv, _ = node
+    gw.CFG.user_group = "llm-users"
+    try:
+        outsider = _session("sub-outsider", [])
+        member = _session("sub-member", ["llm-users"])
+        assert call(srv, "GET", "/api/me", outsider)[1]["may_mint"] is False
+        assert call(srv, "GET", "/api/me", member)[1]["may_mint"] is True
+        # And the refusal names the group so the user can act on it.
+        code, d = call(srv, "POST", "/api/keys", outsider, {"label": "x"})
+        assert code == 403 and "llm-users" in d["error"]["message"]
+    finally:
+        gw.CFG.user_group = "*"
+
+
+def test_an_admin_group_member_is_still_distinguished(node):
+    srv, _ = node
+    adm = _session("sub-admin", ["llm-admins"])
+    d = call(srv, "GET", "/api/me", adm)[1]
+    assert d["is_admin"] is True and d["may_mint"] is True
 
 
 def test_group_membership_in_a_HEADER_grants_nothing(node):
@@ -102,7 +127,11 @@ def test_group_membership_in_a_HEADER_grants_nothing(node):
     r = c.getresponse()
     d = json.loads(r.read())
     c.close()
-    assert d["is_admin"] is False and d["may_mint"] is False
+    # ADMIN is the group-gated privilege, so it is the one a forged header would
+    # be trying to obtain. may_mint is true here by POLICY ("*"), not by header,
+    # which is why this asserts on is_admin.
+    assert d["is_admin"] is False
+    assert d["groups"] == []
 
 
 # --- minting ----------------------------------------------------------------
@@ -113,26 +142,24 @@ def test_minting_requires_a_session(node):
     assert code == 401
 
 
-def test_minting_requires_the_group(node):
+def test_minting_is_open_to_the_pool_as_configured(node):
     srv, _ = node
     sid = _session("sub-nobody", [])
     code, d = call(srv, "POST", "/api/keys", sid, {"label": "x"})
-    assert code == 403
-    # The refusal names the group, so the user can act on it.
-    assert "llm-users" in d["error"]["message"]
+    assert code == 201
 
 
 def test_minting_is_refused_over_plain_http(node):
     """A key minted over cleartext is a key already disclosed."""
     srv, _ = node
-    sid = _session("sub-alice", ["llm-users"])
+    sid = _session("sub-alice", [])
     code, d = call(srv, "POST", "/api/keys", sid, {"label": "x"}, https=False)
     assert code == 400 and d["error"]["type"] == "insecure_transport"
 
 
 def test_a_member_mints_a_usable_key_shown_once(node):
     srv, store = node
-    sid = _session("sub-alice", ["llm-users"])
+    sid = _session("sub-alice", [])
     code, d = call(srv, "POST", "/api/keys", sid, {"label": "laptop"})
     assert code == 201
     assert d["shown_once"] is True
@@ -149,8 +176,8 @@ def test_a_member_mints_a_usable_key_shown_once(node):
 
 def test_listing_shows_only_your_own_keys(node):
     srv, _ = node
-    a = _session("sub-alice", ["llm-users"])
-    b = _session("sub-bob", ["llm-users"])
+    a = _session("sub-alice", [])
+    b = _session("sub-bob", [])
     call(srv, "POST", "/api/keys", a, {"label": "a"})
     call(srv, "POST", "/api/keys", b, {"label": "b"})
     _, la = call(srv, "GET", "/api/keys", a)
@@ -163,7 +190,7 @@ def test_listing_shows_only_your_own_keys(node):
 
 def test_an_admin_can_see_every_key(node):
     srv, _ = node
-    a = _session("sub-alice", ["llm-users"])
+    a = _session("sub-alice", [])
     adm = _session("sub-admin", ["llm-admins"])
     call(srv, "POST", "/api/keys", a, {"label": "a"})
     _, d = call(srv, "GET", "/api/keys?all=1", adm)
@@ -176,7 +203,7 @@ def test_an_admin_can_see_every_key(node):
 def test_revoking_your_own_key_takes_effect_immediately(node):
     srv, store = node
     import time
-    sid = _session("sub-alice", ["llm-users"])
+    sid = _session("sub-alice", [])
     _, minted = call(srv, "POST", "/api/keys", sid, {"label": "x"})
     assert store.authenticate(minted["key"], time.time()) is not None
     code, d = call(srv, "DELETE", "/api/keys/" + minted["key_id"], sid)
@@ -188,8 +215,8 @@ def test_revoking_your_own_key_takes_effect_immediately(node):
 def test_you_cannot_revoke_someone_elses_key(node):
     srv, store = node
     import time
-    a = _session("sub-alice", ["llm-users"])
-    b = _session("sub-bob", ["llm-users"])
+    a = _session("sub-alice", [])
+    b = _session("sub-bob", [])
     _, mine = call(srv, "POST", "/api/keys", b, {"label": "bobs"})
     code, _ = call(srv, "DELETE", "/api/keys/" + mine["key_id"], a)
     assert code == 404
@@ -199,7 +226,7 @@ def test_you_cannot_revoke_someone_elses_key(node):
 def test_an_admin_can_revoke_anyones_key(node):
     srv, store = node
     import time
-    b = _session("sub-bob", ["llm-users"])
+    b = _session("sub-bob", [])
     adm = _session("sub-admin", ["llm-admins"])
     _, k = call(srv, "POST", "/api/keys", b, {"label": "bobs"})
     code, _ = call(srv, "DELETE", "/api/keys/" + k["key_id"], adm)
@@ -209,7 +236,7 @@ def test_an_admin_can_revoke_anyones_key(node):
 
 def test_revocation_is_refused_over_plain_http(node):
     srv, _ = node
-    sid = _session("sub-alice", ["llm-users"])
+    sid = _session("sub-alice", [])
     _, k = call(srv, "POST", "/api/keys", sid, {"label": "x"})
     code, d = call(srv, "DELETE", "/api/keys/" + k["key_id"], sid, https=False)
     assert code == 400 and d["error"]["type"] == "insecure_transport"
@@ -217,18 +244,78 @@ def test_revocation_is_refused_over_plain_http(node):
 
 # --- usage ------------------------------------------------------------------
 
-def test_usage_is_scoped_and_admins_see_everyone(node):
+def _spend(store, key_id, sub, prompt, completion, ts=1_800_000_000.0):
+    store.record_usage({"ts": ts, "key_id": key_id, "sub": sub, "model": "m",
+                        "prompt_tokens": prompt, "completion_tokens": completion,
+                        "status_code": 200})
+
+
+def test_the_scoreboard_ranks_users_by_tokens(node):
+    """A leaderboard that showed only your own row would not be one."""
     srv, store = node
-    a = _session("sub-alice", ["llm-users"])
-    adm = _session("sub-admin", ["llm-admins"])
+    a = _session("sub-alice", [])
+    b = _session("sub-bob", [])
     _, ka = call(srv, "POST", "/api/keys", a, {"label": "a"})
-    store.record_usage({"ts": 1_800_000_000.0, "key_id": ka["key_id"],
-                        "sub": "sub-alice", "model": "m", "prompt_tokens": 10,
-                        "completion_tokens": 5, "status_code": 200})
-    _, mine = call(srv, "GET", "/api/usage", a)
-    assert [u["sub"] for u in mine["usage"]] == ["sub-alice"]
-    _, all_of_it = call(srv, "GET", "/api/usage?all=1", adm)
-    assert all_of_it["all_users"] is True
+    _, kb = call(srv, "POST", "/api/keys", b, {"label": "b"})
+    _spend(store, ka["key_id"], "sub-alice", 10, 5)      # 15 total
+    _spend(store, kb["key_id"], "sub-bob", 100, 50)      # 150 total
+    # Asked by ALICE, and Bob must still be on the board -- above her.
+    d = call(srv, "GET", "/api/usage", a)[1]
+    board = d["leaderboard"]
+    assert [r["sub"] for r in board] == ["sub-bob", "sub-alice"]
+    assert board[0]["total_tokens"] == 150 and board[1]["total_tokens"] == 15
+    assert d["you"] == "sub-alice"           # so the page can highlight your row
+
+
+def test_the_scoreboard_names_the_person_not_just_the_subject(node):
+    srv, store = node
+    store.upsert_user("sub-alice", "alice@example.org", "Alice Example")
+    a = _session("sub-alice", [])
+    _, ka = call(srv, "POST", "/api/keys", a, {"label": "a"})
+    _spend(store, ka["key_id"], "sub-alice", 7, 3)
+    row = call(srv, "GET", "/api/usage", a)[1]["leaderboard"][0]
+    assert row["display_name"] == "Alice Example"
+    assert row["email"] == "alice@example.org"
+
+
+def test_a_key_minted_before_its_owner_signed_in_still_ranks(node):
+    """The break-glass mints without a user row; the board must not drop it."""
+    srv, store = node
+    a = _session("sub-alice", [])
+    _, ka = call(srv, "POST", "/api/keys", a, {"label": "a"})
+    _spend(store, ka["key_id"], "sub-unseen", 5, 5)
+    subs = [r["sub"] for r in call(srv, "GET", "/api/usage", a)[1]["leaderboard"]]
+    assert "sub-unseen" in subs
+
+
+def test_the_key_detail_table_names_the_owner_and_ranks_by_tokens(node):
+    srv, store = node
+    store.upsert_user("sub-bob", "bob@example.org", "Bob")
+    a = _session("sub-alice", [])
+    b = _session("sub-bob", [])
+    _, ka = call(srv, "POST", "/api/keys", a, {"label": "small"})
+    _, kb = call(srv, "POST", "/api/keys", b, {"label": "big"})
+    _spend(store, ka["key_id"], "sub-alice", 1, 1)
+    _spend(store, kb["key_id"], "sub-bob", 90, 10)
+    rows = call(srv, "GET", "/api/usage", a)[1]["usage"]
+    assert rows[0]["key_id"] == kb["key_id"]          # ranked by tokens
+    assert rows[0]["display_name"] == "Bob"           # named, not an opaque id
+    assert rows[0]["label"] == "big"
+
+
+def test_mine_narrows_the_detail_table_to_the_caller(node):
+    srv, store = node
+    a = _session("sub-alice", [])
+    b = _session("sub-bob", [])
+    _, ka = call(srv, "POST", "/api/keys", a, {"label": "a"})
+    _, kb = call(srv, "POST", "/api/keys", b, {"label": "b"})
+    _spend(store, ka["key_id"], "sub-alice", 5, 5)
+    _spend(store, kb["key_id"], "sub-bob", 5, 5)
+    d = call(srv, "GET", "/api/usage?mine=1", a)[1]
+    assert {u["sub"] for u in d["usage"]} == {"sub-alice"}
+    assert d["scope"] == "mine"
+    # The board is still everyone: narrowing the detail must not narrow the board.
+    assert {r["sub"] for r in d["leaderboard"]} == {"sub-alice", "sub-bob"}
 
 
 def test_usage_requires_a_session(node):
@@ -266,7 +353,7 @@ def test_a_key_that_can_infer_can_also_read_stats(node, monkeypatch):
     and not to stats, so one credential could run inference but not the page."""
     srv, store = node
     import time
-    sid = _session("sub-alice", ["llm-users"])
+    sid = _session("sub-alice", [])
     _, minted = call(srv, "POST", "/api/keys", sid, {"label": "x"})
     key = minted["key"]
     # The proxy's authenticator accepts it...
@@ -279,3 +366,30 @@ def test_a_key_that_can_infer_can_also_read_stats(node, monkeypatch):
     # 502 is fine here -- there is no dashboard behind this test gateway. What
     # matters is that it got PAST authentication rather than answering 401.
     assert r.status != 401
+
+
+def test_an_api_key_can_read_the_scoreboard_as_its_owner(node):
+    """One notion of an authenticated reader: /api/stats took a key while
+    /api/usage demanded a session, which drew an arbitrary line through the read
+    endpoints."""
+    srv, store = node
+    sid = _session("sub-alice", [])
+    _, minted = call(srv, "POST", "/api/keys", sid, {"label": "script"})
+    _spend(store, minted["key_id"], "sub-alice", 20, 10)
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    c.request("GET", "/api/usage", None,
+              {"Authorization": "Bearer " + minted["key"],
+               "X-Forwarded-Proto": "https"})
+    r = c.getresponse(); d = json.loads(r.read()); c.close()
+    assert r.status == 200
+    assert d["you"] == "sub-alice"        # reads as its owner
+    assert d["is_admin"] is False         # a key never carries admin
+    assert d["leaderboard"][0]["total_tokens"] == 30
+
+
+def test_servers_needs_a_credential(node):
+    srv, _ = node
+    assert call(srv, "GET", "/api/servers")[0] == 401
+    sid = _session("sub-alice", [])
+    code, d = call(srv, "GET", "/api/servers", sid)
+    assert code == 200 and "servers" in d

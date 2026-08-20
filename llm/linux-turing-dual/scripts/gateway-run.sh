@@ -37,6 +37,13 @@ export QT_UPSTREAM_HOST="127.0.0.1"
 export QT_UPSTREAM_PORT="${QT_LLAMA_PORT}"
 export QT_DASH_PORT_LOCAL="${QT_DASH_PORT}"
 
+# The registry of servers this node can route to. Optional: absent means local
+# only, which is a supported configuration and not a failure.
+REG=/etc/qwen-turing/upstreams.yaml
+if [ -r "$REG" ]; then
+  DBARG+=(--upstreams "$REG")
+fi
+
 exec /opt/qwen-turing/bin/gateway.py \
   --host 127.0.0.1 \
   --port "${QT_GATEWAY_PORT}" \
