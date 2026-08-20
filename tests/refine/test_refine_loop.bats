@@ -244,13 +244,21 @@ EOF
     [[ "$output" == *"Aromatic anilides"* ]]
 }
 
-@test "autospec trio carries canonical ## Next steps section" {
-    # Lockstep guard: all three autospec trio files must document the section.
+@test "the canonical ## Next steps directive is reachable from the autospec trio" {
+    # #3262 turned /autospec into a router: the trio no longer documents Phase 6, so
+    # requiring the directive in all three members would force that refactor to be
+    # undone. run_autospec_refine_contract was updated to read the directive from
+    # end-of-run.md; this suite was not, which is why it stayed red on main.
+    #
+    # Assert the directive at its single source, then assert each trio member reaches
+    # the skill that owns it. Dropping the member assertions without the reachability
+    # half would let the router stop delegating and nothing would notice.
     REPO="${BATS_TEST_DIRNAME}/../.."
-    grep -qE 'canonical `## Next steps` section' "$REPO/skills/autospec/SKILL.md" \
-        || { echo "SKILL.md missing ## Next steps directive"; return 1; }
-    grep -q 'Next steps' "$REPO/skills/autospec/codex/prompt.md" \
-        || { echo "codex/prompt.md missing Next steps reference"; return 1; }
-    grep -q 'Next steps' "$REPO/skills/autospec/opencode/agent.md" \
-        || { echo "opencode/agent.md missing Next steps reference"; return 1; }
+    grep -qE 'canonical `## Next steps` section' \
+        "$REPO/skills/autospec-run/references/end-of-run.md" \
+        || { echo "end-of-run.md missing the canonical ## Next steps directive"; return 1; }
+    for member in SKILL.md codex/prompt.md opencode/agent.md; do
+        grep -qF 'skills/autospec-run/SKILL.md' "$REPO/skills/autospec/$member" \
+            || { echo "skills/autospec/$member no longer delegates to autospec-run"; return 1; }
+    done
 }

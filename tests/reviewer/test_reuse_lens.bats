@@ -183,14 +183,17 @@ _baseline_output() {
 # flag armed. These cases close that gap (feedback_feature_wired_to_script_but_never_invoked).
 
 # Case 12b: _reuse_flags_file is actually assigned (not just consumed) in the trio
-@test "wire-in: _reuse_flags_file is assigned from reuse-triage findings in all 6 trio files" {
+# The reuse lens runs inside Phase 4 review, which #3262 made /autospec delegate to
+# /autospec-run rather than perform. The wiring is present in all three autospec-run
+# mirrors and absent from all three autospec mirrors, so requiring it in six files
+# would force the router refactor to be undone. The router's side is covered by the
+# reachability half of "trio: refute-pass + ADVISE-only prose present in all trio
+# surfaces" below, which is what keeps narrowing this loop honest.
+@test "wire-in: _reuse_flags_file is assigned from reuse-triage findings in the autospec-run trio" {
   for f in \
     "$REPO_ROOT/skills/autospec-run/SKILL.md" \
     "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
-    "$REPO_ROOT/skills/autospec-run/opencode/agent.md" \
-    "$REPO_ROOT/skills/autospec/SKILL.md" \
-    "$REPO_ROOT/skills/autospec/codex/prompt.md" \
-    "$REPO_ROOT/skills/autospec/opencode/agent.md"; do
+    "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
     grep -qF '_reuse_flags_file="$_reuse_candidate"' "$f" \
       || { echo "FAIL: _reuse_flags_file never assigned in $f (dead reviewer lens)"; return 1; }
     grep -qF 'REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER' "$f" \
@@ -199,8 +202,9 @@ _baseline_output() {
 }
 
 # Case 12c: assignment is flag-gated (inert when AUTOSPEC_REUSE_LENS != 1)
+# Same narrowing as the case above, for the same reason.
 @test "wire-in: _reuse_flags_file extraction is gated by AUTOSPEC_REUSE_LENS" {
-  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md"; do
     grep -qF 'AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]' "$f" \
       || { echo "FAIL: reuse-flags extraction not flag-gated in $f"; return 1; }
   done
