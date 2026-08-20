@@ -124,19 +124,25 @@ fn validate_named_outcome_reason(kind: &str, reason: &str) -> Result<(), String>
 }
 impl ConductorState {
     pub fn normalized_state(&self) -> &'static str {
-        self.last_outcome
-            .as_ref()
+        self.current_normalized_outcome()
             .map(ConductorOutcome::normalized_state_name)
             .unwrap_or_else(|| self.phase.normalized_state_name())
     }
 
     pub fn normalized_state_for_cycle(&self, cycle: u64) -> String {
-        let outcome = self.last_outcome.as_ref();
-        let reason = outcome
-            .and_then(ConductorOutcome::reason)
-            .or(self.pause_reason.as_deref())
-            .or(self.terminal_reason.as_deref())
-            .unwrap_or("none");
+        let outcome = self.current_normalized_outcome();
+        let reason = if outcome.is_none() && self.phase == ConductorPhase::Scan {
+            self.no_progress_reason.as_deref()
+        } else {
+            None
+        }
+        .or_else(|| {
+            outcome
+                .and_then(ConductorOutcome::reason)
+                .or(self.pause_reason.as_deref())
+                .or(self.terminal_reason.as_deref())
+        })
+        .unwrap_or("none");
         normalized_state_line(NormalizedStateLine {
             cycle,
             state: self.normalized_state(),
@@ -149,6 +155,14 @@ impl ConductorState {
                 .map(ConductorOutcome::recommended_next_step)
                 .unwrap_or_else(|| recommended_next_step_for_phase(self.phase)),
         })
+    }
+
+    fn current_normalized_outcome(&self) -> Option<&ConductorOutcome> {
+        if self.phase == ConductorPhase::Scan && self.no_progress_reason.is_some() {
+            None
+        } else {
+            self.last_outcome.as_ref()
+        }
     }
 
     pub fn normalized_state_for_tier_receipt(&self, cycle: u64, receipt: &TierReceipt) -> String {

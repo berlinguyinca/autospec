@@ -302,7 +302,12 @@ impl ConductorState {
         };
         state.validate()?;
         if let Some(normalized_state) = normalized_state {
-            if normalized_state != state.normalized_state() {
+            let legacy_blocked_scan = normalized_state == "blocked"
+                && state.phase == ConductorPhase::Scan
+                && state.selected_issue.is_none()
+                && state.no_progress_reason.is_some()
+                && matches!(state.last_outcome, Some(ConductorOutcome::Blocked(_)));
+            if normalized_state != state.normalized_state() && !legacy_blocked_scan {
                 return Err(
                     "conductor state normalized state does not match phase/outcome".to_string(),
                 );
