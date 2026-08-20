@@ -86,6 +86,13 @@ Every user gets their own keys. **Sign in on the dashboard and create one** —
 the key is shown once, revocable on its own, and everything it does is
 attributed to you.
 
+Signing in is also how you read the dashboard. The page used to open a prompt
+asking for the shared secret, which is the very thing per-user sign-in replaces;
+now an API key is an explicit fallback for anyone without an account rather than
+a modal you cannot get past. One consequence worth knowing: `/api/stats` is
+authorised by the gateway and accepts **either** a session or a key, so scripts
+that read it keep working unchanged.
+
 The distinction that shapes this: **sign-in authenticates people, keys
 authenticate machines.** An agentic client cannot complete a browser redirect,
 so a human signs in once and mints long-lived keys for the tools that need them.

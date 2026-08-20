@@ -33,8 +33,17 @@ if [ -r "$LEGACY" ]; then
   DBARG+=(--legacy-key-file "$LEGACY")
 fi
 
+# The dashboard's own key, so the gateway can serve its stats behind one auth
+# authority -- a person signs in, a script carries a key, and neither has to
+# paste a shared secret into a browser.
+DASHKEY="${CREDENTIALS_DIRECTORY:-}/dashkey"
+if [ -r "$DASHKEY" ]; then
+  DBARG+=(--dashboard-key-file "$DASHKEY")
+fi
+
 export QT_UPSTREAM_HOST="127.0.0.1"
 export QT_UPSTREAM_PORT="${QT_LLAMA_PORT}"
+export QT_DASH_PORT_LOCAL="${QT_DASH_PORT}"
 
 exec /opt/qwen-turing/bin/gateway.py \
   --host 127.0.0.1 \

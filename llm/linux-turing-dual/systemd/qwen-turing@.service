@@ -17,7 +17,10 @@ Environment=QT_CONF_DIR=/opt/qwen-turing/etc
 
 # The API key arrives in a private tmpfs readable only by this unit. NOT an
 # Environment= value: any local user can read those out of `systemctl show`.
-LoadCredential=apikey:/etc/qwen-turing.key
+# The runtime accepts ONLY the gateway's internal key. Every user key is
+# checked by the gateway, so a request that somehow reached llama.cpp directly
+# has nothing that works -- it fails closed instead of being served.
+LoadCredential=apikey:/etc/qwen-turing/internal.key
 
 # Fail in a second on insufficient VRAM instead of OOMing minutes into a
 # 15 GiB weight load, which reads as a runtime fault rather than a full card.

@@ -262,7 +262,12 @@ def main() -> int:
 
     if args.api_key_file:
         try:
-            Handler.api_key = open(args.api_key_file).read().strip() or None
+            # FIRST LINE only. A key file may legitimately hold several keys --
+            # llama.cpp reads one per line -- and read().strip() would join them
+            # into a value that matches nothing, rejecting every caller. This was
+            # a live time bomb: the file gained a second line during the gateway
+            # cutover and only an un-restarted process was still working.
+            Handler.api_key = (open(args.api_key_file).readline() or "").strip() or None
         except OSError:
             print(f"cannot read {args.api_key_file}", file=sys.stderr)
             return 78

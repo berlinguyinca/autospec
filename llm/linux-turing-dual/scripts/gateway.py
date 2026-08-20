@@ -56,7 +56,8 @@ REFRESH_SECONDS = 30            # registry -> mirror; the revocation staleness b
 FLUSH_SECONDS = 30
 
 # Paths this process owns. Everything else is proxied to the runtime.
-OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health")
+OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
+         "/api/stats")
 
 _LOCK = threading.Lock()
 _SESSIONS: dict[str, dict] = {}
@@ -73,6 +74,7 @@ class Config:
     def __init__(self) -> None:
         self.upstream_host = os.environ.get("QT_UPSTREAM_HOST", "127.0.0.1")
         self.upstream_port = int(os.environ.get("QT_UPSTREAM_PORT", "8090"))
+        self.dash_port = int(os.environ.get("QT_DASH_PORT_LOCAL", "8081"))
         self.public_fqdn = os.environ.get("QT_PUBLIC_FQDN", "")
         self.region = os.environ.get("QT_COGNITO_REGION", "")
         self.pool_id = os.environ.get("QT_COGNITO_POOL_ID", "")
@@ -97,6 +99,7 @@ class Config:
 CFG = Config()
 STORE: KeyStore | None = None
 INTERNAL_KEY = ""
+DASHBOARD_KEY = ""
 
 # MIGRATION HATCH, meant to be removed.
 #
@@ -307,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._me()
         if path == "/api/gateway-health":
             return self._health()
+        if path == "/api/stats":
+            return self._stats()
         if path == "/api/usage":
             return self._usage_api()
         if path == "/api/keys":
@@ -430,6 +435,63 @@ class Handler(BaseHTTPRequestHandler):
         h["revocation_staleness_seconds"] = REFRESH_SECONDS
         self._json(200, h)
 
+    def _authenticate_key(self, presented: str):
+        """Resolve a presented credential to a key row, or None.
+
+        ONE place, used by both the proxy and the stats endpoint. They had
+        diverged: the proxy honoured the legacy shared key and the stats endpoint
+        did not, so the same credential could run inference but not read the
+        dashboard. Two copies of an auth check is two answers to one question.
+        """
+        row = STORE.authenticate(presented, time.time()) if STORE else None
+        if row is None and LEGACY_KEY and presented:
+            import hmac
+            if hmac.compare_digest(presented, LEGACY_KEY):
+                row = KeyRow(key_id=LEGACY_KEY_ID, sub=LEGACY_SUB or "legacy")
+        return row
+
+    def _bearer(self) -> str:
+        presented = self.headers.get("Authorization", "")
+        return presented[7:].strip() if presented.startswith("Bearer ") else presented
+
+    def _stats(self) -> None:
+        """The dashboard's numbers, behind ONE auth authority.
+
+        Accepts either a browser SESSION or an API key, because the two audiences
+        are different: a person signs in, a script carries a key. Previously the
+        page's only way in was pasting the shared key, which is precisely the
+        thing per-user sign-in exists to replace.
+        """
+        s = self._session()
+        if s is None:
+            if not self._authenticate_key(self._bearer()):
+                self._drain_body()
+                self.close_connection = True
+                return self._json(401, {"error": {
+                    "message": "sign in, or present an API key",
+                    "type": "not_authenticated", "code": 401},
+                    "login_configured": CFG.login_configured()})
+        try:
+            up = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=15)
+            up.putrequest("GET", "/api/stats", skip_host=True,
+                          skip_accept_encoding=True)
+            up.putheader("Host", f"127.0.0.1:{CFG.dash_port}")
+            if DASHBOARD_KEY:
+                up.putheader("Authorization", f"Bearer {DASHBOARD_KEY}")
+            up.endheaders()
+            r = up.getresponse()
+            body = r.read()
+            up.close()
+        except Exception as exc:
+            sys.stderr.write(f"stats proxy failed: {exc}\n")
+            return self._err(502, "the stats collector is not answering")
+        self.send_response(r.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     # --- keys --------------------------------------------------------------
     def _require_session(self):
         s = self._session()
@@ -523,15 +585,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- the proxy ---------------------------------------------------------
     def _proxy(self, method: str) -> None:
-        presented = self.headers.get("Authorization", "")
-        if presented.startswith("Bearer "):
-            presented = presented[7:].strip()
-
-        row = STORE.authenticate(presented, time.time()) if STORE else None
-        if row is None and LEGACY_KEY and presented:
-            import hmac
-            if hmac.compare_digest(presented, LEGACY_KEY):
-                row = KeyRow(key_id=LEGACY_KEY_ID, sub=LEGACY_SUB or "legacy")
+        row = self._authenticate_key(self._bearer())
         if row is None:
             return self._refuse_key()
 
@@ -646,52 +700,74 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
+def _load_credentials(args) -> str | None:
+    """Read the three key files. Returns an error message, or None on success.
+
+    All three are read FIRST LINE ONLY: a key file may legitimately hold several
+    keys, and read().strip() would join them into a value matching nothing.
+    """
+    global INTERNAL_KEY, DASHBOARD_KEY, LEGACY_KEY, LEGACY_SUB
+    try:
+        INTERNAL_KEY = (open(args.internal_key_file).readline() or "").strip()
+    except OSError as exc:
+        return f"cannot read the internal key: {exc}"
+    if not INTERNAL_KEY:
+        return "the internal key file is empty"
+
+    if args.dashboard_key_file:
+        try:
+            DASHBOARD_KEY = (open(args.dashboard_key_file).readline() or "").strip()
+        except OSError as exc:
+            return f"cannot read the dashboard key: {exc}"
+
+    if args.legacy_key_file:
+        try:
+            LEGACY_KEY = (open(args.legacy_key_file).readline() or "").strip()
+        except OSError as exc:
+            return f"cannot read the legacy key: {exc}"
+        LEGACY_SUB = os.environ.get("QT_LEGACY_SUB", "legacy")
+    return None
+
+
+def _build_dsn(password_file: str | None) -> str | None:
+    """The registry DSN, or None to run mirror-only. Mirror-only is a supported
+    mode, not a failure: keys still authenticate and usage still records."""
+    host = os.environ.get("QT_DB_HOST")
+    if not (host and password_file):
+        return None
+    pw = (open(password_file).readline() or "").strip()
+    return (f"host={host} port={os.environ.get('QT_DB_PORT', '6432')} "
+            f"dbname={os.environ.get('QT_DB_NAME', '')} "
+            f"user={os.environ.get('QT_DB_USER', '')} password={pw} "
+            f"connect_timeout=3 application_name=qwen-turing-gateway")
+
+
 def main() -> int:
-    global STORE, INTERNAL_KEY
+    global STORE
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8082)
     ap.add_argument("--mirror", required=True, help="SQLite mirror path")
     ap.add_argument("--internal-key-file", required=True)
+    ap.add_argument("--dashboard-key-file",
+                    help="the dashboard's own key, so the gateway can front its "
+                         "stats behind one auth authority")
     ap.add_argument("--db-password-file")
     ap.add_argument("--legacy-key-file",
                     help="the pre-gateway shared key; accepted and ACCOUNTED so "
                          "its remaining traffic is visible. Temporary.")
     args = ap.parse_args()
 
+    problem = _load_credentials(args)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 78
+
     try:
-        INTERNAL_KEY = (open(args.internal_key_file).readline() or "").strip()
+        dsn = _build_dsn(args.db_password_file)
     except OSError as exc:
-        print(f"cannot read the internal key: {exc}", file=sys.stderr)
+        print(f"cannot read the registry password: {exc}", file=sys.stderr)
         return 78
-    if not INTERNAL_KEY:
-        print("the internal key file is empty", file=sys.stderr)
-        return 78
-
-    global LEGACY_KEY, LEGACY_SUB
-    if args.legacy_key_file:
-        try:
-            # FIRST LINE only. A key file may legitimately hold several keys
-            # (llama.cpp reads one per line), and reading the whole file would
-            # concatenate them into a value that matches nothing.
-            LEGACY_KEY = (open(args.legacy_key_file).readline() or "").strip()
-        except OSError as exc:
-            print(f"cannot read the legacy key: {exc}", file=sys.stderr)
-            return 78
-        LEGACY_SUB = os.environ.get("QT_LEGACY_SUB", "legacy")
-
-    dsn = None
-    host = os.environ.get("QT_DB_HOST")
-    if host and args.db_password_file:
-        try:
-            pw = open(args.db_password_file).read().strip()
-        except OSError as exc:
-            print(f"cannot read the registry password: {exc}", file=sys.stderr)
-            return 78
-        dsn = (f"host={host} port={os.environ.get('QT_DB_PORT', '6432')} "
-               f"dbname={os.environ.get('QT_DB_NAME', '')} "
-               f"user={os.environ.get('QT_DB_USER', '')} password={pw} "
-               f"connect_timeout=3 application_name=qwen-turing-gateway")
 
     STORE = KeyStore(args.mirror, dsn=dsn)
     STORE.migrate_local()
@@ -704,7 +780,8 @@ def main() -> int:
     print(f"gateway on http://{args.host}:{args.port} -> "
           f"{CFG.upstream_host}:{CFG.upstream_port} "
           f"(registry {'configured' if dsn else 'absent'}"
-          f"{', legacy key accepted' if LEGACY_KEY else ''})", flush=True)
+          f"{', legacy key accepted' if LEGACY_KEY else ''}"
+          f"{', stats fronted' if DASHBOARD_KEY else ''})", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

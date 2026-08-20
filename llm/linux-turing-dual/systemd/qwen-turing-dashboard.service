@@ -12,7 +12,9 @@ User=qwen-turing
 Group=qwen-turing
 WorkingDirectory=/var/lib/qwen-turing
 Environment=QT_CONF_DIR=/opt/qwen-turing/etc
-LoadCredential=apikey:/etc/qwen-turing.key
+# Its OWN key, not the shared one. The gateway holds a copy and is the only
+# caller; nothing reaches this process except through nginx and the gateway.
+LoadCredential=apikey:/etc/qwen-turing/dashboard.key
 
 # Read access to the journal, so the config-health panel can report model
 # evictions and silently-disabled options from the router's own log.

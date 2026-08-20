@@ -19,6 +19,10 @@ Environment=QT_CONF_DIR=/opt/qwen-turing/etc
 # to any local user.
 LoadCredential=internalkey:/etc/qwen-turing/internal.key
 LoadCredential=dbpassword:/etc/qwen-turing/llmgw_app.pw
+# The dashboard's own key. The gateway fronts /api/stats so that signing in is
+# enough to read the page -- previously the only way in was pasting a shared
+# secret, which is the thing per-user sign-in exists to replace.
+LoadCredential=dashkey:/etc/qwen-turing/dashboard.key
 # Temporary: the pre-gateway shared key, in its OWN file so retiring the hatch
 # is one `rm` plus this line. Deliberately NOT llama.cpp's key file, which holds
 # several keys -- one per line -- and would be read as a single joined value.
