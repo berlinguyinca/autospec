@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::support::STARTUP_HEARTBEAT_ENV;
+use super::support::lock_heartbeat_env;
 use super::support::{expected_startup_heartbeat, startup_heartbeat_fixture};
 use crate::commands::claim;
 use autospec_core::claim::RunStateRecord;
@@ -13,7 +13,7 @@ use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn released_predecessor_retires_only_its_exact_heartbeat_without_signalling() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let _guard = lock_heartbeat_env();
     let (sandbox, _) = startup_heartbeat_fixture("portable-released-predecessor");
     let heartbeat_root = sandbox.join("heartbeats");
     let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
@@ -71,7 +71,7 @@ fn released_predecessor_retires_only_its_exact_heartbeat_without_signalling() {
 #[cfg(target_os = "linux")]
 #[test]
 fn prior_generation_authorization_rejects_heartbeat_replacement() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let _guard = lock_heartbeat_env();
     let (sandbox, _) = startup_heartbeat_fixture("prior-generation-race");
     let heartbeat_root = sandbox.join("heartbeats");
     let repo_key = super::super::super::autonomous::drain::repository_progress_key("owner/repo");
@@ -372,7 +372,7 @@ fn classify_startup_heartbeat_marks_missing_evidence_absent() {
 fn startup_heartbeat_process_identity() {
     use claim::{StartupHeartbeatClassification::ExpiredDead, StartupPidLiveness};
 
-    let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+    let _environment = lock_heartbeat_env();
     let (directory, _) = startup_heartbeat_fixture("process-identity");
     let root = directory.join(".autospec/process-heartbeats");
     let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");

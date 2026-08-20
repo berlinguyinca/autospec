@@ -599,6 +599,91 @@ fn foreground_empty_slice_does_not_start_a_repository_waterfall_pass() {
 }
 
 #[test]
+fn dirty_integration_base_costs_a_continuous_cycle_instead_of_the_run() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fs::write(fixture.repo_dir.join("untracked.txt"), "operator work\n")
+        .expect("dirty integration checkout");
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--foreground",
+            "--max-cycles",
+            "1",
+            "--poll-interval-sec",
+            "0",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo path"),
+            "--branch",
+            "main",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .output()
+        .expect("run one dirty integration cycle");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = fixture.read_state();
+    assert_eq!(state.phase(), ConductorPhase::Scan);
+    assert_eq!(state.selected_issue(), None);
+    assert_eq!(state.no_progress_cycles(), 1);
+    assert_eq!(state.no_progress_reason(), Some("integration_base_dirty"));
+    assert!(
+        fs::read_to_string(&fixture.accountability)
+            .expect("read accountability projection")
+            .contains("integration_base_dirty"),
+        "dirty integration blocker must reach the managed epic"
+    );
+    let status = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "status",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo path"),
+            "--json",
+        ])
+        .output()
+        .expect("read dirty integration status");
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{stdout}");
+    assert!(stdout.contains("action=scan"), "{stdout}");
+    assert!(stdout.contains("reason=integration_base_dirty"), "{stdout}");
+    assert!(!stdout.contains("reason=executor_receipt_failed"), "{stdout}");
+}
+
+#[test]
+fn dirty_integration_base_stays_fail_closed_for_one_shot_runs() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let dirty = fixture.repo_dir.join("untracked.txt");
+    fs::write(&dirty, "operator work\n").expect("dirty integration checkout");
+
+    let output = fixture.command().output().expect("run one-shot foreground");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("integration base main checkout has uncommitted work")
+    );
+    assert_eq!(
+        fs::read_to_string(dirty).expect("operator work remains"),
+        "operator work\n"
+    );
+}
+
+#[test]
 fn foreground_queue_failure_seals_tier_one_without_advancing_later_tiers() {
     let fixture = ForegroundFixture::new();
     let output = fixture
@@ -656,6 +741,36 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
     assert!(!fs::read_to_string(&fixture.calls)
         .expect("calls after retained-state replay")
         .contains("\npr\ncreate\n"));
+}
+
+#[test]
+fn fresh_selection_retires_stale_claim_receipt_before_persisting_new_generation() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().expect("state parent"))
+        .expect("create state directory");
+    fixture.seed_claim_acquisition_receipt_for_issue(
+        41,
+        "stale-worker",
+        "feat/autonomous-issue-41",
+        "stale-claim-41",
+    );
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = fs::read_to_string(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json"),
+    )
+    .expect("read replacement claim receipt");
+    assert!(receipt.contains("\"issue\":42"), "{receipt}");
+    assert!(!receipt.contains("stale-claim-41"), "{receipt}");
 }
 
 #[test]
@@ -6872,6 +6987,16 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn seed_claim_acquisition_receipt(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        self.seed_claim_acquisition_receipt_for_issue(42, worker_id, branch, claim_id);
+    }
+
+    fn seed_claim_acquisition_receipt_for_issue(
+        &self,
+        issue: u64,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) {
         let path = self.state_path().with_extension("claim-acquisition.json");
         fs::set_permissions(
             path.parent().expect("receipt parent"),
@@ -6881,8 +7006,8 @@ printf '%s\n' '[]' > "$report"
         fs::write(
             &path,
             format!(
-                "{{\"schema\":1,\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":{:?},\"branch\":{:?},\"claim_id\":{:?}}}\n",
-                worker_id, branch, claim_id
+                "{{\"schema\":1,\"repo\":\"test/repo\",\"issue\":{issue},\"worker_id\":{:?},\"branch\":{:?},\"claim_id\":{:?}}}\n",
+                worker_id, branch, claim_id,
             ),
         )
         .expect("seed claim acquisition receipt");

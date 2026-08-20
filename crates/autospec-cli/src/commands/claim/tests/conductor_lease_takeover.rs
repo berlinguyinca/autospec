@@ -100,7 +100,7 @@ mod requeue {
     use super::super::super::{ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
     use crate::commands::claim::tests::support::{
-        startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+        startup_heartbeat_fixture, lock_heartbeat_env,
     };
     use crate::commands::claim::utc_now_iso;
     #[cfg(target_os = "linux")]
@@ -238,7 +238,7 @@ mod requeue {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn portable_live_owner_heartbeat_still_blocks_takeover() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let (sandbox, _) = startup_heartbeat_fixture("portable-live-owner");
         let root = sandbox.join("heartbeats");
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
@@ -308,7 +308,7 @@ mod requeue {
     #[cfg(target_os = "linux")]
     #[test]
     fn dead_current_owner_is_requeued_and_no_longer_blocks_acquisition() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let (sandbox, _) = startup_heartbeat_fixture("current-owner-takeover");
         let root = sandbox.join("heartbeats");
         let branch = format!("feat/autospec-dead-owner-{}", std::process::id());
@@ -346,7 +346,7 @@ mod requeue {
     #[cfg(target_os = "linux")]
     #[test]
     fn missing_current_heartbeat_does_not_preserve_a_fresh_claim() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let (sandbox, _) = startup_heartbeat_fixture("missing-current-owner");
         let root = sandbox.join("heartbeats");
         let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
@@ -390,7 +390,7 @@ mod requeue {
     #[cfg(target_os = "linux")]
     #[test]
     fn live_ready_owner_keeps_its_fresh_claim() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let (sandbox, _) = startup_heartbeat_fixture("live-ready-owner");
         let root = sandbox.join("heartbeats");
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
@@ -419,7 +419,7 @@ mod requeue {
     #[cfg(target_os = "linux")]
     #[test]
     fn retained_dead_predecessor_cannot_authorize_current_owner_takeover() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let (sandbox, _) = startup_heartbeat_fixture("retained-prior-owner");
         let root = sandbox.join("heartbeats");
         install_dead_heartbeat(&root, "prior-worker", "feat/worker", "prior-claim");
@@ -453,7 +453,7 @@ mod requeue {
     #[cfg(target_os = "linux")]
     #[test]
     fn terminal_records_do_not_inspect_heartbeat_storage() {
-        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let _guard = lock_heartbeat_env();
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
         std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", "/");
         for state in ["available", "released", "retryable", "failed", "merged"] {

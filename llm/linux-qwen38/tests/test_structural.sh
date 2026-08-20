@@ -288,5 +288,31 @@ else
   ok "no pre-rename 'hive' reference remains"
 fi
 
+# 26 — within-slot prefix reuse must be on in every launch path. Subagents share
+# a large identical preamble; reprocessing it per request is the one waste here
+# that costs nothing to avoid. Distinct from the cross-slot selection that is
+# deliberately OFF -- if a future edit conflates them, this check still passes
+# while the crash mitigation is silently lost, so both are asserted.
+# cache-reuse is NOT set, and the check is inverted on purpose: llama.cpp
+# disables it on this model in every configuration we can build, so a setting
+# here would read like an optimisation that is running when it is not. The
+# reason has to stay next to the absence or someone re-adds it.
+! grep -q '^cache-reuse = ' "${HERE}/config/router-presets.ini"
+check $? "no inert cache-reuse setting in the preset"
+
+grep -q 'cache_reuse is not supported\|No cache-reuse\|NO cache-reuse' \
+  "${HERE}/config/router-presets.ini" "${HERE}/slurm/gen-preset.py"
+check $? "the reason cache-reuse is absent is recorded where it would go"
+
+grep -q '^slot-prompt-similarity = 0.0' "${HERE}/config/router-presets.ini"
+check $? "cross-slot selection stays disabled"
+
+# The value alone does not say why, and "mitigation, retest later" invited
+# someone to flip it back on a schedule. Measured, the feature never engages
+# here at all, so the reasoning has to travel with the setting.
+grep -q '#22083' "${HERE}/config/router-presets.ini" \
+  && grep -q '264 by LRU' "${HERE}/config/router-presets.ini"
+check $? "and the measurement and upstream reference sit next to it"
+
 echo "== structural: ${pass} passed, ${fail} failed =="
 [ "$fail" -eq 0 ]

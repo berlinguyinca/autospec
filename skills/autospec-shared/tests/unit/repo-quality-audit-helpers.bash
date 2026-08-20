@@ -2,6 +2,9 @@
 
 AUDIT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/repo-quality-audit.sh"
 RUN_SKILL="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)/autospec-run/SKILL.md"
+# The end-of-run tail moved out of autospec-run/SKILL.md in #3156. Assertions about that
+# tail must follow it, or they force the extraction to be undone.
+RUN_END_OF_RUN="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)/autospec-run/references/end-of-run.md"
 SUMMARY_HELPER="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/autospec-write-run-summary.sh"
 
 setup_repo_quality_audit_fixture() {

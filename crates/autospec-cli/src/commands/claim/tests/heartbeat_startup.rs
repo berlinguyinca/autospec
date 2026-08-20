@@ -4,7 +4,7 @@
 
 #[cfg(target_os = "linux")]
 use super::support::inject_heartbeat_boundary;
-use super::support::{startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV};
+use super::support::{startup_heartbeat_fixture, lock_heartbeat_env};
 use crate::commands::claim;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -27,7 +27,7 @@ fn startup_heartbeat_process_identity_is_stable_for_the_current_process() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn portable_publication_is_idempotent_but_rejects_another_generation() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let _guard = lock_heartbeat_env();
     let (sandbox, _) = startup_heartbeat_fixture("portable-publication");
     let heartbeat_root = sandbox.join("heartbeats");
     let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
@@ -527,7 +527,7 @@ fn startup_heartbeat_restrictive_umask() {
 #[cfg(target_os = "linux")]
 #[test]
 fn retryable_release_requires_exact_heartbeat_evidence() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+    let _guard = lock_heartbeat_env();
     let (root, _) = startup_heartbeat_fixture("released-missing");
     let heartbeat_root = root.join("heartbeats");
     std::fs::create_dir(&heartbeat_root).unwrap();

@@ -1270,7 +1270,7 @@ fn runner_checks_worktree_ladder_parity_with_typed_stdin_commands() {
     let report = ValidationRunner::run(&catalog, &validation_fixture("worktree-ladder"));
 
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    assert_eq!(report.results[0].spawn_count, 1); // #3262 narrowed it to autospec-run
 }
 
 #[test]

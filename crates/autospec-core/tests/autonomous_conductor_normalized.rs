@@ -36,6 +36,58 @@ fn no_progress_diagnostic_persists_counts_and_resets_deterministically() {
 }
 
 #[test]
+fn scan_no_progress_diagnostic_overrides_a_stale_blocked_outcome() {
+    let state = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+        })
+        .expect("blocked outcome is recorded")
+        .transition(ConductorEvent::RetireObsoleteSelection)
+        .expect("obsolete selection is retired")
+        .record_no_progress_cycle("integration_base_dirty")
+        .expect("dirty integration cycle is recorded");
+
+    let normalized = state.normalized_state_for_cycle(13);
+
+    assert!(normalized.starts_with("cycle 13: scan;"), "{normalized}");
+    assert!(normalized.contains("action=scan"), "{normalized}");
+    assert!(
+        normalized.contains("reason=integration_base_dirty"),
+        "{normalized}"
+    );
+    assert!(normalized.contains("affected issues=none"), "{normalized}");
+    assert!(
+        !normalized.contains("executor_receipt_failed"),
+        "{normalized}"
+    );
+}
+
+#[test]
+fn legacy_blocked_scan_state_migrates_to_current_no_progress_status() {
+    let state = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+        })
+        .expect("blocked outcome is recorded")
+        .transition(ConductorEvent::RetireObsoleteSelection)
+        .expect("obsolete selection is retired")
+        .record_no_progress_cycle("integration_base_dirty")
+        .expect("dirty integration cycle is recorded");
+    let legacy = state
+        .to_json()
+        .replace("\"state\":\"scan\"", "\"state\":\"blocked\"");
+
+    let restored = ConductorState::parse_json(&legacy).expect("legacy scan state migrates");
+
+    assert_eq!(restored, state);
+    assert!(restored.to_json().contains("\"state\":\"scan\""));
+}
+
+#[test]
 fn no_progress_diagnostic_is_bounded_and_legacy_state_defaults_empty() {
     let legacy = conductor(ConductorScope::Repository)
         .to_json()

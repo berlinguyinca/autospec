@@ -67,6 +67,12 @@ Set `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` to disable all privileged profile writes;
 installation then stops with `codex_sandbox_host_setup_required` when the host
 still blocks Codex.
 
+Set `AUTOSPEC_SKIP_RUNTIME_BINARY=1` to make `autospec-runtime-install.sh` a declared
+no-op, skipping the `cargo build --release` and the runtime binary install. Intended for tests that drive the interactive prompts
+under a substituted `HOME`, where the install receipt cannot hit its cache and a
+cold release build would dominate the run. An install that skips it leaves any
+previously installed `autospec` binary untouched.
+
 The `flags=(unconfined) { userns, }` rule is deliberately narrow by executable
 path and capability, but it allows `/usr/bin/bwrap` to run unconfined after
 creating a user namespace. This trades some AppArmor confinement for the

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import platform
 import shutil
 import socket
 import subprocess
@@ -65,10 +66,67 @@ def load(path: Path) -> dict:
     return {"roofline_efficiency": 0.80, "gpus": {}}
 
 
-def observe() -> list[dict]:
-    """What nvidia-smi says about the GPUs actually present."""
-    if not shutil.which("nvidia-smi"):
+def _apple_name() -> str:
+    """Marketing name of the chip, falling back to something honest."""
+    try:
+        brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                               capture_output=True, text=True, timeout=30)
+        if brand.returncode == 0 and brand.stdout.strip():
+            return brand.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return platform.processor() or "Apple Silicon"
+
+
+def _sysctl_int(key: str) -> int | None:
+    """One integer sysctl, or None if the key or the tool is absent."""
+    try:
+        out = subprocess.run(["sysctl", "-n", key], capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    val = out.stdout.strip()
+    return int(val) if out.returncode == 0 and val.isdigit() else None
+
+
+def observe_metal(sysctl=None, is_apple: bool | None = None) -> list[dict]:
+    """Apple Silicon, where the GPU has no memory of its own.
+
+    Unified memory means "VRAM" is a policy, not a chip: Metal will hand a
+    process up to `iogpu.wired_limit_mb` if the operator has set it, and
+    otherwise roughly three quarters of system RAM. Reporting hw.memsize
+    unqualified would promise a 48 GiB MacBook 48 GiB of weights and then fail
+    at load, so the budget is what is reported, and `unified` marks it as a
+    share of RAM rather than a dedicated pool.
+    """
+    if is_apple is None:
+        is_apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+    if not is_apple:
         return []
+    if sysctl is None:
+        sysctl = _sysctl_int
+
+    total_bytes = sysctl("hw.memsize")
+    if not total_bytes:
+        return []
+    wired_mib = sysctl("iogpu.wired_limit_mb")
+    budget = wired_mib or int(total_bytes / (1024 * 1024) * 0.75)
+    return [{"name": _apple_name(), "vram_mib": int(budget),
+             "compute_cap": "metal", "driver": platform.mac_ver()[0],
+             "unified": True,
+             "system_ram_mib": int(total_bytes / (1024 * 1024))}]
+
+
+def observe() -> list[dict]:
+    """Every accelerator actually present, whichever vendor it is.
+
+    A fleet that spans a 24 GiB 4090, a 96 GiB RTX 6000, H100s and an Apple
+    laptop cannot be sized from one vendor's tool. nvidia-smi answers for CUDA;
+    Metal is asked separately; anything else reports nothing, and the callers
+    fail closed rather than assuming a default card.
+    """
+    if not shutil.which("nvidia-smi"):
+        return observe_metal()
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,compute_cap,driver_version",

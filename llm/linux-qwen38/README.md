@@ -223,6 +223,69 @@ deny it `task` so fan-out cannot nest, and retire the operator-facing skills fro
 `mode: all` to `mode: primary` so an 11k-21k skill body is never spawnable as a
 child.
 
+### Reusing the prefix every session shares
+
+Measured, and the answer was not the one expected. `--cache-reuse` is **inert on
+this model** — llama.cpp disables it in every configuration that can be built
+here, saying so in the log:
+
+| configuration | what the server said |
+|---|---|
+| multimodal (projector loaded) | `cache_reuse is not supported by multimodal` |
+| text-only, `q4_0` KV | `cache_reuse is not supported by this context` |
+| text-only, `f16` KV | same |
+| context shift allowed | same |
+
+It reuses KV by *shifting* it, and Qwen3.8 keeps a recurrent state alongside its
+attention cache that cannot be shifted. So the setting is deliberately absent;
+`test_structural.sh` asserts the absence, because a config line that looks like
+an optimisation while being silently disabled is worse than no line at all.
+
+**Ordinary exact-prefix caching, which does work, matters far more.** With a
+37k-token shared preamble:
+
+| prompt shape | cached | evaluated | prefill |
+|---|---:|---:|---:|
+| identical prefix, different question | 36,998 | 513 | **388 ms** |
+| one varying field near the **start** | 0 | 37,523 | **14,597 ms** |
+
+Thirty-seven times slower, from a single changed token early in the prompt. The
+practical rule for anything fanning out subagents: **keep varying content at the
+end**. A session id, a timestamp or a rotating memory block near the top throws
+away the entire cache. `scripts/bench-cache-reuse.py` measures both shapes.
+
+### Before the server starts: does it fit at all?
+
+`scripts/capacity-preflight.py` prices weights + KV + buffers against the
+accelerator and refuses a context the card cannot hold:
+
+```bash
+capacity-preflight.py --ctx 204800 --kv q4_0 --parallel 1 \
+                      --weights /path/to/model.gguf
+# verdict : DOES NOT FIT — lower the context to 131,072
+```
+
+Exit 0 fits, **75** does not (EX_TEMPFAIL, so a unit refuses rather than
+retries), 2 could not tell. Both boundaries are measured on the RTX 4090 rather
+than modelled: 204800 crash-looped 54 times, 131072 came up healthy holding
+22718 MiB.
+
+It never suggests unpinning `n-gpu-layers`. That is the branch llama.cpp's own
+auto-fitter takes — it fits by moving layers to the CPU, which on a 27B model
+costs far more than the context it saves. Lower the context or the
+quantisation instead.
+
+`--headroom-mib` defaults to 0 because the sizing model already reserves 2 GiB
+plus 512 MiB per slot and then takes 80% of what is left. Raise it on a host
+that also drives a desktop, or one whose node sleeps and has to reclaim its
+memory later — a node sized to the last megabyte cannot wake.
+
+Hardware detection covers CUDA and Apple unified memory, where the budget is
+`iogpu.wired_limit_mb` if set and otherwise three quarters of `hw.memsize`.
+Anything else is undetermined, and the gate says so rather than assuming a card.
+
+### After it starts: can it fund the fan-out?
+
 `scripts/context-budget-check.py` is the gate. It reads the **loaded** server
 rather than these presets, resolves agents through `opencode agent list` and
 `opencode debug agent` so it sees built-ins and config overrides, and prices two

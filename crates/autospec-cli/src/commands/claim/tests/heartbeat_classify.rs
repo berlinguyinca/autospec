@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 #[cfg(target_os = "linux")]
-use super::support::STARTUP_HEARTBEAT_ENV;
+use super::support::lock_heartbeat_env;
 use super::support::{
     assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
     startup_heartbeat_fixture,
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 #[test]
 fn startup_heartbeat_remote_process_identity() {
-    let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+    let _environment = lock_heartbeat_env();
     let (directory, _) = startup_heartbeat_fixture("remote-process-identity");
     let root = directory.join(".autospec/process-heartbeats");
     let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");

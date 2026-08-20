@@ -4,7 +4,7 @@
 
 use super::super::{advance_claim_ref_in, create_claim_ref_commit, ClaimRefAdvance};
 use super::support::{
-    assert_bridge_transition_projection, claim_record, git, ClaimRefFixture, STARTUP_HEARTBEAT_ENV,
+    assert_bridge_transition_projection, claim_record, git, ClaimRefFixture, lock_heartbeat_env,
 };
 use crate::commands::claim;
 use autospec_core::claim::{ExecutorResultEvidence, RemoteComment};
@@ -150,7 +150,7 @@ fn bridge_result_authority_filters_exact_generation_before_uniqueness() {
 #[cfg(unix)]
 #[test]
 fn executor_result_takeover_after_renewal_is_inert_for_successor_authority() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("transition env");
+    let _guard = lock_heartbeat_env();
     let fixture = ClaimRefFixture::new("executor-result-takeover");
     let bin = fixture.root.join("bin");
     let gh = bin.join("gh");
@@ -352,7 +352,7 @@ fn executor_result_takeover_after_renewal_is_inert_for_successor_authority() {
 #[cfg(unix)]
 #[test]
 fn bridge_terminal_transitions_prepare_before_labels_and_restarts_do_not_relabel() {
-    let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("transition env");
+    let _guard = lock_heartbeat_env();
     let retryable_edit = [
         "issue edit 42 ",
         "repo owner/repo ",

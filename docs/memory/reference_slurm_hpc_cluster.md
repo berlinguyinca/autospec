@@ -139,8 +139,18 @@ one line earlier — immediately after
 `selected slot by LCP similarity, f_sim_best = ... (> 0.100 thold)`.
 Setting `slot-prompt-similarity = 0.0` in the preset fixed it: 40/40
 with zero child exits and zero LCP selections, against 11 and 8 failures
-on the two prior runs. A mitigation, not a diagnosis; the cost is losing
-cross-slot prompt-cache reuse.
+on the two prior runs.
+
+Retested 2026-08-19, and the cost turned out to be nothing. With the
+feature ENABLED at 0.1 on b10434, `--parallel 4`, 240 concurrent requests
+carrying deliberately similar 11k-token prompts: **0 LCP selections, 264
+LRU**. It never engages, so "losing cross-slot prompt-cache reuse" — which
+these notes claimed for weeks — was a cost that did not exist. The reuse
+that matters is ordinary exact-prefix caching, untouched by this: 36,998
+of 37,511 tokens from cache. Upstream wants the feature off in common
+configs too (llama.cpp PR #22083, issue #17673: cache thrashing, and the
+same "always LRU" behaviour). Not pending work — revisit only if the
+upstream default changes.
 
 **Never build with `-march=native` on a heterogeneous cluster.** This one
 mixes zen3, zen4 and zen5, and the setup job and the serving job are

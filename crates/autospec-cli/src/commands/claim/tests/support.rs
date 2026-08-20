@@ -20,6 +20,26 @@ use std::sync::{Arc, Barrier, Mutex};
 // Every test that mutates AUTOSPEC_HEARTBEAT_DIR shares this process-wide boundary.
 pub(super) static STARTUP_HEARTBEAT_ENV: Mutex<()> = Mutex::new(());
 
+/// Take the process-wide environment boundary, tolerating poison.
+///
+/// The guarded value is `()`: a panicking holder cannot leave it inconsistent,
+/// so there is no invariant that propagating poison would protect. What poison
+/// does instead is turn one failure into a dozen. On 2026-08-19 a single
+/// contention-induced panic inside
+/// `bridge_terminal_transitions_prepare_before_labels_and_restarts_do_not_relabel`
+/// took eleven other claim tests down with `PoisonError`, so the run reported 12
+/// failures and named the real one nowhere — `cargo test --workspace` showed 15
+/// while only 4 were distinct problems.
+///
+/// Env vars are process-global and cargo runs these tests as threads in one
+/// process, so the mutual exclusion still matters; only the poison propagation
+/// is dropped.
+pub(super) fn lock_heartbeat_env() -> std::sync::MutexGuard<'static, ()> {
+    STARTUP_HEARTBEAT_ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub(super) fn startup_heartbeat_fixture(label: &str) -> (PathBuf, PathBuf) {
     let directory = std::env::temp_dir().join(format!(
         "autospec-startup-heartbeat-{label}-{}-{}",
