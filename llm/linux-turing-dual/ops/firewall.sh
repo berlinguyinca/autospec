@@ -52,11 +52,17 @@ run sudo ufw allow from "${QT_FW_MGMT}"     to any port 22 proto tcp
 for range in "${QT_FW_CAMPUS}" "${QT_FW_INTERNAL}" "${QT_FW_MGMT}"; do
   run sudo ufw allow from "$range" to any port 80   proto tcp
   run sudo ufw allow from "$range" to any port 8080 proto tcp
+  # 443 only once a certificate exists -- a rule for a port nothing listens on
+  # is a rule nobody will remember to review. Scoped to the SAME ranges as 80,
+  # deliberately: a global allow would make the dashboard and the login flow
+  # reachable from further away than the inference endpoint they belong to.
+  if [ -r /etc/ssl/qwen-turing/fullchain.pem ]; then
+    run sudo ufw allow from "$range" to any port 443 proto tcp
+  fi
 done
 
 # NOT opened: 8081 (dashboard) and 8090 (llama.cpp) bind loopback and are reached
-# through nginx. 443 is opened only when a certificate exists -- a rule for a port
-# nothing listens on is a rule nobody will remember to review.
+# through nginx.
 
 run sudo ufw --force enable
 [ "$APPLY" -eq 1 ] && sudo ufw status verbose

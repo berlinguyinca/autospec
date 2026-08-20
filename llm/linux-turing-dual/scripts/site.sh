@@ -75,3 +75,21 @@ require_site() {
   export QT_NODE_ADDR QT_UPLINK_IF QT_MODELS_DIR QT_PORT QT_DASH_ADDR QT_DASH_PORT
   return 0
 }
+
+# Values only the gateway needs: identity provider coordinates and the key
+# registry. DELIBERATELY NOT in QT_REQUIRED_VARS -- that list gates the router,
+# and the router must not fail to start because a value it never reads is
+# absent. A node can serve inference without ever having heard of Cognito.
+QT_GATEWAY_REQUIRED_VARS="QT_PUBLIC_FQDN QT_COGNITO_REGION QT_COGNITO_POOL_ID QT_COGNITO_CLIENT_ID QT_COGNITO_DOMAIN QT_COGNITO_USER_GROUP QT_COGNITO_ADMIN_GROUP QT_DB_HOST QT_DB_PORT QT_DB_NAME QT_DB_USER QT_DB_PASSWORD_FILE"
+
+# The gateway needs the core values too -- it binds a port and proxies to the
+# router -- so this checks both lists and reports every miss at once rather
+# than one per run.
+require_gateway_site() {
+  local saved="$QT_REQUIRED_VARS" rc
+  QT_REQUIRED_VARS="${QT_REQUIRED_VARS} ${QT_GATEWAY_REQUIRED_VARS}"
+  require_site
+  rc=$?
+  QT_REQUIRED_VARS="$saved"
+  return $rc
+}

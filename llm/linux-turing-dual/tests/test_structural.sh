@@ -33,6 +33,10 @@ if [ ! -r "$ex" ]; then
   bad "missing config/site.conf.example"
 else
   demanded="$(sed -n 's/^QT_REQUIRED_VARS="\(.*\)"$/\1/p' "${NODE}/scripts/site.sh")"
+  # The gateway's own list is separate from the router's, but the example must
+  # still document it -- otherwise a gateway operator gets exit 78 with no
+  # template to fill in.
+  demanded="${demanded} $(sed -n 's/^QT_GATEWAY_REQUIRED_VARS="\(.*\)"$/\1/p' "${NODE}/scripts/site.sh")"
   if [ -z "$demanded" ]; then
     bad "could not read QT_REQUIRED_VARS from scripts/site.sh"
   else

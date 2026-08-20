@@ -29,8 +29,27 @@ This design adds three things, in this order:
 | **2** | Cognito login, group-gated minting, a shared registry on the central database server | a new Cognito app client; a provisioned database |
 | **3** | Federation to other GPU hosts, starting with the RTX 4090 workstation | that host's address, and a firewall rule **on that host** |
 
-They are phased because two of them are gated on work outside this repository
-and one is not. Phase 1 alone answers the operator's headline request — *see
+### 0.1 The external blockers are already cleared
+
+Written after the design, because the answer changed the table above: everything
+Phases 2 and 3 were waiting on now exists. What remains for each is code in this
+repository.
+
+| Prerequisite | State |
+|---|---|
+| Key registry database, three non-superuser roles | **provisioned and verified**, including that the application role is refused DDL and cannot read the production database |
+| Application role's password on the node | installed root-only, mode 600, for delivery via `LoadCredential` |
+| Identity provider hosted login domain | **already existed** on the pool — the change originally planned here was never needed |
+| Dedicated app client for this dashboard | **created**: public, no secret, authorization-code + PKCE, `COGNITO` provider, `AllowedOAuthFlowsUserPoolClient` set. Verified by an authorize request that redirects to login, and by an unregistered callback being refused with `redirect_mismatch` |
+| The two authorisation groups | **created**, and the operator added to the admin group |
+| Public DNS name, and a trusted certificate | **live**, issued by an ACME authority through DNS-01 against the existing hosted zone, HTTP/2, renewal dry-run passing and the timer enabled (§8) |
+| Federated upstream's ports restricted to this node | **applied and proven** — allowed peer connects, a third party is dropped, and every validation-failure path leaves the working rules intact (§6.4) |
+
+The one prerequisite that was *not* satisfied, and is not this project's to
+satisfy, is retiring the production superuser credential (§5.2, §11).
+
+They are phased because two of them WERE gated on work outside this repository
+and one was not. Phase 1 alone answers the operator's headline request — *see
 which key generates what usage, and register additional keys* — with zero
 external dependency. It must not be blocked waiting for a database role.
 
@@ -220,11 +239,14 @@ Minting requires membership in a named Cognito group, read per §2.1. The pool i
 the operator's **production** pool containing the whole laboratory; unrestricted
 self-service would grant every existing user a seat on a two-slot node.
 
-Two groups, both configured site-locally:
+Two groups. The names below are the ones that now exist in the pool; the values
+themselves stay site-local (`QT_COGNITO_USER_GROUP`, `QT_COGNITO_ADMIN_GROUP`)
+so this file carries no site identifier, but an implementer needs to know they
+are not free to invent them.
 
 | Group | May |
 |---|---|
-| user group | mint, list, revoke **their own** keys; see **their own** usage |
+| user group (`llm-` prefixed, matching the pool's existing per-application convention) | mint, list, revoke **their own** keys; see **their own** usage |
 | admin group | all of the above, plus see all users' usage and revoke any key |
 
 A verified token whose subject is in neither group authenticates successfully and
@@ -570,7 +592,7 @@ would actually accept — the panel's existing contract.
 
 ---
 
-## 8. Exposure change, and the one thing that got worse
+## 8. Exposure change, and how it was resolved
 
 The operator chose plain HTTP twice, and both times the only secret on the wire
 was one shared inference key. **Phase 2 changes what is on the wire**: session
@@ -579,23 +601,59 @@ captured inference key means someone else's tokens on a two-slot GPU; a captured
 pool session is lateral movement into production. Those are not the same risk,
 and the earlier decision was not made about the second one.
 
-Resolution, chosen by the operator: **inference stays on plain `:80` exactly as
-today**, and login plus key management move to `:443` with a self-signed
-certificate, swapped for the campus certificate when it is issued. API clients
-are entirely unaffected; operators accept a browser warning once.
+That is now resolved with a **real, publicly trusted certificate** rather than
+the self-signed stopgap originally planned, and without waiting on the campus CA.
 
-Requirements:
+### 8.1 Why the certificate does not come from ACM
 
-- The `:443` server carries the dashboard and gateway administration paths.
-- **No HTTP-to-HTTPS redirect and no HSTS header**, for the reason the existing
-  design already records: a redirect to a port that is not listening breaks the
-  endpoint, and an HSTS header cached before a valid certificate exists makes the
-  node unreachable from every browser that saw it. The existing structural check
-  that fails the build if either appears must be extended to cover the new
-  server block, not bypassed by it.
+The obvious-looking answer — issue it in the cloud provider's certificate
+manager — does not work: **those certificates cannot be exported.** They attach
+only to the provider's own load balancers, CDN and API gateway. Fronting this
+node with a CDN to borrow one would route every inference request through it, at
+per-gigabyte cost and against a default origin timeout of about 30 seconds — and
+this node's measured prefill at the 100k ceiling is roughly 210 seconds. The CDN
+would sever exactly the requests the node exists to serve.
+
+The certificate is therefore issued by an ACME certificate authority and
+validated by **DNS-01 through the operator's existing hosted DNS zone**. That
+choice matters beyond cost:
+
+- **No inbound reachability is required.** HTTP-01 would need this node exposed
+  to the public internet on `:80`; the node is meant to be campus- and
+  LAN-scoped, and DNS-01 removes the question entirely.
+- **Renewal is unattended**, through the ACME client's own timer, with a deploy
+  hook that reloads the proxy.
+- **Cost is zero.** The zone already exists; the certificate is free.
+
+The credential the node holds for DNS validation is scoped to a single record
+name and a single record type — it can create the challenge record and nothing
+else in the zone. A read of that credential does not put the zone at risk.
+
+### 8.2 Requirements
+
+- Inference **remains available on plain `:80`** exactly as before. Every client
+  configured today keeps working; TLS is added alongside, not in place of.
+- One server block serves all listeners. TLS directives arrive through an
+  **include the installer writes**, whose content depends on whether a
+  certificate is present — because `listen 443 ssl` against a missing
+  certificate makes the proxy refuse to *start*, which would take plain `:80`
+  down on any node that has no certificate yet.
+- The proxy configuration references the certificate through a **neutral path**
+  symlinked to the ACME client's directory, so the site's own hostname stays out
+  of this public repository, and renewal needs no configuration change.
+- **No HTTP-to-HTTPS redirect and no HSTS header**, still. The reasoning has
+  shifted but not the conclusion: a redirect would break clients configured
+  against `:80`, and HSTS is a promise a browser caches and will not forget —
+  premature on a surface whose login flow is not yet built. The structural check
+  that fails the build if either appears stays in force.
+- The firewall opens `:443` **scoped to the same ranges as `:80`**, and only
+  when a certificate exists. A global allow would make the dashboard and login
+  reachable from further away than the inference endpoint they belong to.
 - Key minting and revocation are refused over plain HTTP with an explanatory
   error, not silently downgraded.
-- The firewall opens `:443` on the same interfaces as `:80`.
+- The identity provider's callback URL **must match the certificate's hostname**.
+  Registering a callback on a name the certificate does not cover fails at login
+  with an error that reads like a provider misconfiguration.
 
 ---
 
@@ -692,6 +750,8 @@ component's shape rather than its details.
   stays valid through Phase 1 as one ordinary key, and is retired by hand once
   named keys have replaced it.
 - Federating anything that is not OpenAI-compatible.
-- The campus certificate, and any dependence on its arrival.
-- Rotating the production superuser credential found during probing (§5.2),
-  which is the operator's, and urgent independently of this work.
+- Retiring the production superuser credential found during probing (§5.2).
+  A read-only role now exists to replace it in read-only consumers, but the
+  credential itself appears in **72 production profile files across 17
+  repositories**, so changing its password is a coordinated production change
+  with its own rollout — not a side effect of this work.

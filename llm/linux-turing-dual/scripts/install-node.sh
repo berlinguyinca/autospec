@@ -170,6 +170,44 @@ echo "CUDA devices visible to llama-server: ${devs}"
 # status=203/EXEC -- a message that names no file and reads like a permissions
 # problem. Deriving the list from the units themselves means adding a helper to a
 # unit without shipping it fails here, loudly, instead of at first start.
+# --- TLS snippet, written BEFORE the site that includes it -------------------
+# The site file includes this unconditionally, so it must always exist. Its
+# CONTENT is conditional: `listen 443 ssl` against a missing certificate makes
+# nginx refuse to start, which would take plain :80 down on any node that has
+# no certificate yet.
+say "write the nginx TLS snippet (content depends on whether a cert exists)"
+sudo install -d -m 0755 /etc/nginx/snippets
+QT_TLS_DIR="/etc/ssl/qwen-turing"
+if [ -r "${QT_TLS_DIR}/fullchain.pem" ] && [ -r "${QT_TLS_DIR}/privkey.pem" ]; then
+  sudo tee /etc/nginx/snippets/qwen-turing-tls.conf >/dev/null <<'TLSEOF'
+# Written by install-node.sh because a certificate was found.
+#
+# `listen ... http2` rather than the newer standalone `http2 on;` directive:
+# that form arrived in nginx 1.25.1 and this host runs 1.24, where it is an
+# "unknown directive" that stops nginx from starting at all.
+listen 443 ssl http2;
+
+ssl_certificate     /etc/ssl/qwen-turing/fullchain.pem;
+ssl_certificate_key /etc/ssl/qwen-turing/privkey.pem;
+ssl_protocols       TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+ssl_session_cache   shared:qwenturing:10m;
+ssl_session_timeout 1d;
+
+# OCSP stapling deliberately omitted: it needs a `resolver` to be effective at
+# all, and Let's Encrypt is retiring OCSP. Enabling it buys a warning.
+TLSEOF
+  echo "TLS enabled: certificate found under ${QT_TLS_DIR}"
+else
+  sudo tee /etc/nginx/snippets/qwen-turing-tls.conf >/dev/null <<'TLSEOF'
+# Written by install-node.sh because NO certificate was found.
+# Populate /etc/ssl/qwen-turing/{fullchain,privkey}.pem -- symlinks to an ACME
+# client's live/ directory are the intended arrangement -- then re-run the
+# installer. Deliberately empty rather than absent: the site file includes it.
+TLSEOF
+  echo "TLS not enabled: no certificate under ${QT_TLS_DIR}"
+fi
+
 # --- install the nginx site --------------------------------------------------
 if [ -r "${NODE}/nginx/qwen-turing.conf" ] && command -v nginx >/dev/null 2>&1; then
   say "install the nginx site and VALIDATE before reloading"

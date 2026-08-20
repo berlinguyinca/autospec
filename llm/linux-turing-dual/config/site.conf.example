@@ -33,3 +33,44 @@
 # shows what the node is doing.
 : "${QT_DASH_ADDR:=<dash-addr>}"
 : "${QT_DASH_PORT:=8081}"
+
+# ---------------------------------------------------------------------------
+# Everything below is read ONLY by the gateway (per-user keys, usage
+# accounting, federation). A node that serves inference without them starts
+# and runs normally -- see QT_GATEWAY_REQUIRED_VARS in scripts/site.sh.
+# ---------------------------------------------------------------------------
+
+# The name clients and the identity provider use to reach this node. It must
+# match the app client's registered callback host exactly, or the login
+# redirect is refused with `redirect_mismatch`.
+: "${QT_PUBLIC_FQDN:=<node-fqdn>}"
+
+# Identity provider coordinates. The pool is shared with other applications,
+# so this node gets its OWN app client -- a public client with no secret, which
+# is why none is configured here.
+: "${QT_COGNITO_REGION:=<aws-region>}"
+: "${QT_COGNITO_POOL_ID:=<user-pool-id>}"
+: "${QT_COGNITO_CLIENT_ID:=<app-client-id>}"
+
+# Hosted login domain, host part only, no scheme. Either the pool's prefix
+# domain (<prefix>.auth.<region>.amazoncognito.com) or a custom domain.
+: "${QT_COGNITO_DOMAIN:=<hosted-login-domain>}"
+
+# Group names that authorise minting, read from the VERIFIED token only --
+# never from a request header. A user in neither group authenticates and is
+# authorised for nothing.
+: "${QT_COGNITO_USER_GROUP:=<user-group-name>}"
+: "${QT_COGNITO_ADMIN_GROUP:=<admin-group-name>}"
+
+# Key registry. The application role holds no DDL privilege, so a compromised
+# node cannot alter the schema it reads.
+: "${QT_DB_HOST:=<db-host>}"
+: "${QT_DB_PORT:=6432}"
+: "${QT_DB_NAME:=<db-name>}"
+: "${QT_DB_USER:=<db-app-role>}"
+
+# Path to the file holding the application role's password -- a PATH, never the
+# password itself. Mode 600, root-owned, delivered to the unit through systemd
+# LoadCredential and never through Environment=, which any local user can read
+# with `systemctl show`.
+: "${QT_DB_PASSWORD_FILE:=/etc/qwen-turing/llmgw_app.pw}"
