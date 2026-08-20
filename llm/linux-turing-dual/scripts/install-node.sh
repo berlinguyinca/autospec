@@ -136,6 +136,16 @@ sudo install -m 0755 "${HERE}/collect-stats.py" "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/queue_window.py"  "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/dashboard.py"     "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/dashboard-run.sh" "${QT_PREFIX}/bin/"
+# The gateway and the modules it imports. gateway.py adds its own directory to
+# sys.path, so these are plain modules rather than executables -- and they must
+# ALL be here: a missing one is a unit that dies at import with
+# ModuleNotFoundError, which is how usage.py was left out the first time.
+sudo install -m 0755 "${HERE}/gateway.py"       "${QT_PREFIX}/bin/"
+sudo install -m 0755 "${HERE}/gateway-run.sh"   "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/keys.py"          "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/keystore.py"      "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/oidc.py"          "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/usage.py"         "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/site.sh"          "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/common.conf" "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/router-presets.ini" "${QT_PREFIX}/etc/"
@@ -229,6 +239,34 @@ if [ -r "${NODE}/nginx/qwen-turing.conf" ] && command -v nginx >/dev/null 2>&1; 
     sudo systemctl enable --now nginx
     echo "nginx site installed and started"
   fi
+fi
+
+# --- the runtime's internal key ----------------------------------------------
+# Distinct from every user key and known only to the gateway, so a request that
+# somehow reaches llama.cpp directly fails closed instead of being served.
+say "ensure the runtime's internal key exists"
+if [ ! -s /etc/qwen-turing/internal.key ]; then
+  sudo install -d -m 0755 /etc/qwen-turing
+  openssl rand -hex 24 | sudo tee /etc/qwen-turing/internal.key >/dev/null
+  sudo chmod 600 /etc/qwen-turing/internal.key
+  sudo chown root:root /etc/qwen-turing/internal.key
+  echo "generated /etc/qwen-turing/internal.key"
+else
+  echo "internal key already present"
+fi
+
+# --- the gateway's imports must all be satisfied ----------------------------
+# Verified by IMPORTING them, not by listing files: a syntax error or a missing
+# dependency is exactly as fatal as a missing file, and both present as a unit
+# that will not start.
+say "verify the gateway's modules import"
+if ! sudo python3 -c "
+import sys; sys.path.insert(0, '${QT_PREFIX}/bin')
+import keys, keystore, oidc, usage   # noqa
+print('gateway modules import cleanly')
+"; then
+  echo "the gateway's modules do not import -- refusing to claim success" >&2
+  exit 70
 fi
 
 say "verify unit ExecStart paths are installed"

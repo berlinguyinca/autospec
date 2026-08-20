@@ -80,6 +80,55 @@ Or derive it from the server so client and server cannot drift:
 
 ---
 
+## Accounts and API keys
+
+Every user gets their own keys. **Sign in on the dashboard and create one** —
+the key is shown once, revocable on its own, and everything it does is
+attributed to you.
+
+The distinction that shapes this: **sign-in authenticates people, keys
+authenticate machines.** An agentic client cannot complete a browser redirect,
+so a human signs in once and mints long-lived keys for the tools that need them.
+
+| | |
+|---|---|
+| Sign in | the dashboard's *Your account and API keys* panel |
+| Create a key | needs membership in the configured user group |
+| See all users' keys and usage | needs the admin group |
+| Revoke | immediate on this node; other nodes converge within the refresh interval, which the API states in its reply |
+
+Two things worth knowing before you lose a key:
+
+* **The secret is shown exactly once** and stored only as a SHA-256 hash. Nobody
+  can retrieve it later — not an administrator, not the database owner. Lost it?
+  Revoke and make another.
+* **The key id is not secret.** It identifies the key in the dashboard and on
+  every usage row, which is what makes per-key attribution possible at all.
+
+Creating and revoking keys **require HTTPS** and are refused over plain HTTP: a
+key minted over cleartext is a key already disclosed. Inference itself still
+works on plain `:80`, so existing clients are unaffected.
+
+### What "usage" means, exactly
+
+Token counts are read from the model's own response, so they are exact rather
+than estimated. Each row carries prompt, completion and **cached** tokens — the
+last one matters here, because the prefix cache is worth roughly tenfold on a
+warm slot, so the cached share is the difference between a cheap conversation
+and an expensive one.
+
+Requests whose client disconnected mid-stream are counted **separately** as
+unknown. Their token counts genuinely are not available — the terminal response
+chunk never arrived — and they are never estimated from byte counts nor reported
+as zero.
+
+### The shared key is on its way out
+
+The node ran on one shared key before per-user keys existed. That key still
+works, so nothing broke on the day this landed, and its traffic is recorded
+under a reserved key id. **Watch that row: when it reaches zero, the shared key
+has no users left and the `legacykey` credential can be removed from the unit.**
+
 ## Measured
 
 | | |

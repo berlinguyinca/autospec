@@ -120,6 +120,16 @@
       about 7&nbsp;s for a 27B off NVMe. Every reload shows up as an eviction above.</div>
   </div>
 
+
+  <!-- ============ ACCOUNT AND KEYS ============ -->
+  <h2>Your account and API keys</h2>
+  <div id="acct"></div>
+  <div id="keysbox"></div>
+
+  <!-- ============ USAGE ============ -->
+  <h2>Usage by key</h2>
+  <div id="usagebox"></div>
+
   <!-- ============ HOW TO CONNECT ============ -->
   <h2>How to connect</h2>
   <div class="warnbox">
@@ -140,9 +150,9 @@
       <span class="sub">Model:</span> <select id="msel"></select>
     </div>
     <pre id="snippet">…</pre>
-    <div class="note">Get the key on the node with
-      <code>sudo cat /etc/qwen-turing.key</code>. Or generate the OpenCode config
-      from the server so client and server cannot drift:
+    <div class="note">Get a key by signing in above and creating one — each key is
+      yours, revocable on its own, and its usage is attributed to you. Or generate
+      the OpenCode config from the server so client and server cannot drift:
       <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code>.</div>
   </div>
 </main>
@@ -362,6 +372,195 @@ async function tick(){
   }
 }
 tick(); setInterval(tick, 2000);
+
+// ---------- account, keys and usage ----------
+// Every request below uses a RELATIVE url, which is origin-relative by
+// construction -- so this page works under whatever name it was loaded as and
+// bakes in no hostname. That matters twice over here: the sign-in callback must
+// match the certificate's hostname, and this file is committed to a public repo.
+let ME = null;
+
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function when(iso){
+  if(!iso) return '<span class="sub">never</span>';
+  const d = new Date(iso);
+  return isNaN(d) ? esc(iso) : d.toLocaleString();
+}
+
+async function loadAccount(){
+  let me;
+  try{ me = await (await fetch('/api/me', {cache:'no-store'})).json(); }
+  catch(e){
+    $('acct').innerHTML = '<div class="card"><div class="sub">Key management is ' +
+      'unavailable — the gateway is not answering.</div></div>';
+    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = ''; return;
+  }
+  ME = me;
+
+  if(!me.authenticated){
+    $('acct').innerHTML = '<div class="card">' +
+      (me.login_configured
+        ? '<div>Sign in to create and manage your own API keys.</div>' +
+          '<div style="margin-top:10px"><a class="tab" href="/auth/login">Sign in</a></div>' +
+          '<div class="note">Sign-in uses the same account as the rest of the lab ' +
+          'tooling. Keys you create are yours: revocable individually, and their ' +
+          'usage is attributed to you rather than to a shared secret.</div>'
+        : '<div class="sub">Sign-in is not configured on this node.</div>') +
+      '</div>';
+    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = '';
+    return;
+  }
+
+  const who = esc(me.name || me.email || me.sub);
+  if(!me.may_mint){
+    // Authenticated and authorised for NOTHING. A distinct state from being
+    // logged out, and the page must say which -- and name the group needed.
+    $('acct').innerHTML = '<div class="warnbox"><strong>Signed in as ' + who +
+      ', but not authorised to create keys.</strong><div class="note">Your account ' +
+      'is not a member of <code>' + esc(me.required_group || 'the required group') +
+      '</code>. Ask an administrator to add you; nothing else is needed.</div></div>';
+    $('keysbox').innerHTML = ''; $('usagebox').innerHTML = '';
+    return;
+  }
+
+  $('acct').innerHTML = '<div class="card"><div>Signed in as <strong>' + who +
+    '</strong>' + (me.is_admin ? ' <span class="badge on">admin</span>' : '') +
+    '</div>' +
+    (me.secure ? '' : '<div class="note" style="color:var(--warn)">This page was ' +
+      'loaded over plain HTTP, so creating and revoking keys is refused. Reload over ' +
+      'HTTPS to manage keys.</div>') +
+    '<div style="margin-top:10px"><button class="tab" id="logout">Sign out</button></div>' +
+    '</div>';
+  $('logout').onclick = async () => {
+    await fetch('/auth/logout', {method:'POST'}); ME = null; loadAccount();
+  };
+  await Promise.all([loadKeys(), loadUsage()]);
+}
+
+async function loadKeys(){
+  const all = ME.is_admin ? '?all=1' : '';
+  let d;
+  try{ d = await (await fetch('/api/keys'+all, {cache:'no-store'})).json(); }
+  catch(e){ $('keysbox').innerHTML = '<div class="err">Could not list keys.</div>'; return; }
+
+  const rows = (d.keys||[]).map(k => {
+    const dead = !!k.revoked_at;
+    return '<tr' + (dead ? ' style="opacity:.55"' : '') + '>' +
+      '<td>' + esc(k.label || '<span class="sub">no label</span>') + '</td>' +
+      '<td><code>' + esc(k.key_id) + '</code></td>' +
+      (ME.is_admin ? '<td class="sub">' + esc(k.sub) + '</td>' : '') +
+      '<td>' + when(k.created_at) + '</td>' +
+      '<td>' + when(k.last_used_at) + '</td>' +
+      '<td>' + (k.expires_at ? when(k.expires_at) : '<span class="sub">never</span>') + '</td>' +
+      '<td>' + (dead ? '<span class="badge u">revoked</span>'
+                     : '<button class="tab" data-revoke="' + esc(k.key_id) + '">Revoke</button>') +
+      '</td></tr>';
+  }).join('');
+
+  $('keysbox').innerHTML =
+    '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
+    '<th>Label</th><th>Key id</th>' + (ME.is_admin ? '<th>Owner</th>' : '') +
+    '<th>Created</th><th>Last used</th><th>Expires</th><th></th>' +
+    '</tr></thead><tbody>' +
+    (rows || '<tr><td colspan="7" class="sub">No keys yet.</td></tr>') +
+    '</tbody></table>' +
+    '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+    '<input id="klabel" placeholder="what will use this key?" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<select id="kttl"><option value="">no expiry</option><option value="30">30 days</option>' +
+    '<option value="90">90 days</option><option value="365">1 year</option></select>' +
+    '<button class="tab" id="mint"' + (ME.secure ? '' : ' disabled') + '>Create a key</button>' +
+    '</div>' +
+    '<div id="minted"></div>' +
+    '<div class="note">The key id is not secret — it identifies the key in this table ' +
+    'and on every usage row. The secret is shown <strong>once</strong>, at creation, ' +
+    'and is stored only as a hash. Revoking takes effect on this node immediately.</div>' +
+    '</div>';
+
+  const mint = $('mint');
+  if(mint) mint.onclick = doMint;
+  [...document.querySelectorAll('[data-revoke]')].forEach(b => b.onclick = () => doRevoke(b.dataset.revoke));
+}
+
+async function doMint(){
+  const label = $('klabel').value.trim();
+  const ttl = $('kttl').value;
+  const body = {label: label || null};
+  if(ttl) body.ttl_days = parseInt(ttl, 10);
+  let r, d;
+  try{
+    r = await fetch('/api/keys', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    d = await r.json();
+  }catch(e){ $('minted').innerHTML = '<div class="err">Could not create a key.</div>'; return; }
+  if(!r.ok){
+    $('minted').innerHTML = '<div class="err">' +
+      esc((d.error && d.error.message) || ('HTTP ' + r.status)) + '</div>';
+    return;
+  }
+  // Shown once, said plainly. There is no second chance and no recovery path.
+  $('minted').innerHTML =
+    '<div class="warnbox"><strong>Copy this now — it will never be shown again.</strong>' +
+    '<pre style="user-select:all;margin-top:8px">' + esc(d.key) + '</pre>' +
+    '<button class="tab" id="copykey">Copy</button>' +
+    '<div class="note">Stored as a hash, so nobody — including an administrator — ' +
+    'can retrieve it later. Lost it? Revoke this key and create another.</div></div>';
+  const cb = $('copykey');
+  if(cb) cb.onclick = () => { navigator.clipboard.writeText(d.key);
+                              cb.textContent = 'Copied'; };
+  loadKeys();
+}
+
+async function doRevoke(keyId){
+  if(!confirm('Revoke ' + keyId + '? Anything using it stops working immediately.')) return;
+  const r = await fetch('/api/keys/' + encodeURIComponent(keyId), {method:'DELETE'});
+  if(!r.ok){
+    const d = await r.json().catch(() => ({}));
+    alert('Could not revoke: ' + ((d.error && d.error.message) || r.status));
+  }
+  loadKeys(); loadUsage();
+}
+
+async function loadUsage(){
+  const all = ME && ME.is_admin ? '?all=1' : '';
+  let d;
+  try{ d = await (await fetch('/api/usage'+all, {cache:'no-store'})).json(); }
+  catch(e){ $('usagebox').innerHTML = '<div class="err">Could not read usage.</div>'; return; }
+  const rows = (d.usage||[]).map(u => {
+    const share = u.prompt_tokens ? Math.round(100*(u.cached_tokens||0)/u.prompt_tokens) : null;
+    return '<tr>' +
+      '<td><code>' + esc(u.key_id) + '</code></td>' +
+      (d.all_users ? '<td class="sub">' + esc(u.sub) + '</td>' : '') +
+      '<td>' + esc(u.model || '–') + '</td>' +
+      '<td class="num">' + n(u.requests) + '</td>' +
+      '<td class="num">' + n(u.prompt_tokens) + '</td>' +
+      '<td class="num">' + n(u.completion_tokens) + '</td>' +
+      '<td class="num">' + (share === null ? '–' : share + '%') + '</td>' +
+      '<td class="num">' + (u.truncated_requests
+        ? '<span class="badge u">' + n(u.truncated_requests) + '</span>' : '0') +
+      '</td></tr>';
+  }).join('');
+  $('usagebox').innerHTML = '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
+    '<th>Key id</th>' + (d.all_users ? '<th>Owner</th>' : '') + '<th>Model</th>' +
+    '<th class="num">Requests</th><th class="num">Prompt tokens</th>' +
+    '<th class="num">Completion tokens</th><th class="num">From cache</th>' +
+    '<th class="num">Unknown</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="8" class="sub">No usage recorded yet.</td></tr>') +
+    '</tbody></table>' +
+    '<div class="note"><strong>Unknown</strong> counts requests whose client ' +
+    'disconnected before the response finished, so their token counts genuinely ' +
+    'are not known. They are counted separately rather than estimated or reported ' +
+    'as zero. <strong>From cache</strong> is the share of prompt tokens served from ' +
+    'the prefix cache — on this node that is worth roughly tenfold on a warm slot.' +
+    '</div></div>';
+}
+
+loadAccount();
+setInterval(() => { if(ME && ME.authenticated) loadUsage(); }, 15000);
+
 </script>
 </body>
 </html>
