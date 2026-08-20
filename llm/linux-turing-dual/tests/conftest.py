@@ -16,6 +16,14 @@ import sys
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 
+# The scripts import each other by bare name (`import keys as _keys`), which works
+# at runtime because the entrypoint puts its own directory on sys.path. Tests must
+# reproduce that, or a module's sibling imports would resolve only when some
+# earlier load_script call happened to register them -- making collection order
+# part of the contract.
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
 
 def load_script(name: str):
     """Import scripts/<name>.py under the module name <name>."""

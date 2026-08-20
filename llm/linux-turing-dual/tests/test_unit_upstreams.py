@@ -207,13 +207,22 @@ def test_auto_is_a_reserved_id():
     assert u.usable is False
 
 
+def _pick(*a, **kw):
+    """pick_auto without the estimate, which these tests do not assert."""
+    sid, why, _est = up.pick_auto(*a, **kw)
+    return sid, why
+
+
 def test_auto_prefers_the_server_you_used_last():
     """The reason this rule exists: a warm prefix cache is worth ~10x here, and
     it lives on whichever machine served you last."""
     ups = up.load(TWO)
-    assert up.pick_auto(ups, ONLINE, "beta", model=M) == ("beta", "last-used")
-    assert up.pick_auto(ups, ONLINE, "alpha", model=M) == ("alpha", "last-used")
-    assert up.pick_auto(ups, ONLINE, "local", model=M) == ("local", "last-used")
+    assert _pick(ups, ONLINE, "beta", model=M) == ("beta", "warm")
+    assert _pick(ups, ONLINE, "alpha", model=M) == ("alpha", "warm")
+    # Reported as `fastest`, not `warm`: this node already wins the tie by
+    # registry order, so warmth did not decide it. The reason names the deciding
+    # factor, and claiming `warm` here would misattribute the choice.
+    assert _pick(ups, ONLINE, "local", model=M) == ("local", "fastest")
 
 
 def test_affinity_never_outranks_being_able_to_serve_the_model():
@@ -221,8 +230,8 @@ def test_affinity_never_outranks_being_able_to_serve_the_model():
     a model beta has not got -- and llama.cpp would answer with the wrong model
     rather than refuse, so beta must drop out entirely."""
     ups = up.load(TWO)
-    assert up.pick_auto(ups, ONLINE, "beta", model=LOCAL_ONLY,
-                        local_models=LOCAL_MODELS) == ("local", "preferred")
+    assert _pick(ups, ONLINE, "beta", model=LOCAL_ONLY,
+                 local_models=LOCAL_MODELS) == ("local", "only-server")
 
 
 def test_auto_falls_back_when_your_last_server_went_offline():
@@ -230,48 +239,97 @@ def test_auto_falls_back_when_your_last_server_went_offline():
     state = {"alpha": {"state": "offline", "models": [M]},
              "beta": {"state": "online", "models": [M]}}
     # Affinity must not pin you to a dead box.
-    assert up.pick_auto(ups, state, "alpha", model=M) == ("local", "preferred")
-    assert up.pick_auto(ups, state, "alpha", model=M,
-                        local_online=False) == ("beta", "model-only")
+    assert _pick(ups, state, "alpha", model=M)[0] == "local"
+    assert _pick(ups, state, "alpha", model=M,
+                 local_online=False) == ("beta", "only-server")
 
 
 def test_auto_prefers_this_node_when_nothing_is_remembered():
-    assert up.pick_auto(up.load(TWO), ONLINE, None, model=M) == ("local", "preferred")
+    """Nothing is measured yet, so every candidate estimates the same and the
+    tie falls to registry order -- which puts this node first, and costs no
+    network hop."""
+    assert _pick(up.load(TWO), ONLINE, None, model=M) == ("local", "fastest")
 
 
 def test_auto_uses_a_remote_when_this_node_is_down():
-    assert up.pick_auto(up.load(TWO), ONLINE, None, model=M,
-                        local_online=False) == ("alpha", "model-only")
+    assert _pick(up.load(TWO), ONLINE, None, model=M,
+                 local_online=False) == ("alpha", "fastest")
 
 
 def test_auto_uses_a_remote_when_only_the_remote_has_the_model():
     """Not a fallback -- the only correct answer. This node cannot serve it."""
     state = {"alpha": {"state": "online", "models": ["exotic-70b"]},
              "beta": {"state": "online", "models": [M]}}
-    assert up.pick_auto(up.load(TWO), state, "local", model="exotic-70b",
-                        local_models=LOCAL_MODELS) == ("alpha", "model-only")
+    assert _pick(up.load(TWO), state, "local", model="exotic-70b",
+                 local_models=LOCAL_MODELS) == ("alpha", "only-server")
 
 
 def test_auto_ignores_servers_that_are_not_online():
     ups = up.load(TWO)
     unknown = {"alpha": {"state": "unknown", "models": [M]},
                "beta": {"state": "offline", "models": [M]}}
-    assert up.pick_auto(ups, unknown, None, model=M,
-                        local_online=False) == (None, "none-eligible")
-    assert up.pick_auto(ups, unknown, "beta", model=M,
-                        local_online=False) == (None, "none-eligible")
+    assert _pick(ups, unknown, None, model=M,
+                 local_online=False) == (None, "none-eligible")
+    assert _pick(ups, unknown, "beta", model=M,
+                 local_online=False) == (None, "none-eligible")
 
 
 def test_auto_refuses_rather_than_guessing_when_nothing_is_up():
-    assert up.pick_auto([], {}, None, model=M, local_online=False) == (
-        None, "none-eligible")
-    assert up.pick_auto(up.load(TWO), {}, "alpha", model=M,
-                        local_online=False) == (None, "none-eligible")
+    assert _pick([], {}, None, model=M, local_online=False) == (None, "none-eligible")
+    assert _pick(up.load(TWO), {}, "alpha", model=M,
+                 local_online=False) == (None, "none-eligible")
 
 
 def test_auto_ignores_a_parked_server_even_if_it_answers():
     parked = up.load(TWO.replace("id: beta", "id: beta\n    enabled: false"))
-    assert up.pick_auto(parked, ONLINE, "beta", model=M) == ("local", "preferred")
+    assert _pick(parked, ONLINE, "beta", model=M)[0] == "local"
+
+
+def test_measured_speed_decides_between_two_that_can_both_serve_it():
+    """The amendment's requirement: a box that delivers 40 tok/s is ranked by the
+    40, not by what it claims to be."""
+    stats = {("alpha", M): {"prefill_rate": 2000.0, "mean_service": 5.0},
+             ("beta", M): {"prefill_rate": 100.0, "mean_service": 5.0}}
+    assert _pick(up.load(TWO), ONLINE, None, model=M, local_online=False,
+                 stats=stats, prompt_tokens=50_000) == ("alpha", "fastest")
+
+
+def test_load_is_taken_from_the_caller_and_can_beat_speed():
+    stats = {("alpha", M): {"prefill_rate": 2000.0, "mean_service": 30.0},
+             ("beta", M): {"prefill_rate": 500.0, "mean_service": 30.0}}
+    assert _pick(up.load(TWO), ONLINE, None, model=M, local_online=False,
+                 stats=stats, load={"alpha": 4}, prompt_tokens=10_000) == (
+        "beta", "fastest")
+
+
+def test_an_operator_tier_wins_and_says_so():
+    tiered = up.load(TWO)
+    for u in tiered:
+        if u.id == "beta":
+            u.priority = 2
+    stats = {("alpha", M): {"prefill_rate": 5000.0, "mean_service": 1.0},
+             ("beta", M): {"prefill_rate": 50.0, "mean_service": 60.0}}
+    assert _pick(tiered, ONLINE, None, model=M, local_online=False,
+                 stats=stats, prompt_tokens=10_000) == ("beta", "priority")
+
+
+def test_a_model_statistic_beats_a_server_wide_one(monkeypatch):
+    """A 9B and a 27B on one card differ by an order of magnitude, so the
+    per-model figure must be preferred where it exists."""
+    stats = {("alpha", None): {"prefill_rate": 5000.0, "mean_service": 1.0},
+             ("alpha", M): {"prefill_rate": 10.0, "mean_service": 100.0},
+             ("beta", None): {"prefill_rate": 400.0, "mean_service": 5.0}}
+    assert _pick(up.load(TWO), ONLINE, None, model=M, local_online=False,
+                 stats=stats, prompt_tokens=10_000) == ("beta", "fastest")
+
+
+def test_a_server_with_no_idle_capacity_is_ranked_last_not_excluded():
+    """The tunnelled case: no pipe free right now. The balanced route should go
+    around it, but a pin must still be able to reach it."""
+    assert _pick(up.load(TWO), ONLINE, None, model=M, local_online=False,
+                 ready={"alpha": False}, prompt_tokens=1000) == ("beta", "fastest")
+    assert _pick(up.load(TWO), ONLINE, None, model=M, local_online=False,
+                 ready={"alpha": False, "beta": False})[0] == "alpha"
 
 
 # --- eligibility, which is the safety property -------------------------------
@@ -297,12 +355,12 @@ def test_an_unreadable_model_keeps_the_request_on_this_node():
     count of them is visible rather than a mystery."""
     ups = up.load(TWO)
     assert up.eligible(ups, ONLINE, None) == ["local"]
-    assert up.pick_auto(ups, ONLINE, "beta", model=None) == ("local", "blind")
+    assert up.pick_auto(ups, ONLINE, "beta", model=None) == ("local", "blind", None)
 
 
 def test_an_unreadable_model_with_this_node_down_is_refused():
     assert up.pick_auto(up.load(TWO), ONLINE, None, model=None,
-                        local_online=False) == (None, "none-eligible")
+                        local_online=False) == (None, "none-eligible", None)
 
 
 def test_this_node_is_eligible_when_its_own_list_is_unknown():
@@ -317,6 +375,50 @@ def test_this_node_drops_out_for_a_model_it_does_not_serve():
              "beta": {"state": "online", "models": [M]}}
     assert up.eligible(up.load(TWO), state, "exotic-70b",
                        local_models=LOCAL_MODELS) == ["alpha"]
+
+
+def test_a_server_outside_the_pool_is_not_eligible_for_the_default_route():
+    """Attaching a box is self-service; putting a stranger's hardware into
+    everyone's /v1 is not. A pin asks for it by name, which is a different
+    question, so pool_only is off there."""
+    ups = up.load(TWO)
+    for u in ups:
+        u.pool_member = False
+    assert up.eligible(ups, ONLINE, M, local_models=LOCAL_MODELS) == ["local"]
+    assert up.eligible(ups, ONLINE, M, local_models=LOCAL_MODELS,
+                       pool_only=False) == ["local", "alpha", "beta"]
+
+
+def test_a_file_entry_is_in_the_pool_by_default():
+    """It was configured by whoever runs the node, and it was already balanced
+    before any of this existed -- changing that would be a silent regression."""
+    assert all(u.pool_member and u.kind == up.KIND_FILE for u in up.load(TWO))
+
+
+def test_an_attached_server_starts_outside_the_pool():
+    rows = [{"server_id": "t1", "kind": "tunnel", "sub": "sub-a",
+             "pool_member": False, "priority": 0},
+            {"server_id": "s1", "kind": "static", "sub": "sub-a",
+             "base_url": "http://box.invalid:8000/v1", "pool_member": True,
+             "priority": 2}]
+    made = {u.id: u for u in up.from_records(rows)}
+    assert made["t1"].pool_member is False and made["t1"].kind == "tunnel"
+    assert made["t1"].direct is False and made["t1"].problems == []
+    assert made["s1"].pool_member is True and made["s1"].priority == 2
+    assert made["s1"].direct is True
+
+
+def test_a_static_record_without_a_usable_address_says_so():
+    made = up.from_records([{"server_id": "s1", "kind": "static", "base_url": ""}])[0]
+    assert made.usable is False and made.problems == ["no usable base_url"]
+
+
+def test_a_tunnelled_server_never_reports_an_address():
+    """It has none: it dialled in. A field for one would invite filling it in,
+    and then the node would dial a box that expects to dial out."""
+    made = up.from_records([{"server_id": "t1", "kind": "tunnel",
+                             "base_url": "http://leaked.invalid/v1"}])[0]
+    assert made.public()["base_url"] is None
 
 
 def test_where_a_model_lives_is_reportable_for_the_refusal():

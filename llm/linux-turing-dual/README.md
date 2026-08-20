@@ -219,6 +219,19 @@ server's measured rate. A scheduler that cannot be second-guessed from outside i
 one nobody can debug — and without the tally, "the balancer quietly became
 local-always" looks exactly like a balancer that is working.
 
+A tunnelled server's capacity is the pipes it holds open, so it can genuinely run
+out — unlike a directly reachable one. A balanced request **ranks a saturated
+server last** and goes around it; a pin waits up to 5 s and then gets `503
+no_capacity`, naming the server. That is honest: this node cannot invent a
+socket, and queueing the request here would make the dashboard's queue arithmetic
+a lie.
+
+A refusal distinguishes three situations a single message would blur — the model
+is on a server that is **not in the balanced pool** (a `404` that tells you to
+pin `/u/<id>/v1`, since you may well be its owner), on one that is **not
+answering** (`503`, where waiting may help), or **nowhere** (`404`, where it will
+not).
+
 Pinning `/u/<id>/v1` names the *machine*, not the model — so the same check
 applies there, and a pin for a model that server has not got is refused rather
 than silently answered by the wrong weights. `X-Route-Force: 1` sends it anyway

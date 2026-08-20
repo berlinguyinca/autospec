@@ -115,6 +115,11 @@ class Pipe:
         self._sock = sock
         self._hooks = [on_close] if on_close else []
         self._closed = False
+        # Set when the pipe closes. The handler thread that accepted the
+        # WebSocket must stay alive while the pipe is in use, because returning
+        # from it makes the HTTP server close the socket underneath us -- so it
+        # parks on this.
+        self._done = threading.Event()
         # Writes are serialised because the pool may ping an IDLE pipe from the
         # housekeeper thread. It never pings one in flight, so this guards a case
         # that should not arise rather than a race the design depends on.
@@ -144,7 +149,7 @@ class Pipe:
         self._closed = True
         try:
             self._write(_ws.OP_CLOSE, _ws.close_payload(_ws.CLOSE_NORMAL))
-        except OSError:
+        except (OSError, ValueError):
             pass          # the peer is already gone; nothing to tell it
         for hook in self._hooks:
             try:
@@ -154,13 +159,14 @@ class Pipe:
         try:
             self._rfile.close()
             self._wfile.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         if self._sock is not None:
             try:
                 self._sock.close()
             except OSError:
                 pass
+        self._done.set()
 
     # --- liveness ----------------------------------------------------------
     def ping(self, payload: bytes = b"") -> bool:
@@ -168,13 +174,13 @@ class Pipe:
         try:
             self._write(_ws.OP_PING, payload)
             return True
-        except OSError:
+        except (OSError, ValueError):
             return False
 
     def pong(self, payload: bytes = b"") -> None:
         try:
             self._write(_ws.OP_PONG, payload)
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     def add_close_hook(self, fn) -> None:
@@ -185,6 +191,16 @@ class Pipe:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def wait_closed(self, timeout: float | None = None) -> bool:
+        """Block until this pipe is done with.
+
+        Used by the thread that accepted it: an HTTP handler returning is what
+        makes the server close the connection, so the thread has to wait even
+        though it does no work. One parked thread per idle pipe is the price of
+        not writing an event loop, and a two-slot box holds about six.
+        """
+        return self._done.wait(timeout)
 
     def _write(self, op: int, payload: bytes) -> None:
         with self._wlock:

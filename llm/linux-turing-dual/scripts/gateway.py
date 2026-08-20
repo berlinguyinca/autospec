@@ -41,6 +41,7 @@ import argparse
 import http.client
 import json
 import os
+import select
 import secrets
 import sys
 import threading
@@ -54,6 +55,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import keys as _keys            # noqa: E402
 import modelpeek as _peek       # noqa: E402
+import tunnel as _tunnel        # noqa: E402
+import wsframe as _ws           # noqa: E402
 import oidc as _oidc            # noqa: E402
 import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
@@ -69,7 +72,7 @@ FLUSH_SECONDS = 30
 
 # Paths this process owns. Everything else is proxied to the runtime.
 OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
-         "/api/stats", "/api/servers")
+         "/api/stats", "/api/servers", "/api/agent/")
 # NO SEPARATE POLL INTERVAL. The housekeeper's own period drives the probes, and
 # a second constant beside it was display-only and wrong by 2x -- the Servers
 # panel claimed a 60 s probe while the timer ran every 30. One timer, one number.
@@ -138,6 +141,68 @@ LOCAL_STATE: dict = {"state": "unknown", "models": [], "error": None,
 ROUTE_WHY: dict[str, int] = {}
 # Returned by the planner when it has already answered the request.
 ANSWERED = object()
+
+# Pipes offered by attached agents, and who is connected.
+POOL = _tunnel.PipePool()
+# server_id -> {state, last_seen, error, gpus, slots, agent_version}. A tunnelled
+# server's liveness is its CONTROL connection, not a probe: the connection either
+# exists or it does not, which is a stronger signal than a poll and a faster one.
+AGENT_STATE: dict[str, dict] = {}
+# server_id -> the thread holding its control connection, so a second connection
+# for the same id can be refused rather than silently racing the first.
+CONTROL: dict[str, dict] = {}
+# Requests in flight per server, including this node as "local". The load term
+# the scheduler ranks on.
+INFLIGHT: dict[str, int] = {}
+# Measured rates, refreshed on the housekeeper's timer. Never computed on the
+# request path: it is a scan over usage history.
+THROUGHPUT: dict = {}
+
+HEARTBEAT_SECONDS = 20          # ping an agent's control connection this often
+HEARTBEAT_GRACE = 10            # and give up on it this long after the last pong
+PIPE_KEEPALIVE_SECONDS = 240    # ping idle pipes, well inside nginx's read timeout
+PIPE_WAIT_SECONDS = 5           # how long a request waits for a free pipe
+# What an agent is asked to keep open. Two slots plus headroom, so a request
+# never pays for a TLS handshake it could have prepaid.
+DEFAULT_PIPES_WANTED = 4
+
+
+def _ks_enrol_ttl() -> int:
+    """The store owns this number; the endpoint only reports it."""
+    from keystore import ENROL_TTL_SECONDS
+    return int(ENROL_TTL_SECONDS)
+
+
+class _Hijacked:
+    """Stands in for a connection this process has taken over.
+
+    After a WebSocket upgrade the socket is no longer HTTP, but
+    BaseHTTPRequestHandler still flushes and closes wfile when the handler
+    returns -- against a file we have already closed, which raises and prints a
+    traceback from a worker thread. Swapping in this sink is how the framework's
+    epilogue becomes harmless.
+    """
+
+    # BaseHTTPRequestHandler.finish() reads `.closed` before flushing, so a sink
+    # that lacks it merely trades one traceback for another.
+    closed = False
+
+    def write(self, data):          # noqa: D102 - a sink
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class NoCapacity(Exception):
+    """No pipe was free for a tunnelled server within PIPE_WAIT_SECONDS.
+
+    Its own exception because it is not an upstream error: the server is fine and
+    simply busy, and answering 502 would send people looking at the wrong box.
+    """
 # --- background work, never on the request path -----------------------------
 
 def _jwks(force: bool = False) -> dict:
@@ -188,6 +253,77 @@ def _load_registry() -> None:
                 u.problems.append(f"key_file unreadable: {exc.strerror}")
 
 
+def _servers_all() -> list:
+    """File-configured entries and attached ones, as ONE list.
+
+    One list because there is one scheduler and one report. Two lists would mean
+    every routing decision asking which kind it was holding, which is how the two
+    would drift.
+
+    A file entry wins a name collision: it is on disk, an operator put it there,
+    and the attached row can be renamed by whoever owns it.
+    """
+    out = list(UPSTREAMS)
+    if STORE is None:
+        return out
+    seen = {u.id for u in out}
+    try:
+        rows = STORE.servers()
+    except Exception as exc:
+        sys.stderr.write(f"attached servers unavailable: {exc}\n")
+        return out
+    for u in _ups.from_records(rows):
+        if u.id in seen:
+            u.problems.append("this name is also in the registry file, which wins")
+        out.append(u)
+    return out
+
+
+def _probe_tunnel(server_id: str) -> None:
+    """Ask a tunnelled server what it serves, over one of its own pipes.
+
+    The same question asked of a direct server, down a different socket -- so the
+    model list has one source of truth (the server's own /v1/models) regardless of
+    how the node reaches it. Nothing here is llama.cpp-specific: any
+    OpenAI-compatible server answers this.
+    """
+    prev = UP_STATE.get(server_id, {})
+    agent = AGENT_STATE.get(server_id) or {}
+    if agent.get("state") != "online":
+        UP_STATE[server_id] = {"state": agent.get("state", "unknown"),
+                               "models": prev.get("models") or [],
+                               "error": agent.get("error"),
+                               "last_seen": agent.get("last_seen")}
+        return
+    # A short wait on purpose: this runs on a timer, and a server whose pipes are
+    # all busy should not have its model list blocked behind real work.
+    pipe = POOL.take(server_id, timeout=1.0)
+    if pipe is None:
+        UP_STATE[server_id] = {"state": "online", "models": prev.get("models") or [],
+                               "error": None, "last_seen": agent.get("last_seen")}
+        return
+    try:
+        up = http.client.HTTPConnection(server_id, 80, timeout=10)
+        up.sock = pipe
+        up.putrequest("GET", "/v1/models", skip_host=True, skip_accept_encoding=True)
+        up.putheader("Host", server_id)
+        up.endheaders()
+        r = up.getresponse()
+        body = r.read()
+        if r.status != 200:
+            raise RuntimeError(f"HTTP {r.status}")
+        data = json.loads(body).get("data") or []
+        models = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+        UP_STATE[server_id] = {"state": "online", "models": models, "error": None,
+                               "last_seen": time.time()}
+    except Exception as exc:
+        UP_STATE[server_id] = {"state": "online", "models": prev.get("models") or [],
+                               "error": f"model list unavailable: {str(exc)[:80]}",
+                               "last_seen": agent.get("last_seen")}
+    finally:
+        pipe.close()
+
+
 def _poll_upstreams() -> None:
     """Ask each usable server what it serves.
 
@@ -195,7 +331,10 @@ def _poll_upstreams() -> None:
     has never answered is `unknown`, which is a different thing from one that
     answered and then stopped.
     """
-    for u in UPSTREAMS:
+    for u in _servers_all():
+        if u.kind == _ups.KIND_TUNNEL:
+            _probe_tunnel(u.id)
+            continue
         if not u.usable:
             UP_STATE[u.id] = {"state": "disabled", "models": [],
                               "error": "; ".join(u.problems) or "parked",
@@ -274,6 +413,15 @@ def _poll_local() -> None:
                        last_seen=time.time())
 
 
+def _refresh_throughput() -> None:
+    """Recompute measured rates. On a timer because it scans usage history, and
+    the request path must never pay for it."""
+    global THROUGHPUT
+    if STORE is None:
+        return
+    THROUGHPUT = STORE.throughput()
+
+
 def _housekeeper() -> None:
     """Registry sync and usage flush. Both are best-effort: a registry outage
     degrades to stale usage, never to a refused request."""
@@ -291,6 +439,16 @@ def _housekeeper() -> None:
             _poll_local()
         except Exception as exc:
             sys.stderr.write(f"upstream poll: {exc}\n")
+        try:
+            _refresh_throughput()
+        except Exception as exc:
+            sys.stderr.write(f"throughput refresh: {exc}\n")
+        try:
+            # Idle pipes would otherwise be reaped by nginx's read timeout, and
+            # the first request after a quiet hour would die on a reset.
+            POOL.keepalive()
+        except Exception as exc:
+            sys.stderr.write(f"pipe keepalive: {exc}\n")
         try:
             now = time.time()
             with _LOCK:
@@ -328,6 +486,7 @@ class Handler(BaseHTTPRequestHandler):
     _auth_key_id = None
     _auto_choice = None
     _route_why = None
+    _route_est = None
     # The prefix of the body already read, to learn the model. Forwarded ahead
     # of the rest of the stream, so peeking costs a buffer and never a re-read.
     _peeked = b""
@@ -450,6 +609,7 @@ class Handler(BaseHTTPRequestHandler):
         self._peeked = b""
         self._auto_choice = None
         self._route_why = None
+        self._route_est = None
         path = self.path.split("?", 1)[0]
         if path.startswith("/u/"):
             return self._proxy(method, remote=True)
@@ -482,6 +642,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._stats()
         if path == "/api/servers":
             return self._servers()
+        if path == "/api/servers/enrol" and method == "POST":
+            return self._enrol()
+        if path == "/api/agent/enrol" and method == "POST":
+            return self._agent_enrol()
+        if path == "/api/agent/control" and method == "GET":
+            return self._agent_control()
+        if path == "/api/agent/pipe" and method == "GET":
+            return self._agent_pipe()
+        if path.startswith("/api/servers/"):
+            rest = path[len("/api/servers/"):].split("/")
+            if len(rest) == 1 and method == "DELETE":
+                return self._detach(rest[0])
+            if len(rest) == 2 and method == "POST" and rest[1] in ("pool", "priority"):
+                return self._server_setting(rest[0], rest[1])
         if path == "/api/usage":
             return self._usage_api()
         if path == "/api/keys":
@@ -650,6 +824,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    _viewer_sub = None
+    _viewer_admin = False
+
     def _servers(self) -> None:
         """Every registered server and what it serves.
 
@@ -662,14 +839,26 @@ class Handler(BaseHTTPRequestHandler):
         # This node is described from its own PROBE, not asserted. The page used
         # to draw it as permanently online, which is the one server whose state
         # it could not actually have known.
-        out = [{"id": _ups.LOCAL, "base_url": None, "enabled": True,
-                "note": "this machine", "gpus": None, "problems": [],
-                "needs_key": True, "state": LOCAL_STATE.get("state") or "unknown",
-                "models": LOCAL_STATE.get("models") or [],
-                "error": LOCAL_STATE.get("error"),
-                "last_seen": LOCAL_STATE.get("last_seen"),
-                "route": "/u/" + _ups.LOCAL + "/v1"}]
-        for u in UPSTREAMS:
+        def measured(sid):
+            """What this node has actually seen from a server, aggregated over
+            every model it served -- so the panel reports evidence, not specs."""
+            m = THROUGHPUT.get((sid, None)) or {}
+            return {"prefill_rate": m.get("prefill_rate"),
+                    "mean_service": m.get("mean_service"),
+                    "samples": m.get("samples", 0)}
+
+        out = [dict({"id": _ups.LOCAL, "base_url": None, "enabled": True,
+                     "note": "this machine", "gpus": None, "problems": [],
+                     "needs_key": True, "kind": "local", "priority": 0,
+                     "pool_member": True, "owner": None,
+                     "state": LOCAL_STATE.get("state") or "unknown",
+                     "models": LOCAL_STATE.get("models") or [],
+                     "error": LOCAL_STATE.get("error"),
+                     "last_seen": LOCAL_STATE.get("last_seen"),
+                     "in_flight": INFLIGHT.get(_ups.LOCAL, 0), "idle_pipes": None,
+                     "route": "/u/" + _ups.LOCAL + "/v1"},
+                    **measured(_ups.LOCAL))]
+        for u in _servers_all():
             st = UP_STATE.get(u.id) or {"state": "unknown", "models": [],
                                         "error": None, "last_seen": None}
             row = u.public()
@@ -677,7 +866,14 @@ class Handler(BaseHTTPRequestHandler):
                        error=st.get("error"), last_seen=st.get("last_seen"),
                        # The path a client points at, so the page never has to
                        # construct it and get it subtly wrong.
-                       route="/u/" + u.id + "/v1")
+                       route="/u/" + u.id + "/v1",
+                       in_flight=(POOL.in_flight(u.id) if u.kind == _ups.KIND_TUNNEL
+                                  else INFLIGHT.get(u.id, 0)),
+                       # None rather than 0 for a direct server: it has no pipes,
+                       # which is a different statement from having none free.
+                       idle_pipes=(POOL.idle(u.id) if u.kind == _ups.KIND_TUNNEL
+                                   else None),
+                       **measured(u.id))
             out.append(row)
         self._json(200, {
             # The interval that ACTUALLY runs, not a constant beside it: the
@@ -692,7 +888,279 @@ class Handler(BaseHTTPRequestHandler):
             "auto_route": "/u/" + _ups.AUTO + "/v1",
             "balanced_paths": list(_ups.BALANCED_PATHS),
             "peek_bytes": _peek.PEEK_BYTES,
+            "pipe_wait_seconds": PIPE_WAIT_SECONDS,
+            "you": {"sub": (self._viewer_sub or ""),
+                    "is_admin": bool(self._viewer_admin)},
             "routing": dict(ROUTE_WHY)})
+
+    # --- attaching servers -------------------------------------------------
+    def _json_body(self) -> dict:
+        """The request body as a dict, bounded. Never raises: a malformed body is
+        an empty one, and every caller validates what it needs anyway."""
+        raw = b""
+        while True:
+            buf = self._read_body(CHUNK)
+            if not buf:
+                break
+            raw += buf
+            if len(raw) > 64 * 1024:
+                break
+        try:
+            out = json.loads(raw or b"{}")
+            return out if isinstance(out, dict) else {}
+        except Exception:
+            return {}
+
+    def _enrol(self) -> None:
+        """Issue a single-use token for attaching one server.
+
+        Self-service, like minting a key: the audience that may use this node may
+        also add capacity to it. What it does NOT grant is a place in the default
+        route -- that needs promotion, because a server declares its own model ids
+        and inserting a stranger's hardware into everyone's /v1 is a different act.
+        """
+        session = self._require_session()
+        if not session:
+            return
+        if not self._secure():
+            # The token is a credential in transit. Same rule as minting a key.
+            return self._err(400, "attaching a server requires HTTPS",
+                             "insecure_transport")
+        may, _ = self._may(session)
+        if not may:
+            return self._err(403, f"your account is not a member of the group "
+                                  f"required to attach a server "
+                                  f"({CFG.user_group or 'unset'})", "not_authorised")
+        body = self._json_body()
+        kind = (body.get("kind") or _ups.KIND_TUNNEL).strip()
+        server_id = (body.get("server_id") or "").strip()
+        try:
+            token = STORE.enrol_token(
+                session["sub"], server_id, kind=kind,
+                base_url=(body.get("base_url") or "").strip() or None,
+                note=(body.get("note") or "").strip()[:120] or None,
+                gpus=(body.get("gpus") or "").strip()[:120] or None)
+        except ValueError as exc:
+            return self._err(400, str(exc), "invalid_request")
+        host = CFG.public_fqdn or "<this-node>"
+        self._json(201, {
+            "server_id": server_id, "kind": kind, "token": token,
+            "expires_in_seconds": _ks_enrol_ttl(),
+            "shown_once": True,
+            # The exact command, so nobody has to assemble it from prose.
+            "command": (f"qwen-turing-agent enrol --node {host} "
+                        f"--token {token} --target http://127.0.0.1:8080")
+                       if kind == _ups.KIND_TUNNEL else
+                       (f"qwen-turing-agent enrol --node {host} --token {token} "
+                        f"--static")})
+
+    def _agent_enrol(self) -> None:
+        """Trade a one-time token for a durable server credential.
+
+        No session: the agent is a machine that was handed a token by a person.
+        HTTPS is still required -- the credential it receives is long-lived.
+        """
+        if not self._secure():
+            return self._err(400, "enrolment requires HTTPS", "insecure_transport")
+        token = (self._json_body().get("token") or "").strip()
+        out = STORE.redeem_token(token) if STORE else None
+        if out is None:
+            # One answer for unknown, expired, already used and forged. The caller
+            # is unauthenticated and anything more specific is an oracle.
+            return self._err(401, "that enrolment token is not usable",
+                             "invalid_token")
+        server_id, credential = out
+        self._json(201, {"server_id": server_id, "credential": credential,
+                         "heartbeat_seconds": HEARTBEAT_SECONDS,
+                         "pipes_wanted": DEFAULT_PIPES_WANTED})
+
+    def _server_setting(self, server_id: str, setting: str) -> None:
+        """Promotion into the default pool, and the operator tier. Admin only.
+
+        Both are decisions about OTHER people's traffic, which is the same line
+        the admin group already draws for revoking other people's keys.
+        """
+        session = self._require_session()
+        if not session:
+            return
+        _, is_admin = self._may(session)
+        if not is_admin:
+            group = CFG.admin_group or "the admin group"
+            return self._err(403, f"only members of {group} may change this",
+                             "not_authorised")
+        body = self._json_body()
+        try:
+            if setting == "pool":
+                ok = STORE.set_pool_member(server_id, bool(body.get("pool_member")))
+            else:
+                ok = STORE.set_priority(server_id, int(body.get("priority") or 0))
+        except (ValueError, TypeError) as exc:
+            return self._err(400, str(exc), "invalid_request")
+        if not ok:
+            return self._err(404, "no such server")
+        self._json(200, {"server_id": server_id, "updated": setting})
+
+    def _detach(self, server_id: str) -> None:
+        """Revoke a server. Its owner, or an admin."""
+        session = self._require_session()
+        if not session:
+            return
+        _, is_admin = self._may(session)
+        if not STORE.revoke_server(server_id, sub=session["sub"], is_admin=is_admin):
+            return self._err(404, "no such server, or not yours to detach")
+        # Its credential is dead, so its pipes are no longer trustworthy capacity.
+        POOL.drop(server_id)
+        with _LOCK:
+            AGENT_STATE.pop(server_id, None)
+        self._json(200, {"detached": server_id})
+
+    # --- the agent's two connections ---------------------------------------
+    def _accept_ws(self):
+        """Complete a WebSocket upgrade, or answer and return None.
+
+        Returns the authenticated ServerRow. After this the connection is no
+        longer HTTP, so nothing may call send_response on it again.
+        """
+        if not self._secure():
+            # The credential is in a header on this request. Same rule as minting
+            # a key: a credential over cleartext is a credential disclosed.
+            self._err(400, "an agent connection requires HTTPS",
+                      "insecure_transport")
+            return None
+        row = STORE.authenticate_server(self._bearer()) if STORE else None
+        if row is None:
+            # Drained and closed like every other refusal: an upgrade request has
+            # no body, but the invariant is unconditional because the exception is
+            # what gets forgotten.
+            self._err(401, "that server credential is not usable",
+                      "invalid_server_credential")
+            return None
+        resp = _ws.handshake_response(self.headers)
+        if resp is None:
+            self._err(400, "this endpoint speaks WebSocket", "not_an_upgrade")
+            return None
+        self.close_connection = True
+        self.wfile.write(resp)
+        self.wfile.flush()
+        return row
+
+    def _agent_control(self) -> None:
+        """The connection that says a server exists, and keeps saying it.
+
+        Liveness is this connection's existence -- not a probe. A dropped TCP
+        connection is a stronger and faster signal than a poll, and a half-open
+        one is caught by the heartbeat below.
+        """
+        row = self._accept_ws()
+        if row is None:
+            return
+        sid = row.server_id
+        with _LOCK:
+            live = CONTROL.get(sid)
+            if live and time.time() - live["seen"] < HEARTBEAT_SECONDS + HEARTBEAT_GRACE:
+                # Two boxes fighting over one name would flap the fleet. The
+                # loser is told why; a rebooted box gets in once the stale
+                # connection is reaped, which its backoff covers.
+                self.wfile.write(_ws.encode(_ws.OP_CLOSE, _ws.close_payload(
+                    _ws.CLOSE_ALREADY_CONNECTED, "already connected")))
+                self.wfile.flush()
+                return
+            CONTROL[sid] = {"seen": time.time()}
+        AGENT_STATE[sid] = {"state": "online", "last_seen": time.time(),
+                            "error": None, "gpus": row.gpus, "slots": None}
+        reader = _ws.FrameReader(self.rfile)
+        last_pong = time.time()
+        next_ping = time.time() + HEARTBEAT_SECONDS
+        try:
+            while True:
+                now = time.time()
+                if now >= next_ping:
+                    self.wfile.write(_ws.encode(_ws.OP_PING, b"hb"))
+                    self.wfile.flush()
+                    next_ping = now + HEARTBEAT_SECONDS
+                if now - last_pong > HEARTBEAT_SECONDS + HEARTBEAT_GRACE:
+                    # Half-open: the box lost power rather than closing. Without
+                    # this it would look online forever and keep taking traffic.
+                    break
+                # select rather than a socket timeout, so a timeout never lands
+                # in the middle of a frame and desynchronises the reader.
+                ready, _w, _x = select.select([self.connection], [], [], 1.0)
+                if not ready:
+                    continue
+                frame = reader.read()
+                if frame is None or frame.op == _ws.OP_CLOSE:
+                    break
+                if frame.op == _ws.OP_PONG:
+                    last_pong = time.time()
+                elif frame.op == _ws.OP_PING:
+                    self.wfile.write(_ws.encode(_ws.OP_PONG, frame.payload))
+                    self.wfile.flush()
+                elif frame.op == _ws.OP_TEXT:
+                    self._agent_said(sid, frame.payload)
+                with _LOCK:
+                    CONTROL[sid] = {"seen": time.time()}
+        except (OSError, ValueError, _ws.ProtocolError) as exc:
+            # ValueError included deliberately: a closed buffered writer raises it
+            # rather than OSError, and letting it escape would leave a traceback
+            # on a worker thread and an attempt to answer 500 on a connection
+            # that is no longer HTTP.
+            AGENT_STATE.setdefault(sid, {})["error"] = str(exc)[:120]
+        finally:
+            with _LOCK:
+                CONTROL.pop(sid, None)
+            AGENT_STATE[sid] = {"state": "offline", "last_seen": time.time(),
+                                "error": (AGENT_STATE.get(sid) or {}).get("error"),
+                                "gpus": row.gpus, "slots": None}
+            # Its pipes are only as good as the agent behind them.
+            POOL.drop(sid)
+            self.wfile = _Hijacked()
+
+    def _agent_said(self, sid: str, payload: bytes) -> None:
+        """Handle a control message. Only what the server says about ITSELF.
+
+        There is deliberately no message here that tells the agent anything about
+        where to connect: its target comes from its own config file, so a
+        compromised node cannot turn every attached agent into a port scanner
+        inside its owner's network.
+        """
+        try:
+            msg = json.loads(payload)
+        except Exception:
+            return
+        if not isinstance(msg, dict):
+            return
+        state = AGENT_STATE.setdefault(sid, {})
+        if msg.get("type") in ("hello", "capabilities"):
+            state.update(state="online", last_seen=time.time(),
+                         gpus=(str(msg.get("gpus"))[:120] if msg.get("gpus") else
+                               state.get("gpus")),
+                         slots=(int(msg["slots"]) if str(msg.get("slots", "")).isdigit()
+                                else state.get("slots")),
+                         agent_version=str(msg.get("agent_version") or "")[:32])
+            if STORE:
+                try:
+                    STORE.touch_server(sid)
+                except Exception:
+                    pass
+
+    def _agent_pipe(self) -> None:
+        """One idle pipe, offered to the pool.
+
+        The handler thread then parks: returning from it would let the HTTP server
+        close the socket the gateway is about to use.
+        """
+        row = self._accept_ws()
+        if row is None:
+            return
+        pipe = _tunnel.Pipe(self.rfile, self.wfile, sock=self.connection)
+        POOL.offer(row.server_id, pipe)
+        try:
+            pipe.wait_closed()
+        except Exception:
+            pass
+        finally:
+            pipe.close()
+            self.wfile = _Hijacked()
 
     # --- keys --------------------------------------------------------------
     def _viewer(self):
@@ -861,6 +1329,45 @@ class Handler(BaseHTTPRequestHandler):
             self._peeked += buf
         return _peek.peek_model(self._peeked)
 
+    def _load(self, servers) -> dict:
+        """Requests already in flight per server, this node included.
+
+        Counted here rather than asked of each server, because this process is
+        the only thing that knows about every request it has sent -- and a remote
+        that reports its own queue is reporting work from other callers too,
+        which is why a tunnelled server's pipe accounting is used where it exists.
+        """
+        out = {_ups.LOCAL: INFLIGHT.get(_ups.LOCAL, 0)}
+        for u in servers:
+            if u.kind == _ups.KIND_TUNNEL:
+                out[u.id] = POOL.in_flight(u.id)
+            else:
+                out[u.id] = INFLIGHT.get(u.id, 0)
+        return out
+
+    def _ready(self, servers) -> dict:
+        """Can each server start work right now?
+
+        Only a tunnelled server can be genuinely unable to: its capacity is the
+        pipes it has offered. Not an exclusion -- the scheduler ranks it last, so
+        the balanced route goes around a busy box while a pin can still reach it.
+        """
+        out = {_ups.LOCAL: True}
+        for u in servers:
+            out[u.id] = POOL.ready(u.id) if u.kind == _ups.KIND_TUNNEL else True
+        return out
+
+    def _prompt_tokens(self) -> float:
+        """A rough token count for this request, for the prefill estimate.
+
+        From Content-Length, at ~4 bytes per token. Deliberately crude: it is
+        already known, it costs nothing, and the scheduler only needs to tell a
+        500-token request from a 100k one. Counting properly would mean
+        tokenising the body, which is the whole thing this gateway refuses to do.
+        """
+        n = int(self.headers.get("Content-Length") or 0)
+        return n / 4.0 if n else 0.0
+
     def _plan(self, remote: bool):
         """Where this request goes: an Upstream, _ups.LOCAL, or ANSWERED.
 
@@ -880,7 +1387,9 @@ class Handler(BaseHTTPRequestHandler):
             self._route_path = self._strip_prefix(raw)
             return self._balance(self._route_path)
 
-        resolved = _ups.route(raw, UPSTREAMS)
+        # The MERGED list: a pinned name may be file-configured or attached, and
+        # consulting only the file made every attached server unreachable by pin.
+        resolved = _ups.route(raw, _servers_all())
         if resolved is None:
             self._err(503, "that server is not available on this node",
                       "upstream_unavailable")
@@ -956,10 +1465,14 @@ class Handler(BaseHTTPRequestHandler):
             return _ups.LOCAL
 
         model, conclusive = self._peek_body()
-        chosen, why = _ups.pick_auto(
-            UPSTREAMS, UP_STATE, self._last_server(), model=model,
+        servers = _servers_all()
+        chosen, why, est = _ups.pick_auto(
+            servers, UP_STATE, self._last_server(), model=model,
             local_online=self._local_online(),
-            local_models=LOCAL_STATE.get("models"))
+            local_models=LOCAL_STATE.get("models"),
+            stats=THROUGHPUT, load=self._load(servers), ready=self._ready(servers),
+            prompt_tokens=self._prompt_tokens())
+        self._route_est = est
         if why == "blind" and conclusive:
             # Three different problems, three different labels. `unnamed` is the
             # client's choice, `blind` is a peek budget too small, and `unframed`
@@ -971,15 +1484,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if chosen is None:
             self._decided("none", "refused")
+            servers_for = servers
             if model is None:
                 self._err(503, "cannot tell which model this request asks for, "
                                "and this node's runtime is not answering",
                           "no_upstream")
                 return ANSWERED
-            where = _ups.servers_for(UPSTREAMS, UP_STATE, model)
-            if where:
+            where = _ups.servers_for(servers_for, UP_STATE, model)
+            # Three different situations that a single message would blur:
+            #   * a server has it and is answering, but is not in the balanced
+            #     pool -- the caller can reach it directly, so SAY so;
+            #   * a server has it and is not answering -- waiting might help;
+            #   * nobody has it -- waiting will not.
+            by_id = {u.id: u for u in servers_for}
+            unpromoted = [s for s in where
+                          if (UP_STATE.get(s) or {}).get("state") == "online"
+                          and by_id.get(s) is not None
+                          and not by_id[s].pool_member]
+            offline = [s for s in where if s not in unpromoted]
+            if unpromoted:
+                pins = ", ".join(f"/u/{s}/v1" for s in unpromoted)
+                self._err(404, f"{model} is served by {', '.join(unpromoted)}, "
+                               f"which is not in the balanced pool -- reach it "
+                               f"directly at {pins}, or ask an administrator to "
+                               f"add it", "model_not_in_pool")
+            elif offline:
                 self._err(503, f"{model} is served by "
-                               f"{', '.join(where)}, which is not answering",
+                               f"{', '.join(offline)}, which is not answering",
                           "upstream_offline")
             else:
                 # 404, not 503: nothing here serves it, so waiting will not help.
@@ -990,7 +1521,7 @@ class Handler(BaseHTTPRequestHandler):
         self._decided(chosen, why)
         if chosen == _ups.LOCAL:
             return _ups.LOCAL
-        for u in UPSTREAMS:
+        for u in servers:
             if u.id == chosen:
                 return u
         self._err(503, "no server is available right now", "no_upstream")
@@ -1048,8 +1579,21 @@ class Handler(BaseHTTPRequestHandler):
         acc = _usage.StreamAccountant()
         status = 0
         streamed = False
+        where = target.id if target else _ups.LOCAL
+        with _LOCK:
+            INFLIGHT[where] = INFLIGHT.get(where, 0) + 1
         try:
             status, streamed = self._relay(method, acc, target)
+        except NoCapacity as exc:
+            # Not an upstream error: the server is fine and simply busy. Answering
+            # 502 would send people looking at the wrong machine.
+            self._decided(str(exc), "no-capacity")
+            try:
+                self._err(503, f"{exc} has no free capacity right now",
+                          "no_capacity")
+            except Exception:
+                pass
+            status = 503
         except (BrokenPipeError, ConnectionResetError):
             # The client went away mid-stream. The terminal chunk never arrived,
             # so the counts are UNKNOWN -- recorded as truncated, never zero.
@@ -1062,6 +1606,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             status = 502
         finally:
+            with _LOCK:
+                INFLIGHT[where] = max(0, INFLIGHT.get(where, 1) - 1)
             u = acc.result()
             try:
                 STORE.record_usage({
@@ -1082,8 +1628,13 @@ class Handler(BaseHTTPRequestHandler):
     def _relay(self, method: str, acc, target=None) -> tuple[int, bool]:
         query = self.path.split("?", 1)
         suffix = ("?" + query[1]) if len(query) == 2 else ""
-        if target is None:
-            scheme, host, port = "http", CFG.upstream_host, CFG.upstream_port
+        scheme, host, port = "http", CFG.upstream_host, CFG.upstream_port
+        if target is not None and target.kind == _ups.KIND_TUNNEL:
+            # The agent forwards to its own configured target, so the path must
+            # be what that target expects -- which is what _route_path already is.
+            path = (self._route_path or query[0]) + suffix
+            key = UP_KEYS.get(target.id, "")
+        elif target is None:
             # _route_path is set whenever the request arrived under /u/, which
             # includes auto choosing THIS node.
             path = (self._route_path or query[0]) + suffix
@@ -1093,9 +1644,19 @@ class Handler(BaseHTTPRequestHandler):
                 target, self._route_path or self._strip_prefix(query[0]))
             path = base + suffix
             key = UP_KEYS.get(target.id, "")
-        cls = (http.client.HTTPSConnection if scheme == "https"
-               else http.client.HTTPConnection)
-        up = cls(host, port, timeout=900)
+        if target is not None and target.kind == _ups.KIND_TUNNEL:
+            # No address to dial: this server's capacity arrives as pipes it
+            # holds open. Everything below is unchanged -- http.client is
+            # speaking over one of those instead of over a socket it opened.
+            pipe = POOL.take(target.id, PIPE_WAIT_SECONDS)
+            if pipe is None:
+                raise NoCapacity(target.id)
+            up = http.client.HTTPConnection(target.id, 80, timeout=900)
+            up.sock = pipe
+        else:
+            cls = (http.client.HTTPSConnection if scheme == "https"
+                   else http.client.HTTPConnection)
+            up = cls(host, port, timeout=900)
         try:
             self._send_upstream_request(up, method, path, host, port, key)
             r = up.getresponse()
@@ -1156,6 +1717,11 @@ class Handler(BaseHTTPRequestHandler):
         why = getattr(self, "_route_why", None)
         if why:
             self.send_header("X-Routed-Why", why)
+        est = getattr(self, "_route_est", None)
+        if est is not None:
+            # What the scheduler PREDICTED, so its arithmetic can be checked from
+            # outside against what actually happened.
+            self.send_header("X-Routed-Est", f"{est:.1f}")
         length = None
         for k, v in r.getheaders():
             lk = k.lower()
@@ -1185,6 +1751,19 @@ class Handler(BaseHTTPRequestHandler):
         if chunked:
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+
+    def finish(self):
+        """The framework's epilogue, made harmless.
+
+        A hijacked connection is closed by whoever took it over, so flushing and
+        closing it again is expected to fail. Swallowed here rather than in five
+        places, because every one of those failures is a worker thread printing a
+        traceback about a socket that did its job.
+        """
+        try:
+            super().finish()
+        except (OSError, ValueError):
+            pass
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))

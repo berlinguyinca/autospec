@@ -152,7 +152,9 @@ def test_the_plain_path_is_balanced_not_pinned_to_this_node(fleet):
     gw.LAST_SERVER["x"] = "remote"       # not this key; must not leak across keys
     status, to, why, _ = infer(srv, key, MODEL_BOTH)
     assert status == 200
-    assert (to, why) == ("local", "preferred")
+    # Nothing is measured yet, so both candidates estimate the same and the tie
+    # falls to registry order, which puts this node first.
+    assert (to, why) == ("local", "fastest")
     assert len(runtime.seen) == 1 and not remote.seen
 
 
@@ -160,7 +162,7 @@ def test_a_model_only_another_server_has_goes_there(fleet):
     srv, runtime, remote, key = fleet
     status, to, why, body = infer(srv, key, MODEL_REMOTE)
     assert status == 200
-    assert (to, why) == ("remote", "model-only")
+    assert (to, why) == ("remote", "only-server")
     assert not runtime.seen and len(remote.seen) == 1
     # Proof it was really served there, not just labelled.
     assert json.loads(body)["model"] == "remote-box"
@@ -172,7 +174,7 @@ def test_the_prefix_cache_affinity_holds_across_requests(fleet):
     srv, runtime, remote, key = fleet
     infer(srv, key, MODEL_REMOTE)                     # lands on the remote
     status, to, why, _ = infer(srv, key, MODEL_BOTH)  # both could serve this
-    assert (status, to, why) == (200, "remote", "last-used")
+    assert (status, to, why) == (200, "remote", "warm")
     assert len(remote.seen) == 2 and not runtime.seen
 
 
@@ -183,7 +185,7 @@ def test_eligibility_outranks_affinity(fleet):
     srv, runtime, remote, key = fleet
     infer(srv, key, MODEL_REMOTE)
     status, to, why, _ = infer(srv, key, MODEL_LOCAL)
-    assert (status, to, why) == (200, "local", "preferred")
+    assert (status, to, why) == (200, "local", "only-server")
     assert len(runtime.seen) == 1
 
 
@@ -192,7 +194,7 @@ def test_a_remote_that_stops_answering_drops_out_of_the_default_route(fleet):
     infer(srv, key, MODEL_REMOTE)
     gw.UP_STATE["remote"]["state"] = "offline"
     status, to, why, _ = infer(srv, key, MODEL_BOTH)
-    assert (status, to, why) == (200, "local", "preferred")
+    assert (status, to, why) == (200, "local", "only-server")
 
 
 def test_this_node_dropping_out_moves_the_default_route_to_the_remote(fleet):
@@ -201,7 +203,7 @@ def test_this_node_dropping_out_moves_the_default_route_to_the_remote(fleet):
     srv, runtime, remote, key = fleet
     gw.LOCAL_STATE.update(state="offline", error="Connection refused")
     status, to, why, _ = infer(srv, key, MODEL_BOTH)
-    assert (status, to, why) == (200, "remote", "model-only")
+    assert (status, to, why) == (200, "remote", "only-server")
     assert len(remote.seen) == 1
 
 
@@ -241,7 +243,7 @@ def test_polling_an_unbalanced_endpoint_does_not_reset_affinity(fleet):
     c.getresponse().read()
     c.close()
     status, to, why, _ = infer(srv, key, MODEL_BOTH)
-    assert (to, why) == ("remote", "last-used")
+    assert (to, why) == ("remote", "warm")
 
 
 # --- pinning ----------------------------------------------------------------
@@ -319,7 +321,7 @@ def test_the_virtual_server_is_also_addressable_by_name(fleet):
     srv, runtime, remote, key = fleet
     status, to, why, _ = infer(srv, key, MODEL_REMOTE,
                                path="/u/auto/v1/chat/completions")
-    assert (status, to, why) == (200, "remote", "model-only")
+    assert (status, to, why) == (200, "remote", "only-server")
     assert remote.seen[0]["path"] == "/v1/chat/completions"
 
 
@@ -336,7 +338,7 @@ def test_affinity_survives_a_restart_without_being_faked_by_a_health_poll(fleet)
     _rows_within(2.0, 2)
     gw.LAST_SERVER.clear()                              # as a restart would
     status, to, why, _ = infer(srv, key, MODEL_BOTH)
-    assert (status, to, why) == (200, "remote", "last-used")
+    assert (status, to, why) == (200, "remote", "warm")
 
 
 def test_a_body_with_no_content_length_is_labelled_apart(fleet):
@@ -506,7 +508,7 @@ def test_the_servers_payload_reports_how_routing_actually_went(fleet):
     c.request("GET", "/api/servers", None, {"Authorization": "Bearer " + key})
     d = json.loads(c.getresponse().read())
     c.close()
-    assert d["routing"]["model-only"] == 1
+    assert d["routing"]["only-server"] == 1
     assert d["routing"]["refused"] == 1
     assert d["peek_bytes"] == gw._peek.PEEK_BYTES
 

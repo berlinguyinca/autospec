@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import scheduler as _sched
+
 try:
     import yaml
 except ImportError:  # pragma: no cover
@@ -40,6 +42,15 @@ BALANCED_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/embeddings",
                   "/v1/rerank", "/v1/reranking")
 
 
+# How the node reaches a server. The distinction is not cosmetic: a tunnelled
+# server has NO address, because it dialled in, and asking for one would mean
+# dialling a box that expects to dial out.
+KIND_FILE = "file"          # from the registry file; configuration, not owned
+KIND_STATIC = "static"      # attached through the dashboard, dialled by the node
+KIND_TUNNEL = "tunnel"      # attached through the dashboard, holds pipes open
+DIRECT_KINDS = (KIND_FILE, KIND_STATIC)
+
+
 @dataclass
 class Upstream:
     id: str
@@ -49,18 +60,36 @@ class Upstream:
     note: str | None = None
     gpus: str | None = None
     problems: list[str] = field(default_factory=list)
+    kind: str = KIND_FILE
+    # The operator's tier. Absolute in the scheduler, so it is bounded where it
+    # is set rather than here.
+    priority: int = 0
+    # File entries default to IN the pool, which preserves the behaviour they
+    # already had; anything attached from the dashboard starts out of it, because
+    # a server declares its own model ids and inserting a stranger's hardware
+    # into everyone's default route is a different act from attaching it.
+    pool_member: bool = True
+    owner: str | None = None
 
     @property
     def usable(self) -> bool:
         return self.enabled and not self.problems
 
+    @property
+    def direct(self) -> bool:
+        """Does this node dial it? False for a tunnelled server, whose capacity
+        arrives as pipes instead."""
+        return self.kind in DIRECT_KINDS
+
     def public(self) -> dict:
         """What the dashboard may show. Excludes key_file: a path is not a
         secret, but it is also of no use on a page and every field that stays
         server-side is a field that cannot leak."""
-        return {"id": self.id, "base_url": self.base_url, "enabled": self.enabled,
-                "note": self.note, "gpus": self.gpus, "problems": self.problems,
-                "needs_key": bool(self.key_file)}
+        return {"id": self.id, "base_url": self.base_url if self.direct else None,
+                "enabled": self.enabled, "note": self.note, "gpus": self.gpus,
+                "problems": self.problems, "needs_key": bool(self.key_file),
+                "kind": self.kind, "priority": self.priority,
+                "pool_member": self.pool_member, "owner": self.owner}
 
 
 def balanceable(path: str) -> bool:
@@ -134,6 +163,28 @@ def load(text: str) -> list[Upstream]:
     return out
 
 
+def from_records(rows: list[dict]) -> list[Upstream]:
+    """Attached servers (from the store) as routable entries.
+
+    The same type as a file entry deliberately: one list, one scheduler, one
+    report. A second type would mean every routing decision asking which kind it
+    was holding.
+    """
+    out = []
+    for r in rows:
+        kind = r.get("kind") or KIND_STATIC
+        base = r.get("base_url") or ""
+        problems = []
+        if kind in DIRECT_KINDS and not base.startswith(("http://", "https://")):
+            problems.append("no usable base_url")
+        out.append(Upstream(
+            id=r.get("server_id") or "", base_url=base, key_file=None,
+            enabled=True, note=r.get("note"), gpus=r.get("gpus"),
+            problems=problems, kind=kind, priority=int(r.get("priority") or 0),
+            pool_member=bool(r.get("pool_member")), owner=r.get("sub")))
+    return out
+
+
 def route(path: str, ups: list[Upstream]) -> tuple[Upstream | None, str] | None:
     """Split a request path into (upstream, remaining path).
 
@@ -192,7 +243,8 @@ def servers_for(ups: list[Upstream], state: dict, model: str) -> list[str]:
 
 def eligible(ups: list[Upstream], state: dict, model: str | None, *,
              local_online: bool = True,
-             local_models: list[str] | None = None) -> list[str]:
+             local_models: list[str] | None = None,
+             pool_only: bool = True) -> list[str]:
     """Which servers may serve this request, in preference order.
 
     THIS IS A HARD FILTER, applied before any preference. It exists because
@@ -218,44 +270,62 @@ def eligible(ups: list[Upstream], state: dict, model: str | None, *,
     if model is None:
         return out
     for u in ups:
+        if not u.usable:
+            continue
+        # `pool_only` is what keeps an attached server out of the DEFAULT route
+        # until an admin promotes it. A pin bypasses this by asking for the server
+        # by name, which is a different question from "where should this go".
+        if pool_only and not u.pool_member:
+            continue
         st = state.get(u.id) or {}
-        if u.usable and st.get("state") == "online" and model in (st.get("models") or []):
+        if st.get("state") == "online" and model in (st.get("models") or []):
             out.append(u.id)
     return out
 
 
 def pick_auto(ups: list[Upstream], state: dict, last_used: str | None, *,
               model: str | None = None, local_online: bool = True,
-              local_models: list[str] | None = None) -> tuple[str | None, str]:
-    """(server, why) for a balanced request, or (None, why) if none can serve it.
+              local_models: list[str] | None = None,
+              stats: dict | None = None, load: dict | None = None,
+              ready: dict | None = None, prompt_tokens: float = 0.0,
+              pool_only: bool = True) -> tuple[str | None, str, float | None]:
+    """(server, why, estimated seconds) for a balanced request.
 
-    Eligibility comes first and is absolute; the order below only decides among
-    servers that can actually serve the model:
+    Two steps, and the order is the whole safety property:
 
-    1. **The server this caller used last.** Not for tidiness -- for the PREFIX
-       CACHE. A warm slot was measured on this project at roughly a tenfold
-       saving on prompt processing, so sending someone back to the machine that
-       already holds their conversation is the largest performance lever here.
-    2. **This node**, when nothing is remembered. Its state is known first-hand
-       rather than inferred from a poll, and it costs no extra network hop.
-    3. **Any eligible remote**, in registry order, so a node that is merely busy
-       still gets used rather than the request failing.
+    1. **Eligibility**, here. Absolute. A server that does not advertise the
+       model is not a slower choice, it is a WRONG one -- llama.cpp answers with
+       whatever it has loaded rather than refusing, measured on this fleet.
+    2. **Ranking**, delegated to scheduler.choose, which knows nothing about
+       models and everything about how fast these servers have actually been.
 
-    `why` is returned rather than logged because a balancer nobody can question
-    is a balancer nobody can debug: it rides out on X-Routed-Why and is counted
-    for the Servers panel, so "auto quietly became local-always" is visible
-    instead of a mystery.
+    `stats` is keyed (server, model) with a (server, None) fallback, as
+    KeyStore.throughput returns it. `load` and `ready` are keyed by server.
     """
     elig = eligible(ups, state, model, local_online=local_online,
-                    local_models=local_models)
+                    local_models=local_models, pool_only=pool_only)
     if not elig:
-        return None, "none-eligible"
+        return None, "none-eligible", None
     if model is None:
-        # Local by construction -- eligible() admits nothing else when the model
-        # is unreadable -- but say WHY, so a rising blind count is noticeable.
-        return elig[0], "blind"
-    if last_used and last_used in elig:
-        return last_used, "last-used"
-    if LOCAL in elig:
-        return LOCAL, "preferred"
-    return elig[0], "model-only"
+        # The model could not be read, so only this node is eligible (a remote
+        # might substitute silently). Said as its own reason rather than dressed
+        # up as a ranking decision.
+        return elig[0], "blind", None
+
+    by_id = {u.id: u for u in ups}
+    stats = stats or {}
+    load = load or {}
+    ready = ready or {}
+    candidates = []
+    for sid in elig:
+        u = by_id.get(sid)
+        s = stats.get((sid, model)) or stats.get((sid, None)) or {}
+        candidates.append(_sched.Candidate(
+            server_id=sid,
+            priority=(u.priority if u else 0),
+            queued_ahead=float(load.get(sid, 0) or 0),
+            prefill_rate=s.get("prefill_rate"),
+            mean_service=s.get("mean_service"),
+            warm=(last_used == sid),
+            ready=bool(ready.get(sid, True))))
+    return _sched.choose(candidates, prompt_tokens)

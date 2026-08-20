@@ -107,21 +107,34 @@ def _tier(candidates: list[Candidate]) -> list[Candidate]:
     return [c for c in candidates if c.priority == top]
 
 
-def _winner(scored: list[tuple]) -> tuple:
-    """The lowest estimate, with ties broken by INPUT order.
+def _band(scored: list[tuple]) -> list[tuple]:
+    """The candidates whose estimates are, for practical purposes, equal.
 
-    The tie band is the point. Two servers whose estimates differ by less than
-    TIE_SECONDS are giving the same answer, and picking between them on that
-    difference would flap traffic back and forth on rounding noise -- throwing
-    away a warm prefix cache each time, which is the one thing this scheduler is
-    most careful to preserve. `scored` must therefore arrive in registry order,
-    not sorted.
+    Two servers within TIE_SECONDS are giving the same answer, and choosing
+    between them on that difference would flap traffic back and forth on
+    measurement noise. `scored` must arrive in registry order and this preserves
+    it, so the fallback is at least predictable.
     """
     best = min(e for _, e in scored)
-    for pair in scored:
-        if pair[1] <= best + TIE_SECONDS:
-            return pair
-    return scored[0]                    # unreachable: min() is always in band
+    return [pair for pair in scored if pair[1] <= best + TIE_SECONDS]
+
+
+def _winner(scored: list[tuple], *, warm_tiebreak: bool = True) -> tuple:
+    """The best candidate: lowest estimate, ties broken by warmth then order.
+
+    Warmth breaks the tie because cache locality is worth more than this one
+    request shows. A 500-token prompt saves only a fraction of a second on a warm
+    slot -- inside the band -- but moving that conversation elsewhere ALSO
+    discards the cache the next turn would have used, and the next turn may be
+    100k tokens. Ranking a tie by registry order would quietly scatter every
+    short exchange across the fleet.
+    """
+    band = _band(scored)
+    if warm_tiebreak:
+        for pair in band:
+            if pair[0].warm:
+                return pair
+    return band[0]
 
 
 def rank(candidates: list[Candidate], prompt_tokens: float) -> list[tuple]:
@@ -165,13 +178,13 @@ def choose(candidates: list[Candidate], prompt_tokens: float = 0.0) -> tuple:
     if _winner(full)[0].server_id != winner.server_id:
         return winner.server_id, "priority", best
 
-    # Would it still have won without its warm cache? If not, the cache is the
-    # reason, and reporting `fastest` would misattribute it to a server that is
-    # not.
-    others = [e for c, e in scored if c.server_id != winner.server_id]
-    if winner.warm and others:
-        cold = estimate(winner, prompt_tokens, ignore_warm=True)
-        if cold > min(others) + TIE_SECONDS:
+    # Would it have been chosen if it were not warm? Asked as a counterfactual
+    # rather than by comparing terms, because warmth now decides in two different
+    # ways -- by lowering the estimate, and by breaking a tie -- and a rule that
+    # only understood one of them would report the wrong reason for the other.
+    if winner.warm:
+        cold = [(c, estimate(c, prompt_tokens, ignore_warm=True)) for c, _ in scored]
+        if _winner(cold, warm_tiebreak=False)[0].server_id != winner.server_id:
             return winner.server_id, "warm", best
 
     return winner.server_id, "fastest", best

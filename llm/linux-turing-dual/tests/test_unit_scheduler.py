@@ -163,6 +163,17 @@ def test_an_estimate_is_returned_so_the_decision_can_be_checked_from_outside():
     assert est == pytest.approx(10.0 + 10.0)
 
 
+def test_a_warm_server_wins_a_tie_even_when_the_saving_is_small():
+    """A 500-token prompt saves a fraction of a second on a warm slot, which is
+    inside the tie band -- but moving the conversation also discards the cache the
+    NEXT turn would have used, and that turn may be 100k tokens. Ranking this by
+    registry order would scatter every short exchange across the fleet."""
+    cold_first = [C("cold", prefill_rate=500.0, mean_service=10.0),
+                  C("warm", prefill_rate=500.0, mean_service=10.0, warm=True)]
+    sid, why, _ = sch.choose(cold_first, 500)
+    assert (sid, why) == ("warm", "warm")
+
+
 def test_ties_keep_registry_order_rather_than_flapping():
     """Two equivalent servers must not swap on rounding noise: each swap throws
     away a warm cache."""
