@@ -262,8 +262,8 @@ def test_an_unknown_endpoint_under_api_is_404_not_proxied(node):
 
 def test_a_key_that_can_infer_can_also_read_stats(node, monkeypatch):
     """The proxy and the stats endpoint must answer the SAME question about a
-    credential. They diverged once: the proxy honoured the legacy shared key and
-    stats did not, so one credential could run inference but not read the page."""
+    credential. They diverged once, when a migration hatch was added to the proxy
+    and not to stats, so one credential could run inference but not the page."""
     srv, store = node
     import time
     sid = _session("sub-alice", ["llm-users"])
@@ -279,19 +279,3 @@ def test_a_key_that_can_infer_can_also_read_stats(node, monkeypatch):
     # 502 is fine here -- there is no dashboard behind this test gateway. What
     # matters is that it got PAST authentication rather than answering 401.
     assert r.status != 401
-
-
-def test_the_legacy_shared_key_is_honoured_by_the_shared_helper(node):
-    """The migration hatch has to live in the shared helper, or it applies to one
-    path and not the other."""
-    srv, _ = node
-    gw.LEGACY_KEY = "legacy-secret-value"
-    gw.LEGACY_SUB = "legacy"
-    try:
-        # The helper reads only module state and its argument, so it needs no
-        # request object.
-        row = gw.Handler._authenticate_key(None, "legacy-secret-value")
-        assert row is not None and row.key_id == gw.LEGACY_KEY_ID
-        assert gw.Handler._authenticate_key(None, "not-the-legacy-key") is None
-    finally:
-        gw.LEGACY_KEY = ""

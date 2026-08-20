@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import keys as _keys            # noqa: E402
 import oidc as _oidc            # noqa: E402
 import usage as _usage          # noqa: E402
-from keystore import KeyRow, KeyStore   # noqa: E402
+from keystore import KeyStore   # noqa: E402
 
 CHUNK = 65536
 SESSION_COOKIE = "qt_session"
@@ -100,23 +100,6 @@ CFG = Config()
 STORE: KeyStore | None = None
 INTERNAL_KEY = ""
 DASHBOARD_KEY = ""
-
-# MIGRATION HATCH, meant to be removed.
-#
-# The node ran on one shared key before this gateway existed. That key is not in
-# qtk_ format, so it cannot be stored as an ordinary key -- and clients
-# configured against it must not break on the day the gateway lands. So it is
-# accepted here, attributed to a single reserved key id, and its traffic is
-# recorded like everyone else's.
-#
-# That accounting is the point: the usage panel shows exactly how much still
-# arrives on the shared key, which is the signal for when retiring it is safe.
-# Delete this, the two flags, and LEGACY_KEY_ID once that number is zero.
-LEGACY_KEY = ""
-LEGACY_SUB = ""
-LEGACY_KEY_ID = "legacy-shared"
-
-
 # --- background work, never on the request path -----------------------------
 
 def _jwks(force: bool = False) -> dict:
@@ -438,17 +421,12 @@ class Handler(BaseHTTPRequestHandler):
     def _authenticate_key(self, presented: str):
         """Resolve a presented credential to a key row, or None.
 
-        ONE place, used by both the proxy and the stats endpoint. They had
-        diverged: the proxy honoured the legacy shared key and the stats endpoint
-        did not, so the same credential could run inference but not read the
-        dashboard. Two copies of an auth check is two answers to one question.
+        ONE place, used by both the proxy and the stats endpoint. They diverged
+        once, when a migration hatch was added to the proxy and not to stats, so
+        the same credential could run inference but not read the dashboard. Two
+        copies of an auth check is two answers to one question.
         """
-        row = STORE.authenticate(presented, time.time()) if STORE else None
-        if row is None and LEGACY_KEY and presented:
-            import hmac
-            if hmac.compare_digest(presented, LEGACY_KEY):
-                row = KeyRow(key_id=LEGACY_KEY_ID, sub=LEGACY_SUB or "legacy")
-        return row
+        return STORE.authenticate(presented, time.time()) if STORE else None
 
     def _bearer(self) -> str:
         presented = self.headers.get("Authorization", "")
@@ -706,7 +684,7 @@ def _load_credentials(args) -> str | None:
     All three are read FIRST LINE ONLY: a key file may legitimately hold several
     keys, and read().strip() would join them into a value matching nothing.
     """
-    global INTERNAL_KEY, DASHBOARD_KEY, LEGACY_KEY, LEGACY_SUB
+    global INTERNAL_KEY, DASHBOARD_KEY
     try:
         INTERNAL_KEY = (open(args.internal_key_file).readline() or "").strip()
     except OSError as exc:
@@ -720,12 +698,6 @@ def _load_credentials(args) -> str | None:
         except OSError as exc:
             return f"cannot read the dashboard key: {exc}"
 
-    if args.legacy_key_file:
-        try:
-            LEGACY_KEY = (open(args.legacy_key_file).readline() or "").strip()
-        except OSError as exc:
-            return f"cannot read the legacy key: {exc}"
-        LEGACY_SUB = os.environ.get("QT_LEGACY_SUB", "legacy")
     return None
 
 
@@ -753,9 +725,6 @@ def main() -> int:
                     help="the dashboard's own key, so the gateway can front its "
                          "stats behind one auth authority")
     ap.add_argument("--db-password-file")
-    ap.add_argument("--legacy-key-file",
-                    help="the pre-gateway shared key; accepted and ACCOUNTED so "
-                         "its remaining traffic is visible. Temporary.")
     args = ap.parse_args()
 
     problem = _load_credentials(args)
@@ -780,7 +749,6 @@ def main() -> int:
     print(f"gateway on http://{args.host}:{args.port} -> "
           f"{CFG.upstream_host}:{CFG.upstream_port} "
           f"(registry {'configured' if dsn else 'absent'}"
-          f"{', legacy key accepted' if LEGACY_KEY else ''}"
           f"{', stats fronted' if DASHBOARD_KEY else ''})", flush=True)
     try:
         srv.serve_forever()

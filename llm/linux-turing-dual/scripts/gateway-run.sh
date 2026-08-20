@@ -25,14 +25,6 @@ else
   echo "no registry credential -- running mirror-only (keys still work)" >&2
 fi
 
-# The pre-gateway shared key, while it still has users. Its traffic shows up in
-# the usage panel under a reserved key id, which is how you know when it is safe
-# to drop this credential from the unit.
-LEGACY="${CREDENTIALS_DIRECTORY:-}/legacykey"
-if [ -r "$LEGACY" ]; then
-  DBARG+=(--legacy-key-file "$LEGACY")
-fi
-
 # The dashboard's own key, so the gateway can serve its stats behind one auth
 # authority -- a person signs in, a script carries a key, and neither has to
 # paste a shared secret into a browser.

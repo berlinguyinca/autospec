@@ -129,12 +129,36 @@ unknown. Their token counts genuinely are not available — the terminal respons
 chunk never arrived — and they are never estimated from byte counts nor reported
 as zero.
 
-### The shared key is on its way out
+### If you cannot sign in
 
-The node ran on one shared key before per-user keys existed. That key still
-works, so nothing broke on the day this landed, and its traffic is recorded
-under a reserved key id. **Watch that row: when it reaches zero, the shared key
-has no users left and the `legacykey` credential can be removed from the unit.**
+There is no shared key any more: the only credential this node accepts is a
+per-user key, and the only self-service way to get one is signing in. That is the
+point — but it means a provider outage would otherwise leave you with no way in.
+
+The break-glass runs on the node, as root, and goes through the same store the
+API does — so it is not a backdoor, just the same operation without a browser:
+
+```bash
+head -1 /etc/qwen-turing/llmgw_app.pw \
+  | sudo -u qwen-turing --preserve-env=QT_DB_HOST,QT_DB_PORT,QT_DB_NAME,QT_DB_USER \
+      python3 - "<your-subject-id>" "label" <<'EOF'
+import os, sys
+sys.path.insert(0, "/opt/qwen-turing/bin")
+from keystore import KeyStore
+pw = sys.stdin.readline().strip()
+dsn = (f"host={os.environ['QT_DB_HOST']} port={os.environ['QT_DB_PORT']} "
+       f"dbname={os.environ['QT_DB_NAME']} user={os.environ['QT_DB_USER']} "
+       f"password={pw} connect_timeout=3")
+s = KeyStore("/var/lib/qwen-turing/keys.sqlite3", dsn=dsn)
+s.migrate_local(); s.upsert_user(sys.argv[1], None, None)
+print(s.mint(sys.argv[1], label=sys.argv[2])[0])
+EOF
+```
+
+Two details that matter. The registry password is passed on **stdin**, never in
+argv or the environment, because both are readable by other processes. And the
+store is written as the **service user**, so the mirror does not end up owned by
+root and unwritable by the gateway that has to use it.
 
 ## Measured
 

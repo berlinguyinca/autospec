@@ -23,10 +23,6 @@ LoadCredential=dbpassword:/etc/qwen-turing/llmgw_app.pw
 # enough to read the page -- previously the only way in was pasting a shared
 # secret, which is the thing per-user sign-in exists to replace.
 LoadCredential=dashkey:/etc/qwen-turing/dashboard.key
-# Temporary: the pre-gateway shared key, in its OWN file so retiring the hatch
-# is one `rm` plus this line. Deliberately NOT llama.cpp's key file, which holds
-# several keys -- one per line -- and would be read as a single joined value.
-LoadCredential=legacykey:/etc/qwen-turing/legacy.key
 
 ExecStart=/opt/qwen-turing/bin/gateway-run.sh
 
