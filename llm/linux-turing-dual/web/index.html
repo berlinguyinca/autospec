@@ -553,7 +553,14 @@ function ago(ts){
   return Math.round(s/3600) + 'h ago';
 }
 
-function serverCard(o){
+const KIND_BADGE = {
+  local:  '<span class="badge">this node</span>',
+  tunnel: '<span class="badge v">tunnelled</span>',
+  static: '<span class="badge">dialled</span>',
+  file:   '<span class="badge">configured</span>',
+};
+
+function serverCard(o, me){
   const badge = {
     online:   '<span class="badge on">online</span>',
     offline:  '<span class="badge u">not answering</span>',
@@ -566,39 +573,93 @@ function serverCard(o){
       o.models.map(m => '<code>' + esc(m) + '</code>').join(' ') + '</div>'
     : '<div class="sub" style="margin-top:8px">no models reported</div>';
 
+  // MEASURED, not declared. A box that claims a 4090 and delivers 40 tok/s is
+  // shown -- and ranked -- by the 40.
+  const rate = o.prefill_rate
+    ? '<div class="sub" style="margin-top:8px">measured ' +
+      Math.round(o.prefill_rate).toLocaleString() + ' tok/s prefill' +
+      (o.mean_service ? ' · ' + o.mean_service.toFixed(1) + 's mean request' : '') +
+      ' <span class="sub">(' + n(o.samples) + ' samples)</span></div>'
+    : '<div class="sub" style="margin-top:8px">not measured yet — it will be ' +
+      'tried, which is how it gets a number</div>';
+
+  const load = [];
+  if(o.in_flight) load.push(n(o.in_flight) + ' in flight');
+  if(o.idle_pipes != null) load.push(n(o.idle_pipes) + ' idle pipes');
+  if(o.kind === 'tunnel' && o.idle_pipes === 0)
+    load.push('<span style="color:var(--warn)">saturated — balanced requests ' +
+              'route around it</span>');
+
+  const pool = o.kind === 'local' ? '' :
+    (o.pool_member
+      ? '<div class="sub">in the balanced pool</div>'
+      : '<div class="sub" style="color:var(--warn)">not in the balanced pool — ' +
+        'reachable only at <code>' + esc(o.route) + '</code></div>');
+
+  const tier = o.priority ? '<div class="sub">tier ' + (o.priority > 0 ? '+' : '') +
+    o.priority + (o.priority > 0 ? ' — preferred over lower tiers'
+                                 : ' — used only when nothing higher can') +
+    '</div>' : '';
+
+  const mine = me && o.owner && me.sub === o.owner;
+  const actions = [];
+  if(o.kind === 'tunnel' || o.kind === 'static'){
+    if(me && me.is_admin){
+      actions.push('<button class="tab" data-pool="' + esc(o.id) + '" data-on="' +
+                   (o.pool_member ? '0' : '1') + '">' +
+                   (o.pool_member ? 'Remove from pool' : 'Add to pool') + '</button>');
+      actions.push('<button class="tab" data-tier="' + esc(o.id) + '">Tier…</button>');
+    }
+    if(mine || (me && me.is_admin))
+      actions.push('<button class="tab" data-detach="' + esc(o.id) + '">Detach</button>');
+  }
+
   return '<div class="card">' +
     '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">' +
-      '<span style="font-weight:640">' + esc(o.name || o.id) + '</span>' + badge + '</div>' +
+      '<span style="font-weight:640">' + esc(o.name || o.id) + '</span>' +
+      '<span>' + (KIND_BADGE[o.kind] || '') + ' ' + badge + '</span></div>' +
     (o.note ? '<div class="sub">' + esc(o.note) + '</div>' : '') +
     (o.gpus ? '<div class="sub">' + esc(o.gpus) + '</div>' : '') +
+    (o.owner ? '<div class="sub">attached by ' +
+               esc(o.owner_name || o.owner) + '</div>' : '') +
     '<div class="sub" style="margin-top:8px">Base URL <code>' + esc(o.route) + '</code></div>' +
+    pool + tier +
+    (load.length ? '<div class="sub">' + load.join(' · ') + '</div>' : '') +
     (o.state === 'offline'
       ? '<div class="sub" style="color:var(--warn)">last seen ' + ago(o.last_seen) +
         (o.error ? ' · ' + esc(o.error) : '') + '</div>' : '') +
     (o.problems && o.problems.length
       ? '<div class="sub" style="color:var(--warn)">' + esc(o.problems.join('; ')) + '</div>'
       : '') +
-    (o.needs_key === false && o.id !== 'local' && o.state === 'online'
+    // A tunnelled server is not shown this: nothing can reach it, so there is
+    // nothing to restrict.
+    (o.needs_key === false && o.kind !== 'local' && o.kind !== 'tunnel' &&
+     o.state === 'online'
       ? '<div class="sub" style="color:var(--warn)">reachable without a key — ' +
         'restrict its port to this node</div>' : '') +
-    (o.id === 'local'
+    (o.kind === 'local'
       ? '<div class="sub">Balanced requests land here by default; ' +
         '<code>/u/local/v1</code> insists on it.</div>' : '') +
-    models + '</div>';
+    rate + models +
+    (actions.length ? '<div class="row" style="margin-top:9px">' +
+                      actions.join('') + '</div>' : '') +
+    '</div>';
 }
 
 // How the balancer's own decisions came out, so "it quietly stopped balancing"
 // is a visible number rather than a mystery.
 const WHY_LABEL = {
-  'last-used': 'sent back to a warm cache',
-  'preferred': 'served here',
-  'model-only': 'the only machine with the model',
+  'warm': 'sent back to a warm cache',
+  'fastest': 'fastest by measurement',
+  'priority': 'an operator tier decided it',
+  'only-server': 'the only one that could serve it',
   'pinned': 'you named the server',
+  'forced': 'you insisted, unchecked',
   'not-balanced': 'about this machine, so kept here',
   'unnamed': 'no model named, kept here',
-  'blind': 'model unreadable, kept here',
   'unframed': 'body not framed with a length, kept here',
-  'forced': 'you insisted, unchecked',
+  'blind': 'model unreadable, kept here',
+  'no-capacity': 'refused: nothing free on that server',
   'refused': 'refused rather than answered by the wrong model',
 };
 function routingTally(r){
@@ -616,17 +677,91 @@ function defaultCard(d){
     '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
       '<span style="font-weight:640">the default</span>' +
       '<span class="badge v">balancer</span></div>' +
-    '<div class="sub">Picks a machine that has the model you asked for.</div>' +
+    '<div class="sub">Picks whichever machine will answer soonest.</div>' +
     '<div class="sub" style="margin-top:8px">Base URL <code>' +
       esc(d.default_route || '/v1') + '</code>' +
       (d.auto_route ? ' <span class="sub">or <code>' + esc(d.auto_route) +
         '</code></span>' : '') + '</div>' +
-    '<div class="note">Prefers <strong>the server you used last</strong>, because a ' +
-    'warm prefix cache is worth roughly tenfold on prompt processing — being sent ' +
-    'elsewhere silently throws that away. But <strong>only among machines that ' +
-    'actually serve the model you named</strong>: a server without it does not ' +
-    'refuse, it answers with whatever it has loaded, and a wrong answer is worse ' +
-    'than a slow one. The reply carries <code>X-Routed-To</code>.</div></div>';
+    '<div class="note">Only among machines that <strong>actually serve the model ' +
+    'you named</strong> — a server without it does not refuse, it answers with ' +
+    'whatever it has loaded, and a wrong answer is worse than a slow one. Among ' +
+    'those, the choice is by <strong>measured</strong> speed and current load, ' +
+    'with the machine holding your conversation preferred by about the tenfold a ' +
+    'warm cache was measured to be worth. Every reply carries ' +
+    '<code>X-Routed-To</code>, <code>X-Routed-Why</code> and ' +
+    '<code>X-Routed-Est</code>.</div></div>';
+}
+
+// The attach flow. Rendered from state for the same reason the key reveal is:
+// the token is shown once, and a refresh must rebuild it rather than erase it.
+let ATTACH = null, ATTACH_ERR = '';
+
+function attachBox(){
+  if(ATTACH_ERR) return '<div class="err">' + esc(ATTACH_ERR) + '</div>';
+  if(!ATTACH) return '';
+  return '<div class="warnbox"><strong>Run this on the machine you are ' +
+    'attaching — the token works once.</strong>' +
+    '<pre style="user-select:all;margin-top:8px">' + esc(ATTACH.command) + '</pre>' +
+    '<div class="row"><button class="tab" id="copyattach">Copy</button>' +
+    '<button class="tab" id="doneattach">Done</button></div>' +
+    '<div class="note">It expires in ' +
+    Math.round((ATTACH.expires_in_seconds || 1800) / 60) + ' minutes. The server ' +
+    'appears here once it connects, reachable at <code>/u/' + esc(ATTACH.server_id) +
+    '/v1</code>; an administrator adds it to the balanced pool.</div></div>';
+}
+
+function attachForm(me){
+  if(!me || !me.sub) return '';
+  return '<div class="card"><div style="font-weight:640">Attach a server</div>' +
+    '<div class="sub">Any OpenAI-compatible server. A <strong>tunnelled</strong> ' +
+    'one dials out and needs no inbound port; a <strong>dialled</strong> one is ' +
+    'reached at an address you give.</div>' +
+    '<div class="row" style="margin-top:9px">' +
+    '<input id="asid" placeholder="short name, e.g. workstation" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<select id="akind"><option value="tunnel">tunnelled (dials out)</option>' +
+    '<option value="static">dialled (give an address)</option></select>' +
+    '<input id="aurl" placeholder="http://host:8000/v1" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<input id="agpus" placeholder="what cards it has" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<button class="tab" id="attach">Attach</button></div>' +
+    '<div id="attachbox">' + attachBox() + '</div></div>';
+}
+
+async function doAttach(){
+  ATTACH_ERR = '';
+  const body = {server_id: ($('asid').value || '').trim(),
+                kind: $('akind').value,
+                base_url: ($('aurl').value || '').trim(),
+                gpus: ($('agpus').value || '').trim()};
+  let r, d;
+  try{
+    r = await fetch('/api/servers/enrol', {method: 'POST', headers:
+      Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+      body: JSON.stringify(body)});
+    d = await r.json();
+  }catch(e){ ATTACH_ERR = 'Could not reach the node.'; return loadServers(); }
+  if(!r.ok){
+    ATTACH_ERR = (d.error && d.error.message) || ('HTTP ' + r.status);
+    return loadServers();
+  }
+  ATTACH = d;
+  loadServers();
+}
+
+async function serverAction(url, body){
+  const r = await fetch(url, {method: body ? 'POST' : 'DELETE', headers:
+    Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+    body: body ? JSON.stringify(body) : null});
+  if(!r.ok){
+    const d = await r.json().catch(() => ({}));
+    alert((d.error && d.error.message) || ('HTTP ' + r.status));
+  }
+  loadServers();
 }
 
 async function loadServers(){
@@ -647,27 +782,54 @@ async function loadServers(){
     return;
   }
 
+  const me = d.you || {};
   const all = (d.servers || []).map(s => s.id === 'local'
     // The GPUs are the page's own knowledge; everything else is the node's probe
     // of itself, so this card can be wrong in the way a real server can.
     ? Object.assign({}, s, {name: 'This node',
         gpus: (LAST_GPUS || []).map(g => g.name).filter(Boolean).join(' + ') || null})
     : s);
-  const remotes = all.filter(s => s.id !== 'local');
+  const remotes = all.filter(s => s.kind !== 'local');
 
   $('servers').innerHTML =
-    '<div class="grid">' + defaultCard(d) + all.map(serverCard).join('') + '</div>' +
+    '<div class="grid">' + defaultCard(d) +
+      all.map(s => serverCard(s, me)).join('') + '</div>' +
     routingTally(d.routing) +
+    attachForm(me) +
     (remotes.length
       ? '<div class="note">Servers are re-probed every ' +
         n(d.poll_seconds) + ' seconds, never on the request path — a request for a ' +
         'server that is not answering is refused at once rather than waiting out a ' +
-        'proxy timeout.</div>'
-      : '<div class="note">No other servers are registered. Add one to ' +
-        '<code>/etc/qwen-turing/upstreams.yaml</code> — see ' +
-        '<code>config/upstreams.yaml.example</code> — and it appears here with its ' +
-        'own base URL. Its inference port must be restricted to this node, or a ' +
-        'client could reach it directly and bypass authentication entirely.</div>');
+        'proxy timeout. A tunnelled server holds its own connections open, so its ' +
+        'capacity is those pipes: when none is free, a balanced request goes ' +
+        'around it and a pinned one is refused after ' + n(d.pipe_wait_seconds) +
+        ' seconds rather than hanging.</div>'
+      : '<div class="note">No other servers yet. Attach one above, or add an ' +
+        'entry to <code>/etc/qwen-turing/upstreams.yaml</code> — see ' +
+        '<code>config/upstreams.yaml.example</code>.</div>');
+
+  const a = $('attach');
+  if(a) a.onclick = doAttach;
+  const cb = $('copyattach');
+  if(cb) cb.onclick = async () => {
+    try{ await navigator.clipboard.writeText(ATTACH.command); cb.textContent = 'Copied'; }
+    catch(e){ cb.textContent = 'Copy failed — select it above'; }
+  };
+  const db = $('doneattach');
+  if(db) db.onclick = () => { ATTACH = null; ATTACH_ERR = ''; loadServers(); };
+  [...document.querySelectorAll('[data-pool]')].forEach(b => b.onclick = () =>
+    serverAction('/api/servers/' + encodeURIComponent(b.dataset.pool) + '/pool',
+                 {pool_member: b.dataset.on === '1'}));
+  [...document.querySelectorAll('[data-tier]')].forEach(b => b.onclick = () => {
+    const v = prompt('Tier for ' + b.dataset.tier +
+                     ' (-10 to 10; higher is preferred, and absolute):', '0');
+    if(v !== null) serverAction('/api/servers/' + encodeURIComponent(b.dataset.tier) +
+                                '/priority', {priority: parseInt(v, 10) || 0});
+  });
+  [...document.querySelectorAll('[data-detach]')].forEach(b => b.onclick = () => {
+    if(confirm('Detach ' + b.dataset.detach + '? Its credential stops working.'))
+      serverAction('/api/servers/' + encodeURIComponent(b.dataset.detach));
+  });
 }
 
 // ---------- poll ----------

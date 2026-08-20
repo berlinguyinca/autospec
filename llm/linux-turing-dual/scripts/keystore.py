@@ -748,6 +748,29 @@ class KeyStore:
         self._update_server(server_id, "last_seen",
                             _iso(time.time() if now is None else now))
 
+    def user_names(self, subs) -> dict:
+        """sub -> a human name, for display only.
+
+        A subject id is an opaque uuid; showing part of it names nobody, and
+        splitting it on a dash -- which an earlier version of the panel did --
+        produced "attached by sub". Resolved here because this is where the
+        users table is, and it is PRESENTATION ONLY, never an authorisation
+        input.
+        """
+        wanted = [s for s in dict.fromkeys(subs) if s]
+        if not wanted:
+            return {}
+        marks = ",".join("?" * len(wanted))
+        with self._lock, self._conn() as c:
+            rows = c.execute(
+                f"SELECT sub, display_name, email FROM users WHERE sub IN ({marks})",
+                wanted).fetchall()
+        out = {}
+        for r in rows:
+            out[r["sub"]] = (r["display_name"] or (r["email"] or "").split("@")[0]
+                             or r["sub"][:8])
+        return out
+
     # --- what the scheduler measures --------------------------------------
     def throughput(self, *, window_seconds: float = 7 * 86400,
                    now: float | None = None) -> dict:

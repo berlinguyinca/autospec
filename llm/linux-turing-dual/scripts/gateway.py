@@ -824,9 +824,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    _viewer_sub = None
-    _viewer_admin = False
-
     def _servers(self) -> None:
         """Every registered server and what it serves.
 
@@ -834,8 +831,10 @@ class Handler(BaseHTTPRequestHandler):
         which is what someone needs before choosing a base URL. It is never
         public -- it names internal hosts.
         """
-        if not self._viewer():
+        who = self._viewer()
+        if not who:
             return
+
         # This node is described from its own PROBE, not asserted. The page used
         # to draw it as permanently online, which is the one server whose state
         # it could not actually have known.
@@ -858,10 +857,16 @@ class Handler(BaseHTTPRequestHandler):
                      "in_flight": INFLIGHT.get(_ups.LOCAL, 0), "idle_pipes": None,
                      "route": "/u/" + _ups.LOCAL + "/v1"},
                     **measured(_ups.LOCAL))]
-        for u in _servers_all():
+        servers = _servers_all()
+        try:
+            names = STORE.user_names([u.owner for u in servers]) if STORE else {}
+        except Exception:
+            names = {}
+        for u in servers:
             st = UP_STATE.get(u.id) or {"state": "unknown", "models": [],
                                         "error": None, "last_seen": None}
             row = u.public()
+            row["owner_name"] = names.get(u.owner)
             row.update(state=st.get("state", "unknown"), models=st.get("models") or [],
                        error=st.get("error"), last_seen=st.get("last_seen"),
                        # The path a client points at, so the page never has to
@@ -889,8 +894,9 @@ class Handler(BaseHTTPRequestHandler):
             "balanced_paths": list(_ups.BALANCED_PATHS),
             "peek_bytes": _peek.PEEK_BYTES,
             "pipe_wait_seconds": PIPE_WAIT_SECONDS,
-            "you": {"sub": (self._viewer_sub or ""),
-                    "is_admin": bool(self._viewer_admin)},
+            # Who is asking, so the page knows which buttons it may offer. It
+            # decides nothing: every action re-checks server-side.
+            "you": {"sub": who["sub"], "is_admin": who["is_admin"]},
             "routing": dict(ROUTE_WHY)})
 
     # --- attaching servers -------------------------------------------------
