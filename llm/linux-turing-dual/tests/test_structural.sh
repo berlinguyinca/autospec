@@ -462,13 +462,18 @@ fi
 # The collection route above is exact-only, but enrolment and management actions
 # live below /api/servers/. They must reach the gateway too, with the same
 # forwarded headers as the collection endpoint.
+collection_location=$(awk '/location = \/api\/servers \{/,/^    }/' "${NODE}/nginx/qwen-turing.conf")
 server_prefix=$(awk '/location \^~ \/api\/servers\//,/^    }/' "${NODE}/nginx/qwen-turing.conf")
-if ! printf '%s' "$server_prefix" | grep -q 'proxy_pass http://qwen_gateway' \
+if ! printf '%s' "$collection_location" | grep -q 'location = /api/servers {' \
+  || ! printf '%s' "$collection_location" | grep -q 'proxy_pass http://qwen_gateway' \
+  || ! printf '%s' "$server_prefix" | grep -q '^    location \^~ /api/servers/ {' \
+  || grep -q '^    location \^~ /api/servers {' "${NODE}/nginx/qwen-turing.conf" \
+  || ! printf '%s' "$server_prefix" | grep -q 'proxy_pass http://qwen_gateway' \
   || ! printf '%s' "$server_prefix" | grep -q 'proxy_set_header Host \$host' \
   || ! printf '%s' "$server_prefix" | grep -q 'proxy_set_header X-Forwarded-Proto \$scheme'; then
-  bad "nginx does not route the whole /api/servers/ management prefix to the gateway"
+  bad "nginx does not preserve the exact collection route and slash-terminated management prefix"
 else
-  ok "nginx routes the whole /api/servers/ management prefix to the gateway"
+  ok "nginx preserves the exact collection route and slash-terminated management prefix"
 fi
 
 # --- a streaming location must clear Connection -----------------------------
