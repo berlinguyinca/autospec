@@ -210,7 +210,12 @@ check $? "gpu-registry.json is well-formed"
 # import time. Left collectable, pytest reports INTERNALERROR, which reads like
 # a broken test rather than a misuse of the runner.
 conftest="${HERE}/tests/conftest.py"
-[ -f "$conftest" ] && grep -q 'collect_ignore_glob' "$conftest"
+# Either mechanism satisfies the intent, so assert the INTENT, not one spelling.
+# This check used to name collect_ignore_glob specifically -- and then the glob
+# was deliberately replaced, because `collect_ignore_glob = ["test_*.py"]` also
+# swallowed the unit tests it was never meant to exclude. A check that names an
+# implementation fails the moment that implementation is improved.
+[ -f "$conftest" ] && grep -qE 'collect_ignore(_glob)?[[:space:]]*=' "$conftest"
 check $? "conftest keeps pytest out of the standalone script suites"
 
 # 21 — the reconnect counter is what an operator reads to decide whether the

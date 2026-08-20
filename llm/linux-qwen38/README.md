@@ -391,3 +391,33 @@ The unit deliberately does **not** set `PrivateDevices=true`, `DevicePolicy=clos
 stack, the first two by hiding `/dev/nvidia*`. `ProtectSystem=full` is the
 strongest setting that leaves CUDA working. `tests/test_structural.sh` asserts
 none of the four come back.
+
+## Federating this node to another host
+
+This node serves inference **without an API key**, which is safe only while it is
+loopback-bound (`QWEN38_HOST=127.0.0.1`, the default). The moment another node
+proxies to it, the port must be bound to a routable address — and an
+unauthenticated inference port reachable by anything other than that node lets
+any client bypass the proxying node's authentication entirely, with its usage
+attributed to nobody.
+
+[`ops/federation-firewall.sh`](ops/federation-firewall.sh) is the guard, and it
+belongs on **this** host — the proxying node cannot apply it:
+
+```bash
+QWEN38_FED_ALLOW="<peer-addr>" sudo -E ./ops/federation-firewall.sh --persist
+sudo ./ops/federation-firewall.sh --status
+```
+
+It restricts every OpenAI-compatible port on this host (both runtimes, since
+guarding only the one you happen to be thinking about is how the other gets
+exposed), keeps loopback open, and installs a boot unit — this host has neither
+`netfilter-persistent` nor `/etc/iptables`, so rules do not otherwise survive a
+reboot.
+
+Two behaviours worth knowing. Every peer is **validated before any rule is
+touched**, because an earlier version flushed first and validated as it went: a
+bad peer aborted part way through and left a chain with no DROP, silently
+*opening* the port it exists to close. And rules land in `INPUT`, which is right
+for a systemd unit on the host — containerise the server and traffic arrives via
+`DOCKER-USER` instead, reopening the port without a single rule changing.
