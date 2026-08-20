@@ -775,6 +775,21 @@ returned `200` and `"model":"qwen3.8-27b"`: the wrong weights, no error, exactly
 as measured before. The failure is still there in llama.cpp; it is now only
 reachable on purpose.
 
+### Through the agent tunnel
+
+Not yet measured. A server that dials **out** and holds pipes open reaches
+inference over a WebSocket rather than a direct socket, and the figures above are
+the baseline it has to be compared against: prompt tokens, prefill, wall clock,
+and gateway RSS before and after.
+
+They get recorded here whichever way they fall, next to the direct numbers, with
+the same rule as above -- a difference between two single samples is not
+attributed to the tunnel without a second sample. The transport is deliberately
+one HTTP conversation per socket, so there is no reason to expect a change beyond
+one TLS handshake that the idle-pipe pool has already paid before the request
+arrives; if a change shows up anyway, that is the interesting result and it goes
+here unflattered.
+
 This run doubled as the live proof of the eligibility rule. The key's remembered
 server was the workstation, but `qwen3.8-27b-100k` exists only on this node, so
 the reply came back `X-Routed-Why: preferred` rather than `last-used`: being able

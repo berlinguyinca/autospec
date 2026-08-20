@@ -224,26 +224,33 @@ if [ -r "$inst" ]; then
   fi
 fi
 
-# --- every module the gateway imports is installed --------------------------
-# Derived from gateway.py's own import lines rather than kept as a second list:
-# usage.py was left out of the installer once and upstreams.py a second time,
-# and both are invisible until a CLEAN install dies at import.
+# --- every module the shipped scripts import is installed -------------------
+# Derived from the scripts' OWN import lines rather than kept as a second list:
+# usage.py was left out of the installer once and upstreams.py a second time, and
+# both are invisible until a CLEAN install dies at import.
+#
+# TRANSITIVELY, because a module is not only imported by the entrypoint: tunnel.py
+# imports wsframe, and checking gateway.py alone would have missed it.
 missing=""
-while read -r mod; do
-  [ -f "${NODE}/scripts/${mod}.py" ] || continue
-  # An `install` LINE, not any mention: the comment above that block names the
-  # modules it forgot, and matching prose would make this check vacuous. It was,
-  # for one commit, until the positive control below caught it.
-  grep -Eq "install .*${mod}\.py" "${NODE}/scripts/install-node.sh" \
-    || missing="${missing} ${mod}.py"
-done <<EOF
-$(sed -n 's/^import \([a-z_]*\) as .*/\1/p; s/^from \([a-z_]*\) import .*/\1/p' \
-    "${NODE}/scripts/gateway.py")
+for f in "${NODE}"/scripts/*.py; do
+  # Only modules that are actually shipped can drag in a dependency that must be.
+  grep -Eq "install .*$(basename "$f")" "${NODE}/scripts/install-node.sh" || continue
+  while read -r mod; do
+    [ -n "${mod}" ] || continue
+    [ -f "${NODE}/scripts/${mod}.py" ] || continue
+    # An `install` LINE, not any mention: the comment above that block names the
+    # modules it forgot, and matching prose would make this check vacuous. It was,
+    # for one commit, until a positive control caught it.
+    grep -Eq "install .*${mod}\\.py" "${NODE}/scripts/install-node.sh" \
+      || missing="${missing} ${mod}.py (needed by $(basename "$f"))"
+  done <<EOF
+$(sed -n 's/^import \([a-z_]*\) as .*/\1/p; s/^import \([a-z_]*\)$/\1/p; s/^from \([a-z_]*\) import .*/\1/p' "$f")
 EOF
+done
 if [ -n "${missing}" ]; then
   bad "installer would not ship:${missing}"
 else
-  ok "installer ships every module the gateway imports"
+  ok "installer ships every module the shipped scripts import"
 fi
 
 # --- the new-key reveal must survive its own refresh ------------------------
