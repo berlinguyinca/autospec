@@ -99,6 +99,14 @@
   input,select{font:inherit;font-size:12px;padding:5px 9px;border:1px solid var(--line);
                border-radius:7px;background:var(--panel);color:var(--ink)}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:13px}
+  textarea{font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);
+    border-radius:7px;background:var(--card);color:var(--fg);flex:1;min-width:16ch;resize:vertical}
+  .chatlog{margin-top:13px;display:flex;flex-direction:column;gap:9px;
+    max-height:52vh;overflow-y:auto;padding-right:4px}
+  .turn{border:1px solid var(--line);border-radius:9px;padding:9px 11px;
+    background:var(--card);white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+  .turn.me{background:color-mix(in srgb,var(--accent) 8%,var(--card));margin-left:8%}
+  .turn .who{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
   .scroll{overflow-x:auto}
 
   @media (max-width:880px){
@@ -231,6 +239,30 @@
   </section>
 
   <!-- ===================== KEYS ===================== -->
+  <!-- ===================== CHAT ====================== -->
+  <section id="s-chat" role="tabpanel" aria-labelledby="n-chat" hidden>
+    <h1>Chat</h1>
+    <p class="lede">Try the models without minting a key. Signed in, this spends
+      the node the same way an API request does — balanced across the fleet,
+      counted against your name on the leaderboard.</p>
+    <div id="chatgate"></div>
+    <div id="chatui" class="hide">
+      <div class="row">
+        <select id="chatmodel" aria-label="Model"></select>
+        <button class="tab" id="chatclear" type="button">New conversation</button>
+        <span class="sub" id="chatwhere"></span>
+      </div>
+      <div id="chatlog" class="chatlog" aria-live="polite" aria-atomic="false"></div>
+      <form id="chatform" class="row" autocomplete="off">
+        <textarea id="chatin" rows="2" placeholder="Ask something. Enter sends, Shift+Enter for a new line."
+                  aria-label="Message"></textarea>
+        <button class="tab sel" id="chatsend" type="submit">Send</button>
+        <button class="tab hide" id="chatstop" type="button">Stop</button>
+      </form>
+      <div class="note" id="chatnote"></div>
+    </div>
+  </section>
+
   <section id="s-keys" role="tabpanel" aria-labelledby="n-keys" hidden>
     <h1>Keys</h1>
     <p class="lede">Sign in to create keys that are yours: revocable on their own,
@@ -300,6 +332,7 @@ const SECTIONS = [
   ['models',   'Models'],
   ['servers',  'Servers'],
   ['connect',  'Connect'],
+  ['chat',     'Chat'],
   ['keys',     'Keys'],
   ['usage',    'Usage'],
   ['health',   'Health'],
@@ -311,22 +344,25 @@ $('nav').innerHTML = SECTIONS.map(([id,label]) =>
            aria-controls="s-${id}">${label}<span class="pill hide" id="p-${id}"></span></button>`
 ).join('');
 
-// Unauthenticated, the sections must be HIDDEN rather than rendered empty. A
-// "GPUs" heading with nothing under it and a grid of em dashes reads as a broken
-// page, not as "sign in" -- which is the opposite of what the banner says.
-let AUTHED = true;
-function setAuthed(ok){
-  AUTHED = ok;
-  document.querySelectorAll('main section').forEach(s => {
-    if(!ok) s.hidden = true;
+// The node is PUBLIC to read: what it serves, how busy it is, how fast it is,
+// and who is on the leaderboard. Signing in buys exactly two things -- creating
+// keys, and the chat panel -- so those are the only sections that can be gated.
+//
+// This page used to hide EVERY section on a 401, which meant a visitor with no
+// reason to sign in saw an empty shell. Read access is now the default and the
+// lockout is gone; what remains is a hint on the two tabs that need a person.
+const NEEDS_SIGNIN = {keys: 1, chat: 1};
+let SIGNED_IN = false;
+function setSignedIn(ok){
+  SIGNED_IN = ok;
+  SECTIONS.forEach(([id]) => {
+    const b = $('n-' + id);
+    if(b) b.style.opacity = (!ok && NEEDS_SIGNIN[id]) ? '.55' : '';
   });
-  $('nav').style.opacity = ok ? '' : '.45';
-  $('nav').style.pointerEvents = ok ? '' : 'none';
-  if(ok) show(SECTION, false);
+  if(SECTION === 'chat') renderChat();
 }
 
 function show(id, push){
-  if(!AUTHED) return;
   if(!SECTIONS.some(s => s[0] === id)) id = 'overview';
   SECTION = id;
   SECTIONS.forEach(([s]) => {
@@ -337,6 +373,7 @@ function show(id, push){
   // Keys needs a SESSION (minting is a browser action). Usage needs only a
   // credential, so it must not be gated behind the account panel -- doing that
   // left an API-key viewer staring at an empty Usage tab.
+  if(id === 'chat') renderChat();
   if(id === 'keys') loadAccount();
   if(id === 'usage') loadUsage();
   if(id === 'servers') loadServers();
@@ -853,36 +890,185 @@ async function loadServers(){
   });
 }
 
+// ---------- chat ----------
+// The conversation lives in this page and nowhere else. Nothing is stored on the
+// node: a transcript is the most personal thing this node could hold, and the
+// panel exists for trying the models rather than for keeping a record. Reload
+// and it is gone, which is the honest behaviour for something that promises no
+// history.
+let CHAT = [];            // [{role, content}]
+let CHAT_STREAM = null;   // AbortController while a turn is in flight
+let CHAT_MODELS = null;
+
+function chatTurns(){
+  return CHAT.map(t =>
+    '<div class="turn' + (t.role === 'user' ? ' me' : '') + '">' +
+      '<span class="who">' + (t.role === 'user' ? 'you' : 'model') + '</span>' +
+      esc(t.content || (t.role === 'assistant' ? '…' : '')) +
+    '</div>').join('');
+}
+
+function drawChat(){
+  const log = $('chatlog');
+  log.innerHTML = CHAT.length ? chatTurns()
+    : '<div class="note">No messages yet. Pick a model and ask something.</div>';
+  log.scrollTop = log.scrollHeight;
+}
+
+async function fillChatModels(){
+  if(CHAT_MODELS) return;
+  // The SAME list discovery advertises, so the picker cannot offer a model the
+  // balancer will refuse. /v1/models needs no credential, by design.
+  const r = await req('/v1/models', {cache:'no-store'});
+  CHAT_MODELS = (r.data.data || []).map(m => m.id).filter(Boolean);
+  const sel = $('chatmodel');
+  sel.innerHTML = CHAT_MODELS.length
+    ? CHAT_MODELS.map(id => '<option>' + esc(id) + '</option>').join('')
+    : '<option value="">no models available</option>';
+}
+
+function renderChat(){
+  const gate = $('chatgate'), ui = $('chatui');
+  if(!SIGNED_IN){
+    ui.classList.add('hide');
+    gate.innerHTML = '<div class="card"><strong>Sign in to chat.</strong>' +
+      '<div class="note">The panel spends the node, so what it spends is ' +
+      'attributed to a person. Everything else on this page is public.</div>' +
+      '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a></div></div>';
+    return;
+  }
+  gate.innerHTML = '';
+  ui.classList.remove('hide');
+  drawChat();
+  fillChatModels();
+}
+
+function chatBusy(on){
+  $('chatsend').classList.toggle('hide', on);
+  $('chatstop').classList.toggle('hide', !on);
+  $('chatin').disabled = on;
+}
+
+async function sendTurn(text){
+  const model = $('chatmodel').value;
+  if(!model){ $('chatnote').textContent = 'No model is available right now.'; return; }
+  CHAT.push({role: 'user', content: text});
+  const reply = {role: 'assistant', content: ''};
+  const outgoing = CHAT.slice();     // the turns the model should see
+  CHAT.push(reply);
+  drawChat();
+  $('chatnote').textContent = '';
+  $('chatwhere').textContent = '';
+
+  const ctl = new AbortController();
+  CHAT_STREAM = ctl;
+  chatBusy(true);
+  let reader = null;
+  try{
+    // NOT through req(): req() buffers the whole body, and this one is read as
+    // it arrives. Every exit below still consumes or cancels -- an unread body
+    // and an abandoned reader hold the connection in exactly the same way.
+    const r = await fetch('/api/chat', {
+      method: 'POST', signal: ctl.signal, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: model, messages: outgoing})});
+    if(!r.ok){
+      const raw = await r.text();          // drained, always
+      let why = 'The node answered ' + r.status + '.';
+      try{ why = JSON.parse(raw).error.message || why; }catch(e){}
+      reply.content = '';
+      $('chatnote').textContent = why;
+      if(r.status === 401){ setSignedIn(false); renderChat(); return; }
+      drawChat();
+      return;
+    }
+    const where = r.headers.get('X-Routed-To');
+    if(where) $('chatwhere').textContent = 'served by ' + where;
+    reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for(;;){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream: true});
+      // SSE: complete lines only. A chunk boundary lands mid-JSON often enough
+      // that parsing partial lines shows torn text.
+      let nl;
+      while((nl = buf.indexOf('\n')) >= 0){
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if(!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if(payload === '[DONE]') continue;
+        try{
+          const bit = JSON.parse(payload).choices[0].delta.content;
+          if(bit){ reply.content += bit; drawChat(); }
+        }catch(e){ /* a keep-alive or a shape without a delta */ }
+      }
+    }
+    if(!reply.content) $('chatnote').textContent =
+      'The model returned nothing. Try a longer budget, or a different model.';
+  }catch(e){
+    if(ctl.signal.aborted){
+      $('chatnote').textContent = 'Stopped.';
+    }else{
+      $('chatnote').textContent = 'The node stopped answering.';
+    }
+  }finally{
+    // A reader that is abandoned holds the connection open exactly as an unread
+    // body does -- the fault that stopped this page updating once already. Safe
+    // and idempotent after a completed stream.
+    if(reader){ try{ await reader.cancel(); }catch(e){} }
+    CHAT_STREAM = null;
+    chatBusy(false);
+    drawChat();
+  }
+}
+
+$('chatform').addEventListener('submit', ev => {
+  ev.preventDefault();
+  const box = $('chatin');
+  const text = box.value.trim();
+  if(!text || CHAT_STREAM) return;
+  box.value = '';
+  sendTurn(text);
+});
+$('chatin').addEventListener('keydown', ev => {
+  if(ev.key === 'Enter' && !ev.shiftKey){
+    ev.preventDefault();
+    $('chatform').requestSubmit();
+  }
+});
+$('chatstop').onclick = () => { if(CHAT_STREAM) CHAT_STREAM.abort(); };
+$('chatclear').onclick = () => {
+  if(CHAT_STREAM) CHAT_STREAM.abort();
+  CHAT = []; $('chatnote').textContent = ''; $('chatwhere').textContent = '';
+  drawChat();
+};
+
 // ---------- poll ----------
 async function tick(){
   try{
     const r = await req('/api/stats', {cache:'no-store', credentials:'same-origin',
                                       headers: authHeaders()});
-    if(r.status === 401){
-      // SIGNING IN IS THE PRIMARY PATH. The old behaviour opened a prompt asking
-      // for a shared secret, which is the thing per-user sign-in replaces -- and
-      // it fired before the reader had even seen the sign-in panel. A key stays
-      // available as an explicit fallback, not an unavoidable modal.
-      let cfg = {};
-      try{ cfg = (await req('/api/me', {cache:'no-store'})).data; }catch(e){}
-      $('dot').className = 'dot down'; $('state').textContent = 'not signed in';
-      $('err').innerHTML = (cfg.login_configured
-        ? '<strong>Sign in to see this node.</strong>' +
-          '<div class="note">Your key, your usage. Machines carry keys; people sign in.</div>' +
-          '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a>' +
-          '<a class="tab" href="#" id="setkey">Use an API key instead</a></div>'
-        : '<strong>This node needs an API key.</strong>' +
-          '<div class="row"><a class="tab" href="#" id="setkey">Enter it</a></div>');
-      $('err').classList.remove('hide');
-      setAuthed(false);
-      const a = $('setkey');
-      if(a) a.onclick = ev => { ev.preventDefault(); if(askKey('API key')) tick(); };
-      return;
-    }
     if(!r.ok) throw new Error('HTTP '+r.status);
     const d = r.data;
-    $('err').classList.add('hide');
-    if(!AUTHED) setAuthed(true);
+    // `public` marks the allow-listed projection -- the node served this to a
+    // stranger. Said plainly, and only when a credential WAS offered and did not
+    // work: silence there is how someone stares at a partial page believing they
+    // are signed in. With no credential at all there is nothing to report.
+    if(d.public && (getKey() || ME)){
+      $('err').innerHTML = '<strong>Showing the public view.</strong>' +
+        '<div class="note">The credential this page holds was not accepted. ' +
+        'Sign in again, or re-enter your key.</div>' +
+        '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a>' +
+        '<a class="tab" href="#" id="setkey">Enter a key</a></div>';
+      $('err').classList.remove('hide');
+      const a = $('setkey');
+      if(a) a.onclick = ev => { ev.preventDefault(); if(askKey('API key')) tick(); };
+    } else {
+      $('err').classList.add('hide');
+    }
 
     $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
     $('state').textContent = d.llama_up ? (d.model || 'model resident') : 'model not loaded';
@@ -944,6 +1130,7 @@ async function loadAccount(){
     $('keysbox').innerHTML = ''; return;
   }
   ME = me;
+  setSignedIn(!!me.authenticated);
 
   if(!me.authenticated){
     $('acct').innerHTML = '<div class="card">' +
@@ -1203,8 +1390,10 @@ async function loadUsage(){
 show(location.hash.slice(1) || 'overview', false);
 tick(); setInterval(tick, 2000);
 loadAccount();
-// Usage refreshes only while you are looking at it.
+// Usage refreshes only while you are looking at it -- and it no longer waits for
+// a session, because the leaderboard is public. Gating this on authentication
+// left a visitor on the Usage tab watching numbers that never moved.
 setInterval(() => {
-  if(ME && ME.authenticated && (SECTION === 'usage' || SECTION === 'keys')) loadUsage();
+  if(SECTION === 'usage' || SECTION === 'keys') loadUsage();
 }, 15000);
 </script>

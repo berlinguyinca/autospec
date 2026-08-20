@@ -356,10 +356,21 @@ fi
 #
 # Enforced by counting raw fetch() calls: index.html may have exactly one, inside
 # req(), and status.html exactly one, which reads text() before checking status.
+#
+# The chat panel adds the one shape req() cannot serve: a body read AS IT ARRIVES.
+# A reader that is abandoned holds the connection exactly as an unread body does,
+# so a second raw fetch is allowed only alongside a reader.cancel() -- and the
+# streaming call must carry a signal, or Stop could not release it at all.
 raw_index=$(grep -c "await fetch(" "${NODE}/web/index.html" || true)
 raw_status=$(grep -c "await fetch(" "${NODE}/web/status.html" || true)
-if [ "$raw_index" -gt 1 ]; then
-  bad "web/index.html calls fetch() directly ${raw_index} times; route it through req(), which drains"
+streams=$(grep -c "getReader()" "${NODE}/web/index.html" || true)
+allowed=$((1 + streams))
+if [ "$streams" -gt 0 ] && ! grep -q "reader.cancel()" "${NODE}/web/index.html"; then
+  bad "web/index.html reads a stream but never cancels the reader; it will hold the connection"
+elif [ "$streams" -gt 0 ] && ! grep -q "signal: ctl.signal" "${NODE}/web/index.html"; then
+  bad "web/index.html streams without an abort signal, so a stopped turn cannot be released"
+elif [ "$raw_index" -gt "$allowed" ]; then
+  bad "web/index.html calls fetch() directly ${raw_index} times (${allowed} accounted for); route it through req(), which drains"
 elif ! grep -q "async function req(url, opts)" "${NODE}/web/index.html"; then
   bad "web/index.html must keep req(), the one place a response body is drained"
 elif [ "$raw_status" -gt 1 ] || ! grep -q "await r.text();" "${NODE}/web/status.html"; then
@@ -412,6 +423,40 @@ elif ! python3 -m pytest -q -p no:cacheprovider --collect-only ${suites} >/dev/n
   bad "the node suites do not collect together the way CI runs them"
 else
   ok "both node suites collect in one pytest run, as CI invokes them"
+fi
+
+# --- everything the gateway OWNS must actually reach the gateway ------------
+# nginx routes /api/* by explicit location blocks and everything else falls to
+# `location /`, which is the DASHBOARD. So an endpoint added to the gateway's
+# OWNED tuple without a matching block is answered by the wrong process: the
+# dashboard 404s a request the gateway was ready to serve. That is exactly how
+# /api/chat shipped broken for one commit.
+#
+# Read from OWNED itself rather than from a second list here, because a check
+# with its own copy of the answer stops checking anything.
+owned=$(python3 - "${NODE}/scripts/gateway.py" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"^OWNED = \((.*?)\)$", src, re.S | re.M)
+print(" ".join(re.findall(r'"([^"]+)"', m.group(1))))
+PYEOF
+)
+missing=""
+for path in $owned; do
+  case "$path" in
+    /auth/|/api/agent/) pat="location \^~ ${path}" ;;
+    */)                pat="location \^~ ${path}" ;;
+    /api/keys)         pat="location \^~ ${path}" ;;
+    *)                 pat="location = ${path}" ;;
+  esac
+  grep -q "$pat" "${NODE}/nginx/qwen-turing.conf" || missing="${missing} ${path}"
+done
+if [ -z "$owned" ]; then
+  bad "could not read OWNED from the gateway; the route check is not checking"
+elif [ -n "$missing" ]; then
+  bad "the gateway owns these paths but nginx does not route them to it:${missing}"
+else
+  ok "every path the gateway owns has an nginx route to the gateway"
 fi
 
 echo

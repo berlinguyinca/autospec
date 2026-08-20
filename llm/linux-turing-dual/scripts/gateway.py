@@ -60,6 +60,8 @@ import wsframe as _ws           # noqa: E402
 import oidc as _oidc            # noqa: E402
 import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
+import publicview as _public    # noqa: E402
+import chat as _chat            # noqa: E402
 from keystore import KeyStore   # noqa: E402
 
 CHUNK = 65536
@@ -72,7 +74,7 @@ FLUSH_SECONDS = 30
 
 # Paths this process owns. Everything else is proxied to the runtime.
 OWNED = ("/auth/", "/api/keys", "/api/me", "/api/usage", "/api/gateway-health",
-         "/api/stats", "/api/servers", "/api/agent/",
+         "/api/stats", "/api/servers", "/api/agent/", "/api/chat",
          # Discovery is the fleet's union now, so this process owns it: it is the
          # only one that knows what the other servers serve.
          "/v1/models")
@@ -769,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._models()
         if path == "/api/servers":
             return self._servers()
+        if path == "/api/chat" and method == "POST":
+            return self._chat()
         if path == "/api/servers/enrol" and method == "POST":
             return self._enrol()
         if path == "/api/agent/enrol" and method == "POST":
@@ -928,8 +932,7 @@ class Handler(BaseHTTPRequestHandler):
         page's only way in was pasting the shared key, which is precisely the
         thing per-user sign-in exists to replace.
         """
-        if not self._viewer():
-            return
+        who = self._reader()
         try:
             up = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=15)
             up.putrequest("GET", "/api/stats", skip_host=True,
@@ -944,6 +947,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             sys.stderr.write(f"stats proxy failed: {exc}\n")
             return self._err(502, "the stats collector is not answering")
+        if who["via"] == "public" and r.status == 200:
+            # Parsed and re-serialised rather than relayed, because the public
+            # view is an allow-list and cannot be expressed as a passthrough. An
+            # unparseable payload becomes a 502 rather than leaking the bytes:
+            # failing to project is not a reason to skip projecting.
+            try:
+                full = json.loads(body)
+            except ValueError:
+                return self._err(502, "the stats collector answered unreadably")
+            return self._json(200, _public.stats(full))
         self.send_response(r.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -958,9 +971,7 @@ class Handler(BaseHTTPRequestHandler):
         which is what someone needs before choosing a base URL. It is never
         public -- it names internal hosts.
         """
-        who = self._viewer()
-        if not who:
-            return
+        who = self._reader()
 
         # This node is described from its own PROBE, not asserted. The page used
         # to draw it as permanently online, which is the one server whose state
@@ -1011,7 +1022,7 @@ class Handler(BaseHTTPRequestHandler):
                                    else None),
                        **measured(u.id))
             out.append(row)
-        self._json(200, {
+        full = {
             # The interval that ACTUALLY runs, not a constant beside it: the
             # housekeeper's own period is what re-probes these servers, and a
             # panel whose job is honesty about what it knows must not overstate
@@ -1028,7 +1039,13 @@ class Handler(BaseHTTPRequestHandler):
             # Who is asking, so the page knows which buttons it may offer. It
             # decides nothing: every action re-checks server-side.
             "you": {"sub": who["sub"], "is_admin": who["is_admin"]},
-            "routing": dict(ROUTE_WHY)})
+            "routing": dict(ROUTE_WHY)}
+        if who["via"] == "public":
+            # Capability and load, with nothing that says where anything lives.
+            # Projected by allow-list in publicview.py, so a field added above
+            # is absent here until someone names it.
+            return self._json(200, _public.servers(full))
+        self._json(200, full)
 
     # --- discovery ----------------------------------------------------------
     def _models(self) -> None:
@@ -1049,7 +1066,24 @@ class Handler(BaseHTTPRequestHandler):
         holds what is fleet composition -- that belongs in the authenticated
         /api/servers, which already reports it.
         """
-        local, status = self._local_models_payload()
+        data = self._fleet_models()
+        body = json.dumps({"object": "list", "data": data}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self._body(body)
+
+    def _fleet_models(self) -> list:
+        """The union, as a list of model entries.
+
+        Factored out because the chat panel must validate against EXACTLY what
+        discovery advertises. Two answers to "what can this node serve" is how a
+        panel comes to offer a model the balancer then refuses -- or worse, one
+        llama.cpp silently substitutes.
+        """
+        local, _status = self._local_models_payload()
         data = list(local.get("data") or [])
         seen = {m.get("id") for m in data if isinstance(m, dict)}
         # The dashboard owns the sanitiser, but it does not own the FACT. If it is
@@ -1075,13 +1109,10 @@ class Handler(BaseHTTPRequestHandler):
                     # say where it lives.
                     extra.append({"id": mid, "object": "model",
                                   "owned_by": "qwen-turing"})
-        body = json.dumps({"object": "list", "data": data + extra}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self._body(body)
+        return data + extra
+
+    def _served_model_ids(self) -> set:
+        return {m.get("id") for m in self._fleet_models() if isinstance(m, dict)}
 
     def _local_models_payload(self) -> tuple[dict, int]:
         """This node's list, from the dashboard -- which is where the sanitiser
@@ -1408,6 +1439,27 @@ class Handler(BaseHTTPRequestHandler):
                          "login_configured": CFG.login_configured()})
         return None
 
+    def _reader(self) -> dict:
+        """Who is reading, WITHOUT refusing a stranger.
+
+        Anyone may read this node -- what it serves, how busy it is, how fast,
+        and who is on the leaderboard. `via` says which audience answered, and
+        every read handler uses it to choose between the full payload and the
+        allow-listed public projection in publicview.py.
+
+        The sibling `_viewer()` still exists and still refuses: it is for reads
+        that stay private. This one never writes a response, so a caller can rely
+        on getting an identity back.
+        """
+        s = self._session()
+        if s:
+            _, is_admin = self._may(s)
+            return {"sub": s["sub"], "is_admin": is_admin, "via": "session"}
+        row = self._authenticate_key(self._bearer())
+        if row:
+            return {"sub": row.sub, "is_admin": False, "via": "key"}
+        return {"sub": None, "is_admin": False, "via": "public"}
+
     def _require_session(self):
         s = self._session()
         if not s:
@@ -1483,9 +1535,15 @@ class Handler(BaseHTTPRequestHandler):
         `mine=1` narrows the detail table to the caller, for someone who only
         wants to audit their own keys.
         """
-        who = self._viewer()
-        if not who:
-            return
+        who = self._reader()
+        if who["via"] == "public":
+            # The scoreboard, by display name. No email, no sub -- and no key
+            # table: that names each person's keys, which is the one part of this
+            # payload that is about individuals rather than about the node.
+            return self._json(200, {
+                "leaderboard": _public.leaderboard(STORE.leaderboard()),
+                "usage": [], "scope": "public", "you": None,
+                "is_admin": False, "public": True})
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         mine = "mine=1" in query
         self._json(200, {
@@ -1494,6 +1552,67 @@ class Handler(BaseHTTPRequestHandler):
             "scope": "mine" if mine else "everyone",
             "you": who["sub"],
             "is_admin": who["is_admin"]})
+
+    # --- the chat panel ----------------------------------------------------
+    def _chat(self) -> None:
+        """Inference bought with a SESSION, for the dashboard's chat panel.
+
+        The one endpoint here where a cookie pays for GPU time, which is why the
+        same-origin check comes first -- before the body is read, before a model
+        is resolved, before anything is routed. A cookie travels automatically,
+        so without that check any page on the internet could spend this node.
+
+        Everything after validation is the ORDINARY balanced path: the request is
+        rewritten into the chat-completions request it actually is and handed to
+        the same proxy every key-holder uses. Eligibility, scheduling, warm-cache
+        affinity, streaming and accounting are therefore identical -- a second
+        implementation of routing for the panel is how the panel would come to
+        disagree with the balancer.
+        """
+        session = self._require_session()
+        if not session:
+            return
+        if not self._secure():
+            return self._err(403, "the chat panel needs HTTPS",
+                             "insecure_transport")
+        if not _chat.same_origin(self.headers.get, self.headers.get("Host") or ""):
+            return self._err(403, "this endpoint answers only this node's page",
+                             "cross_origin")
+
+        raw = b""
+        while len(raw) <= _chat.MAX_CHARS * 4:
+            buf = self._read_body(CHUNK)
+            if not buf:
+                break
+            raw += buf
+        self._drain_body()
+
+        body, why = _chat.validate(raw, self._served_model_ids())
+        if body is None:
+            return self._err(400, why, "invalid_request")
+
+        blob = json.dumps(body).encode()
+        # The rewritten body replaces the peek, and the request length must be
+        # corrected with it: _send_upstream_request copies the client's headers
+        # verbatim, so a stale Content-Length would truncate the prompt upstream.
+        self._peeked = blob
+        self._body_left = 0
+        if self.headers.get("Content-Length") is None:
+            self.headers["Content-Length"] = str(len(blob))
+        else:
+            self.headers.replace_header("Content-Length", str(len(blob)))
+        # The body this now sends IS JSON, whatever the panel labelled its own
+        # request. The peek that finds the model checks this header before
+        # scanning, so a mislabelled request would route blind.
+        if self.headers.get("Content-Type") is None:
+            self.headers["Content-Type"] = "application/json"
+        else:
+            self.headers.replace_header("Content-Type", "application/json")
+        # Balanced like any other completion. The path IS what the machinery keys
+        # on -- BALANCED_PATHS, the model peek, the affinity -- so it is set here
+        # rather than special-cased in five places.
+        self.path = "/v1/chat/completions"
+        self._proxy("POST", identity=(_chat.USAGE_KEY_ID, session["sub"]))
 
     # --- planning: where does this request go? ------------------------------
     @staticmethod
@@ -1533,9 +1652,17 @@ class Handler(BaseHTTPRequestHandler):
         will do", because llama.cpp would answer with the wrong model rather
         than refuse.
         """
-        if self._body_left <= 0:
-            # No Content-Length either: a chunked body is left alone rather
-            # than reframed, so nothing about the existing pass-through changes.
+        if self._body_left <= 0 and not self._peeked:
+            # Nothing to look at. A chunked body reaches here with no length and
+            # nothing buffered, and is left alone rather than reframed, so the
+            # existing pass-through is unchanged.
+            #
+            # The `not self._peeked` half matters: the chat panel rewrites the
+            # request and hands over a body that is ALREADY buffered with nothing
+            # left to read. Testing the length alone declared that request
+            # unreadable and kept every chat turn on this node -- a model only
+            # another server had was served locally, which is the substitution
+            # this whole routing layer exists to prevent.
             return None, True
         ctype = (self.headers.get("Content-Type") or "").lower()
         if "json" not in ctype:
@@ -1787,15 +1914,27 @@ class Handler(BaseHTTPRequestHandler):
         self._body(body)
 
     # --- the proxy ---------------------------------------------------------
-    def _proxy(self, method: str, remote: bool = False) -> None:
-        row = self._authenticate_key(self._bearer())
-        if row is None:
-            return self._refuse_key()
+    def _proxy(self, method: str, remote: bool = False,
+               identity: tuple | None = None) -> None:
+        """Relay an inference request. `identity` overrides key authentication.
 
-        self._auth_key_id = row.key_id
-        # Whose key this is, so a refusal can tell an owner about their own
+        Only the chat panel passes one, having already established WHO from a
+        verified session. It carries a sentinel key id rather than a minted key,
+        so usage attributes to the person without creating a real credential they
+        can neither see nor revoke.
+        """
+        if identity is None:
+            row = self._authenticate_key(self._bearer())
+            if row is None:
+                return self._refuse_key()
+            key_id, sub = row.key_id, row.sub
+        else:
+            key_id, sub = identity
+
+        self._auth_key_id = key_id
+        # Whose request this is, so a refusal can tell an owner about their own
         # server without telling everyone else about it.
-        self._auth_sub = row.sub
+        self._auth_sub = sub
         self._route_path = None
         plan = self._plan(remote)
         if plan is ANSWERED:
@@ -1811,7 +1950,7 @@ class Handler(BaseHTTPRequestHandler):
         # node, and its next completion would abandon a warm remote slot for a
         # cold local one -- the exact loss the affinity exists to prevent.
         if self._route_why != "not-balanced":
-            LAST_SERVER[row.key_id] = target.id if target else _ups.LOCAL
+            LAST_SERVER[key_id] = target.id if target else _ups.LOCAL
 
         started = time.time()
         acc = _usage.StreamAccountant()
@@ -1849,7 +1988,7 @@ class Handler(BaseHTTPRequestHandler):
             u = acc.result()
             try:
                 STORE.record_usage({
-                    "ts": started, "key_id": row.key_id, "sub": row.sub,
+                    "ts": started, "key_id": key_id, "sub": sub,
                     "model": u.model,
                     "upstream": target.id if target else "local",
                     "endpoint": self.path.split("?", 1)[0],

@@ -31,6 +31,7 @@ from nodescripts import load_script
 
 gw = load_script("gateway")
 keys = load_script("keys")
+_chatmod = load_script("chat")
 
 MODEL_BOTH = "qwen3.8-27b"          # this node and the remote
 MODEL_LOCAL = "qwen3.5-9b-vision"   # this node only
@@ -544,3 +545,125 @@ def test_usage_records_which_server_served_it(fleet):
     # gateway restart does not scatter everybody onto cold slots.
     kid = keys.parse(key)[0]
     assert gw.STORE.last_upstream(kid) == "local"
+
+
+# --- the chat panel: a session buys inference, on the same balanced path -----
+
+def _sid(sub="sub-a"):
+    import secrets
+    s = secrets.token_urlsafe(8)
+    gw._SESSIONS[s] = {"sub": sub, "email": f"{sub}@example.org", "name": sub,
+                       "groups": [], "created": time.time()}
+    return s
+
+
+def chat_post(srv, sid, payload, https=True, site="same-origin", origin=None):
+    raw = json.dumps(payload).encode()
+    h = {"Content-Type": "application/json", "Content-Length": str(len(raw))}
+    if sid:
+        h["Cookie"] = f"{gw.SESSION_COOKIE}={sid}"
+    if https:
+        h["X-Forwarded-Proto"] = "https"
+    if site:
+        h["Sec-Fetch-Site"] = site
+    if origin:
+        h["Origin"] = origin
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=15)
+    c.request("POST", "/api/chat", raw, h)
+    r = c.getresponse()
+    body = r.read()
+    out = (r.status, r.getheader("X-Routed-To"), body)
+    c.close()
+    return out
+
+
+def test_the_chat_panel_needs_a_session(fleet):
+    srv = fleet[0]
+    status, _, _ = chat_post(srv, None, {"model": MODEL_BOTH,
+                                         "messages": [{"role": "user",
+                                                       "content": "hi"}]})
+    assert status == 401
+
+
+def test_a_cross_origin_page_cannot_spend_this_node(fleet):
+    """A cookie travels automatically, so without this check any page on the
+    internet could make a signed-in browser buy GPU time here."""
+    srv = fleet[0]
+    turn = {"model": MODEL_BOTH, "messages": [{"role": "user", "content": "hi"}]}
+    assert chat_post(srv, _sid(), turn, site="cross-site")[0] == 403
+    assert chat_post(srv, _sid(), turn, site=None,
+                     origin="https://evil.example.net")[0] == 403
+    assert chat_post(srv, _sid(), turn, site=None)[0] == 403
+
+
+def test_the_chat_panel_refuses_cleartext(fleet):
+    srv = fleet[0]
+    assert chat_post(srv, _sid(), {"model": MODEL_BOTH,
+                                   "messages": [{"role": "user", "content": "hi"}]},
+                     https=False)[0] == 403
+
+
+def test_a_chat_turn_reaches_the_upstream_whole(fleet):
+    """The rewritten body must arrive intact. The panel's request is rebuilt --
+    stream, budget and thinking are added -- so it is LONGER than what the client
+    sent, and a stale Content-Length would truncate the prompt upstream into
+    unparseable JSON."""
+    srv, runtime, _remote, _key = fleet
+    prompt = "tell me about " + "x" * 3000
+    status, routed, _ = chat_post(srv, _sid(), {
+        "model": MODEL_LOCAL, "messages": [{"role": "user", "content": prompt}]})
+    assert status == 200
+    assert routed == "local"
+    seen = [s for s in runtime.seen if s["path"].endswith("/v1/chat/completions")]
+    assert seen, "the upstream never received the turn"
+    sent = json.loads(seen[-1]["body"])
+    assert sent["messages"][0]["content"] == prompt
+    assert sent["stream"] is True
+    assert sent["chat_template_kwargs"] == {"enable_thinking": False}
+    assert sent["max_tokens"] == _chatmod.DEFAULT_MAX_TOKENS
+
+
+def test_a_chat_turn_is_balanced_like_any_other_completion(fleet):
+    """Not pinned to this node. A model only the remote serves must go there, or
+    the panel has its own routing and will disagree with the balancer."""
+    srv, _runtime, remote, _key = fleet
+    status, routed, _ = chat_post(srv, _sid(), {
+        "model": MODEL_REMOTE, "messages": [{"role": "user", "content": "hi"}]})
+    assert status == 200
+    assert routed == "remote"
+    assert any(s["path"].endswith("/v1/chat/completions") for s in remote.seen)
+
+
+def test_a_model_nobody_serves_never_reaches_an_upstream(fleet):
+    """Refused at the panel's door rather than sent somewhere that would answer
+    it with different weights and a 200."""
+    srv, runtime, remote, _key = fleet
+    before = len(runtime.seen) + len(remote.seen)
+    status, _, body = chat_post(srv, _sid(), {
+        "model": "no-such-model", "messages": [{"role": "user", "content": "hi"}]})
+    assert status == 400
+    assert b"does not serve" in body
+    assert len(runtime.seen) + len(remote.seen) == before
+
+
+def test_chat_usage_bills_the_person_without_creating_a_credential(fleet):
+    """Attributed by `sub` under a sentinel key id -- so it ranks on the
+    leaderboard, and no key exists that its owner cannot see or revoke."""
+    srv, _runtime, _remote, _key = fleet
+    chat_post(srv, _sid("sub-a"), {"model": MODEL_LOCAL,
+                                   "messages": [{"role": "user", "content": "hi"}]})
+    deadline = time.time() + 5
+    rows = []
+    while time.time() < deadline:
+        with gw.STORE._conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT key_id, sub, endpoint FROM usage_events "
+                "WHERE key_id = ?", (_chatmod.USAGE_KEY_ID,))]
+        if rows:
+            break
+        time.sleep(0.02)
+    assert rows, "the chat turn was never billed"
+    assert rows[0]["sub"] == "sub-a"
+    assert rows[0]["endpoint"] == "/v1/chat/completions"
+    assert gw.STORE.list_keys("sub-a") == [] or all(
+        k.key_id != _chatmod.USAGE_KEY_ID for k in gw.STORE.list_keys("sub-a"))

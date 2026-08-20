@@ -318,10 +318,22 @@ def test_mine_narrows_the_detail_table_to_the_caller(node):
     assert {r["sub"] for r in d["leaderboard"]} == {"sub-alice", "sub-bob"}
 
 
-def test_usage_requires_a_session(node):
-    srv, _ = node
-    code, _ = call(srv, "GET", "/api/usage")
-    assert code == 401
+def test_the_leaderboard_is_public_but_the_key_table_is_not(node):
+    """Anyone may read the scoreboard; only a signed-in caller gets the per-key
+    detail, which names each person's keys rather than describing the node."""
+    srv, store = node
+    key_id = store.mint("sub-alice", "k")[1].key_id
+    _spend(store, key_id, "sub-alice", 100, 200)
+
+    code, anon = call(srv, "GET", "/api/usage")
+    assert code == 200
+    assert anon["leaderboard"], "the public scoreboard must not be empty"
+    assert anon["usage"] == []
+    assert anon["scope"] == "public"
+
+    code, mine = call(srv, "GET", "/api/usage", _session("sub-alice", []))
+    assert code == 200
+    assert mine["usage"], "a signed-in caller still gets the key table"
 
 
 # --- the login callback -----------------------------------------------------
@@ -387,9 +399,26 @@ def test_an_api_key_can_read_the_scoreboard_as_its_owner(node):
     assert d["leaderboard"][0]["total_tokens"] == 30
 
 
-def test_servers_needs_a_credential(node):
+def test_the_fleet_is_public_without_saying_where_anything_lives(node):
+    """Capability and load are public; addresses and owners are not.
+
+    Asserted as ABSENCE on the payload a stranger receives, because that is the
+    only form the guarantee has: publicview.py projects by allow-list, so a field
+    added to the private payload later is caught here rather than published.
+    """
     srv, _ = node
-    assert call(srv, "GET", "/api/servers")[0] == 401
-    sid = _session("sub-alice", [])
-    code, d = call(srv, "GET", "/api/servers", sid)
-    assert code == 200 and "servers" in d
+    code, anon = call(srv, "GET", "/api/servers")
+    assert code == 200
+    assert anon["public"] is True
+    assert anon["servers"], "the public fleet view must still name the servers"
+    for row in anon["servers"]:
+        assert "id" in row and "state" in row and "models" in row
+        for forbidden in ("base_url", "owner", "owner_name", "error",
+                          "problems", "needs_key"):
+            assert forbidden not in row, f"{forbidden} leaked to a stranger"
+    assert "you" not in anon
+
+    code, full = call(srv, "GET", "/api/servers", _session("sub-alice", []))
+    assert code == 200
+    assert "base_url" in full["servers"][0], "the private view keeps addresses"
+    assert full["you"]["sub"] == "sub-alice"
