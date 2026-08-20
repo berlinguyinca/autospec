@@ -2253,7 +2253,15 @@ fn run_foreground_cycles(
         let cycle = retry_pending_accountability_projection(layout, lease)
             .map_err(ForegroundFailure::from)
             .and_then(|_| {
-                run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission)
+                run_foreground_with_lease(
+                    layout,
+                    options,
+                    config,
+                    scope.clone(),
+                    lease,
+                    admission,
+                    continuous,
+                )
             });
         let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
         let mut completion = match cycle {
@@ -2404,6 +2412,7 @@ fn run_foreground_with_lease(
     scope: RepositoryScope,
     lease: &resilience::ConductorLease,
     admission: resilience::ResilienceAdmission,
+    continuous: bool,
 ) -> Result<ForegroundCompletion, ForegroundFailure> {
     let mut input = foreground_lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope.clone()).with_transition(LifecycleTransition::Foreground),
@@ -2707,13 +2716,36 @@ fn run_foreground_with_lease(
     }
     // Scan, review, selection, and admission must all observe the synchronized
     // integration base.
-    synchronize_fresh_selection_base(
+    let synchronized = synchronize_fresh_selection_base(
         Path::new(&options.repo_dir),
         &health.branch,
         state.phase(),
         state.selected_issue(),
-    )
-    .map_err(CommandFailure::diagnostic)?;
+    );
+    if let Err(reason) = synchronized {
+        let dirty_checkout = format!(
+            "integration base {} checkout has uncommitted work",
+            health.branch
+        );
+        if continuous && reason == dirty_checkout {
+            let state = state
+                .record_no_progress_cycle("integration_base_dirty")
+                .map_err(CommandFailure::diagnostic)?;
+            record_accountability_event_once(
+                layout,
+                accountability_event(
+                    accountability::EventKind::Blocked,
+                    "Quarantined Tier 1 because the integration checkout is dirty",
+                    "Autospec preserves operator work instead of overwriting or stashing it",
+                    "integration_base_dirty; next=restart with a clean dedicated checkout",
+                )?,
+                true,
+            )?;
+            persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundCompletion::State(Box::new(state)));
+        }
+        return Err(CommandFailure::diagnostic(reason).into());
+    }
 
     let waterfall_policy = waterfall_policy::WaterfallPolicy::from_config(config)
         .map_err(CommandFailure::diagnostic)?;

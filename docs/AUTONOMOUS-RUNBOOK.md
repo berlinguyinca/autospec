@@ -1,5 +1,17 @@
 # Autonomous Runbook
 
+## Dirty integration checkout containment
+
+Before a fresh selection, the conductor synchronizes its configured integration
+branch with the remote. A one-shot `run-foreground` invocation still fails closed
+when that branch is checked out with tracked or untracked changes.
+
+A continuous conductor records `integration_base_dirty` as a no-progress cycle
+instead of terminalizing the run. Status reports that current reason rather than
+an older executor outcome, and the next cycle retries after its polling interval.
+The conductor does not overwrite, stash, or delete operator work. To restore Tier
+1 immediately, restart it with `--repo-dir` pointing at a clean dedicated clone.
+
 ## Continuation-aware merge recovery
 
 When an executor restarts from `BridgePhase::Merged`, recovery completes in this
