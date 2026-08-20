@@ -667,3 +667,58 @@ def test_chat_usage_bills_the_person_without_creating_a_credential(fleet):
     assert rows[0]["endpoint"] == "/v1/chat/completions"
     assert gw.STORE.list_keys("sub-a") == [] or all(
         k.key_id != _chatmod.USAGE_KEY_ID for k in gw.STORE.list_keys("sub-a"))
+
+
+# --- the Models page's join: every advertised id must have a host ------------
+
+def _get(srv, path, key=None):
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=15)
+    h = {"Authorization": "Bearer " + key} if key else {}
+    c.request("GET", path, None, h)
+    r = c.getresponse()
+    body = r.read()
+    c.close()
+    return r.status, json.loads(body or b"{}")
+
+
+def test_every_advertised_model_is_claimed_by_a_server(fleet):
+    """The invariant the Models page joins on.
+
+    The page reads /v1/models for what is offered and /api/servers for who holds
+    it. If discovery advertised an id no server row claimed, the page would print
+    a model with no host -- and /v1 would accept a request nothing could serve.
+    """
+    srv = fleet[0]
+    _status, models = _get(srv, "/v1/models")
+    advertised = {m["id"] for m in models["data"]}
+    assert advertised, "discovery advertised nothing"
+
+    _status, fleet_view = _get(srv, "/api/servers")
+    claimed = set()
+    for s in fleet_view["servers"]:
+        claimed.update(s.get("models") or [])
+
+    assert advertised <= claimed, (
+        "advertised but hosted by nobody: %s" % sorted(advertised - claimed))
+
+
+def test_the_public_fleet_view_is_enough_to_answer_who_holds_what(fleet):
+    """The join must work WITHOUT a credential, because the Models page is public.
+
+    Asserted through the unauthenticated payload rather than the private one: the
+    allow-list could drop `models` and every other test here would still pass
+    while the public page silently lost its Served-by column.
+    """
+    srv, _runtime, _remote, _key = fleet
+    _status, anon = _get(srv, "/api/servers")
+    assert anon.get("public") is True
+    by_model = {}
+    for s in anon["servers"]:
+        for mid in s.get("models") or []:
+            by_model.setdefault(mid, []).append(s["id"])
+
+    # The fixture's local runtime holds one model the remote does not, and vice
+    # versa, and they share a third -- so a correct join is visible three ways.
+    assert by_model.get(MODEL_LOCAL) == ["local"]
+    assert by_model.get(MODEL_REMOTE) == ["remote"]
+    assert sorted(by_model.get(MODEL_BOTH) or []) == ["local", "remote"]

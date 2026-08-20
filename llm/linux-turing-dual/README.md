@@ -111,6 +111,20 @@ you to skim it.
 
 Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
 
+## The Models page says who holds what
+
+Each model row names the servers currently serving it — `qwen3.8-27b` reads
+*this node, bender*; a model only one box holds names only that box. Models no
+preset here describes are listed too, marked `elsewhere`: without them the page
+would show what this node can load and call it the fleet, while `/v1` accepted an
+id the page never mentioned.
+
+The join needs no credential. `/v1/models` says what is offered and
+`/api/servers` says who holds it, and both are public — so a visitor deciding
+where to point a client can see the whole fleet before they have a key. Context
+and seat counts stay this node's own presets, because a node cannot report a
+context tier it does not configure.
+
 ## Who may see what
 
 Reading this node needs no credential. Signing in buys exactly two things.

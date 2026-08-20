@@ -186,14 +186,19 @@
   <!-- ===================== MODELS ===================== -->
   <section id="s-models" role="tabpanel" aria-labelledby="n-models" hidden>
     <h1>Models</h1>
-    <p class="lede">Seven presets, one resident at a time. A context tier is a
-      <em>contract</em>, not a limit: a <code>-100k</code> id means run solo, and a
-      100k session beside a 40k one over-subscribes the shared pool so both die.</p>
+    <p class="lede">Everything the fleet serves, and which server holds it. Ask
+      <code>/v1</code> for any id here and the balancer picks a server that
+      actually has it — a context tier is a <em>contract</em>, not a limit: a
+      <code>-100k</code> id means run solo, and a 100k session beside a 40k one
+      over-subscribes the shared pool so both die.</p>
     <div class="card scroll">
       <table><thead><tr>
-        <th>Served id</th><th>Kind</th><th class="num">Context</th>
+        <th>Served id</th><th>Served by</th><th>Kind</th><th class="num">Context</th>
         <th class="num">Seats</th><th>State</th><th>Aliases</th>
       </tr></thead><tbody id="catbody"></tbody></table>
+      <div class="note">Context and seats are this node's own presets. A model
+        only another server holds shows its host and that server's state — the
+        node cannot report a context tier it does not configure.</div>
     </div>
   </section>
 
@@ -374,6 +379,10 @@ function show(id, push){
   // credential, so it must not be gated behind the account panel -- doing that
   // left an API-key viewer staring at an empty Usage tab.
   if(id === 'chat') renderChat();
+  // The catalog is redrawn by the stats poll, but the fleet it joins against is
+  // fetched separately -- so opening this tab must fetch it and redraw at once,
+  // or the "Served by" column stays empty until the fleet happens to be loaded.
+  if(id === 'models') loadFleet().then(() => renderCatalog(CATALOG));
   if(id === 'keys') loadAccount();
   if(id === 'usage') loadUsage();
   if(id === 'servers') loadServers();
@@ -521,23 +530,89 @@ function gpuCard(g){
 
 // ---------- catalog + snippets ----------
 let CATALOG = [], TAB = 'curl', LAST_GPUS = [];
+// The fleet, shared by the Models and Servers panels. /api/servers is public and
+// carries each server's model list, so "who holds what" needs no new endpoint --
+// and this must be a shared cache rather than a second fetch, or the two panels
+// could disagree about the same fleet in the same second.
+let FLEET = [];
 function kindBadge(k){
   const cls = k === 'vision' ? 'v' : (k && k.indexOf('uncensored') === 0 ? 'u' : '');
   return '<span class="badge '+cls+'">'+(k||'text')+'</span>';
 }
+
+async function loadFleet(){
+  const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
+  if(r.ok) FLEET = r.data.servers || [];
+  return FLEET;
+}
+
+function serverLabel(s){
+  // The node's own card is "this node" everywhere else on the page; keeping the
+  // raw id here would make the same machine read as two different servers.
+  const name = s.id === 'local' ? 'this node' : s.id;
+  const cls = s.state === 'online' ? 'on' : '';
+  return '<span class="badge ' + cls + '" title="' + esc(s.state || 'unknown') + '">'
+    + esc(name) + '</span>';
+}
+
+// Which servers serve this id. Aliases count: a preset's alias IS a served id,
+// and a remote reports whichever names its own runtime answers to.
+function hostsOf(id, aliases){
+  const names = [id].concat(aliases || []);
+  return FLEET.filter(s => (s.models || []).some(m => names.indexOf(m) >= 0));
+}
+
+function hostCell(id, aliases){
+  const hosts = hostsOf(id, aliases);
+  if(!hosts.length){
+    // Configured here but not currently served by anything -- which is the
+    // truthful answer for a preset that needs a reload, and would otherwise be
+    // an empty cell that reads like a rendering fault.
+    return '<span class="sub">not loaded anywhere</span>';
+  }
+  return hosts.map(serverLabel).join(' ');
+}
+
 function renderCatalog(cat){
   CATALOG = cat || [];
-  $('catbody').innerHTML = CATALOG.map(m => `<tr>
+  const known = {};
+  CATALOG.forEach(m => { known[m.id] = 1; (m.aliases||[]).forEach(a => known[a] = 1); });
+
+  const rows = CATALOG.map(m => `<tr>
       <td><code>${m.id}</code></td>
+      <td>${hostCell(m.id, m.aliases)}</td>
       <td>${kindBadge(m.kind)}</td>
       <td class="num">${m.context ? m.context.toLocaleString() : '—'}</td>
       <td class="num">${m.slots ?? '—'}</td>
       <td>${m.resident ? '<span class="badge on">resident</span>' : '<span class="badge">reload needed</span>'}</td>
       <td class="sub">${(m.aliases||[]).join(', ') || '—'}</td>
-    </tr>`).join('') || '<tr><td colspan="6" class="sub">no models reported</td></tr>';
+    </tr>`);
+
+  // Models no preset here describes, because another server holds them. Without
+  // these the page would list what this node can load and call it the fleet --
+  // and /v1 would serve an id the Models page never mentioned.
+  const remote = [];
+  FLEET.forEach(s => (s.models || []).forEach(id => {
+    if(!known[id] && remote.indexOf(id) < 0) remote.push(id);
+  }));
+  remote.sort().forEach(id => rows.push(`<tr>
+      <td><code>${esc(id)}</code></td>
+      <td>${hostCell(id, [])}</td>
+      <td>${kindBadge(null)}</td>
+      <td class="num sub">—</td>
+      <td class="num sub">—</td>
+      <td><span class="badge">elsewhere</span></td>
+      <td class="sub">—</td>
+    </tr>`));
+
+  $('catbody').innerHTML = rows.join('')
+    || '<tr><td colspan="7" class="sub">no models reported</td></tr>';
+
+  // The picker offers everything /v1 will accept, remote models included.
+  const ids = CATALOG.map(m => m.id).concat(remote);
   const sel = $('msel'), prev = sel.value;
-  sel.innerHTML = CATALOG.map(m => `<option value="${m.id}">${m.id}</option>`).join('');
-  if(prev && CATALOG.some(m => m.id === prev)) sel.value = prev;
+  sel.innerHTML = ids.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+  if(prev && ids.indexOf(prev) >= 0) sel.value = prev;
   renderSnippet();
 }
 function snippetFor(kind, id, ctx){
@@ -829,7 +904,7 @@ async function loadServers(){
   let d = null, why = '';
   try{
     const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
-    if(r.ok) d = r.data;
+    if(r.ok){ d = r.data; FLEET = d.servers || []; }
     else why = r.status === 401 ? 'Sign in, or enter a key, to see the fleet.'
                                 : 'The node answered ' + r.status + '.';
   }catch(e){ why = 'The node is not answering.'; }
@@ -1390,6 +1465,12 @@ async function loadUsage(){
 show(location.hash.slice(1) || 'overview', false);
 tick(); setInterval(tick, 2000);
 loadAccount();
+// Once at boot so the Models table can say who holds what on the first draw,
+// then only while a panel that shows it is open.
+loadFleet().then(() => renderCatalog(CATALOG));
+setInterval(() => {
+  if(SECTION === 'models') loadFleet().then(() => renderCatalog(CATALOG));
+}, 15000);
 // Usage refreshes only while you are looking at it -- and it no longer waits for
 // a session, because the leaderboard is public. Gating this on authentication
 // left a visitor on the Usage tab watching numbers that never moved.
