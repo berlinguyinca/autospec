@@ -1,15 +1,20 @@
 # Self-registering GPU servers over a held-open connection — design
 
-**Status:** implemented and accepted 2026-08-20. The workstation runs the agent,
-its inference port is bound to loopback and its firewall exception is deleted --
-which was the acceptance criterion, since the whole justification is that the box
-needs no inbound port. Figures in `llm/linux-turing-dual/docs/measured-ceilings.md`.
-Amended in §11 after approval to cover static registration, measured priority, and
-non-Qwen model families.
+**Status:** the core agent transport was implemented and accepted 2026-08-20. The
+workstation runs the agent, its inference port is bound to loopback and its
+firewall exception is deleted -- which was the acceptance criterion, since the
+whole justification is that the box needs no inbound port. Figures in
+`llm/linux-turing-dual/docs/measured-ceilings.md`. Amended in §11 after approval to
+cover static registration, measured priority, and non-Qwen model families.
+§13 was approved on 2026-08-20; its Slurm lifecycle adapter and the nginx
+management-prefix route required to enrol and promote new servers are not yet
+implemented.
 
-**Supersedes nothing; extends** `2026-08-19-multitenant-keys-usage-federation-design.md`
-§6, which assumes **the node can reach the server**. Everything here is the
-inverse case: the server reaches the node, and keeps that connection open.
+The core transport **extends**
+`2026-08-19-multitenant-keys-usage-federation-design.md` §6, which assumes **the
+node can reach the server**. Everything here is the inverse case: the server
+reaches the node and keeps that connection open. For federated Slurm capacity,
+§13 **supersedes** the older workstation SSH-forward and holding-proxy path.
 
 ---
 
@@ -519,3 +524,123 @@ Nothing in routing may assume a model family. Concretely:
 * **Non-llama.cpp targets.** The agent forwards to an OpenAI-compatible endpoint;
   whether that is llama.cpp, vLLM or MLX is the target's business, but only
   llama.cpp is tested.
+
+---
+
+## 13. Amendment: contributor-owned scheduler workers
+
+Approved 2026-08-20. The fleet is not limited to machines owned by the gateway
+operator. Different users may contribute workstations or temporary scheduler
+allocations, and those servers appear and disappear without changing the public
+OpenAI-compatible endpoint.
+
+### 13.1 Identity belongs to a logical worker slot, not to a GPU model
+
+Every simultaneously connected worker has a unique `server_id` and its own
+`qts_` credential. The recommended scheduler form is
+`<site>-<owner>-<slot>`, for example `cluster-alice-01`.
+
+Do not put `rtx6000` or `a100` in the identity. A scheduler may land the same
+logical slot on different hardware after preemption. The agent advertises the
+cards it actually sees over the control connection and the dashboard shows that
+live evidence. Scheduling uses measured per-server, per-model performance rather
+than the declared card. The adapter must invalidate that server's prior throughput
+history when the observed hardware fingerprint changes, so a stable slot moved
+from a fast card to a slow one is not ranked by stale measurements.
+
+One stable id may follow a serially requeued job. Two concurrent allocations may
+not share it: the gateway rejects a second live control connection for an id that
+is already attached. A contributor who may run `N` jobs enrols `N` slot identities
+and gives each active allocation exactly one of them.
+
+The scheduler adapter claims a slot config under an atomic per-slot lock before
+submitting or starting the job and releases it when that allocation ends. Merely
+choosing the first filename in a directory permits two jobs to race into the same
+identity and makes the gateway reject one as a duplicate.
+
+The server record retains the attaching user's identity. Self-enrolment grants
+the owner a pinned `/u/<id>/v1` route; it does not grant placement in the shared
+`/v1` pool. Promotion remains an administrator decision and persists across
+ordinary disconnect/reconnect cycles for that stable id.
+
+### 13.2 The agent is a child of the allocation
+
+The scheduler job owns the complete serving lifecycle:
+
+1. Allocate the GPU and derive the preset from the hardware actually assigned.
+2. Start the OpenAI-compatible runtime on compute-node loopback.
+3. Verify `/v1/models` locally.
+4. Start `qwen-turing-agent` with the slot's private config, targeting that
+   loopback runtime.
+5. Keep the runtime and agent in the same job lifetime and terminate both when
+   the allocation ends.
+
+The resulting path is:
+
+```text
+external client -> public gateway /v1
+                -> reverse WSS pipe already opened by the allocation
+                -> compute-node loopback -> llama.cpp
+```
+
+There is no workstation hop, SSH forward, holding proxy, inbound inference port,
+or per-client provider configuration. The compute node needs outbound HTTPS/WSS
+to the gateway and no inbound reachability. When the job exits or is preempted,
+its control connection closes; the gateway marks the server offline, drops its
+idle pipes, removes its models from the routable fleet union, and routes around it.
+That connection lifecycle is the worker's **online lease**. Its durable identity
+remains registered, but offline, so the next allocation can reconnect without
+enrolling again.
+
+Running an always-on workstation agent in front of the old holding proxy is
+forbidden for fleet service. The proxy deliberately stays available while no GPU
+exists, but the gateway defines a tunnelled server's liveness by the agent control
+connection. Combining them would advertise stale capacity during queue and
+requeue gaps.
+
+### 13.3 Credentials and multi-user clusters
+
+Each contributor enrols their own slot identities. The durable agent configuration
+is stored in that contributor's private shared-storage directory with mode `0600`;
+it is never committed, printed in a job log, or passed on a command line. A
+single-use `qte_` token may bootstrap a slot, but only the resulting `qts_`
+credential is reused by later allocations.
+
+Revoking a contributor's server credential prevents future control and pipe
+connections without affecting their user API keys. Removing one slot never
+revokes another contributor or another slot owned by the same person.
+
+### 13.4 Model advertisement remains transparent
+
+The worker does not send a hand-written model catalog. The gateway asks the
+attached runtime for `/v1/models` through one of its pipes and admits only the ids
+that runtime reports. `/v1/models` on the public endpoint remains the deduplicated
+union of online, promoted workers, so adding an RTX 6000 that serves an existing
+Qwen id adds capacity without changing the client-visible catalog.
+
+The initial scheduler integration accepts only workers whose advertised ids are a
+subset of the established seven Qwen model ids. It adds capacity for those ids
+without inventing an eighth id or hiding the remaining models served elsewhere.
+This is an operational acceptance condition for the first integration, not a
+gateway-wide allow-list: §11.3 still permits an administrator to promote other
+OpenAI-compatible model families deliberately later.
+
+The outside client continues to use the ordinary `/v1` base. Eligibility filters
+by advertised model first; measured load, throughput, warm affinity and available
+pipes rank the remaining servers. Server identity, GPU placement and requeue are
+control-plane facts and never become client configuration.
+
+### 13.5 Deployment requirements added by this amendment
+
+* nginx must send the whole `/api/servers/` management prefix to the gateway, not
+  only the exact `/api/servers` collection path. Enrolment, promotion, priority
+  and detach are otherwise unreachable from the dashboard.
+* The compute node must prove outbound TLS access to the gateway before an
+  allocation is treated as federation-capable.
+* The Slurm job must not bind the inference runtime to `0.0.0.0`; the agent and
+  runtime share the compute node, so loopback is sufficient.
+* The legacy SSH supervisor and holding proxy remain historical diagnostics, not
+  part of the federated request path.
+* A live test passes only when the worker appears in `/api/servers`, reports its
+  observed card and model ids, serves a completion through public `/v1`, then
+  becomes offline after the allocation is cancelled without manual deregistration.

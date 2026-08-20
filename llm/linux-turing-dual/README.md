@@ -339,6 +339,38 @@ pool is an admin action, because a registered server declares its own model ids 
 attaching your own box is cheap, being inserted into everyone's default route is
 not.
 
+### Contributor and scheduler-owned servers
+
+Server names are unique, contributor-owned identities. For temporary scheduler
+capacity, name logical slots rather than hardware: `cluster-alice-01`, not
+`cluster-rtx6000`. The same slot may return on a different card after preemption;
+the agent reports the card it actually sees. Concurrent allocations require
+distinct ids and credentials because two live agents may not claim one name.
+
+The generic agent and gateway behavior below are implemented. The adapter that
+starts and stops that agent with each Slurm allocation and the nginx
+`/api/servers/` management-prefix route needed for new enrolment and promotion
+are approved but still pending.
+
+A Slurm allocation runs the agent **inside the serving job**, beside a runtime
+bound to compute-node loopback:
+
+```text
+client -> this gateway /v1 -> reverse WSS pipe -> allocation -> 127.0.0.1:8080
+```
+
+This replaces the old workstation SSH forward, holding proxy and per-client
+OpenCode provider. The compute node opens every connection outbound. Job exit or
+preemption closes the control connection, so this gateway marks the server
+offline and routes around it without a separate deregistration call. The public
+model list changes only when the promoted, online fleet's model union changes.
+For the initial scheduler integration, each contributed model list must be a
+subset of the established seven Qwen ids; the gateway remains capable of adding
+other administrator-approved model families later.
+
+The full identity, ownership, credential and Slurm lifecycle contract is in
+[the design amendment](../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md#13-amendment-contributor-owned-scheduler-workers).
+
 Balancing applies **only** to the endpoints that name a model — `chat/completions`,
 `completions`, `embeddings`, `rerank`. `/health`, `/slots`, `/metrics` and
 `/props` describe *this* box, so answering them from another machine would report

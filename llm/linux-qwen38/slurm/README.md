@@ -169,14 +169,58 @@ Two traps:
 
 ## Running it
 
-### First, name your site
+### Fleet mode: register directly from the allocation
+
+**Approved architecture; two deployment pieces are pending:** the Slurm lifecycle
+adapter and the gateway's nginx `/api/servers/` management-prefix route used to
+enrol and promote new workers. The scripts in this directory still execute the
+historical workstation SSH path until that migration lands.
+
+Fleet mode does **not** tunnel inference through the workstation. The serving job
+starts `qwen-turing-agent` beside llama.cpp; the agent opens a control connection
+and request pipes directly to the public gateway over WSS. The runtime binds
+compute-node loopback, because only the colocated agent needs to reach it:
+
+```text
+external client -> public OpenAI-compatible gateway /v1
+                -> reverse WSS pipe from the allocation
+                -> 127.0.0.1:8080 on the compute node
+```
+
+Each contributor owns uniquely named logical slots such as `cluster-alice-01` and
+`cluster-alice-02`, each with its own durable server credential in a private `0600`
+file on shared storage. Names identify slots, not cards: after preemption the
+same slot may return on a different GPU, and the agent advertises the hardware it
+actually sees. Simultaneous jobs require simultaneous unique slots.
+
+The job lifecycle is the registration lifecycle. Start llama.cpp, verify its
+local `/v1/models`, then start the agent. When Slurm cancels, expires or preempts
+the job, the agent connection closes and the gateway marks that slot offline and
+routes around it. No SSH forward, workstation proxy, inbound compute-node port,
+or client-specific provider is involved.
+
+The gateway probes the job's own `/v1/models`; the worker never maintains a
+second model catalog. Once an administrator promotes the stable slot into the
+balanced pool, later reconnects remain eligible. The public `/v1/models` remains
+the deduplicated union of models on online, promoted servers.
+
+The first scheduler integration accepts only a subset of the established seven
+Qwen ids. That keeps the current external catalog stable while still allowing a
+worker to contribute only the models its assigned GPU can serve.
+
+The implementation contract is
+[§13 of the registration design](../../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md#13-amendment-contributor-owned-scheduler-workers).
+
+### Site and scheduler configuration
+
+#### Name your site
 
 Every placeholder in this document — `<login-host>`, `<user>`,
 `<shared-storage>`, `<gpu-account>` — is a real value that is deliberately not
 committed, because this repository is public and a login host, an account name
 and a group's storage path are your institution's details to publish rather than
-ours. None of them is a secret; the tunnel authenticates with your existing SSH
-key.
+ours. The scheduler connection still authenticates with the contributor's
+existing SSH key; inference traffic does not use that connection.
 
 They live in one local file:
 
@@ -191,7 +235,15 @@ missing, rather than reaching `ssh` and failing on a hostname that does not
 resolve. An environment variable wins over the file, so
 `OPENCODE_SLURM_PARTITION=high opencode_slurm up` is a one-off, not an edit.
 
-### Then, one command from the workstation
+### Historical workstation tunnel path (superseded)
+
+The commands and measurements below describe the first, single-client deployment.
+They are retained because the scheduler, requeue and failure findings remain
+useful while the allocation launcher is migrated. They are **not** the federated
+request path: `opencode_slurm`, `slurm-proxy.py`, the SSH forward and the local
+`qwen-slurm` provider are superseded by the allocation-owned agent above.
+
+#### The former workstation command
 
 ```bash
 opencode_slurm                  # acquire a GPU, serve, tunnel, configure, launch
@@ -203,7 +255,7 @@ opencode_slurm --gpu nvidia_a100-sxm4-80gb --time 04:00:00
 It reuses a running job rather than starting a second one, and runs the setup
 job for you if llama.cpp or the weights are missing.
 
-### Staying connected
+#### How the former SSH path stayed connected
 
 Three processes, because the middle one is allowed to fail:
 

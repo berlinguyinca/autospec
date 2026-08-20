@@ -1038,10 +1038,11 @@ on the machine.
 
 ### B.9 Serving from a machine you do not control
 
-B.8 covers getting a job to run. This covers keeping a client usefully connected
-to one, which turns out to be a different problem: the node is borrowed, the
-allocation expires, and the only route in is a tunnel. Four things had to be
-true before a session survived that, and each was learned by watching it fail.
+B.8 covers getting a job to run. The preferred fleet path is now the outbound
+agent in B.8: the allocation registers with the gateway and needs no workstation
+SSH tunnel. This section retains the earlier direct-client tunnel findings for a
+site that cannot reach the gateway over outbound TLS. It is a legacy fallback,
+not the federated architecture.
 
 **Put an always-listening proxy in front of the tunnel.** If the listening
 socket *is* the SSH forward, then every reconnect, node change, and expired
@@ -1092,6 +1093,11 @@ Time-boxed access to a cluster is a different deployment from a workstation:
 no root, no systemd, no persistent service, and a job that disappears at
 walltime. The stack still works, but four assumptions in the main text break.
 
+**Implementation status:** direct agent registration is the approved fleet path,
+but the Slurm lifecycle adapter and gateway nginx management-prefix route are
+pending. The current `linux-qwen38/slurm/` launcher still implements the legacy
+workstation SSH path until those pieces land.
+
 **No root, no `/opt`, no service.** Install everything under `$HOME` or scratch
 and run the server as a foreground process inside the job. `install-node.sh`
 assumes systemd and a service account; on a cluster, use its pieces (weights
@@ -1107,21 +1113,27 @@ built — and the build needs `nvcc` from the cluster's toolchain, which usually
 means a `module load` and often a compute node. Build once into scratch and
 reuse it across jobs; do not rebuild per job.
 
-**The server is on a compute node, your editor is not.** Reach it with an SSH
-tunnel through the login node, then point the client at `127.0.0.1` as usual:
+**The server is on a compute node, and the gateway is not.** In fleet mode, run
+`qwen-turing-agent` inside the allocation and bind the inference runtime to
+loopback. The agent opens outbound WSS control and pipe connections, so neither
+the gateway nor a workstation needs an inbound route to the compute node:
 
 ```bash
-# in the job: bind to the node's address, print where it landed
+# in the job: the agent and runtime share loopback
 llama-server --models-preset presets.ini --models-max 1 \
-             --host 0.0.0.0 --port 8080
-
-# from the workstation: forward through the login node to that compute node
-ssh -N -L 8080:${COMPUTE_NODE}:8080 ${USER}@${LOGIN_HOST}
+             --host 127.0.0.1 --port 8080 &
+qwen-turing-agent run --config "$PRIVATE_SHARED_DIR/agent.json"
 ```
 
-Binding `0.0.0.0` on a shared cluster exposes an unauthenticated model server to
-every other user on the network. Set an API key, or bind to the node's private
-interface only, and check the site's policy before doing either.
+Each contributor enrols unique logical slots such as `<site>-<owner>-01`; each
+simultaneous allocation uses its own id and credential. The id stays stable when
+a requeued job lands on different hardware, while the agent advertises the GPU it
+actually sees. Closing the job closes the control connection, which removes that
+capacity from routing without a deregistration call.
+
+This supersedes the workstation proxy and SSH forward for federated service. Keep
+the legacy tunnel only as a private debugging fallback when compute nodes cannot
+make outbound TLS connections to the gateway.
 
 **Sizing for a time-boxed loan.** With days rather than minutes, spend the first
 hour measuring rather than assuming: `measure-ceiling.sh` for the real ceiling,
