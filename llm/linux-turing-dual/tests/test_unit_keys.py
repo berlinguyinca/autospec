@@ -9,22 +9,14 @@ import sys
 
 import pytest
 
+from conftest import load_script
+
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 
 
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    # Registered BEFORE exec, exactly as a real import does. `from __future__
-    # import annotations` makes @dataclass resolve its field types through
-    # sys.modules[cls.__module__], so a module loaded by path alone raises
-    # "NoneType has no attribute __dict__" at class-creation time.
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
 
-keys = _load("keys")
+keys = load_script("keys")
 
 
 def test_generate_round_trips_and_never_stores_the_secret():
