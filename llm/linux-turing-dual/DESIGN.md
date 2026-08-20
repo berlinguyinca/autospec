@@ -4,7 +4,7 @@
 
 - Status: Active
 - Last refreshed: 2026-08-20
-- Primary product surfaces: operational overview, model catalog, server fleet, usage, health
+- Primary product surfaces: operational overview, model/service catalog, rendered service guide, server fleet, usage, health
 - Evidence reviewed: `web/index.html`, `scripts/gateway.py`, `scripts/collect-stats.py`, `scripts/publicview.py`, `scripts/keystore.py`, and the live `/api/stats` and `/api/servers` payloads
 
 ## Brand
@@ -15,19 +15,19 @@
 
 ## Product goals
 
-- Goals: answer what is loaded, where work is running, which authenticated principals and credentials have requests active, how busy each server and GPU is, and what throughput has been observed
+- Goals: answer what is loaded, which quantized artifact each deployment serves, how to select a model and deployment/GPU route, where work is running, which authenticated principals and credentials have requests active, how busy each server and GPU is, and what throughput has been observed
 - Non-goals: historical time-series analytics, alerting, GPU-process attribution, or observing clients that bypass this gateway
 - Success signals: the landing view answers the five operational questions without opening another tab, while the existing detail pages remain authoritative drill-downs
 
 ## Personas and jobs
 
 - Primary personas: node operator, lab member choosing a model, and client owner diagnosing slow work
-- User jobs: confirm availability, distinguish queueing from slow inference, see loaded versus merely available models, and identify current gateway activity
+- User jobs: compare quantization/context/capability tradeoffs, select the balanced route or a specific deployment, confirm availability, distinguish queueing from slow inference, see loaded versus merely available models, and identify current gateway activity
 - Key contexts of use: desktop operations, narrow laptop screens, and an unauthenticated public status check
 
 ## Information architecture
 
-- Primary navigation: Operations, Models, Servers, Connect, Chat, Keys, Usage, Health
+- Primary navigation: Operations, Models, Servers, Guide, Connect, Chat, Keys, Usage, Health
 - Core routes/screens: `/#overview` remains the stable landing route and is labeled Operations
 - Content hierarchy: fleet state, active work, loaded models, server load, GPUs, then local queue detail
 
@@ -38,6 +38,7 @@
 - Public views expose aggregate load; members see only their own active identity details, and administrators may see every active identity
 - Detail tabs remain available; the landing view summarizes rather than duplicates their controls
 - Tradeoffs: the overview joins independently refreshed APIs, so it shows each source's freshness instead of pretending to be an atomic snapshot
+- Model ids choose weights and serving profiles; server routes choose deployments. A GPU is independently selectable only when it is exposed as its own runtime/server id.
 
 ## Visual language
 
@@ -51,7 +52,7 @@
 ## Components
 
 - Existing components to reuse: `.grid`, `.card`, `.badge`, `.bar`, `.scroll`, server badges, GPU cards, and problem rows
-- New/changed components: operations KPI strip, loaded-model rows, server-load table, and active-request/principal panel
+- New/changed components: operations KPI strip, loaded-model rows, service-catalog table, routing-flow diagram, deployment chooser, server-load table, and active-request/principal panel
 - Variants and states: live, measured baseline, unknown, stale, empty, public aggregate, and authenticated detail
 - Token/component ownership: `web/index.html`; no new design-system layer or dependency
 
@@ -81,7 +82,7 @@
 ## Content voice
 
 - Tone: plain, specific, and operational
-- Terminology: loaded, available, active, queued, live decode, measured prefill/decode, and unknown
+- Terminology: loaded, available, quantization variant, serving profile, deployment, active, queued, live decode, measured prefill/decode, and unknown
 - Microcopy rules: always name the observation window and never use “currently” for a historical aggregate
 
 ## Implementation constraints
@@ -89,7 +90,7 @@
 - Framework/styling system: framework-free HTML, CSS, and JavaScript plus Python standard-library services
 - Design-token constraints: extend existing CSS variables and components only
 - Performance constraints: no new request-path database scans; activity tracking is bounded without undercounting; probes stay on background timers; browser polls never overlap
-- Compatibility constraints: generic OpenAI-compatible servers may not report residency, so `loaded_models` is nullable
+- Compatibility constraints: generic OpenAI-compatible servers may not report residency or quantization, so both remain nullable and provenance-bearing
 - Test/screenshot expectations: test API projection and concurrency behavior first, run both node suites together, run structural validation, and visually inspect desktop and narrow layouts
 
 ## Open questions

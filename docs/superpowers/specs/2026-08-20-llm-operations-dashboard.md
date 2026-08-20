@@ -2,7 +2,7 @@
 
 ## Outcome
 
-The existing `/#overview` route becomes a fleet operations view that answers, without drill-down: which models are loaded, which servers and GPUs are carrying work, how many requests and authenticated principals are active, what is queued, and what throughput is live versus historically measured.
+The existing `/#overview` route becomes a fleet operations view that answers, without drill-down: which models and quantized artifacts are loaded, which servers and GPUs are carrying work, how many requests and authenticated principals are active, what is queued, and what throughput is live versus historically measured.
 
 The model, server, usage, and health pages remain drill-downs. The public page keeps aggregate operational visibility. A member additionally sees their own active credentials, while an administrator may see every active identity.
 
@@ -14,6 +14,7 @@ The model, server, usage, and health pages remain drill-downs. The public page k
 - `keystore.throughput()` already computes prefill and prediction rates over seven days; the fleet API currently drops prediction rate and does not name the window.
 - `INFLIGHT` counts requests per server, but no registry connects current work to a client.
 - Local decode rate is live when metrics are readable. Remote rates are completed-request history, not live GPU counters.
+- `config/model-artifacts.yaml` already records the artifact id, role, architecture, size, quantization method/variant/Dynamic generation, verified context, and declared GPU layout. It is the authoritative source for local model metadata.
 
 ## Approaches considered
 
@@ -40,6 +41,32 @@ Every server row keeps `models` as the available capability list and adds:
 - `loaded_models_observed_at: number | null`
 
 The gateway reads `status.value == "loaded"` from llama.cpp model entries. If no model entry exposes a residency status, it reports `null` and `unsupported`. A failed refresh may retain the last list only as `stale`. Public projection explicitly allow-lists these fields. Server rows also carry source-specific `models_observed_at`, `cards_observed_at`, and throughput refresh time; control-channel `last_seen` is not reused as model freshness.
+
+### Model and deployment metadata
+
+The installed dashboard reads the shipped artifact manifest and joins each preset to an artifact by the preset's model-file basename. The public model descriptor contains only an allow-listed profile:
+
+```json
+{
+  "role": "primary",
+  "architecture": "Qwen3_5ForConditionalGeneration",
+  "weight_size_bytes": 16464440224,
+  "verified_context_tokens": 99710,
+  "quantization": {"method": "gguf", "variant": "UD-Q4_K_M", "dynamic": "v3.0"}
+}
+```
+
+No repository path, revision, runtime argv, secret-file location, or raw `status` object is published. A remote OpenAI-compatible server may advertise the same allow-listed `quantization` object; otherwise its quantization is `null` with source `unsupported`. Quantization is deployment-specific because two servers may expose the same model id with different artifacts.
+
+`GET /v1/models` remains OpenAI-compatible and adds optional extension fields for `kind`, `context`, `slots`, `profile`, and `deployments`. Each deployment names its public server id, pinned route, loaded state, residency provenance, and safe quantization metadata. `/api/servers` remains the source for server-level GPU cards.
+
+The selection rule is deliberately two-dimensional:
+
+- `model` selects weights, quantization, capabilities, and context profile;
+- base URL `/u/<server>/v1` selects a deployment and therefore its server/GPU runtime;
+- plain `/v1` lets the scheduler select among eligible deployments by measured load, throughput, and warm affinity.
+
+A physical GPU is separately requestable only when its runtime is registered as a distinct server id. The gateway does not claim it can select one card inside a multi-GPU process.
 
 ### Throughput
 
@@ -72,6 +99,8 @@ The Operations page renders, in order:
 5. Active work: public counts, a member's own credential rows, or administrator-wide identity rows.
 6. Local queue and cumulative local counters: the existing cards, relabeled as local.
 
+The Models page adds quantization, artifact role, verified context, and deployment routes. A new deep-linkable `/#guide` page renders the service documentation: a routing-flow diagram, the model-versus-deployment decision rule, balanced and pinned examples, privacy/telemetry boundaries, and a live service-catalog table populated from the same APIs as discovery.
+
 There are no charts in this change: the current APIs do not carry time-series data, and a single bar would imply history that does not exist.
 
 ## Failure and privacy behavior
@@ -94,7 +123,10 @@ There are no charts in this change: the current APIs do not carry time-series da
 7. GPU cards include every reported card and retain their server label.
 8. Queue, activity, and throughput unknowns render as em dashes or explicit unknown states, never fabricated zeroes.
 9. Existing Models, Servers, Usage, and Health routes continue to work.
-10. The joint Python suites, structural suite, Go agent suite, and relevant repository validation pass, with any pre-existing baseline failure reported separately.
+10. `/v1/models` advertises each known local artifact's quantization/profile and per-server deployment routes without exposing paths, revisions, argv, or secret metadata.
+11. `/#guide` renders the routing branch from client to model eligibility to balanced or pinned deployment, with copyable examples for both paths.
+12. A server/GPU can be selected through its advertised `/u/<server>/v1` route; the guide states that an individual card needs its own registered runtime/server id.
+13. The joint Python suites, structural suite, Go agent suite, and relevant repository validation pass, with any pre-existing baseline failure reported separately.
 
 ## Deferred work
 
@@ -102,3 +134,4 @@ There are no charts in this change: the current APIs do not carry time-series da
 - Per-process GPU attribution.
 - Observing traffic that bypasses this gateway.
 - An atomic multi-source snapshot or a new telemetry database.
+- Composite `model@server` aliases or request-body rewriting; deployment selection remains an explicit base-URL choice.
