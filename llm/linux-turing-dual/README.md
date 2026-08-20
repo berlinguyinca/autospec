@@ -190,14 +190,34 @@ an uncensored one by the aligned model, is far worse than a refusal. So each
 server's own `/v1/models` is a routing input, and a model nothing here serves is a
 clean `404` rather than a substitution.
 
-Among the servers that *can* serve it, the balancer prefers **the one you used
-last**. That is not tidiness: a warm prefix cache was measured here at roughly a
-tenfold saving on prompt processing, so being sent elsewhere silently throws it
-away. Being able to serve the model always outranks that preference. Failing
-that it prefers this node, then any other eligible server. Every reply carries
-`X-Routed-To` and `X-Routed-Why`, and the Servers panel tallies the reasons —
-without that, "the balancer quietly became local-always" looks exactly like a
-balancer that is working.
+Among the servers that *can* serve it, the choice is **whichever will answer
+soonest**, from numbers this node measured rather than specifications anyone
+declared:
+
+```
+estimate = queued_ahead x mean_service  +  prompt_tokens / prefill_rate
+```
+
+`prefill_rate` and `mean_service` are rolling means from this node's own
+accounting for that server and that model — `prompt_ms` and `predicted_ms` come
+from the model's own response, so a box that claims a 4090 and delivers 40 tok/s
+is ranked by the 40. A server with no history yet gets a conservative default, so
+it is tried and thereby measured; scoring it zero would rank it first forever and
+scoring it infinity would mean it never ran again.
+
+Two things sit outside the estimate. An admin-set **priority** tier is absolute —
+only the highest tier with a candidate is considered, because an override whose
+effect depends on load is not an override. And **prefix-cache affinity** is a
+factor on the prefill term, worth about the tenfold it was measured at: the
+machine already holding your conversation is strongly preferred, but a warm
+server that is ten times slower still loses, which a plain "stick with the last
+one" rule gets wrong.
+
+Every reply carries `X-Routed-To`, `X-Routed-Why` and `X-Routed-Est` (the
+predicted seconds), and the Servers panel tallies the reasons and shows each
+server's measured rate. A scheduler that cannot be second-guessed from outside is
+one nobody can debug — and without the tally, "the balancer quietly became
+local-always" looks exactly like a balancer that is working.
 
 Pinning `/u/<id>/v1` names the *machine*, not the model — so the same check
 applies there, and a pin for a model that server has not got is refused rather
