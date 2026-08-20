@@ -19,7 +19,7 @@ import io
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 ws = load_script("wsframe")
 

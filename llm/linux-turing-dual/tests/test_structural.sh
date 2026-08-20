@@ -368,6 +368,27 @@ else
   ok "no page path leaves a response body unread"
 fi
 
+# --- the suites must collect TOGETHER, the way CI runs them -----------------
+# CI runs both node suites in ONE pytest invocation, which puts both tests
+# directories on sys.path. A test module importing the bare name `conftest` then
+# gets whichever directory sorted first -- the other node's, which has no
+# load_script. Every module here failed to import: 14 collection errors, the
+# whole suite silently not running, while invoking each directory on its own
+# stayed green. Hence a uniquely-named nodescripts.py and this check.
+#
+# Asserted by actually collecting, not by grepping for the old symptom: the next
+# instance of this will have a different shape and the same consequence.
+suites="${NODE}/tests $(dirname "${NODE}")/linux-qwen38/tests"
+if ! python3 -c "import pytest" >/dev/null 2>&1; then
+  ok "joint collection skipped (no pytest here)"
+elif grep -rlEq "^(from conftest import|import conftest)" ${NODE}/tests/*.py 2>/dev/null; then
+  bad "a test module imports the bare name 'conftest', which the other node suite shadows"
+elif ! python3 -m pytest -q -p no:cacheprovider --collect-only ${suites} >/dev/null 2>&1; then
+  bad "the node suites do not collect together the way CI runs them"
+else
+  ok "both node suites collect in one pytest run, as CI invokes them"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 

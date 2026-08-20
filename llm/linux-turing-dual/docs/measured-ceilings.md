@@ -61,11 +61,24 @@ is the thing the guard exists to prevent. Check 7 of the structural suite is the
 secret-free companion: no literal IPv4 under the node directory at all, since
 every address comes from `site.conf` at runtime.
 
-A note on collection: `llm/linux-qwen38/tests/conftest.py` used to ignore
-`test_*.py` wholesale to keep its standalone script-suites out of pytest. That
-silently swallowed a genuine pytest module added beside them — it passed when
-named explicitly and never ran under directory collection. Ignoring is now by
-name, with a `test_unit_*.py` convention for real pytest modules.
+Two notes on collection, both of the same species — a suite that looked green
+while not running.
+
+`llm/linux-qwen38/tests/conftest.py` used to ignore `test_*.py` wholesale to keep
+its standalone script-suites out of pytest. That silently swallowed a genuine
+pytest module added beside them — it passed when named explicitly and never ran
+under directory collection. Ignoring is now by name, with a `test_unit_*.py`
+convention for real pytest modules.
+
+The command above names both suites, which puts **both** tests directories on
+`sys.path`. A test module importing the bare name `conftest` therefore got
+whichever directory sorted first — the other node's, which has no `load_script`.
+Measured: 14 collection errors and the entire dual-Turing suite not running,
+while `pytest` invoked inside each directory separately reported 466 passing. The
+shared helper is now `llm/linux-turing-dual/tests/nodescripts.py`, a name no
+sibling suite can shadow, and there is no `conftest.py` there at all. The
+structural suite runs `--collect-only` over the exact CI command, so a future
+collision fails a check rather than quietly emptying the run.
 
 ---
 

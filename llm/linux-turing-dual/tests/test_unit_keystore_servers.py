@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 keys = load_script("keys")
 ks = load_script("keystore")

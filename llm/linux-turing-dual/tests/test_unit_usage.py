@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 HERE = pathlib.Path(__file__).resolve().parent
 SCRIPTS = HERE.parent / "scripts"

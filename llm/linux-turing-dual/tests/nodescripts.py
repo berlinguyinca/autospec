@@ -1,4 +1,15 @@
-"""Shared test helpers.
+"""Shared test helpers, under a name no other suite can shadow.
+
+This deliberately is NOT conftest.py. Both node suites are collected in one
+pytest run (`pytest llm/linux-turing-dual/tests llm/linux-qwen38/tests`), which
+puts BOTH directories on sys.path -- so a test module asking for the bare name
+`conftest` got whichever directory came first. It got the other node's, which
+has no load_script, and every module here failed to import: 14 collection
+errors, the entire suite silently not running in CI while it passed when each
+directory was invoked on its own.
+
+A unique module name is the whole fix. There is no conftest.py here any more,
+because there is nothing left for one to do.
 
 `load_script` exists because these scripts are executables with hyphens and no
 package, so they cannot be imported normally. It registers the module in

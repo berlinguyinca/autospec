@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 gw = load_script("gateway")
 keys = load_script("keys")

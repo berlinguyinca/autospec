@@ -12,7 +12,7 @@ Two properties matter more than the happy path, and both are asserted here:
 """
 import json
 
-from conftest import load_script
+from nodescripts import load_script
 
 mp = load_script("modelpeek")
 

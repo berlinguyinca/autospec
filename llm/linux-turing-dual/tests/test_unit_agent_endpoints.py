@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 from fakeagent import FakeAgent
 
 gw = load_script("gateway")

@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 

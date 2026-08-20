@@ -12,7 +12,7 @@ The rules worth defending, and each has a test that fails if the rule is dropped
 """
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 sch = load_script("scheduler")
 

@@ -19,7 +19,7 @@ import time
 import jwt
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 

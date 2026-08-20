@@ -6,7 +6,7 @@ misconfigured box is indistinguishable from a box nobody configured.
 """
 import pytest
 
-from conftest import load_script
+from nodescripts import load_script
 
 up = load_script("upstreams")
 
