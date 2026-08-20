@@ -29,6 +29,14 @@ from dataclasses import dataclass, field
 
 import keys as _keys
 
+# Duplicated from upstreams.RESERVED rather than imported, to keep this module
+# free of the registry parser (and of pyyaml). A test asserts the two agree --
+# a server called `auto` would shadow the balancer itself.
+RESERVED_SERVER_IDS = ("local", "auto")
+_SERVER_ID_RE = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+SERVER_KINDS = ("tunnel", "static", "file")
+ENROL_TTL_SECONDS = 1800
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   sub           TEXT PRIMARY KEY,
@@ -67,6 +75,41 @@ CREATE TABLE IF NOT EXISTS usage_events (
   synced            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_sync_idx ON usage_events (synced);
+
+-- Servers, and the tokens that enrol them.
+--
+-- NODE-LOCAL ON PURPOSE, unlike keys and usage. A tunnelled server's capacity
+-- exists only where its pipes are held, so a row replicated to another node
+-- would describe capacity that node cannot reach. When a second node exists and
+-- static servers want sharing, this becomes a registry table like the others --
+-- until then, replicating it would be inventing a distributed problem.
+CREATE TABLE IF NOT EXISTS servers (
+  server_id    TEXT PRIMARY KEY,
+  sub          TEXT,                          -- NULL for a file-configured entry
+  kind         TEXT NOT NULL,                 -- tunnel | static | file
+  base_url     TEXT,                          -- static/file only
+  note         TEXT,
+  gpus         TEXT,
+  priority     INTEGER NOT NULL DEFAULT 0,
+  pool_member  INTEGER NOT NULL DEFAULT 0,
+  secret_hash  TEXT,                          -- NULL for a file entry
+  created_at   TEXT NOT NULL,
+  revoked_at   TEXT,
+  last_seen    TEXT
+);
+CREATE TABLE IF NOT EXISTS enrol_tokens (
+  token_id     TEXT PRIMARY KEY,
+  server_id    TEXT NOT NULL,
+  sub          TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  base_url     TEXT,
+  note         TEXT,
+  gpus         TEXT,
+  secret_hash  TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  used_at      TEXT
+);
 """
 
 
@@ -101,6 +144,31 @@ class KeyRow:
         return {"key_id": self.key_id, "sub": self.sub, "label": self.label,
                 "created_at": self.created_at, "expires_at": self.expires_at,
                 "revoked_at": self.revoked_at, "last_used_at": self.last_used_at}
+
+
+@dataclass
+class ServerRow:
+    server_id: str
+    sub: str | None
+    kind: str
+    base_url: str | None = None
+    note: str | None = None
+    gpus: str | None = None
+    priority: int = 0
+    pool_member: bool = False
+    created_at: str = ""
+    revoked_at: str | None = None
+    last_seen: str | None = None
+
+    def as_public(self) -> dict:
+        """What the dashboard may see. No credential hash, and for a tunnelled
+        server no address either -- there is none, and inventing a field for it
+        would invite someone to fill it in."""
+        return {"server_id": self.server_id, "sub": self.sub, "kind": self.kind,
+                "base_url": self.base_url if self.kind != "tunnel" else None,
+                "note": self.note, "gpus": self.gpus, "priority": self.priority,
+                "pool_member": self.pool_member, "created_at": self.created_at,
+                "revoked_at": self.revoked_at, "last_seen": self.last_seen}
 
 
 class KeyStore:
@@ -490,3 +558,237 @@ class KeyStore:
                 "registry_reachable": self._pg_ok,
                 "registry_error": self._pg_error,
                 "pending_usage": len(self.pending_usage_ids())}
+
+    # --- servers -----------------------------------------------------------
+    def _validate_server_id(self, server_id: str) -> None:
+        """Refuse an id that cannot be a path segment, is reserved, or is taken.
+
+        Raised rather than returned because every caller is a person attaching a
+        machine and needs to be told which rule they hit.
+        """
+        if not _SERVER_ID_RE.match(server_id or ""):
+            raise ValueError("a server id is lowercase letters, digits and "
+                             "dashes, starting with a letter or digit")
+        if server_id in RESERVED_SERVER_IDS:
+            raise ValueError(f"'{server_id}' is reserved")
+        with self._lock, self._conn() as c:
+            taken = c.execute("SELECT 1 FROM servers WHERE server_id=? "
+                              "AND revoked_at IS NULL", (server_id,)).fetchone()
+            pending = c.execute("SELECT 1 FROM enrol_tokens WHERE server_id=? "
+                                "AND used_at IS NULL", (server_id,)).fetchone()
+        if taken or pending:
+            raise ValueError(f"'{server_id}' is already registered or being "
+                             f"enrolled")
+
+    def enrol_token(self, sub: str, server_id: str, *, kind: str = "tunnel",
+                    base_url: str | None = None, note: str | None = None,
+                    gpus: str | None = None, now: float | None = None) -> str:
+        """A single-use token for attaching one server. Shown once.
+
+        A static server needs an address up front, because the node dials it; a
+        tunnelled one must not carry one, because the node never dials it and a
+        stored address would be a lie that outlives the pipe.
+        """
+        import time
+        at = time.time() if now is None else now
+        if kind not in ("tunnel", "static"):
+            raise ValueError("a server is attached as 'tunnel' or 'static'")
+        if kind == "static" and not (base_url or "").startswith(("http://", "https://")):
+            raise ValueError("a static server needs a base_url starting with "
+                             "http:// or https://")
+        if kind == "tunnel" and base_url:
+            raise ValueError("a tunnelled server has no address of its own")
+        self._validate_server_id(server_id)
+        full, token_id, secret_hash = _keys.generate(_keys.PREFIX_ENROL)
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO enrol_tokens (token_id, server_id, sub, kind, "
+                      "base_url, note, gpus, secret_hash, created_at, expires_at) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (token_id, server_id, sub, kind, base_url, note, gpus,
+                       secret_hash, _iso(at), _iso(at + ENROL_TTL_SECONDS)))
+        return full
+
+    def redeem_token(self, token: str, *,
+                     now: float | None = None) -> tuple[str, str] | None:
+        """(server_id, server credential), or None.
+
+        None covers every failure -- unknown, expired, already used, wrong secret
+        -- because the caller is unauthenticated and distinguishing them is an
+        oracle. The row is marked used in the SAME transaction that creates the
+        server, so a race cannot mint two credentials from one token.
+        """
+        import time
+        at = time.time() if now is None else now
+        parsed = _keys.parse(token, _keys.PREFIX_ENROL)
+        if not parsed:
+            return None
+        token_id, secret = parsed
+        full, _, secret_hash = _keys.generate(_keys.PREFIX_SERVER)
+        with self._lock, self._conn() as c:
+            row = c.execute("SELECT * FROM enrol_tokens WHERE token_id=?",
+                            (token_id,)).fetchone()
+            if not row or row["used_at"]:
+                return None
+            if not _keys.verify(secret, row["secret_hash"]):
+                return None
+            if _iso(at) > row["expires_at"]:
+                return None
+            c.execute("UPDATE enrol_tokens SET used_at=? WHERE token_id=? "
+                      "AND used_at IS NULL", (_iso(at), token_id))
+            if c.total_changes == 0:
+                return None                      # lost the race; mint nothing
+            # A retired record with this id is REPLACED, because re-attaching a
+            # box under its old name is the ordinary case and forcing people to
+            # invent box2 would be worse. Attribution history is not lost by
+            # this: usage_events records the upstream as a string, so it survives
+            # independently -- but it also means a re-used id inherits the old
+            # one's usage rows, which is why the panel shows the owner and the
+            # attach date rather than treating the name as an identity.
+            c.execute("DELETE FROM servers WHERE server_id=? "
+                      "AND revoked_at IS NOT NULL", (row["server_id"],))
+            c.execute("INSERT INTO servers (server_id, sub, kind, base_url, note, "
+                      "gpus, priority, pool_member, secret_hash, created_at) "
+                      "VALUES (?,?,?,?,?,?,0,0,?,?)",
+                      (row["server_id"], row["sub"], row["kind"], row["base_url"],
+                       row["note"], row["gpus"], secret_hash, _iso(at)))
+        return row["server_id"], full
+
+    def authenticate_server(self, presented: str,
+                            now: float | None = None) -> ServerRow | None:
+        """Resolve a server credential. Never accepts a user key: the namespace
+        is part of the pattern, so a qtk_ fails to parse here."""
+        parsed = _keys.parse(presented or "", _keys.PREFIX_SERVER)
+        if not parsed:
+            return None
+        server_id, secret = parsed
+        with self._lock, self._conn() as c:
+            row = c.execute("SELECT * FROM servers WHERE secret_hash IS NOT NULL "
+                            "AND revoked_at IS NULL").fetchall()
+        for r in row:
+            if _keys.verify(secret, r["secret_hash"]):
+                return self._server_row(r)
+        return None
+
+    @staticmethod
+    def _server_row(r) -> ServerRow:
+        return ServerRow(server_id=r["server_id"], sub=r["sub"], kind=r["kind"],
+                         base_url=r["base_url"], note=r["note"], gpus=r["gpus"],
+                         priority=r["priority"],
+                         pool_member=bool(r["pool_member"]),
+                         created_at=r["created_at"], revoked_at=r["revoked_at"],
+                         last_seen=r["last_seen"])
+
+    def server(self, server_id: str) -> ServerRow | None:
+        with self._lock, self._conn() as c:
+            r = c.execute("SELECT * FROM servers WHERE server_id=?",
+                          (server_id,)).fetchone()
+        return self._server_row(r) if r else None
+
+    def servers(self, *, sub: str | None = None,
+                include_revoked: bool = False) -> list[dict]:
+        q = "SELECT * FROM servers"
+        where, args = [], []
+        if sub:
+            where.append("sub=?")
+            args.append(sub)
+        if not include_revoked:
+            where.append("revoked_at IS NULL")
+        if where:
+            q += " WHERE " + " AND ".join(where)
+        with self._lock, self._conn() as c:
+            rows = c.execute(q + " ORDER BY server_id", args).fetchall()
+        return [self._server_row(r).as_public() for r in rows]
+
+    def set_pool_member(self, server_id: str, value: bool) -> bool:
+        return self._update_server(server_id, "pool_member", 1 if value else 0)
+
+    def set_priority(self, server_id: str, value: int) -> bool:
+        """The operator's tier. Bounded so a typo cannot create a tier nothing
+        else can ever reach."""
+        if not -10 <= int(value) <= 10:
+            raise ValueError("priority is between -10 and 10")
+        return self._update_server(server_id, "priority", int(value))
+
+    def _update_server(self, server_id: str, column: str, value) -> bool:
+        # The column name is never caller-supplied -- only these two methods
+        # reach here -- but it is checked anyway, because a query built from a
+        # string is one refactor away from being built from a request.
+        if column not in ("pool_member", "priority", "last_seen"):
+            raise ValueError(f"not an updatable column: {column}")
+        with self._lock, self._conn() as c:
+            cur = c.execute(f"UPDATE servers SET {column}=? WHERE server_id=? "
+                            f"AND revoked_at IS NULL", (value, server_id))
+            return cur.rowcount > 0
+
+    def revoke_server(self, server_id: str, *, sub: str | None = None,
+                      is_admin: bool = False, now: float | None = None) -> bool:
+        """Revoke a server. The owner or an admin; a file entry never.
+
+        A file entry is configuration: revoking it here would be undone by the
+        next registry reload, and a button that silently does nothing is worse
+        than no button.
+        """
+        import time
+        at = time.time() if now is None else now
+        with self._lock, self._conn() as c:
+            row = c.execute("SELECT * FROM servers WHERE server_id=? "
+                            "AND revoked_at IS NULL", (server_id,)).fetchone()
+            if not row:
+                return False
+            if row["kind"] == "file":
+                return False
+            if not is_admin and (sub is None or row["sub"] != sub):
+                return False
+            c.execute("UPDATE servers SET revoked_at=? WHERE server_id=?",
+                      (_iso(at), server_id))
+        return True
+
+    def touch_server(self, server_id: str, now: float | None = None) -> None:
+        import time
+        self._update_server(server_id, "last_seen",
+                            _iso(time.time() if now is None else now))
+
+    # --- what the scheduler measures --------------------------------------
+    def throughput(self, *, window_seconds: float = 7 * 86400,
+                   now: float | None = None) -> dict:
+        """Measured rates per (upstream, model), plus a per-upstream fallback.
+
+        MEASURED, not declared. A box that claims a 4090 and delivers 40 tok/s is
+        ranked by the 40, and this node already holds the evidence: prompt_ms and
+        predicted_ms come from the model's own response, exactly.
+
+        Keyed by (upstream, model) because rates differ by an order of magnitude
+        between a 9B and a 27B on the same card; (upstream, None) aggregates for
+        a model that server has not served yet.
+
+        Rows with no timings, or marked truncated, are excluded -- a request whose
+        counts were lost would otherwise look like an infinitely fast one.
+        """
+        import time
+        at = time.time() if now is None else now
+        since = _iso(at - window_seconds)
+        with self._lock, self._conn() as c:
+            rows = c.execute(
+                "SELECT upstream, model, prompt_tokens, completion_tokens, "
+                "prompt_ms, predicted_ms FROM usage_events "
+                "WHERE ts >= ? AND truncated = 0 AND prompt_ms IS NOT NULL "
+                "AND prompt_ms > 0", (since,)).fetchall()
+        acc: dict = {}
+        for r in rows:
+            for key in ((r["upstream"], r["model"]), (r["upstream"], None)):
+                a = acc.setdefault(key, {"ptok": 0, "pms": 0.0, "ctok": 0,
+                                         "cms": 0.0, "samples": 0})
+                a["ptok"] += r["prompt_tokens"] or 0
+                a["pms"] += r["prompt_ms"] or 0.0
+                a["ctok"] += r["completion_tokens"] or 0
+                a["cms"] += r["predicted_ms"] or 0.0
+                a["samples"] += 1
+        out = {}
+        for key, a in acc.items():
+            secs = (a["pms"] + a["cms"]) / 1000.0
+            out[key] = {
+                "prefill_rate": (a["ptok"] / (a["pms"] / 1000.0)) if a["pms"] else None,
+                "predict_rate": (a["ctok"] / (a["cms"] / 1000.0)) if a["cms"] else None,
+                "mean_service": (secs / a["samples"]) if a["samples"] else None,
+                "samples": a["samples"]}
+        return out

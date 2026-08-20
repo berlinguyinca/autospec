@@ -22,6 +22,18 @@ user-chosen, this reasoning stops holding and a KDF becomes required.
 
 A Cognito `sub` must NEVER be accepted as a key: it is neither secret nor
 revocable. See the design's section 2.2.
+
+THREE NAMESPACES, NEVER INTERCHANGEABLE
+
+    qtk_  a USER key       -- authenticates inference
+    qts_  a SERVER key     -- authenticates an agent offering capacity
+    qte_  an ENROLMENT key -- single use, traded once for a qts_
+
+They share this format and nothing else. The prefix is part of the pattern, so
+`parse()` for one namespace refuses the others by shape before any lookup
+happens -- which is the mechanism that stops a server credential from becoming an
+inference key. The cheap alternative, one regex with an alternation, would make
+every caller responsible for checking which kind it got.
 """
 from __future__ import annotations
 
@@ -31,17 +43,27 @@ import hmac
 import re
 import secrets
 
-PREFIX = "qtk"
+PREFIX = "qtk"              # a user key
+PREFIX_SERVER = "qts"       # a server credential
+PREFIX_ENROL = "qte"        # a single-use enrolment token
 KEY_ID_LEN = 12
 SECRET_LEN = 32
 
 # Lowercase base32 without padding. Restricting the alphabet up front means a
 # malformed key is rejected by shape before anything touches the database.
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
-_KEY_RE = re.compile(
-    r"^%s_([%s]{%d})_([%s]{%d})$"
-    % (re.escape(PREFIX), _ALPHABET, KEY_ID_LEN, _ALPHABET, SECRET_LEN)
-)
+
+
+def _pattern(prefix: str):
+    return re.compile(
+        r"^%s_([%s]{%d})_([%s]{%d})$"
+        % (re.escape(prefix), _ALPHABET, KEY_ID_LEN, _ALPHABET, SECRET_LEN))
+
+
+# One compiled pattern per namespace, built once. A single pattern with an
+# alternation would match all three and push the "which kind is this?" question
+# out to every caller, which is exactly where it would eventually be forgotten.
+_PATTERNS = {p: _pattern(p) for p in (PREFIX, PREFIX_SERVER, PREFIX_ENROL)}
 
 
 def _token(n_chars: int) -> str:
@@ -51,16 +73,18 @@ def _token(n_chars: int) -> str:
     return base64.b32encode(raw).decode().lower().rstrip("=")[:n_chars]
 
 
-def generate() -> tuple[str, str, str]:
+def generate(prefix: str = PREFIX) -> tuple[str, str, str]:
     """Return (full_key, key_id, secret_hash). The full key is the ONLY time the
     secret exists in a returnable form; the caller must show it once and drop
     it."""
+    if prefix not in _PATTERNS:
+        raise ValueError(f"unknown credential namespace {prefix!r}")
     key_id = _token(KEY_ID_LEN)
     secret = _token(SECRET_LEN)
-    return f"{PREFIX}_{key_id}_{secret}", key_id, hash_secret(secret)
+    return f"{prefix}_{key_id}_{secret}", key_id, hash_secret(secret)
 
 
-def parse(presented: str) -> tuple[str, str] | None:
+def parse(presented: str, prefix: str = PREFIX) -> tuple[str, str] | None:
     """Split a presented credential into (key_id, secret), or None if it is not
     shaped like one of ours.
 
@@ -71,15 +95,18 @@ def parse(presented: str) -> tuple[str, str] | None:
     """
     if not isinstance(presented, str):
         return None
-    m = _KEY_RE.match(presented)
+    pattern = _PATTERNS.get(prefix)
+    if pattern is None:
+        raise ValueError(f"unknown credential namespace {prefix!r}")
+    m = pattern.match(presented)
     if not m:
         return None
     return m.group(1), m.group(2)
 
 
-def public_id(presented: str) -> str | None:
+def public_id(presented: str, prefix: str = PREFIX) -> str | None:
     """The non-secret half, for display and attribution. None if malformed."""
-    parsed = parse(presented)
+    parsed = parse(presented, prefix)
     return parsed[0] if parsed else None
 
 

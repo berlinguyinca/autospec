@@ -80,3 +80,43 @@ def test_verify_rejects_an_empty_or_bogus_stored_hash():
     _, secret = keys.parse(full)
     assert not keys.verify(secret, "")
     assert not keys.verify(secret, "not-a-hash")
+
+
+# --- the three namespaces ---------------------------------------------------
+
+def test_each_namespace_generates_its_own_shape():
+    for prefix in (keys.PREFIX, keys.PREFIX_SERVER, keys.PREFIX_ENROL):
+        full, key_id, _ = keys.generate(prefix)
+        assert full.startswith(prefix + "_")
+        assert keys.parse(full, prefix) is not None
+        assert keys.public_id(full, prefix) == key_id
+
+
+def test_a_credential_from_one_namespace_is_refused_by_the_others():
+    """The mechanism that stops a server credential becoming an inference key.
+    Checked in every direction, because one missing pair is the whole hole."""
+    made = {p: keys.generate(p)[0]
+            for p in (keys.PREFIX, keys.PREFIX_SERVER, keys.PREFIX_ENROL)}
+    for owner, full in made.items():
+        for other in made:
+            if other == owner:
+                assert keys.parse(full, other) is not None
+            else:
+                assert keys.parse(full, other) is None, (owner, other)
+
+
+def test_the_default_namespace_is_the_user_key():
+    """Every existing caller passes no prefix, so the default must stay qtk_ --
+    and must refuse a server credential without being asked to."""
+    assert keys.parse(keys.generate()[0]) is not None
+    assert keys.parse(keys.generate(keys.PREFIX_SERVER)[0]) is None
+
+
+def test_an_unknown_namespace_is_an_error_not_a_silent_pass():
+    # A typo in a prefix must not degrade to "matches nothing", which would read
+    # as "credential refused" and be debugged for hours.
+    with pytest.raises(ValueError):
+        keys.generate("qtx")
+    with pytest.raises(ValueError):
+        keys.parse("qtx_aaaaaaaaaaaa_" + "a" * 32, "qtx")
+    assert keys.generate(keys.PREFIX_SERVER)[0].startswith("qts_")
