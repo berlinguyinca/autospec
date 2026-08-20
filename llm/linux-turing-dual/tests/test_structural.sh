@@ -246,6 +246,25 @@ else
   ok "installer ships every module the gateway imports"
 fi
 
+# --- the new-key reveal must survive its own refresh ------------------------
+# The bug this guards: doMint() wrote the key into #minted and then called
+# loadKeys(), which rewrites the whole keysbox -- #minted included. The reveal
+# was destroyed in the same task that created it, so a newly created key was
+# never visible for even one frame, with no way to recover it. Reproduced in a
+# browser, not inferred.
+#
+# The invariant is ownership: #minted lives inside loadKeys()'s template, so
+# loadKeys() is the only function that may fill it. Anything writing it directly
+# is the bug coming back.
+page="${NODE}/web/index.html"
+if grep -q "\$('minted')\.innerHTML" "$page"; then
+  bad "web/index.html writes #minted directly; it must render from state via mintedBox()"
+elif ! grep -q "id=\"minted\">' + mintedBox()" "$page"; then
+  bad "web/index.html must render the key reveal from state inside the keys panel"
+else
+  ok "the new-key reveal is rendered by the panel that owns it"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 
