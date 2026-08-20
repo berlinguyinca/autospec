@@ -4,6 +4,12 @@
 WHERE THIS SITS
 
     client -> nginx -> THIS (127.0.0.1) -> llama.cpp (127.0.0.1)
+                                     `-> another GPU server
+
+THE DEFAULT ROUTE IS THE VIRTUAL SERVER. `/v1` does not mean "this machine", it
+means "whichever machine should serve this" -- so every client already pointed at
+this node is load-balanced without touching its configuration. `/u/local/v1`
+pins this machine and `/u/<id>/v1` pins a named one.
 
 and why it is a separate process from the dashboard: the two have OPPOSITE
 correct behaviour when they break. The dashboard's queue snapshot is telemetry,
@@ -21,7 +27,11 @@ FIVE PROPERTIES THIS FILE MUST KEEP
     second queue here would make that panel lie.
  3. The client's credential is never forwarded upstream. llama.cpp holds its own
     internal key, which only this process knows.
- 4. Token counts come from the response, so the request body is never parsed.
+ 4. Token counts come from the response. The request body is PEEKED for routing
+    -- a bounded 8 KB prefix, to learn which model was asked for -- and never
+    parsed for accounting. See modelpeek.py for why that peek is unavoidable:
+    llama.cpp answers a request for a model it has not got with whatever it HAS
+    got, so a balancer that cannot read the model cannot avoid wrong answers.
  5. Nothing per-user reaches a public payload. This process serves no public
     endpoint at all.
 """
@@ -43,6 +53,7 @@ from http.cookies import SimpleCookie
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import keys as _keys            # noqa: E402
+import modelpeek as _peek       # noqa: E402
 import oidc as _oidc            # noqa: E402
 import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
@@ -113,6 +124,18 @@ UP_KEYS: dict[str, str] = {}
 # warm. Seeded from recorded usage on first miss, so a gateway restart does not
 # scatter everybody onto cold slots.
 LAST_SERVER: dict[str, str] = {}
+# This node's own liveness and model list, from the same kind of probe as a
+# remote's -- because the runtime is a SEPARATE process. A live gateway with a
+# dead runtime would otherwise read as "local is fine" and pin every balanced
+# request to a server that cannot answer.
+LOCAL_STATE: dict = {"state": "unknown", "models": [], "error": None,
+                     "last_seen": None}
+# How balancing decisions came out, by reason. Counted because a balancer that
+# quietly stops balancing -- every request going local because the peek keeps
+# failing -- looks exactly like a working one from outside.
+ROUTE_WHY: dict[str, int] = {}
+# Returned by the planner when it has already answered the request.
+ANSWERED = object()
 # --- background work, never on the request path -----------------------------
 
 def _jwks(force: bool = False) -> dict:
@@ -202,6 +225,53 @@ def _poll_upstreams() -> None:
                               "last_seen": prev.get("last_seen")}
 
 
+def _poll_local() -> None:
+    """Probe the local runtime: is it up, and what does it serve?
+
+    `/health` is the liveness signal and NOT an inference call, so this stays
+    off the request path. It was checked against a live model swap before being
+    wired into routing: it answered 200 throughout a 7.5 s swap, so a swap does
+    not make this node look offline. That matters -- flapping would scatter
+    callers onto cold slots, destroying the prefix-cache affinity that balancing
+    exists to protect.
+    """
+    host, port = CFG.upstream_host, CFG.upstream_port
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.request("GET", "/health")
+        r = conn.getresponse()
+        r.read()
+        conn.close()
+        if r.status != 200:
+            raise RuntimeError(f"HTTP {r.status}")
+    except Exception as exc:
+        # Keep the last known model list: it describes what this node CAN serve,
+        # which does not stop being true because the runtime is restarting.
+        LOCAL_STATE.update(state="offline", error=str(exc)[:120])
+        return
+
+    models = LOCAL_STATE.get("models") or []
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=6)
+        headers = {"Authorization": "Bearer " + INTERNAL_KEY} if INTERNAL_KEY else {}
+        conn.request("GET", "/v1/models", headers=headers)
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        if r.status == 200:
+            data = json.loads(body).get("data") or []
+            # IDS ONLY, and nothing else from this payload ever leaves the
+            # process: the runtime's own model list embeds each child's argv,
+            # which includes the path to its API key file. That is exactly why
+            # the public model list is served sanitised by the dashboard.
+            models = [m.get("id") for m in data
+                      if isinstance(m, dict) and m.get("id")]
+    except Exception as exc:
+        sys.stderr.write(f"local model list unavailable: {exc}\n")
+    LOCAL_STATE.update(state="online", error=None, models=models,
+                       last_seen=time.time())
+
+
 def _housekeeper() -> None:
     """Registry sync and usage flush. Both are best-effort: a registry outage
     degrades to stale usage, never to a refused request."""
@@ -216,6 +286,7 @@ def _housekeeper() -> None:
         try:
             _load_registry()
             _poll_upstreams()
+            _poll_local()
         except Exception as exc:
             sys.stderr.write(f"upstream poll: {exc}\n")
         try:
@@ -254,6 +325,10 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     _auth_key_id = None
     _auto_choice = None
+    _route_why = None
+    # The prefix of the body already read, to learn the model. Forwarded ahead
+    # of the rest of the stream, so peeking costs a buffer and never a re-read.
+    _peeked = b""
     # The path with any /u/<server> prefix removed. Set during resolution and
     # used for BOTH destinations: when auto picks this node the prefix still has
     # to go, or the local runtime is asked for a path it has never heard of.
@@ -370,6 +445,9 @@ class Handler(BaseHTTPRequestHandler):
         # every request on a keep-alive connection -- so it must be reset here,
         # not in __init__.
         self._body_left = int(self.headers.get("Content-Length") or 0)
+        self._peeked = b""
+        self._auto_choice = None
+        self._route_why = None
         path = self.path.split("?", 1)[0]
         if path.startswith("/u/"):
             return self._proxy(method, remote=True)
@@ -579,7 +657,16 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self._viewer():
             return
-        out = []
+        # This node is described from its own PROBE, not asserted. The page used
+        # to draw it as permanently online, which is the one server whose state
+        # it could not actually have known.
+        out = [{"id": _ups.LOCAL, "base_url": None, "enabled": True,
+                "note": "this machine", "gpus": None, "problems": [],
+                "needs_key": True, "state": LOCAL_STATE.get("state") or "unknown",
+                "models": LOCAL_STATE.get("models") or [],
+                "error": LOCAL_STATE.get("error"),
+                "last_seen": LOCAL_STATE.get("last_seen"),
+                "route": "/u/" + _ups.LOCAL + "/v1"}]
         for u in UPSTREAMS:
             st = UP_STATE.get(u.id) or {"state": "unknown", "models": [],
                                         "error": None, "last_seen": None}
@@ -590,8 +677,16 @@ class Handler(BaseHTTPRequestHandler):
                        # construct it and get it subtly wrong.
                        route="/u/" + u.id + "/v1")
             out.append(row)
-        self._json(200, {"servers": out, "poll_seconds": UPSTREAM_POLL_SECONDS,
-                         "registry_configured": bool(REGISTRY_PATH)})
+        self._json(200, {
+            "servers": out, "poll_seconds": UPSTREAM_POLL_SECONDS,
+            "registry_configured": bool(REGISTRY_PATH),
+            # The plain path IS the virtual server, so the page can say so
+            # rather than hard-coding a convention that might change.
+            "default_route": "/v1",
+            "auto_route": "/u/" + _ups.AUTO + "/v1",
+            "balanced_paths": list(_ups.BALANCED_PATHS),
+            "peek_bytes": _peek.PEEK_BYTES,
+            "routing": dict(ROUTE_WHY)})
 
     # --- keys --------------------------------------------------------------
     def _viewer(self):
@@ -705,31 +800,158 @@ class Handler(BaseHTTPRequestHandler):
             "you": who["sub"],
             "is_admin": who["is_admin"]})
 
-    def _resolve_target(self):
-        """Which server a /u/<id>/ request is for, or None having answered.
+    # --- planning: where does this request go? ------------------------------
+    @staticmethod
+    def _local_online() -> bool:
+        """Is the local runtime answering?
 
-        Refuses IMMEDIATELY when the server is unknown, parked or known-offline.
-        An agent must never sit through a 900 s proxy timeout because a
-        workstation is switched off, and the reply says which server and how long
-        it has been quiet.
+        False ONLY when a probe ran and failed. `unknown` -- no probe has
+        completed yet -- counts as available: refusing every request because a
+        liveness probe is late would be failing closed on telemetry, which is
+        the wrong way round for anything that is not authentication.
         """
-        path = self.path.split("?", 1)[0]
-        if path.startswith("/u/" + _ups.AUTO + "/") or path == "/u/" + _ups.AUTO:
-            return self._resolve_auto(path)
-        resolved = _ups.route(path, UPSTREAMS)
+        return (LOCAL_STATE.get("state") or "unknown") != "offline"
+
+    def _last_server(self) -> str | None:
+        """The server this key used last, from memory or from recorded usage.
+
+        Read through to the store on a miss so a gateway restart does not
+        scatter everybody onto cold slots -- the affinity is worth ~10x on
+        prompt processing and it must survive a deploy.
+        """
+        kid = self._auth_key_id or ""
+        last = LAST_SERVER.get(kid)
+        if last is None and kid and STORE:
+            try:
+                last = STORE.last_upstream(kid)
+            except Exception:
+                last = None
+            if last:
+                LAST_SERVER[kid] = last
+        return last
+
+    def _peek_body(self) -> tuple[str | None, bool]:
+        """The model this request asks for, from a bounded prefix of the body.
+
+        Returns (model, conclusive). Every "I cannot tell" case answers None,
+        and the caller treats that as "keep it here" -- never as "any server
+        will do", because llama.cpp would answer with the wrong model rather
+        than refuse.
+        """
+        if self._body_left <= 0:
+            # No Content-Length either: a chunked body is left alone rather
+            # than reframed, so nothing about the existing pass-through changes.
+            return None, True
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if "json" not in ctype:
+            return None, True
+        if self.headers.get("Content-Encoding"):
+            return None, True          # compressed; not worth inflating here
+        while len(self._peeked) < _peek.PEEK_BYTES and self._body_left > 0:
+            want = min(CHUNK, _peek.PEEK_BYTES - len(self._peeked))
+            buf = self._read_body(want)
+            if not buf:
+                break
+            self._peeked += buf
+        return _peek.peek_model(self._peeked)
+
+    def _plan(self, remote: bool):
+        """Where this request goes: an Upstream, _ups.LOCAL, or ANSWERED.
+
+        ANSWERED means a refusal has already been written -- and every one of
+        those paths drains the body first, because a reply that leaves an unread
+        body in the socket corrupts the NEXT request on the connection.
+        """
+        raw = self.path.split("?", 1)[0]
+        if not remote:
+            # No server named. THIS IS THE DEFAULT ROUTE, and the default is the
+            # virtual server: a client configured against /v1 is balanced
+            # without being reconfigured.
+            self._route_path = raw
+            return self._balance(raw)
+
+        if raw == "/u/" + _ups.AUTO or raw.startswith("/u/" + _ups.AUTO + "/"):
+            self._route_path = self._strip_prefix(raw)
+            return self._balance(self._route_path)
+
+        resolved = _ups.route(raw, UPSTREAMS)
         if resolved is None:
             self._err(503, "that server is not available on this node",
                       "upstream_unavailable")
-            return None
-        target = resolved[0]
-        self._route_path = resolved[1]
-        st = UP_STATE.get(target.id) or {}
+            return ANSWERED
+        pinned, self._route_path = resolved
+        if pinned == _ups.LOCAL:
+            if not self._local_online():
+                self._err(503, "this node's runtime is not answering",
+                          "upstream_offline")
+                return ANSWERED
+            self._decided(_ups.LOCAL, "pinned")
+            return _ups.LOCAL
+        st = UP_STATE.get(pinned.id) or {}
         if st.get("state") == "offline":
             seen = (f" (last seen {int(time.time() - st['last_seen'])}s ago)"
                     if st.get("last_seen") else " and has not been seen")
-            self._err(503, f"{target.id} is not answering" + seen, "upstream_offline")
-            return None
-        return target
+            self._err(503, f"{pinned.id} is not answering" + seen,
+                      "upstream_offline")
+            return ANSWERED
+        self._decided(pinned.id, "pinned")
+        return pinned
+
+    def _decided(self, server: str, why: str) -> None:
+        """Record a routing decision, for the response headers and the counters.
+
+        Counted because a balancer that quietly stops balancing looks identical
+        from outside to one that is working: if the peek starts failing, every
+        request goes local and the only visible trace is this tally.
+        """
+        self._auto_choice, self._route_why = server, why
+        ROUTE_WHY[why] = ROUTE_WHY.get(why, 0) + 1
+
+    def _balance(self, path: str):
+        """Choose a server for a request that named none."""
+        if not _ups.balanceable(path):
+            # /health, /props, /metrics, /slots ... describe THIS machine.
+            # Answering them from another one would report someone else's GPUs.
+            self._decided(_ups.LOCAL, "not-balanced")
+            return _ups.LOCAL
+
+        model, conclusive = self._peek_body()
+        chosen, why = _ups.pick_auto(
+            UPSTREAMS, UP_STATE, self._last_server(), model=model,
+            local_online=self._local_online(),
+            local_models=LOCAL_STATE.get("models"))
+        if why == "blind" and conclusive:
+            # Told apart on purpose: `unnamed` means the request really has no
+            # model field, `blind` means the peek ran out of buffer. One is a
+            # client's choice, the other is a tuning problem here.
+            why = "unnamed"
+
+        if chosen is None:
+            self._decided("none", "refused")
+            if model is None:
+                self._err(503, "cannot tell which model this request asks for, "
+                               "and this node's runtime is not answering",
+                          "no_upstream")
+                return ANSWERED
+            where = _ups.servers_for(UPSTREAMS, UP_STATE, model)
+            if where:
+                self._err(503, f"{model} is served by "
+                               f"{', '.join(where)}, which is not answering",
+                          "upstream_offline")
+            else:
+                # 404, not 503: nothing here serves it, so waiting will not help.
+                self._err(404, f"no server on this node serves {model}",
+                          "model_not_found")
+            return ANSWERED
+
+        self._decided(chosen, why)
+        if chosen == _ups.LOCAL:
+            return _ups.LOCAL
+        for u in UPSTREAMS:
+            if u.id == chosen:
+                return u
+        self._err(503, "no server is available right now", "no_upstream")
+        return ANSWERED
 
     @staticmethod
     def _strip_prefix(path: str) -> str:
@@ -737,35 +959,6 @@ class Handler(BaseHTTPRequestHandler):
         rather than by name -- the name may be a real server or the virtual one,
         and both must strip identically."""
         return "/" + path.split("/", 3)[3] if path.count("/") >= 3 else "/"
-
-    def _resolve_auto(self, path: str):
-        """Pick a server for /u/auto/, or answer and return None.
-
-        Returns the sentinel string "local" rather than an Upstream when this node
-        wins, because the relay already treats None as local -- and a caller that
-        cannot tell "auto chose local" from "auto failed" would route blind.
-        """
-        last = LAST_SERVER.get(self._auth_key_id or "")
-        if last is None and self._auth_key_id and STORE:
-            try:
-                last = STORE.last_upstream(self._auth_key_id)
-            except Exception:
-                last = None
-            if last:
-                LAST_SERVER[self._auth_key_id] = last
-        chosen = _ups.pick_auto(UPSTREAMS, UP_STATE, last, local_online=True)
-        if chosen is None:
-            self._err(503, "no server is available right now", "no_upstream")
-            return None
-        self._auto_choice = chosen
-        self._route_path = self._strip_prefix(path)
-        if chosen == _ups.LOCAL:
-            return _ups.LOCAL
-        for u in UPSTREAMS:
-            if u.id == chosen:
-                return u
-        self._err(503, "no server is available right now", "no_upstream")
-        return None
 
     def _refuse_key(self) -> None:
         """One answer for every authentication failure -- unknown key, wrong
@@ -792,16 +985,21 @@ class Handler(BaseHTTPRequestHandler):
 
         self._auth_key_id = row.key_id
         self._route_path = None
-        target = None                      # None == the local runtime
-        if remote:
-            target = self._resolve_target()
-            if target is None:
-                return                     # _resolve_target already answered
-            if target == _ups.LOCAL:
-                target = None              # auto chose this node
-        # Remember where this key went, so /u/auto/ can send it back to the same
-        # warm prefix cache next time.
-        LAST_SERVER[row.key_id] = target.id if target else _ups.LOCAL
+        plan = self._plan(remote)
+        if plan is ANSWERED:
+            return                         # _plan already answered
+        # None == the local runtime, which is what both "pinned here" and
+        # "balanced here" come to.
+        target = None if plan == _ups.LOCAL else plan
+        # Remember where this key went, so the next balanced request goes back
+        # to the same warm prefix cache.
+        #
+        # NOT for requests that were never balanced. A client polling /v1/models
+        # or /health would otherwise keep resetting its own affinity to this
+        # node, and its next completion would abandon a warm remote slot for a
+        # cold local one -- the exact loss the affinity exists to prevent.
+        if self._route_why != "not-balanced":
+            LAST_SERVER[row.key_id] = target.id if target else _ups.LOCAL
 
         started = time.time()
         acc = _usage.StreamAccountant()
@@ -889,6 +1087,10 @@ class Handler(BaseHTTPRequestHandler):
             up.putheader("Authorization", f"Bearer {key}")
         up.endheaders()
 
+        # Whatever was read to find the model goes first, unchanged. The body
+        # the upstream sees is byte-identical to the body the client sent.
+        if self._peeked:
+            up.send(self._peeked)
         # Streamed up in bounded chunks: a 100k prompt is ~400 KB and must not
         # be held in memory just to be forwarded.
         while True:
@@ -902,11 +1104,15 @@ class Handler(BaseHTTPRequestHandler):
         be chunked, i.e. the upstream gave no Content-Length (every streamed
         completion)."""
         self.send_response(r.status)
-        # Which server actually served this. Without it, /u/auto/ is a black box
-        # and nobody can explain their own latency.
+        # Which server actually served this, and why it was chosen. Without
+        # these the default route is a black box: nobody can explain their own
+        # latency, and "auto quietly became local-always" is invisible.
         chosen = getattr(self, "_auto_choice", None)
         if chosen:
             self.send_header("X-Routed-To", chosen)
+        why = getattr(self, "_route_why", None)
+        if why:
+            self.send_header("X-Routed-Why", why)
         length = None
         for k, v in r.getheaders():
             lk = k.lower()
@@ -1007,6 +1213,7 @@ def main() -> int:
     REGISTRY_PATH = args.upstreams or ""
     _load_registry()
     _poll_upstreams()
+    _poll_local()
 
     STORE = KeyStore(args.mirror, dsn=dsn)
     STORE.migrate_local()

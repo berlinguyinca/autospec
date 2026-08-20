@@ -224,8 +224,31 @@ if [ -r "$inst" ]; then
   fi
 fi
 
+# --- every module the gateway imports is installed --------------------------
+# Derived from gateway.py's own import lines rather than kept as a second list:
+# usage.py was left out of the installer once and upstreams.py a second time,
+# and both are invisible until a CLEAN install dies at import.
+missing=""
+while read -r mod; do
+  [ -f "${NODE}/scripts/${mod}.py" ] || continue
+  # An `install` LINE, not any mention: the comment above that block names the
+  # modules it forgot, and matching prose would make this check vacuous. It was,
+  # for one commit, until the positive control below caught it.
+  grep -Eq "install .*${mod}\.py" "${NODE}/scripts/install-node.sh" \
+    || missing="${missing} ${mod}.py"
+done <<EOF
+$(sed -n 's/^import \([a-z_]*\) as .*/\1/p; s/^from \([a-z_]*\) import .*/\1/p' \
+    "${NODE}/scripts/gateway.py")
+EOF
+if [ -n "${missing}" ]; then
+  bad "installer would not ship:${missing}"
+else
+  ok "installer ships every module the gateway imports"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
+
   echo "OK -- all structural checks passed"
   exit 0
 fi

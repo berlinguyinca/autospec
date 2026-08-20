@@ -46,7 +46,7 @@ thrashing the node between models.
 | `http://<node-host>/` | dashboard (needs the API key) |
 | `http://<node-host>/status` | public load page, no key |
 | `http://<node-host>/api/queue` | public load JSON, no key |
-| `http://<node-host>/v1` | OpenAI-compatible API base |
+| `http://<node-host>/v1` | OpenAI-compatible API base (balanced across the fleet) |
 
 ```bash
 KEY=$(sudo cat /etc/qwen-turing.key)
@@ -145,39 +145,62 @@ Creating and revoking keys **require HTTPS** and are refused over plain HTTP: a
 key minted over cleartext is a key already disclosed. Inference itself still
 works on plain `:80`, so existing clients are unaffected.
 
-## Routing to other servers
+## Routing: the default base URL is the balancer
 
-Every machine reachable through this endpoint appears under **Servers**, with the
-models it serves and the base URL to reach it:
+`/v1` does not mean "this machine". It means **whichever machine should serve
+this** — so every client already pointed at this node is load-balanced without
+being reconfigured, which is the only way a default can mean anything.
 
 | Target | Base URL |
 |---|---|
-| this node | `/v1` |
-| a registered server | `/u/<id>/v1` |
-| **pick one for me** | `/u/auto/v1` |
+| **balanced (the default)** | `/v1` |
+| the balancer, named | `/u/auto/v1` |
+| this node, insisted on | `/u/local/v1` |
+| a named server | `/u/<id>/v1` |
 
 Registration is one entry in `/etc/qwen-turing/upstreams.yaml` — see
 [`config/upstreams.yaml.example`](config/upstreams.yaml.example).
 
-**Routing is by path, not by model name.** Model-name namespacing reads better
-until you notice it requires the proxy to parse the `model` field out of the
-request body — and not parsing the body is exactly what makes this gateway cost
-nothing measurable. A path prefix carries the same information in the part of the
-request already being read, and it means two servers may serve the same model id
-without colliding.
+Balancing applies **only** to the endpoints that name a model — `chat/completions`,
+`completions`, `embeddings`, `rerank`. `/health`, `/slots`, `/metrics` and
+`/props` describe *this* box, so answering them from another machine would report
+someone else's GPUs as ours. That list is an allow-list rather than an
+exclude-list, so the next endpoint llama.cpp grows stays local until someone
+decides otherwise.
 
-`/u/auto/v1` prefers **the server you used last**. That is not tidiness: a warm
-prefix cache was measured here at roughly a tenfold saving on prompt processing,
-so being sent elsewhere silently throws it away. It falls back to this node, then
-to any other online server, and every reply carries `X-Routed-To` so you can
-always tell where a request actually landed.
+**A server is only ever sent a model it advertises.** This is the rule that
+matters most, because the failure it prevents is silent: llama.cpp does **not**
+refuse a request for a model it has not got — it answers with whatever is loaded.
+Measured here, a request naming `qwen3.5-9b-vision` came back served by
+`qwen3.8-27b` with no error at all. A vision request answered by a text model, or
+an uncensored one by the aligned model, is far worse than a refusal. So each
+server's own `/v1/models` is a routing input, and a model nothing here serves is a
+clean `404` rather than a substitution.
 
-Two behaviours to rely on. Remote servers are probed on a timer and **never on
-the request path**, so a request for a server that is switched off is refused in
-milliseconds rather than waiting out a proxy timeout. And a registered server
-that answers **without a key** is flagged in the panel as a configuration fault:
-its port must be restricted to this node, or a client can reach it directly and
-bypass authentication entirely.
+Among the servers that *can* serve it, the balancer prefers **the one you used
+last**. That is not tidiness: a warm prefix cache was measured here at roughly a
+tenfold saving on prompt processing, so being sent elsewhere silently throws it
+away. Being able to serve the model always outranks that preference. Failing
+that it prefers this node, then any other eligible server. Every reply carries
+`X-Routed-To` and `X-Routed-Why`, and the Servers panel tallies the reasons —
+without that, "the balancer quietly became local-always" looks exactly like a
+balancer that is working.
+
+**Reading the model does not mean parsing the body.** At most 8 KB of the request
+is buffered to find the top-level `model` field, then forwarded unchanged; a 100k
+prompt is ~400 KB and still streams straight through. If the field is not in that
+prefix the request is kept **here** and labelled `blind`, never sent to a server
+that might substitute. `model` is accepted only as a key of the top-level object,
+so a `"model"` inside a user's own message text cannot steer routing.
+
+Two behaviours to rely on. Servers are probed on a timer and **never on the
+request path**, so a request for a server that is switched off is refused in
+milliseconds rather than waiting out a proxy timeout — and this node is probed
+the same way as any other, because a live gateway with a dead runtime is exactly
+the case a hard-coded "local is always up" cannot express. And a registered
+server that answers **without a key** is flagged in the panel as a configuration
+fault: its port must be restricted to this node, or a client can reach it
+directly and bypass authentication entirely.
 
 ### What "usage" means, exactly
 
@@ -259,7 +282,9 @@ Full detail, including what was rejected and what was never tested, in
 
 ```
 client ─▶ nginx :80 (+:8080)          ONE public port
-            ├─ /v1/*  …            ─▶ llama.cpp 127.0.0.1:8090
+            ├─ /v1/*  /u/*  …      ─▶ gateway 127.0.0.1:8082
+            │                           ├─ llama.cpp 127.0.0.1:8090
+            │                           └─ another GPU server
             ├─ /v1/models          ─▶ dashboard (sanitised)
             ├─ /  /status  /api/*  ─▶ dashboard 127.0.0.1:8081
             └─ auth_request        ─▶ dashboard /api/queue-headers  (X-Queue-*)

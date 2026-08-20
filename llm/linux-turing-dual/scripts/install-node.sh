@@ -139,13 +139,18 @@ sudo install -m 0755 "${HERE}/dashboard-run.sh" "${QT_PREFIX}/bin/"
 # The gateway and the modules it imports. gateway.py adds its own directory to
 # sys.path, so these are plain modules rather than executables -- and they must
 # ALL be here: a missing one is a unit that dies at import with
-# ModuleNotFoundError, which is how usage.py was left out the first time.
+# ModuleNotFoundError, which is how usage.py was left out the first time -- and
+# how upstreams.py was left out the second time, which only a clean install would
+# have shown. tests/test_structural.sh now derives the list from gateway.py's own
+# imports and fails the build when one is missing, so it cannot drift again.
 sudo install -m 0755 "${HERE}/gateway.py"       "${QT_PREFIX}/bin/"
 sudo install -m 0755 "${HERE}/gateway-run.sh"   "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/keys.py"          "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/keystore.py"      "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/oidc.py"          "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/usage.py"         "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/upstreams.py"     "${QT_PREFIX}/bin/"
+sudo install -m 0644 "${HERE}/modelpeek.py"     "${QT_PREFIX}/bin/"
 sudo install -m 0644 "${HERE}/site.sh"          "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/common.conf" "${QT_PREFIX}/etc/"
 sudo install -m 0644 "${NODE}/config/router-presets.ini" "${QT_PREFIX}/etc/"

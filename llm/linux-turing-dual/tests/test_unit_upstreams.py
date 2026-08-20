@@ -148,6 +148,39 @@ def test_https_defaults_to_443_and_http_to_80():
     assert up.target(b, "/v1/models")[2] == 80
 
 
+# --- what may be balanced at all --------------------------------------------
+
+def test_only_model_bearing_endpoints_are_balanced():
+    for ok in ("/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+               "/v1/rerank", "/v1/reranking", "/v1/chat/completions/"):
+        assert up.balanceable(ok) is True, ok
+
+
+def test_this_machines_own_endpoints_are_never_balanced():
+    """These describe THIS box. Answering /slots or /metrics from another
+    machine would report someone else's GPUs as ours."""
+    for no in ("/health", "/props", "/metrics", "/slots", "/completion",
+               "/v1/models", "/tokenize", "/detokenize", "/apply-template",
+               "/v1/audio/speech", "/", "/v1"):
+        assert up.balanceable(no) is False, no
+
+
+# --- pinning this node explicitly -------------------------------------------
+
+def test_u_local_pins_this_node():
+    """It used to REFUSE -- `local` was a reserved id and never a destination.
+    Now that the plain path is balanced, this is the only way to insist."""
+    assert up.route("/u/local/v1/chat/completions", up.load(TWO)) == (
+        up.LOCAL, "/v1/chat/completions")
+    assert up.route("/u/local", up.load(TWO)) == (up.LOCAL, "/")
+    assert up.route("/u/local/", up.load(TWO)) == (up.LOCAL, "/")
+
+
+def test_local_is_still_a_reserved_registry_id():
+    u = up.load(TWO.replace("id: alpha", "id: local"))[0]
+    assert "'local' is reserved" in u.problems and u.usable is False
+
+
 # --- the virtual "auto" server ----------------------------------------------
 
 TWO = """
@@ -158,7 +191,14 @@ upstreams:
     base_url: http://b.invalid:8000/v1
 """
 
-ONLINE = {"alpha": {"state": "online"}, "beta": {"state": "online"}}
+M = "qwen3.8-27b"
+# A model only this node has. The fleet is genuinely like this: seven ids here,
+# one on the workstation.
+LOCAL_ONLY = "qwen3.5-9b-vision"
+LOCAL_MODELS = [M, LOCAL_ONLY]
+
+ONLINE = {"alpha": {"state": "online", "models": [M]},
+          "beta": {"state": "online", "models": [M]}}
 
 
 def test_auto_is_a_reserved_id():
@@ -171,40 +211,119 @@ def test_auto_prefers_the_server_you_used_last():
     """The reason this rule exists: a warm prefix cache is worth ~10x here, and
     it lives on whichever machine served you last."""
     ups = up.load(TWO)
-    assert up.pick_auto(ups, ONLINE, last_used="beta") == "beta"
-    assert up.pick_auto(ups, ONLINE, last_used="alpha") == "alpha"
-    assert up.pick_auto(ups, ONLINE, last_used="local") == "local"
+    assert up.pick_auto(ups, ONLINE, "beta", model=M) == ("beta", "last-used")
+    assert up.pick_auto(ups, ONLINE, "alpha", model=M) == ("alpha", "last-used")
+    assert up.pick_auto(ups, ONLINE, "local", model=M) == ("local", "last-used")
+
+
+def test_affinity_never_outranks_being_able_to_serve_the_model():
+    """The ordering that matters. You used beta last, but you are now asking for
+    a model beta has not got -- and llama.cpp would answer with the wrong model
+    rather than refuse, so beta must drop out entirely."""
+    ups = up.load(TWO)
+    assert up.pick_auto(ups, ONLINE, "beta", model=LOCAL_ONLY,
+                        local_models=LOCAL_MODELS) == ("local", "preferred")
 
 
 def test_auto_falls_back_when_your_last_server_went_offline():
     ups = up.load(TWO)
-    state = {"alpha": {"state": "offline"}, "beta": {"state": "online"}}
+    state = {"alpha": {"state": "offline", "models": [M]},
+             "beta": {"state": "online", "models": [M]}}
     # Affinity must not pin you to a dead box.
-    assert up.pick_auto(ups, state, last_used="alpha") == "local"
-    assert up.pick_auto(ups, state, last_used="alpha", local_online=False) == "beta"
+    assert up.pick_auto(ups, state, "alpha", model=M) == ("local", "preferred")
+    assert up.pick_auto(ups, state, "alpha", model=M,
+                        local_online=False) == ("beta", "model-only")
 
 
 def test_auto_prefers_this_node_when_nothing_is_remembered():
-    assert up.pick_auto(up.load(TWO), ONLINE, last_used=None) == "local"
+    assert up.pick_auto(up.load(TWO), ONLINE, None, model=M) == ("local", "preferred")
 
 
 def test_auto_uses_a_remote_when_this_node_is_down():
-    assert up.pick_auto(up.load(TWO), ONLINE, last_used=None,
-                        local_online=False) == "alpha"
+    assert up.pick_auto(up.load(TWO), ONLINE, None, model=M,
+                        local_online=False) == ("alpha", "model-only")
+
+
+def test_auto_uses_a_remote_when_only_the_remote_has_the_model():
+    """Not a fallback -- the only correct answer. This node cannot serve it."""
+    state = {"alpha": {"state": "online", "models": ["exotic-70b"]},
+             "beta": {"state": "online", "models": [M]}}
+    assert up.pick_auto(up.load(TWO), state, "local", model="exotic-70b",
+                        local_models=LOCAL_MODELS) == ("alpha", "model-only")
 
 
 def test_auto_ignores_servers_that_are_not_online():
     ups = up.load(TWO)
-    unknown = {"alpha": {"state": "unknown"}, "beta": {"state": "offline"}}
-    assert up.pick_auto(ups, unknown, last_used=None, local_online=False) is None
-    assert up.pick_auto(ups, unknown, last_used="beta", local_online=False) is None
+    unknown = {"alpha": {"state": "unknown", "models": [M]},
+               "beta": {"state": "offline", "models": [M]}}
+    assert up.pick_auto(ups, unknown, None, model=M,
+                        local_online=False) == (None, "none-eligible")
+    assert up.pick_auto(ups, unknown, "beta", model=M,
+                        local_online=False) == (None, "none-eligible")
 
 
 def test_auto_refuses_rather_than_guessing_when_nothing_is_up():
-    assert up.pick_auto([], {}, last_used=None, local_online=False) is None
-    assert up.pick_auto(up.load(TWO), {}, last_used="alpha", local_online=False) is None
+    assert up.pick_auto([], {}, None, model=M, local_online=False) == (
+        None, "none-eligible")
+    assert up.pick_auto(up.load(TWO), {}, "alpha", model=M,
+                        local_online=False) == (None, "none-eligible")
 
 
 def test_auto_ignores_a_parked_server_even_if_it_answers():
     parked = up.load(TWO.replace("id: beta", "id: beta\n    enabled: false"))
-    assert up.pick_auto(parked, ONLINE, last_used="beta") == "local"
+    assert up.pick_auto(parked, ONLINE, "beta", model=M) == ("local", "preferred")
+
+
+# --- eligibility, which is the safety property -------------------------------
+
+def test_a_server_that_does_not_advertise_the_model_is_not_eligible():
+    """The measured reason: asked for qwen3.5-9b-vision, the workstation
+    answered as qwen3.8-27b with no error. Wrong, not slow."""
+    ups = up.load(TWO)
+    assert up.eligible(ups, ONLINE, LOCAL_ONLY, local_models=LOCAL_MODELS) == ["local"]
+
+
+def test_a_server_with_no_polled_list_is_excluded_not_included():
+    """Eligibility is a POSITIVE check, so a failed poll loses a server instead
+    of silently winning one."""
+    ups = up.load(TWO)
+    blank = {"alpha": {"state": "online"}, "beta": {"state": "online", "models": []}}
+    assert up.eligible(ups, blank, M, local_models=LOCAL_MODELS) == ["local"]
+
+
+def test_an_unreadable_model_keeps_the_request_on_this_node():
+    """The peek buffer ran out. A remote might answer with the wrong model, so
+    only this node is eligible -- and the choice is labelled `blind` so a rising
+    count of them is visible rather than a mystery."""
+    ups = up.load(TWO)
+    assert up.eligible(ups, ONLINE, None) == ["local"]
+    assert up.pick_auto(ups, ONLINE, "beta", model=None) == ("local", "blind")
+
+
+def test_an_unreadable_model_with_this_node_down_is_refused():
+    assert up.pick_auto(up.load(TWO), ONLINE, None, model=None,
+                        local_online=False) == (None, "none-eligible")
+
+
+def test_this_node_is_eligible_when_its_own_list_is_unknown():
+    """A broken local probe must not empty the fleet: this node is the model
+    authority here, so an unknown list fails OPEN for it."""
+    assert up.eligible(up.load(TWO), ONLINE, LOCAL_ONLY, local_models=None) == ["local"]
+    assert up.eligible(up.load(TWO), ONLINE, LOCAL_ONLY, local_models=[]) == ["local"]
+
+
+def test_this_node_drops_out_for_a_model_it_does_not_serve():
+    state = {"alpha": {"state": "online", "models": ["exotic-70b"]},
+             "beta": {"state": "online", "models": [M]}}
+    assert up.eligible(up.load(TWO), state, "exotic-70b",
+                       local_models=LOCAL_MODELS) == ["alpha"]
+
+
+def test_where_a_model_lives_is_reportable_for_the_refusal():
+    """So a refusal can say "it is on beta, which is not answering" instead of
+    the dead end "nothing serves it"."""
+    state = {"alpha": {"state": "offline", "models": ["exotic-70b"]},
+             "beta": {"state": "online", "models": [M]}}
+    ups = up.load(TWO)
+    assert up.servers_for(ups, state, "exotic-70b") == ["alpha"]
+    assert up.servers_for(ups, state, "nowhere-9b") == []

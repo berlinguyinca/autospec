@@ -3,12 +3,26 @@
 # Copy to /etc/qwen-turing/upstreams.yaml. This file is committed and this
 # repository is public, so the real addresses live only in that copy.
 #
-# THE LOCAL RUNTIME IS NOT LISTED HERE. It is implicit, always present, and
-# always served at /v1.
+# THE LOCAL RUNTIME IS NOT LISTED HERE. It is implicit and always present.
 #
-# ROUTING IS BY PATH, NOT BY MODEL NAME.
-#   local   ->  https://<node>/v1/chat/completions
-#   remote  ->  https://<node>/u/<id>/v1/chat/completions
+# THE DEFAULT BASE URL IS THE BALANCER.
+#   default (balanced)  ->  https://<node>/v1/chat/completions
+#   this machine        ->  https://<node>/u/local/v1/chat/completions
+#   a named machine     ->  https://<node>/u/<id>/v1/chat/completions
+#   the balancer, named ->  https://<node>/u/auto/v1/chat/completions
+#
+# `/v1` means "whichever machine should serve this", not "this machine", so every
+# client already pointed at this node is balanced without being reconfigured.
+# Balancing applies only to the endpoints that name a model -- chat/completions,
+# completions, embeddings, rerank. /health, /slots, /metrics and /props describe
+# THIS box and are never sent elsewhere.
+#
+# A server is only ever sent a model it advertises in its own /v1/models. That is
+# not politeness: llama.cpp does not refuse a model it has not got, it answers
+# with whatever is loaded. Measured here -- a request for `qwen3.5-9b-vision` came
+# back served by `qwen3.8-27b`, no error. So the model list this file's servers
+# publish is a routing input, and an unreachable server is refused rather than
+# guessed at.
 #
 # The design first called for namespaced model names, which reads better -- until
 # you notice it requires the proxy to parse the `model` field out of the request

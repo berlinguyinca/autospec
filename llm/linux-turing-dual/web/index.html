@@ -193,8 +193,9 @@
   <section id="s-servers" role="tabpanel" aria-labelledby="n-servers" hidden>
     <h1>Servers</h1>
     <p class="lede">Every machine reachable through this endpoint, and which
-      models live on which GPUs. Each server has its own base URL, so pointing a
-      client at a particular box is a config change and nothing more.</p>
+      models live on which GPUs. The plain <code>/v1</code> is the balancer, so
+      the default needs no configuration; each server also has its own base URL
+      for when you want to insist.</p>
     <div id="servers"></div>
   </section>
 
@@ -202,7 +203,9 @@
   <section id="s-connect" role="tabpanel" aria-labelledby="n-connect" hidden>
     <h1>Connect</h1>
     <p class="lede">An OpenAI-compatible endpoint. Pick a model, copy the snippet,
-      and use a key from the Keys section.</p>
+      and use a key from the Keys section. The base URL below is the balancer —
+      it routes you to a machine that actually has the model you named, and the
+      reply says which one.</p>
 
     <div class="warnbox"><strong>Allow token headroom.</strong> These models emit
       reasoning before content, so <code>max_tokens: 16</code> returns
@@ -216,6 +219,11 @@
         <span class="sub" id="mctx"></span>
       </div>
       <pre id="snippet">…</pre>
+      <div class="note"><strong>Where does it run?</strong> Every reply carries
+        <code>X-Routed-To</code>, and consecutive requests stay on the same
+        machine while its cache is warm — worth roughly tenfold on prompt
+        processing. To pin one box instead, swap <code>/v1</code> for
+        <code>/u/&lt;server&gt;/v1</code> from the Servers section.</div>
       <div class="note">Or generate the OpenCode config from the server, so client
         and server cannot drift:
         <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code></div>
@@ -573,41 +581,70 @@ function serverCard(o){
     (o.needs_key === false && o.id !== 'local' && o.state === 'online'
       ? '<div class="sub" style="color:var(--warn)">reachable without a key — ' +
         'restrict its port to this node</div>' : '') +
+    (o.id === 'local'
+      ? '<div class="sub">Balanced requests land here by default; ' +
+        '<code>/u/local/v1</code> insists on it.</div>' : '') +
     models + '</div>';
+}
+
+// How the balancer's own decisions came out, so "it quietly stopped balancing"
+// is a visible number rather than a mystery.
+const WHY_LABEL = {
+  'last-used': 'sent back to a warm cache',
+  'preferred': 'served here',
+  'model-only': 'the only machine with the model',
+  'pinned': 'you named the server',
+  'not-balanced': 'about this machine, so kept here',
+  'unnamed': 'no model named, kept here',
+  'blind': 'model unreadable, kept here',
+  'refused': 'refused rather than answered by the wrong model',
+};
+function routingTally(r){
+  const rows = Object.entries(r || {}).filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if(!rows.length) return '';
+  return '<div class="note"><strong>Routing so far.</strong> ' +
+    rows.map(([k, v]) => n(v) + ' × ' + esc(WHY_LABEL[k] || k)).join(' · ') +
+    '</div>';
+}
+
+function defaultCard(d){
+  // Described, not probed: the virtual server has no address of its own.
+  return '<div class="card" style="border-left:3px solid var(--accent)">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
+      '<span style="font-weight:640">the default</span>' +
+      '<span class="badge v">balancer</span></div>' +
+    '<div class="sub">Picks a machine that has the model you asked for.</div>' +
+    '<div class="sub" style="margin-top:8px">Base URL <code>' +
+      esc(d.default_route || '/v1') + '</code>' +
+      (d.auto_route ? ' <span class="sub">or <code>' + esc(d.auto_route) +
+        '</code></span>' : '') + '</div>' +
+    '<div class="note">Prefers <strong>the server you used last</strong>, because a ' +
+    'warm prefix cache is worth roughly tenfold on prompt processing — being sent ' +
+    'elsewhere silently throws that away. But <strong>only among machines that ' +
+    'actually serve the model you named</strong>: a server without it does not ' +
+    'refuse, it answers with whatever it has loaded, and a wrong answer is worse ' +
+    'than a slow one. The reply carries <code>X-Routed-To</code>.</div></div>';
 }
 
 async function loadServers(){
   let d = {servers: []};
   try{ d = await (await fetch('/api/servers', {cache:'no-store'})).json(); }
-  catch(e){ /* rendered as local-only below */ }
+  catch(e){ /* rendered as unknown below */ }
 
-  // This node is always first, described from what the page already knows.
-  const local = {
-    id: 'local', name: 'This node', state: 'online', route: '/v1',
-    note: 'the machine serving this page',
-    gpus: (LAST_GPUS || []).map(g => g.name).filter(Boolean).join(' + ') || null,
-    models: (CATALOG || []).map(m => m.id), needs_key: true, problems: [],
-  };
-  const remotes = d.servers || [];
-
-  // The virtual server is described, not probed: it has no address of its own.
-  const auto = '<div class="card" style="border-left:3px solid var(--accent)">' +
-    '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
-      '<span style="font-weight:640">auto</span>' +
-      '<span class="badge v">virtual</span></div>' +
-    '<div class="sub">Picks a server for you.</div>' +
-    '<div class="sub" style="margin-top:8px">Base URL <code>/u/auto/v1</code></div>' +
-    '<div class="note">Prefers <strong>the server you used last</strong>, because a ' +
-    'warm prefix cache is worth roughly tenfold on prompt processing — being sent ' +
-    'elsewhere silently throws that away. Falls back to this node, then to any ' +
-    'other server that is online. The reply carries <code>X-Routed-To</code>, so ' +
-    'you can always tell where a request actually landed.</div></div>';
+  const all = (d.servers || []).map(s => s.id === 'local'
+    // The GPUs are the page's own knowledge; everything else is the node's probe
+    // of itself, so this card can be wrong in the way a real server can.
+    ? Object.assign({}, s, {name: 'This node',
+        gpus: (LAST_GPUS || []).map(g => g.name).filter(Boolean).join(' + ') || null})
+    : s);
+  const remotes = all.filter(s => s.id !== 'local');
 
   $('servers').innerHTML =
-    '<div class="grid">' + serverCard(local) +
-      remotes.map(serverCard).join('') + auto + '</div>' +
+    '<div class="grid">' + defaultCard(d) + all.map(serverCard).join('') + '</div>' +
+    routingTally(d.routing) +
     (remotes.length
-      ? '<div class="note">Remote servers are re-probed every ' +
+      ? '<div class="note">Servers are re-probed every ' +
         n(d.poll_seconds) + ' seconds, never on the request path — a request for a ' +
         'server that is not answering is refused at once rather than waiting out a ' +
         'proxy timeout.</div>'
