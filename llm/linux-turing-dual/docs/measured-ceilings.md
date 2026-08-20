@@ -777,18 +777,62 @@ reachable on purpose.
 
 ### Through the agent tunnel
 
-Not yet measured. A server that dials **out** and holds pipes open reaches
-inference over a WebSocket rather than a direct socket, and the figures above are
-the baseline it has to be compared against: prompt tokens, prefill, wall clock,
-and gateway RSS before and after.
+Measured 2026-08-20, against the workstation after it was re-attached as a
+tunnelled server. The comparison is deliberately of the SAME box either side of
+the transport -- not tunnel-versus-this-node, which would be comparing two
+different GPUs -- and the two prompts differ so a warm prefix cache cannot
+flatter the second run.
 
-They get recorded here whichever way they fall, next to the direct numbers, with
-the same rule as above -- a difference between two single samples is not
-attributed to the tunnel without a second sample. The transport is deliberately
-one HTTP conversation per socket, so there is no reason to expect a change beyond
-one TLS handshake that the idle-pipe pool has already paid before the request
-arrives; if a change shows up anyway, that is the interesting result and it goes
-here unflattered.
+| | Through the tunnel | Direct, on the box itself |
+|---|---|---|
+| Request body | 100,671 bytes | 102,371 bytes |
+| Prompt tokens | 21,016 | 22,416 |
+| **Prefill** | **2748.9 tok/s** | **2750.3 tok/s** |
+| Wall clock | 8.33 s | 8.77 s |
+| Time to first byte | 0.14 s | 0.10 s |
+
+**0.05% apart on prefill.** That is the number this design needed: relaying
+inference over a WebSocket the far end dialled costs nothing measurable on the
+part that dominates. It is one sample each and the difference is far inside
+run-to-run variance, so the honest claim is only that the tunnel is not the
+bottleneck -- which is the same claim the direct pass-through earns above.
+
+Gateway resident set across the tunnelled request: **46,208 kB -> 46,888 kB**, a
+growth of **680 kB** for a 100 kB body. Still megabytes rather than body-sized,
+so nothing is being assembled on the way through.
+
+### The scheduler, deciding out loud
+
+Same node, same moment, three requests on one key. Measured rates at the time
+were 531 tok/s here (52 samples) and 2147 tok/s on the workstation (11 samples).
+
+| request | routed to | why | predicted | actual |
+|---|---|---|---|---|
+| ~106 tokens | this node | `fastest` | 0.8 s | 1.39 s |
+| ~25,000 tokens | the workstation | `fastest` | 11.7 s | 8.14 s |
+| the same 25,000 again | the workstation | `fastest` | 1.2 s | **0.67 s** |
+
+Three things worth reading off that table. A small prompt stays here, because the
+prefill difference is a fraction of a second and a network hop is not free. A
+large one goes to the faster card, which is the whole point of measuring. And the
+third row is the prefix cache: the same prompt to the same server came back in
+**0.67 s against 8.14 s**, a twelvefold saving that the estimate anticipated by
+applying the tenfold cache factor -- which is why affinity is worth as much as it
+is, and why the scheduler will keep a conversation on a slower machine rather than
+scatter it.
+
+The predictions are conservative rather than accurate, which is the right
+direction for a default: the 11.7 s estimate against 8.14 s actual comes from a
+rate averaged over every prompt size that server has served, including small ones
+where per-request overhead dominates.
+
+### One thing the tunnel does not change
+
+A model list is still asked of the server itself, and still only every 30 s. A
+reconnecting server therefore reports no models for a moment -- and an empty model
+list reads as "serves nothing", which made it ineligible for the balanced route
+until the next poll. The node now probes as soon as the agent offers a pipe. This
+was found by watching the real thing recover, not by reading the code.
 
 This run doubled as the live proof of the eligibility rule. The key's remembered
 server was the workstation, but `qwen3.8-27b-100k` exists only on this node, so

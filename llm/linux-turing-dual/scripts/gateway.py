@@ -279,6 +279,31 @@ def _servers_all() -> list:
     return out
 
 
+def _state_view(servers) -> dict:
+    """UP_STATE, with a tunnelled server's liveness taken from its CONTROL
+    connection rather than from the last poll.
+
+    The whole claim for this transport is that a dropped connection is a faster
+    and stronger signal than a probe -- but the panel and the refusals read the
+    polled state, so a server that had just vanished still showed `online` for up
+    to a poll interval, and one that had just come back still showed `offline`.
+    Both were observed live. The model list stays polled, because that genuinely
+    is a question only the server can answer.
+    """
+    view = dict(UP_STATE)
+    for u in servers:
+        if u.kind != _ups.KIND_TUNNEL:
+            continue
+        agent = AGENT_STATE.get(u.id) or {}
+        row = dict(view.get(u.id) or {})
+        row["state"] = agent.get("state", "unknown")
+        row["last_seen"] = agent.get("last_seen") or row.get("last_seen")
+        row["error"] = agent.get("error") or row.get("error")
+        row.setdefault("models", [])
+        view[u.id] = row
+    return view
+
+
 def _probe_tunnel(server_id: str) -> None:
     """Ask a tunnelled server what it serves, over one of its own pipes.
 
@@ -322,6 +347,22 @@ def _probe_tunnel(server_id: str) -> None:
                                "last_seen": agent.get("last_seen")}
     finally:
         pipe.close()
+
+
+def _probe_when_ready(server_id: str, tries: int = 10) -> None:
+    """Probe as soon as the agent has offered a pipe.
+
+    Called when a server says hello, which happens BEFORE its pipes arrive -- so
+    this waits for one rather than probing into an empty pool and giving up.
+    """
+    for _ in range(tries):
+        if POOL.idle(server_id) > 0:
+            try:
+                _probe_tunnel(server_id)
+            except Exception as exc:
+                sys.stderr.write(f"probe of {server_id} failed: {exc}\n")
+            return
+        time.sleep(0.5)
 
 
 def _poll_upstreams() -> None:
@@ -858,13 +899,14 @@ class Handler(BaseHTTPRequestHandler):
                      "route": "/u/" + _ups.LOCAL + "/v1"},
                     **measured(_ups.LOCAL))]
         servers = _servers_all()
+        view = _state_view(servers)
         try:
             names = STORE.user_names([u.owner for u in servers]) if STORE else {}
         except Exception:
             names = {}
         for u in servers:
-            st = UP_STATE.get(u.id) or {"state": "unknown", "models": [],
-                                        "error": None, "last_seen": None}
+            st = view.get(u.id) or {"state": "unknown", "models": [],
+                                    "error": None, "last_seen": None}
             row = u.public()
             row["owner_name"] = names.get(u.owner)
             row.update(state=st.get("state", "unknown"), models=st.get("models") or [],
@@ -1148,6 +1190,12 @@ class Handler(BaseHTTPRequestHandler):
                     STORE.touch_server(sid)
                 except Exception:
                     pass
+            # Ask what it serves NOW rather than at the next poll. Without this a
+            # reconnected server is ineligible for the balanced route until the
+            # timer comes round -- it is online, with an empty model list, which
+            # reads as "serves nothing".
+            threading.Thread(target=_probe_when_ready, args=(sid,),
+                             daemon=True).start()
 
     def _agent_pipe(self) -> None:
         """One idle pipe, offered to the pool.
@@ -1408,7 +1456,7 @@ class Handler(BaseHTTPRequestHandler):
                 return ANSWERED
             self._decided(_ups.LOCAL, "pinned")
             return _ups.LOCAL
-        st = UP_STATE.get(pinned.id) or {}
+        st = _state_view([pinned]).get(pinned.id) or {}
         if st.get("state") == "offline":
             seen = (f" (last seen {int(time.time() - st['last_seen'])}s ago)"
                     if st.get("last_seen") else " and has not been seen")
@@ -1472,8 +1520,9 @@ class Handler(BaseHTTPRequestHandler):
 
         model, conclusive = self._peek_body()
         servers = _servers_all()
+        state = _state_view(servers)
         chosen, why, est = _ups.pick_auto(
-            servers, UP_STATE, self._last_server(), model=model,
+            servers, state, self._last_server(), model=model,
             local_online=self._local_online(),
             local_models=LOCAL_STATE.get("models"),
             stats=THROUGHPUT, load=self._load(servers), ready=self._ready(servers),
@@ -1496,7 +1545,7 @@ class Handler(BaseHTTPRequestHandler):
                                "and this node's runtime is not answering",
                           "no_upstream")
                 return ANSWERED
-            where = _ups.servers_for(servers_for, UP_STATE, model)
+            where = _ups.servers_for(servers_for, state, model)
             # Three different situations that a single message would blur:
             #   * a server has it and is answering, but is not in the balanced
             #     pool -- the caller can reach it directly, so SAY so;
@@ -1504,7 +1553,7 @@ class Handler(BaseHTTPRequestHandler):
             #   * nobody has it -- waiting will not.
             by_id = {u.id: u for u in servers_for}
             unpromoted = [s for s in where
-                          if (UP_STATE.get(s) or {}).get("state") == "online"
+                          if (state.get(s) or {}).get("state") == "online"
                           and by_id.get(s) is not None
                           and not by_id[s].pool_member]
             offline = [s for s in where if s not in unpromoted]
@@ -1847,6 +1896,10 @@ def main() -> int:
     STORE.migrate_local()
     if dsn:
         STORE.refresh()
+    # AFTER the store exists, not before: the first version of this line sat
+    # above it and silently did nothing, so every restart began with an
+    # unmeasured fleet and ranked it as if nothing had ever been served.
+    _refresh_throughput()
 
     threading.Thread(target=_housekeeper, daemon=True).start()
 

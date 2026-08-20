@@ -259,6 +259,35 @@ def test_losing_the_connection_marks_the_server_offline_and_drops_its_pipes(node
     agent.stop()
 
 
+def test_the_reported_state_follows_the_connection_without_waiting_for_a_poll(node):
+    """Asserted through /api/servers, not through the internal dict.
+
+    An earlier test checked AGENT_STATE and passed while the PANEL still said
+    online for up to a poll interval -- observed live on the real fleet. What a
+    reader sees is the thing that has to be right.
+    """
+    srv, _, target = node
+    cred, _ = attach(srv, session("sub-a"))
+    agent = FakeAgent(srv.server_address[1], cred)
+    agent.control("box")
+    agent.add_pipe(("127.0.0.1", target.server_address[1]))
+    assert wait_for(lambda: gw.POOL.idle("box") == 1)
+    gw._probe_tunnel("box")            # as the timer would, once
+
+    def reported():
+        rows = call(srv, "GET", "/api/servers", session("sub-a"))[1]["servers"]
+        return {r["id"]: r for r in rows}["box"]
+
+    assert reported()["state"] == "online"
+    agent.stop_control()
+    # No poll happens in between: the connection going away is the signal.
+    assert wait_for(lambda: reported()["state"] == "offline", 3.0)
+    # And the model list survives, because that is a question only the server
+    # can answer and losing it would empty the panel on every blip.
+    assert reported()["models"] == ["llama-3.3-70b", "mixtral-8x7b"]
+    agent.stop()
+
+
 def test_a_box_that_stops_answering_is_reaped_by_the_heartbeat(node, monkeypatch):
     """The half-open case: the socket is still open because the machine lost power
     rather than closing. Nothing arrives and nothing errors, so only the missing

@@ -161,12 +161,16 @@ being reconfigured, which is the only way a default can mean anything.
 Registration is one entry in `/etc/qwen-turing/upstreams.yaml` — see
 [`config/upstreams.yaml.example`](config/upstreams.yaml.example).
 
-Two more ways to join are being built, both from the dashboard rather than from a
-file. A **tunnelled** server runs a small native agent, dials **out** to
+Two more ways to join, both from the dashboard rather than from a file. A **tunnelled** server runs [the agent](../agent/README.md), dials **out** to
 `wss://<node-host>/api/agent/…` and holds connections open that this node invokes
 inference over — so the box needs no inbound port at all. A **static** server is
 one the node dials, registered through the same flow instead of by editing the
 registry. Any OpenAI-compatible server qualifies; llama.cpp is the tested one.
+
+The first tunnelled server was measured at **2748.9 tok/s prefill through the
+tunnel against 2750.3 direct on the box** — 0.05% apart — and its inference port
+is now bound to loopback with its firewall exception deleted, because nothing
+needs to reach it any more.
 See [the design](../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md).
 
 Attaching is self-service for anyone who can sign in. Joining the **balanced**

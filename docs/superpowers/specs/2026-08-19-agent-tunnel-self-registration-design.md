@@ -1,7 +1,11 @@
 # Self-registering GPU servers over a held-open connection — design
 
-**Status:** approved; implementation under way. Amended in §11 after approval to
-cover static registration, measured priority, and non-Qwen model families.
+**Status:** implemented and accepted 2026-08-20. The workstation runs the agent,
+its inference port is bound to loopback and its firewall exception is deleted --
+which was the acceptance criterion, since the whole justification is that the box
+needs no inbound port. Figures in `llm/linux-turing-dual/docs/measured-ceilings.md`.
+Amended in §11 after approval to cover static registration, measured priority, and
+non-Qwen model families.
 
 **Supersedes nothing; extends** `2026-08-19-multitenant-keys-usage-federation-design.md`
 §6, which assumes **the node can reach the server**. Everything here is the
