@@ -221,3 +221,20 @@ def test_expiry_boundary_is_checked_on_both_sides(store):
     full, _ = store.mint("sub-alice", ttl_days=1, now=NOW)
     assert store.authenticate(full, NOW + 86399) is not None   # one second before
     assert store.authenticate(full, NOW + 86400) is None       # exactly at expiry
+
+
+def test_last_upstream_remembers_where_a_key_went(store):
+    """Routing affinity survives a gateway restart because it is read back from
+    recorded usage rather than held only in memory."""
+    _, row = store.mint("sub-alice")
+    assert store.last_upstream(row.key_id) is None
+    store.record_usage(_rec(store, row.key_id, "sub-alice", upstream="local", ts=NOW))
+    store.record_usage(_rec(store, row.key_id, "sub-alice", upstream="bigbox", ts=NOW + 10))
+    assert store.last_upstream(row.key_id) == "bigbox"
+    # ...and the earlier one is not what comes back.
+    store.record_usage(_rec(store, row.key_id, "sub-alice", upstream="local", ts=NOW + 20))
+    assert store.last_upstream(row.key_id) == "local"
+
+
+def test_last_upstream_of_an_unknown_key_is_none(store):
+    assert store.last_upstream("neverseen") is None

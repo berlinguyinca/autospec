@@ -56,10 +56,18 @@
 # domain (<prefix>.auth.<region>.amazoncognito.com) or a custom domain.
 : "${QT_COGNITO_DOMAIN:=<hosted-login-domain>}"
 
-# Group names that authorise minting, read from the VERIFIED token only --
-# never from a request header. A user in neither group authenticates and is
-# authorised for nothing.
-: "${QT_COGNITO_USER_GROUP:=<user-group-name>}"
+# Group names that authorise, read from the VERIFIED token only -- never from a
+# request header.
+#
+# QT_COGNITO_USER_GROUP accepts "*", meaning every authenticated member of the
+# pool may create keys. Use that when the pool IS the intended audience; name a
+# group instead to narrow it. Either way this is a config change, not a code
+# change.
+#
+# The admin group is separate and is never opened by "*": it grants seeing and
+# revoking other people's keys, which is a different question from being allowed
+# to use the node.
+: "${QT_COGNITO_USER_GROUP:=<user-group-name-or-asterisk>}"
 : "${QT_COGNITO_ADMIN_GROUP:=<admin-group-name>}"
 
 # Key registry. The application role holds no DDL privilege, so a compromised

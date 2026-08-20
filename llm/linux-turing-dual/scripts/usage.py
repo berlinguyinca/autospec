@@ -103,10 +103,17 @@ class StreamAccountant:
 
     def __init__(self) -> None:
         self._tail = bytearray()
+        # Whether a STREAM was ever seen. This is what separates "we lost the
+        # counts" from "there were never any counts": a /v1/models listing is a
+        # perfectly complete response that involves no tokens, and marking it
+        # truncated puts a phantom row on the usage scoreboard.
+        self._saw_stream = False
 
     def feed(self, chunk: bytes) -> None:
         if not chunk:
             return
+        if not self._saw_stream and _DATA in chunk:
+            self._saw_stream = True
         self._tail.extend(chunk)
         if len(self._tail) > MAX_TAIL_BYTES:
             del self._tail[:len(self._tail) - MAX_TAIL_BYTES]
@@ -155,10 +162,10 @@ class StreamAccountant:
         try:
             obj = json.loads(bytes(self._tail))
         except (ValueError, UnicodeDecodeError):
-            return Usage(truncated=True, model=model)
+            return Usage(truncated=self._saw_stream, model=model)
         got = _from_obj(obj)
         if got is not None:
             return got
         if model is None and isinstance(obj, dict) and isinstance(obj.get("model"), str):
             model = obj["model"]
-        return Usage(truncated=True, model=model)
+        return Usage(truncated=self._saw_stream, model=model)

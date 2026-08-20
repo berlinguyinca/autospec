@@ -91,10 +91,18 @@ def test_the_accountant_does_not_retain_the_whole_stream():
     assert acc.buffered_bytes() <= usage.MAX_TAIL_BYTES
 
 
-def test_an_empty_stream_is_truncated_not_zero():
-    acc = usage.StreamAccountant()
-    u = acc.result()
-    assert u.truncated is True and u.prompt_tokens is None
+def test_an_empty_response_yields_no_counts_and_is_not_marked_lost():
+    """`truncated` means "a stream's counts were lost", not "no counts". Nothing
+    arrived at all here, so there is nothing to have lost.
+
+    The honest trade-off, stated: a client that disconnects BEFORE the first
+    chunk is indistinguishable from a request that never involved tokens, so its
+    prefill goes unrecorded. Accepting that is better than the alternative, which
+    put a phantom "unknown" row on the scoreboard for every model listing.
+    """
+    u = usage.StreamAccountant().result()
+    assert u.truncated is False
+    assert u.prompt_tokens is None
 
 
 def test_a_body_with_no_usage_at_all_is_unknown():
@@ -147,3 +155,26 @@ def test_a_plain_json_body_split_across_reads_still_parses():
     for i in range(0, len(raw), 7):
         acc.feed(raw[i:i + 7])
     assert acc.result().prompt_tokens == 13
+
+
+def test_a_response_with_no_stream_and_no_counts_is_not_truncated():
+    """A /v1/models listing is a COMPLETE response that involves no tokens.
+    Marking it truncated puts a phantom row on the usage scoreboard -- which is
+    exactly what it did: six model listings appeared as six requests with
+    "unknown" token counts."""
+    acc = usage.StreamAccountant()
+    acc.feed(json.dumps({"object": "list",
+                         "data": [{"id": "qwen3.5-9b"}]}).encode())
+    u = acc.result()
+    assert u.truncated is False
+    assert u.prompt_tokens is None      # still unknown, but not LOST
+
+
+def test_a_stream_cut_short_is_still_truncated():
+    """The distinction has to keep working in the direction that matters."""
+    u = _stream("stream_truncated.sse")
+    assert u.truncated is True
+
+
+def test_an_empty_response_is_not_truncated():
+    assert usage.StreamAccountant().result().truncated is False

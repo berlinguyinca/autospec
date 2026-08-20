@@ -248,17 +248,61 @@ class KeyStore:
         the token totals -- those rows have genuinely unknown counts."""
         where, args = "", []
         if sub:
-            where = "WHERE sub=?"
+            where = "WHERE e.sub=?"
             args = [sub]
-        sql = (f"SELECT key_id, sub, model, COUNT(*) AS requests, "
-               f"SUM(truncated) AS truncated_requests, "
-               f"SUM(COALESCE(prompt_tokens,0)) AS prompt_tokens, "
-               f"SUM(COALESCE(completion_tokens,0)) AS completion_tokens, "
-               f"SUM(COALESCE(cached_tokens,0)) AS cached_tokens "
-               f"FROM usage_events {where} GROUP BY key_id, sub, model "
-               f"ORDER BY requests DESC")
+        sql = (f"SELECT e.key_id AS key_id, e.sub AS sub, u.display_name, u.email, "
+               f"k.label AS label, e.model AS model, COUNT(*) AS requests, "
+               f"SUM(e.truncated) AS truncated_requests, "
+               f"SUM(COALESCE(e.prompt_tokens,0)) AS prompt_tokens, "
+               f"SUM(COALESCE(e.completion_tokens,0)) AS completion_tokens, "
+               f"SUM(COALESCE(e.cached_tokens,0)) AS cached_tokens, "
+               f"SUM(COALESCE(e.prompt_tokens,0) + COALESCE(e.completion_tokens,0)) "
+               f"  AS total_tokens "
+               f"FROM usage_events e "
+               f"LEFT JOIN users u ON u.sub = e.sub "
+               f"LEFT JOIN api_keys k ON k.key_id = e.key_id "
+               f"{where} GROUP BY e.key_id, e.sub, u.display_name, u.email, k.label, e.model "
+               f"ORDER BY total_tokens DESC, requests DESC")
         with self._lock, self._conn() as c:
             return [dict(r) for r in c.execute(sql, args)]
+
+    def last_upstream(self, key_id: str) -> str | None:
+        """The server this key used most recently, for routing affinity.
+
+        Read from recorded usage rather than kept only in memory, so a gateway
+        restart does not scatter every caller onto a cold prefix cache.
+        """
+        with self._lock, self._conn() as c:
+            r = c.execute("SELECT upstream FROM usage_events WHERE key_id=? "
+                          "ORDER BY ts DESC LIMIT 1", (key_id,)).fetchone()
+        return r["upstream"] if r and r["upstream"] else None
+
+    def leaderboard(self) -> list[dict]:
+        """Per-USER totals, ranked by tokens. The scoreboard.
+
+        Joined to `users` so a row can name a person rather than an opaque
+        subject id. Falls back to the subject when a user row has not been seen
+        yet -- which happens for a key minted through the break-glass before its
+        owner has ever signed in.
+
+        Deliberately NOT scoped to one subject: a scoreboard that shows only your
+        own score is not a scoreboard. It stays behind authentication, though --
+        this is a lab leaderboard, not a public one.
+        """
+        sql = ("SELECT e.sub AS sub, u.display_name, u.email, "
+               "       COUNT(*) AS requests, "
+               "       COUNT(DISTINCT e.key_id) AS keys, "
+               "       SUM(e.truncated) AS truncated_requests, "
+               "       SUM(COALESCE(e.prompt_tokens,0)) AS prompt_tokens, "
+               "       SUM(COALESCE(e.completion_tokens,0)) AS completion_tokens, "
+               "       SUM(COALESCE(e.cached_tokens,0)) AS cached_tokens, "
+               "       SUM(COALESCE(e.prompt_tokens,0) + COALESCE(e.completion_tokens,0)) "
+               "         AS total_tokens "
+               "  FROM usage_events e LEFT JOIN users u ON u.sub = e.sub "
+               " GROUP BY e.sub, u.display_name, u.email "
+               " ORDER BY total_tokens DESC, requests DESC")
+        with self._lock, self._conn() as c:
+            return [dict(r) for r in c.execute(sql)]
 
     # --- registry merge ----------------------------------------------------
     def apply_registry_rows(self, rows: list[dict]) -> int:

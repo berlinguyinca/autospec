@@ -89,6 +89,7 @@ reader almost always wants exactly one of them:
 |---|---|
 | Overview | is it alive, is there a free seat, what are the cards doing |
 | Models | what can I ask for, and what does each cost in context and seats |
+| Servers | which machines are reachable, and which GPUs hold which models |
 | Connect | how do I point my client at it |
 | Keys | sign in, create a key, revoke one |
 | Usage | what has each key actually spent |
@@ -122,9 +123,15 @@ so a human signs in once and mints long-lived keys for the tools that need them.
 | | |
 |---|---|
 | Sign in | the dashboard's *Your account and API keys* panel |
-| Create a key | needs membership in the configured user group |
+| Create a key | **anyone who can sign in** — the pool is the audience |
 | See all users' keys and usage | needs the admin group |
 | Revoke | immediate on this node; other nodes converge within the refresh interval, which the API states in its reply |
+
+Minting is open to every member of the pool (`QT_COGNITO_USER_GROUP="*"`). Naming
+a group there narrows it again, and that is a config change rather than a code
+change. The **admin** group is separate and is never opened by `"*"`: it grants
+seeing and revoking other people's keys, which is a different question from being
+allowed to use the node.
 
 Two things worth knowing before you lose a key:
 
@@ -138,6 +145,40 @@ Creating and revoking keys **require HTTPS** and are refused over plain HTTP: a
 key minted over cleartext is a key already disclosed. Inference itself still
 works on plain `:80`, so existing clients are unaffected.
 
+## Routing to other servers
+
+Every machine reachable through this endpoint appears under **Servers**, with the
+models it serves and the base URL to reach it:
+
+| Target | Base URL |
+|---|---|
+| this node | `/v1` |
+| a registered server | `/u/<id>/v1` |
+| **pick one for me** | `/u/auto/v1` |
+
+Registration is one entry in `/etc/qwen-turing/upstreams.yaml` — see
+[`config/upstreams.yaml.example`](config/upstreams.yaml.example).
+
+**Routing is by path, not by model name.** Model-name namespacing reads better
+until you notice it requires the proxy to parse the `model` field out of the
+request body — and not parsing the body is exactly what makes this gateway cost
+nothing measurable. A path prefix carries the same information in the part of the
+request already being read, and it means two servers may serve the same model id
+without colliding.
+
+`/u/auto/v1` prefers **the server you used last**. That is not tidiness: a warm
+prefix cache was measured here at roughly a tenfold saving on prompt processing,
+so being sent elsewhere silently throws it away. It falls back to this node, then
+to any other online server, and every reply carries `X-Routed-To` so you can
+always tell where a request actually landed.
+
+Two behaviours to rely on. Remote servers are probed on a timer and **never on
+the request path**, so a request for a server that is switched off is refused in
+milliseconds rather than waiting out a proxy timeout. And a registered server
+that answers **without a key** is flagged in the panel as a configuration fault:
+its port must be restricted to this node, or a client can reach it directly and
+bypass authentication entirely.
+
 ### What "usage" means, exactly
 
 Token counts are read from the model's own response, so they are exact rather
@@ -145,6 +186,10 @@ than estimated. Each row carries prompt, completion and **cached** tokens — th
 last one matters here, because the prefix cache is worth roughly tenfold on a
 warm slot, so the cached share is the difference between a cheap conversation
 and an expensive one.
+
+Usage is a **scoreboard**: everyone signed in sees everyone's totals, ranked by
+tokens, because a leaderboard showing only your own row would not be one. It
+stays behind authentication — a lab scoreboard, never a public one.
 
 Requests whose client disconnected mid-stream are counted **separately** as
 unknown. Their token counts genuinely are not available — the terminal response
