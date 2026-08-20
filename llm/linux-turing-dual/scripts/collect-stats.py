@@ -83,13 +83,24 @@ def parse_nvidia_csv(text: str) -> list[dict]:
 
 
 def summarise(metrics: dict[str, float], gpus: list[dict],
-              model: str | None = None) -> dict:
-    """Join the two sources into what the page renders."""
+              model: str | None = None, answering: bool | None = None) -> dict:
+    """Join the two sources into what the page renders.
+
+    `answering` is liveness, and it is a SEPARATE question from whether metrics
+    could be read. Measured on this build: /metrics, /health, /slots and /props
+    all return 401 to every credential while /v1/models answers and inference
+    works -- so inferring liveness from metrics declared a serving node dead, and
+    the whole health surface then cascaded from that one wrong bit.
+
+    Left as `bool(metrics)` when no answer is supplied, so a caller that only has
+    metrics behaves as before.
+    """
     def m(name: str, default: float = 0.0) -> float:
         return metrics.get(f"llamacpp:{name}", default)
 
     return {
-        "llama_up": bool(metrics),
+        "llama_up": bool(metrics) if answering is None else bool(answering),
+        "metrics_readable": bool(metrics),
         "model": model,
         "prompt_tokens_total": int(m("prompt_tokens_total")),
         "generated_tokens_total": int(m("tokens_predicted_total")),
@@ -334,7 +345,12 @@ def read_journal(unit: str = "qwen-turing@router.service", since: str = "-2h",
                  timeout: float = 6.0) -> tuple[str, bool]:
     """Return (text, READABLE). The bool must never be collapsed into "no events"."""
     try:
-        r = subprocess.run(["journalctl", "-u", unit, "--since", since,
+        # `-b` as well as `--since`: THIS boot, and recently. The journal is
+        # persistent, so a window of hours alone kept reporting a crash that a
+        # reboot had already fixed -- observed straight after one, with the
+        # dashboard insisting CUDA could not initialise on a node that had just
+        # served a request on both cards.
+        r = subprocess.run(["journalctl", "-u", unit, "-b", "--since", since,
                             "-o", "cat", "--no-pager"],
                            capture_output=True, text=True, timeout=timeout)
         return (r.stdout, True) if r.returncode == 0 else ("", False)

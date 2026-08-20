@@ -53,7 +53,17 @@ _JOURNAL_FAULTS = (
      "the runtime could not initialise CUDA, so it cannot use the GPUs", DOWN),
     (re.compile(r"ggml_cuda_error|CUDA error", re.I),
      "the runtime hit a CUDA error while serving", DOWN),
-    (re.compile(r"out of memory|OOM", re.I),
+    # NOT case-insensitive `OOM`: that matched "to make rOOM for" in the
+    # router's own healthy eviction line and reported a memory failure on a node
+    # that had none. The acronym is upper-case and a word; the phrase is a
+    # phrase. A detector's false positive is worse than a missing check, because
+    # it sends someone to fix the wrong thing.
+    # The PHRASE is case-insensitive (the kernel capitalises "Out of memory");
+    # the ACRONYM is not, and must be a whole word. Case-insensitive `OOM` matched
+    # "to make rOOM for" -- the router's own healthy eviction line -- and reported
+    # a memory failure on a node that had none. A detector's false positive is
+    # worse than a missing check: it sends someone to fix the wrong thing.
+    (re.compile(r"(?i:out of memory|failed to allocate)|\bOOM\b|oom-kill"),
      "the runtime ran out of memory", DEGRADED),
 )
 

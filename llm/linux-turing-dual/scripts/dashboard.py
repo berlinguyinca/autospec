@@ -96,7 +96,9 @@ def _poll_once() -> dict:
     metrics = COLLECT.read_metrics(url, Handler.api_key)
     slots = COLLECT.read_slot_total(_base_url(), Handler.api_key, model)
     cards, smi_stderr, smi_failed = COLLECT.read_gpus_with_faults()
-    summary = COLLECT.summarise(metrics, cards, model)
+    # Liveness from the endpoint this build actually permits: a model list that
+    # answers proves the runtime is there, whatever /metrics says about auth.
+    summary = COLLECT.summarise(metrics, cards, model, answering=bool(models))
     # Carried under private keys (stripped from every response) so the slow
     # journal timer can turn them into problems without forking nvidia-smi again.
     summary["_smi_stderr"] = smi_stderr

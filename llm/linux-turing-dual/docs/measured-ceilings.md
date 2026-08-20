@@ -43,6 +43,40 @@ hold a 16 GiB model that may not be split. `per_card_ceiling()` and
 
 ---
 
+## This build refuses its own management endpoints
+
+Measured on the router build in service, with the key the router itself accepts:
+
+| endpoint | with the key | with no key |
+|---|---|---|
+| `/v1/models` | **200** | **200** |
+| `/health` | 401 | 401 |
+| `/metrics` | 401 | 401 |
+| `/slots` | 401 | 401 |
+| `/props` | 401 | 401 |
+
+Inference works throughout. The router logs `srv operator(): unauthorized:
+Invalid API Key` once per poll, and `llama-server --help` offers no operator or
+management credential — so this is not a misconfiguration anything here can fix.
+
+Three separate bugs followed from treating those 401s as facts about the node:
+
+* the gateway's liveness probe demanded `200` from `/health`, so it marked a
+  **serving** node offline and took it out of the balanced route. Any status now
+  counts as alive; only `5xx` or a transport failure is death. A 401 is the server
+  answering.
+* `llama_up` was `bool(metrics)`, so a node that could not be *measured* was
+  reported as a node that could not *serve*. Liveness now comes from the endpoint
+  this build permits, and `metrics_readable` records the other fact separately.
+* the health surface then cascaded from that one wrong bit: `local` down → its
+  seven models "orphaned" → a fleet-level alarm, on a node answering requests.
+
+**Still missing because of it:** tokens/second, prompt and generated token
+totals, and KV-pool usage all come from `/metrics`. They are unavailable on this
+build. Nothing else depends on them.
+
+---
+
 ## A known flake — recorded rather than rediscovered
 
 `test_promotion_admits_it_to_the_default_route` and

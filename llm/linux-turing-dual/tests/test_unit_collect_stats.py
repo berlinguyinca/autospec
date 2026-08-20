@@ -169,3 +169,41 @@ def test_summarise_reports_the_model_name():
 def test_summarise_model_defaults_to_none():
     m = load()
     assert m.summarise({}, [])["model"] is None
+
+
+def test_the_journal_window_is_scoped_to_this_boot():
+    """A window of hours alone kept reporting a crash a reboot had already fixed.
+
+    The journal is persistent, so `--since -2h` spans a reboot: straight after
+    one, the dashboard insisted CUDA could not initialise on a node that had just
+    served a request on both cards. `-b` is what makes a fault CURRENT.
+    """
+    import unittest.mock as mock
+    m = load()
+    with mock.patch.object(m.subprocess, "run") as run:
+        run.return_value = mock.Mock(returncode=0, stdout="x")
+        m.read_journal()
+    argv = run.call_args[0][0]
+    assert "-b" in argv, argv
+    assert "--since" in argv, argv
+
+
+def test_liveness_is_not_inferred_from_readable_metrics():
+    """Measured on this build: /metrics, /health, /slots and /props all 401 to
+    every credential while /v1/models answers and inference works. Inferring
+    liveness from metrics declared a serving node dead, and the whole health
+    surface cascaded from that one wrong bit.
+    """
+    m = load()
+    up = m.summarise({}, [], "qwen3.8-27b", answering=True)
+    assert up["llama_up"] is True
+    assert up["metrics_readable"] is False, "the two facts must stay separable"
+
+    down = m.summarise({}, [], None, answering=False)
+    assert down["llama_up"] is False
+
+
+def test_metrics_alone_still_imply_liveness_for_a_caller_that_has_only_those():
+    m = load()
+    assert m.summarise({"llamacpp:prompt_tokens_total": 5}, [], "x")["llama_up"] is True
+    assert m.summarise({}, [], None)["llama_up"] is False

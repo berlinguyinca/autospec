@@ -25,7 +25,7 @@ from __future__ import annotations
 
 # --- the node's own numbers -------------------------------------------------
 STATS_FIELDS = (
-    "llama_up", "model", "catalog", "queue",
+    "llama_up", "metrics_readable", "model", "catalog", "queue",
     "gpu_count", "gpu_total_mem_mib", "gpu_used_mem_mib",
     "kv_cache_usage_ratio", "requests_processing", "requests_deferred",
     "tokens_per_second", "prompt_tokens_total", "generated_tokens_total",

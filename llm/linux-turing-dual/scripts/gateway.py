@@ -505,7 +505,12 @@ def _poll_local() -> None:
         r = conn.getresponse()
         r.read()
         conn.close()
-        if r.status != 200:
+        # ANY status means the runtime answered, and answering is what liveness
+        # asks. Measured on this build: /health, /metrics, /slots and /props all
+        # return 401 to every credential, while inference works -- so demanding
+        # 200 marked a serving node offline and took it out of the balanced route
+        # entirely. Only a transport failure is evidence of death.
+        if r.status >= 500:
             raise RuntimeError(f"HTTP {r.status}")
     except Exception as exc:
         # Keep the last known model list: it describes what this node CAN serve,

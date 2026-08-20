@@ -231,3 +231,33 @@ def test_precomputed_faults_are_honoured_over_re_derivation():
     not be treated as "not asked" and quietly recomputed."""
     servers = [{"id": "local", "state": "online", "models": ["a"], "faults": []}]
     assert h.orphaned_models(["a"], servers) == []
+
+
+# --- false positives are worse than gaps ------------------------------------
+
+def test_the_routers_own_eviction_line_is_not_a_memory_failure():
+    """The exact line that fooled the first version of this module. `OOM`
+    case-insensitively matches "to make rOOM for" -- a healthy LRU eviction --
+    so a node with no memory trouble was reported as having run out. It was
+    reported to a person, who then asked for a memory fix that was not needed.
+    """
+    line = ("srv  ensure_model: evicting idle LRU name=qwen3.8-27b to make "
+            "room for name=qwen3.8-27b-uncensored")
+    assert h.runtime_problems(True, line, True) == []
+
+
+def test_a_real_memory_failure_is_still_caught():
+    """The narrowing must not trade a false positive for a blind spot."""
+    # The kernel capitalises the phrase, so the phrase must be case-insensitive
+    # even though the acronym cannot be.
+    for line in ("ggml_backend_cuda_buffer_type_alloc_buffer: failed to allocate",
+                 "CUDA error: out of memory",
+                 "kernel: Out of memory: Killed process 1234",
+                 "oom-kill:constraint=CONSTRAINT_NONE",
+                 "llama_new_context_with_model: OOM"):
+        assert h.runtime_problems(True, line, True), line
+
+
+def test_the_word_room_never_triggers_it():
+    for line in ("making room", "no room left in the cache", "ROOM", "bedroom"):
+        assert h.runtime_problems(True, line, True) == [], line
