@@ -1,12 +1,26 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestHardwareFingerprintIgnoresVolatileTelemetryAndIndex(t *testing.T) {
-	a := []card{{Index: 0, Name: "RTX 6000", MemTotal: 97887, MemUsed: 10, Util: 2}}
-	b := []card{{Index: 7, Name: "RTX 6000", MemTotal: 97887, MemUsed: 90000, Util: 99}}
+	a := []card{{Index: 0, Name: "RTX 6000", MemTotal: 97887, MemUsed: 10, Util: 2, Temp: 30, Power: 100}}
+	b := []card{{Index: 7, Name: "RTX 6000", MemTotal: 97887, MemUsed: 90000, Util: 99, Temp: 90, Power: 300}}
 	if hardwareFingerprint(a) != hardwareFingerprint(b) {
 		t.Fatal("volatile telemetry changed fingerprint")
+	}
+}
+
+func TestCapabilitiesOmitsEmptyHardwareFingerprint(t *testing.T) {
+	encoded, err := json.Marshal(capabilities{Type: "capabilities", Cards: nil, HardwareFingerprint: ""})
+	if err != nil {
+		t.Fatalf("marshal capabilities: %v", err)
+	}
+	if strings.Contains(string(encoded), "hardware_fingerprint") {
+		t.Fatalf("empty hardware fingerprint was serialized: %s", encoded)
 	}
 }
 
