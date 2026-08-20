@@ -43,6 +43,24 @@ hold a 16 GiB model that may not be split. `per_card_ceiling()` and
 
 ---
 
+## A known flake — recorded rather than rediscovered
+
+`test_promotion_admits_it_to_the_default_route` and
+`test_an_unpromoted_server_s_models_are_not_advertised` failed **together, once
+in four full-suite runs** (525 tests) and have not reproduced since: not in
+isolation, not with their two files paired, and not in three consecutive full
+runs after. Both concern what a tunnelled server advertises around promotion, so
+the suspect is cross-test bleed through the module-global `POOL` / `AGENT_STATE`
+rather than either test's own logic — a leaked `_probe_when_ready` thread from an
+earlier fixture is the obvious candidate, though it requires a spare pipe
+(`idle > 1`) and these tests offer exactly one, which argues against it.
+
+Written down because a 1-in-4 flake with no reproduction is exactly the finding
+that gets rediscovered from scratch. The fixture teardown does not reset `POOL` or
+`AGENT_STATE`; that is where to look first.
+
+---
+
 ## Reconnect after a redeploy — measured
 
 The agent's control loop grew its backoff on every failure and never reset it, so
