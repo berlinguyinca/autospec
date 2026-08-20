@@ -17,6 +17,12 @@
 --   nonexistent database name is rejected by PostgreSQL itself, not by the
 --   pooler.
 --
+-- INVOKE IT WITH -f, NOT WITH REDIRECTED STDIN
+--   The \prompt directives below read from the TERMINAL. Running this as
+--   `psql < 000-provision.sql` makes \prompt consume the script's own remaining
+--   lines as answers, which silently sets a role's password to a line of SQL.
+--   Always use `-f 000-provision.sql`.
+--
 -- PASSWORDS
 --   Supplied interactively below so they never enter this file, your shell
 --   history, or this public repository. Generate them with, e.g.

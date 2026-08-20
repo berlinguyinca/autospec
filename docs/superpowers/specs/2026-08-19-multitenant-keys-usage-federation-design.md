@@ -3,9 +3,9 @@
 > Brainstorm provenance: classified architectural. Trust model, component
 > placement, key format, storage authority, login flow, provisioning ownership
 > and offline-upstream behaviour were locked interactively with the operator
-> (2026-08-19). Four probes ran against the live node BEFORE this document
-> existed; §1 records what they returned, because two of them changed the
-> design.
+> (2026-08-19). Six probes ran against the live node BEFORE this document was
+> finished; §1 records what they returned, because two of them changed the
+> design and a third replaced a requirement's justification.
 
 Extends [`2026-08-19-turing-dual-qwen-node-design.md`](2026-08-19-turing-dual-qwen-node-design.md)
 and [`2026-08-19-queue-visibility-design.md`](2026-08-19-queue-visibility-design.md).
@@ -42,9 +42,11 @@ splitting the *delivery* is what the table above is for.
 
 ## 1. What the probes returned
 
-Four questions could each have invalidated a branch. All four were answered
+Six questions could each have invalidated a branch. All six were answered
 against the running node before any design was committed, in keeping with the
-project's one rule: never configure a number you have not verified.
+project's one rule: never configure a number you have not verified. Two of them
+changed the design; §1.6 removed a requirement's justification and replaced it
+with a better one.
 
 ### 1.1 Exact token counts need no body rewriting — the decisive finding
 
@@ -113,6 +115,68 @@ reachable by anything other than this node **bypasses this entire design**
 node; `python3-psycopg2` is available from the distribution. Requirement: the
 gateway installs from distribution packages only. No `pip`, no venv, no wheel
 building — consistent with every other component on this node.
+
+### 1.6 The runtime already accepts many keys — and that is not enough
+
+Verified against the built binary, not its documentation:
+
+```
+--api-key-file FNAME   path to file containing API keys, one per line; ...
+```
+
+Two keys were appended, the router restarted, and **both authenticated (200 and
+200) while a bogus key was refused (401)**. Removing a line and restarting
+revoked that key (401).
+
+So "many keys instead of one" is available with no new component at all. It is
+still insufficient, for two reasons that are the entire justification for §3:
+
+- **No attribution.** The runtime does not record which key served a request, so
+  a key file can answer "who may use this node" and can never answer "who used
+  it". The operator asked for the second question.
+- **Revocation costs a model reload.** The key set is read at startup, so
+  revoking requires a restart — which evicts the resident model and costs a
+  reload. Revocation must not be a service interruption.
+
+**Requirement:** the internal key of §3.2 is a **single-line** file that only the
+gateway reads. User keys never appear in it, so no user key is ever revoked by
+restarting the router.
+
+### 1.7 A pass-through preserves streaming and prefill — measured
+
+§3 places a Python process between nginx and the runtime. The risk is real: the
+existing proxy sets `proxy_buffering off` and `proxy_request_buffering off`
+precisely because a buffered body adds minutes of latency to a large prompt, and
+a naive implementation that reads a request in full before forwarding it would
+reintroduce exactly that.
+
+A throwaway stdlib pass-through was measured against the runtime directly, using
+**two distinct prompts** so the prefix cache could not confound the comparison
+(`cache_n = 0` on both):
+
+| | Direct | Through the pass-through |
+|---|---|---|
+| Prefill | 1930.8 tok/s | **1927.6 tok/s** (−0.17%) |
+| Decode | 58.9 tok/s | 60.3 tok/s |
+| Prompt tokens | 33,783 | 33,770 |
+
+Response delivery was confirmed **incremental**, not buffered: 42 chunks arriving
+spread over 0.77 s rather than in one block at the end.
+
+Scope of that measurement, stated honestly: ~34k tokens on the 9B preset, not
+100k on the 27B. It establishes the component's *shape* — a pass-through costs
+nothing measurable — and it does not replace the acceptance test at the measured
+100k ceiling (§10).
+
+**Requirements it turns into:**
+
+- The gateway streams **both** directions. It never reads a full request body or
+  a full response into memory; both are relayed in bounded chunks, and response
+  chunks are flushed as they arrive.
+- Memory per in-flight request is bounded by the chunk size, not by the prompt
+  size.
+- The gateway sets no read timeout shorter than the proxy's, so it can never be
+  the component that severs a long prefill.
 
 ---
 
@@ -220,9 +284,10 @@ Three requirements, all cheap, defending in depth:
 
 1. **`@inference_no_headers` proxies to the gateway**, not to llama.cpp. Queue
    headers still degrade independently; authentication does not.
-2. **llama.cpp retains `--api-key-file`**, holding an *internal* key known only
-   to the gateway and distinct from every user key. Any path that reaches it
-   directly fails closed with a 401 instead of serving.
+2. **llama.cpp retains `--api-key-file`**, holding a **single-line** *internal*
+   key known only to the gateway and distinct from every user key (§1.6). Any
+   path that reaches it directly fails closed with a 401 instead of serving, and
+   no user key is ever revoked by restarting the router.
 3. **A structural check fails the build** if any client-reachable `location` in
    the site file can `proxy_pass` to the llama.cpp upstream. The suite already
    has precedent for a check of exactly this shape guarding the HSTS trap.
@@ -241,14 +306,40 @@ both added latency and corrupted the sampling window it was reading.
 | key registry | 30 s, plus write-through on local change | serve last known (§4.3) |
 | upstream health | 15 s | treat as `unknown`, never as online |
 
-### 3.4 Sandboxing ceiling
+### 3.4 Sandboxing, by name
 
-The gateway touches no GPU, so unlike the router unit it may take the stricter
-systemd confinement — but it must read the credential directory and the site
-configuration. Secrets arrive via `LoadCredential` **only**; never
-`Environment=`, which is readable by any local user through `systemctl show`.
+The gateway touches no GPU, so it is not bound by the confinement ceiling the
+router unit hit — but "stricter" is not a specification, and the directives that
+broke sibling units here are known. Required, explicitly:
+
+- `ProtectSystem=strict` is permitted (the router cannot take it; CUDA needs
+  write access this process does not).
+- `ProtectHome=true` **with** the site-configuration directory added to
+  `ReadOnlyPaths=` — that exact combination already broke a sibling unit's
+  configuration read on this node, and adding the path is the fix.
+- `NoNewPrivileges=true`, `PrivateTmp=true`, `RestrictAddressFamilies=` limited
+  to the families actually used.
+- Secrets arrive via `LoadCredential` **only** — never `Environment=`, which any
+  local user can read through `systemctl show`.
+
+The gateway needs no journal group membership; it logs to its own unit.
 
 ---
+
+### 3.5 The gateway adds no queue of its own
+
+The queue panel's arithmetic reads the runtime's own counters, and its rolling
+window was calibrated against today's topology. Inserting a component in front
+of the runtime could create a **second** place where requests wait — and a panel
+that reports one queue while requests pile up in another is a panel that lies.
+
+**Requirement: the gateway performs no admission control and maintains no
+request queue.** It accepts a connection, authenticates, and relays; concurrency
+is bounded by the runtime's slots exactly as it is today. The existing queue
+arithmetic therefore remains correct and unchanged.
+
+If admission control is ever wanted (it is not in scope — see §11), the queue
+panel must be extended in the same change. It may not be added silently.
 
 ## 4. Keys and accounting
 
@@ -460,7 +551,10 @@ action on the pool:
 1. A **separate app client** for this dashboard — public, no client secret, PKCE
    required — leaving the existing frontend's app client untouched.
 2. A hosted login domain on the pool.
-3. A callback URL pointing at this node's `:443` dashboard path.
+3. A callback URL pointing at this node's `:443` dashboard path. **Ordering
+   constraint: the certificate and the `:443` listener must exist before this
+   app client is created**, or the redirect target does not resolve and login
+   fails in a way that looks like a pool misconfiguration.
 4. The two groups from §2.3, and membership.
 
 The gateway performs the authorization-code exchange with PKCE, verifies the
@@ -544,36 +638,46 @@ parser's own assumptions cannot catch a bug in those assumptions.
 
 ## 10. Acceptance criteria
 
-**Phase 1**
-1. Two distinct keys both authenticate; a request with no key, a malformed key,
+**Phase 1** — criterion 1 runs **first**, because a failure there changes the
+component's shape rather than its details.
+
+1. A prompt at the measured 100k ceiling completes through the gateway, with
+   prefill throughput within measurement noise of the recorded figure, and
+   response chunks arriving incrementally rather than in one block. The
+   pass-through shape was measured good at ~34k (§1.7); this is the same check
+   at the ceiling that matters.
+2. Peak gateway memory during that request stays bounded well below the prompt
+   size, proving neither direction is buffered.
+3. Two distinct keys both authenticate; a request with no key, a malformed key,
    and a revoked key are each rejected with the correct status.
-2. Revoking one key leaves the other working, verified by request.
-3. Usage attributed per key matches the token counts the model itself reported,
+4. Revoking one key leaves the other working, verified by request, and **without
+   restarting the router** (§1.6).
+5. Usage attributed per key matches the token counts the model itself reported,
    for a streamed and a non-streaming request.
-4. A client disconnected mid-stream produces a `truncated` record, not a zero.
-5. The gateway stopped leaves inference **refused**, not open — verified by
+6. A client disconnected mid-stream produces a `truncated` record, not a zero.
+7. The gateway stopped leaves inference **refused**, not open — verified by
    request, not by reading the configuration.
-6. A prompt at the measured 100k ceiling still completes through the gateway,
-   with prefill throughput within measurement noise of the recorded figure.
 
 **Phase 2**
-7. A user in the user group can mint, list and revoke only their own keys.
-8. A user in neither group authenticates and is authorized for nothing, and is
+
+8. A user in the user group can mint, list and revoke only their own keys.
+9. A user in neither group authenticates and is authorized for nothing, and is
    told which group they need.
-9. Group membership supplied in a header rather than a verified token grants
-   nothing.
-10. With the registry unreachable, existing keys still authenticate and usage
+10. Group membership supplied in a header rather than a verified token grants
+    nothing.
+11. With the registry unreachable, existing keys still authenticate and usage
     buffers; on restoration it drains without double-counting.
-11. Key minting over plain HTTP is refused.
+12. Key minting over plain HTTP is refused.
 
 **Phase 3**
-12. A model on a reachable upstream answers through the node with usage
+
+13. A model on a reachable upstream answers through the node, with usage
     attributed to the calling key and the upstream recorded.
-13. A model on an unreachable upstream returns 503 naming the upstream in under
-    a second, and does not appear in `/v1/models`.
-14. An upstream that is reachable **and** unauthenticated is reported as a
+14. A model on an unreachable upstream returns 503 naming the upstream in under
+    a second, and does not appear in the model list.
+15. An upstream that is reachable **and** unauthenticated is reported as a
     configuration fault.
-15. Every existing client configuration keeps working unchanged.
+16. Every existing client configuration keeps working unchanged.
 
 ---
 
