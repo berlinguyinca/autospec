@@ -63,6 +63,7 @@ import usage as _usage          # noqa: E402
 import publicview as _public    # noqa: E402
 import chat as _chat            # noqa: E402
 import health as _health        # noqa: E402
+import admission as _adm        # noqa: E402
 from keystore import KeyStore   # noqa: E402
 
 CHUNK = 65536
@@ -181,6 +182,17 @@ MODEL_LIST_MAX = 1 << 20
 # What an agent is asked to keep open. Two slots plus headroom, so a request
 # never pays for a TLS handshake it could have prepaid.
 DEFAULT_PIPES_WANTED = 4
+# How long a request may HOLD for a seat before being told the node is full.
+# Sized against measured prefill: ~210 s to the first token at 100k, and nginx's
+# read timeout here is 900 s -- so a wait shorter than a legitimate prefill would
+# refuse work the node was about to do anyway, and one longer than nginx's would
+# be a wait nobody is left to receive.
+ADMIT_WAIT_SECONDS = 300
+ADMIT = _adm.Admission()
+# Model context and slot counts, from the dashboard's catalog. Refreshed by the
+# housekeeper: the pool size is a property of how a model was LOADED, so it is
+# read from the node rather than assumed.
+POOL_SIZES: dict = {}
 
 
 def _ks_enrol_ttl() -> int:
@@ -551,6 +563,39 @@ def _refresh_throughput() -> None:
     THROUGHPUT = STORE.throughput()
 
 
+def _refresh_pool_sizes() -> None:
+    """How big each model's KV pool is, and how many slots it was given.
+
+    Read from the node's own catalog rather than assumed, because the pool is a
+    property of how the model was LOADED -- a preset edited and reloaded changes
+    it, and admission control working from a stale constant would either refuse
+    work that fits or admit work that does not.
+    """
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", CFG.dash_port, timeout=5)
+        conn.putrequest("GET", "/api/stats", skip_host=True,
+                        skip_accept_encoding=True)
+        conn.putheader("Host", f"127.0.0.1:{CFG.dash_port}")
+        if DASHBOARD_KEY:
+            conn.putheader("Authorization", f"Bearer {DASHBOARD_KEY}")
+        conn.endheaders()
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        if r.status != 200:
+            return
+        for m in json.loads(body).get("catalog") or []:
+            mid, ctx, slots = m.get("id"), m.get("context"), m.get("slots")
+            if mid and ctx:
+                POOL_SIZES[mid] = (int(ctx), int(slots or 1))
+                for alias in m.get("aliases") or []:
+                    # An alias shares the instance's pool -- it is the same loaded
+                    # model under another name, which is the whole point of a tier.
+                    POOL_SIZES[alias] = (int(ctx), int(slots or 1))
+    except Exception:
+        return
+
+
 def _housekeeper() -> None:
     """Registry sync and usage flush. Both are best-effort: a registry outage
     degrades to stale usage, never to a refused request."""
@@ -572,6 +617,10 @@ def _housekeeper() -> None:
             _refresh_throughput()
         except Exception as exc:
             sys.stderr.write(f"throughput refresh: {exc}\n")
+        try:
+            _refresh_pool_sizes()
+        except Exception as exc:
+            sys.stderr.write(f"pool sizes: {exc}\n")
         try:
             # Idle pipes would otherwise be reaped by nginx's read timeout, and
             # the first request after a quiet hour would die on a reset.
@@ -624,6 +673,12 @@ class Handler(BaseHTTPRequestHandler):
     # used for BOTH destinations: when auto picks this node the prefix still has
     # to go, or the local runtime is asked for a path it has never heard of.
     _route_path = None
+    # The model this request named, from the peek. Admission weighs the tier.
+    _req_model = None
+    # Seconds this request spent holding for a seat. Reported back, because a
+    # caller that waited 40 s deserves to know the node was full rather than
+    # slow -- those call for different actions.
+    _admit_waited = 0.0
     # A HEAD is a GET whose body is thrown away. It is a CLASS attribute rather
     # than per-request state reset in _route(), because _route() runs after
     # do_HEAD() has set it -- resetting it there would clear the flag and send a
@@ -1096,6 +1151,15 @@ class Handler(BaseHTTPRequestHandler):
         # What is wrong, per server and for the fleet. Computed from the rows
         # just built rather than from a second query, so the panel and the
         # problem list cannot describe different moments.
+        # What is holding for a seat, per server. On this build llama.cpp's own
+        # queue metrics are unreachable (/metrics 401s), so this is the ONLY
+        # queue visibility there is -- and a queue that holds silently is
+        # indistinguishable from a node that is simply slow.
+        seats = ADMIT.snapshot()
+        for row in out:
+            row["admission"] = [
+                dict(v, model=k.split("/", 1)[1]) for k, v in sorted(seats.items())
+                if k.split("/", 1)[0] == row["id"]]
         advertised = set()
         for row in out:
             row["faults"] = (row.pop("node_problems", None) or []) \
@@ -1628,6 +1692,29 @@ class Handler(BaseHTTPRequestHandler):
             "you": who["sub"],
             "is_admin": who["is_admin"]})
 
+    def _client_gone(self) -> bool:
+        """Has the caller hung up? Checked WITHOUT consuming anything.
+
+        MSG_PEEK rather than a read: at admission time the request body has not
+        been forwarded yet, so consuming a byte here would corrupt it. Readable
+        with zero bytes waiting is the peer having closed.
+
+        Matters because the queue is FIFO: a caller that walked away would
+        otherwise hold the head of the line until its timeout, and everyone
+        behind it waits on a ghost.
+        """
+        try:
+            import select
+            import socket as _socket
+            sock = self.connection
+            ready, _, _ = select.select([sock], [], [], 0)
+            if not ready:
+                return False
+            return sock.recv(1, _socket.MSG_PEEK) == b""
+        except Exception:
+            # Unknown is not gone. Guessing "gone" would cancel a live request.
+            return False
+
     # --- the chat panel ----------------------------------------------------
     def _chat(self) -> None:
         """Inference bought with a SESSION, for the dashboard's chat panel.
@@ -1888,6 +1975,8 @@ class Handler(BaseHTTPRequestHandler):
             return _ups.LOCAL
 
         model, conclusive = self._peek_body()
+        # Kept for admission control, which needs the tier the caller named.
+        self._req_model = model
         servers = _servers_all()
         state = _state_view(servers)
         chosen, why, est = _ups.pick_auto(
@@ -2032,6 +2121,23 @@ class Handler(BaseHTTPRequestHandler):
         status = 0
         streamed = False
         where = target.id if target else _ups.LOCAL
+
+        # --- admission: HOLD for a seat rather than over-subscribe ----------
+        # A context tier on this node is a contract nothing enforced. Two
+        # sessions could claim more of one model's KV pool than exists, and
+        # llama.cpp does not refuse -- it dies, taking every live session with
+        # it. So a request that does not fit waits here, before it can take a
+        # tunnel pipe or reach a runtime.
+        lease = pool = None
+        try:
+            lease, pool, refusal = self._admit(where)
+        except NoCapacity as exc:
+            self._decided(str(exc), "too-large")
+            return self._err(413, str(exc), "context_too_large")
+        if refusal:
+            self._decided(where, "full")
+            return self._err(503, refusal, "no_capacity")
+
         with _LOCK:
             INFLIGHT[where] = INFLIGHT.get(where, 0) + 1
         try:
@@ -2058,6 +2164,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             status = 502
         finally:
+            # Released on EVERY path. A leaked lease shrinks the pool
+            # permanently, and that failure looks like a node that mysteriously
+            # got slower rather than like a bug.
+            if pool is not None:
+                pool.release(lease)
             with _LOCK:
                 INFLIGHT[where] = max(0, INFLIGHT.get(where, 1) - 1)
             u = acc.result()
@@ -2076,6 +2187,43 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 # Accounting must never break serving.
                 sys.stderr.write(f"usage not recorded: {exc}\n")
+
+    def _admit(self, where: str):
+        """Reserve KV for this request. Returns (lease, pool, refusal_message).
+
+        Only inference is weighed. A model list or a health probe reserves
+        nothing: they cost no KV, and making them queue behind a 100k prefill
+        would make the node look dead while it was merely busy.
+
+        An unbudgeted request -- a model whose pool size this node does not know
+        -- is admitted rather than blocked. Failing closed on missing telemetry
+        would turn one unreadable catalog into a total outage, and the tiers this
+        protects are the ones we DO know about.
+        """
+        model = self._req_model
+        path = (self._route_path or self.path).split("?", 1)[0]
+        if not model or not _ups.balanceable(path):
+            return None, None, None
+        sizes = POOL_SIZES.get(model)
+        if not sizes:
+            return None, None, None
+        context, slots = sizes
+        want = _adm.tier_tokens(model, context, slots)
+        if want <= 0:
+            return None, None, None
+        pool = ADMIT.pool(where, model, context)
+        try:
+            lease = pool.acquire(want, ADMIT_WAIT_SECONDS,
+                                 cancelled=self._client_gone)
+        except _adm.TooLarge as exc:
+            raise NoCapacity(str(exc))
+        if lease is None:
+            return None, None, (
+                f"{where} is full: {want} tokens of {model}'s "
+                f"{context}-token pool were not free within "
+                f"{ADMIT_WAIT_SECONDS}s")
+        self._admit_waited = lease.waited
+        return lease, pool, None
 
     def _relay(self, method: str, acc, target=None) -> tuple[int, bool]:
         query = self.path.split("?", 1)
@@ -2186,6 +2334,12 @@ class Handler(BaseHTTPRequestHandler):
         why = getattr(self, "_route_why", None)
         if why:
             self.send_header("X-Routed-Why", why)
+        # How long this request HELD for a seat. Reported so a caller can tell a
+        # full node from a slow one -- those call for different actions, and
+        # without this the wait is indistinguishable from prefill.
+        waited = getattr(self, "_admit_waited", 0.0)
+        if waited and waited > 0.05:
+            self.send_header("X-Queued-Seconds", f"{waited:.2f}")
         est = getattr(self, "_route_est", None)
         if est is not None:
             # What the scheduler PREDICTED, so its arithmetic can be checked from

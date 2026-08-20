@@ -111,6 +111,55 @@ you to skim it.
 
 Each section is deep-linkable (`/#keys`), so a refresh keeps you where you were.
 
+## The KV pool has admission control now
+
+A context tier here was always a **contract** and never a limit. Two sessions
+could claim more of one model's pool than exists, and llama.cpp does not refuse —
+it dies, taking every live session with it.
+
+The gateway now holds instead. A request reserves what its tier names (`-40k` →
+40 × 1024) or, with no tier in the id, the fair share the preset configured
+(`context / slots`). If that does not fit, it **waits** in a FIFO queue, and the
+response reports the wait as `X-Queued-Seconds`.
+
+Verified live — two `qwen3.8-27b-100k` requests at once, each claiming the whole
+102400-token pool:
+
+```
+request 1: HTTP 200  x-routed-to: local
+request 2: HTTP 200  x-routed-to: local  x-queued-seconds: 1.43
+```
+
+Waiting, not refusing: many small agents arriving together is the expected shape
+of this workload, and a queue turns a thundering herd into a line, where a refusal
+would turn it into a retry storm — the same herd with worse latency and no order.
+
+Three properties, each tested with real threads:
+
+* **FIFO.** Only the head of the queue may be admitted. Admitting whoever happens
+  to fit starves the large session forever, and that is the caller most likely to
+  be a person waiting.
+* **What can never fit is refused at once** (`413`), never queued. Waiting for
+  capacity that cannot exist is a hang dressed up as fairness.
+* **Every lease is released on every path.** A leaked reservation shrinks the pool
+  permanently, and that failure looks like a node that mysteriously got slower.
+
+A model whose pool size this node does not know is admitted un-weighed: failing
+closed on missing telemetry would turn one unreadable catalog into a total outage.
+Discovery and health probes are never queued — they cost no KV, and making them
+wait behind a 100k prefill would make a busy node look dead.
+
+### What this means for many concurrent agents
+
+The tier is now a real reservation, so **asking for more context than you need
+costs other callers directly**. `qwen3.8-27b` is 102400 tokens across 2 slots, so
+two sessions of 51200 run at once and a third waits. A subagent that names
+`-100k` takes the whole pool and serialises everything behind it.
+
+Concurrency is therefore a function of `parallel` and per-agent context, not of
+GPU count: raising `--parallel` and giving each agent the smallest tier it needs
+is what buys more simultaneous agents.
+
 ## Problems, said plainly and shown first
 
 The Overview opens with what is **wrong**, above every gauge. A fault buried under

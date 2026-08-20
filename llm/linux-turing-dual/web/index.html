@@ -647,6 +647,23 @@ async function loadFleet(){
   return FLEET;
 }
 
+// KV seats per loaded model: what is admitted, and what is HOLDING for room.
+// A context tier here is a contract the gateway now enforces -- a session that
+// would over-subscribe a model's pool waits instead of killing every live one.
+// Shown because a request that is queued looks exactly like a request that is
+// slow, and the two call for different actions.
+function seatLine(o){
+  const pools = (o.admission || []).filter(p => p.used || p.waiting);
+  if(!pools.length) return '';
+  return pools.map(p => {
+    const pct = p.total ? Math.round(100 * p.used / p.total) : 0;
+    return '<div class="sub" style="margin-top:5px">' + esc(p.model) + ': ' +
+      n(p.used) + ' / ' + n(p.total) + ' KV tokens (' + pct + '%)' +
+      (p.waiting ? ' · <strong>' + p.waiting + ' holding</strong>' : '') +
+      (p.rejected ? ' · ' + p.rejected + ' too large' : '') + '</div>';
+  }).join('');
+}
+
 function serverLabel(s){
   // The Models page's host badge says when its host is faulting: a model listed
   // against a broken server is worse than no listing, because it reads as
@@ -860,6 +877,7 @@ function serverCard(o, me){
       '<span>' + (KIND_BADGE[o.kind] || '') + ' ' + badge + '</span></div>' +
     (o.note ? '<div class="sub">' + esc(o.note) + '</div>' : '') +
     (o.gpus ? '<div class="sub">' + esc(o.gpus) + '</div>' : '') +
+    seatLine(o) +
     (o.owner ? '<div class="sub">attached by ' +
                esc(o.owner_name || o.owner) + '</div>' : '') +
     '<div class="sub" style="margin-top:8px">Base URL <code>' + esc(o.route) + '</code></div>' +

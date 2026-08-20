@@ -45,6 +45,8 @@ SERVER_FIELDS = (
     # What is wrong with this server. Categories, never the probe's own error
     # string -- those quote hosts and ports.
     "faults",
+    # KV seats: what is admitted and what is holding. Load, not identity.
+    "admission",
     # Per-card telemetry the server reported about itself. Projected through the
     # same GPU_FIELDS as this node's own cards, below.
     "cards",

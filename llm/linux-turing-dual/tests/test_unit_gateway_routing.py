@@ -722,3 +722,116 @@ def test_the_public_fleet_view_is_enough_to_answer_who_holds_what(fleet):
     assert by_model.get(MODEL_LOCAL) == ["local"]
     assert by_model.get(MODEL_REMOTE) == ["remote"]
     assert sorted(by_model.get(MODEL_BOTH) or []) == ["local", "remote"]
+
+
+# --- admission: hold for a seat rather than over-subscribe -------------------
+
+_adm = load_script("admission")
+
+
+def infer_h(srv, key, model, timeout=30):
+    """Like infer(), but returns the response headers too."""
+    raw = json.dumps({"model": model,
+                      "messages": [{"role": "user", "content": "x"}]}).encode()
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                   timeout=timeout)
+    c.request("POST", "/v1/chat/completions", raw,
+              {"Authorization": "Bearer " + key,
+               "Content-Type": "application/json",
+               "Content-Length": str(len(raw))})
+    r = c.getresponse()
+    body = r.read()
+    out = (r.status, dict(r.getheaders()), body)
+    c.close()
+    return out
+
+
+def test_a_request_that_does_not_fit_waits_and_then_runs(fleet):
+    """The documented crash, prevented. Two sessions used to claim more of one
+    model's KV pool than exists; llama.cpp does not refuse, it dies and takes
+    every live session with it. Now the second one holds."""
+    srv, runtime, _remote, key = fleet
+    gw.POOL_SIZES[MODEL_LOCAL] = (1024, 1)          # a one-seat pool
+    pool = gw.ADMIT.pool(_ups_local(), MODEL_LOCAL, 1024)
+    held = pool.acquire(1024, timeout=2)
+    assert held is not None
+
+    done = {}
+    def go():
+        done["r"] = infer_h(srv, key, MODEL_LOCAL, timeout=30)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    time.sleep(0.6)
+    assert "r" not in done, "the request must WAIT, not be served or refused"
+    assert pool.waiting == 1, "it must be queued, not spinning"
+
+    pool.release(held)
+    t.join(timeout=20)
+    status, headers, _ = done["r"]
+    assert status == 200
+    assert float(headers["X-Queued-Seconds"]) > 0.3, \
+        "the hold must be reported, or a full node is indistinguishable from a slow one"
+    gw.POOL_SIZES.pop(MODEL_LOCAL, None)
+
+
+def _ups_local():
+    return gw._ups.LOCAL
+
+
+def test_a_request_larger_than_the_whole_pool_is_refused_at_once(fleet):
+    """Never queued: no amount of waiting makes room that cannot exist."""
+    srv, _runtime, _remote, key = fleet
+    gw.POOL_SIZES["big-40k"] = (1024, 1)
+    gw.LOCAL_STATE["models"] = list(gw.LOCAL_STATE["models"]) + ["big-40k"]
+    started = time.time()
+    status, _headers, body = infer_h(srv, key, "big-40k")
+    assert status == 413
+    assert b"exceeds" in body
+    assert time.time() - started < 5, "it must not have waited"
+    gw.POOL_SIZES.pop("big-40k", None)
+
+
+def test_a_model_with_no_known_pool_is_not_gated(fleet):
+    """Failing closed on missing telemetry would turn one unreadable catalog into
+    a total outage. The tiers this protects are the ones we DO know."""
+    srv, _runtime, _remote, key = fleet
+    gw.POOL_SIZES.clear()
+    status, headers, _ = infer_h(srv, key, MODEL_LOCAL)
+    assert status == 200
+    assert "X-Queued-Seconds" not in headers
+
+
+def test_discovery_is_never_made_to_queue(fleet):
+    """A model list costs no KV. Making it wait behind a 100k prefill would make
+    the node look dead while it was merely busy."""
+    srv, _runtime, _remote, _key = fleet
+    gw.POOL_SIZES[MODEL_LOCAL] = (1024, 1)
+    pool = gw.ADMIT.pool(_ups_local(), MODEL_LOCAL, 1024)
+    held = pool.acquire(1024, timeout=2)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=8)
+        c.request("GET", "/v1/models")
+        r = c.getresponse()
+        r.read()
+        assert r.status == 200
+        c.close()
+    finally:
+        pool.release(held)
+        gw.POOL_SIZES.pop(MODEL_LOCAL, None)
+
+
+def test_a_lease_is_returned_even_when_the_upstream_fails(fleet):
+    """A leaked lease shrinks the pool permanently, and that failure looks like a
+    node that mysteriously got slower rather than like a bug."""
+    srv, _runtime, _remote, key = fleet
+    gw.POOL_SIZES[MODEL_LOCAL] = (4096, 1)
+    pool = gw.ADMIT.pool(_ups_local(), MODEL_LOCAL, 4096)
+    # Pointed at a port nobody listens on, so the connection is REFUSED at once.
+    # Shutting the stand-in down instead leaves its listening socket accepting,
+    # and the relay then waits out its own 900 s timeout -- a hung test rather
+    # than a fast one.
+    gw.CFG.upstream_port = 1
+    status, _h, _b = infer_h(srv, key, MODEL_LOCAL)
+    assert status in (502, 503)
+    assert pool.used == 0, "the reservation must have been released"
+    gw.POOL_SIZES.pop(MODEL_LOCAL, None)
