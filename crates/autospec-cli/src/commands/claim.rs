@@ -1916,7 +1916,7 @@ fn recover_stale_startup_record(
             previous_claim_id: None,
         });
     }
-    if !quarantine_authoritative_stale_heartbeat(
+    if !quarantine_authoritative_stale_heartbeat_with_sync_hook(
         repo,
         issue,
         &selected.record,
@@ -2022,7 +2022,6 @@ fn recover_authoritative_stale_startup(
         &selected.record,
         authorized_prior.as_deref(),
         &mut || Ok(()),
-        &mut |_| Ok(()),
     )? {
         return Ok(RecoveryOutcome {
             recovered: false,
@@ -2155,6 +2154,24 @@ fn expired_prior_generation_heartbeat(
 
 #[cfg(unix)]
 fn quarantine_authoritative_stale_heartbeat(
+    repo_slug: &str,
+    issue: u64,
+    record: &RunStateRecord,
+    authorized_prior: Option<&StartupHeartbeatSnapshot>,
+    boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
+) -> Result<bool, CommandFailure> {
+    quarantine_authoritative_stale_heartbeat_with_sync_hook(
+        repo_slug,
+        issue,
+        record,
+        authorized_prior,
+        boundary,
+        &mut |_| Ok(()),
+    )
+}
+
+#[cfg(unix)]
+fn quarantine_authoritative_stale_heartbeat_with_sync_hook(
     repo_name: &str,
     issue: u64,
     record: &RunStateRecord,
@@ -2340,6 +2357,24 @@ fn quarantine_authoritative_stale_heartbeat(
 #[cfg(not(unix))]
 #[cfg(not(target_os = "linux"))]
 fn quarantine_authoritative_stale_heartbeat(
+    repo_slug: &str,
+    issue: u64,
+    record: &RunStateRecord,
+    authorized_prior: Option<&StartupHeartbeatSnapshot>,
+    boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
+) -> Result<bool, CommandFailure> {
+    quarantine_authoritative_stale_heartbeat_with_sync_hook(
+        repo_slug,
+        issue,
+        record,
+        authorized_prior,
+        boundary,
+        &mut |_| Ok(()),
+    )
+}
+
+#[cfg(not(unix))]
+fn quarantine_authoritative_stale_heartbeat_with_sync_hook(
     _repo: &str,
     _issue: u64,
     _record: &RunStateRecord,
