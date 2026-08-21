@@ -2470,6 +2470,43 @@ fn run_foreground_with_lease(
     let state_path = foreground_state_path(layout, scope);
     let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
+    let orphaned_executor_receipt = state.phase() == ConductorPhase::Paused
+        && state.selected_issue().is_none()
+        && matches!(
+            state.last_outcome(),
+            Some(ConductorOutcome::Blocked(reason))
+                if reason == blocked_cycle::EXECUTOR_RECEIPT_FAILURE_PAUSE
+        );
+    if orphaned_executor_receipt {
+        if let Some(acquisition) =
+            read_claim_acquisition_receipt(&state_path).map_err(CommandFailure::diagnostic)?
+        {
+            if acquisition.repo != layout.repo {
+                return Err(CommandFailure::diagnostic(
+                    "orphaned claim acquisition receipt belongs to another repository",
+                )
+                .into());
+            }
+            let _ = claim::transition_bridge_claim(
+                claim::ClaimMutationIdentity {
+                    repo: &acquisition.repo,
+                    issue: acquisition.issue,
+                    worker_id: &acquisition.worker_id,
+                    branch: &acquisition.branch,
+                    claim_id: &acquisition.claim_id,
+                },
+                None,
+                claim::BridgeClaimDisposition::Retryable,
+            )?;
+            clear_claim_acquisition_receipt(&state_path)
+                .map_err(CommandFailure::diagnostic)?;
+        }
+        state = state
+            .transition(ConductorEvent::AbandonTerminal)
+            .map_err(CommandFailure::diagnostic)?;
+        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        return Ok(ForegroundCompletion::State(Box::new(state)));
+    }
     if blocked_cycle::no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
         let ready = initial_plan.as_ref().map_err(|reason| {
             CommandFailure::diagnostic(format!("cannot recheck paused foreground queue: {reason}"))
@@ -2569,6 +2606,31 @@ fn run_foreground_with_lease(
                         .map_err(CommandFailure::diagnostic)?;
                     persist_foreground_state(&state_path, &state)
                         .map_err(CommandFailure::diagnostic)?;
+                } else if continuous {
+                    if let Some(acquisition) =
+                        load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+                            .map_err(CommandFailure::diagnostic)?
+                    {
+                        let _ = claim::transition_bridge_claim(
+                            claim::ClaimMutationIdentity {
+                                repo: &acquisition.repo,
+                                issue: acquisition.issue,
+                                worker_id: &acquisition.worker_id,
+                                branch: &acquisition.branch,
+                                claim_id: &acquisition.claim_id,
+                            },
+                            None,
+                            claim::BridgeClaimDisposition::Retryable,
+                        )?;
+                    }
+                    clear_claim_acquisition_receipt(&state_path)
+                        .map_err(CommandFailure::diagnostic)?;
+                    state = state
+                        .transition(ConductorEvent::RetireObsoleteSelection)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {

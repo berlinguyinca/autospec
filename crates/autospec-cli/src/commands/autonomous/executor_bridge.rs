@@ -12906,7 +12906,10 @@ where
             &fs::read_to_string(&path)
                 .map_err(|error| format!("read interrupted executor predecessor: {error}"))?,
         )?;
-        if state.phase != BridgePhase::Interrupted
+        if !matches!(
+            state.phase,
+            BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+        )
             || state.identity.repository != repository
             || state.identity.repository_path != repository_path
             || state.identity.issue != issue
@@ -12953,7 +12956,12 @@ where
     };
     let mut transferred = false;
     let authorized = authorize(&state, &mut || {
-        prepare_available_worktree_transfer(&state_path, &state, None)?;
+        let mut retired = state.clone();
+        retired.supervisor = None;
+        retired.process = None;
+        retired.progress_at = unix_now()?;
+        write_invocation_atomic(&state_path, &retired)?;
+        prepare_available_worktree_transfer(&state_path, &retired, None)?;
         transferred = true;
         Ok(())
     })?;

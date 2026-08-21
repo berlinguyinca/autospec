@@ -13,6 +13,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "linux")]
@@ -263,8 +264,18 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     .expect_err("live predecessor stays owned");
     assert!(live.contains("process is still live"), "{live}");
 
-    state.process = None;
-    bridge::write_invocation_atomic(&state_path, &state).expect("persist quiescent invocation");
+    let mut exited = Command::new("sh")
+        .args(["-c", "sleep 0.1"])
+        .spawn()
+        .expect("spawn predecessor process");
+    let dead = bridge::observe_process_identity(exited.id(), "")
+        .expect("observe predecessor process")
+        .expect("predecessor process identity");
+    exited.wait().expect("wait for predecessor process");
+    state.supervisor = Some(dead.clone());
+    state.process = Some(dead);
+    bridge::write_invocation_atomic(&state_path, &state)
+        .expect("persist quiescent process anchors");
     let withheld = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(true))
         .expect_err("authority cannot escape without owning the transfer");
     assert!(
@@ -273,6 +284,12 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     );
     let unchanged = fs::read_to_string(&wip).expect("withheld authority preserves WIP");
     assert_eq!(unchanged, "preserve me\n");
+    let withheld_state = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("read withheld predecessor"),
+    )
+    .expect("parse withheld predecessor");
+    assert!(withheld_state.supervisor.is_some());
+    assert!(withheld_state.process.is_some());
     let release_checks = std::cell::Cell::new(0usize);
     assert!(
         recover_test_predecessor(&fixture, &state_dir, &worktree, |candidate, transfer| {
@@ -290,6 +307,12 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
         1,
         "only the transfer-bound predecessor reaches the authority gate"
     );
+    let transferred_state = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("read transferred predecessor"),
+    )
+    .expect("parse transferred predecessor");
+    assert!(transferred_state.supervisor.is_none());
+    assert!(transferred_state.process.is_none());
     assert_eq!(
         bridge::PersistedInvocation::from_json(
             &fs::read_to_string(&historical_path).expect("read historical predecessor")
@@ -340,6 +363,74 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
         ],
     );
     let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+}
+
+#[test]
+fn autonomous_executor_bridge_transfers_released_implementation_complete_predecessor() {
+    let fixture = GitFixture::new("implementation-complete-transfer");
+    let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+    let scope = format!(
+        "implementation_complete_transfer_{}_{}",
+        std::process::id(),
+        TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let worktree = bridge::provision_issue_worktree_for_claim(
+        &fixture.repo,
+        &scope,
+        42,
+        &base,
+        Some(("old-claim", "old-invocation")),
+    )
+    .expect("provision predecessor worktree");
+    fs::write(worktree.path.join("implementation.txt"), "preserved implementation\n")
+        .expect("write predecessor implementation");
+    git(&worktree.path, &["add", "implementation.txt"]);
+    git(
+        &worktree.path,
+        &["commit", "-m", "feat: preserve predecessor implementation"],
+    );
+    let preserved_head = git_stdout(&worktree.path, &["rev-parse", "HEAD"]);
+
+    let mut state = supervision_state(&fixture);
+    state.phase = BridgePhase::ImplementationComplete;
+    state.identity.worktree = worktree.path.clone();
+    state.identity.branch = worktree.branch.clone();
+    state.identity.claim_id = "old-claim".to_string();
+    state.identity.invocation_id = "old-invocation".to_string();
+    state.identity.runtime_environment_dir = None;
+    state.identity.runtime_session_id = None;
+    state.process =
+        bridge::observe_process_identity(std::process::id(), "").expect("observe live process");
+    let state_dir = fixture.root.join("state");
+    let generation = &bridge::sha256_hex(b"old-claim")[..16];
+    let state_path = state_dir.join(format!("issue-42-{generation}.json"));
+    bridge::write_invocation_atomic(&state_path, &state).expect("persist live predecessor");
+
+    let live = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+        panic!("live implementation-complete predecessor must fail before authority")
+    })
+    .expect_err("live predecessor blocks transfer");
+    assert!(live.contains("process is still live"), "{live}");
+
+    state.process = None;
+    bridge::write_invocation_atomic(&state_path, &state).expect("retire predecessor process");
+    assert!(
+        recover_test_predecessor(&fixture, &state_dir, &worktree, |candidate, transfer| {
+            assert_eq!(candidate.phase, BridgePhase::ImplementationComplete);
+            transfer()?;
+            Ok(true)
+        })
+        .expect("transfer implementation-complete predecessor")
+    );
+    let adopted = bridge::provision_issue_worktree_for_claim(
+        &fixture.repo,
+        &scope,
+        42,
+        &base,
+        Some(("new-claim", "new-invocation")),
+    )
+    .expect("adopt preserved implementation");
+    assert_eq!(git_stdout(&adopted.path, &["rev-parse", "HEAD"]), preserved_head);
 }
 
 #[test]

@@ -482,6 +482,73 @@ fn foreground_resumes_no_ready_pause() {
 }
 
 #[test]
+fn foreground_retires_orphaned_executor_receipt_after_selection_is_lost() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let orphaned = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim state")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+        })
+        .expect("executor receipt failure pause")
+        .transition(ConductorEvent::RetireObsoleteSelection)
+        .expect("lose selected issue")
+        .transition(ConductorEvent::ScanFoundWork)
+        .expect("rescan")
+        .transition(ConductorEvent::SafetyReviewed)
+        .expect("review")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("park after the orphaned claim leaves no ready work");
+    seed_foreground_state(&fixture, &orphaned);
+    fixture.seed_claim_acquisition_receipt(
+        "orphaned-worker",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--foreground",
+            "--max-cycles",
+            "1",
+            "--poll-interval-sec",
+            "0",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo path"),
+            "--branch",
+            "main",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run orphaned-receipt recovery cycle");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert!(fixture.read_state().selected_issue().is_none());
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "orphaned local acquisition must be retired"
+    );
+}
+
+#[test]
 fn foreground_still_empty_pause_polls_without_process_churn() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
@@ -771,6 +838,198 @@ fn fresh_selection_retires_stale_claim_receipt_before_persisting_new_generation(
     .expect("read replacement claim receipt");
     assert!(receipt.contains("\"issue\":42"), "{receipt}");
     assert!(!receipt.contains("stale-claim-41"), "{receipt}");
+}
+
+#[test]
+fn continuous_unrecoverable_executor_receipt_failure_retires_after_recovery_cycle() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let paused = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim state")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+        })
+        .expect("executor receipt failure pause");
+    seed_foreground_state(&fixture, &paused);
+    fixture.seed_claim("orphaned-worker", "feat/autonomous-issue-42");
+    fs::write(&fixture.mode, "claimed\n").expect("seed claimed label projection");
+    fixture.seed_claim_acquisition_receipt(
+        "orphaned-worker",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_interrupted_executor_invocation_without_cleanup(
+        "orphaned-worker",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_expired_claim_heartbeat(
+        "orphaned-worker",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--foreground",
+            "--max-cycles",
+            "1",
+            "--poll-interval-sec",
+            "0",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo path"),
+            "--branch",
+            "main",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .output()
+        .expect("run one recovery cycle");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = fixture.read_state();
+    assert_eq!(state.phase(), ConductorPhase::Scan);
+    assert_eq!(state.selected_issue(), None);
+    assert_eq!(state.blocked_backlog_cycles(), 0);
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "unrecoverable executor receipt must retire after its recovery cycle"
+    );
+    let claim = fixture.claim_record();
+    assert_eq!(claim.state, "released");
+    assert_eq!(claim.step, "retryable_released");
+    assert_eq!(
+        fs::read_to_string(&fixture.mode).expect("read restored label projection"),
+        "reviewed\n"
+    );
+}
+
+#[test]
+fn continuous_executor_receipt_failure_resumes_implementation_proven_evidence() {
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
+    };
+
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    first_command.env("AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS", "1");
+    let first = first_command
+        .output()
+        .expect("persist a proven implementation before draft recovery");
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let invocation = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| is_generation_invocation_path(path, 42))
+        .expect("generation-scoped invocation");
+    let mut invocation_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read recoverable invocation"),
+    )
+    .expect("parse recoverable invocation");
+    invocation_state["phase"] = serde_json::json!("implementation_proven");
+    invocation_state["pr"] = serde_json::Value::Null;
+    invocation_state["draft_process"] = serde_json::Value::Null;
+    fs::write(&invocation, format!("{invocation_state}\n"))
+        .expect("seed ImplementationProven recovery point");
+    for extension in ["draft-release", "draft-release-intent"] {
+        let artifact = invocation.with_extension(extension);
+        if artifact.exists() {
+            fs::remove_file(&artifact).expect("remove post-proof draft artifact");
+        }
+    }
+    git_fixture(
+        &fixture.repo_dir,
+        &["push", "origin", ":refs/heads/feat/autonomous-issue-42"],
+    );
+    fs::write(&fixture.pull_requests, "[]\n").expect("remove interrupted draft fixture");
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("seed paused recovery state");
+
+    let launches = bridge.safe_root.join("implementation-proven-harness.launches");
+    let mut recovery = fixture.configured_command();
+    recovery.args([
+        "autonomous",
+        "start",
+        "--foreground",
+        "--max-cycles",
+        "1",
+        "--poll-interval-sec",
+        "0",
+        "--repo",
+        "test/repo",
+        "--repo-dir",
+        fixture.repo_dir.to_str().expect("repo path"),
+        "--branch",
+        "main",
+    ]);
+    configure(&mut recovery);
+    recovery.env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &launches);
+    let recovered = recovery
+        .output()
+        .expect("resume ImplementationProven evidence");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stdout={} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert!(
+        !launches.exists(),
+        "ImplementationProven recovery must not rerun the implementation harness"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("calls after recovery");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 2);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
 }
 
 #[test]

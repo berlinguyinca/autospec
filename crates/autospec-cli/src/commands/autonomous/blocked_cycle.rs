@@ -15,6 +15,7 @@ use super::{
 
 /// The pause a conductor cannot resume from, and the only one that poisons startup.
 const RETRY_LIMIT_EXHAUSTED_PAUSE: &str = "retry_limit_exhausted";
+pub(super) const EXECUTOR_RECEIPT_FAILURE_PAUSE: &str = "executor_receipt_failed";
 
 /// The governor key that pause is charged under.
 ///
@@ -162,6 +163,12 @@ pub(super) fn foreground_cycle_is_loopable(
     ) {
         return Ok(true);
     }
+    if state.phase() == ConductorPhase::Paused
+        && state.pause_reason() == Some(EXECUTOR_RECEIPT_FAILURE_PAUSE)
+        && state.selected_issue().is_some()
+    {
+        return Ok(true);
+    }
     no_ready_selection_pause(state)
 }
 
@@ -264,6 +271,11 @@ fn blocked_cycle_continuation(state: ConductorState) -> Result<(ConductorState, 
         )
     {
         return Ok((state, false));
+    }
+    if state.pause_reason() == Some(EXECUTOR_RECEIPT_FAILURE_PAUSE)
+        && state.selected_issue().is_some()
+    {
+        return Ok((state, true));
     }
     let (Some(issue), Some(reason)) = (state.selected_issue(), pause_governor_reason(&state))
     else {

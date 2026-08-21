@@ -27,7 +27,7 @@ fn blocked_foreground_state(issue: u64, reason: &str) -> ConductorState {
 
 #[test]
 fn blocked_cycle_keeps_the_conductor_looping_instead_of_exiting() {
-    let state = blocked_foreground_state(51, "executor_receipt_failed");
+    let state = blocked_foreground_state(51, "candidate_blocked");
     assert_eq!(state.phase(), ConductorPhase::Paused);
 
     let (state, keep_looping) =
@@ -41,6 +41,23 @@ fn blocked_cycle_keeps_the_conductor_looping_instead_of_exiting() {
     assert_eq!(state.selected_issue(), None);
     assert_eq!(state.blocked_backlog_cycles(), 1);
     assert_eq!(state.blocked_backlog_issues(), [51]);
+}
+
+#[test]
+fn executor_receipt_failure_keeps_its_selection_for_the_recovery_cycle() {
+    let state = blocked_foreground_state(51, "executor_receipt_failed");
+
+    let (retained, keep_looping) =
+        blocked_cycle_continuation(state).expect("preserve executor recovery selection");
+
+    assert!(keep_looping);
+    assert_eq!(retained.phase(), ConductorPhase::Paused);
+    assert_eq!(retained.selected_issue(), Some(51));
+    assert_eq!(retained.pause_reason(), Some("executor_receipt_failed"));
+    assert!(
+        foreground_cycle_is_loopable(&ForegroundCompletion::State(Box::new(retained)))
+            .expect("executor recovery pause is loopable")
+    );
 }
 
 /// Re-drive an already-scanning state into the same blocked dispatch, the way
@@ -67,7 +84,7 @@ fn reblock_foreground_state(state: ConductorState, issue: u64, reason: &str) -> 
 
 #[test]
 fn repeating_the_same_blocked_issue_seals_the_backlog_and_stays_alive() {
-    let mut state = blocked_foreground_state(51, "executor_receipt_failed");
+    let mut state = blocked_foreground_state(51, "candidate_blocked");
     let mut cycles = 0;
     loop {
         let (next, keep_looping) =
@@ -85,7 +102,7 @@ fn repeating_the_same_blocked_issue_seals_the_backlog_and_stays_alive() {
             cycles < BLOCKED_BACKLOG_THRESHOLD + 2,
             "the governor must seal instead of looping forever"
         );
-        state = reblock_foreground_state(state, 51, "executor_receipt_failed");
+        state = reblock_foreground_state(state, 51, "candidate_blocked");
     }
 
     assert_eq!(cycles, BLOCKED_BACKLOG_THRESHOLD);
@@ -97,14 +114,14 @@ fn repeating_the_same_blocked_issue_seals_the_backlog_and_stays_alive() {
 #[test]
 fn a_different_blocked_issue_resets_the_backlog_governor() {
     let (state, _) =
-        blocked_cycle_continuation(blocked_foreground_state(51, "executor_receipt_failed"))
+        blocked_cycle_continuation(blocked_foreground_state(51, "candidate_blocked"))
             .expect("first blocked cycle");
     assert_eq!(state.blocked_backlog_cycles(), 1);
 
-    let mut next = blocked_foreground_state(52, "executor_receipt_failed");
+    let mut next = blocked_foreground_state(52, "candidate_blocked");
     next = next
         .clone()
-        .record_blocked_backlog_cycle("executor_receipt_failed", vec![51])
+        .record_blocked_backlog_cycle("candidate_blocked", vec![51])
         .expect("carry prior governor");
     let (next, _) = blocked_cycle_continuation(next).expect("second blocked cycle");
 

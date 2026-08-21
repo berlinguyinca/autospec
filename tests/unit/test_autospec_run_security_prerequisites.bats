@@ -7,7 +7,7 @@ setup() {
 
 @test "ready selection excludes blocked prerequisite issues" {
   grep -Fq 'autospec:blocked-prerequisite' "$SKILL"
-  grep -Fq 'all_open excludes every issue carrying' "$SKILL"
+  grep -Fq 'autospec queue ready' "$SKILL"
 }
 
 @test "predispatch gate accepts only absent or verified prerequisites" {
