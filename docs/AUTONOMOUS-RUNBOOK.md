@@ -20,6 +20,13 @@ the conductor removes that stale receipt and continues in the same process. A
 receipt for another repository, malformed JSON, or a different generation of
 the same issue remains fail-closed.
 
+An executor receipt failure retains its exact selected issue for the next
+continuous cycle. That cycle resumes durable bridge evidence when available.
+When no recovery evidence exists, Autospec transitions the exact claim to
+retryable and restores `auto-implement` when the durable acquisition still owns
+the authoritative claim. If ownership is already absent or lost, it retires only
+the stale local ownership before scanning again.
+
 ## Continuation-aware merge recovery
 
 When an executor restarts from `BridgePhase::Merged`, recovery completes in this

@@ -2569,6 +2569,31 @@ fn run_foreground_with_lease(
                         .map_err(CommandFailure::diagnostic)?;
                     persist_foreground_state(&state_path, &state)
                         .map_err(CommandFailure::diagnostic)?;
+                } else if continuous {
+                    if let Some(acquisition) =
+                        load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+                            .map_err(CommandFailure::diagnostic)?
+                    {
+                        let _ = claim::transition_bridge_claim(
+                            claim::ClaimMutationIdentity {
+                                repo: &acquisition.repo,
+                                issue: acquisition.issue,
+                                worker_id: &acquisition.worker_id,
+                                branch: &acquisition.branch,
+                                claim_id: &acquisition.claim_id,
+                            },
+                            None,
+                            claim::BridgeClaimDisposition::Retryable,
+                        )?;
+                    }
+                    clear_claim_acquisition_receipt(&state_path)
+                        .map_err(CommandFailure::diagnostic)?;
+                    state = state
+                        .transition(ConductorEvent::RetireObsoleteSelection)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {
