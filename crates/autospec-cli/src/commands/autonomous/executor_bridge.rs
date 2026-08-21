@@ -13052,7 +13052,9 @@ where
         )?;
         if !matches!(
             state.phase,
-            BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+            BridgePhase::Pending
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
         )
             || state.identity.repository != repository
             || state.identity.repository_path != repository_path
@@ -13071,6 +13073,14 @@ where
         saw_transfer = true;
         if !executor_terminal_processes_are_quiescent(&state)? {
             return Err("interrupted executor predecessor process is still live".to_string());
+        }
+        if state.phase == BridgePhase::Pending
+            && has_durable_harness_recovery_evidence(&path, &state)?
+        {
+            return Err(
+                "pending executor predecessor retains durable harness recovery evidence"
+                    .to_string(),
+            );
         }
         if !ownership_transfer_names_predecessor(&transfer_path, &state)? {
             continue;
