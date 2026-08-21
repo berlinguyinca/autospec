@@ -198,7 +198,7 @@ EOF
     run bash -n "$BRIDGE"
     [ "$status" -eq 0 ]
     grep -q 'direct fallback max runtime' "$BRIDGE"
-    grep -q 'kill_tree "\$direct_pid"' "$BRIDGE"
+    grep -q 'autospec_kill_tree "\$direct_pid" separate' "$BRIDGE"
 }
 
 @test "bridge preserves a non-zero direct verifier fallback result" {
@@ -206,6 +206,7 @@ EOF
     mkdir -p "$direct_root/scripts/lib"
     cp "$BRIDGE" "$direct_root/scripts/autospec-autonomous-explore-drain.sh"
     cp "$(dirname "$BRIDGE")/lib/autospec-harness-detect.sh" "$direct_root/scripts/lib/"
+    cp "$(dirname "$BRIDGE")/lib/autospec-process-tree.sh" "$direct_root/scripts/lib/"
     cat > "$direct_root/scripts/autospec-explore.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' '{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":false,"reason":"research-incomplete"}'
