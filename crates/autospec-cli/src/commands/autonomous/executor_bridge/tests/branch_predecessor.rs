@@ -13,6 +13,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "linux")]
@@ -263,8 +264,18 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     .expect_err("live predecessor stays owned");
     assert!(live.contains("process is still live"), "{live}");
 
-    state.process = None;
-    bridge::write_invocation_atomic(&state_path, &state).expect("persist quiescent invocation");
+    let mut exited = Command::new("sh")
+        .args(["-c", "sleep 0.1"])
+        .spawn()
+        .expect("spawn predecessor process");
+    let dead = bridge::observe_process_identity(exited.id(), "")
+        .expect("observe predecessor process")
+        .expect("predecessor process identity");
+    exited.wait().expect("wait for predecessor process");
+    state.supervisor = Some(dead.clone());
+    state.process = Some(dead);
+    bridge::write_invocation_atomic(&state_path, &state)
+        .expect("persist quiescent process anchors");
     let withheld = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(true))
         .expect_err("authority cannot escape without owning the transfer");
     assert!(
@@ -273,6 +284,12 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
     );
     let unchanged = fs::read_to_string(&wip).expect("withheld authority preserves WIP");
     assert_eq!(unchanged, "preserve me\n");
+    let withheld_state = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("read withheld predecessor"),
+    )
+    .expect("parse withheld predecessor");
+    assert!(withheld_state.supervisor.is_some());
+    assert!(withheld_state.process.is_some());
     let release_checks = std::cell::Cell::new(0usize);
     assert!(
         recover_test_predecessor(&fixture, &state_dir, &worktree, |candidate, transfer| {
@@ -290,6 +307,12 @@ fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer
         1,
         "only the transfer-bound predecessor reaches the authority gate"
     );
+    let transferred_state = bridge::PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path).expect("read transferred predecessor"),
+    )
+    .expect("parse transferred predecessor");
+    assert!(transferred_state.supervisor.is_none());
+    assert!(transferred_state.process.is_none());
     assert_eq!(
         bridge::PersistedInvocation::from_json(
             &fs::read_to_string(&historical_path).expect("read historical predecessor")
