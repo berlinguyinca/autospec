@@ -228,11 +228,15 @@ can corrupt that contributor's slot state; it does not grant cross-UID access.
 Every state change is an exact compare-and-swap over the stored revision, claim
 ID, nullable active attempt ID, and nullable serving job ID. Mutations are
 serialized by a sibling `.<slot>.txn` process-generation claim. A mutex left by
-a process that is provably dead on this host is recovered; a malformed mutex or
-one owned by another host is preserved and blocks mutation for operator review.
-State publication uses a unique same-directory `0600` temporary file, file
-`fsync`, `os.replace`, and directory `fsync`, so a crash exposes either the old
-validated generation or the complete new one.
+a process that is provably dead on this host is recovered only if it never armed
+its durable transaction barrier. Before state replacement or release rename,
+the writer creates and syncs that separate barrier; any crash or I/O failure
+afterward preserves it and blocks load, claim, cleanup, and stale recovery for
+operator review, even if the owner record could not be marked blocked. The
+barrier is removed only after the mutation is published and verified. A
+malformed mutex, an armed barrier, or a mutex owned by another host is never
+reaped automatically. State publication uses a unique same-directory `0600`
+temporary file, file `fsync`, `os.replace`, and directory `fsync`.
 
 Cleanup supplies the claim, attempt, and Slurm job IDs. `release_if_current`
 reads the revision while holding the mutex and releases only the full current

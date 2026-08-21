@@ -28,6 +28,8 @@ from typing import Callable, Iterator
 
 SCHEMA = "qwen-slurm-slot/v1"
 TXN_SCHEMA = "qwen-slurm-slot-txn/v1"
+_TXN_BARRIER_NAME = "barrier"
+_TXN_BARRIER_PAYLOAD = b"qwen-slurm-slot-txn-barrier/v1\n"
 MAX_STATE_BYTES = 256 * 1024
 MAX_ATTEMPTS = 32
 MAX_CLEANUP_JOBS = 32
@@ -648,7 +650,7 @@ def load(root: Path, slot: str) -> Lease:
     finally:
         root_directory.close()
 
-    with _mutation(root, slot) as recovered_root:
+    with _mutation(root, slot) as (recovered_root, _):
         return _load_lease_from_root(
             root,
             recovered_root,
@@ -838,6 +840,7 @@ def _atomic_write_state(
     slot_directory: _PinnedDirectory,
     state: dict,
     slot: str,
+    arm_barrier: Callable[[], None],
     prior_identity: _EntryIdentity | None = None,
 ) -> None:
     payload = _state_bytes(state, slot)
@@ -874,6 +877,7 @@ def _atomic_write_state(
             if observed_state != linked_identity or observed_backup != linked_identity:
                 raise LeaseError("prior slot state backup inode mismatch; preserved")
 
+        arm_barrier()
         publication_started = True
         os.replace(
             temp,
@@ -1043,17 +1047,40 @@ def _validate_txn_document(document: dict) -> None:
     raise LeaseError("cannot prove transaction mutex status")
 
 
+def _read_txn_barrier(mutex: _PinnedDirectory) -> _EntryIdentity | None:
+    try:
+        os.stat(_TXN_BARRIER_NAME, dir_fd=mutex.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LeaseError("unsafe slot transaction barrier") from exc
+    payload, identity = _read_secure_snapshot_at(
+        mutex,
+        _TXN_BARRIER_NAME,
+        "slot transaction barrier",
+        len(_TXN_BARRIER_PAYLOAD),
+    )
+    if payload != _TXN_BARRIER_PAYLOAD:
+        raise LeaseError("unsafe slot transaction barrier")
+    return identity
+
+
 def _read_txn_pinned(mutex: _PinnedDirectory) -> dict:
     try:
         _revalidate_directory(mutex, "transaction mutex")
-        entries = os.listdir(mutex.fd)
-        if entries != ["owner.json"]:
+        entries = set(os.listdir(mutex.fd))
+        if "owner.json" not in entries or not entries <= {
+            "owner.json",
+            _TXN_BARRIER_NAME,
+        }:
             raise LeaseError("cannot prove stale transaction mutex")
         document = _decode_json(
             _read_secure_at(mutex, "owner.json", "transaction owner", 4096),
             "transaction owner",
         )
         _validate_txn_document(document)
+        if _TXN_BARRIER_NAME in entries:
+            _read_txn_barrier(mutex)
         return document
     except LeaseError as exc:
         if "cannot prove stale" in str(exc):
@@ -1075,6 +1102,8 @@ def _remove_txn(
     )
     try:
         document = _read_txn_pinned(mutex)
+        if _read_txn_barrier(mutex) is not None:
+            raise LeaseError("transaction barrier prevents mutex removal")
         if expected_nonce is not None and document["nonce"] != expected_nonce:
             raise LeaseError("transaction mutex ownership changed")
         if document["status"] != "active":
@@ -1113,6 +1142,10 @@ def _recover_existing_txn(
         name=mutex_name,
     )
     try:
+        if _read_txn_barrier(mutex) is not None:
+            raise LeaseError(
+                "slot transaction barrier is blocked; explicit repair required"
+            )
         document = _read_txn_pinned(mutex)
     finally:
         mutex.close()
@@ -1167,6 +1200,73 @@ def _mark_txn_blocked(
         mutex.close()
 
 
+def _arm_txn_barrier(
+    root: _PinnedDirectory,
+    mutex_name: str,
+    mutex_path: Path,
+    nonce: str,
+) -> _EntryIdentity:
+    mutex = _open_pinned_directory(
+        mutex_path,
+        "transaction mutex",
+        parent=root,
+        name=mutex_name,
+    )
+    try:
+        document = _read_txn_pinned(mutex)
+        if document["nonce"] != nonce or document["status"] != "active":
+            raise LeaseError("transaction mutex ownership changed before barrier")
+        if _read_txn_barrier(mutex) is not None:
+            raise LeaseError("transaction barrier already exists")
+        identity = _write_exclusive_at(
+            mutex,
+            _TXN_BARRIER_NAME,
+            _TXN_BARRIER_PAYLOAD,
+            "slot transaction barrier",
+        )
+        _fsync_pinned(mutex, "transaction mutex")
+        observed = _read_txn_barrier(mutex)
+        if observed != identity:
+            raise LeaseError("slot transaction barrier verification failed")
+        _fsync_pinned(root, "lease root")
+        return identity
+    finally:
+        mutex.close()
+
+
+def _disarm_txn_barrier(
+    root: _PinnedDirectory,
+    mutex_name: str,
+    mutex_path: Path,
+    nonce: str,
+    expected: _EntryIdentity,
+) -> None:
+    mutex = _open_pinned_directory(
+        mutex_path,
+        "transaction mutex",
+        parent=root,
+        name=mutex_name,
+    )
+    try:
+        document = _read_txn_pinned(mutex)
+        if document["nonce"] != nonce or document["status"] != "active":
+            raise LeaseError("transaction mutex ownership changed before disarm")
+        observed = _read_txn_barrier(mutex)
+        if observed != expected:
+            raise LeaseError("slot transaction barrier changed; preserved")
+        _discard_exact_entry(
+            mutex,
+            _TXN_BARRIER_NAME,
+            expected,
+            "slot transaction barrier",
+            len(_TXN_BARRIER_PAYLOAD),
+        )
+        _fsync_pinned(mutex, "transaction mutex")
+        _fsync_pinned(root, "lease root")
+    finally:
+        mutex.close()
+
+
 def _acquire_txn(root: _PinnedDirectory, slot: str) -> tuple[str, Path, str]:
     mutex_name = f".{slot}.txn"
     mutex_path = root.path / mutex_name
@@ -1212,16 +1312,33 @@ def _acquire_txn(root: _PinnedDirectory, slot: str) -> tuple[str, Path, str]:
 
 
 @contextmanager
-def _mutation(root: Path, slot: str) -> Iterator[_PinnedDirectory]:
+def _mutation(
+    root: Path, slot: str
+) -> Iterator[tuple[_PinnedDirectory, Callable[[], None]]]:
     _reject_symlink_components(root)
     root_directory = _open_pinned_directory(root, "lease root")
     try:
         mutex_name, mutex_path, nonce = _acquire_txn(root_directory, slot)
         remove_transaction = True
+        barrier_attempted = False
+        barrier_identity: _EntryIdentity | None = None
+
+        def arm_barrier() -> None:
+            nonlocal barrier_attempted, barrier_identity
+            if barrier_identity is not None:
+                return
+            barrier_attempted = True
+            barrier_identity = _arm_txn_barrier(
+                root_directory,
+                mutex_name,
+                mutex_path,
+                nonce,
+            )
+
         try:
             _recover_tombstones(root_directory, slot)
             _recover_temporary_state(root_directory, slot)
-            yield root_directory
+            yield root_directory, arm_barrier
         except _PublicationBlocked as exc:
             remove_transaction = False
             try:
@@ -1237,6 +1354,22 @@ def _mutation(root: Path, slot: str) -> Iterator[_PinnedDirectory]:
                     "slot transaction blocked; marker update failed closed"
                 ) from marker_error
             raise LeaseError(f"slot transaction blocked: {exc.reason}") from exc
+        except BaseException:
+            if barrier_attempted:
+                remove_transaction = False
+            raise
+        else:
+            if barrier_identity is not None:
+                remove_transaction = False
+                _disarm_txn_barrier(
+                    root_directory,
+                    mutex_name,
+                    mutex_path,
+                    nonce,
+                    barrier_identity,
+                )
+                barrier_identity = None
+                remove_transaction = True
         finally:
             if remove_transaction:
                 _remove_txn(root_directory, mutex_name, mutex_path, nonce)
@@ -1520,7 +1653,7 @@ def mutate(
         raise LeaseError("transition must be callable")
     slot_path = root / slot
 
-    with _mutation(root, slot) as root_directory:
+    with _mutation(root, slot) as (root_directory, arm_barrier):
         if expected is None:
             if _entry_exists(root_directory, slot, "slot creation state"):
                 raise LeaseError("unsafe slot already exists or is partial")
@@ -1538,7 +1671,12 @@ def mutate(
                     raise LeaseError("slot transition must return an object")
                 _validate_state(candidate, slot)
                 _validate_initial_state(candidate)
-                _atomic_write_state(slot_directory, candidate, slot)
+                _atomic_write_state(
+                    slot_directory,
+                    candidate,
+                    slot,
+                    arm_barrier,
+                )
                 _revalidate_directory(root_directory, "lease root")
             except BaseException:
                 if slot_directory is not None:
@@ -1587,6 +1725,7 @@ def mutate(
                 slot_directory,
                 candidate,
                 slot,
+                arm_barrier,
                 prior_identity=current_identity,
             )
             _revalidate_directory(root_directory, "lease root")
@@ -1605,7 +1744,7 @@ def release_if_current(
     _validate_job_id(serve_job_id, "serve job id")
     slot_path = root / slot
 
-    with _mutation(root, slot) as root_directory:
+    with _mutation(root, slot) as (root_directory, arm_barrier):
         if not _entry_exists(root_directory, slot, "slot directory"):
             return "stale_cleanup"
         slot_directory = _open_pinned_directory(
@@ -1643,6 +1782,7 @@ def release_if_current(
             else:
                 raise LeaseError("unsafe slot tombstone already exists")
             try:
+                arm_barrier()
                 os.replace(
                     slot,
                     tombstone_name,

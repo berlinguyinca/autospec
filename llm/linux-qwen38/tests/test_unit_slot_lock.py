@@ -168,6 +168,34 @@ def _holding_mutation_worker(
         results.put(("mutated", lease.revision))
 
 
+def _blocked_marker_persistence_failure_worker(root: str) -> None:
+    real_decode = sl._decode_json
+    real_write_exclusive = sl._write_exclusive_at
+
+    def fail_published_validation(payload: bytes, label: str) -> dict:
+        if label == "published slot state":
+            raise sl.LeaseError("simulated post-publication validation failure")
+        return real_decode(payload, label)
+
+    def fail_blocked_owner_write(directory, name, payload, label):
+        if label == "blocked transaction owner":
+            raise sl.LeaseError("simulated blocked-marker persistence failure")
+        return real_write_exclusive(directory, name, payload, label)
+
+    sl._decode_json = fail_published_validation
+    sl._write_exclusive_at = fail_blocked_owner_write
+    try:
+        sl.mutate(
+            Path(root),
+            SLOT,
+            sl.ExpectedState(1, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+    except sl.LeaseError:
+        return
+    raise AssertionError("simulated blocked-marker persistence failure was accepted")
+
+
 def _replace_state(root: Path, content: bytes) -> Path:
     state_path = root / SLOT / "state.json"
     state_path.unlink()
@@ -804,7 +832,7 @@ def test_attempt_records_reject_duplicate_identities(tmp_path: Path, duplicate: 
 
 
 @pytest.mark.parametrize("when", ["before", "after"])
-def test_process_crash_around_state_replace_recovers_without_torn_state(
+def test_process_crash_around_state_replace_leaves_transaction_barrier(
     tmp_path: Path, when: str
 ):
     root = _private_root(tmp_path)
@@ -816,28 +844,16 @@ def test_process_crash_around_state_replace_recovers_without_torn_state(
     process.join(10)
 
     assert process.exitcode == (81 if when == "before" else 82)
-    observed = sl.load(root, SLOT)
-    assert (observed.revision, observed.state["phase"]) == (
-        (1, "claimed") if when == "before" else (2, "blocked")
-    )
-    recovered = sl.mutate(
-        root,
-        SLOT,
-        sl.ExpectedState(
-            observed.revision,
-            CLAIM_A,
-            observed.active_attempt_id,
-            observed.serve_job_id,
-        ),
-        lambda state: {**state, "phase": "stopping"},
-    )
-    assert recovered.revision == observed.revision + 1
-    assert not (root / f".{SLOT}.txn").exists()
-    assert not list((root / SLOT).glob(".state.*.tmp"))
+    transaction = root / f".{SLOT}.txn"
+    assert transaction.is_dir()
+    assert {path.name for path in transaction.iterdir()} - {"owner.json"}
+    with pytest.raises(sl.LeaseError, match="barrier|blocked"):
+        sl.load(root, SLOT)
+    assert transaction.is_dir()
 
 
 @pytest.mark.parametrize("when", ["before", "after"])
-def test_process_crash_around_release_rename_is_recoverable(
+def test_process_crash_around_release_rename_leaves_transaction_barrier(
     tmp_path: Path, when: str
 ):
     root = _private_root(tmp_path)
@@ -852,12 +868,14 @@ def test_process_crash_around_release_rename_is_recoverable(
     if when == "after":
         assert not (root / SLOT).exists()
         assert list(root.glob(f".{SLOT}.tombstone.*"))
-        expected = "stale_cleanup"
     else:
         assert (root / SLOT).exists()
-        expected = "released"
-    assert sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A) == expected
-    assert not list(root.glob(f".{SLOT}.tombstone.*"))
+    transaction = root / f".{SLOT}.txn"
+    assert transaction.is_dir()
+    assert {path.name for path in transaction.iterdir()} - {"owner.json"}
+    with pytest.raises(sl.LeaseError, match="barrier|blocked"):
+        sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+    assert transaction.is_dir()
 
 
 def test_unprovably_stale_mutex_is_preserved_and_fails_closed(tmp_path: Path):
@@ -1279,6 +1297,40 @@ def test_rollback_failure_preserves_blocked_barrier_and_refuses_readers(
     assert (root / f".{SLOT}.txn").is_dir()
     with pytest.raises(sl.LeaseError, match="blocked"):
         sl.load(root, SLOT)
+
+
+def test_blocked_marker_io_failure_leaves_non_reapable_transaction_barrier(
+    tmp_path: Path,
+):
+    root = _private_root(tmp_path)
+    _claim(root)
+    ctx = mp.get_context("fork")
+    process = ctx.Process(
+        target=_blocked_marker_persistence_failure_worker,
+        args=(str(root),),
+    )
+
+    process.start()
+    process.join(10)
+
+    assert process.exitcode == 0
+    transaction = root / f".{SLOT}.txn"
+    assert transaction.is_dir()
+    barrier_entries = {path.name for path in transaction.iterdir()} - {"owner.json"}
+    assert barrier_entries
+    assert _blocked_transaction(root)["status"] == "active"
+    operations = (
+        lambda: sl.load(root, SLOT),
+        lambda: sl.claim(root, SLOT, CLAIM_B, os.geteuid(), "user"),
+        lambda: sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A),
+    )
+    for operation in operations:
+        with pytest.raises(sl.LeaseError, match="barrier|blocked"):
+            operation()
+        assert transaction.is_dir()
+        assert {path.name for path in transaction.iterdir()} - {"owner.json"} == (
+            barrier_entries
+        )
 
 
 def test_tombstone_symlink_is_not_followed_or_deleted(tmp_path: Path):
