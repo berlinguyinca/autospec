@@ -13052,7 +13052,9 @@ where
         )?;
         if !matches!(
             state.phase,
-            BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+            BridgePhase::Pending
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
         )
             || state.identity.repository != repository
             || state.identity.repository_path != repository_path

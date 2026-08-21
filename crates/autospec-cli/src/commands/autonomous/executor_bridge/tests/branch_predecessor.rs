@@ -434,6 +434,65 @@ fn autonomous_executor_bridge_transfers_released_implementation_complete_predece
 }
 
 #[test]
+fn autonomous_executor_bridge_transfers_released_pending_predecessor() {
+    let fixture = GitFixture::new("pending-predecessor-transfer");
+    let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+    let scope = format!(
+        "pending_predecessor_transfer_{}_{}",
+        std::process::id(),
+        TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let worktree = bridge::provision_issue_worktree_for_claim(
+        &fixture.repo,
+        &scope,
+        42,
+        &base,
+        Some(("old-claim", "old-invocation")),
+    )
+    .expect("provision pending predecessor");
+
+    let mut state = supervision_state(&fixture);
+    state.phase = BridgePhase::Pending;
+    state.identity.worktree = worktree.path.clone();
+    state.identity.branch = worktree.branch.clone();
+    state.identity.claim_id = "old-claim".to_string();
+    state.identity.invocation_id = "old-invocation".to_string();
+    state.identity.runtime_environment_dir = None;
+    state.identity.runtime_session_id = None;
+    state.process =
+        bridge::observe_process_identity(std::process::id(), "").expect("observe live process");
+    let state_dir = fixture.root.join("state");
+    let generation = &bridge::sha256_hex(b"old-claim")[..16];
+    let state_path = state_dir.join(format!("issue-42-{generation}.json"));
+    bridge::write_invocation_atomic(&state_path, &state).expect("persist live predecessor");
+
+    let live = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+        panic!("live pending predecessor must fail before authority")
+    })
+    .expect_err("live pending predecessor blocks transfer");
+    assert!(live.contains("process is still live"), "{live}");
+
+    state.process = None;
+    bridge::write_invocation_atomic(&state_path, &state).expect("retire predecessor process");
+    assert!(
+        recover_test_predecessor(&fixture, &state_dir, &worktree, |candidate, transfer| {
+            assert_eq!(candidate.phase, BridgePhase::Pending);
+            transfer()?;
+            Ok(true)
+        })
+        .expect("transfer pending predecessor")
+    );
+    bridge::provision_issue_worktree_for_claim(
+        &fixture.repo,
+        &scope,
+        42,
+        &base,
+        Some(("new-claim", "new-invocation")),
+    )
+    .expect("adopt pending predecessor worktree");
+}
+
+#[test]
 fn autonomous_executor_bridge_retry_fast_forwards_proven_empty_worktree_to_advanced_base() {
     let _environment = test_environment();
     let fixture = GitFixture::new("retry-empty-base-adoption");
