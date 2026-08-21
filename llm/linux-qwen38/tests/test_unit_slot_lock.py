@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import stat
 import sys
+import uuid
 from functools import partial
 from pathlib import Path
 
@@ -184,6 +185,31 @@ def _set_nested(document: dict, path: tuple[object, ...], value: object) -> None
     for part in path[:-1]:
         current = current[part]  # type: ignore[index]
     current[path[-1]] = value  # type: ignore[index]
+
+
+def _inode_paths(root: Path, inode: int) -> list[Path]:
+    matches: list[Path] = []
+    for directory, child_directories, files in os.walk(root):
+        for name in [*child_directories, *files]:
+            path = Path(directory) / name
+            if path.lstat().st_ino == inode:
+                matches.append(path)
+    return matches
+
+
+def _write_at(directory_fd: int, name: str, payload: bytes) -> int:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        return os.fstat(descriptor).st_ino
+    finally:
+        os.close(descriptor)
 
 
 def test_claim_creates_private_revisioned_claimed_state(tmp_path: Path):
@@ -930,25 +956,31 @@ def test_tombstone_directory_swap_cannot_redirect_state_deletion(tmp_path: Path,
     _activate(root)
     moved = root / "released-generation.moved"
     marker = b"do not delete this object"
-    real_unlink = sl.os.unlink
+    real_replace = sl.os.replace
     swapped = False
 
-    def swap_before_unlink(path, *args, **kwargs):
+    def swap_before_quarantine(source, destination, *args, **kwargs):
         nonlocal swapped
-        path_name = os.fspath(path)
+        source_name = os.fspath(source)
+        destination_name = os.fspath(destination)
         tombstones = list(root.glob(f".{SLOT}.tombstone.*"))
-        if not swapped and Path(path_name).name == "state.json" and tombstones:
+        if (
+            not swapped
+            and Path(source_name).name == "state.json"
+            and Path(destination_name).name.startswith(".quarantine.")
+            and tombstones
+        ):
             swapped = True
             tombstones[0].rename(moved)
             tombstones[0].mkdir(mode=0o700)
             impostor_state = tombstones[0] / "state.json"
             impostor_state.write_bytes(marker)
             impostor_state.chmod(0o600)
-        return real_unlink(path, *args, **kwargs)
+        return real_replace(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(sl.os, "unlink", swap_before_unlink)
+    monkeypatch.setattr(sl.os, "replace", swap_before_quarantine)
 
-    with pytest.raises(sl.LeaseError, match="changed|binding"):
+    with pytest.raises(sl.LeaseError, match="changed|binding|quarantined|preserved"):
         sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
 
     tombstone = next(root.glob(f".{SLOT}.tombstone.*"))
@@ -960,24 +992,29 @@ def test_mutex_directory_swap_cannot_redirect_owner_deletion(tmp_path: Path, mon
     lease = _claim(root)
     moved = root / "transaction.moved"
     marker = b"do not delete this owner"
-    real_unlink = sl.os.unlink
+    real_replace = sl.os.replace
     swapped = False
 
-    def swap_before_unlink(path, *args, **kwargs):
+    def swap_before_quarantine(source, destination, *args, **kwargs):
         nonlocal swapped
         mutex = root / f".{SLOT}.txn"
-        if not swapped and Path(os.fspath(path)).name == "owner.json" and mutex.exists():
+        if (
+            not swapped
+            and Path(os.fspath(source)).name == "owner.json"
+            and Path(os.fspath(destination)).name.startswith(".quarantine.")
+            and mutex.exists()
+        ):
             swapped = True
             mutex.rename(moved)
             mutex.mkdir(mode=0o700)
             impostor_owner = mutex / "owner.json"
             impostor_owner.write_bytes(marker)
             impostor_owner.chmod(0o600)
-        return real_unlink(path, *args, **kwargs)
+        return real_replace(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(sl.os, "unlink", swap_before_unlink)
+    monkeypatch.setattr(sl.os, "replace", swap_before_quarantine)
 
-    with pytest.raises(sl.LeaseError, match="changed|binding"):
+    with pytest.raises(sl.LeaseError, match="changed|binding|quarantined|preserved"):
         sl.mutate(
             root,
             SLOT,
@@ -986,6 +1023,181 @@ def test_mutex_directory_swap_cannot_redirect_owner_deletion(tmp_path: Path, mon
         )
 
     assert (root / f".{SLOT}.txn" / "owner.json").read_bytes() == marker
+
+
+def test_swapped_source_temp_is_never_published_and_prior_state_is_restored(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    prior_bytes = (root / SLOT / "state.json").read_bytes()
+    real_replace = sl.os.replace
+    attacker_inode: int | None = None
+
+    def swap_source(source, destination, *args, **kwargs):
+        nonlocal attacker_inode
+        source_name = os.fspath(source)
+        destination_name = os.fspath(destination)
+        source_fd = kwargs.get("src_dir_fd")
+        if (
+            attacker_inode is None
+            and source_fd is not None
+            and Path(source_name).name.startswith(".state.")
+            and Path(destination_name).name == "state.json"
+        ):
+            preserved = f".review-preserved-temp.{uuid.uuid4().hex}"
+            real_replace(
+                source_name,
+                preserved,
+                src_dir_fd=source_fd,
+                dst_dir_fd=source_fd,
+            )
+            attacker_inode = _write_at(
+                source_fd, source_name, b"attacker-controlled state"
+            )
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "replace", swap_source)
+
+    with pytest.raises(sl.LeaseError, match="inode|publication|state"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+
+    assert attacker_inode is not None
+    assert (root / SLOT / "state.json").read_bytes() == prior_bytes
+    assert (root / SLOT / "state.json").stat().st_ino != attacker_inode
+    assert _inode_paths(root, attacker_inode)
+
+
+def test_swapped_recovery_temp_is_quarantined_not_unlinked(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    prior_bytes = (root / SLOT / "state.json").read_bytes()
+    candidate = _read_raw(root)
+    candidate["revision"] = 2
+    temp_name = f".state.2.{'c' * 32}.tmp"
+    temp_path = root / SLOT / temp_name
+    temp_path.write_text(json.dumps(candidate))
+    temp_path.chmod(0o600)
+    real_replace = sl.os.replace
+    attacker_inode: int | None = None
+
+    def swap_recovery_temp(source, destination, *args, **kwargs):
+        nonlocal attacker_inode
+        source_name = os.fspath(source)
+        source_fd = kwargs.get("src_dir_fd")
+        if attacker_inode is None and source_fd is not None and source_name == temp_name:
+            preserved = f".review-preserved-recovery.{uuid.uuid4().hex}"
+            real_replace(
+                source_name,
+                preserved,
+                src_dir_fd=source_fd,
+                dst_dir_fd=source_fd,
+            )
+            attacker_inode = _write_at(source_fd, source_name, b"unrelated marker")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "replace", swap_recovery_temp)
+
+    with pytest.raises(sl.LeaseError, match="inode|temporary|quarantine"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: state,
+        )
+
+    assert attacker_inode is not None
+    assert (root / SLOT / "state.json").read_bytes() == prior_bytes
+    assert _inode_paths(root, attacker_inode)
+
+
+def test_swapped_tombstone_child_is_preserved_instead_of_deleted(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    _activate(root)
+    real_replace = sl.os.replace
+    real_unlink = sl.os.unlink
+    attacker_inode: int | None = None
+
+    def swap_child(directory_fd: int) -> None:
+        nonlocal attacker_inode
+        preserved = f".review-preserved-state.{uuid.uuid4().hex}"
+        real_replace(
+            "state.json",
+            preserved,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        attacker_inode = _write_at(directory_fd, "state.json", b"unrelated marker")
+
+    def replace_hook(source, destination, *args, **kwargs):
+        source_fd = kwargs.get("src_dir_fd")
+        if (
+            attacker_inode is None
+            and source_fd is not None
+            and os.fspath(source) == "state.json"
+        ):
+            swap_child(source_fd)
+        return real_replace(source, destination, *args, **kwargs)
+
+    def unlink_hook(path, *args, **kwargs):
+        directory_fd = kwargs.get("dir_fd")
+        if (
+            attacker_inode is None
+            and directory_fd is not None
+            and os.fspath(path) == "state.json"
+        ):
+            swap_child(directory_fd)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "replace", replace_hook)
+    monkeypatch.setattr(sl.os, "unlink", unlink_hook)
+
+    with pytest.raises(sl.LeaseError, match="inode|tombstone|quarantine|remove"):
+        sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+
+    assert attacker_inode is not None
+    assert _inode_paths(root, attacker_inode)
+
+
+def test_pre_rmdir_directory_swap_preserves_unrelated_inode(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    _activate(root)
+    real_listdir = sl.os.listdir
+    real_replace = sl.os.replace
+    swapped = False
+    unrelated_inode: int | None = None
+
+    def listdir_hook(path):
+        nonlocal swapped, unrelated_inode
+        entries = real_listdir(path)
+        tombstones = list(root.glob(f".{SLOT}.tombstone.*"))
+        if not swapped and isinstance(path, int) and entries == [] and tombstones:
+            swapped = True
+            moved = root / f".review-preserved-directory.{uuid.uuid4().hex}"
+            real_replace(tombstones[0], moved)
+            tombstones[0].mkdir(mode=0o700)
+            unrelated_inode = tombstones[0].stat().st_ino
+        return entries
+
+    monkeypatch.setattr(sl.os, "listdir", listdir_hook)
+
+    with pytest.raises(sl.LeaseError, match="binding|tombstone|directory"):
+        sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+
+    assert swapped
+    assert unrelated_inode is not None
+    assert _inode_paths(root, unrelated_inode)
 
 
 def test_tombstone_symlink_is_not_followed_or_deleted(tmp_path: Path):

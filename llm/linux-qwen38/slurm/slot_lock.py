@@ -32,6 +32,9 @@ _BOOT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _TEMP_RE = re.compile(r"^\.state\.([1-9][0-9]*)\.([0-9a-f]{32})\.tmp$")
+_BACKUP_RE = re.compile(
+    r"^\.state\.backup\.([1-9][0-9]*)\.([0-9a-f]{32})$"
+)
 _PHASES = frozenset(
     {"claimed", "submitting", "active", "replacing", "stopping", "blocked"}
 )
@@ -119,6 +122,27 @@ class _PinnedDirectory:
 
     def close(self) -> None:
         os.close(self.fd)
+
+
+@dataclass(frozen=True)
+class _EntryIdentity:
+    device: int
+    inode: int
+    file_type: int
+    owner: int
+    mode: int
+    links: int
+
+
+def _entry_identity(info: os.stat_result) -> _EntryIdentity:
+    return _EntryIdentity(
+        device=info.st_dev,
+        inode=info.st_ino,
+        file_type=stat.S_IFMT(info.st_mode),
+        owner=info.st_uid,
+        mode=stat.S_IMODE(info.st_mode),
+        links=info.st_nlink,
+    )
 
 
 def _now() -> str:
@@ -291,9 +315,14 @@ def _decode_json(payload: bytes, label: str) -> dict:
     return value
 
 
-def _read_secure_at(
-    directory: _PinnedDirectory, name: str, label: str, maximum: int
-) -> bytes:
+def _read_secure_snapshot_at(
+    directory: _PinnedDirectory,
+    name: str,
+    label: str,
+    maximum: int,
+    *,
+    expected_links: int = 1,
+) -> tuple[bytes, _EntryIdentity]:
     try:
         before = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
     except OSError as exc:
@@ -304,8 +333,8 @@ def _read_secure_at(
         raise LeaseError(f"unsafe {label}: file mode must be 0600")
     if before.st_uid != os.geteuid():
         raise LeaseError(f"unsafe {label}: file owner mismatch")
-    if before.st_nlink != 1:
-        raise LeaseError(f"unsafe {label}: file link count must be one")
+    if before.st_nlink != expected_links:
+        raise LeaseError(f"unsafe {label}: unexpected file link count")
     if before.st_size > maximum:
         raise LeaseError(f"unsafe {label}: file is too large")
     if before.st_size == 0:
@@ -318,7 +347,7 @@ def _read_secure_at(
         raise LeaseError(f"unsafe {label}: file cannot be opened") from exc
     try:
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        if _entry_identity(before) != _entry_identity(after):
             raise LeaseError(f"unsafe {label}: file changed during validation")
         chunks: list[bytes] = []
         remaining = maximum + 1
@@ -334,9 +363,33 @@ def _read_secure_at(
         if len(payload) != after.st_size:
             raise LeaseError(f"unsafe {label}: file changed while being read")
         _revalidate_directory(directory, f"{label} parent")
-        return payload
+        return payload, _entry_identity(after)
     finally:
         os.close(descriptor)
+
+
+def _read_secure_at(
+    directory: _PinnedDirectory, name: str, label: str, maximum: int
+) -> bytes:
+    return _read_secure_snapshot_at(directory, name, label, maximum)[0]
+
+
+def _read_recovery_snapshot_at(
+    directory: _PinnedDirectory, name: str, label: str, maximum: int
+) -> tuple[bytes, _EntryIdentity]:
+    try:
+        info = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+    except OSError as exc:
+        raise LeaseError(f"unsafe {label}: file is unavailable") from exc
+    if info.st_nlink not in {1, 2}:
+        raise LeaseError(f"unsafe {label}: unexpected recovery link count")
+    return _read_secure_snapshot_at(
+        directory,
+        name,
+        label,
+        maximum,
+        expected_links=info.st_nlink,
+    )
 
 
 def _require_exact_fields(value: dict, expected: frozenset[str], label: str) -> None:
@@ -505,19 +558,50 @@ def _active_job_id(state: dict) -> str | None:
     raise LeaseError("active attempt record is missing")
 
 
-def _load_state_pinned(slot_directory: _PinnedDirectory, slot: str) -> dict:
-    payload = _read_secure_at(
-        slot_directory, "state.json", "slot state", MAX_STATE_BYTES
+def _load_state_snapshot_pinned(
+    slot_directory: _PinnedDirectory, slot: str, *, expected_links: int = 1
+) -> tuple[dict, _EntryIdentity, bytes]:
+    payload, identity = _read_secure_snapshot_at(
+        slot_directory,
+        "state.json",
+        "slot state",
+        MAX_STATE_BYTES,
+        expected_links=expected_links,
     )
     state = _decode_json(payload, "slot state")
     _validate_state(state, slot)
-    return state
+    return state, identity, payload
 
 
-def _load_state(slot_path: Path, slot: str) -> dict:
-    slot_directory = _open_pinned_directory(slot_path, "slot directory")
+def _load_state_pinned(slot_directory: _PinnedDirectory, slot: str) -> dict:
+    return _load_state_snapshot_pinned(slot_directory, slot)[0]
+
+
+def _load_lease_from_root(
+    root: Path,
+    root_directory: _PinnedDirectory,
+    slot: str,
+    *,
+    transaction_expected: bool,
+) -> Lease:
+    slot_path = root / slot
+    slot_directory = _open_pinned_directory(
+        slot_path,
+        "slot directory",
+        parent=root_directory,
+        name=slot,
+    )
     try:
-        return _load_state_pinned(slot_directory, slot)
+        if os.listdir(slot_directory.fd) != ["state.json"]:
+            raise LeaseError("unsafe unexpected entry in slot directory")
+        state = _load_state_pinned(slot_directory, slot)
+        _revalidate_directory(root_directory, "lease root")
+        transaction_present = _entry_exists(
+            root_directory, f".{slot}.txn", "transaction mutex"
+        )
+        if transaction_present != transaction_expected:
+            raise LeaseError("slot mutation boundary changed during read")
+        return Lease(slot_path / "state.json", copy.deepcopy(state))
     finally:
         slot_directory.close()
 
@@ -528,26 +612,31 @@ def load(root: Path, slot: str) -> Lease:
     _reject_symlink_components(root)
     root_directory = _open_pinned_directory(root, "lease root")
     try:
-        slot_path = root / slot
-        slot_directory = _open_pinned_directory(
-            slot_path,
-            "slot directory",
-            parent=root_directory,
-            name=slot,
+        transaction_exists = _entry_exists(
+            root_directory, f".{slot}.txn", "transaction mutex"
         )
-        try:
-            state = _load_state_pinned(slot_directory, slot)
-            _revalidate_directory(root_directory, "lease root")
-            return Lease(slot_path / "state.json", copy.deepcopy(state))
-        finally:
-            slot_directory.close()
+        if not transaction_exists:
+            return _load_lease_from_root(
+                root,
+                root_directory,
+                slot,
+                transaction_expected=False,
+            )
     finally:
         root_directory.close()
+
+    with _mutation(root, slot) as recovered_root:
+        return _load_lease_from_root(
+            root,
+            recovered_root,
+            slot,
+            transaction_expected=True,
+        )
 
 
 def _write_exclusive_at(
     directory: _PinnedDirectory, name: str, payload: bytes, label: str
-) -> None:
+) -> _EntryIdentity:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor: int | None = None
     try:
@@ -560,7 +649,16 @@ def _write_exclusive_at(
                 raise OSError("short write")
             view = view[written:]
         os.fsync(descriptor)
+        written_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(written_info.st_mode)
+            or written_info.st_uid != os.geteuid()
+            or stat.S_IMODE(written_info.st_mode) != 0o600
+            or written_info.st_nlink != 1
+        ):
+            raise OSError("written file identity changed")
         _revalidate_directory(directory, f"{label} parent")
+        return _entry_identity(written_info)
     except OSError as exc:
         raise LeaseError(f"failed to write {label}") from exc
     finally:
@@ -568,43 +666,220 @@ def _write_exclusive_at(
             os.close(descriptor)
 
 
-def _safe_unlink_regular_at(
-    directory: _PinnedDirectory, name: str, label: str, maximum: int = MAX_STATE_BYTES
-) -> None:
-    _read_secure_at(directory, name, label, maximum)
+def _quarantine_exact_entry(
+    directory: _PinnedDirectory,
+    name: str,
+    expected: _EntryIdentity,
+    label: str,
+    maximum: int = MAX_STATE_BYTES,
+) -> str:
+    quarantine = f".quarantine.{uuid.uuid4().hex}.entry"
     try:
-        os.unlink(name, dir_fd=directory.fd)
+        os.replace(
+            name,
+            quarantine,
+            src_dir_fd=directory.fd,
+            dst_dir_fd=directory.fd,
+        )
     except OSError as exc:
-        raise LeaseError(f"failed to remove {label}") from exc
+        raise LeaseError(f"failed to quarantine {label}") from exc
+    try:
+        _, observed = _read_secure_snapshot_at(
+            directory,
+            quarantine,
+            f"quarantined {label}",
+            maximum,
+            expected_links=expected.links,
+        )
+    except LeaseError as exc:
+        raise LeaseError(f"unsafe quarantined {label} preserved") from exc
+    if observed != expected:
+        raise LeaseError(f"quarantined {label} inode mismatch; entry preserved")
+    _revalidate_directory(directory, f"{label} parent")
+    return quarantine
+
+
+def _discard_exact_entry(
+    directory: _PinnedDirectory,
+    name: str,
+    expected: _EntryIdentity,
+    label: str,
+    maximum: int = MAX_STATE_BYTES,
+) -> None:
+    quarantine = _quarantine_exact_entry(
+        directory, name, expected, label, maximum
+    )
+    _, observed = _read_secure_snapshot_at(
+        directory,
+        quarantine,
+        f"quarantined {label}",
+        maximum,
+        expected_links=expected.links,
+    )
+    if observed != expected:
+        raise LeaseError(f"quarantined {label} changed; entry preserved")
+    try:
+        os.unlink(quarantine, dir_fd=directory.fd)
+    except OSError as exc:
+        raise LeaseError(f"failed to remove quarantined {label}") from exc
     _revalidate_directory(directory, f"{label} parent")
 
 
+def _identity_with_links(identity: _EntryIdentity, links: int) -> _EntryIdentity:
+    return _EntryIdentity(
+        device=identity.device,
+        inode=identity.inode,
+        file_type=identity.file_type,
+        owner=identity.owner,
+        mode=identity.mode,
+        links=links,
+    )
+
+
+def _restore_prior_state(
+    slot_directory: _PinnedDirectory,
+    backup: str,
+    expected: _EntryIdentity,
+    slot: str,
+) -> None:
+    try:
+        os.replace(
+            backup,
+            "state.json",
+            src_dir_fd=slot_directory.fd,
+            dst_dir_fd=slot_directory.fd,
+        )
+    except OSError as exc:
+        raise LeaseError("prior slot state restore failed") from exc
+    _, restored, _ = _load_state_snapshot_pinned(slot_directory, slot)
+    if restored != expected:
+        raise LeaseError("prior slot state restore inode mismatch")
+
+
 def _atomic_write_state(
-    slot_directory: _PinnedDirectory, state: dict, slot: str
+    slot_directory: _PinnedDirectory,
+    state: dict,
+    slot: str,
+    prior_identity: _EntryIdentity | None = None,
 ) -> None:
     payload = _state_bytes(state, slot)
     temp = f".state.{state['revision']}.{uuid.uuid4().hex}.tmp"
-    _write_exclusive_at(slot_directory, temp, payload, "temporary slot state")
+    temp_identity = _write_exclusive_at(
+        slot_directory, temp, payload, "temporary slot state"
+    )
+    backup: str | None = None
     try:
+        if prior_identity is not None:
+            backup = f".state.backup.{state['revision'] - 1}.{uuid.uuid4().hex}"
+            try:
+                os.link(
+                    "state.json",
+                    backup,
+                    src_dir_fd=slot_directory.fd,
+                    dst_dir_fd=slot_directory.fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise LeaseError("prior slot state backup failed") from exc
+            linked_identity = _identity_with_links(prior_identity, 2)
+            _, observed_state, _ = _load_state_snapshot_pinned(
+                slot_directory, slot, expected_links=2
+            )
+            _, observed_backup = _read_secure_snapshot_at(
+                slot_directory,
+                backup,
+                "slot state backup",
+                MAX_STATE_BYTES,
+                expected_links=2,
+            )
+            if observed_state != linked_identity or observed_backup != linked_identity:
+                raise LeaseError("prior slot state backup inode mismatch; preserved")
+
         os.replace(
             temp,
             "state.json",
             src_dir_fd=slot_directory.fd,
             dst_dir_fd=slot_directory.fd,
         )
+        observed_payload, observed_identity = _read_secure_snapshot_at(
+            slot_directory, "state.json", "published slot state", MAX_STATE_BYTES
+        )
+        if observed_identity != temp_identity or observed_payload != payload:
+            _quarantine_exact_entry(
+                slot_directory,
+                "state.json",
+                observed_identity,
+                "suspicious published slot state",
+            )
+            if backup is not None:
+                _restore_prior_state(
+                    slot_directory, backup, prior_identity, slot  # type: ignore[arg-type]
+                )
+                backup = None
+            _fsync_pinned(slot_directory, "slot directory")
+            raise LeaseError("slot state publication inode mismatch; prior state restored")
+        _validate_state(_decode_json(observed_payload, "published slot state"), slot)
+
+        if backup is not None:
+            _, backup_identity = _read_secure_snapshot_at(
+                slot_directory, backup, "slot state backup", MAX_STATE_BYTES
+            )
+            if backup_identity != prior_identity:
+                raise LeaseError("slot state backup changed; preserved")
+            _discard_exact_entry(
+                slot_directory,
+                backup,
+                backup_identity,
+                "slot state backup",
+            )
+            backup = None
         _fsync_pinned(slot_directory, "slot directory")
     except BaseException:
         try:
-            os.stat(temp, dir_fd=slot_directory.fd, follow_symlinks=False)
+            _, observed_temp = _read_secure_snapshot_at(
+                slot_directory, temp, "temporary slot state", MAX_STATE_BYTES
+            )
         except OSError:
             pass
+        except LeaseError:
+            pass
         else:
+            if observed_temp == temp_identity:
+                try:
+                    _discard_exact_entry(
+                        slot_directory,
+                        temp,
+                        temp_identity,
+                        "temporary slot state",
+                    )
+                except LeaseError:
+                    pass
+        if backup is not None and prior_identity is not None:
             try:
-                _safe_unlink_regular_at(
-                    slot_directory, temp, "temporary slot state"
+                _, current_identity, _ = _load_state_snapshot_pinned(
+                    slot_directory, slot, expected_links=2
                 )
             except LeaseError:
                 pass
+            else:
+                linked_identity = _identity_with_links(prior_identity, 2)
+                if current_identity == linked_identity:
+                    try:
+                        _, backup_identity = _read_secure_snapshot_at(
+                            slot_directory,
+                            backup,
+                            "slot state backup",
+                            MAX_STATE_BYTES,
+                            expected_links=2,
+                        )
+                        _discard_exact_entry(
+                            slot_directory,
+                            backup,
+                            backup_identity,
+                            "slot state backup",
+                        )
+                    except LeaseError:
+                        pass
         raise
 
 
@@ -708,7 +983,19 @@ def _remove_txn(
         document = _read_txn_pinned(mutex)
         if expected_nonce is not None and document["nonce"] != expected_nonce:
             raise LeaseError("transaction mutex ownership changed")
-        _safe_unlink_regular_at(mutex, "owner.json", "transaction owner", 4096)
+        _, owner_identity = _read_secure_snapshot_at(
+            mutex, "owner.json", "transaction owner", 4096
+        )
+        _discard_exact_entry(
+            mutex,
+            "owner.json",
+            owner_identity,
+            "transaction owner",
+            4096,
+        )
+        if os.listdir(mutex.fd):
+            raise LeaseError("unexpected entry in transaction mutex before removal")
+        _revalidate_directory(mutex, "transaction mutex")
         _revalidate_directory(root, "lease root")
         try:
             os.rmdir(mutex_name, dir_fd=root.fd)
@@ -824,25 +1111,89 @@ def _recover_temporary_state(root: _PinnedDirectory, slot: str) -> None:
         except OSError as exc:
             raise LeaseError("unsafe slot directory cannot be inspected") from exc
         extras = [name for name in entries if name != "state.json"]
-        parsed_temps = [(name, _TEMP_RE.fullmatch(name)) for name in extras]
-        if any(match is None for _, match in parsed_temps):
+        parsed_temps = [
+            (name, match)
+            for name in extras
+            if (match := _TEMP_RE.fullmatch(name)) is not None
+        ]
+        parsed_backups = [
+            (name, match)
+            for name in extras
+            if (match := _BACKUP_RE.fullmatch(name)) is not None
+        ]
+        known = {name for name, _ in [*parsed_temps, *parsed_backups]}
+        if set(extras) != known:
             raise LeaseError("unsafe unknown entry in slot directory")
-        if len(parsed_temps) > 1:
-            raise LeaseError("unsafe ambiguous temporary slot state")
+        if len(parsed_temps) > 1 or len(parsed_backups) > 1:
+            raise LeaseError("unsafe ambiguous slot publication state")
         if "state.json" not in entries:
-            if parsed_temps:
+            if parsed_temps or parsed_backups:
                 raise LeaseError("unsafe incomplete initial slot transaction")
             return
-        current = _load_state_pinned(slot_directory, slot)
+
+        if parsed_backups:
+            backup_name, backup_match = parsed_backups[0]
+            try:
+                current_payload, current_identity = _read_recovery_snapshot_at(
+                    slot_directory,
+                    "state.json",
+                    "slot state",
+                    MAX_STATE_BYTES,
+                )
+                current = _decode_json(current_payload, "slot state")
+                _validate_state(current, slot)
+                backup_payload, backup_identity = _read_recovery_snapshot_at(
+                    slot_directory,
+                    backup_name,
+                    "slot state backup",
+                    MAX_STATE_BYTES,
+                )
+                backup_state = _decode_json(backup_payload, "slot state backup")
+                _validate_state(backup_state, slot)
+            except LeaseError as exc:
+                raise LeaseError("unsafe slot publication recovery state") from exc
+            if (
+                backup_state["revision"] != int(backup_match.group(1))
+                or backup_state["claim_id"] != current["claim_id"]
+            ):
+                raise LeaseError("unsafe slot state backup generation")
+            same_inode = (
+                current_identity.device,
+                current_identity.inode,
+            ) == (backup_identity.device, backup_identity.inode)
+            if same_inode:
+                if (
+                    current_identity.links != 2
+                    or backup_identity != current_identity
+                    or current["revision"] != backup_state["revision"]
+                ):
+                    raise LeaseError("unsafe linked slot state backup")
+            elif (
+                current_identity.links != 1
+                or backup_identity.links != 1
+                or current["revision"] != backup_state["revision"] + 1
+            ):
+                raise LeaseError("unsafe replaced slot state backup")
+            _discard_exact_entry(
+                slot_directory,
+                backup_name,
+                backup_identity,
+                "slot state backup",
+            )
+            current = _load_state_pinned(slot_directory, slot)
+        else:
+            current = _load_state_pinned(slot_directory, slot)
+
         for name, match in parsed_temps:
             try:
+                temp_payload, temp_identity = _read_secure_snapshot_at(
+                    slot_directory,
+                    name,
+                    "temporary slot state",
+                    MAX_STATE_BYTES,
+                )
                 candidate = _decode_json(
-                    _read_secure_at(
-                        slot_directory,
-                        name,
-                        "temporary slot state",
-                        MAX_STATE_BYTES,
-                    ),
+                    temp_payload,
                     "temporary slot state",
                 )
                 _validate_state(candidate, slot)
@@ -855,10 +1206,13 @@ def _recover_temporary_state(root: _PinnedDirectory, slot: str) -> None:
                 or candidate["claim_id"] != current["claim_id"]
             ):
                 raise LeaseError("unsafe temporary slot state generation")
-            _safe_unlink_regular_at(
-                slot_directory, name, "temporary slot state"
+            _discard_exact_entry(
+                slot_directory,
+                name,
+                temp_identity,
+                "temporary slot state",
             )
-        if parsed_temps:
+        if parsed_temps or parsed_backups:
             _fsync_pinned(slot_directory, "slot directory")
     finally:
         slot_directory.close()
@@ -897,7 +1251,9 @@ def _recover_tombstones(root: _PinnedDirectory, slot: str) -> None:
     )
     try:
         try:
-            state = _load_state_pinned(tombstone, slot)
+            state, state_identity, _ = _load_state_snapshot_pinned(
+                tombstone, slot
+            )
         except LeaseError as exc:
             raise LeaseError("unsafe slot tombstone") from exc
         if state["revision"] != int(match.group(1)) or state["claim_id"] != match.group(2):
@@ -905,9 +1261,15 @@ def _recover_tombstones(root: _PinnedDirectory, slot: str) -> None:
         entries = os.listdir(tombstone.fd)
         if entries != ["state.json"]:
             raise LeaseError("unsafe slot tombstone contents")
-        _safe_unlink_regular_at(
-            tombstone, "state.json", "slot tombstone state"
+        _discard_exact_entry(
+            tombstone,
+            "state.json",
+            state_identity,
+            "slot tombstone state",
         )
+        if os.listdir(tombstone.fd):
+            raise LeaseError("unexpected slot tombstone entry before removal")
+        _revalidate_directory(tombstone, "slot tombstone")
         _revalidate_directory(root, "lease root")
         try:
             os.rmdir(name, dir_fd=root.fd)
@@ -1053,7 +1415,9 @@ def mutate(
             name=slot,
         )
         try:
-            current = _load_state_pinned(slot_directory, slot)
+            current, current_identity, _ = _load_state_snapshot_pinned(
+                slot_directory, slot
+            )
             if not _matches(current, expected):
                 raise LeaseError("compare-and-swap failed: slot generation changed")
             candidate = transition(copy.deepcopy(current))
@@ -1065,7 +1429,12 @@ def mutate(
             for immutable in ("schema", "slot", "claim_id", "owner", "created_at"):
                 if candidate[immutable] != current[immutable]:
                     raise LeaseError(f"slot transition changed immutable field: {immutable}")
-            _atomic_write_state(slot_directory, candidate, slot)
+            _atomic_write_state(
+                slot_directory,
+                candidate,
+                slot,
+                prior_identity=current_identity,
+            )
             _revalidate_directory(root_directory, "lease root")
             return Lease(slot_path / "state.json", copy.deepcopy(candidate))
         finally:
@@ -1092,7 +1461,9 @@ def release_if_current(
             name=slot,
         )
         try:
-            current = _load_state_pinned(slot_directory, slot)
+            current, state_identity, _ = _load_state_snapshot_pinned(
+                slot_directory, slot
+            )
             expected = ExpectedState(
                 revision=current["revision"],
                 claim_id=claim_id,
@@ -1130,9 +1501,15 @@ def release_if_current(
                 _fsync_pinned(root_directory, "lease root")
             except OSError as exc:
                 raise LeaseError("slot release rename failed") from exc
-            _safe_unlink_regular_at(
-                slot_directory, "state.json", "slot tombstone state"
+            _discard_exact_entry(
+                slot_directory,
+                "state.json",
+                state_identity,
+                "slot tombstone state",
             )
+            if os.listdir(slot_directory.fd):
+                raise LeaseError("unexpected slot tombstone entry before removal")
+            _revalidate_directory(slot_directory, "slot tombstone")
             _revalidate_directory(root_directory, "lease root")
             try:
                 os.rmdir(tombstone_name, dir_fd=root_directory.fd)
