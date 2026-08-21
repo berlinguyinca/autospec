@@ -179,6 +179,41 @@ def test_reenrolment_immediately_discards_cached_routing_evidence(monkeypatch, n
     assert ("box", "m1") not in gw.THROUGHPUT
 
 
+def test_reenrolment_survives_a_failed_full_cache_refresh(
+        monkeypatch, capsys, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    assert call(srv, "DELETE", "/api/servers/box", session("sub-a"))[0] == 200
+    code, issued = call(srv, "POST", "/api/servers/enrol", session("sub-a"),
+                        {"server_id": "box"})
+    assert code == 201
+    gw.THROUGHPUT = {
+        ("box", "m1"): {"samples": 7},
+        ("box", None): {"samples": 7},
+        ("other", "m1"): {"samples": 3},
+    }
+
+    def failed_scan():
+        raise RuntimeError("scan failed\nSECOND LINE MUST NOT BE LOGGED" + "x" * 500)
+
+    monkeypatch.setattr(store, "throughput", failed_scan)
+    code, enrolled = call(srv, "POST", "/api/agent/enrol",
+                          body={"token": issued["token"]})
+
+    assert code == 201
+    assert all(key[0] != "box" for key in gw.THROUGHPUT)
+    assert ("other", "m1") in gw.THROUGHPUT
+    authenticated = store.authenticate_server(enrolled["credential"])
+    assert authenticated is not None and authenticated.server_id == "box"
+    assert call(srv, "POST", "/api/agent/enrol",
+                body={"token": issued["token"]})[0] == 401
+    error = capsys.readouterr().err
+    line = next(line for line in error.splitlines()
+                if line.startswith("throughput refresh after enrolment:"))
+    assert "scan failed" in line and len(line) <= 160
+    assert "SECOND LINE MUST NOT BE LOGGED" not in error
+
+
 def test_attaching_over_cleartext_is_refused(node):
     srv, _, _ = node
     code, d = call(srv, "POST", "/api/servers/enrol", session("sub-a"),
@@ -620,6 +655,31 @@ def test_hardware_change_refreshes_live_scheduler_cache(monkeypatch, node):
     assert ("box", "m1") not in gw.THROUGHPUT
 
 
+def test_hardware_change_evicts_old_cache_when_fresh_scan_fails(monkeypatch, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    now = time.time()
+    store.record_usage({
+        "ts": now - 20, "key_id": "k", "sub": "sub-a", "model": "m1",
+        "upstream": "box", "prompt_tokens": 1000, "completion_tokens": 10,
+        "prompt_ms": 1000, "predicted_ms": 100, "status_code": 200,
+    })
+    assert store.observe_hardware("box", "v1:old", now=now - 10) is False
+    gw._refresh_throughput()
+    assert ("box", "m1") in gw.THROUGHPUT
+
+    def failed_scan():
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(store, "throughput", failed_scan)
+
+    gw.Handler._agent_said(object(), "box", json.dumps({
+        "type": "capabilities", "hardware_fingerprint": "v1:new", "cards": []
+    }).encode())
+
+    assert ("box", "m1") not in gw._throughput_snapshot()
+
+
 def test_hardware_invalidation_cannot_be_overwritten_by_older_refresh(
         monkeypatch, node):
     srv, store, _target = node
@@ -666,6 +726,97 @@ def test_hardware_invalidation_cannot_be_overwritten_by_older_refresh(
 
     assert not stale.is_alive() and not fresh.is_alive()
     assert ("box", "m1") not in gw.THROUGHPUT
+
+
+def test_planner_cannot_read_precutoff_cache_while_fresh_scan_is_blocked(
+        monkeypatch, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    now = time.time()
+    store.record_usage({
+        "ts": now - 20, "key_id": "k", "sub": "sub-a", "model": "m1",
+        "upstream": "box", "prompt_tokens": 1000, "completion_tokens": 10,
+        "prompt_ms": 1000, "predicted_ms": 100, "status_code": 200,
+    })
+    assert store.observe_hardware("box", "v1:old", now=now - 10) is False
+    gw._refresh_throughput()
+    assert ("box", "m1") in gw.THROUGHPUT
+
+    original_throughput = store.throughput
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def blocked_fresh_scan():
+        scan_started.set()
+        assert release_scan.wait(3)
+        return original_throughput(now=now + 1)
+
+    monkeypatch.setattr(store, "throughput", blocked_fresh_scan)
+    invalidator = threading.Thread(
+        target=gw.Handler._agent_said,
+        args=(object(), "box", json.dumps({
+            "type": "capabilities", "hardware_fingerprint": "v1:new", "cards": []
+        }).encode()), daemon=True)
+    invalidator.start()
+    assert scan_started.wait(3)
+
+    captured = []
+    planner_done = threading.Event()
+    planner_errors = []
+
+    class Planner:
+        headers = {}
+        _body_left = 1
+
+        def _peek_body(self):
+            return "m1", True
+
+        def _last_server(self):
+            return None
+
+        def _local_online(self):
+            return True
+
+        def _load(self, _servers):
+            return {}
+
+        def _ready(self, _servers):
+            return {}
+
+        def _prompt_tokens(self):
+            return 1
+
+        def _decided(self, _server, _why):
+            pass
+
+    monkeypatch.setattr(gw, "_servers_all", lambda: [])
+    monkeypatch.setattr(gw, "_state_view", lambda _servers: {})
+
+    def pick(_servers, _state, _last, **kwargs):
+        captured.append(kwargs["stats"])
+        return gw._ups.LOCAL, "measured", 0.0
+
+    monkeypatch.setattr(gw._ups, "pick_auto", pick)
+
+    def plan():
+        try:
+            gw.Handler._balance(Planner(), "/v1/chat/completions")
+        except Exception as exc:
+            planner_errors.append(exc)
+        finally:
+            planner_done.set()
+
+    planner = threading.Thread(target=plan, daemon=True)
+    planner.start()
+    blocked = not planner_done.wait(0.2)
+    release_scan.set()
+    invalidator.join(3)
+    planner.join(3)
+
+    assert blocked, "the planner read pre-cutoff THROUGHPUT while refresh was blocked"
+    assert not invalidator.is_alive() and not planner.is_alive()
+    assert planner_errors == []
+    assert len(captured) == 1 and ("box", "m1") not in captured[0]
 
 
 def test_a_reported_card_list_is_bounded(monkeypatch):

@@ -555,16 +555,55 @@ def _poll_local() -> None:
                        last_seen=time.time())
 
 
+def _throughput_snapshot() -> dict:
+    """A stable scheduler view that cannot cross an invalidation boundary."""
+    with _THROUGHPUT_LOCK:
+        return dict(THROUGHPUT)
+
+
+def _refresh_throughput_locked() -> None:
+    """Refresh while the caller holds ``_THROUGHPUT_LOCK``."""
+    global THROUGHPUT
+    if STORE is not None:
+        THROUGHPUT = STORE.throughput()
+
+
 def _refresh_throughput() -> None:
     """Recompute measured rates. On a timer because it scans usage history, and
     the request path must never pay for it."""
-    global THROUGHPUT
     # Serialize the query and publication together. Otherwise a slow refresh
     # that read before an invalidation can overwrite the newer post-cutoff map.
     with _THROUGHPUT_LOCK:
-        if STORE is None:
-            return
-        THROUGHPUT = STORE.throughput()
+        _refresh_throughput_locked()
+
+
+def _evict_throughput_locked(server_id: str) -> None:
+    """Remove one server's evidence while the caller holds the cache lock."""
+    global THROUGHPUT
+    THROUGHPUT = {
+        key: value for key, value in THROUGHPUT.items()
+        if not (isinstance(key, tuple) and key and key[0] == server_id)
+    }
+
+
+def _evict_throughput(server_id: str) -> None:
+    """Synchronously remove one server's evidence without requiring a DB scan."""
+    with _THROUGHPUT_LOCK:
+        _evict_throughput_locked(server_id)
+
+
+def _observe_hardware_and_refresh(server_id: str, fingerprint: str) -> bool:
+    """Commit a generation change and publish its cache as one visible step."""
+    if STORE is None:
+        return False
+    with _THROUGHPUT_LOCK:
+        changed = STORE.observe_hardware(server_id, fingerprint)
+        if changed:
+            # If the full scan fails, the old generation must still be gone
+            # before a planner can acquire the reader snapshot lock.
+            _evict_throughput_locked(server_id)
+            _refresh_throughput_locked()
+        return changed
 
 
 def _refresh_pool_sizes() -> None:
@@ -1082,10 +1121,12 @@ class Handler(BaseHTTPRequestHandler):
         # This node is described from its own PROBE, not asserted. The page used
         # to draw it as permanently online, which is the one server whose state
         # it could not actually have known.
+        throughput = _throughput_snapshot()
+
         def measured(sid):
             """What this node has actually seen from a server, aggregated over
             every model it served -- so the panel reports evidence, not specs."""
-            m = THROUGHPUT.get((sid, None)) or {}
+            m = throughput.get((sid, None)) or {}
             return {"prefill_rate": m.get("prefill_rate"),
                     "mean_service": m.get("mean_service"),
                     "samples": m.get("samples", 0)}
@@ -1346,7 +1387,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(401, "that enrolment token is not usable",
                              "invalid_token")
         server_id, credential = out
-        _refresh_throughput()
+        # Redemption is already committed and the token is consumed. Cache
+        # maintenance must never turn that success into a credential-stranding
+        # 500. Eviction is sufficient for correctness; the full scan is only a
+        # best-effort opportunity to refresh every other server as well.
+        try:
+            _evict_throughput(server_id)
+            _refresh_throughput()
+        except Exception as exc:
+            lines = str(exc).strip().splitlines()
+            detail = (lines[0] if lines else type(exc).__name__)[:120]
+            sys.stderr.write(f"throughput refresh after enrolment: {detail}\n")
         self._json(201, {"server_id": server_id, "credential": credential,
                          "heartbeat_seconds": HEARTBEAT_SECONDS,
                          "pipes_wanted": DEFAULT_PIPES_WANTED})
@@ -1529,8 +1580,7 @@ class Handler(BaseHTTPRequestHandler):
                 fingerprint = msg.get("hardware_fingerprint")
                 if isinstance(fingerprint, str) and fingerprint:
                     try:
-                        if STORE.observe_hardware(sid, fingerprint):
-                            _refresh_throughput()
+                        _observe_hardware_and_refresh(sid, fingerprint)
                     except Exception:
                         pass
         if kind == "hello":
@@ -1995,7 +2045,8 @@ class Handler(BaseHTTPRequestHandler):
             servers, state, self._last_server(), model=model,
             local_online=self._local_online(),
             local_models=LOCAL_STATE.get("models"),
-            stats=THROUGHPUT, load=self._load(servers), ready=self._ready(servers),
+            stats=_throughput_snapshot(), load=self._load(servers),
+            ready=self._ready(servers),
             prompt_tokens=self._prompt_tokens())
         self._route_est = est
         if why == "blind" and conclusive:
