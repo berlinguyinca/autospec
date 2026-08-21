@@ -168,6 +168,31 @@ for vram in 97887 81920 46068 40960; do
 done
 check $gen_ok "gen-preset.py output is valid for every supported card"
 
+fed_ok=0
+for vram in 97887 81920 46068 40960; do
+  tmp="$(mktemp)"
+  python3 "$gp" --vram-mib "$vram" --models-dir /m --federated >"$tmp" 2>/dev/null
+  if ! python3 - "$tmp" "${HERE}/slurm" <<'PYCHK' >/dev/null 2>&1; then
+import configparser, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import federation_contract as fc
+
+ini = configparser.ConfigParser(interpolation=None)
+ini.optionxform = str
+ini.read_string("[__top__]\n" + Path(sys.argv[1]).read_text())
+sections = {name for name in ini.sections() if name not in {"*", "__top__"}}
+assert sections
+assert fc.validate_scheduler_subset(sections) == sections
+assert all(not ini.has_option(name, "alias") for name in sections)
+PYCHK
+    bad "gen-preset.py --federated output for ${vram} MiB leaks aliases or non-primary ids"
+    fed_ok=1
+  fi
+  rm -f "$tmp"
+done
+check $fed_ok "gen-preset.py --federated only advertises primary ids on supported cards"
+
 # A card too small for the weights must refuse, not emit something unservable.
 tmp="$(mktemp)"
 python3 "$gp" --vram-mib 24564 --models-dir /m >"$tmp" 2>/dev/null

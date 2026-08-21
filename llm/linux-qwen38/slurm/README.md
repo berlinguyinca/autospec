@@ -207,6 +207,8 @@ the deduplicated union of models on online, promoted servers.
 The first scheduler integration accepts only a subset of the established seven
 Qwen ids. That keeps the current external catalog stable while still allowing a
 worker to contribute only the models its assigned GPU can serve.
+`gen-preset.py --federated` emits exactly that worker-facing surface: primary
+section ids only, no context-tier aliases.
 
 The implementation contract is
 [§13 of the registration design](../../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md#13-amendment-contributor-owned-scheduler-workers).

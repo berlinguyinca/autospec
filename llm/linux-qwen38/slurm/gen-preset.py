@@ -60,7 +60,7 @@ def tiers_for(pool: int, parallel: int, prefix: str) -> list[tuple[str, int]]:
 
 
 def emit(name: str, model: str, pool: int, parallel: int, models_dir: str,
-         mmproj: str | None = None) -> str:
+         mmproj: str | None = None, *, federated: bool = False) -> str:
     if pool <= 0:
         return ""
     lines = [f"[{name}]", f"model = {models_dir}/{model}"]
@@ -68,7 +68,7 @@ def emit(name: str, model: str, pool: int, parallel: int, models_dir: str,
         lines += [f"mmproj = {models_dir}/{mmproj}", "image-min-tokens = 1024"]
     lines += [f"c = {pool}", f"parallel = {parallel}"]
     tiers = tiers_for(pool, parallel, name)
-    if tiers:
+    if tiers and not federated:
         lines.append("alias = " + ",".join(t for t, _ in tiers))
     return "\n".join(lines) + "\n"
 
@@ -78,6 +78,8 @@ def main() -> int:
     ap.add_argument("--vram-mib", type=int, required=True)
     ap.add_argument("--models-dir", required=True)
     ap.add_argument("--kv", default="f16", choices=sorted(KV_BYTES_PER_TOKEN))
+    ap.add_argument("--federated", action="store_true",
+                    help="emit only primary model sections for scheduler federation")
     args = ap.parse_args()
 
     v = args.vram_mib
@@ -123,15 +125,17 @@ def main() -> int:
     print()
     d = args.models_dir
     print(emit("qwen3.8-27b", "Qwen3.8-27B-UD-Q8_K_XL.gguf",
-               text_pool, parallel, d))
+               text_pool, parallel, d, federated=args.federated))
     print(emit("qwen3.8-27b-vision", "Qwen3.8-27B-UD-Q8_K_XL.gguf",
-               vis_pool, max(2, parallel // 2), d, "mmproj-F16.gguf"))
+               vis_pool, max(2, parallel // 2), d, "mmproj-F16.gguf",
+               federated=args.federated))
     print(emit("qwen3.8-27b-uncensored", "Qwen3.8-27B-ABLITERATED-Q8_0.gguf",
-               unc_pool, parallel, d))
+               unc_pool, parallel, d, federated=args.federated))
     print(emit("qwen3.8-27b-uncensored-vision",
                "Qwen3.8-27B-ABLITERATED-Q8_0.gguf", unc_vis,
                max(2, parallel // 2), d,
-               "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf"))
+               "mmproj-Qwen3.8-27B-ABLITERATED-F16.gguf",
+               federated=args.federated))
     return 0
 
 
