@@ -60,6 +60,18 @@ fn executor_receipt_failure_keeps_its_selection_for_the_recovery_cycle() {
     );
 }
 
+#[test]
+fn an_inflight_dispatch_keeps_the_continuous_conductor_looping() {
+    let state = claimed_foreground_state(51);
+    assert_eq!(state.phase(), ConductorPhase::Dispatch);
+    assert_eq!(state.selected_issue(), Some(51));
+
+    assert!(
+        foreground_cycle_is_loopable(&ForegroundCompletion::State(Box::new(state)))
+            .expect("in-flight dispatch is loopable")
+    );
+}
+
 /// Re-drive an already-scanning state into the same blocked dispatch, the way
 /// a later cycle reloads persisted state and re-selects the same issue. The
 /// blocked-backlog counters must survive this, which is what bounds the retries.
