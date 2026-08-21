@@ -61,6 +61,13 @@ fail_closed() {
     exit 1
 }
 
+PROCESS_TREE_HELPER="$SCRIPT_DIR/lib/autospec-process-tree.sh"
+if [ ! -f "$PROCESS_TREE_HELPER" ]; then
+    fail_closed "process-tree helper missing: $PROCESS_TREE_HELPER"
+fi
+# shellcheck source=/dev/null
+. "$PROCESS_TREE_HELPER"
+
 deterministic_fallback() {
     # Preserve progress when the optional skeptic harness is unavailable, but
     # only allow candidates whose evidence names a real repository path and
@@ -115,20 +122,6 @@ fi
 # ── Harness absence is FAIL-CLOSED here (unlike the run/explore drains). ──────
 command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
 
-kill_tree() {
-    _pid="$1"
-    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
-    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
-    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
-        kill -TERM -- "-$_pgid" 2>/dev/null || true
-        kill -KILL -- "-$_pgid" 2>/dev/null || true
-    fi
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        kill_tree "$_child"
-    done
-    kill "$_pid" 2>/dev/null || true
-}
-
 # ── Build the adversarial-skeptic prompt (embeds the exact norm_title keys). ──
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-prompt.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-prompt.%s' "$$")"
 if ! python3 - "$DEDUPED_IN" > "$PROMPT_FILE" <<'PY'; then
@@ -176,15 +169,14 @@ rm -f "$PROMPT_FILE"
 # ── Run the skeptic through omx, with a stall watchdog. ───────────────────────
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-drain.%s' "$$")"
 
-run_in_new_session() {
-    if command -v setsid >/dev/null 2>&1; then
-        setsid "$@"
-    else
-        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
-    fi
-}
-
-run_in_new_session omx exec \
+# The background job must be the new-session process itself: backgrounding a
+# function wraps it in a subshell that stays in our own process group, which
+# the shared helper refuses to signal and which would leak the harness tree.
+NEW_SESSION_CMD=(python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
+if command -v setsid >/dev/null 2>&1; then
+    NEW_SESSION_CMD=(setsid)
+fi
+"${NEW_SESSION_CMD[@]}" omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" > "$HARNESS_LOG" 2>&1 &
@@ -207,7 +199,7 @@ else
         if [ "${VERIFY_MAX_SECS:-0}" -gt 0 ] 2>/dev/null && [ "$elapsed_secs" -ge "$VERIFY_MAX_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: absolute timeout after %ss; terminating skeptic child pid %s\n' \
                 "$VERIFY_MAX_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break
@@ -222,7 +214,7 @@ else
         if [ "$idle_secs" -ge "$VERIFY_STALL_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: stalled after %ss with no output; terminating skeptic child pid %s\n' \
                 "$VERIFY_STALL_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break
