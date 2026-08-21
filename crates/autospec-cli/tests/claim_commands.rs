@@ -1185,41 +1185,116 @@ fn claim_state_clear_without_exact_identity_leaves_audit_history_untouched() {
     assert!(!calls.contains("\n-X\nDELETE"));
 }
 
-#[test]
-fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
-    let fixture = temp_dir("autospec-claim-recover-stale");
-    let bin = fixture.join("bin");
-    let log = fixture.join("gh.log");
-    std::fs::create_dir_all(&bin).expect("fake bin directory");
-    write_executable(
-        &bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
-    );
-    let comments = r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+#[cfg(target_os = "linux")]
+struct LegacyRecoveryFixture {
+    root: std::path::PathBuf,
+    bin: std::path::PathBuf,
+    log: std::path::PathBuf,
+    repo: std::path::PathBuf,
+    comments: String,
+    heartbeats: std::path::PathBuf,
+}
 
-    let output = autospec()
-        .args([
-            "claim",
-            "state",
-            "recover-stale-startup",
-            "--issue",
-            "42",
-            "--repo",
-            "testorg/testrepo",
-            "--timeout-seconds",
-            "300",
-        ])
-        .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
-        .env("AUTOSPEC_CLAIM_LOG", &log)
-        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
-        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+#[cfg(target_os = "linux")]
+impl LegacyRecoveryFixture {
+    fn new(name: &str) -> Self {
+        let root = temp_dir(name);
+        let bin = root.join("bin");
+        let log = root.join("gh.log");
+        let repo = claim_git_repo(&root);
+        std::fs::create_dir_all(&bin).expect("fake bin directory");
+        write_executable(
+            &bin.join("gh"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
+        );
+        let comments = r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800,\"claim_id\":\"claim-a\"}\n<!-- autospec-run-state:end -->"}]"#.to_string();
+        let heartbeats = root.join("heartbeats");
+        let heartbeat_repo = heartbeats.join("o7_testorg_r8_testrepo");
+        std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
+        std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
+            .expect("private heartbeat root");
+        std::fs::set_permissions(&heartbeat_repo, std::fs::Permissions::from_mode(0o700))
+            .expect("private heartbeat repository");
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
+        let boot =
+            std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+        std::fs::write(
+            heartbeat_repo.join("42.json"),
+            format!(
+                "{{\"issue\":\"42\",\"branch\":\"\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
+                host.trim(),
+                boot.trim()
+            ),
+        )
+        .expect("expired heartbeat");
+        std::fs::set_permissions(
+            heartbeat_repo.join("42.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("private heartbeat");
+        Self {
+            root,
+            bin,
+            log,
+            repo,
+            comments,
+            heartbeats,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+        command
+            .args([
+                "claim",
+                "state",
+                "recover-stale-startup",
+                "--issue",
+                "42",
+                "--repo",
+                "testorg/testrepo",
+                "--timeout-seconds",
+                "300",
+            ])
+            .current_dir(&self.repo)
+            .env(
+                "AUTOSPEC_CLAIM_GIT_REMOTE",
+                self.root.join("claim-remote.git"),
+            )
+            .env(
+                "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+                self.root.join("claim-state"),
+            )
+            .env("PATH", path_with(&self.bin))
+            .env("AUTOSPEC_CLAIM_COMMENTS", &self.comments)
+            .env("AUTOSPEC_CLAIM_LOG", &self.log)
+            .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+            .env("AUTOSPEC_HEARTBEAT_DIR", &self.heartbeats);
+        command
+    }
+
+    fn assert_no_remote_mutation(&self) {
+        let calls = std::fs::read_to_string(&self.log).expect("gh call log");
+        assert!(!calls.contains("issue\nedit\n42"), "{calls}");
+        assert!(
+            !calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nDELETE"),
+            "{calls}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claim_legacy_stale_heartbeat_recovery() {
+    let fixture = LegacyRecoveryFixture::new("autospec-claim-recover-stale");
+    let output = fixture
+        .command()
         .output()
         .expect("autospec claim stale recovery starts");
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
-    let calls = std::fs::read_to_string(log).expect("gh call log");
+    let calls = std::fs::read_to_string(&fixture.log).expect("gh call log");
     let labels = calls
         .find("issue\nedit\n42\n--repo\ntestorg/testrepo\n--remove-label\nin-progress-by-bot\n--add-label\nauto-implement")
         .expect("label release");
@@ -1227,6 +1302,89 @@ fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
         .find("repos/testorg/testrepo/issues/comments/100\n-X\nDELETE")
         .expect("state clear");
     assert!(labels < clear);
+    assert!(claim_ref_message(&fixture.repo, 42).contains("\"state\":\"available\""));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_stale_heartbeat_failpoints_preserve_claim_without_remote_mutation() {
+    for point in ["source", "handoff", "cleanup"] {
+        let fixture = LegacyRecoveryFixture::new(&format!("autospec-legacy-recovery-{point}"));
+        let output = fixture
+            .command()
+            .env("AUTOSPEC_LEGACY_RECOVERY_FAILPOINT", point)
+            .output()
+            .expect("autospec claim stale recovery starts");
+        assert!(!output.status.success(), "{point}");
+        fixture.assert_no_remote_mutation();
+        let remote = fixture.root.join("claim-remote.git");
+        assert!(
+            git(
+                &fixture.repo,
+                &[
+                    "ls-remote",
+                    "--refs",
+                    remote.to_str().unwrap(),
+                    "refs/autospec/claims/issue-42"
+                ]
+            )
+            .is_empty(),
+            "{point}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_stale_heartbeat_claim_ref_race_preserves_successor() {
+    let fixture = LegacyRecoveryFixture::new("autospec-legacy-recovery-race");
+    transition_claim_ref(
+        &fixture.repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-b",
+            "claimed",
+            "feat/successor",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-b"),
+    );
+    let successor_oid = claim_ref_oid(&fixture.repo, 42);
+    let remote = fixture.root.join("claim-remote.git");
+    git(
+        &fixture.repo,
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "update-ref",
+            "-d",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let injected = fixture.root.join("race-injected");
+    let git_wrapper = fixture.bin.join("git-wrapper");
+    write_executable(
+        &git_wrapper,
+        "#!/bin/sh\ncase \" $* \" in *' push '*'refs/autospec/claims/issue-42'*) if [ ! -e \"$RACE_INJECTED\" ]; then /usr/bin/git --git-dir \"$RACE_REMOTE\" update-ref refs/autospec/claims/issue-42 \"$RACE_OID\"; : > \"$RACE_INJECTED\"; fi;; esac\nexec /usr/bin/git \"$@\"\n",
+    );
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CLAIM_GIT_BIN", &git_wrapper)
+        .env("RACE_INJECTED", &injected)
+        .env("RACE_REMOTE", &remote)
+        .env("RACE_OID", &successor_oid)
+        .output()
+        .expect("autospec claim stale recovery starts");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""));
+    assert!(claim_ref_message(&fixture.repo, 42).contains("\"claim_id\":\"claim-b\""));
+    fixture.assert_no_remote_mutation();
 }
 
 #[test]
