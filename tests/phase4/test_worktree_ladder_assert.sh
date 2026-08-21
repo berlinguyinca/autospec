@@ -2,7 +2,7 @@
 # tests/phase4/test_worktree_ladder_assert.sh
 # Verifies the PR-aware recovery ladder + mandatory worktree-guard.sh assert
 # wiring (issue #961, spec §D3):
-#   1. All 6 run-trio files carry the 3-state ladder (open-pr/branch-only/fresh)
+#   1. All 3 autospec-run adapter files carry the 3-state ladder (open-pr/branch-only/fresh)
 #      wired through `worktree-guard.sh resolve-branch`.
 #   2. All 6 run-trio files carry the mandatory `worktree-guard.sh assert` gate
 #      that MUST exit 0 before any edit, stopping the issue on non-zero exit
@@ -23,23 +23,19 @@ check_exact_branch_guards() {
     [ "$actual_count" -eq "$expected_count" ]
 }
 
-# ── File sets for both run trios ─────────────────────────────────────────────
+# ── Autospec-run adapter files ───────────────────────────────────────────────
 
 RUN_SKILL="$SCRIPT_DIR/skills/autospec-run/SKILL.md"
 RUN_CODEX="$SCRIPT_DIR/skills/autospec-run/codex/prompt.md"
 RUN_OPENCODE="$SCRIPT_DIR/skills/autospec-run/opencode/agent.md"
 
-AS_SKILL="$SCRIPT_DIR/skills/autospec/SKILL.md"
-AS_CODEX="$SCRIPT_DIR/skills/autospec/codex/prompt.md"
-AS_OPENCODE="$SCRIPT_DIR/skills/autospec/opencode/agent.md"
-
-ALL_SIX="$RUN_SKILL $RUN_CODEX $RUN_OPENCODE $AS_SKILL $AS_CODEX $AS_OPENCODE"
+RUN_ADAPTERS="$RUN_SKILL $RUN_CODEX $RUN_OPENCODE"
 
 PHASE4="$SCRIPT_DIR/skills/autospec-run/prompts/phase4-implementer.md"
 
-# ── 1. Ladder: 3 states wired through resolve-branch, in all 6 trio files ─────
+# ── 1. Ladder: 3 states wired through resolve-branch in run adapters ──────────
 
-for f in $ALL_SIX $PHASE4; do
+for f in $RUN_ADAPTERS $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
 
     grep -q 'worktree-guard.sh resolve-branch' "$f" \
@@ -62,9 +58,9 @@ for f in $ALL_SIX $PHASE4; do
         || fail "$name: branch-only path must adopt the branch (#917)"
 done
 
-# ── 2. Mandatory assert gate before any edit, stop-on-failure, in all 6 ──────
+# ── 2. Mandatory assert gate before any edit, stop-on-failure ─────────────────
 
-for f in $ALL_SIX $PHASE4; do
+for f in $RUN_ADAPTERS $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
     expected_count=1
     case "$f" in
@@ -88,7 +84,7 @@ if check_exact_branch_guards "$mutated" 2; then
     fail "mutation proof: one unguarded legacy assertion was accepted"
 fi
 
-for f in $ALL_SIX $PHASE4; do
+for f in $RUN_ADAPTERS $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
 
     grep -q 'worktree-guard.sh assert' "$f" \
@@ -104,7 +100,7 @@ done
 
 # ── 3. Prose hard rules: no primary-checkout mutation; cleanup + prune ────────
 
-for f in $ALL_SIX $PHASE4; do
+for f in $RUN_ADAPTERS $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
 
     grep -qi 'primary checkout' "$f" \
@@ -118,7 +114,7 @@ done
 # ── 4. Ladder bash extracted from each SKILL.md is well-formed ───────────────
 # Extract the LADDER fenced block (delimited by sentinel comments) and bash -n it.
 
-for f in "$RUN_SKILL" "$AS_SKILL"; do
+for f in "$RUN_SKILL"; do
     name="${f#"$SCRIPT_DIR"/}"
     block="$(awk '
         /worktree-ladder:begin/{cap=1; next}
@@ -131,4 +127,4 @@ for f in "$RUN_SKILL" "$AS_SKILL"; do
         || fail "$name: extracted worktree-ladder block fails bash -n"
 done
 
-echo "ok: worktree ladder + assert wiring present in all 6 trio files + phase4-implementer.md"
+echo "ok: worktree ladder + assert wiring present in the autospec-run trio + phase4-implementer.md"

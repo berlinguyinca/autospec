@@ -1,31 +1,27 @@
 #!/usr/bin/env bash
 # tests/phase4/test_docs_drift_gate_regen_conditional.sh
 # Verifies the docs-drift-gate auto_regenerate conditional (issue #955, spec §D2b):
-#   1. All 6 run-trio files carry the _REGEN gate wrapping the regeneration path.
+#   1. All 3 autospec-run adapter files carry the _REGEN gate wrapping the regeneration path.
 #   2. Detection, labels, and classifier verdict logging are OUTSIDE the _REGEN gate.
-#   3. The OFF-path log line is present in all 6 files.
+#   3. The OFF-path log line is present in all 3 adapter files.
 #   4. The gate bash extracted from each SKILL.md is well-formed (bash -n).
-#   5. doc-orchestrator.mjs is inside the _REGEN=1 gate in all 6 files.
+#   5. doc-orchestrator.mjs is inside the _REGEN=1 gate in all 3 adapter files.
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-# ── File sets for both run trios ─────────────────────────────────────────────
+# ── Autospec-run adapter files ───────────────────────────────────────────────
 
 RUN_SKILL="$SCRIPT_DIR/skills/autospec-run/SKILL.md"
 RUN_CODEX="$SCRIPT_DIR/skills/autospec-run/codex/prompt.md"
 RUN_OPENCODE="$SCRIPT_DIR/skills/autospec-run/opencode/agent.md"
 
-AS_SKILL="$SCRIPT_DIR/skills/autospec/SKILL.md"
-AS_CODEX="$SCRIPT_DIR/skills/autospec/codex/prompt.md"
-AS_OPENCODE="$SCRIPT_DIR/skills/autospec/opencode/agent.md"
+RUN_ADAPTERS="$RUN_SKILL $RUN_CODEX $RUN_OPENCODE"
 
-ALL_SIX="$RUN_SKILL $RUN_CODEX $RUN_OPENCODE $AS_SKILL $AS_CODEX $AS_OPENCODE"
+# ── 1. Gate conditional present in all autospec-run adapters ─────────────────
 
-# ── 1. Gate conditional present in all 6 files ───────────────────────────────
-
-for f in $ALL_SIX; do
+for f in $RUN_ADAPTERS; do
     name="${f#"$SCRIPT_DIR"/}"
 
     # The _REGEN resolver call must be present.
@@ -56,7 +52,7 @@ done
 # branch must appear BEFORE (i.e. at a lower line number than) the _REGEN check.
 # This ensures detection always runs regardless of auto_regenerate setting.
 
-for SKILL in "$RUN_SKILL" "$AS_SKILL"; do
+for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
 
     drift_label_line=$(grep -n '"docs:drift"' "$SKILL" | grep 'add-label' | head -1 | cut -d: -f1)
@@ -76,7 +72,7 @@ done
 # Verify the orchestrator call appears after the _REGEN=1 branch open and before
 # the matching else/fi in each SKILL.md.
 
-for SKILL in "$RUN_SKILL" "$AS_SKILL"; do
+for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
 
     # Extract the docs-drift-gate bash block and check ordering.
@@ -125,7 +121,7 @@ extract_gate_bash() {
     ' "$skill"
 }
 
-for SKILL in "$RUN_SKILL" "$AS_SKILL"; do
+for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
     gate_bash="$(extract_gate_bash "$SKILL")"
     [ -n "$gate_bash" ] || fail "$name: could not extract gate bash"
@@ -141,4 +137,4 @@ for SKILL in "$RUN_SKILL" "$AS_SKILL"; do
     bash -n "$TMP" || fail "$name: extracted gate bash is not well-formed (bash -n failed)"
 done
 
-echo "OK: docs-drift-gate auto_regenerate conditional verified across both run trios (6 files)"
+echo "OK: docs-drift-gate auto_regenerate conditional verified across the autospec-run trio (3 files)"
