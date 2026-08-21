@@ -27,6 +27,11 @@ retryable and restores `auto-implement` when the durable acquisition still owns
 the authoritative claim. If ownership is already absent or lost, it retires only
 the stale local ownership before scanning again.
 
+If an older cycle already lost the selected issue but retained the blocked
+executor outcome and local acquisition receipt, the next cycle uses that exact
+receipt to release any still-owned claim, clears the orphaned local acquisition,
+and returns to `Scan` instead of remaining in a no-ready pause.
+
 ## Continuation-aware merge recovery
 
 When an executor restarts from `BridgePhase::Merged`, recovery completes in this

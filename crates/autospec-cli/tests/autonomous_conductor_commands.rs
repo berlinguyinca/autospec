@@ -482,6 +482,73 @@ fn foreground_resumes_no_ready_pause() {
 }
 
 #[test]
+fn foreground_retires_orphaned_executor_receipt_after_selection_is_lost() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let orphaned = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim state")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+        })
+        .expect("executor receipt failure pause")
+        .transition(ConductorEvent::RetireObsoleteSelection)
+        .expect("lose selected issue")
+        .transition(ConductorEvent::ScanFoundWork)
+        .expect("rescan")
+        .transition(ConductorEvent::SafetyReviewed)
+        .expect("review")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("park after the orphaned claim leaves no ready work");
+    seed_foreground_state(&fixture, &orphaned);
+    fixture.seed_claim_acquisition_receipt(
+        "orphaned-worker",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--foreground",
+            "--max-cycles",
+            "1",
+            "--poll-interval-sec",
+            "0",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo path"),
+            "--branch",
+            "main",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run orphaned-receipt recovery cycle");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert!(fixture.read_state().selected_issue().is_none());
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "orphaned local acquisition must be retired"
+    );
+}
+
+#[test]
 fn foreground_still_empty_pause_polls_without_process_churn() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
