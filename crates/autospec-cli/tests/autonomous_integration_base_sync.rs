@@ -486,6 +486,7 @@ exit 1
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git_fixture(&self.repo_dir, &["push", "-u", "origin", "main"]);
+        git_fixture(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     }
 }
 
