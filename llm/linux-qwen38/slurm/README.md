@@ -218,6 +218,13 @@ root and each slot directory must be owned by the effective user with mode
 mode `0600`. Symlinks, unknown schema fields, duplicate JSON keys, oversized or
 partial files, and ownership or mode ambiguity are refused rather than repaired.
 
+The contributor UID is the trust boundary. Slot locking coordinates cooperative
+processes owned by that UID and fails closed on pre-existing ambiguity, crashes,
+and ordinary I/O failure. It does not attempt to defend against a malicious
+same-UID process: that account can already read the slot's `0600` `qts_`
+credential and ptrace or replace its own agent. Compromise of one contributor
+can corrupt that contributor's slot state; it does not grant cross-UID access.
+
 Every state change is an exact compare-and-swap over the stored revision, claim
 ID, nullable active attempt ID, and nullable serving job ID. Mutations are
 serialized by a sibling `.<slot>.txn` process-generation claim. A mutex left by

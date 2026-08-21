@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Secure, revisioned shared-filesystem leases for logical Slurm slots."""
+"""Revisioned shared-filesystem leases for contributor-owned Slurm slots.
+
+The effective contributor UID is the trust principal. These checks coordinate
+cooperative processes and fail closed on pre-existing ambiguity, crashes, and
+ordinary I/O faults. They do not isolate the lease from a malicious process
+running as the same UID: that process can already read the slot's mode-0600 qts
+credential and ptrace or replace the contributor-owned agent.
+"""
 
 from __future__ import annotations
 
@@ -73,12 +80,28 @@ _ATTEMPT_FIELDS = frozenset(
 )
 _CLEANUP_FIELDS = frozenset({"tag", "state", "job_ids"})
 _TXN_FIELDS = frozenset(
-    {"schema", "host", "boot_id", "pid", "start_ticks", "uid", "nonce"}
+    {
+        "schema",
+        "host",
+        "boot_id",
+        "pid",
+        "start_ticks",
+        "uid",
+        "nonce",
+        "status",
+        "reason",
+    }
 )
 
 
 class LeaseError(RuntimeError):
     """The requested lease operation could not be proven safe."""
+
+
+class _PublicationBlocked(LeaseError):
+    def __init__(self, reason: str):
+        super().__init__(f"slot transaction blocked: {reason}")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -756,6 +779,61 @@ def _restore_prior_state(
         raise LeaseError("prior slot state restore inode mismatch")
 
 
+def _rollback_publication(
+    slot_directory: _PinnedDirectory,
+    slot: str,
+    temp_identity: _EntryIdentity,
+    backup: str | None,
+    prior_identity: _EntryIdentity | None,
+) -> None:
+    _, current_identity = _read_recovery_snapshot_at(
+        slot_directory,
+        "state.json",
+        "published slot state",
+        MAX_STATE_BYTES,
+    )
+    if (
+        backup is not None
+        and prior_identity is not None
+        and current_identity == _identity_with_links(prior_identity, 2)
+    ):
+        _, backup_identity = _read_secure_snapshot_at(
+            slot_directory,
+            backup,
+            "slot state backup",
+            MAX_STATE_BYTES,
+            expected_links=2,
+        )
+        _discard_exact_entry(
+            slot_directory, backup, backup_identity, "slot state backup"
+        )
+        _fsync_pinned(slot_directory, "slot directory")
+        return
+
+    if current_identity == temp_identity:
+        _discard_exact_entry(
+            slot_directory,
+            "state.json",
+            current_identity,
+            "failed published slot state",
+        )
+    else:
+        _quarantine_exact_entry(
+            slot_directory,
+            "state.json",
+            current_identity,
+            "suspicious published slot state",
+        )
+    if backup is not None and prior_identity is not None:
+        _restore_prior_state(
+            slot_directory,
+            backup,
+            prior_identity,
+            slot,
+        )
+    _fsync_pinned(slot_directory, "slot directory")
+
+
 def _atomic_write_state(
     slot_directory: _PinnedDirectory,
     state: dict,
@@ -768,6 +846,7 @@ def _atomic_write_state(
         slot_directory, temp, payload, "temporary slot state"
     )
     backup: str | None = None
+    publication_started = False
     try:
         if prior_identity is not None:
             backup = f".state.backup.{state['revision'] - 1}.{uuid.uuid4().hex}"
@@ -795,6 +874,7 @@ def _atomic_write_state(
             if observed_state != linked_identity or observed_backup != linked_identity:
                 raise LeaseError("prior slot state backup inode mismatch; preserved")
 
+        publication_started = True
         os.replace(
             temp,
             "state.json",
@@ -805,19 +885,7 @@ def _atomic_write_state(
             slot_directory, "state.json", "published slot state", MAX_STATE_BYTES
         )
         if observed_identity != temp_identity or observed_payload != payload:
-            _quarantine_exact_entry(
-                slot_directory,
-                "state.json",
-                observed_identity,
-                "suspicious published slot state",
-            )
-            if backup is not None:
-                _restore_prior_state(
-                    slot_directory, backup, prior_identity, slot  # type: ignore[arg-type]
-                )
-                backup = None
-            _fsync_pinned(slot_directory, "slot directory")
-            raise LeaseError("slot state publication inode mismatch; prior state restored")
+            raise LeaseError("slot state publication inode mismatch")
         _validate_state(_decode_json(observed_payload, "published slot state"), slot)
 
         if backup is not None:
@@ -834,7 +902,21 @@ def _atomic_write_state(
             )
             backup = None
         _fsync_pinned(slot_directory, "slot directory")
-    except BaseException:
+    except BaseException as publication_error:
+        blocked_reason: str | None = None
+        if publication_started:
+            try:
+                _rollback_publication(
+                    slot_directory,
+                    slot,
+                    temp_identity,
+                    backup,
+                    prior_identity,
+                )
+            except (LeaseError, OSError):
+                blocked_reason = "rollback_failed"
+            else:
+                blocked_reason = "publication_failed"
         try:
             _, observed_temp = _read_secure_snapshot_at(
                 slot_directory, temp, "temporary slot state", MAX_STATE_BYTES
@@ -854,7 +936,7 @@ def _atomic_write_state(
                     )
                 except LeaseError:
                     pass
-        if backup is not None and prior_identity is not None:
+        if blocked_reason is None and backup is not None and prior_identity is not None:
             try:
                 _, current_identity, _ = _load_state_snapshot_pinned(
                     slot_directory, slot, expected_links=2
@@ -880,6 +962,8 @@ def _atomic_write_state(
                         )
                     except LeaseError:
                         pass
+        if blocked_reason is not None:
+            raise _PublicationBlocked(blocked_reason) from publication_error
         raise
 
 
@@ -925,6 +1009,8 @@ def _txn_document(nonce: str) -> dict:
         "start_ticks": start_ticks,
         "uid": os.geteuid(),
         "nonce": nonce,
+        "status": "active",
+        "reason": None,
     }
 
 
@@ -947,6 +1033,14 @@ def _validate_txn_document(document: dict) -> None:
     if document["uid"] != os.geteuid():
         raise LeaseError("cannot prove stale transaction mutex owner")
     _validate_hex_id(document["nonce"], "transaction nonce")
+    if document["status"] == "active" and document["reason"] is None:
+        return
+    if document["status"] == "blocked" and document["reason"] in {
+        "publication_failed",
+        "rollback_failed",
+    }:
+        return
+    raise LeaseError("cannot prove transaction mutex status")
 
 
 def _read_txn_pinned(mutex: _PinnedDirectory) -> dict:
@@ -983,6 +1077,8 @@ def _remove_txn(
         document = _read_txn_pinned(mutex)
         if expected_nonce is not None and document["nonce"] != expected_nonce:
             raise LeaseError("transaction mutex ownership changed")
+        if document["status"] != "active":
+            raise LeaseError("blocked transaction mutex cannot be removed")
         _, owner_identity = _read_secure_snapshot_at(
             mutex, "owner.json", "transaction owner", 4096
         )
@@ -1020,6 +1116,8 @@ def _recover_existing_txn(
         document = _read_txn_pinned(mutex)
     finally:
         mutex.close()
+    if document["status"] == "blocked":
+        raise LeaseError("slot transaction is blocked; explicit repair required")
     if document["host"] != socket.gethostname():
         raise LeaseError("cannot prove stale transaction mutex on another host")
     current_boot = _boot_id()
@@ -1028,6 +1126,45 @@ def _recover_existing_txn(
         if observed_start == document["start_ticks"]:
             raise LeaseError("slot mutation already in progress")
     _remove_txn(root, mutex_name, mutex_path, document["nonce"])
+
+
+def _mark_txn_blocked(
+    root: _PinnedDirectory,
+    mutex_name: str,
+    mutex_path: Path,
+    nonce: str,
+    reason: str,
+) -> None:
+    mutex = _open_pinned_directory(
+        mutex_path,
+        "transaction mutex",
+        parent=root,
+        name=mutex_name,
+    )
+    temp = f".owner.blocked.{uuid.uuid4().hex}.tmp"
+    try:
+        document = _read_txn_pinned(mutex)
+        if document["nonce"] != nonce or document["status"] != "active":
+            raise LeaseError("transaction mutex ownership changed before block")
+        document["status"] = "blocked"
+        document["reason"] = reason
+        payload = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        _write_exclusive_at(mutex, temp, payload, "blocked transaction owner")
+        os.replace(
+            temp,
+            "owner.json",
+            src_dir_fd=mutex.fd,
+            dst_dir_fd=mutex.fd,
+        )
+        _fsync_pinned(mutex, "transaction mutex")
+        blocked = _read_txn_pinned(mutex)
+        if blocked["nonce"] != nonce or blocked["status"] != "blocked":
+            raise LeaseError("blocked transaction marker verification failed")
+        _fsync_pinned(root, "lease root")
+    finally:
+        mutex.close()
 
 
 def _acquire_txn(root: _PinnedDirectory, slot: str) -> tuple[str, Path, str]:
@@ -1080,13 +1217,30 @@ def _mutation(root: Path, slot: str) -> Iterator[_PinnedDirectory]:
     root_directory = _open_pinned_directory(root, "lease root")
     try:
         mutex_name, mutex_path, nonce = _acquire_txn(root_directory, slot)
+        remove_transaction = True
         try:
             _recover_tombstones(root_directory, slot)
             _recover_temporary_state(root_directory, slot)
             yield root_directory
+        except _PublicationBlocked as exc:
+            remove_transaction = False
+            try:
+                _mark_txn_blocked(
+                    root_directory,
+                    mutex_name,
+                    mutex_path,
+                    nonce,
+                    exc.reason,
+                )
+            except LeaseError as marker_error:
+                raise LeaseError(
+                    "slot transaction blocked; marker update failed closed"
+                ) from marker_error
+            raise LeaseError(f"slot transaction blocked: {exc.reason}") from exc
         finally:
-            _remove_txn(root_directory, mutex_name, mutex_path, nonce)
-            _fsync_pinned(root_directory, "lease root")
+            if remove_transaction:
+                _remove_txn(root_directory, mutex_name, mutex_path, nonce)
+                _fsync_pinned(root_directory, "lease root")
     finally:
         root_directory.close()
 

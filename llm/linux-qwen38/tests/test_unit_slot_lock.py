@@ -940,7 +940,7 @@ def test_slot_directory_swap_cannot_redirect_state_publication(tmp_path: Path, m
 
     monkeypatch.setattr(sl.os, "replace", swap_before_replace)
 
-    with pytest.raises(sl.LeaseError, match="changed|binding"):
+    with pytest.raises(sl.LeaseError, match="changed|binding|blocked|rollback"):
         sl.mutate(
             root,
             SLOT,
@@ -1198,6 +1198,87 @@ def test_pre_rmdir_directory_swap_preserves_unrelated_inode(
     assert swapped
     assert unrelated_inode is not None
     assert _inode_paths(root, unrelated_inode)
+
+
+def _blocked_transaction(root: Path) -> dict:
+    return json.loads((root / f".{SLOT}.txn" / "owner.json").read_text())
+
+
+def test_post_publication_validation_failure_restores_prior_and_blocks_slot(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    prior_bytes = (root / SLOT / "state.json").read_bytes()
+    real_decode = sl._decode_json
+
+    def fail_published_validation(payload: bytes, label: str) -> dict:
+        if label == "published slot state":
+            raise sl.LeaseError("simulated post-publication validation failure")
+        return real_decode(payload, label)
+
+    monkeypatch.setattr(sl, "_decode_json", fail_published_validation)
+
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+
+    assert (root / SLOT / "state.json").read_bytes() == prior_bytes
+    blocked = _blocked_transaction(root)
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "publication_failed"
+    assert "simulated" not in json.dumps(blocked)
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.load(root, SLOT)
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.claim(root, SLOT, CLAIM_B, os.geteuid(), "user")
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+
+
+def test_rollback_failure_preserves_blocked_barrier_and_refuses_readers(
+    tmp_path: Path, monkeypatch
+):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    real_decode = sl._decode_json
+    real_replace = sl.os.replace
+
+    def fail_published_validation(payload: bytes, label: str) -> dict:
+        if label == "published slot state":
+            raise sl.LeaseError("simulated post-publication validation failure")
+        return real_decode(payload, label)
+
+    def fail_prior_restore(source, destination, *args, **kwargs):
+        if (
+            os.fspath(source).startswith(".state.backup.")
+            and os.fspath(destination) == "state.json"
+        ):
+            raise OSError("simulated rollback I/O failure")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(sl, "_decode_json", fail_published_validation)
+    monkeypatch.setattr(sl.os, "replace", fail_prior_restore)
+
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+
+    blocked = _blocked_transaction(root)
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "rollback_failed"
+    assert "simulated" not in json.dumps(blocked)
+    assert (root / f".{SLOT}.txn").is_dir()
+    with pytest.raises(sl.LeaseError, match="blocked"):
+        sl.load(root, SLOT)
 
 
 def test_tombstone_symlink_is_not_followed_or_deleted(tmp_path: Path):
