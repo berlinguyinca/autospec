@@ -806,9 +806,13 @@ class KeyStore:
         import time
         at = time.time() if now is None else now
         with self._lock, self._conn() as c:
+            # The Python lock coordinates threads sharing this KeyStore only.
+            # Reserve the SQLite write lock before reading so another KeyStore
+            # cannot change the fingerprint between our comparison and update.
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute(
-                "SELECT hardware_fingerprint FROM servers WHERE server_id=? "
-                "AND revoked_at IS NULL", (server_id,)).fetchone()
+                "SELECT hardware_fingerprint, throughput_valid_after FROM servers "
+                "WHERE server_id=? AND revoked_at IS NULL", (server_id,)).fetchone()
             if not row:
                 return False
             previous = row["hardware_fingerprint"]
@@ -818,9 +822,13 @@ class KeyStore:
                 c.execute("UPDATE servers SET hardware_fingerprint=? "
                           "WHERE server_id=?", (fingerprint, server_id))
                 return False
-            c.execute("UPDATE servers SET hardware_fingerprint=?, "
-                      "throughput_valid_after=? WHERE server_id=?",
-                      (fingerprint, _iso(at), server_id))
+            cutoff = _iso(at)
+            c.execute(
+                "UPDATE servers SET hardware_fingerprint=?, "
+                "throughput_valid_after=CASE "
+                "WHEN throughput_valid_after IS NULL OR throughput_valid_after < ? "
+                "THEN ? ELSE throughput_valid_after END WHERE server_id=?",
+                (fingerprint, cutoff, cutoff, server_id))
             return True
 
     def user_names(self, subs) -> dict:

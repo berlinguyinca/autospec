@@ -171,6 +171,7 @@ INFLIGHT: dict[str, int] = {}
 # Measured rates, refreshed on the housekeeper's timer. Never computed on the
 # request path: it is a scan over usage history.
 THROUGHPUT: dict = {}
+_THROUGHPUT_LOCK = threading.Lock()
 
 HEARTBEAT_SECONDS = 20          # ping an agent's control connection this often
 HEARTBEAT_GRACE = 10            # and give up on it this long after the last pong
@@ -558,9 +559,12 @@ def _refresh_throughput() -> None:
     """Recompute measured rates. On a timer because it scans usage history, and
     the request path must never pay for it."""
     global THROUGHPUT
-    if STORE is None:
-        return
-    THROUGHPUT = STORE.throughput()
+    # Serialize the query and publication together. Otherwise a slow refresh
+    # that read before an invalidation can overwrite the newer post-cutoff map.
+    with _THROUGHPUT_LOCK:
+        if STORE is None:
+            return
+        THROUGHPUT = STORE.throughput()
 
 
 def _refresh_pool_sizes() -> None:
@@ -1342,6 +1346,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(401, "that enrolment token is not usable",
                              "invalid_token")
         server_id, credential = out
+        _refresh_throughput()
         self._json(201, {"server_id": server_id, "credential": credential,
                          "heartbeat_seconds": HEARTBEAT_SECONDS,
                          "pipes_wanted": DEFAULT_PIPES_WANTED})

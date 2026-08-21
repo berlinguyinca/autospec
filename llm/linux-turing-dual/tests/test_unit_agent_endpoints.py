@@ -158,6 +158,27 @@ def test_the_token_is_shown_once_and_works_once(node):
     assert call(srv, "POST", "/api/agent/enrol", body={"token": d["token"]})[0] == 401
 
 
+def test_reenrolment_immediately_discards_cached_routing_evidence(monkeypatch, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    store.record_usage({
+        "ts": time.time() - 1, "key_id": "k", "sub": "sub-a", "model": "m1",
+        "upstream": "box", "prompt_tokens": 1000, "completion_tokens": 10,
+        "prompt_ms": 1000, "predicted_ms": 100, "status_code": 200,
+    })
+    gw._refresh_throughput()
+    assert ("box", "m1") in gw.THROUGHPUT
+
+    assert call(srv, "DELETE", "/api/servers/box", session("sub-a"))[0] == 200
+    attach(srv, session("sub-a"), "box")
+    assert ("box", "m1") not in gw.THROUGHPUT
+
+    _said("box", {
+        "type": "capabilities", "hardware_fingerprint": "v1:baseline", "cards": []
+    }, monkeypatch)
+    assert ("box", "m1") not in gw.THROUGHPUT
+
+
 def test_attaching_over_cleartext_is_refused(node):
     srv, _, _ = node
     code, d = call(srv, "POST", "/api/servers/enrol", session("sub-a"),
@@ -576,9 +597,15 @@ def test_periodic_capabilities_do_not_re_probe(monkeypatch):
 def test_hardware_change_refreshes_live_scheduler_cache(monkeypatch, node):
     srv, store, _target = node
     attach(srv, session("sub-a"), "box")
-    store.observe_hardware("box", "v1:old")
-    called = []
-    monkeypatch.setattr(gw, "_refresh_throughput", lambda: called.append(True))
+    now = time.time()
+    store.record_usage({
+        "ts": now - 20, "key_id": "k", "sub": "sub-a", "model": "m1",
+        "upstream": "box", "prompt_tokens": 1000, "completion_tokens": 10,
+        "prompt_ms": 1000, "predicted_ms": 100, "status_code": 200,
+    })
+    assert store.observe_hardware("box", "v1:old", now=now - 10) is False
+    gw._refresh_throughput()
+    assert ("box", "m1") in gw.THROUGHPUT
 
     _said("box", {
         "type": "capabilities", "hardware_fingerprint": "v1:new", "cards": []
@@ -590,7 +617,55 @@ def test_hardware_change_refreshes_live_scheduler_cache(monkeypatch, node):
         "type": "capabilities", "hardware_fingerprint": "", "cards": []
     }, monkeypatch)
 
-    assert called == [True]
+    assert ("box", "m1") not in gw.THROUGHPUT
+
+
+def test_hardware_invalidation_cannot_be_overwritten_by_older_refresh(
+        monkeypatch, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    now = time.time()
+    store.record_usage({
+        "ts": now - 20, "key_id": "k", "sub": "sub-a", "model": "m1",
+        "upstream": "box", "prompt_tokens": 1000, "completion_tokens": 10,
+        "prompt_ms": 1000, "predicted_ms": 100, "status_code": 200,
+    })
+    assert store.observe_hardware("box", "v1:old", now=now - 10) is False
+    original_throughput = store.throughput
+    first_snapshot = threading.Event()
+    second_query = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    calls = 0
+
+    def delayed_throughput():
+        nonlocal calls
+        result = original_throughput(now=now + 1)
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_snapshot.set()
+            assert release_first.wait(3)
+        else:
+            second_query.set()
+        return result
+
+    monkeypatch.setattr(store, "throughput", delayed_throughput)
+    stale = threading.Thread(target=gw._refresh_throughput, daemon=True)
+    stale.start()
+    assert first_snapshot.wait(3)
+    assert store.observe_hardware("box", "v1:new", now=now) is True
+
+    fresh = threading.Thread(target=gw._refresh_throughput, daemon=True)
+    fresh.start()
+    second_query.wait(0.2)
+    release_first.set()
+    stale.join(3)
+    fresh.join(3)
+
+    assert not stale.is_alive() and not fresh.is_alive()
+    assert ("box", "m1") not in gw.THROUGHPUT
 
 
 def test_a_reported_card_list_is_bounded(monkeypatch):

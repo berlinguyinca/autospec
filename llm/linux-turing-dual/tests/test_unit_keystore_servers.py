@@ -6,6 +6,7 @@ a user key and a user key is not a server credential -- in every direction. One
 capacity silently becomes one that may spend it.
 """
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -403,6 +404,95 @@ def test_hardware_change_invalidates_only_that_servers_old_samples(store):
 
     _usage(store, "boxa", "m1", 1000, 1000, 10, 100, ts=now + 0.5)
     assert store.throughput(now=now + 1)[("boxa", "m1")]["samples"] == 1
+
+
+def test_hardware_cutoff_never_moves_backwards(store):
+    attach(store, "box")
+    assert store.observe_hardware("box", "v1:baseline", now=100) is False
+    assert store.observe_hardware("box", "v1:newer", now=300) is True
+    assert store.observe_hardware("box", "v1:late-old-clock", now=200) is True
+
+    with store._conn() as c:
+        cutoff = c.execute(
+            "SELECT throughput_valid_after FROM servers WHERE server_id='box'"
+        ).fetchone()[0]
+    assert cutoff == ks._iso(300)
+
+
+def test_concurrent_hardware_changes_are_atomic_across_store_instances(
+        store, monkeypatch):
+    attach(store, "box")
+    assert store.observe_hardware("box", "v1:baseline", now=50) is False
+    older = ks.KeyStore(store.path, dsn=None)
+    newer = ks.KeyStore(store.path, dsn=None)
+    read_ready = threading.Event()
+    release_old_read = threading.Event()
+
+    class PausingCursor:
+        def __init__(self, cursor, connection):
+            self.cursor = cursor
+            self.connection = connection
+
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            read_ready.set()
+            if not self.connection.in_transaction:
+                assert release_old_read.wait(3)
+            return row
+
+    class PausingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def execute(self, sql, parameters=()):
+            cursor = self.connection.execute(sql, parameters)
+            if sql.startswith("SELECT hardware_fingerprint"):
+                return PausingCursor(cursor, self.connection)
+            return cursor
+
+    def pausing_connection():
+        connection = sqlite3.connect(store.path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return PausingConnection(connection)
+
+    monkeypatch.setattr(older, "_conn", pausing_connection)
+    results = []
+    errors = []
+
+    def observe(target, fingerprint, at):
+        try:
+            results.append(target.observe_hardware("box", fingerprint, now=at))
+        except Exception as exc:
+            errors.append(exc)
+
+    older_thread = threading.Thread(
+        target=observe, args=(older, "v1:older", 100), daemon=True)
+    newer_thread = threading.Thread(
+        target=observe, args=(newer, "v1:newer", 200), daemon=True)
+    older_thread.start()
+    assert read_ready.wait(3)
+    newer_thread.start()
+    newer_thread.join(3)
+    release_old_read.set()
+    older_thread.join(3)
+
+    assert not older_thread.is_alive() and not newer_thread.is_alive()
+    assert errors == [] and results == [True, True]
+    with store._conn() as c:
+        row = c.execute(
+            "SELECT hardware_fingerprint, throughput_valid_after FROM servers "
+            "WHERE server_id='box'").fetchone()
+    assert row["hardware_fingerprint"] == "v1:newer"
+    assert row["throughput_valid_after"] == ks._iso(200)
 
 
 def test_reenrolled_id_keeps_usage_but_starts_without_routing_samples(store):
