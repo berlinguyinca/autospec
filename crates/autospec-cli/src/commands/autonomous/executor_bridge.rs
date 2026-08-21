@@ -10453,9 +10453,18 @@ impl RemoteMutationSnapshot {
             .and_then(|identity| identity.get("dirty_wip"))
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(|| "executor prelaunch dirty-WIP evidence is invalid".to_string())?;
+        let exact_adopted_base_merge = if persisted_local_head != state.identity.base_oid
+            && preserved_ref != Some(persisted_local_head)
+            && !dirty_wip
+        {
+            adopted_transfer_authorizes_prelaunch_head(state, persisted_local_head)?
+        } else {
+            false
+        };
         if persisted_local_head != state.identity.base_oid
             && preserved_ref != Some(persisted_local_head)
             && !dirty_wip
+            && !exact_adopted_base_merge
         {
             return Err(
                 "executor prelaunch local HEAD is not the base or exact preserved WIP".to_string(),
