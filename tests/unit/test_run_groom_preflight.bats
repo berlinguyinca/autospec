@@ -81,7 +81,7 @@ teardown() {
 import sys
 text = open(sys.argv[1], encoding='utf-8').read()
 preflight = text.index('Backlog grooming preflight')
-queue = text.index('[monitor] queue scan')
+queue = text.index('monitor-outer-loop.sh')
 if preflight > queue:
     raise SystemExit('preflight must appear before queue scan')
 PY
