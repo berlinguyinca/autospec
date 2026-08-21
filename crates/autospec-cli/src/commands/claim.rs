@@ -1923,22 +1923,27 @@ fn recover_stale_startup_record(
         None,
         &mut || Ok(()),
         &mut legacy_recovery_handoff_failpoint,
-    )?
-    {
+    )? {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
             previous_claim_id: None,
         });
     }
-    if read_claim_ref(repo, issue)?.is_some() {
-        return Ok(RecoveryOutcome {
-            recovered: false,
-            reason: "ownership_lost".to_string(),
-            previous_claim_id: None,
-        });
+    let head = match advance_claim_ref(repo, issue, None, &selected.record)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "ownership_lost".to_string(),
+                previous_claim_id: None,
+            })
+        }
+    };
+    let outcome = recover_authoritative_stale_startup(repo, issue, timeout_seconds, *head, None)?;
+    if !outcome.recovered {
+        return Ok(outcome);
     }
-    release_stale_startup_labels(repo, issue)?;
     if let Err(error) = clear_marked_state(repo, &comments) {
         let restore_labels = [
             "issue".to_string(),
@@ -1957,12 +1962,7 @@ fn recover_stale_startup_record(
         );
         return Err(error);
     }
-    emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_released");
-    Ok(RecoveryOutcome {
-        recovered: true,
-        reason: "released_stale_startup_claim".to_string(),
-        previous_claim_id: None,
-    })
+    Ok(outcome)
 }
 
 fn recover_authoritative_stale_startup(
