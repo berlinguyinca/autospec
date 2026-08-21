@@ -108,6 +108,7 @@ fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() 
 fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     let (fixture, mut state, state_path, _) =
         zero_effect_classifier_fixture("snapshot-adopted-base-merge", false, false);
+    let recorded_base = state.identity.base_oid.clone();
     let implementation = state.identity.worktree.join("implementation.txt");
     fs::write(&implementation, "preserved implementation\n").expect("write implementation");
     git(&state.identity.worktree, &["add", "implementation.txt"]);
@@ -152,6 +153,39 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     state.remote_snapshot_digest = None;
     bridge::write_invocation_atomic(&state_path, &state).expect("persist successor invocation");
     let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+
+    let no_intent = bridge::RemoteMutationSnapshot::capture_and_persist(
+        &state_path,
+        &mut state,
+        &adapter,
+    )
+    .expect_err("same-parent merge without durable intent must fail closed");
+    assert!(no_intent.contains("intent"), "{no_intent}");
+
+    let scope_root = state.identity.worktree.parent().expect("scope root");
+    let intent = bridge::BaseDriftIntent {
+        old_base: recorded_base,
+        old_head: transfer_head,
+        new_base: state.identity.base_oid.clone(),
+    };
+    bridge::ensure_base_drift_intent(
+        &scope_root.join(format!("issue-{}.provision", state.identity.issue)),
+        &intent,
+    )
+    .expect("persist exact base-drift intent");
+
+    fs::write(state.identity.worktree.join("tampered.txt"), "unowned tree\n")
+        .expect("write unowned merge tree");
+    git(&state.identity.worktree, &["add", "tampered.txt"]);
+    git(&state.identity.worktree, &["commit", "--amend", "--no-edit"]);
+    let unowned = bridge::RemoteMutationSnapshot::capture_and_persist(
+        &state_path,
+        &mut state,
+        &adapter,
+    )
+    .expect_err("same-parent merge with an arbitrary tree must fail closed");
+    assert!(unowned.contains("tree"), "{unowned}");
+    git(&state.identity.worktree, &["reset", "--hard", &merged_head]);
 
     bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
         .expect("exact adopted base merge is a valid prelaunch HEAD");
