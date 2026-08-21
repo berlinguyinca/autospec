@@ -171,10 +171,10 @@ Two traps:
 
 ### Fleet mode: register directly from the allocation
 
-**Approved architecture; two deployment pieces are pending:** the Slurm lifecycle
-adapter and the gateway's nginx `/api/servers/` management-prefix route used to
-enrol and promote new workers. The scripts in this directory still execute the
-historical workstation SSH path until that migration lands.
+**Approved architecture; the Slurm lifecycle adapter is pending.** The gateway's
+nginx management-prefix route and the scheduler slot-state foundation have
+landed. The scripts in this directory still execute the historical workstation
+SSH path until the adapter migration lands.
 
 Fleet mode does **not** tunnel inference through the workstation. The serving job
 starts `qwen-turing-agent` beside llama.cpp; the agent opens a control connection
@@ -209,6 +209,38 @@ Qwen ids. That keeps the current external catalog stable while still allowing a
 worker to contribute only the models its assigned GPU can serve.
 `gen-preset.py --federated` emits exactly that worker-facing surface: primary
 section ids only, no context-tier aliases.
+
+#### Slot lease and cleanup fencing
+
+`slot_lock.py` owns the shared-filesystem claim for one logical slot. The lease
+root and each slot directory must be owned by the effective user with mode
+`0700`; `state.json` must be a single-link regular file owned by that user with
+mode `0600`. Symlinks, unknown schema fields, duplicate JSON keys, oversized or
+partial files, and ownership or mode ambiguity are refused rather than repaired.
+
+Every state change is an exact compare-and-swap over the stored revision, claim
+ID, nullable active attempt ID, and nullable serving job ID. Mutations are
+serialized by a sibling `.<slot>.txn` process-generation claim. A mutex left by
+a process that is provably dead on this host is recovered; a malformed mutex or
+one owned by another host is preserved and blocks mutation for operator review.
+State publication uses a unique same-directory `0600` temporary file, file
+`fsync`, `os.replace`, and directory `fsync`, so a crash exposes either the old
+validated generation or the complete new one.
+
+Cleanup supplies the claim, attempt, and Slurm job IDs. `release_if_current`
+reads the revision while holding the mutex and releases only the full current
+tuple. Release first renames the slot directory to a revision-and-claim-named
+tombstone, syncs the lease root, then removes the validated tombstone. A cleanup
+from an older attempt or claim, or a duplicate cleanup after release, returns
+`stale_cleanup` without touching a replacement generation. The job-facing form
+prints only the result, never the supplied identifiers or root:
+
+```bash
+python3 slot_lock.py cleanup \
+  --root "$QWEN_SLOT_ROOT" --slot "$QWEN_SLOT_ID" \
+  --claim "$QWEN_SLOT_CLAIM" --attempt "$QWEN_ATTEMPT_ID" \
+  --job-id "$SLURM_JOB_ID"
+```
 
 The implementation contract is
 [§13 of the registration design](../../../docs/superpowers/specs/2026-08-19-agent-tunnel-self-registration-design.md#13-amendment-contributor-owned-scheduler-workers).
