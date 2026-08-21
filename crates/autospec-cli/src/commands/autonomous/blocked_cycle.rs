@@ -163,6 +163,9 @@ pub(super) fn foreground_cycle_is_loopable(
     ) {
         return Ok(true);
     }
+    if state.phase() == ConductorPhase::Dispatch && state.selected_issue().is_some() {
+        return Ok(true);
+    }
     if state.phase() == ConductorPhase::Paused
         && state.pause_reason() == Some(EXECUTOR_RECEIPT_FAILURE_PAUSE)
         && state.selected_issue().is_some()
