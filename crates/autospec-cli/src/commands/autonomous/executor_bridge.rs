@@ -12906,7 +12906,10 @@ where
             &fs::read_to_string(&path)
                 .map_err(|error| format!("read interrupted executor predecessor: {error}"))?,
         )?;
-        if state.phase != BridgePhase::Interrupted
+        if !matches!(
+            state.phase,
+            BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+        )
             || state.identity.repository != repository
             || state.identity.repository_path != repository_path
             || state.identity.issue != issue
