@@ -10323,12 +10323,24 @@ impl RemoteMutationSnapshot {
             &["status", "--porcelain=v1", "--untracked-files=all"],
         )?
         .is_empty();
+        let exact_adopted_base_merge = if local_head != state.identity.base_oid
+            && snapshot
+                .refs
+                .get(&format!("refs/heads/{}", state.identity.branch))
+                != Some(&local_head)
+            && !dirty_wip
+        {
+            adopted_transfer_authorizes_prelaunch_head(state, &local_head)?
+        } else {
+            false
+        };
         if local_head != state.identity.base_oid
             && snapshot
                 .refs
                 .get(&format!("refs/heads/{}", state.identity.branch))
                 != Some(&local_head)
             && !dirty_wip
+            && !exact_adopted_base_merge
         {
             return Err(
                 "executor prelaunch local HEAD must equal the base or exact preserved remote WIP"
@@ -12808,6 +12820,33 @@ fn adopted_ownership_transfer_head_for_owner(
     state: &PersistedInvocation,
 ) -> Result<Option<String>, String> {
     ownership_transfer_generation_head(path, state, Some("adopted"))
+}
+
+fn adopted_transfer_authorizes_prelaunch_head(
+    state: &PersistedInvocation,
+    local_head: &str,
+) -> Result<bool, String> {
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "adopted executor worktree has no scope root".to_string())?;
+    let transfer = ownership_transfer_path(scope_root, state.identity.issue);
+    if !transfer
+        .try_exists()
+        .map_err(|error| format!("inspect executor ownership transfer: {error}"))?
+    {
+        return Ok(false);
+    }
+    let Some(transfer_head) = adopted_ownership_transfer_head_for_owner(&transfer, state)? else {
+        return Ok(false);
+    };
+    adopted_transfer_reaches_recovered_head(
+        &state.identity.worktree,
+        &transfer_head,
+        local_head,
+        &state.identity.base_oid,
+    )
 }
 
 fn ownership_transfer_generation_head(
