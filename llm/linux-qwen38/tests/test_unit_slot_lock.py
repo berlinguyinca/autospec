@@ -106,10 +106,10 @@ def _claim_worker(
 def _crash_mutation_worker(root: str, when: str) -> None:
     real_replace = sl.os.replace
 
-    def crash_replace(source, destination):
+    def crash_replace(source, destination, *args, **kwargs):
         if when == "before":
             os._exit(81)
-        real_replace(source, destination)
+        real_replace(source, destination, *args, **kwargs)
         os._exit(82)
 
     sl.os.replace = crash_replace
@@ -129,14 +129,42 @@ def _crash_mutation_worker(root: str, when: str) -> None:
 def _crash_release_worker(root: str, when: str) -> None:
     real_replace = sl.os.replace
 
-    def crash_replace(source, destination):
+    def crash_replace(source, destination, *args, **kwargs):
         if when == "before":
             os._exit(83)
-        real_replace(source, destination)
+        real_replace(source, destination, *args, **kwargs)
         os._exit(84)
 
     sl.os.replace = crash_replace
     sl.release_if_current(Path(root), SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+
+
+def _holding_mutation_worker(
+    root: str,
+    slot: str,
+    claim_id: str,
+    entered,
+    release,
+    results,
+) -> None:
+    def transition(state: dict) -> dict:
+        entered.set()
+        if not release.wait(10):
+            raise RuntimeError("test release event was not set")
+        state["phase"] = "blocked"
+        return state
+
+    try:
+        lease = sl.mutate(
+            Path(root),
+            slot,
+            sl.ExpectedState(1, claim_id, None, None),
+            transition,
+        )
+    except Exception as exc:  # pragma: no cover - asserted through process result
+        results.put(("error", type(exc).__name__))
+    else:
+        results.put(("mutated", lease.revision))
 
 
 def _replace_state(root: Path, content: bytes) -> Path:
@@ -149,6 +177,13 @@ def _replace_state(root: Path, content: bytes) -> Path:
 
 def _read_raw(root: Path) -> dict:
     return json.loads((root / SLOT / "state.json").read_text())
+
+
+def _set_nested(document: dict, path: tuple[object, ...], value: object) -> None:
+    current: object = document
+    for part in path[:-1]:
+        current = current[part]  # type: ignore[index]
+    current[path[-1]] = value  # type: ignore[index]
 
 
 def test_claim_creates_private_revisioned_claimed_state(tmp_path: Path):
@@ -217,6 +252,42 @@ def test_two_processes_can_claim_independent_slots(tmp_path: Path):
     assert sorted(results.get(timeout=2)[0] for _ in processes) == [
         "claimed",
         "claimed",
+    ]
+
+
+def test_independent_slot_mutations_hold_their_mutexes_concurrently(tmp_path: Path):
+    root = _private_root(tmp_path)
+    sl.claim(root, "cluster-user-01", CLAIM_A, os.geteuid(), "user")
+    sl.claim(root, "cluster-user-02", CLAIM_B, os.geteuid(), "user")
+    ctx = mp.get_context("fork")
+    entered = [ctx.Event(), ctx.Event()]
+    release = ctx.Event()
+    results = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_holding_mutation_worker,
+            args=(str(root), slot, claim_id, event, release, results),
+        )
+        for slot, claim_id, event in (
+            ("cluster-user-01", CLAIM_A, entered[0]),
+            ("cluster-user-02", CLAIM_B, entered[1]),
+        )
+    ]
+
+    for process in processes:
+        process.start()
+    try:
+        assert entered[0].wait(5)
+        assert entered[1].wait(5)
+    finally:
+        release.set()
+        for process in processes:
+            process.join(10)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert sorted(results.get(timeout=2) for _ in processes) == [
+        ("mutated", 2),
+        ("mutated", 2),
     ]
 
 
@@ -318,6 +389,26 @@ def test_expected_none_cannot_replace_an_existing_or_partial_slot(tmp_path: Path
 
     assert sl.load(root, SLOT).claim_id == CLAIM_A
     assert partial.is_dir()
+
+
+def test_expected_none_rejects_claimed_state_with_a_bound_active_attempt(
+    tmp_path: Path,
+):
+    seed_parent = tmp_path / "seed"
+    seed_parent.mkdir()
+    seed = _private_root(seed_parent)
+    _claim(seed)
+    exploit = _read_raw(seed)
+    exploit["active_attempt_id"] = ATTEMPT_A
+    exploit["attempts"] = [_attempt(CLAIM_A, ATTEMPT_A, JOB_A)]
+    target_parent = tmp_path / "target"
+    target_parent.mkdir()
+    target = _private_root(target_parent)
+
+    with pytest.raises(sl.LeaseError, match="initial slot"):
+        sl.mutate(target, SLOT, None, lambda _: exploit)
+
+    assert not (target / SLOT / "state.json").exists()
 
 
 def test_transition_validation_failure_preserves_current_generation(tmp_path: Path):
@@ -546,6 +637,113 @@ def test_unknown_schema_or_fields_fail_closed(tmp_path: Path, corruption: str):
     assert (root / SLOT / "state.json").is_file()
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("phase",), []),
+        (("claim_id",), []),
+        (("revision",), "2"),
+        (("owner",), []),
+        (("owner", "uid"), "1000"),
+        (("active_attempt_id",), []),
+        (("attempts",), {}),
+        (("attempts", 0, "attempt_id"), []),
+        (("attempts", 0, "ordinal"), "0"),
+        (("attempts", 0, "gpu"), []),
+        (("attempts", 0, "state"), []),
+        (("attempts", 0, "serve_tag"), []),
+        (("attempts", 0, "serve_job_id"), 12345),
+        (("attempts", 0, "cleanup"), []),
+        (("attempts", 0, "cleanup", "state"), []),
+        (("attempts", 0, "cleanup", "job_ids"), {}),
+        (("attempts", 0, "cleanup", "job_ids", 0), 12346),
+        (("updated_at",), []),
+    ],
+)
+def test_malformed_schema_types_always_raise_lease_error(
+    tmp_path: Path, path: tuple[object, ...], value: object
+):
+    root = _private_root(tmp_path)
+    _activate(root)
+    document = _read_raw(root)
+    if path[-2:] == ("job_ids", 0):
+        document["attempts"][0]["cleanup"]["job_ids"] = ["12346"]
+    _set_nested(document, path, value)
+    _replace_state(root, json.dumps(document).encode())
+
+    with pytest.raises(sl.LeaseError):
+        sl.load(root, SLOT)
+
+    assert (root / SLOT / "state.json").is_file()
+
+
+def test_cli_corrupt_type_returns_redacted_refusal_without_traceback(tmp_path: Path, capsys):
+    root = _private_root(tmp_path)
+    _activate(root)
+    document = _read_raw(root)
+    document["phase"] = []
+    _replace_state(root, json.dumps(document).encode())
+
+    result = sl.main(
+        [
+            "cleanup",
+            "--root",
+            str(root),
+            "--slot",
+            SLOT,
+            "--claim",
+            CLAIM_A,
+            "--attempt",
+            ATTEMPT_A,
+            "--job-id",
+            JOB_A,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "slot cleanup refused: unsafe lease state\n"
+    assert "Traceback" not in captured.err
+    assert CLAIM_A not in captured.err
+
+
+def test_recovery_preserves_unrelated_owned_temp_named_file(tmp_path: Path):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    unrelated = root / SLOT / ".state.operator-notes.tmp"
+    unrelated.write_text("operator evidence")
+    unrelated.chmod(0o600)
+
+    with pytest.raises(sl.LeaseError, match="unknown entry"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: state,
+        )
+
+    assert unrelated.read_text() == "operator evidence"
+
+
+def test_recovery_preserves_malformed_temp_with_valid_name(tmp_path: Path):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    ambiguous = root / SLOT / f".state.2.{'c' * 32}.tmp"
+    ambiguous.write_text("{}")
+    ambiguous.chmod(0o600)
+
+    with pytest.raises(sl.LeaseError, match="temporary slot state"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: state,
+        )
+
+    assert ambiguous.read_text() == "{}"
+
+
 @pytest.mark.parametrize("duplicate", ["attempt_id", "serve_tag", "cleanup_tag", "job_id"])
 def test_attempt_records_reject_duplicate_identities(tmp_path: Path, duplicate: str):
     root = _private_root(tmp_path)
@@ -671,6 +869,123 @@ def test_malformed_mutex_is_preserved_and_fails_closed(tmp_path: Path):
         _claim(root)
 
     assert mutex.is_dir()
+
+
+def test_transaction_owner_uid_must_match_effective_uid(tmp_path: Path):
+    root = _private_root(tmp_path)
+    mutex = root / f".{SLOT}.txn"
+    mutex.mkdir(mode=0o700)
+    document = sl._txn_document("f" * 32)
+    document["uid"] = os.geteuid() + 1
+    owner = mutex / "owner.json"
+    owner.write_text(json.dumps(document))
+    owner.chmod(0o600)
+
+    with pytest.raises(sl.LeaseError, match="cannot prove stale"):
+        _claim(root)
+
+    assert owner.exists()
+
+
+def test_slot_directory_swap_cannot_redirect_state_publication(tmp_path: Path, monkeypatch):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    slot_path = root / SLOT
+    moved = root / f"{SLOT}.moved"
+    marker = b"do not replace this object"
+    real_replace = sl.os.replace
+    swapped = False
+
+    def swap_before_replace(source, destination, *args, **kwargs):
+        nonlocal swapped
+        destination_name = os.fspath(destination)
+        if not swapped and Path(destination_name).name == "state.json":
+            swapped = True
+            slot_path.rename(moved)
+            slot_path.mkdir(mode=0o700)
+            impostor_state = slot_path / "state.json"
+            impostor_state.write_bytes(marker)
+            impostor_state.chmod(0o600)
+            if not kwargs.get("src_dir_fd"):
+                impostor_temp = slot_path / Path(os.fspath(source)).name
+                impostor_temp.write_bytes(b"attacker-controlled temporary")
+                impostor_temp.chmod(0o600)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "replace", swap_before_replace)
+
+    with pytest.raises(sl.LeaseError, match="changed|binding"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+
+    assert (slot_path / "state.json").read_bytes() == marker
+
+
+def test_tombstone_directory_swap_cannot_redirect_state_deletion(tmp_path: Path, monkeypatch):
+    root = _private_root(tmp_path)
+    _activate(root)
+    moved = root / "released-generation.moved"
+    marker = b"do not delete this object"
+    real_unlink = sl.os.unlink
+    swapped = False
+
+    def swap_before_unlink(path, *args, **kwargs):
+        nonlocal swapped
+        path_name = os.fspath(path)
+        tombstones = list(root.glob(f".{SLOT}.tombstone.*"))
+        if not swapped and Path(path_name).name == "state.json" and tombstones:
+            swapped = True
+            tombstones[0].rename(moved)
+            tombstones[0].mkdir(mode=0o700)
+            impostor_state = tombstones[0] / "state.json"
+            impostor_state.write_bytes(marker)
+            impostor_state.chmod(0o600)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "unlink", swap_before_unlink)
+
+    with pytest.raises(sl.LeaseError, match="changed|binding"):
+        sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A)
+
+    tombstone = next(root.glob(f".{SLOT}.tombstone.*"))
+    assert (tombstone / "state.json").read_bytes() == marker
+
+
+def test_mutex_directory_swap_cannot_redirect_owner_deletion(tmp_path: Path, monkeypatch):
+    root = _private_root(tmp_path)
+    lease = _claim(root)
+    moved = root / "transaction.moved"
+    marker = b"do not delete this owner"
+    real_unlink = sl.os.unlink
+    swapped = False
+
+    def swap_before_unlink(path, *args, **kwargs):
+        nonlocal swapped
+        mutex = root / f".{SLOT}.txn"
+        if not swapped and Path(os.fspath(path)).name == "owner.json" and mutex.exists():
+            swapped = True
+            mutex.rename(moved)
+            mutex.mkdir(mode=0o700)
+            impostor_owner = mutex / "owner.json"
+            impostor_owner.write_bytes(marker)
+            impostor_owner.chmod(0o600)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(sl.os, "unlink", swap_before_unlink)
+
+    with pytest.raises(sl.LeaseError, match="changed|binding"):
+        sl.mutate(
+            root,
+            SLOT,
+            sl.ExpectedState(lease.revision, CLAIM_A, None, None),
+            lambda state: {**state, "phase": "blocked"},
+        )
+
+    assert (root / f".{SLOT}.txn" / "owner.json").read_bytes() == marker
 
 
 def test_tombstone_symlink_is_not_followed_or_deleted(tmp_path: Path):
