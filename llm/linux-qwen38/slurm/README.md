@@ -233,10 +233,14 @@ its durable transaction barrier. Before state replacement or release rename,
 the writer creates and syncs that separate barrier; any crash or I/O failure
 afterward preserves it and blocks load, claim, cleanup, and stale recovery for
 operator review, even if the owner record could not be marked blocked. The
-barrier is removed only after the mutation is published and verified. A
-malformed mutex, an armed barrier, or a mutex owned by another host is never
-reaped automatically. State publication uses a unique same-directory `0600`
-temporary file, file `fsync`, `os.replace`, and directory `fsync`.
+barrier is removed only after the mutation is published and verified. Disarm
+first creates and syncs a separate `0600` quarantine marker, so a failed
+post-removal sync or failed barrier re-arm remains non-reapable; successful
+transaction cleanup removes the owner before that final quarantine marker. A
+malformed mutex, an armed barrier or disarm quarantine, or a mutex owned by
+another host is never reaped automatically. State publication uses a unique
+same-directory `0600` temporary file, file `fsync`, `os.replace`, and directory
+`fsync`.
 
 Cleanup supplies the claim, attempt, and Slurm job IDs. `release_if_current`
 reads the revision while holding the mutex and releases only the full current

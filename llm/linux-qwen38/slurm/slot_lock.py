@@ -30,6 +30,8 @@ SCHEMA = "qwen-slurm-slot/v1"
 TXN_SCHEMA = "qwen-slurm-slot-txn/v1"
 _TXN_BARRIER_NAME = "barrier"
 _TXN_BARRIER_PAYLOAD = b"qwen-slurm-slot-txn-barrier/v1\n"
+_TXN_DISARM_QUARANTINE_NAME = "disarm-quarantine"
+_TXN_DISARM_QUARANTINE_PAYLOAD = b"qwen-slurm-slot-txn-disarm-quarantine/v1\n"
 MAX_STATE_BYTES = 256 * 1024
 MAX_ATTEMPTS = 32
 MAX_CLEANUP_JOBS = 32
@@ -1065,6 +1067,30 @@ def _read_txn_barrier(mutex: _PinnedDirectory) -> _EntryIdentity | None:
     return identity
 
 
+def _read_txn_disarm_quarantine(
+    mutex: _PinnedDirectory,
+) -> _EntryIdentity | None:
+    try:
+        os.stat(
+            _TXN_DISARM_QUARANTINE_NAME,
+            dir_fd=mutex.fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LeaseError("unsafe transaction disarm quarantine") from exc
+    payload, identity = _read_secure_snapshot_at(
+        mutex,
+        _TXN_DISARM_QUARANTINE_NAME,
+        "transaction disarm quarantine",
+        len(_TXN_DISARM_QUARANTINE_PAYLOAD),
+    )
+    if payload != _TXN_DISARM_QUARANTINE_PAYLOAD:
+        raise LeaseError("unsafe transaction disarm quarantine")
+    return identity
+
+
 def _read_txn_pinned(mutex: _PinnedDirectory) -> dict:
     try:
         _revalidate_directory(mutex, "transaction mutex")
@@ -1072,6 +1098,7 @@ def _read_txn_pinned(mutex: _PinnedDirectory) -> dict:
         if "owner.json" not in entries or not entries <= {
             "owner.json",
             _TXN_BARRIER_NAME,
+            _TXN_DISARM_QUARANTINE_NAME,
         }:
             raise LeaseError("cannot prove stale transaction mutex")
         document = _decode_json(
@@ -1081,6 +1108,8 @@ def _read_txn_pinned(mutex: _PinnedDirectory) -> dict:
         _validate_txn_document(document)
         if _TXN_BARRIER_NAME in entries:
             _read_txn_barrier(mutex)
+        if _TXN_DISARM_QUARANTINE_NAME in entries:
+            _read_txn_disarm_quarantine(mutex)
         return document
     except LeaseError as exc:
         if "cannot prove stale" in str(exc):
@@ -1093,6 +1122,7 @@ def _remove_txn(
     mutex_name: str,
     mutex_path: Path,
     expected_nonce: str | None,
+    expected_disarm_quarantine: _EntryIdentity | None = None,
 ) -> None:
     mutex = _open_pinned_directory(
         mutex_path,
@@ -1104,6 +1134,9 @@ def _remove_txn(
         document = _read_txn_pinned(mutex)
         if _read_txn_barrier(mutex) is not None:
             raise LeaseError("transaction barrier prevents mutex removal")
+        disarm_quarantine = _read_txn_disarm_quarantine(mutex)
+        if disarm_quarantine != expected_disarm_quarantine:
+            raise LeaseError("transaction disarm quarantine prevents mutex removal")
         if expected_nonce is not None and document["nonce"] != expected_nonce:
             raise LeaseError("transaction mutex ownership changed")
         if document["status"] != "active":
@@ -1118,6 +1151,14 @@ def _remove_txn(
             "transaction owner",
             4096,
         )
+        if expected_disarm_quarantine is not None:
+            _discard_exact_entry(
+                mutex,
+                _TXN_DISARM_QUARANTINE_NAME,
+                expected_disarm_quarantine,
+                "transaction disarm quarantine",
+                len(_TXN_DISARM_QUARANTINE_PAYLOAD),
+            )
         if os.listdir(mutex.fd):
             raise LeaseError("unexpected entry in transaction mutex before removal")
         _revalidate_directory(mutex, "transaction mutex")
@@ -1145,6 +1186,10 @@ def _recover_existing_txn(
         if _read_txn_barrier(mutex) is not None:
             raise LeaseError(
                 "slot transaction barrier is blocked; explicit repair required"
+            )
+        if _read_txn_disarm_quarantine(mutex) is not None:
+            raise LeaseError(
+                "slot transaction disarm quarantine is blocked; explicit repair required"
             )
         document = _read_txn_pinned(mutex)
     finally:
@@ -1240,7 +1285,7 @@ def _disarm_txn_barrier(
     mutex_path: Path,
     nonce: str,
     expected: _EntryIdentity,
-) -> None:
+) -> _EntryIdentity:
     mutex = _open_pinned_directory(
         mutex_path,
         "transaction mutex",
@@ -1254,15 +1299,49 @@ def _disarm_txn_barrier(
         observed = _read_txn_barrier(mutex)
         if observed != expected:
             raise LeaseError("slot transaction barrier changed; preserved")
-        _discard_exact_entry(
+        if _read_txn_disarm_quarantine(mutex) is not None:
+            raise LeaseError("transaction disarm quarantine already exists")
+        quarantine_identity = _write_exclusive_at(
             mutex,
-            _TXN_BARRIER_NAME,
-            expected,
-            "slot transaction barrier",
-            len(_TXN_BARRIER_PAYLOAD),
+            _TXN_DISARM_QUARANTINE_NAME,
+            _TXN_DISARM_QUARANTINE_PAYLOAD,
+            "transaction disarm quarantine",
         )
         _fsync_pinned(mutex, "transaction mutex")
+        if _read_txn_disarm_quarantine(mutex) != quarantine_identity:
+            raise LeaseError("transaction disarm quarantine verification failed")
         _fsync_pinned(root, "lease root")
+        try:
+            _discard_exact_entry(
+                mutex,
+                _TXN_BARRIER_NAME,
+                expected,
+                "slot transaction barrier",
+                len(_TXN_BARRIER_PAYLOAD),
+            )
+            _fsync_pinned(mutex, "transaction mutex")
+            _fsync_pinned(root, "lease root")
+        except BaseException:
+            try:
+                if _read_txn_barrier(mutex) is None:
+                    rearmed = _write_exclusive_at(
+                        mutex,
+                        _TXN_BARRIER_NAME,
+                        _TXN_BARRIER_PAYLOAD,
+                        "slot transaction barrier",
+                    )
+                    try:
+                        _fsync_pinned(mutex, "transaction mutex")
+                    except LeaseError:
+                        pass
+                    if _read_txn_barrier(mutex) != rearmed:
+                        raise LeaseError(
+                            "slot transaction barrier rearm verification failed"
+                        )
+            except LeaseError:
+                pass
+            raise
+        return quarantine_identity
     finally:
         mutex.close()
 
@@ -1322,6 +1401,7 @@ def _mutation(
         remove_transaction = True
         barrier_attempted = False
         barrier_identity: _EntryIdentity | None = None
+        disarm_quarantine_identity: _EntryIdentity | None = None
 
         def arm_barrier() -> None:
             nonlocal barrier_attempted, barrier_identity
@@ -1361,7 +1441,7 @@ def _mutation(
         else:
             if barrier_identity is not None:
                 remove_transaction = False
-                _disarm_txn_barrier(
+                disarm_quarantine_identity = _disarm_txn_barrier(
                     root_directory,
                     mutex_name,
                     mutex_path,
@@ -1372,7 +1452,13 @@ def _mutation(
                 remove_transaction = True
         finally:
             if remove_transaction:
-                _remove_txn(root_directory, mutex_name, mutex_path, nonce)
+                _remove_txn(
+                    root_directory,
+                    mutex_name,
+                    mutex_path,
+                    nonce,
+                    disarm_quarantine_identity,
+                )
                 _fsync_pinned(root_directory, "lease root")
     finally:
         root_directory.close()

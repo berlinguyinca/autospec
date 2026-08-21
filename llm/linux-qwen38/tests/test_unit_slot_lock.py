@@ -196,6 +196,48 @@ def _blocked_marker_persistence_failure_worker(root: str) -> None:
     raise AssertionError("simulated blocked-marker persistence failure was accepted")
 
 
+def _disarm_directory_fsync_failure_worker(root: str, fail_rearm: bool) -> None:
+    real_fsync_pinned = sl._fsync_pinned
+    real_write_exclusive = sl._write_exclusive_at
+    saw_barrier = False
+    failed = False
+    barrier_writes = 0
+
+    def fail_after_barrier_removal(directory, label: str) -> None:
+        nonlocal saw_barrier, failed
+        if label == "transaction mutex":
+            entries = set(os.listdir(directory.fd))
+            if "barrier" in entries:
+                saw_barrier = True
+            elif saw_barrier and not failed:
+                failed = True
+                raise sl.LeaseError("simulated disarm directory fsync failure")
+        real_fsync_pinned(directory, label)
+
+    def fail_barrier_rearm(directory, name, payload, label):
+        nonlocal barrier_writes
+        if label == "slot transaction barrier":
+            barrier_writes += 1
+            if fail_rearm and barrier_writes > 1:
+                raise sl.LeaseError("simulated barrier rearm failure")
+        return real_write_exclusive(directory, name, payload, label)
+
+    sl._fsync_pinned = fail_after_barrier_removal
+    sl._write_exclusive_at = fail_barrier_rearm
+    try:
+        sl.mutate(
+            Path(root),
+            SLOT,
+            sl.ExpectedState(2, CLAIM_A, ATTEMPT_A, JOB_A),
+            lambda state: {**state, "phase": "stopping"},
+        )
+    except sl.LeaseError:
+        if saw_barrier and failed:
+            return
+        raise
+    raise AssertionError("simulated disarm directory fsync failure was accepted")
+
+
 def _replace_state(root: Path, content: bytes) -> Path:
     state_path = root / SLOT / "state.json"
     state_path.unlink()
@@ -1326,6 +1368,42 @@ def test_blocked_marker_io_failure_leaves_non_reapable_transaction_barrier(
     )
     for operation in operations:
         with pytest.raises(sl.LeaseError, match="barrier|blocked"):
+            operation()
+        assert transaction.is_dir()
+        assert {path.name for path in transaction.iterdir()} - {"owner.json"} == (
+            barrier_entries
+        )
+
+
+@pytest.mark.parametrize("fail_rearm", [False, True])
+def test_disarm_fsync_failure_rearms_or_quarantines_transaction_barrier(
+    tmp_path: Path,
+    fail_rearm: bool,
+):
+    root = _private_root(tmp_path)
+    _activate(root)
+    transaction = root / f".{SLOT}.txn"
+    assert not transaction.exists()
+    ctx = mp.get_context("fork")
+    process = ctx.Process(
+        target=_disarm_directory_fsync_failure_worker,
+        args=(str(root), fail_rearm),
+    )
+
+    process.start()
+    process.join(10)
+
+    assert process.exitcode == 0
+    assert transaction.is_dir()
+    barrier_entries = {path.name for path in transaction.iterdir()} - {"owner.json"}
+    assert barrier_entries
+    operations = (
+        lambda: sl.load(root, SLOT),
+        lambda: sl.claim(root, SLOT, CLAIM_B, os.geteuid(), "user"),
+        lambda: sl.release_if_current(root, SLOT, CLAIM_A, ATTEMPT_A, JOB_A),
+    )
+    for operation in operations:
+        with pytest.raises(sl.LeaseError, match="barrier|quarantine|blocked"):
             operation()
         assert transaction.is_dir()
         assert {path.name for path in transaction.iterdir()} - {"owner.json"} == (
