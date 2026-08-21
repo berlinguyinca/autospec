@@ -12953,7 +12953,12 @@ where
     };
     let mut transferred = false;
     let authorized = authorize(&state, &mut || {
-        prepare_available_worktree_transfer(&state_path, &state, None)?;
+        let mut retired = state.clone();
+        retired.supervisor = None;
+        retired.process = None;
+        retired.progress_at = unix_now()?;
+        write_invocation_atomic(&state_path, &retired)?;
+        prepare_available_worktree_transfer(&state_path, &retired, None)?;
         transferred = true;
         Ok(())
     })?;
