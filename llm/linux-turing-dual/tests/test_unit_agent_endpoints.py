@@ -573,6 +573,26 @@ def test_periodic_capabilities_do_not_re_probe(monkeypatch):
     assert gw.AGENT_STATE["box"]["state"] == "online"
 
 
+def test_hardware_change_refreshes_live_scheduler_cache(monkeypatch, node):
+    srv, store, _target = node
+    attach(srv, session("sub-a"), "box")
+    store.observe_hardware("box", "v1:old")
+    called = []
+    monkeypatch.setattr(gw, "_refresh_throughput", lambda: called.append(True))
+
+    _said("box", {
+        "type": "capabilities", "hardware_fingerprint": "v1:new", "cards": []
+    }, monkeypatch)
+    _said("box", {
+        "type": "capabilities", "hardware_fingerprint": "v1:new", "cards": []
+    }, monkeypatch)
+    _said("box", {
+        "type": "capabilities", "hardware_fingerprint": "", "cards": []
+    }, monkeypatch)
+
+    assert called == [True]
+
+
 def test_a_reported_card_list_is_bounded(monkeypatch):
     """It arrives from another machine. An unbounded list is a memory hole."""
     gw.AGENT_STATE.pop("box", None)

@@ -100,7 +100,9 @@ CREATE TABLE IF NOT EXISTS servers (
   upstream_key TEXT,
   created_at   TEXT NOT NULL,
   revoked_at   TEXT,
-  last_seen    TEXT
+  last_seen    TEXT,
+  hardware_fingerprint  TEXT,
+  throughput_valid_after TEXT
 );
 CREATE TABLE IF NOT EXISTS enrol_tokens (
   token_id     TEXT PRIMARY KEY,
@@ -207,6 +209,10 @@ class KeyStore:
                         c.execute(f"PRAGMA table_info({table})")}
                 if have and "upstream_key" not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN upstream_key TEXT")
+            have = {r["name"] for r in c.execute("PRAGMA table_info(servers)")}
+            for column in ("hardware_fingerprint", "throughput_valid_after"):
+                if column not in have:
+                    c.execute(f"ALTER TABLE servers ADD COLUMN {column} TEXT")
 
     # --- users -------------------------------------------------------------
     def upsert_user(self, sub: str, email: str | None = None,
@@ -667,17 +673,20 @@ class KeyStore:
             # box under its old name is the ordinary case and forcing people to
             # invent box2 would be worse. Attribution history is not lost by
             # this: usage_events records the upstream as a string, so it survives
-            # independently -- but it also means a re-used id inherits the old
-            # one's usage rows, which is why the panel shows the owner and the
-            # attach date rather than treating the name as an identity.
+            # independently. Routing evidence is generation-specific, though,
+            # so a replacement starts with a cutoff at its new attach time.
+            retired = c.execute("SELECT 1 FROM servers WHERE server_id=? "
+                                "AND revoked_at IS NOT NULL",
+                                (row["server_id"],)).fetchone() is not None
             c.execute("DELETE FROM servers WHERE server_id=? "
                       "AND revoked_at IS NOT NULL", (row["server_id"],))
             c.execute("INSERT INTO servers (server_id, sub, kind, base_url, note, "
                       "gpus, priority, pool_member, secret_hash, upstream_key, "
-                      "created_at) VALUES (?,?,?,?,?,?,0,0,?,?,?)",
+                      "created_at, throughput_valid_after) "
+                      "VALUES (?,?,?,?,?,?,0,0,?,?,?,?)",
                       (row["server_id"], row["sub"], row["kind"], row["base_url"],
                        row["note"], row["gpus"], secret_hash,
-                       row["upstream_key"], _iso(at)))
+                       row["upstream_key"], _iso(at), _iso(at) if retired else None))
         return row["server_id"], full
 
     def authenticate_server(self, presented: str,
@@ -791,6 +800,29 @@ class KeyStore:
         self._update_server(server_id, "last_seen",
                             _iso(time.time() if now is None else now))
 
+    def observe_hardware(self, server_id: str, fingerprint: str, *,
+                         now: float | None = None) -> bool:
+        """Remember hardware identity and invalidate routing evidence on change."""
+        import time
+        at = time.time() if now is None else now
+        with self._lock, self._conn() as c:
+            row = c.execute(
+                "SELECT hardware_fingerprint FROM servers WHERE server_id=? "
+                "AND revoked_at IS NULL", (server_id,)).fetchone()
+            if not row:
+                return False
+            previous = row["hardware_fingerprint"]
+            if previous == fingerprint:
+                return False
+            if not previous:
+                c.execute("UPDATE servers SET hardware_fingerprint=? "
+                          "WHERE server_id=?", (fingerprint, server_id))
+                return False
+            c.execute("UPDATE servers SET hardware_fingerprint=?, "
+                      "throughput_valid_after=? WHERE server_id=?",
+                      (fingerprint, _iso(at), server_id))
+            return True
+
     def user_names(self, subs) -> dict:
         """sub -> a human name, for display only.
 
@@ -836,9 +868,11 @@ class KeyStore:
         with self._lock, self._conn() as c:
             rows = c.execute(
                 "SELECT upstream, model, prompt_tokens, completion_tokens, "
-                "prompt_ms, predicted_ms FROM usage_events "
+                "prompt_ms, predicted_ms FROM usage_events e "
+                "LEFT JOIN servers s ON s.server_id=e.upstream "
                 "WHERE ts >= ? AND truncated = 0 AND prompt_ms IS NOT NULL "
-                "AND prompt_ms > 0", (since,)).fetchall()
+                "AND prompt_ms > 0 AND (s.throughput_valid_after IS NULL "
+                "OR e.ts >= s.throughput_valid_after)", (since,)).fetchall()
         acc: dict = {}
         for r in rows:
             for key in ((r["upstream"], r["model"]), (r["upstream"], None)):

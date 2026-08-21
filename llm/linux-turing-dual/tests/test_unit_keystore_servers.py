@@ -5,6 +5,7 @@ a user key and a user key is not a server credential -- in every direction. One
 `authenticate()` for everything is exactly how a credential that may only offer
 capacity silently becomes one that may spend it.
 """
+import sqlite3
 import time
 
 import pytest
@@ -228,6 +229,24 @@ def test_the_upstream_key_column_is_added_to_an_older_database(tmp_path):
     assert older.upstream_keys() == {"keyed": "sk-x"}
 
 
+def test_hardware_columns_are_added_to_an_older_database(tmp_path):
+    db = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE servers (server_id TEXT PRIMARY KEY, sub TEXT, kind TEXT NOT NULL, "
+        "base_url TEXT, note TEXT, gpus TEXT, priority INTEGER NOT NULL DEFAULT 0, "
+        "pool_member INTEGER NOT NULL DEFAULT 0, secret_hash TEXT, upstream_key TEXT, "
+        "created_at TEXT NOT NULL, revoked_at TEXT, last_seen TEXT);"
+    )
+    con.close()
+
+    older = ks.KeyStore(str(db), dsn=None)
+    older.migrate_local()
+
+    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(servers)")}
+    assert {"hardware_fingerprint", "throughput_valid_after"} <= cols
+
+
 # --- the pool and the tier --------------------------------------------------
 
 def test_a_new_server_is_not_in_the_default_pool(store):
@@ -346,6 +365,61 @@ def test_a_row_outside_the_window_is_excluded(store):
     _usage(store, "boxa", "m1", 1000, 1000.0, 100, 1000.0, ts=now - 40 * 86400)
     assert store.throughput(now=now) == {}
     assert store.throughput(now=now, window_seconds=60 * 86400) != {}
+
+
+def test_hardware_change_invalidates_only_that_servers_old_samples(store):
+    attach(store, "boxa")
+    attach(store, "boxb")
+    now = time.time()
+    _usage(store, "boxa", "m1", 1000, 1000, 10, 100, ts=now - 20)
+    _usage(store, "boxb", "m1", 1000, 1000, 10, 100, ts=now - 20)
+
+    assert store.observe_hardware("boxa", "v1:first", now=now - 10) is False
+    with store._conn() as c:
+        first = c.execute(
+            "SELECT hardware_fingerprint, throughput_valid_after FROM servers "
+            "WHERE server_id='boxa'").fetchone()
+    assert first["hardware_fingerprint"] == "v1:first"
+    assert first["throughput_valid_after"] is None
+    assert store.observe_hardware("boxa", "v1:first", now=now - 5) is False
+    assert store.observe_hardware("boxa", "v1:second", now=now) is True
+
+    out = store.throughput(now=now + 1)
+    assert ("boxa", "m1") not in out
+    assert ("boxb", "m1") in out
+    with store._conn() as c:
+        cutoff = c.execute(
+            "SELECT throughput_valid_after FROM servers WHERE server_id='boxa'"
+        ).fetchone()[0]
+        assert c.execute(
+            "SELECT COUNT(*) FROM usage_events WHERE upstream='boxa'"
+        ).fetchone()[0] == 1
+
+    assert store.observe_hardware("boxa", "v1:second", now=now + 0.25) is False
+    with store._conn() as c:
+        assert c.execute(
+            "SELECT throughput_valid_after FROM servers WHERE server_id='boxa'"
+        ).fetchone()[0] == cutoff
+
+    _usage(store, "boxa", "m1", 1000, 1000, 10, 100, ts=now + 0.5)
+    assert store.throughput(now=now + 1)[("boxa", "m1")]["samples"] == 1
+
+
+def test_reenrolled_id_keeps_usage_but_starts_without_routing_samples(store):
+    now = time.time()
+    first_token = store.enrol_token("sub-a", "box", now=now - 30)
+    assert store.redeem_token(first_token, now=now - 30) is not None
+    _usage(store, "box", "m1", 1000, 1000, 10, 100, ts=now - 20)
+    assert store.revoke_server("box", sub="sub-a", now=now - 10) is True
+
+    second_token = store.enrol_token("sub-a", "box", now=now)
+    assert store.redeem_token(second_token, now=now) is not None
+
+    assert store.throughput(now=now + 1) == {}
+    with store._conn() as c:
+        assert c.execute(
+            "SELECT COUNT(*) FROM usage_events WHERE upstream='box'"
+        ).fetchone()[0] == 1
 
 
 def test_an_unmeasured_server_is_simply_absent(store):

@@ -402,6 +402,13 @@ is ranked by the 40. A server with no history yet gets a conservative default, s
 it is tried and thereby measured; scoring it zero would rank it first forever and
 scoring it infinity would mean it never ran again.
 
+The agent also reports a stable fingerprint of the hardware behind its logical
+server id. The first report establishes the baseline without discarding evidence;
+if that fingerprint later changes, the scheduler immediately stops using samples
+from before the change. Re-enrolling a revoked id likewise starts a fresh routing
+generation. The old usage rows remain intact for accounting in both cases — only
+their value as evidence about the hardware currently serving that id expires.
+
 Two things sit outside the estimate. An admin-set **priority** tier is absolute —
 only the highest tier with a candidate is considered, because an override whose
 effect depends on load is not an override. And **prefix-cache affinity** is a

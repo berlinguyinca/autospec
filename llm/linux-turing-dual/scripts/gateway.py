@@ -1521,6 +1521,13 @@ class Handler(BaseHTTPRequestHandler):
                     STORE.touch_server(sid)
                 except Exception:
                     pass
+                fingerprint = msg.get("hardware_fingerprint")
+                if isinstance(fingerprint, str) and fingerprint:
+                    try:
+                        if STORE.observe_hardware(sid, fingerprint):
+                            _refresh_throughput()
+                    except Exception:
+                        pass
         if kind == "hello":
             # Ask what it serves NOW rather than at the next poll. Without this a
             # reconnected server is ineligible for the balanced route until the
