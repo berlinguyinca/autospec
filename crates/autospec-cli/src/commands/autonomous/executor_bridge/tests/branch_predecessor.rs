@@ -493,6 +493,59 @@ fn autonomous_executor_bridge_transfers_released_pending_predecessor() {
 }
 
 #[test]
+fn autonomous_executor_bridge_pending_sidecar_blocks_predecessor_transfer() {
+    let fixture = GitFixture::new("pending-sidecar-transfer");
+    let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+    let scope = format!(
+        "pending_sidecar_transfer_{}_{}",
+        std::process::id(),
+        TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let worktree = bridge::provision_issue_worktree_for_claim(
+        &fixture.repo,
+        &scope,
+        42,
+        &base,
+        Some(("old-claim", "old-invocation")),
+    )
+    .expect("provision pending predecessor");
+    let mut state = supervision_state(&fixture);
+    state.phase = BridgePhase::Pending;
+    state.identity.worktree = worktree.path.clone();
+    state.identity.branch = worktree.branch.clone();
+    state.identity.claim_id = "old-claim".to_string();
+    state.identity.invocation_id = "old-invocation".to_string();
+    state.identity.runtime_environment_dir = None;
+    state.identity.runtime_session_id = None;
+    state.supervisor = None;
+    state.process = None;
+    let state_dir = fixture.root.join("state");
+    let generation = &bridge::sha256_hex(b"old-claim")[..16];
+    let state_path = state_dir.join(format!("issue-42-{generation}.json"));
+    bridge::write_invocation_atomic(&state_path, &state).expect("persist pending predecessor");
+
+    let mut supervisor = Command::new("sh")
+        .args(["-c", "sleep 30"])
+        .spawn()
+        .expect("spawn sidecar-only supervisor");
+    let identity = bridge::observe_process_identity(supervisor.id(), "")
+        .expect("observe sidecar supervisor")
+        .expect("live sidecar supervisor identity");
+    let sinks = bridge::output_sink_paths(&state_path, &state.identity.invocation_id)
+        .expect("pending output sinks");
+    bridge::write_supervisor_identity(&sinks.supervisor_identity, &identity, None)
+        .expect("persist supervisor sidecar");
+
+    let recovery = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+        panic!("sidecar-owned Pending predecessor must fail before authority")
+    });
+    supervisor.kill().expect("stop sidecar supervisor");
+    supervisor.wait().expect("reap sidecar supervisor");
+    let error = recovery.expect_err("sidecar-owned Pending predecessor blocks transfer");
+    assert!(error.contains("recovery evidence"), "{error}");
+}
+
+#[test]
 fn autonomous_executor_bridge_retry_fast_forwards_proven_empty_worktree_to_advanced_base() {
     let _environment = test_environment();
     let fixture = GitFixture::new("retry-empty-base-adoption");
