@@ -10323,12 +10323,24 @@ impl RemoteMutationSnapshot {
             &["status", "--porcelain=v1", "--untracked-files=all"],
         )?
         .is_empty();
+        let exact_adopted_base_merge = if local_head != state.identity.base_oid
+            && snapshot
+                .refs
+                .get(&format!("refs/heads/{}", state.identity.branch))
+                != Some(&local_head)
+            && !dirty_wip
+        {
+            adopted_transfer_authorizes_prelaunch_head(state, &local_head)?
+        } else {
+            false
+        };
         if local_head != state.identity.base_oid
             && snapshot
                 .refs
                 .get(&format!("refs/heads/{}", state.identity.branch))
                 != Some(&local_head)
             && !dirty_wip
+            && !exact_adopted_base_merge
         {
             return Err(
                 "executor prelaunch local HEAD must equal the base or exact preserved remote WIP"
@@ -12810,6 +12822,138 @@ fn adopted_ownership_transfer_head_for_owner(
     ownership_transfer_generation_head(path, state, Some("adopted"))
 }
 
+fn adopted_transfer_authorizes_prelaunch_head(
+    state: &PersistedInvocation,
+    local_head: &str,
+) -> Result<bool, String> {
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "adopted executor worktree has no scope root".to_string())?;
+    let transfer = ownership_transfer_path(scope_root, state.identity.issue);
+    if !transfer
+        .try_exists()
+        .map_err(|error| format!("inspect executor ownership transfer: {error}"))?
+    {
+        return Ok(false);
+    }
+    let Some(transfer_head) = adopted_ownership_transfer_head_for_owner(&transfer, state)? else {
+        return Ok(false);
+    };
+    if !adopted_transfer_reaches_recovered_head(
+        &state.identity.worktree,
+        &transfer_head,
+        local_head,
+        &state.identity.base_oid,
+    )? {
+        return Ok(false);
+    }
+    let Some(intent) = exact_adopted_base_drift_intent(state, &transfer_head)? else {
+        return Err("executor adopted base merge has no exact durable intent".to_string());
+    };
+    let expected_tree = git_stdout(
+        &state.identity.worktree,
+        &[
+            "merge-tree",
+            "--write-tree",
+            &intent.old_head,
+            &intent.new_base,
+        ],
+    )?;
+    if !canonical_git_oid(&expected_tree) {
+        return Err("executor adopted base merge expected tree is malformed".to_string());
+    }
+    let observed_tree = git_stdout(
+        &state.identity.worktree,
+        &["show", "-s", "--format=%T", local_head],
+    )?;
+    if observed_tree != expected_tree {
+        return Err("executor adopted base merge tree does not match its durable intent".to_string());
+    }
+    Ok(true)
+}
+
+fn exact_adopted_base_drift_intent(
+    state: &PersistedInvocation,
+    transfer_head: &str,
+) -> Result<Option<BaseDriftIntent>, String> {
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "adopted executor worktree has no scope root".to_string())?;
+    validate_private_directory(scope_root)?;
+    let worktree_name = state
+        .identity
+        .worktree
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "adopted executor worktree name is not UTF-8".to_string())?;
+    let prefix = format!("{worktree_name}.base-drift-");
+    let anchor = scope_root.join(format!("{worktree_name}.provision"));
+    let mut matched = None;
+    for entry in fs::read_dir(scope_root)
+        .map_err(|error| format!("inventory executor base-drift intents: {error}"))?
+    {
+        let path = entry
+            .map_err(|error| format!("inventory executor base-drift intent: {error}"))?
+            .path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".intent") {
+            continue;
+        }
+        validate_private_state_file(&path)?;
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&path)
+                .map_err(|error| format!("read executor base-drift intent: {error}"))?,
+        )
+        .map_err(|error| format!("parse executor base-drift intent: {error}"))?;
+        let object = strict_object(
+            value,
+            &["schema", "old_base", "old_head", "new_base"],
+            "executor base-drift intent",
+        )?;
+        if checked_u32(&object, "schema")? != 1 {
+            return Err("executor base-drift intent schema is invalid".to_string());
+        }
+        let intent = BaseDriftIntent {
+            old_base: text(&object, "old_base")?,
+            old_head: text(&object, "old_head")?,
+            new_base: text(&object, "new_base")?,
+        };
+        if [&intent.old_base, &intent.old_head, &intent.new_base]
+            .iter()
+            .any(|oid| !canonical_git_oid(oid))
+            || base_drift_intent_path(&anchor, &intent) != path
+        {
+            return Err("executor base-drift intent identity is invalid".to_string());
+        }
+        if intent.old_head != transfer_head || intent.new_base != state.identity.base_oid {
+            continue;
+        }
+        if matched.replace(intent).is_some() {
+            return Err("multiple executor base-drift intents match the adopted transfer".to_string());
+        }
+    }
+    let Some(intent) = matched else {
+        return Ok(None);
+    };
+    for descendant in [&intent.old_head, &intent.new_base] {
+        if git(
+            &state.identity.worktree,
+            &["merge-base", "--is-ancestor", &intent.old_base, descendant],
+        )
+        .is_err()
+        {
+            return Err("executor base-drift intent ancestry is invalid".to_string());
+        }
+    }
+    Ok(Some(intent))
+}
+
 fn ownership_transfer_generation_head(
     path: &Path,
     state: &PersistedInvocation,
@@ -12908,7 +13052,9 @@ where
         )?;
         if !matches!(
             state.phase,
-            BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+            BridgePhase::Pending
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
         )
             || state.identity.repository != repository
             || state.identity.repository_path != repository_path
@@ -12927,6 +13073,14 @@ where
         saw_transfer = true;
         if !executor_terminal_processes_are_quiescent(&state)? {
             return Err("interrupted executor predecessor process is still live".to_string());
+        }
+        if state.phase == BridgePhase::Pending
+            && has_durable_harness_recovery_evidence(&path, &state)?
+        {
+            return Err(
+                "pending executor predecessor retains durable harness recovery evidence"
+                    .to_string(),
+            );
         }
         if !ownership_transfer_names_predecessor(&transfer_path, &state)? {
             continue;
