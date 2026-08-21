@@ -761,8 +761,16 @@ def test_planner_cannot_read_precutoff_cache_while_fresh_scan_is_blocked(
     assert scan_started.wait(3)
 
     captured = []
+    planner_attempted = threading.Event()
     planner_done = threading.Event()
     planner_errors = []
+    real_snapshot = gw._throughput_snapshot
+
+    def attempted_snapshot():
+        planner_attempted.set()
+        return real_snapshot()
+
+    monkeypatch.setattr(gw, "_throughput_snapshot", attempted_snapshot)
 
     class Planner:
         headers = {}
@@ -808,6 +816,7 @@ def test_planner_cannot_read_precutoff_cache_while_fresh_scan_is_blocked(
 
     planner = threading.Thread(target=plan, daemon=True)
     planner.start()
+    assert planner_attempted.wait(3), "the planner never reached its cache snapshot"
     blocked = not planner_done.wait(0.2)
     release_scan.set()
     invalidator.join(3)
