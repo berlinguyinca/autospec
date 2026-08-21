@@ -187,8 +187,12 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     assert!(unowned.contains("tree"), "{unowned}");
     git(&state.identity.worktree, &["reset", "--hard", &merged_head]);
 
-    bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
-        .expect("exact adopted base merge is a valid prelaunch HEAD");
+    let captured =
+        bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+            .expect("exact adopted base merge is a valid prelaunch HEAD");
+    let loaded = bridge::RemoteMutationSnapshot::load(&state_path, &state)
+        .expect("exact adopted base merge snapshot replays");
+    assert_eq!(loaded, captured);
     let snapshot: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(snapshot_path).expect("read successor snapshot"),
     )
