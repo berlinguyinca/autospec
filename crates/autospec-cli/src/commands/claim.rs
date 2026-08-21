@@ -1906,14 +1906,35 @@ fn recover_stale_startup_record(
             previous_claim_id: None,
         });
     }
-    if startup_heartbeat_exists(repo, issue)
-        || branch_ref_exists(&selected.record.branch)
+    if branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
+        });
+    }
+    if !quarantine_authoritative_stale_heartbeat(
+        repo,
+        issue,
+        &selected.record,
+        None,
+        &mut || Ok(()),
+        &mut legacy_recovery_handoff_failpoint,
+    )?
+    {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+            previous_claim_id: None,
+        });
+    }
+    if read_claim_ref(repo, issue)?.is_some() {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "ownership_lost".to_string(),
             previous_claim_id: None,
         });
     }
@@ -2001,6 +2022,7 @@ fn recover_authoritative_stale_startup(
         &selected.record,
         authorized_prior.as_deref(),
         &mut || Ok(()),
+        &mut |_| Ok(()),
     )? {
         return Ok(RecoveryOutcome {
             recovered: false,
@@ -2138,6 +2160,7 @@ fn quarantine_authoritative_stale_heartbeat(
     record: &RunStateRecord,
     authorized_prior: Option<&StartupHeartbeatSnapshot>,
     boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
+    after_sync: &mut impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
 ) -> Result<bool, CommandFailure> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::fstatat;
@@ -2155,6 +2178,18 @@ fn quarantine_authoritative_stale_heartbeat(
         }
         Ok(_) => open_heartbeat_directory_beneath(&root, repo_path)?,
     };
+    let issue_name = format!("{issue}.json");
+    if matches!(
+        fstatat(
+            &repo,
+            std::ffi::OsStr::new(&issue_name),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        ),
+        Err(nix::errno::Errno::ENOENT)
+    ) && record.claim_id.is_none()
+    {
+        return Ok(true);
+    }
     let Some(claim_id) = record.claim_id.as_deref() else {
         return Ok(false);
     };
@@ -2168,7 +2203,6 @@ fn quarantine_authoritative_stale_heartbeat(
         claim_id,
         step: "claimed",
     };
-    let issue_name = format!("{issue}.json");
     let classified = if heartbeat_lifecycle_step(&record.step) {
         match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2282,7 +2316,7 @@ fn quarantine_authoritative_stale_heartbeat(
             issue_name.as_ref(),
             &snapshot,
             |_, _, _, _| {},
-            |_| Ok(()),
+            after_sync,
         )?;
     } else if !matches!(
         fstatat(
@@ -2311,8 +2345,28 @@ fn quarantine_authoritative_stale_heartbeat(
     _record: &RunStateRecord,
     _authorized_prior: Option<&StartupHeartbeatSnapshot>,
     _boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
+    _after_sync: &mut impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
 ) -> Result<bool, CommandFailure> {
     Ok(false)
+}
+
+fn legacy_recovery_handoff_failpoint(
+    boundary: HeartbeatHandoffSyncBoundary,
+) -> Result<(), CommandFailure> {
+    let point = match boundary {
+        HeartbeatHandoffSyncBoundary::Source => "source",
+        HeartbeatHandoffSyncBoundary::Handoff => "handoff",
+        HeartbeatHandoffSyncBoundary::Cleanup => "cleanup",
+        HeartbeatHandoffSyncBoundary::RestoreRoot
+        | HeartbeatHandoffSyncBoundary::RestoreUnlink
+        | HeartbeatHandoffSyncBoundary::RestoreHandoff => return Ok(()),
+    };
+    if std::env::var("AUTOSPEC_LEGACY_RECOVERY_FAILPOINT").as_deref() == Ok(point) {
+        return Err(CommandFailure::diagnostic(format!(
+            "legacy heartbeat recovery stopped at {point} durability boundary"
+        )));
+    }
+    Ok(())
 }
 
 fn release_stale_startup_labels(repo: &str, issue: u64) -> Result<(), CommandFailure> {
@@ -5970,7 +6024,6 @@ fn persist_heartbeat_copy_with_hooks(
     Ok(target)
 }
 
-#[cfg(unix)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatHandoffSyncBoundary {

@@ -1185,8 +1185,9 @@ fn claim_state_clear_without_exact_identity_leaves_audit_history_untouched() {
     assert!(!calls.contains("\n-X\nDELETE"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
+fn claim_legacy_stale_heartbeat_recovery() {
     let fixture = temp_dir("autospec-claim-recover-stale");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
@@ -1195,7 +1196,30 @@ fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
         &bin.join("gh"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
     );
-    let comments = r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+    let comments = r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800,\"claim_id\":\"claim-a\"}\n<!-- autospec-run-state:end -->"}]"#;
+    let heartbeats = fixture.join("heartbeats");
+    let heartbeat_repo = heartbeats.join("o7_testorg_r8_testrepo");
+    std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
+    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
+        .expect("private heartbeat root");
+    std::fs::set_permissions(&heartbeat_repo, std::fs::Permissions::from_mode(0o700))
+        .expect("private heartbeat repository");
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+    std::fs::write(
+        heartbeat_repo.join("42.json"),
+        format!(
+            "{{\"issue\":\"42\",\"branch\":\"\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
+            host.trim(),
+            boot.trim()
+        ),
+    )
+    .expect("expired heartbeat");
+    std::fs::set_permissions(
+        heartbeat_repo.join("42.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("private heartbeat");
 
     let output = autospec()
         .args([
@@ -1213,7 +1237,7 @@ fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
         .env("AUTOSPEC_CLAIM_COMMENTS", comments)
         .env("AUTOSPEC_CLAIM_LOG", &log)
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
-        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
         .output()
         .expect("autospec claim stale recovery starts");
 
