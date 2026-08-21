@@ -102,6 +102,12 @@
     "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
   },
   {
+    "file": "crates/autospec-cli/tests/autonomous_integration_base_sync.rs",
+    "function": "new",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "This test-only fixture dispatches exact fake GitHub CLI responses; the repeated shell case arms model protocol commands rather than production domain logic."
+  },
+  {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
