@@ -8,6 +8,19 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
+## Integration base synchronization
+
+A fresh foreground selection synchronizes the configured integration base before
+scan, review, selection, and admission. The conductor fast-forwards the local
+base to the fetched remote head with a compare-and-swap or a `--ff-only` merge;
+it never force-pushes and never performs a destructive reset. A recovered lease
+already owns a dispatched base and skips this fresh-selection synchronization.
+When the local base has diverged from origin, synchronization fails closed
+before any issue is selected or admitted, leaving the base and the queue
+untouched. Operators recover a divergence by resetting the local base to the
+remote head in a clean checkout and relaunching the conductor; they must not
+force-push or hand-edit the base ref.
+
 ## Startup heartbeat recovery
 
 Authoritative claim recovery treats startup heartbeat evidence as an audit
