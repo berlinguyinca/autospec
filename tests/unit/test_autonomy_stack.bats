@@ -1,6 +1,10 @@
 #!/usr/bin/env bats
 # tests/unit/test_autonomy_stack.bats — target stack detection and confidence
 # (scripts/autospec_autonomy_stack.py), extracted from autospec-autonomy-v2-lib.py.
+#
+# linter:allow-OUT_OF_SCOPE three assertions here encode the pre-split contract
+# that issue #3105 replaces — nextjs-web-app is now a framework and can no longer
+# set primary_profile, so they are updated with the change that causes it.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -36,15 +40,16 @@ print(d['primary_profile']['id'], d['primary_profile']['confidence'])
     printf '%s\n' "$output" | grep -Fqx 'react-vite-typescript 0.95'
 }
 
-@test "stack: next detects nextjs-web-app" {
+@test "stack: next is reported as a framework and never as the primary language" {
     printf '%s\n' '{"dependencies":{"next":"1"}}' > "$WORK/package.json"
     run_py "
 st.detect_stack(root)
 import json
-print(json.loads((root / '.autospec/state/stack-profile.json').read_text())['primary_profile']['id'])
+d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
+print(d['primary_profile']['id'], [p['id'] for p in d['frameworks']])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'nextjs-web-app'
+    printf '%s\n' "$output" | grep -Fqx "unknown ['nextjs-web-app']"
 }
 
 @test "stack: a python file alone detects python-cli-tool below the scaffold threshold" {
@@ -92,21 +97,21 @@ print(json.loads((root / '.autospec/state/stack-profile.json').read_text())['pri
 }
 
 @test "stack: stack_confidence detects on demand when no profile exists yet" {
-    printf '%s\n' '{"dependencies":{"next":"1"}}' > "$WORK/package.json"
+    printf '%s\n' '{"dependencies":{"react":"1","vite":"1","typescript":"1"}}' > "$WORK/package.json"
     run_py "
 c = st.stack_confidence(root)
 print(c, (root / '.autospec/state/stack-profile.json').is_file())
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx '0.9 True'
+    printf '%s\n' "$output" | grep -Fqx '0.95 True'
 }
 
 @test "stack: the markdown report names the primary profile" {
-    printf '%s\n' '{"dependencies":{"next":"1"}}' > "$WORK/package.json"
+    printf '%s\n' '{"dependencies":{"react":"1","vite":"1","typescript":"1"}}' > "$WORK/package.json"
     run_py "
 st.detect_stack(root)
 print((root / '.autospec/reports/stack-profile.md').read_text().strip().splitlines()[-1])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fq 'nextjs-web-app'
+    printf '%s\n' "$output" | grep -Fq 'react-vite-typescript'
 }
