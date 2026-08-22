@@ -49,6 +49,24 @@ teardown() {
     [ ! -s "$offenders" ]
 }
 
+@test "no rendered skill body assigns a positional parameter" {
+    # Issue #3101: the scan above covers templates/skill-blocks/ ONLY, so a
+    # positional assignment written directly into a trio body (SKILL.md,
+    # codex/prompt.md, opencode/agent.md) or into a reference a body pulls in
+    # was never seen. Those files are rendered by the same harness, so the same
+    # substitution applies to them.
+    scan="$TMP/scan-rendered-positionals.sh"
+    cat > "$scan" <<'EOS'
+cd "$1" || exit 2
+grep -rn '="\$[0-9]"' skills/*/SKILL.md skills/*/codex/*.md \
+    skills/*/opencode/*.md skills/*/references/*.md
+EOS
+    run bash "$scan" "$REPO_ROOT"
+    # grep exits 1 when nothing matched, and that is the only passing outcome:
+    # 0 means offenders, 2 means the scan itself broke.
+    [ "$status" -eq 1 ] || { echo "rendered-body positional assignments:"; echo "$output"; return 1; }
+}
+
 @test "expanded skill-block output carries no positional-parameter assignment" {
     synth="$TMP/synth.md"
     printf '<!-- autospec-block:startup-self-update SKILL_NAME=autospec-run -->\n' > "$synth"
