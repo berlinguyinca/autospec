@@ -1501,7 +1501,7 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         options.state.clone(),
         options.branch,
         options.pr,
-        options.step.unwrap_or(options.state),
+        options.step.unwrap_or_else(|| selected.record.step.clone()),
         options.paths,
         claimed_at,
         now,
@@ -1738,9 +1738,16 @@ fn active_claim_state(value: String) -> Result<String, CommandFailure> {
     if value == "claimed" {
         return Ok(value);
     }
+    let remedy = if matches!(
+        value.as_str(),
+        "available" | "failed" | "merged" | "needs-human" | "released" | "retryable"
+    ) {
+        "complete the claim with `autospec claim release`"
+    } else {
+        "record progress with --step"
+    };
     Err(CommandFailure::diagnostic(format!(
-        "--state must be claimed; record progress such as \"{value}\" with --step, \
-         and complete the claim with `autospec claim release`"
+        "--state must be claimed, not \"{value}\"; {remedy}"
     )))
 }
 

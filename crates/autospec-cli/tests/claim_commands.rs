@@ -2870,6 +2870,22 @@ fn claim_state_upsert_rejects_a_progress_step_as_a_claim_state() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--state must be claimed"), "{stderr}");
     assert!(stderr.contains("--step"), "{stderr}");
+
+    // A terminal state is a different mistake and earns a different remedy.
+    let terminal = autospec()
+        .args([
+            "claim", "state", "upsert", "--issue", "42", "--repo", "testorg/testrepo",
+            "--worker-id", "worker-a", "--branch", "feat/test", "--claim-id", "claim-a",
+            "--state", "merged",
+        ])
+        .current_dir(&repo)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .output()
+        .expect("autospec claim state upsert starts");
+    assert!(!terminal.status.success());
+    let terminal_stderr = String::from_utf8_lossy(&terminal.stderr);
+    assert!(terminal_stderr.contains("claim release"), "{terminal_stderr}");
     assert_eq!(claim_ref_oid(&repo, 42), original_oid);
 }
 
@@ -3035,12 +3051,61 @@ fn the_phase4_claim_sequence_leaves_the_claim_releasable() {
     assert!(claim_ref_message(&repo, 42).contains("\"state\":\"merged\""));
 }
 
+#[test]
+fn an_upsert_without_a_step_keeps_the_predecessor_step() {
+    let fixture = temp_dir("autospec-claim-upsert-step-carry");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "worktree_ready",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+
+    let output = autospec()
+        .args([
+            "claim", "state", "upsert", "--issue", "42", "--repo", "testorg/testrepo",
+            "--worker-id", "worker-a", "--claim-id", "claim-a", "--branch", "feat/test",
+            "--state", "claimed",
+        ])
+        .current_dir(&repo)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .output()
+        .expect("autospec claim state upsert starts");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Defaulting step to state would record "claimed", which the watchdog reads
+    // as a freshly acquired claim and reclaims on the shorter timeout.
+    assert_eq!(claim_run_state(&output.stdout).step, "worktree_ready");
+}
+
 /// The Phase 4 prompt once told every implementer to write the `pr_created`
 /// step into `--state`. That is not a claim state, and it silently disabled
-/// every later ownership operation on the claim. Guard the whole prompt and
-/// script surface so no caller reintroduces a step name as a state.
+/// every later ownership operation on the claim. Guard the whole shell and
+/// prompt surface so no caller reintroduces it.
+///
+/// Matching is on `upsert` plus `--issue` over continuation-joined text, not on
+/// the literal `claim state upsert`: the two callers that actually broke were a
+/// backslash-continued invocation and a `claim_state upsert` wrapper, and a
+/// narrower matcher reported success while both were red.
 #[test]
-fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
+fn no_shell_caller_upserts_anything_but_a_claimed_state() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
@@ -3068,27 +3133,32 @@ fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
     for directory in ["skills", "scripts", "tests"] {
         collect(&root.join(directory), &mut files);
     }
-    assert!(!files.is_empty(), "no prompt or script surface to scan");
+    assert!(!files.is_empty(), "no shell or prompt surface to scan");
 
     let mut inspected = 0usize;
     for path in files {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        for line in text.lines() {
-            if !line.contains("claim state upsert") {
+        for statement in text.replace("\\\n", " ").lines() {
+            // `--issue` separates an invocation from prose naming the command.
+            if !statement.contains("upsert") || !statement.contains("--issue") {
                 continue;
             }
-            let Some(rest) = line.split("--state ").nth(1) else {
-                continue;
-            };
-            let state = rest.split_whitespace().next().unwrap_or_default();
             inspected += 1;
+            let state = statement.split("--state ").nth(1).map(|rest| {
+                rest.split_whitespace().next().unwrap_or_default()
+            });
+            let Some(state) = state else {
+                panic!("{}: upsert invocation has no --state", path.display());
+            };
+            // `claimed` is the only legal value, so a variable here is a way to
+            // smuggle a step name past this guard rather than a real need.
             assert!(
                 state == "claimed",
-                "{}: `claim state upsert --state {state}` cannot survive its own \
-                 upsert; record progress with --step and complete the claim with \
-                 `autospec claim release`",
+                "{}: `upsert --state {state}` cannot survive its own upsert; \
+                 pass the literal `claimed`, record progress with --step, and \
+                 complete the claim with `autospec claim release`",
                 path.display()
             );
         }

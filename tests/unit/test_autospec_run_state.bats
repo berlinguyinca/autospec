@@ -132,13 +132,13 @@ run_state() {
 
 @test "repeated upsert keeps 1 marked state comment" {
     run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed >/dev/null
-    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready --step worktree_ready >/dev/null
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step worktree_ready >/dev/null
 
     run jq '[.[].body | select(contains("autospec-run-state:begin"))] | length' "$COMMENTS"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
     run run_state read --issue 42 --repo testorg/testrepo
-    [[ "$output" == *'"state":"worktree_ready"'* ]]
+    [[ "$output" == *'"step":"worktree_ready"'* ]]
 }
 
 @test "invalid schema 0 is replaced" {
@@ -185,7 +185,7 @@ JSON
 ]
 JSON
 
-    run run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+    run run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step worktree_ready
 
     [ "$status" -eq 0 ]
     run jq '[.[].body | select(contains("autospec-run-state:begin"))] | length' "$COMMENTS"
@@ -200,12 +200,12 @@ JSON
     run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed >/dev/null
     export AUTOSPEC_TEST_FAIL_PATCH_ONCE=1
 
-    run run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+    run run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step worktree_ready
 
     [ "$status" -eq 0 ]
     [ -f "$AUTOSPEC_TEST_PATCH_FAIL_MARKER" ]
     run run_state read --issue 42 --repo testorg/testrepo
-    [[ "$output" == *'"state":"worktree_ready"'* ]]
+    [[ "$output" == *'"step":"worktree_ready"'* ]]
 }
 
 @test "phase4 pr creation marks heartbeat and run-state with the PR number" {
@@ -240,7 +240,9 @@ JSON
     run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step pr_created --branch feat/test --pr "$pr_number" >/dev/null
 
     state="$(run_state read --issue 42 --repo testorg/testrepo)"
-    [ "$(printf '%s' "$state" | jq -r '.state')" = "pr_created" ]
+    # pr_created is the step; the claim stays claimed until it is released.
+    [ "$(printf '%s' "$state" | jq -r '.step')" = "pr_created" ]
+    [ "$(printf '%s' "$state" | jq -r '.state')" = "claimed" ]
     [ "$(printf '%s' "$state" | jq -r '.pr')" = "$pr_number" ]
 
     heartbeat_file="$heartbeat_dir/testorg__testrepo/42.json"
