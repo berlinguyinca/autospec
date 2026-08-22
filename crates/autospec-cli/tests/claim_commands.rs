@@ -917,7 +917,7 @@ fn claim_state_upsert_appends_to_the_authoritative_parent_without_deleting_histo
             "--branch",
             "feat/test",
             "--state",
-            "worktree_ready",
+            "claimed",
             "--step",
             "worktree_ready",
             "--paths",
@@ -999,6 +999,8 @@ fn claim_state_upsert_requires_expected_claim_id() {
             "--branch",
             "feat/test",
             "--state",
+            "claimed",
+            "--step",
             "implementing",
         ])
         .current_dir(&repo)
@@ -1056,6 +1058,8 @@ fn stale_claim_generation_cannot_upsert_successor_state() {
             "--claim-id",
             "claim-a",
             "--state",
+            "claimed",
+            "--step",
             "blocked",
         ])
         .current_dir(&repo)
@@ -1124,6 +1128,8 @@ fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
             "--branch",
             "feat/test",
             "--state",
+            "claimed",
+            "--step",
             "worktree_ready",
         ])
         .env(
@@ -2807,3 +2813,293 @@ fn claim_option_parsers_reject_duplicates_even_when_the_value_is_empty_or_defaul
 // Split out of this file, which is past the size ratchet: see the module for what it owns.
 #[path = "claim_commands/retirement.rs"]
 mod retirement;
+
+#[test]
+fn claim_state_upsert_rejects_a_progress_step_as_a_claim_state() {
+    let fixture = temp_dir("autospec-claim-upsert-progress-state");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    let original_oid = claim_ref_oid(&repo, 42);
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--state",
+            "pr_created",
+            "--step",
+            "pr_created",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .output()
+        .expect("autospec claim state upsert starts");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--state must be one of"), "{stderr}");
+    assert!(stderr.contains("--step"), "{stderr}");
+    assert_eq!(claim_ref_oid(&repo, 42), original_oid);
+}
+
+#[test]
+fn claim_state_upsert_reports_an_inactive_claim_instead_of_blaming_identity() {
+    let fixture = temp_dir("autospec-claim-upsert-inactive-state");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "pr_created",
+            "feat/test",
+            "",
+            "pr_created",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--state",
+            "claimed",
+            "--step",
+            "review",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .output()
+        .expect("autospec claim state upsert starts");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pr_created"), "{stderr}");
+    assert!(
+        !stderr.contains("worker, branch, or claim ID"),
+        "an inactive claim must not be reported as a stolen one: {stderr}"
+    );
+}
+
+#[test]
+fn the_phase4_claim_sequence_leaves_the_claim_releasable() {
+    let fixture = temp_dir("autospec-claim-phase4-sequence");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:102,updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then exit 0; fi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nexit 17\n",
+    );
+    std::fs::write(&comments, "[]").expect("comments fixture");
+
+    let claim_env = |command: &mut std::process::Command| -> std::process::Output {
+        command
+            .current_dir(&repo)
+            .env(
+                "AUTOSPEC_CLAIM_GIT_REMOTE",
+                fixture.join("claim-remote.git"),
+            )
+            .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+            .env("PATH", path_with(&bin))
+            .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+            .env("AUTOSPEC_CLAIM_LOG", &log)
+            .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+            .output()
+            .expect("autospec claim command starts")
+    };
+
+    // Phase 4 records progress twice, then completes the claim. Every step after
+    // the first used to fail once a step name had been written into `state`.
+    for step in ["worktree_ready", "pr_created"] {
+        let upsert = claim_env(autospec().args([
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--claim-id",
+            "claim-a",
+            "--branch",
+            "feat/test",
+            "--state",
+            "claimed",
+            "--step",
+            step,
+        ]));
+        assert!(
+            upsert.status.success(),
+            "upsert {step}: {}",
+            String::from_utf8_lossy(&upsert.stderr)
+        );
+    }
+
+    let release = claim_env(autospec().args([
+        "claim",
+        "release",
+        "--issue",
+        "42",
+        "--repo",
+        "testorg/testrepo",
+        "--worker-id",
+        "worker-a",
+        "--claim-id",
+        "claim-a",
+        "--branch",
+        "feat/test",
+        "--state",
+        "merged",
+        "--pr",
+        "77",
+    ]));
+    assert!(
+        release.status.success(),
+        "release: {}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+    assert!(claim_ref_message(&repo, 42).contains("\"state\":\"merged\""));
+}
+
+/// The Phase 4 prompt once told every implementer to write the `pr_created`
+/// step into `--state`. That is not a claim state, and it silently disabled
+/// every later ownership operation on the claim. Guard the whole prompt and
+/// script surface so no caller reintroduces a step name as a state.
+#[test]
+fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
+    const RECOGNIZED: [&str; 7] = [
+        "available",
+        "claimed",
+        "failed",
+        "merged",
+        "needs-human",
+        "released",
+        "retryable",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("repository root above crates/autospec-cli")
+        .to_path_buf();
+
+    fn collect(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, found);
+            } else if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("md") | Some("sh")
+            ) {
+                found.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for directory in ["skills", "scripts"] {
+        collect(&root.join(directory), &mut files);
+    }
+    assert!(!files.is_empty(), "no prompt or script surface to scan");
+
+    let mut inspected = 0usize;
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            if !line.contains("claim state upsert") {
+                continue;
+            }
+            let Some(rest) = line.split("--state ").nth(1) else {
+                continue;
+            };
+            let state = rest.split_whitespace().next().unwrap_or_default();
+            inspected += 1;
+            assert!(
+                RECOGNIZED.contains(&state),
+                "{}: `claim state upsert --state {state}` is not a claim state; \
+                 record progress with --step",
+                path.display()
+            );
+        }
+    }
+    assert!(inspected > 0, "the upsert caller surface went unscanned");
+}
