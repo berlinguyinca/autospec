@@ -37,8 +37,10 @@ SOURCE_SUFFIXES = frozenset({
 })
 
 # Which suffixes a language profile is actually written in, for line share.
+_WEB_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte")
 LANGUAGE_SUFFIXES = {
-    "react-vite-typescript": (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"),
+    "react-vite-typescript": _WEB_SUFFIXES,
+    "nextjs-web-app": _WEB_SUFFIXES,
     "python-cli-tool": (".py",),
 }
 MIN_LINE_SHARE = 0.5
@@ -118,8 +120,13 @@ def _profile(pid: str, confidence: float, evidence: list[str], recipes: list[str
 def _detect_profiles(root: Path) -> dict:
     """{"languages": [...], "frameworks": [...]}; only a language may be primary.
 
-    playwright and nextjs-web-app name a framework, not the language a repo is
-    written in, so they are reported but can never set primary_profile.
+    playwright names a test framework, not the language a repo is written in, so
+    it is reported but can never set primary_profile. nextjs-web-app and
+    react-vite-typescript stay language-tier: they are the only profiles carrying
+    TypeScript/JavaScript language evidence, and the runtime adapter/generator
+    pipeline resolves its adapter from primary_profile. Demoting them before the
+    follow-up marker-table issue lands a TS/JS language marker would leave every
+    such repo at unknown @ 0.1.
     """
     pkg = _package_text(root)
     entries = list(_walk(root))
@@ -131,8 +138,8 @@ def _detect_profiles(root: Path) -> dict:
     if "fastapi" in pkg or (root / "pyproject.toml").exists() or any(f.endswith(".py") for f in markers):
         languages.append(_profile("python-cli-tool", 0.65, ["python files or pyproject"], ["metadata-drift-test"]))
     if "next" in pkg:
-        frameworks.append(_profile("nextjs-web-app", 0.9, ["package.json: next"],
-                                   ["documentation-route-scaffold", "settings-page-scaffold"]))
+        languages.append(_profile("nextjs-web-app", 0.9, ["package.json: next"],
+                                  ["documentation-route-scaffold", "settings-page-scaffold"]))
     if "@playwright/test" in pkg or any("playwright.config" in f for f in markers):
         frameworks.append(_profile("playwright", 0.9, ["Playwright dependency/config"],
                                    ["playwright-viewport-matrix", "accessibility-smoke"]))
