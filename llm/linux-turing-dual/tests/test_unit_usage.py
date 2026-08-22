@@ -1,0 +1,180 @@
+"""Exact token accounting, against RESPONSES CAPTURED FROM THE RUNNING NODE.
+
+The fixtures are real bytes, not hand-written. A fixture built from the parser's
+own assumptions cannot catch a bug in those assumptions -- which is how a
+transcript-slug bug once shipped green for months in this repo.
+
+Known values in the fixtures: prompt=13, completion=12 tokens.
+"""
+import importlib.util
+import json
+import pathlib
+import sys
+
+import pytest
+
+from nodescripts import load_script
+
+HERE = pathlib.Path(__file__).resolve().parent
+SCRIPTS = HERE.parent / "scripts"
+FIX = HERE / "fixtures"
+
+
+
+
+usage = load_script("usage")
+
+
+def _stream(name):
+    acc = usage.StreamAccountant()
+    acc.feed((FIX / name).read_bytes())
+    return acc.result()
+
+
+def test_streaming_without_stream_options_still_yields_exact_counts():
+    """The decisive property: llama.cpp emits `timings` unconditionally, so the
+    proxy never has to rewrite a client's request body to add stream_options."""
+    u = _stream("stream_timings_only.sse")
+    assert u.prompt_tokens == 13
+    assert u.completion_tokens == 12
+    assert u.truncated is False
+    assert u.prompt_ms and u.prompt_ms > 0
+    assert u.predicted_ms and u.predicted_ms > 0
+
+
+def test_streaming_with_usage_prefers_the_usage_object():
+    u = _stream("stream_with_usage.sse")
+    assert u.prompt_tokens == 13
+    assert u.completion_tokens == 12
+    assert u.cached_tokens == 0        # present and zero -- not None
+    assert u.truncated is False
+
+
+def test_non_streaming_reads_usage_and_cached_tokens():
+    body = json.loads((FIX / "nonstream.json").read_text())
+    u = usage.from_json_body(body)
+    assert u.prompt_tokens == 13
+    assert u.completion_tokens == 12
+    assert u.cached_tokens == 9         # a real prefix-cache hit
+    assert u.truncated is False
+
+
+def test_a_truncated_stream_is_marked_unknown_and_never_zero():
+    """A client that disconnects mid-stream never sends the terminal chunk, so
+    the count is genuinely unknown. Reporting zero would silently under-bill;
+    estimating from byte counts would invent a measurement."""
+    u = _stream("stream_truncated.sse")
+    assert u.truncated is True
+    assert u.prompt_tokens is None
+    assert u.completion_tokens is None
+
+
+@pytest.mark.parametrize("size", [1, 3, 17, 64, 500, 4096])
+def test_chunk_boundaries_do_not_change_the_result(size):
+    """Network reads split wherever they like, including mid-JSON and mid-UTF-8.
+    The result must not depend on where."""
+    raw = (FIX / "stream_with_usage.sse").read_bytes()
+    acc = usage.StreamAccountant()
+    for i in range(0, len(raw), size):
+        acc.feed(raw[i:i + size])
+    u = acc.result()
+    assert (u.prompt_tokens, u.completion_tokens) == (13, 12)
+
+
+def test_the_accountant_does_not_retain_the_whole_stream():
+    """A 100k-token exchange must not be accumulated in memory just to read its
+    last chunk."""
+    acc = usage.StreamAccountant()
+    blob = b"data: " + json.dumps({"choices": [{"delta": {"content": "x" * 900}}]}).encode() + b"\n\n"
+    for _ in range(300):
+        acc.feed(blob)
+    assert acc.buffered_bytes() <= usage.MAX_TAIL_BYTES
+
+
+def test_an_empty_response_yields_no_counts_and_is_not_marked_lost():
+    """`truncated` means "a stream's counts were lost", not "no counts". Nothing
+    arrived at all here, so there is nothing to have lost.
+
+    The honest trade-off, stated: a client that disconnects BEFORE the first
+    chunk is indistinguishable from a request that never involved tokens, so its
+    prefill goes unrecorded. Accepting that is better than the alternative, which
+    put a phantom "unknown" row on the scoreboard for every model listing.
+    """
+    u = usage.StreamAccountant().result()
+    assert u.truncated is False
+    assert u.prompt_tokens is None
+
+
+def test_a_body_with_no_usage_at_all_is_unknown():
+    u = usage.from_json_body({"choices": []})
+    assert u.truncated is True and u.prompt_tokens is None
+
+
+def test_garbage_does_not_raise():
+    acc = usage.StreamAccountant()
+    acc.feed(b"data: {not json\n\ndata: [DONE]\n\n")
+    u = acc.result()
+    assert u.truncated is True
+
+
+def test_the_model_is_read_from_the_response_not_the_request():
+    """So attribution never needs the request body, which at 100k tokens is
+    ~400 KB and must stream straight through."""
+    assert _stream("stream_timings_only.sse").model == "qwen3.5-9b"
+    assert _stream("stream_with_usage.sse").model == "qwen3.5-9b"
+    body = json.loads((FIX / "nonstream.json").read_text())
+    assert usage.from_json_body(body).model == "qwen3.5-9b"
+
+
+def test_a_truncated_stream_can_still_name_the_model():
+    """Even when counts are unknown, the row should say which model it was --
+    the mid-stream chunks carry it."""
+    acc = usage.StreamAccountant()
+    acc.feed((FIX / "stream_truncated.sse").read_bytes())
+    u = acc.result()
+    assert u.truncated is True
+    assert u.model == "qwen3.5-9b"
+
+
+def test_the_accountant_also_handles_a_PLAIN_JSON_body():
+    """The gateway pipes BOTH response kinds through StreamAccountant -- it does
+    not know in advance whether a request was streamed. A non-streaming response
+    is raw JSON with no `data:` framing, and parsing only SSE silently recorded
+    every non-streaming request as truncated with no counts at all."""
+    acc = usage.StreamAccountant()
+    acc.feed((FIX / "nonstream.json").read_bytes())
+    u = acc.result()
+    assert u.truncated is False
+    assert (u.prompt_tokens, u.completion_tokens, u.cached_tokens) == (13, 12, 9)
+    assert u.model == "qwen3.5-9b"
+
+
+def test_a_plain_json_body_split_across_reads_still_parses():
+    raw = (FIX / "nonstream.json").read_bytes()
+    acc = usage.StreamAccountant()
+    for i in range(0, len(raw), 7):
+        acc.feed(raw[i:i + 7])
+    assert acc.result().prompt_tokens == 13
+
+
+def test_a_response_with_no_stream_and_no_counts_is_not_truncated():
+    """A /v1/models listing is a COMPLETE response that involves no tokens.
+    Marking it truncated puts a phantom row on the usage scoreboard -- which is
+    exactly what it did: six model listings appeared as six requests with
+    "unknown" token counts."""
+    acc = usage.StreamAccountant()
+    acc.feed(json.dumps({"object": "list",
+                         "data": [{"id": "qwen3.5-9b"}]}).encode())
+    u = acc.result()
+    assert u.truncated is False
+    assert u.prompt_tokens is None      # still unknown, but not LOST
+
+
+def test_a_stream_cut_short_is_still_truncated():
+    """The distinction has to keep working in the direction that matters."""
+    u = _stream("stream_truncated.sse")
+    assert u.truncated is True
+
+
+def test_an_empty_response_is_not_truncated():
+    assert usage.StreamAccountant().result().truncated is False

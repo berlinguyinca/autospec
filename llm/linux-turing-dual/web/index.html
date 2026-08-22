@@ -1,0 +1,1656 @@
+<!-- The node dashboard.
+     Sidebar navigation rather than one long scroll: nine stacked sections read
+     as a wall, and the reader almost always wants exactly one of them. The
+     status block stays pinned so "is it alive" never costs a click.
+     Every request is a RELATIVE url -- origin-relative by construction, so the
+     page works under whatever name it was loaded as and bakes in no hostname. -->
+<meta charset="utf-8">
+<title>Qwen inference node</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{ --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672; --line:#e3e7ec;
+         --accent:#2f6feb; --ok:#1a7f4b; --warn:#b4530a; --side:#fbfcfd; }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad; --line:#242b33;
+           --accent:#6ea8fe; --ok:#4bd08b; --warn:#e8a049; --side:#12161b; }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* ---- shell ---- */
+  .shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100%}
+  .side{background:var(--side);border-right:1px solid var(--line);
+        display:flex;flex-direction:column;gap:2px;padding:18px 14px;
+        position:sticky;top:0;height:100vh;overflow-y:auto}
+  .main{padding:26px 30px 60px;min-width:0}
+
+  /* ---- sidebar identity + live status ---- */
+  .brand{font-weight:670;letter-spacing:-.01em;margin-bottom:14px}
+  .brand .sub{font-weight:400}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+        padding:10px 11px;margin-bottom:16px}
+  .statline{display:flex;align-items:center;gap:7px;font-weight:600}
+  .statnums{display:flex;gap:10px;margin-top:6px;font-variant-numeric:tabular-nums;
+            font-size:12px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.up{background:var(--ok)} .dot.down{background:var(--warn)}
+
+  /* ---- sidebar nav ---- */
+  nav{display:flex;flex-direction:column;gap:1px}
+  .nav{display:flex;align-items:center;justify-content:space-between;gap:8px;
+       font:inherit;font-size:13px;text-align:left;cursor:pointer;
+       background:none;border:0;border-radius:7px;padding:7px 10px;color:var(--muted)}
+  .nav:hover{background:var(--panel);color:var(--ink)}
+  .nav[aria-selected="true"]{background:var(--panel);color:var(--ink);font-weight:600;
+       box-shadow:inset 2px 0 0 var(--accent)}
+  .nav:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .pill{font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;
+        background:var(--line);color:var(--muted)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  .sidefoot{margin-top:auto;padding-top:14px;font-size:11px;color:var(--muted)}
+
+  /* ---- content ---- */
+  h1{font-size:20px;margin:0 0 3px;letter-spacing:-.01em}
+  .lede{color:var(--muted);margin:0 0 20px;max-width:66ch}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+     margin:26px 0 10px;font-weight:650}
+  h2:first-of-type{margin-top:0}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+  .v{font-size:27px;font-weight:660;margin-top:3px;font-variant-numeric:tabular-nums;
+     letter-spacing:-.02em}
+  .v.idle{color:var(--muted);font-weight:500}
+  .v .u{font-size:13px;font-weight:500;color:var(--muted);margin-left:3px}
+  .sub{color:var(--muted);font-size:12px}
+  .note{color:var(--muted);font-size:12px;margin-top:9px;max-width:74ch}
+  .bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:9px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;
+         transition:width .35s}
+  .bar>i.over{background:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);font-size:13px}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+     font-weight:650}
+  tr:last-child td{border-bottom:0}
+  td.num,th.num{text-align:right}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;
+      padding:12px 13px;overflow-x:auto;font-size:12.5px;margin:0}
+  .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;
+         border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .badge.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+  .badge.u{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+  .badge.v{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .seg{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:11px}
+  .tab{font:inherit;font-size:12px;padding:5px 11px;border:1px solid var(--line);
+       border-radius:99px;background:var(--panel);color:var(--muted);cursor:pointer}
+  .tab:hover{color:var(--ink)}
+  .tab.sel{border-color:var(--accent);color:var(--accent);font-weight:600}
+  .tab[disabled]{opacity:.45;cursor:not-allowed}
+  .warnbox{background:var(--panel);border:1px solid var(--line);
+           border-left:3px solid var(--warn);border-radius:8px;padding:12px 14px;margin:12px 0}
+  .banner{background:var(--panel);border:1px solid var(--line);
+          border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;
+          margin-bottom:20px}
+  .hide{display:none}
+  input,select{font:inherit;font-size:12px;padding:5px 9px;border:1px solid var(--line);
+               border-radius:7px;background:var(--panel);color:var(--ink)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:13px}
+  textarea{font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);
+    border-radius:7px;background:var(--card);color:var(--fg);flex:1;min-width:16ch;resize:vertical}
+  .prob{border:1px solid var(--line);border-left-width:3px;border-radius:8px;
+    padding:9px 11px;margin-top:9px;background:var(--card);font-size:13px}
+  .prob.down{border-left-color:#e5534b}
+  .prob.degraded{border-left-color:#d29922}
+  .prob.warning{border-left-color:#8b949e}
+  .prob .where{font-size:11px;color:var(--muted);display:block;margin-bottom:3px}
+  .chatlog{margin-top:13px;display:flex;flex-direction:column;gap:9px;
+    max-height:52vh;overflow-y:auto;padding-right:4px}
+  .turn{border:1px solid var(--line);border-radius:9px;padding:9px 11px;
+    background:var(--card);white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+  .turn.me{background:color-mix(in srgb,var(--accent) 8%,var(--card));margin-left:8%}
+  .turn .who{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+  .scroll{overflow-x:auto}
+
+  @media (max-width:880px){
+    .shell{grid-template-columns:1fr}
+    .side{position:static;height:auto;flex-direction:column;border-right:0;
+          border-bottom:1px solid var(--line)}
+    nav{flex-direction:row;overflow-x:auto;gap:4px}
+    .nav{white-space:nowrap}
+    .nav[aria-selected="true"]{box-shadow:inset 0 -2px 0 var(--accent)}
+    .sidefoot{margin-top:10px}
+    .main{padding:20px 18px 48px}
+  }
+</style>
+
+<div class="shell">
+<aside class="side">
+  <div class="brand">Qwen node<div class="sub">dual Turing</div></div>
+
+  <div class="stat">
+    <div class="statline"><span class="dot" id="dot"></span><span id="state">connecting…</span></div>
+    <div class="statnums">
+      <span><span id="stps">–</span> tok/s</span>
+      <span><span id="skv">–</span>% KV</span>
+      <span id="sseats">– seats</span>
+    </div>
+  </div>
+
+  <nav id="nav" role="tablist" aria-label="Sections"></nav>
+  <div class="sidefoot" id="stamp">…</div>
+</aside>
+
+<main class="main">
+  <div class="banner hide" id="err"></div>
+
+  <!-- ===================== OVERVIEW ===================== -->
+  <section id="s-overview" role="tabpanel" aria-labelledby="n-overview">
+    <h1>Overview</h1>
+    <p class="lede">What the node is doing right now. One model is resident at a
+      time; asking for a different id costs a reload.</p>
+
+    <h2>Queue</h2>
+    <div class="grid">
+      <div class="card"><div class="k">In flight</div>
+        <div id="qidle" hidden>
+          <div class="v idle">no model resident</div>
+          <div class="sub" style="margin-top:7px">Nothing is queued because nothing
+            is loaded. The first request pays the reload.</div></div>
+        <div id="qlive">
+          <div class="v"><span id="qproc">–</span><span class="u">of <span id="qslots">–</span> seats</span></div>
+          <div class="bar"><i id="qbar" style="width:0"></i></div>
+          <div class="sub" style="margin-top:7px"><span id="qpct">–</span>% full ·
+            <span id="qqueued">–</span> waiting</div>
+          <div class="sub" id="qover" style="color:var(--warn)"></div></div></div>
+      <div class="card"><div class="k">Estimated wait</div>
+        <div class="v" id="qwait">–</div>
+        <div class="sub" id="qwaitnote"></div></div>
+      <div class="card"><div class="k">Typical request</div>
+        <div class="v" id="qmean">–</div>
+        <div class="sub" id="qsamples"></div></div>
+    </div>
+
+    <div id="problems"></div>
+
+    <h2 id="gpuh">GPUs</h2>
+    <div class="grid" id="gpus"></div>
+
+    <h2>Served since start</h2>
+    <div class="grid">
+      <div class="card"><div class="k">Prompt tokens</div>
+        <div class="v" id="pt">–</div></div>
+      <div class="card"><div class="k">Decode rate</div>
+        <div class="v"><span id="tps">–</span><span class="u">tok/s</span></div></div>
+      <div class="card"><div class="k">KV pool used</div>
+        <div class="v"><span id="kv">–</span><span class="u">%</span></div>
+        <div class="bar"><i id="kvbar" style="width:0"></i></div></div>
+    </div>
+  </section>
+
+  <!-- ===================== MODELS ===================== -->
+  <section id="s-models" role="tabpanel" aria-labelledby="n-models" hidden>
+    <h1>Models</h1>
+    <p class="lede">Everything the fleet serves, and which server holds it. Ask
+      <code>/v1</code> for any id here and the balancer picks a server that
+      actually has it — a context tier is a <em>contract</em>, not a limit: a
+      <code>-100k</code> id means run solo, and a 100k session beside a 40k one
+      over-subscribes the shared pool so both die.</p>
+    <div class="card scroll">
+      <table><thead><tr>
+        <th>Served id</th><th>Served by</th><th>Kind</th><th class="num">Context</th>
+        <th class="num">Seats</th><th>State</th><th>Aliases</th>
+      </tr></thead><tbody id="catbody"></tbody></table>
+      <div class="note">Context and seats are this node's own presets. A model
+        only another server holds shows its host and that server's state — the
+        node cannot report a context tier it does not configure.</div>
+    </div>
+  </section>
+
+  <!-- ===================== SERVERS ===================== -->
+  <section id="s-servers" role="tabpanel" aria-labelledby="n-servers" hidden>
+    <h1>Servers</h1>
+    <p class="lede">Every machine reachable through this endpoint, and which
+      models live on which GPUs. The plain <code>/v1</code> is the balancer, so
+      the default needs no configuration; each server also has its own base URL
+      for when you want to insist.</p>
+    <div id="servers"></div>
+  </section>
+
+  <!-- ===================== CONNECT ===================== -->
+  <section id="s-connect" role="tabpanel" aria-labelledby="n-connect" hidden>
+    <h1>Connect</h1>
+    <p class="lede">An OpenAI-compatible endpoint. Pick a model, copy the snippet,
+      and use a key from the Keys section. The base URL below is the balancer —
+      it routes you to a machine that actually has the model you named, and the
+      reply says which one.</p>
+
+    <div class="warnbox"><strong>Allow token headroom.</strong> These models emit
+      reasoning before content, so <code>max_tokens: 16</code> returns
+      <em>empty</em> content — all of it went to reasoning. Either allow 512+ or
+      send <code>"chat_template_kwargs": {"enable_thinking": false}</code>.</div>
+
+    <div class="card">
+      <div class="seg" id="tabs"></div>
+      <div class="row" style="margin:0 0 11px">
+        <span class="sub">Model</span> <select id="msel"></select>
+        <span class="sub" id="mctx"></span>
+      </div>
+      <pre id="snippet">…</pre>
+      <div class="note"><strong>Where does it run?</strong> Every reply carries
+        <code>X-Routed-To</code>, and consecutive requests stay on the same
+        machine while its cache is warm — worth roughly tenfold on prompt
+        processing. To pin one box instead, swap <code>/v1</code> for
+        <code>/u/&lt;server&gt;/v1</code> from the Servers section.</div>
+      <div class="note">Or generate the OpenCode config from the server, so client
+        and server cannot drift:
+        <code>configure-opencode.py --presets /opt/qwen-turing/etc/router-presets.ini</code></div>
+    </div>
+  </section>
+
+  <!-- ===================== KEYS ===================== -->
+  <!-- ===================== CHAT ====================== -->
+  <section id="s-chat" role="tabpanel" aria-labelledby="n-chat" hidden>
+    <h1>Chat</h1>
+    <p class="lede">Try the models without minting a key. Signed in, this spends
+      the node the same way an API request does — balanced across the fleet,
+      counted against your name on the leaderboard.</p>
+    <div id="chatgate"></div>
+    <div id="chatui" class="hide">
+      <div class="row">
+        <select id="chatmodel" aria-label="Model"></select>
+        <button class="tab" id="chatclear" type="button">New conversation</button>
+        <span class="sub" id="chatwhere"></span>
+      </div>
+      <div id="chatlog" class="chatlog" aria-live="polite" aria-atomic="false"></div>
+      <form id="chatform" class="row" autocomplete="off">
+        <textarea id="chatin" rows="2" placeholder="Ask something. Enter sends, Shift+Enter for a new line."
+                  aria-label="Message"></textarea>
+        <button class="tab sel" id="chatsend" type="submit">Send</button>
+        <button class="tab hide" id="chatstop" type="button">Stop</button>
+      </form>
+      <div class="note" id="chatnote"></div>
+    </div>
+  </section>
+
+  <section id="s-keys" role="tabpanel" aria-labelledby="n-keys" hidden>
+    <h1>Keys</h1>
+    <p class="lede">Sign in to create keys that are yours: revocable on their own,
+      with every request attributed to you. Machines carry keys; people sign in.</p>
+    <div id="acct"></div>
+    <div id="keysbox"></div>
+  </section>
+
+  <!-- ===================== USAGE ===================== -->
+  <section id="s-usage" role="tabpanel" aria-labelledby="n-usage" hidden>
+    <h1>Usage</h1>
+    <p class="lede">Who is using the node, ranked by tokens. Counts are exact —
+      read from the model's own response rather than estimated — and cover
+      everyone, because a scoreboard showing only your own row would not be one.</p>
+    <div id="usagebox"></div>
+  </section>
+
+  <!-- ===================== HEALTH ===================== -->
+  <section id="s-health" role="tabpanel" aria-labelledby="n-health" hidden>
+    <h1>Health</h1>
+    <p class="lede">Configuration problems the node can see in its own logs.
+      Everything that is fine is hidden by default.</p>
+    <div id="health"></div>
+  </section>
+</main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const n = v => (v === null || v === undefined) ? '–' : v.toLocaleString();
+const KEYNAME = 'qt-api-key';
+// EVERY response body must be read, even one we do not want.
+//
+// An unread fetch body leaves the stream open -- the browser has not finished
+// with the response, so it holds the connection (an HTTP/2 stream) indefinitely.
+// tick() used to return early on 401 without reading, once every two seconds,
+// and the page appeared to hang: nine requests were "pending" after twenty
+// seconds and nothing ever updated again. Measured, not guessed: five unread
+// bodies stayed pending forever, and reading them freed all five at once.
+//
+// This is the same rule the gateway learned on the server side, where a reply
+// that did not drain the request body corrupted the NEXT request. Both ends of
+// an HTTP conversation owe the other a fully consumed body.
+async function req(url, opts){
+  const r = await fetch(url, opts);
+  let text = '';
+  try{ text = await r.text(); }catch(e){ /* aborted: nothing left to drain */ }
+  let data = null;
+  if(text){ try{ data = JSON.parse(text); }catch(e){ /* not JSON; keep text */ } }
+  return {ok: r.ok, status: r.status, data: data || {}, text: text};
+}
+
+const getKey = () => localStorage.getItem(KEYNAME) || '';
+const authHeaders = () => { const k = getKey(); return k ? {'Authorization':'Bearer '+k} : {}; };
+function askKey(msg){
+  const k = prompt((msg ? msg+'\n\n' : '') + 'API key for this node:', getKey());
+  if(k !== null) localStorage.setItem(KEYNAME, k.trim());
+  return k !== null;
+}
+
+// ---------- sidebar navigation ----------
+// Hash-routed, so a link can point at a section and a refresh keeps you there.
+// Only the visible section fetches its own data; /api/stats feeds four sections
+// at once, so it is polled regardless.
+const SECTIONS = [
+  ['overview', 'Overview'],
+  ['models',   'Models'],
+  ['servers',  'Servers'],
+  ['connect',  'Connect'],
+  ['chat',     'Chat'],
+  ['keys',     'Keys'],
+  ['usage',    'Usage'],
+  ['health',   'Health'],
+];
+let SECTION = 'overview';
+
+$('nav').innerHTML = SECTIONS.map(([id,label]) =>
+  `<button class="nav" id="n-${id}" role="tab" data-s="${id}" aria-selected="false"
+           aria-controls="s-${id}">${label}<span class="pill hide" id="p-${id}"></span></button>`
+).join('');
+
+// The node is PUBLIC to read: what it serves, how busy it is, how fast it is,
+// and who is on the leaderboard. Signing in buys exactly two things -- creating
+// keys, and the chat panel -- so those are the only sections that can be gated.
+//
+// This page used to hide EVERY section on a 401, which meant a visitor with no
+// reason to sign in saw an empty shell. Read access is now the default and the
+// lockout is gone; what remains is a hint on the two tabs that need a person.
+const NEEDS_SIGNIN = {keys: 1, chat: 1};
+let SIGNED_IN = false;
+function setSignedIn(ok){
+  SIGNED_IN = ok;
+  SECTIONS.forEach(([id]) => {
+    const b = $('n-' + id);
+    if(b) b.style.opacity = (!ok && NEEDS_SIGNIN[id]) ? '.55' : '';
+  });
+  if(SECTION === 'chat') renderChat();
+}
+
+function show(id, push){
+  if(!SECTIONS.some(s => s[0] === id)) id = 'overview';
+  SECTION = id;
+  SECTIONS.forEach(([s]) => {
+    $('s-'+s).hidden = (s !== id);
+    $('n-'+s).setAttribute('aria-selected', s === id ? 'true' : 'false');
+  });
+  if(push && location.hash !== '#'+id) history.replaceState(null, '', '#'+id);
+  // Keys needs a SESSION (minting is a browser action). Usage needs only a
+  // credential, so it must not be gated behind the account panel -- doing that
+  // left an API-key viewer staring at an empty Usage tab.
+  if(id === 'chat') renderChat();
+  // The catalog is redrawn by the stats poll, but the fleet it joins against is
+  // fetched separately -- so opening this tab must fetch it and redraw at once,
+  // or the "Served by" column stays empty until the fleet happens to be loaded.
+  if(id === 'models') loadFleet().then(() => renderCatalog(CATALOG));
+  if(id === 'keys') loadAccount();
+  if(id === 'usage') loadUsage();
+  if(id === 'servers') loadServers();
+}
+$('nav').onclick = e => {
+  const b = e.target.closest('[data-s]'); if(b) show(b.dataset.s, true);
+};
+$('nav').onkeydown = e => {
+  const i = SECTIONS.findIndex(s => s[0] === SECTION);
+  let j = null;
+  if(e.key === 'ArrowDown' || e.key === 'ArrowRight') j = (i+1) % SECTIONS.length;
+  if(e.key === 'ArrowUp'   || e.key === 'ArrowLeft')  j = (i-1+SECTIONS.length) % SECTIONS.length;
+  if(j === null) return;
+  e.preventDefault(); show(SECTIONS[j][0], true); $('n-'+SECTIONS[j][0]).focus();
+};
+addEventListener('hashchange', () => show(location.hash.slice(1), false));
+
+function pill(id, text, warn){
+  const el = $('p-'+id);
+  if(!text){ el.classList.add('hide'); return; }
+  el.textContent = text; el.className = 'pill' + (warn ? ' warn' : '');
+}
+
+// The collector reports its window the way journalctl takes it ("-2h"). Printed
+// raw next to a count that reads "3 since -2h", which is not a sentence.
+function window_text(w){
+  if(!w) return '';
+  const m = String(w).trim().match(/^-(\d+)([a-z]+)$/);
+  return m ? 'in the last ' + m[1] + m[2] : String(w);
+}
+
+function secs(v){
+  if(v === null || v === undefined) return '—';
+  return v < 90 ? Math.round(v)+'s' : Math.round(v/60)+' min';
+}
+
+// ---------- queue ----------
+function renderQueue(q){
+  q = q || {};
+  const slots = q.slots || 0, out = (q.processing||0) + (q.queued||0);
+  // An idle node reports no seats, and "0 of 0 seats, -% full" reads as a fault.
+  // Say what is actually true: nothing is resident, so there is nothing to queue.
+  $('qidle').hidden = slots > 0;
+  $('qlive').hidden = slots === 0;
+  // No early return: the seat figures live inside the hidden block, so writing
+  // them is harmless -- and returning here would leave the wait and typical-request
+  // cards without their notes, which is less informative than before.
+  $('qproc').textContent = n(q.processing); $('qslots').textContent = n(slots);
+  $('qqueued').textContent = n(q.queued);
+  // Clamp the BAR, never the label: a queue at 300% must read as 300%.
+  const pct = slots ? Math.round(out/slots*100) : null;
+  $('qpct').textContent = pct === null ? '–' : pct;
+  $('qbar').style.width = pct === null ? '0' : Math.min(100,pct)+'%';
+  $('qbar').className = (pct !== null && pct > 100) ? 'over' : '';
+  $('qover').textContent = (pct !== null && pct > 100)
+    ? 'More requests than seats — the excess is queued, not rejected.' : '';
+  // null is "not measured yet" and must never render as 0.
+  const w = q.est_wait_seconds;
+  $('qwait').textContent = (w === null || w === undefined) ? '—' : secs(w);
+  $('qwaitnote').textContent = (w === null || w === undefined)
+    ? 'not enough completions observed yet'
+    : 'from ' + n(q.completions) + ' completions';
+  $('qmean').textContent = q.mean_service_seconds ? secs(q.mean_service_seconds) : '—';
+  $('qsamples').textContent = n(q.samples) + ' samples · ' + n(q.completions) + ' completions';
+}
+
+// ---------- config health ----------
+function renderHealth(h){
+  LAST_HEALTH = h;
+  if(!h){ $('health').innerHTML = '<div class="card"><div class="note">no data yet</div></div>'; return; }
+  // Each row carries whether it NEEDS ATTENTION. A health panel that lists
+  // everything trains you to skim it; one that lists only problems gets read.
+  const rows = [];
+  if(!h.journal_readable || h.events === null){
+    // "unavailable" must never look like "zero evictions" -- no evictions is
+    // exactly the good news someone would act on.
+    rows.push(['Model evictions','<span class="badge">event feed unavailable</span>',
+      'The dashboard cannot read the journal. Add SupplementaryGroups=systemd-journal to its unit.',
+      true]);
+  }else{
+    const ev = h.events;
+    rows.push(['Model evictions', n(ev.evictions.length) + ' <span class="sub">' + window_text(h.window) + '</span>',
+      ev.evictions.length
+        ? 'Clients are asking for different models against --models-max 1. Last: ' +
+          ev.evictions[ev.evictions.length-1].from + ' → ' +
+          ev.evictions[ev.evictions.length-1].to +
+          '. Pin clients to one id, or add a third card to raise --models-max.'
+        : 'No thrashing.',
+      ev.evictions.length > 0]);
+    // The window travels with the count. Without it, an empty list cannot be told
+    // apart from a window that simply rolled over -- and "config is clean" is
+    // exactly the conclusion someone would act on.
+    rows.push(['Options silently disabled',
+      (ev.disabled.length ? '<span class="badge u">' + ev.disabled.join(', ') + '</span>'
+                          : '<span class="badge on">none</span>') +
+      ' <span class="sub">' + window_text(h.window) + '</span>',
+      ev.disabled.length
+        ? 'The config asks for something this model cannot do; remove it rather than leave it looking effective.'
+        : 'No option was discarded in this window. Note that is a WINDOW, not all time: an option removed longer ago than the window will no longer appear.',
+      ev.disabled.length > 0]);
+  }
+  const c = h.cache || {};
+  const hr = c.hit_rate;
+  rows.push(['Prompt cache hit rate',
+    hr === null || hr === undefined ? '<span class="badge">not prompted yet</span>'
+      : (Math.round(hr*100) + '%'),
+    hr === null || hr === undefined ? 'No prompts on the current instance.'
+      : (hr < 0.2
+        ? 'Low. Repeated long prefixes are being re-processed — a warm slot is worth ~10×. Use a single-seat preset for iterative work.'
+        : 'Prefixes are being reused.'),
+    hr !== null && hr !== undefined && hr < 0.2]);
+  const bad = rows.filter(r => r[3]);
+  pill('health', bad.length ? String(bad.length) : '', true);
+  const shown = HEALTH_ALL ? rows : bad;
+  const table = shown.length
+    ? '<div class="card scroll"><table><thead><tr>' +
+      '<th>Signal</th><th>Value</th><th>What to change</th></tr></thead><tbody>' +
+      shown.map(r => '<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="sub">'+r[2]+'</td></tr>').join('') +
+      '</tbody></table></div>'
+    : '<div class="card"><span class="badge on">nothing to act on</span>' +
+      '<div class="note">All ' + rows.length + ' checks are clean. That is a statement ' +
+      'about the current window, not about all time.</div></div>';
+  $('health').innerHTML = table +
+    '<div class="row"><button class="tab" id="halltoggle">' +
+    (HEALTH_ALL ? 'Show only problems' : 'Show all ' + rows.length + ' checks') +
+    '</button></div>';
+  $('halltoggle').onclick = () => { HEALTH_ALL = !HEALTH_ALL; renderHealth(LAST_HEALTH); };
+}
+let HEALTH_ALL = false, LAST_HEALTH = null;
+
+// ---------- problems ----------
+// The node once reported itself healthy while it could not serve: both GPUs had
+// faulted, the runtime could not initialise CUDA, and six of seven models hung
+// every caller for 45 s. The page showed "online" and seven models, because the
+// only thing it asked was whether a process answered.
+//
+// So problems are drawn FIRST, above the numbers. A fault buried under a grid of
+// healthy-looking gauges is a fault nobody sees.
+const SEV_ORDER = {down: 0, degraded: 1, warning: 2};
+const SEV_WORD = {down: 'not working', degraded: 'degraded', warning: 'needs attention'};
+
+function problemRow(p){
+  const sev = SEV_WORD[p.severity] ? p.severity : 'warning';
+  return '<div class="prob ' + sev + '">' +
+    '<span class="where">' + esc(p.where || 'this node') + ' — ' +
+      esc(SEV_WORD[sev]) + '</span>' + esc(p.text) + '</div>';
+}
+
+function renderProblems(){
+  // Node problems come from the stats poll, fleet problems and per-server faults
+  // from /api/servers. Merged so the reader sees ONE list: two lists of problems
+  // side by side is how one of them stops being read.
+  const all = (LAST_PROBLEMS || []).concat(FLEET_PROBLEMS || []);
+  (FLEET || []).forEach(s => (s.faults || []).forEach(f => all.push(f)));
+  all.sort((a, b) => (SEV_ORDER[a.severity] ?? 3) - (SEV_ORDER[b.severity] ?? 3));
+
+  const box = $('problems');
+  if(!all.length){ box.innerHTML = ''; return; }
+  box.innerHTML = '<h2>Problems</h2>' + all.map(problemRow).join('');
+}
+
+// A badge for one server, for the fleet and Models panels.
+function faultBadge(s){
+  const sev = worstOf(s.faults);
+  if(!sev) return '';
+  return ' <span class="badge" title="' + esc((s.faults||[]).map(f=>f.text).join('; '))
+    + '" style="border-color:' + (sev === 'down' ? '#e5534b' : '#d29922') + '">'
+    + esc(SEV_WORD[sev]) + '</span>';
+}
+
+function worstOf(faults){
+  for(const level of ['down', 'degraded', 'warning'])
+    if((faults || []).some(f => f.severity === level)) return level;
+  return null;
+}
+
+// ---------- gpus ----------
+// Every card in the fleet, each saying which server it belongs to. This panel
+// used to draw only THIS node's cards, so a fleet member's GPU appeared nowhere
+// -- the machine was listed as a server, and the hardware doing the work was
+// invisible.
+//
+// A local card comes from this node's nvidia-smi. A remote card comes from the
+// agent's, reported over the control connection in the same shape, so both are
+// drawn by the code below rather than by two renderers that could drift.
+function gpuCard(g, where){
+  const used = g.mem_used_mib ?? 0, tot = g.mem_total_mib ?? 1;
+  const pct = Math.min(100, Math.round(used/tot*100));
+  return `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-weight:600">GPU ${g.index}</span>
+      <span class="sub">${g.util_pct ?? '–'}% util</span></div>
+    <div class="sub">${esc(g.name ?? '')}</div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="sub" style="margin-top:7px">${n(used)} / ${n(tot)} MiB
+      ${g.temp_c != null ? ' · '+g.temp_c+'°C' : ''}
+      ${g.power_w != null ? ' · '+g.power_w.toFixed(0)+' W' : ''}</div>
+    <div class="sub" style="margin-top:5px">${where}</div></div>`;
+}
+
+// A server whose agent reports no card telemetry: no nvidia-smi, a different
+// vendor, or an older agent. Its operator's written description is shown and
+// LABELLED as written, because a description beside measured cards would
+// otherwise read as another measurement.
+function declaredCard(s){
+  return `<div class="card">
+    <div style="font-weight:600">${esc(s.id)}</div>
+    <div class="sub" style="margin-top:5px">${esc(s.gpus)}</div>
+    <div class="sub" style="margin-top:7px">declared by its operator, not measured</div>
+    </div>`;
+}
+
+function serverBadge(id, state){
+  const cls = state === 'online' ? 'on' : '';
+  return '<span class="badge ' + cls + '">' + esc(id === 'local' ? 'this node' : id)
+    + '</span>';
+}
+
+function renderGpus(){
+  const out = [];
+  // This node first, and from the stats poll rather than from the fleet payload:
+  // its cards refresh every two seconds there, against fifteen for the fleet.
+  (LAST_GPUS || []).forEach(g => out.push(gpuCard(g, serverBadge('local', 'online'))));
+  (FLEET || []).forEach(s => {
+    if(s.id === 'local') return;
+    const badge = serverBadge(s.id, s.state);
+    const cards = s.cards || [];
+    if(cards.length) cards.forEach(g => out.push(gpuCard(g, badge)));
+    else if(s.gpus) out.push(declaredCard(s));
+  });
+  $('gpuh').hidden = out.length === 0;
+  $('gpus').innerHTML = out.join('');
+}
+
+// ---------- catalog + snippets ----------
+let CATALOG = [], TAB = 'curl', LAST_GPUS = [];
+// The fleet, shared by the Models and Servers panels. /api/servers is public and
+// carries each server's model list, so "who holds what" needs no new endpoint --
+// and this must be a shared cache rather than a second fetch, or the two panels
+// could disagree about the same fleet in the same second.
+let FLEET = [], FLEET_PROBLEMS = [], LAST_PROBLEMS = [];
+function kindBadge(k){
+  const cls = k === 'vision' ? 'v' : (k && k.indexOf('uncensored') === 0 ? 'u' : '');
+  return '<span class="badge '+cls+'">'+(k||'text')+'</span>';
+}
+
+async function loadFleet(){
+  const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
+  if(r.ok){
+    FLEET = r.data.servers || [];
+    FLEET_PROBLEMS = r.data.problems || [];
+  }
+  renderProblems();
+  return FLEET;
+}
+
+// KV seats per loaded model: what is admitted, and what is HOLDING for room.
+// A context tier here is a contract the gateway now enforces -- a session that
+// would over-subscribe a model's pool waits instead of killing every live one.
+// Shown because a request that is queued looks exactly like a request that is
+// slow, and the two call for different actions.
+function seatLine(o){
+  const pools = (o.admission || []).filter(p => p.used || p.waiting);
+  if(!pools.length) return '';
+  return pools.map(p => {
+    const pct = p.total ? Math.round(100 * p.used / p.total) : 0;
+    return '<div class="sub" style="margin-top:5px">' + esc(p.model) + ': ' +
+      n(p.used) + ' / ' + n(p.total) + ' KV tokens (' + pct + '%)' +
+      (p.waiting ? ' · <strong>' + p.waiting + ' holding</strong>' : '') +
+      (p.rejected ? ' · ' + p.rejected + ' too large' : '') + '</div>';
+  }).join('');
+}
+
+function serverLabel(s){
+  // The Models page's host badge says when its host is faulting: a model listed
+  // against a broken server is worse than no listing, because it reads as
+  // available.
+  // The node's own card is "this node" everywhere else on the page; keeping the
+  // raw id here would make the same machine read as two different servers.
+  const name = s.id === 'local' ? 'this node' : s.id;
+  const cls = s.state === 'online' ? 'on' : '';
+  const bad = worstOf(s.faults);
+  return '<span class="badge ' + (bad ? '' : cls) + '" title="'
+    + esc((s.faults || []).map(f => f.text).join('; ') || s.state || 'unknown')
+    + '" style="' + (bad === 'down' ? 'border-color:#e5534b' : '') + '">'
+    + esc(name) + (bad === 'down' ? ' ⚠' : '') + '</span>';
+}
+
+// Which servers serve this id. Aliases count: a preset's alias IS a served id,
+// and a remote reports whichever names its own runtime answers to.
+function hostsOf(id, aliases){
+  const names = [id].concat(aliases || []);
+  return FLEET.filter(s => (s.models || []).some(m => names.indexOf(m) >= 0));
+}
+
+function hostCell(id, aliases){
+  const hosts = hostsOf(id, aliases);
+  if(!hosts.length){
+    // Configured here but not currently served by anything -- which is the
+    // truthful answer for a preset that needs a reload, and would otherwise be
+    // an empty cell that reads like a rendering fault.
+    return '<span class="sub">not loaded anywhere</span>';
+  }
+  return hosts.map(serverLabel).join(' ');
+}
+
+function renderCatalog(cat){
+  CATALOG = cat || [];
+  const known = {};
+  CATALOG.forEach(m => { known[m.id] = 1; (m.aliases||[]).forEach(a => known[a] = 1); });
+
+  const rows = CATALOG.map(m => `<tr>
+      <td><code>${m.id}</code></td>
+      <td>${hostCell(m.id, m.aliases)}</td>
+      <td>${kindBadge(m.kind)}</td>
+      <td class="num">${m.context ? m.context.toLocaleString() : '—'}</td>
+      <td class="num">${m.slots ?? '—'}</td>
+      <td>${m.resident ? '<span class="badge on">resident</span>' : '<span class="badge">reload needed</span>'}</td>
+      <td class="sub">${(m.aliases||[]).join(', ') || '—'}</td>
+    </tr>`);
+
+  // Models no preset here describes, because another server holds them. Without
+  // these the page would list what this node can load and call it the fleet --
+  // and /v1 would serve an id the Models page never mentioned.
+  const remote = [];
+  FLEET.forEach(s => (s.models || []).forEach(id => {
+    if(!known[id] && remote.indexOf(id) < 0) remote.push(id);
+  }));
+  remote.sort().forEach(id => rows.push(`<tr>
+      <td><code>${esc(id)}</code></td>
+      <td>${hostCell(id, [])}</td>
+      <td>${kindBadge(null)}</td>
+      <td class="num sub">—</td>
+      <td class="num sub">—</td>
+      <td><span class="badge">elsewhere</span></td>
+      <td class="sub">—</td>
+    </tr>`));
+
+  $('catbody').innerHTML = rows.join('')
+    || '<tr><td colspan="7" class="sub">no models reported</td></tr>';
+
+  // The picker offers everything /v1 will accept, remote models included.
+  const ids = CATALOG.map(m => m.id).concat(remote);
+  const sel = $('msel'), prev = sel.value;
+  sel.innerHTML = ids.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+  if(prev && ids.indexOf(prev) >= 0) sel.value = prev;
+  renderSnippet();
+}
+function snippetFor(kind, id, ctx){
+  const o = location.origin;
+  const c = ctx ? ctx.toLocaleString() : 'unknown';
+  if(kind === 'curl') return `# ${id} — context ${c} tokens
+curl ${o}/v1/chat/completions \\
+  -H "Authorization: Bearer $QWEN_KEY" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"model":"${id}",
+       "messages":[{"role":"user","content":"Hello"}],
+       "max_tokens":512}'`;
+  if(kind === 'python') return `# ${id} — context ${c} tokens
+from openai import OpenAI
+client = OpenAI(base_url="${o}/v1", api_key="<your key>")
+r = client.chat.completions.create(
+    model="${id}",
+    messages=[{"role": "user", "content": "Hello"}],
+    max_tokens=512,                     # headroom: reasoning runs first
+)
+print(r.choices[0].message.content)`;
+  if(kind === 'node') return `// ${id} — context ${c} tokens
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "${o}/v1", apiKey: process.env.QWEN_KEY });
+const r = await client.chat.completions.create({
+  model: "${id}",
+  messages: [{ role: "user", content: "Hello" }],
+  max_tokens: 512,
+});
+console.log(r.choices[0].message.content);`;
+  return `// ~/.config/opencode/opencode.json   —  ${id}, context ${c} tokens
+{
+  "provider": {
+    "qwen-turing": {
+      "name": "Qwen (dual Turing node)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "${o}/v1", "apiKey": "<your key>" },
+      "models": {
+${CATALOG.map(m => '        "' + m.id + '": {}').join(',\n')}
+      }
+    }
+  }
+}`;
+}
+function renderSnippet(){
+  const id = $('msel').value || (CATALOG[0] && CATALOG[0].id) || 'qwen3.8-27b';
+  const m = CATALOG.find(x => x.id === id) || {};
+  $('snippet').textContent = snippetFor(TAB, id, m.context);
+  $('mctx').textContent = m.context
+    ? '· ' + m.context.toLocaleString() + ' token context, ' +
+      (m.slots === 1 ? 'run solo' : (m.slots || '?') + ' seats')
+    : '';
+}
+const CLIENTS = [['curl','curl'],['python','Python'],['node','Node'],['opencode','OpenCode']];
+$('tabs').innerHTML = CLIENTS.map(([k,l]) =>
+  `<button class="tab${k===TAB?' sel':''}" data-k="${k}">${l}</button>`).join('');
+$('tabs').onclick = e => {
+  const k = e.target.dataset && e.target.dataset.k; if(!k) return;
+  TAB = k;
+  [...$('tabs').children].forEach(b => b.className = 'tab' + (b.dataset.k===k?' sel':''));
+  renderSnippet();
+};
+$('msel').onchange = renderSnippet;
+
+// ---------- servers ----------
+function ago(ts){
+  if(!ts) return 'never';
+  const s = Math.max(0, Math.round(Date.now()/1000 - ts));
+  if(s < 90) return s + 's ago';
+  if(s < 5400) return Math.round(s/60) + ' min ago';
+  return Math.round(s/3600) + 'h ago';
+}
+
+const KIND_BADGE = {
+  local:  '<span class="badge">this node</span>',
+  tunnel: '<span class="badge v">tunnelled</span>',
+  static: '<span class="badge">dialled</span>',
+  file:   '<span class="badge">configured</span>',
+};
+
+function serverCard(o, me){
+  const badge = {
+    online:   '<span class="badge on">online</span>',
+    offline:  '<span class="badge u">not answering</span>',
+    disabled: '<span class="badge">parked</span>',
+    unknown:  '<span class="badge">not probed yet</span>',
+  }[o.state] || '<span class="badge">' + esc(o.state) + '</span>';
+
+  const models = (o.models || []).length
+    ? '<div class="sub" style="margin-top:8px">' +
+      o.models.map(m => '<code>' + esc(m) + '</code>').join(' ') + '</div>'
+    : '<div class="sub" style="margin-top:8px">no models reported</div>';
+
+  // MEASURED, not declared. A box that claims a 4090 and delivers 40 tok/s is
+  // shown -- and ranked -- by the 40.
+  const rate = o.prefill_rate
+    ? '<div class="sub" style="margin-top:8px">measured ' +
+      Math.round(o.prefill_rate).toLocaleString() + ' tok/s prefill' +
+      (o.mean_service ? ' · ' + o.mean_service.toFixed(1) + 's mean request' : '') +
+      ' <span class="sub">(' + n(o.samples) + ' samples)</span></div>'
+    : '<div class="sub" style="margin-top:8px">not measured yet — it will be ' +
+      'tried, which is how it gets a number</div>';
+
+  const load = [];
+  if(o.in_flight) load.push(n(o.in_flight) + ' in flight');
+  if(o.idle_pipes != null) load.push(n(o.idle_pipes) + ' idle pipes');
+  if(o.kind === 'tunnel' && o.idle_pipes === 0)
+    load.push('<span style="color:var(--warn)">saturated — balanced requests ' +
+              'route around it</span>');
+
+  const pool = o.kind === 'local' ? '' :
+    (o.pool_member
+      ? '<div class="sub">in the balanced pool</div>'
+      : '<div class="sub" style="color:var(--warn)">not in the balanced pool — ' +
+        'reachable only at <code>' + esc(o.route) + '</code></div>');
+
+  const tier = o.priority ? '<div class="sub">tier ' + (o.priority > 0 ? '+' : '') +
+    o.priority + (o.priority > 0 ? ' — preferred over lower tiers'
+                                 : ' — used only when nothing higher can') +
+    '</div>' : '';
+
+  const mine = me && o.owner && me.sub === o.owner;
+  const actions = [];
+  if(o.kind === 'tunnel' || o.kind === 'static'){
+    if(me && me.is_admin){
+      actions.push('<button class="tab" data-pool="' + esc(o.id) + '" data-on="' +
+                   (o.pool_member ? '0' : '1') + '">' +
+                   (o.pool_member ? 'Remove from pool' : 'Add to pool') + '</button>');
+      actions.push('<button class="tab" data-tier="' + esc(o.id) + '">Tier…</button>');
+    }
+    if(mine || (me && me.is_admin))
+      actions.push('<button class="tab" data-detach="' + esc(o.id) + '">Detach</button>');
+  }
+
+  return '<div class="card">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">' +
+      '<span style="font-weight:640">' + esc(o.name || o.id) + '</span>' +
+      '<span>' + (KIND_BADGE[o.kind] || '') + ' ' + badge + '</span></div>' +
+    (o.note ? '<div class="sub">' + esc(o.note) + '</div>' : '') +
+    (o.gpus ? '<div class="sub">' + esc(o.gpus) + '</div>' : '') +
+    seatLine(o) +
+    (o.owner ? '<div class="sub">attached by ' +
+               esc(o.owner_name || o.owner) + '</div>' : '') +
+    '<div class="sub" style="margin-top:8px">Base URL <code>' + esc(o.route) + '</code></div>' +
+    pool + tier +
+    (load.length ? '<div class="sub">' + load.join(' · ') + '</div>' : '') +
+    (o.state === 'offline'
+      ? '<div class="sub" style="color:var(--warn)">last seen ' + ago(o.last_seen) +
+        (o.error ? ' · ' + esc(o.error) : '') + '</div>' : '') +
+    (o.problems && o.problems.length
+      ? '<div class="sub" style="color:var(--warn)">' + esc(o.problems.join('; ')) + '</div>'
+      : '') +
+    // A tunnelled server is not shown this: nothing can reach it, so there is
+    // nothing to restrict.
+    (o.needs_key === false && o.kind !== 'local' && o.kind !== 'tunnel' &&
+     o.state === 'online'
+      ? '<div class="sub" style="color:var(--warn)">reachable without a key — ' +
+        'restrict its port to this node</div>' : '') +
+    (o.kind === 'local'
+      ? '<div class="sub">Balanced requests land here by default; ' +
+        '<code>/u/local/v1</code> insists on it.</div>' : '') +
+    rate + models +
+    (actions.length ? '<div class="row" style="margin-top:9px">' +
+                      actions.join('') + '</div>' : '') +
+    '</div>';
+}
+
+// How the balancer's own decisions came out, so "it quietly stopped balancing"
+// is a visible number rather than a mystery.
+const WHY_LABEL = {
+  'warm': 'sent back to a warm cache',
+  'fastest': 'fastest by measurement',
+  'priority': 'an operator tier decided it',
+  'only-server': 'the only one that could serve it',
+  'pinned': 'you named the server',
+  'forced': 'you insisted, unchecked',
+  'not-balanced': 'about this machine, so kept here',
+  'unnamed': 'no model named, kept here',
+  'unframed': 'body not framed with a length, kept here',
+  'blind': 'model unreadable, kept here',
+  'no-capacity': 'refused: nothing free on that server',
+  'refused': 'refused rather than answered by the wrong model',
+};
+function routingTally(r){
+  const rows = Object.entries(r || {}).filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if(!rows.length) return '';
+  return '<div class="note"><strong>Routing so far.</strong> ' +
+    rows.map(([k, v]) => n(v) + ' × ' + esc(WHY_LABEL[k] || k)).join(' · ') +
+    '</div>';
+}
+
+function defaultCard(d){
+  // Described, not probed: the virtual server has no address of its own.
+  return '<div class="card" style="border-left:3px solid var(--accent)">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
+      '<span style="font-weight:640">the default</span>' +
+      '<span class="badge v">balancer</span></div>' +
+    '<div class="sub">Picks whichever machine will answer soonest.</div>' +
+    '<div class="sub" style="margin-top:8px">Base URL <code>' +
+      esc(d.default_route || '/v1') + '</code>' +
+      (d.auto_route ? ' <span class="sub">or <code>' + esc(d.auto_route) +
+        '</code></span>' : '') + '</div>' +
+    '<div class="note">Only among machines that <strong>actually serve the model ' +
+    'you named</strong> — a server without it does not refuse, it answers with ' +
+    'whatever it has loaded, and a wrong answer is worse than a slow one. Among ' +
+    'those, the choice is by <strong>measured</strong> speed and current load, ' +
+    'with the machine holding your conversation preferred by about the tenfold a ' +
+    'warm cache was measured to be worth. Every reply carries ' +
+    '<code>X-Routed-To</code>, <code>X-Routed-Why</code> and ' +
+    '<code>X-Routed-Est</code>.</div></div>';
+}
+
+// The attach flow. Rendered from state for the same reason the key reveal is:
+// the token is shown once, and a refresh must rebuild it rather than erase it.
+let ATTACH = null, ATTACH_ERR = '';
+
+function attachBox(){
+  if(ATTACH_ERR) return '<div class="err">' + esc(ATTACH_ERR) + '</div>';
+  if(!ATTACH) return '';
+  return '<div class="warnbox"><strong>Run this on the machine you are ' +
+    'attaching — the token works once.</strong>' +
+    '<pre style="user-select:all;margin-top:8px">' + esc(ATTACH.command) + '</pre>' +
+    '<div class="row"><button class="tab" id="copyattach">Copy</button>' +
+    '<button class="tab" id="doneattach">Done</button></div>' +
+    '<div class="note">It expires in ' +
+    Math.round((ATTACH.expires_in_seconds || 1800) / 60) + ' minutes. The server ' +
+    'appears here once it connects, reachable at <code>/u/' + esc(ATTACH.server_id) +
+    '/v1</code>; an administrator adds it to the balanced pool.</div></div>';
+}
+
+function attachForm(me){
+  if(!me || !me.sub) return '';
+  return '<div class="card"><div style="font-weight:640">Attach a server</div>' +
+    '<div class="sub">Any OpenAI-compatible server. A <strong>tunnelled</strong> ' +
+    'one dials out and needs no inbound port; a <strong>dialled</strong> one is ' +
+    'reached at an address you give.</div>' +
+    '<div class="row" style="margin-top:9px">' +
+    '<input id="asid" placeholder="short name, e.g. workstation" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<select id="akind"><option value="tunnel">tunnelled (dials out)</option>' +
+    '<option value="static">dialled (give an address)</option></select>' +
+    '<input id="aurl" placeholder="http://host:8000/v1" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<input id="agpus" placeholder="what cards it has" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<button class="tab" id="attach">Attach</button></div>' +
+    '<div id="attachbox">' + attachBox() + '</div></div>';
+}
+
+async function doAttach(){
+  ATTACH_ERR = '';
+  const body = {server_id: ($('asid').value || '').trim(),
+                kind: $('akind').value,
+                base_url: ($('aurl').value || '').trim(),
+                gpus: ($('agpus').value || '').trim()};
+  let r, d;
+  try{
+    r = await req('/api/servers/enrol', {method: 'POST', headers:
+      Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+      body: JSON.stringify(body)});
+    d = r.data;
+  }catch(e){ ATTACH_ERR = 'Could not reach the node.'; return loadServers(); }
+  if(!r.ok){
+    ATTACH_ERR = (d.error && d.error.message) || ('HTTP ' + r.status);
+    return loadServers();
+  }
+  ATTACH = d;
+  loadServers();
+}
+
+async function serverAction(url, body){
+  const r = await req(url, {method: body ? 'POST' : 'DELETE', headers:
+    Object.assign({'Content-Type': 'application/json'}, authHeaders()),
+    body: body ? JSON.stringify(body) : null});
+  if(!r.ok){
+    const d = r.data;
+    alert((d.error && d.error.message) || ('HTTP ' + r.status));
+  }
+  loadServers();
+}
+
+async function loadServers(){
+  // The key goes with it, like every other read on this page: a viewer holding
+  // a key rather than a session would otherwise be shown an empty fleet and no
+  // reason for it.
+  let d = null, why = '';
+  try{
+    const r = await req('/api/servers', {cache:'no-store', headers: authHeaders()});
+    if(r.ok){ d = r.data; FLEET = d.servers || []; FLEET_PROBLEMS = d.problems || []; }
+    else why = r.status === 401 ? 'Sign in, or enter a key, to see the fleet.'
+                                : 'The node answered ' + r.status + '.';
+  }catch(e){ why = 'The node is not answering.'; }
+  if(!d){
+    // NOT "no servers are registered": that is a different fact, and printing
+    // it here would describe a fleet nobody could see as a fleet that is empty.
+    $('servers').innerHTML = '<div class="note">' + esc(why) + '</div>';
+    return;
+  }
+
+  const me = d.you || {};
+  const all = (d.servers || []).map(s => s.id === 'local'
+    // The GPUs are the page's own knowledge; everything else is the node's probe
+    // of itself, so this card can be wrong in the way a real server can.
+    ? Object.assign({}, s, {name: 'This node',
+        gpus: (LAST_GPUS || []).map(g => g.name).filter(Boolean).join(' + ') || null})
+    : s);
+  const remotes = all.filter(s => s.kind !== 'local');
+
+  $('servers').innerHTML =
+    '<div class="grid">' + defaultCard(d) +
+      all.map(s => serverCard(s, me)).join('') + '</div>' +
+    routingTally(d.routing) +
+    attachForm(me) +
+    (remotes.length
+      ? '<div class="note">Servers are re-probed every ' +
+        n(d.poll_seconds) + ' seconds, never on the request path — a request for a ' +
+        'server that is not answering is refused at once rather than waiting out a ' +
+        'proxy timeout. A tunnelled server holds its own connections open, so its ' +
+        'capacity is those pipes: when none is free, a balanced request goes ' +
+        'around it and a pinned one is refused after ' + n(d.pipe_wait_seconds) +
+        ' seconds rather than hanging.</div>'
+      : '<div class="note">No other servers yet. Attach one above, or add an ' +
+        'entry to <code>/etc/qwen-turing/upstreams.yaml</code> — see ' +
+        '<code>config/upstreams.yaml.example</code>.</div>');
+
+  const a = $('attach');
+  if(a) a.onclick = doAttach;
+  const cb = $('copyattach');
+  if(cb) cb.onclick = async () => {
+    try{ await navigator.clipboard.writeText(ATTACH.command); cb.textContent = 'Copied'; }
+    catch(e){ cb.textContent = 'Copy failed — select it above'; }
+  };
+  const db = $('doneattach');
+  if(db) db.onclick = () => { ATTACH = null; ATTACH_ERR = ''; loadServers(); };
+  [...document.querySelectorAll('[data-pool]')].forEach(b => b.onclick = () =>
+    serverAction('/api/servers/' + encodeURIComponent(b.dataset.pool) + '/pool',
+                 {pool_member: b.dataset.on === '1'}));
+  [...document.querySelectorAll('[data-tier]')].forEach(b => b.onclick = () => {
+    const v = prompt('Tier for ' + b.dataset.tier +
+                     ' (-10 to 10; higher is preferred, and absolute):', '0');
+    if(v !== null) serverAction('/api/servers/' + encodeURIComponent(b.dataset.tier) +
+                                '/priority', {priority: parseInt(v, 10) || 0});
+  });
+  [...document.querySelectorAll('[data-detach]')].forEach(b => b.onclick = () => {
+    if(confirm('Detach ' + b.dataset.detach + '? Its credential stops working.'))
+      serverAction('/api/servers/' + encodeURIComponent(b.dataset.detach));
+  });
+}
+
+// ---------- chat ----------
+// The conversation lives in this page and nowhere else. Nothing is stored on the
+// node: a transcript is the most personal thing this node could hold, and the
+// panel exists for trying the models rather than for keeping a record. Reload
+// and it is gone, which is the honest behaviour for something that promises no
+// history.
+let CHAT = [];            // [{role, content}]
+let CHAT_STREAM = null;   // AbortController while a turn is in flight
+let CHAT_MODELS = null;
+
+function chatTurns(){
+  return CHAT.map(t =>
+    '<div class="turn' + (t.role === 'user' ? ' me' : '') + '">' +
+      '<span class="who">' + (t.role === 'user' ? 'you' : 'model') + '</span>' +
+      esc(t.content || (t.role === 'assistant' ? '…' : '')) +
+    '</div>').join('');
+}
+
+function drawChat(){
+  const log = $('chatlog');
+  log.innerHTML = CHAT.length ? chatTurns()
+    : '<div class="note">No messages yet. Pick a model and ask something.</div>';
+  log.scrollTop = log.scrollHeight;
+}
+
+async function fillChatModels(){
+  if(CHAT_MODELS) return;
+  // The SAME list discovery advertises, so the picker cannot offer a model the
+  // balancer will refuse. /v1/models needs no credential, by design.
+  const r = await req('/v1/models', {cache:'no-store'});
+  CHAT_MODELS = (r.data.data || []).map(m => m.id).filter(Boolean);
+  const sel = $('chatmodel');
+  sel.innerHTML = CHAT_MODELS.length
+    ? CHAT_MODELS.map(id => '<option>' + esc(id) + '</option>').join('')
+    : '<option value="">no models available</option>';
+}
+
+function renderChat(){
+  const gate = $('chatgate'), ui = $('chatui');
+  if(!SIGNED_IN){
+    ui.classList.add('hide');
+    gate.innerHTML = '<div class="card"><strong>Sign in to chat.</strong>' +
+      '<div class="note">The panel spends the node, so what it spends is ' +
+      'attributed to a person. Everything else on this page is public.</div>' +
+      '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a></div></div>';
+    return;
+  }
+  gate.innerHTML = '';
+  ui.classList.remove('hide');
+  drawChat();
+  fillChatModels();
+}
+
+function chatBusy(on){
+  $('chatsend').classList.toggle('hide', on);
+  $('chatstop').classList.toggle('hide', !on);
+  $('chatin').disabled = on;
+}
+
+async function sendTurn(text){
+  const model = $('chatmodel').value;
+  if(!model){ $('chatnote').textContent = 'No model is available right now.'; return; }
+  CHAT.push({role: 'user', content: text});
+  const reply = {role: 'assistant', content: ''};
+  const outgoing = CHAT.slice();     // the turns the model should see
+  CHAT.push(reply);
+  drawChat();
+  $('chatnote').textContent = '';
+  $('chatwhere').textContent = '';
+
+  const ctl = new AbortController();
+  CHAT_STREAM = ctl;
+  chatBusy(true);
+  let reader = null;
+  try{
+    // NOT through req(): req() buffers the whole body, and this one is read as
+    // it arrives. Every exit below still consumes or cancels -- an unread body
+    // and an abandoned reader hold the connection in exactly the same way.
+    const r = await fetch('/api/chat', {
+      method: 'POST', signal: ctl.signal, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: model, messages: outgoing})});
+    if(!r.ok){
+      const raw = await r.text();          // drained, always
+      let why = 'The node answered ' + r.status + '.';
+      try{ why = JSON.parse(raw).error.message || why; }catch(e){}
+      reply.content = '';
+      $('chatnote').textContent = why;
+      if(r.status === 401){ setSignedIn(false); renderChat(); return; }
+      drawChat();
+      return;
+    }
+    const where = r.headers.get('X-Routed-To');
+    const waited = r.headers.get('X-Queued-Seconds');
+    if(where) $('chatwhere').textContent = 'served by ' + where +
+      (waited ? ' · held ' + waited + 's for a seat' : '');
+    // Reported separately: a response with no readable body is a different fault
+    // from a stream that broke mid-flight, and the generic message below used to
+    // make them indistinguishable.
+    if(!r.body){
+      $('chatnote').textContent = 'The node answered with no readable body ' +
+        '(content-type ' + (r.headers.get('Content-Type') || 'unset') + ').';
+      drawChat();
+      return;
+    }
+    reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for(;;){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream: true});
+      // SSE: complete lines only. A chunk boundary lands mid-JSON often enough
+      // that parsing partial lines shows torn text.
+      let nl;
+      while((nl = buf.indexOf('\n')) >= 0){
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if(!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if(payload === '[DONE]') continue;
+        try{
+          const bit = JSON.parse(payload).choices[0].delta.content;
+          if(bit){ reply.content += bit; drawChat(); }
+        }catch(e){ /* a keep-alive or a shape without a delta */ }
+      }
+    }
+    if(!reply.content) $('chatnote').textContent =
+      'The model returned nothing. Try a longer budget, or a different model.';
+  }catch(e){
+    if(ctl.signal.aborted){
+      $('chatnote').textContent = 'Stopped.';
+    }else{
+      // KEEP WHAT ARRIVED. The node finishes the answer and nginx logs a
+      // complete 200; what is lost is only the part of the stream this browser
+      // did not receive. Discarding the text we DID get -- as this used to --
+      // threw away good output and made a local connection drop look like a
+      // model failure.
+      //
+      // Measured cause on this workstation: 184 `docker0` carrier flaps in
+      // thirty minutes, from a test run creating a container per test. Chrome
+      // reports every one as ERR_NETWORK_CHANGED and cancels requests in flight,
+      // so a thirty-second stream cannot survive. Naming that beats blaming the
+      // node, which was innocent.
+      const local = /NETWORK_CHANGED|network error|Failed to fetch/i.test(
+        (e && e.message) || '');
+      if(reply.content) reply.content += '\n\n[the connection dropped here]';
+      $('chatnote').innerHTML =
+        esc((e && e.name ? e.name : 'Error') +
+            (e && e.message ? ': ' + e.message : '')) +
+        ' — kept ' + reply.content.length + ' characters. ' +
+        (local
+          ? 'Your browser lost the connection, not the node. A local network ' +
+            'change does this: a VPN, Wi-Fi switching, or containers starting ' +
+            'and stopping. '
+          : '') +
+        '<a href="#" id="chatretry">Ask again</a>';
+      if(window.console) console.error('chat stream failed', e);
+      drawChat();
+      const again = $('chatretry');
+      if(again) again.onclick = ev => {
+        ev.preventDefault();
+        // Drop the truncated answer and re-ask the same question, rather than
+        // sending the broken turn back to the model as if it had said it.
+        CHAT.pop();
+        const last = CHAT.pop();
+        if(last && last.role === 'user') sendTurn(last.content);
+      };
+    }
+  }finally{
+    // A reader that is abandoned holds the connection open exactly as an unread
+    // body does -- the fault that stopped this page updating once already. Safe
+    // and idempotent after a completed stream.
+    if(reader){ try{ await reader.cancel(); }catch(e){} }
+    CHAT_STREAM = null;
+    chatBusy(false);
+    drawChat();
+  }
+}
+
+$('chatform').addEventListener('submit', ev => {
+  ev.preventDefault();
+  const box = $('chatin');
+  const text = box.value.trim();
+  if(!text || CHAT_STREAM) return;
+  box.value = '';
+  sendTurn(text);
+});
+$('chatin').addEventListener('keydown', ev => {
+  if(ev.key === 'Enter' && !ev.shiftKey){
+    ev.preventDefault();
+    $('chatform').requestSubmit();
+  }
+});
+$('chatstop').onclick = () => { if(CHAT_STREAM) CHAT_STREAM.abort(); };
+$('chatclear').onclick = () => {
+  if(CHAT_STREAM) CHAT_STREAM.abort();
+  CHAT = []; $('chatnote').textContent = ''; $('chatwhere').textContent = '';
+  drawChat();
+};
+
+// ---------- poll ----------
+async function tick(){
+  try{
+    const r = await req('/api/stats', {cache:'no-store', credentials:'same-origin',
+                                      headers: authHeaders()});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d = r.data;
+    // `public` marks the allow-listed projection -- the node served this to a
+    // stranger. Said plainly, and only when a credential WAS offered and did not
+    // work: silence there is how someone stares at a partial page believing they
+    // are signed in. With no credential at all there is nothing to report.
+    if(d.public && (getKey() || ME)){
+      $('err').innerHTML = '<strong>Showing the public view.</strong>' +
+        '<div class="note">The credential this page holds was not accepted. ' +
+        'Sign in again, or re-enter your key.</div>' +
+        '<div class="row"><a class="tab sel" href="/auth/login">Sign in</a>' +
+        '<a class="tab" href="#" id="setkey">Enter a key</a></div>';
+      $('err').classList.remove('hide');
+      const a = $('setkey');
+      if(a) a.onclick = ev => { ev.preventDefault(); if(askKey('API key')) tick(); };
+    } else {
+      $('err').classList.add('hide');
+    }
+
+    $('dot').className = 'dot ' + (d.llama_up ? 'up' : 'down');
+    $('state').textContent = d.llama_up ? (d.model || 'model resident') : 'model not loaded';
+    $('pt').textContent = n(d.prompt_tokens_total);
+    const tps = (d.tokens_per_second ?? 0).toFixed(1);
+    $('tps').textContent = tps; $('stps').textContent = tps;
+    const kvp = Math.round((d.kv_cache_usage_ratio ?? 0)*100);
+    $('kv').textContent = kvp; $('skv').textContent = kvp; $('kvbar').style.width = kvp+'%';
+    const q = d.queue || {};
+    // With no model resident there are no seats to report, and "0 of 0 seats"
+    // reads like a fault rather than an idle node.
+    $('sseats').textContent = q.slots
+      ? (q.processing ?? 0) + ' of ' + q.slots + ' seats'
+      : 'idle';
+    renderQueue(q);
+    renderHealth(d.config_health);
+    const gpus = d.gpus || [];
+    // The Servers panel names this node's cards from here. It can be drawn
+    // before the first stats tick has arrived, so re-draw it once the GPUs are
+    // known rather than leaving that one card the only nameless machine.
+    const gpusNewlyKnown = gpus.length > 0 && LAST_GPUS.length === 0;
+    LAST_GPUS = gpus;
+    if(gpusNewlyKnown && SECTION === 'servers') loadServers();
+    LAST_PROBLEMS = d.problems || [];
+    renderProblems();
+    renderGpus();
+    renderCatalog(d.catalog);
+    pill('models', String((d.catalog||[]).length));
+    $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  }catch(e){
+    $('dot').className = 'dot down'; $('state').textContent = 'unreachable';
+    $('err').innerHTML = '<strong>Could not read the node.</strong>' +
+      '<div class="note">' + esc(e.message) + '</div>';
+    $('err').classList.remove('hide');
+  }
+}
+
+// ---------- account, keys and usage ----------
+// Every request below uses a RELATIVE url, which is origin-relative by
+// construction -- so this page works under whatever name it was loaded as and
+// bakes in no hostname. That matters twice over here: the sign-in callback must
+// match the certificate's hostname, and this file is committed to a public repo.
+let ME = null;
+
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function when(iso){
+  if(!iso) return '<span class="sub">never</span>';
+  const d = new Date(iso);
+  return isNaN(d) ? esc(iso) : d.toLocaleString();
+}
+
+async function loadAccount(){
+  let me;
+  try{ me = (await req('/api/me', {cache:'no-store'})).data; }
+  catch(e){
+    $('acct').innerHTML = '<div class="card"><div class="sub">Key management is ' +
+      'unavailable — the gateway is not answering.</div></div>';
+    $('keysbox').innerHTML = ''; return;
+  }
+  ME = me;
+  setSignedIn(!!me.authenticated);
+
+  if(!me.authenticated){
+    $('acct').innerHTML = '<div class="card">' +
+      (me.login_configured
+        ? '<div>Sign in to create and manage your own API keys.</div>' +
+          '<div style="margin-top:10px"><a class="tab" href="/auth/login">Sign in</a></div>' +
+          '<div class="note">Sign-in uses the same account as the rest of the lab ' +
+          'tooling. Keys you create are yours: revocable individually, and their ' +
+          'usage is attributed to you rather than to a shared secret.</div>'
+        : '<div class="sub">Sign-in is not configured on this node.</div>') +
+      '</div>';
+    $('keysbox').innerHTML = '';
+    return;
+  }
+
+  const who = esc(me.name || me.email || me.sub);
+  if(!me.may_mint){
+    // Authenticated and authorised for NOTHING. A distinct state from being
+    // logged out, and the page must say which -- and name the group needed.
+    $('acct').innerHTML = '<div class="warnbox"><strong>Signed in as ' + who +
+      ', but not authorised to create keys.</strong><div class="note">Your account ' +
+      'is not a member of <code>' + esc(me.required_group || 'the required group') +
+      '</code>. Ask an administrator to add you; nothing else is needed.</div></div>';
+    $('keysbox').innerHTML = '';
+    return;
+  }
+
+  $('acct').innerHTML = '<div class="card"><div>Signed in as <strong>' + who +
+    '</strong>' + (me.is_admin ? ' <span class="badge on">admin</span>' : '') +
+    '</div>' +
+    (me.secure ? '' : '<div class="note" style="color:var(--warn)">This page was ' +
+      'loaded over plain HTTP, so creating and revoking keys is refused. Reload over ' +
+      'HTTPS to manage keys.</div>') +
+    '<div style="margin-top:10px"><button class="tab" id="logout">Sign out</button></div>' +
+    '</div>';
+  $('logout').onclick = async () => {
+    await req('/auth/logout', {method:'POST'}); ME = null; loadAccount();
+  };
+  await loadKeys();
+}
+
+// The freshly minted key lives HERE, not only in the DOM.
+//
+// It used to be written straight into #minted by doMint(), which then called
+// loadKeys() -- and loadKeys() rewrites the whole keysbox, #minted included. The
+// reveal was destroyed in the same task that created it, so the key was never
+// visible for even one frame and there is no way to get it back. Rendering it
+// from state means a refresh RECONSTRUCTS it instead of erasing it.
+let MINTED = null, MINT_ERR = '';
+
+function mintedBox(){
+  // Failures render from state for the same reason successes do: whoever owns a
+  // container is the only one who may write into it.
+  if(MINT_ERR) return '<div class="err">' + esc(MINT_ERR) + '</div>';
+  if(!MINTED) return '';
+  return '<div class="warnbox"><strong>Copy this now — it is not stored anywhere ' +
+    'it can be read back.</strong>' +
+    '<pre style="user-select:all;margin-top:8px">' + esc(MINTED.key) + '</pre>' +
+    '<div class="row"><button class="tab" id="copykey">Copy</button>' +
+    '<button class="tab" id="donekey">I have saved it</button></div>' +
+    '<div class="note">Stored as a hash, so nobody — including an administrator — ' +
+    'can retrieve it later. Lost it? Revoke it and create another. This stays on ' +
+    'screen until you dismiss it.</div></div>';
+}
+
+function wireMinted(){
+  const cb = $('copykey');
+  if(cb) cb.onclick = async () => {
+    try{ await navigator.clipboard.writeText(MINTED.key); cb.textContent = 'Copied'; }
+    // Clipboard access is refused in some contexts, and silently failing to copy
+    // a secret that is about to be dismissed is the worst possible outcome.
+    catch(e){ cb.textContent = 'Copy failed — select it above'; }
+  };
+  const db = $('donekey');
+  if(db) db.onclick = () => { MINTED = null; MINT_ERR = ''; loadKeys(); };
+}
+
+async function loadKeys(){
+  const all = ME.is_admin ? '?all=1' : '';
+  let d;
+  try{ d = (await req('/api/keys'+all, {cache:'no-store'})).data; }
+  catch(e){ $('keysbox').innerHTML = '<div class="err">Could not list keys.</div>'; return; }
+
+  const rows = (d.keys||[]).map(k => {
+    const dead = !!k.revoked_at;
+    const fresh = MINTED && k.key_id === MINTED.key_id;
+    return '<tr' + (dead ? ' style="opacity:.55"'
+                         : (fresh ? ' style="background:var(--accent-weak,#eef3ff)"' : '')) + '>' +
+      '<td>' + esc(k.label || '<span class="sub">no label</span>') + '</td>' +
+      '<td><code>' + esc(k.key_id) + '</code></td>' +
+      (ME.is_admin ? '<td class="sub">' + esc(k.sub) + '</td>' : '') +
+      '<td>' + when(k.created_at) + '</td>' +
+      '<td>' + when(k.last_used_at) + '</td>' +
+      '<td>' + (k.expires_at ? when(k.expires_at) : '<span class="sub">never</span>') + '</td>' +
+      '<td>' + (dead ? '<span class="badge u">revoked</span>'
+                     : '<button class="tab" data-revoke="' + esc(k.key_id) + '">Revoke</button>') +
+      '</td></tr>';
+  }).join('');
+
+  $('keysbox').innerHTML =
+    '<div class="card" style="overflow-x:auto"><table><thead><tr>' +
+    '<th>Label</th><th>Key id</th>' + (ME.is_admin ? '<th>Owner</th>' : '') +
+    '<th>Created</th><th>Last used</th><th>Expires</th><th></th>' +
+    '</tr></thead><tbody>' +
+    (rows || '<tr><td colspan="7" class="sub">No keys yet.</td></tr>') +
+    '</tbody></table>' +
+    '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+    '<input id="klabel" placeholder="what will use this key?" ' +
+    'style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--line);' +
+    'border-radius:6px;background:var(--panel);color:var(--ink)">' +
+    '<select id="kttl"><option value="">no expiry</option><option value="30">30 days</option>' +
+    '<option value="90">90 days</option><option value="365">1 year</option></select>' +
+    '<button class="tab" id="mint"' + (ME.secure ? '' : ' disabled') + '>Create a key</button>' +
+    '</div>' +
+    '<div id="minted">' + mintedBox() + '</div>' +
+    '<div class="note">The key id is not secret — it identifies the key in this table ' +
+    'and on every usage row. The secret is shown <strong>once</strong>, at creation, ' +
+    'and is stored only as a hash. Revoking takes effect on this node immediately.</div>' +
+    '</div>';
+
+  const live = (d.keys||[]).filter(k => !k.revoked_at).length;
+  pill('keys', live ? String(live) : '');
+  const mint = $('mint');
+  if(mint) mint.onclick = doMint;
+  wireMinted();
+  [...document.querySelectorAll('[data-revoke]')].forEach(b => b.onclick = () => doRevoke(b.dataset.revoke));
+}
+
+async function doMint(){
+  const label = $('klabel').value.trim();
+  const ttl = $('kttl').value;
+  MINT_ERR = '';
+  const body = {label: label || null};
+  if(ttl) body.ttl_days = parseInt(ttl, 10);
+  let r, d;
+  try{
+    r = await req('/api/keys', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    d = r.data;
+  }catch(e){ MINT_ERR = 'Could not create a key.'; return loadKeys(); }
+  if(!r.ok){
+    MINT_ERR = (d.error && d.error.message) || ('HTTP ' + r.status);
+    return loadKeys();
+  }
+  // Shown once, said plainly. There is no second chance and no recovery path --
+  // which is exactly why this goes into state and is rendered by the one function
+  // that owns this panel, rather than being written here and overwritten there.
+  MINTED = {key: d.key, key_id: d.key_id};
+  MINT_ERR = '';
+  $('klabel').value = '';
+  loadKeys();
+}
+
+async function doRevoke(keyId){
+  if(!confirm('Revoke ' + keyId + '? Anything using it stops working immediately.')) return;
+  const r = await req('/api/keys/' + encodeURIComponent(keyId), {method:'DELETE'});
+  if(!r.ok){
+    alert('Could not revoke: ' + ((r.data.error && r.data.error.message) || r.status));
+  }
+  loadKeys(); loadUsage();
+}
+
+let USAGE_MINE = false;
+
+function personName(r){
+  // A row should name a person, not an opaque subject id. Prefer the display
+  // name, then the local part of the email, and only then a subject prefix --
+  // a bare sub is unreadable and a full email is more than a scoreboard needs.
+  if(r.display_name) return esc(r.display_name);
+  if(r.email) return esc(String(r.email).split('@')[0]);
+  return '<span class="sub">' + esc(String(r.sub || '?').slice(0, 8)) + '…</span>';
+}
+
+async function loadUsage(){
+  let d;
+  try{
+    d = (await req('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
+                   {cache:'no-store'})).data;
+  }catch(e){ $('usagebox').innerHTML = '<div class="banner">Could not read usage.</div>'; return; }
+
+  const board = d.leaderboard || [];
+  const top = board.length ? Math.max(1, board[0].total_tokens || 1) : 1;
+  const total = board.reduce((a,r) => a + (r.total_tokens||0), 0);
+
+  const boardRows = board.map((r,i) => {
+    const you = r.sub === d.you;
+    const share = r.prompt_tokens ? Math.round(100*(r.cached_tokens||0)/r.prompt_tokens) : null;
+    return '<tr' + (you ? ' style="background:color-mix(in srgb,var(--accent) 7%,transparent)"' : '') + '>' +
+      '<td class="num sub">' + (i+1) + '</td>' +
+      '<td>' + personName(r) + (you ? ' <span class="badge v">you</span>' : '') + '</td>' +
+      '<td class="num">' + n(r.total_tokens) + '</td>' +
+      '<td style="width:26%"><div class="bar" style="margin:0">' +
+        '<i style="width:' + Math.round(100*(r.total_tokens||0)/top) + '%"></i></div></td>' +
+      '<td class="num">' + n(r.requests) + '</td>' +
+      '<td class="num">' + (share === null ? '—' : share + '%') + '</td>' +
+      '<td class="num sub">' + n(r.keys) + '</td></tr>';
+  }).join('');
+
+  const detail = (d.usage || []).map((u,i) => {
+    const share = u.prompt_tokens ? Math.round(100*(u.cached_tokens||0)/u.prompt_tokens) : null;
+    return '<tr>' +
+      '<td class="num sub">' + (i+1) + '</td>' +
+      '<td><code>' + esc(u.key_id) + '</code>' +
+        (u.label ? '<div class="sub">' + esc(u.label) + '</div>' : '') + '</td>' +
+      '<td>' + personName(u) + '</td>' +
+      '<td>' + esc(u.model || '—') + '</td>' +
+      '<td class="num">' + n(u.total_tokens) + '</td>' +
+      '<td class="num">' + n(u.requests) + '</td>' +
+      '<td class="num">' + n(u.prompt_tokens) + '</td>' +
+      '<td class="num">' + n(u.completion_tokens) + '</td>' +
+      '<td class="num">' + (share === null ? '—' : share + '%') + '</td>' +
+      '<td class="num">' + (u.truncated_requests
+        ? '<span class="badge u">' + n(u.truncated_requests) + '</span>' : '0') +
+      '</td></tr>';
+  }).join('');
+
+  $('usagebox').innerHTML =
+    (board.length
+      ? '<div class="card scroll"><table><thead><tr>' +
+        '<th class="num">#</th><th>Who</th><th class="num">Tokens</th><th></th>' +
+        '<th class="num">Requests</th><th class="num">From cache</th>' +
+        '<th class="num">Keys</th></tr></thead><tbody>' + boardRows + '</tbody></table>' +
+        '<div class="note">' + n(total) + ' tokens across ' + board.length +
+        (board.length === 1 ? ' person' : ' people') +
+        '. Ranked by prompt plus completion tokens. <strong>From cache</strong> is the ' +
+        'share of prompt tokens served from the prefix cache — worth roughly tenfold ' +
+        'on a warm slot, so a high share is a cheap conversation rather than a small one.' +
+        '</div></div>'
+      : '<div class="card"><div class="v idle">nothing used yet</div>' +
+        '<div class="note">The scoreboard fills in as keys are used.</div></div>') +
+
+    '<h2>By key</h2>' +
+    '<div class="seg"><button class="tab' + (USAGE_MINE ? '' : ' sel') + '" id="u-all">Everyone</button>' +
+    '<button class="tab' + (USAGE_MINE ? ' sel' : '') + '" id="u-mine">Only mine</button></div>' +
+    (detail
+      ? '<div class="card scroll"><table><thead><tr>' +
+        '<th class="num">#</th><th>Key</th><th>Owner</th><th>Model</th>' +
+        '<th class="num">Tokens</th><th class="num">Requests</th>' +
+        '<th class="num">Prompt</th><th class="num">Completion</th>' +
+        '<th class="num">From cache</th><th class="num">Unknown</th>' +
+        '</tr></thead><tbody>' + detail + '</tbody></table>' +
+        '<div class="note"><strong>Unknown</strong> counts requests whose client ' +
+        'disconnected before the response finished, so their token counts genuinely ' +
+        'are not known. They are counted separately rather than estimated or ' +
+        'reported as zero.</div></div>'
+      : '<div class="card"><div class="sub">No usage recorded' +
+        (USAGE_MINE ? ' for your keys' : '') + ' yet.</div></div>');
+
+  const all = $('u-all'), mine = $('u-mine');
+  if(all)  all.onclick  = () => { USAGE_MINE = false; loadUsage(); };
+  if(mine) mine.onclick = () => { USAGE_MINE = true;  loadUsage(); };
+}
+
+// ---------- bootstrap ----------
+// These three lines were briefly lost to a careless slice, and the page simply
+// never initialised: no section shown, no polling, status stuck on "connecting".
+show(location.hash.slice(1) || 'overview', false);
+tick(); setInterval(tick, 2000);
+loadAccount();
+// Once at boot so the Models table can say who holds what on the first draw,
+// then only while a panel that shows it is open.
+loadFleet().then(() => { renderCatalog(CATALOG); renderGpus(); });
+setInterval(() => {
+  if(SECTION === 'models'){ loadFleet().then(() => renderCatalog(CATALOG)); }
+  // The Overview's GPU panel draws remote cards from the same fleet payload, so
+  // it needs refreshing there too -- otherwise a fleet member's cards were as
+  // stale as whenever the fleet was last fetched for some other reason.
+  else if(SECTION === 'overview'){ loadFleet().then(renderGpus); }
+  else if(SECTION === 'health'){ loadFleet(); }
+}, 15000);
+// Usage refreshes only while you are looking at it -- and it no longer waits for
+// a session, because the leaderboard is public. Gating this on authentication
+// left a visitor on the Usage tab watching numbers that never moved.
+setInterval(() => {
+  if(SECTION === 'usage' || SECTION === 'keys') loadUsage();
+}, 15000);
+</script>

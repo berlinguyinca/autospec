@@ -1,0 +1,59 @@
+[Unit]
+Description=Qwen node authenticating gateway (per-user keys, usage accounting)
+Documentation=file:///opt/qwen-turing/etc/common.conf
+# Wants, not Requires: the gateway must start and REFUSE requests when the
+# router is down, rather than not start at all. A gateway that is absent is a
+# gateway nginx falls back around; a gateway that is present and answering 502
+# is a closed door.
+Wants=network-online.target qwen-turing@router.service
+After=network-online.target qwen-turing@router.service
+
+[Service]
+Type=exec
+User=qwen-turing
+Group=qwen-turing
+WorkingDirectory=/var/lib/qwen-turing
+Environment=QT_CONF_DIR=/opt/qwen-turing/etc
+
+# Credentials, never Environment=: `systemctl show` prints Environment= values
+# to any local user.
+LoadCredential=internalkey:/etc/qwen-turing/internal.key
+LoadCredential=dbpassword:/etc/qwen-turing/llmgw_app.pw
+# The dashboard's own key. The gateway fronts /api/stats so that signing in is
+# enough to read the page -- previously the only way in was pasting a shared
+# secret, which is the thing per-user sign-in exists to replace.
+LoadCredential=dashkey:/etc/qwen-turing/dashboard.key
+
+ExecStart=/opt/qwen-turing/bin/gateway-run.sh
+
+Restart=on-failure
+RestartSec=5
+
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+# Stricter than the router and the dashboard can take: this process touches no
+# GPU, so it needs no CUDA device access and no writable /usr.
+ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+PrivateDevices=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ProtectSystem=strict makes everything read-only, so both of these are
+# required rather than optional. ProtectHome=true alone already broke a sibling
+# unit's site.conf read on this node, which is why the config path is explicit.
+ReadWritePaths=/var/lib/qwen-turing
+ReadOnlyPaths=/etc/qwen-turing /opt/qwen-turing
+
+[Install]
+WantedBy=multi-user.target

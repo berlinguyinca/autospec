@@ -13,4 +13,19 @@ here, because there are none of its kind. ``test_structural.sh`` is the entry
 point that knows how to invoke each one.
 """
 
-collect_ignore_glob = ["test_*.py"]
+import pathlib
+
+_HERE = pathlib.Path(__file__).parent
+
+# Ignore the script-style suites by NAME rather than by a blanket glob, so a
+# genuine pytest module can live here too. Convention: ``test_unit_*.py`` is a
+# real pytest module and IS collected; anything else matching ``test_*.py`` is a
+# standalone script and is not.
+#
+# The blanket glob that used to be here silently swallowed a new pytest module
+# added beside the scripts -- it passed when named explicitly and never ran
+# under directory collection, which is the worst of both.
+collect_ignore = [
+    p.name for p in sorted(_HERE.glob("test_*.py"))
+    if not p.name.startswith("test_unit_")
+]

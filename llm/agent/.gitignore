@@ -1,0 +1,4 @@
+dist/
+# `go build` with no -o drops the binary here, named after the module. It is
+# build output, not source: a 6 MB blob got committed once by exactly that route.
+qwen-turing-agent

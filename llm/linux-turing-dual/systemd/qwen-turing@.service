@@ -1,0 +1,65 @@
+[Unit]
+# Instance name is the profile: qwen-turing@router.service
+Description=Qwen inference node, dual Turing (profile %i)
+Documentation=file:///opt/qwen-turing/etc/common.conf
+Wants=network-online.target
+After=network-online.target
+# The 27B holds ~15.3 GiB of the pair's 22 GiB. Nothing else that wants the
+# cards may run at the same time; add Conflicts= here if another model server
+# is ever installed on this host.
+
+[Service]
+Type=exec
+User=qwen-turing
+Group=qwen-turing
+WorkingDirectory=/var/lib/qwen-turing
+Environment=QT_CONF_DIR=/opt/qwen-turing/etc
+
+# The API key arrives in a private tmpfs readable only by this unit. NOT an
+# Environment= value: any local user can read those out of `systemctl show`.
+# The runtime accepts ONLY the gateway's internal key. Every user key is
+# checked by the gateway, so a request that somehow reached llama.cpp directly
+# has nothing that works -- it fails closed instead of being served.
+LoadCredential=apikey:/etc/qwen-turing/internal.key
+
+# Fail in a second on insufficient VRAM instead of OOMing minutes into a
+# 15 GiB weight load, which reads as a runtime fault rather than a full card.
+# --min-total is a TOTAL across both cards; the earlier single-card form of this
+# check read nvidia-smi's first row and refused to start a node that fits.
+ExecStartPre=/opt/qwen-turing/bin/vram-guard.sh --min-total 19000 --min-per-card 8000
+ExecStart=/opt/qwen-turing/bin/serve-router.sh %i
+
+Restart=on-failure
+RestartSec=10
+# Loading ~15 GiB of weights from NVMe is not a hang.
+TimeoutStartSec=900
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# NOTE -- deliberately NOT set, and why. Every one of these looks like hardening
+# and produces a unit that restart-loops on this host:
+#
+#   ProtectSystem=strict      blocks the NVIDIA driver's /proc and /sys access
+#   PrivateDevices=true       hides /dev/nvidia*, so CUDA cannot initialise
+#   DevicePolicy=closed       same
+#   MemoryDenyWriteExecute=   breaks the CUDA JIT
+#   RestrictAddressFamilies=  the driver uses netlink; AF_UNIX/AF_INET alone is
+#                             not enough and the failure is opaque
+#
+# ProtectSystem=full is the strongest setting that leaves the CUDA stack
+# working, and it still makes /usr and /boot read-only. tests/test_structural.sh
+# check 5 fails the build if any of the above is reintroduced.
+ReadWritePaths=/var/lib/qwen-turing
+
+[Install]
+WantedBy=multi-user.target
