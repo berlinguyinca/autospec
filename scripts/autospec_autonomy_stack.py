@@ -54,16 +54,16 @@ def is_skipped(rel_path: str) -> bool:
 
 
 def _walk(root: Path):
-    """(repo-relative lowercased path, path) for every file outside the exclusions."""
+    """(repo-relative lowercased path, path) for every file outside the exclusions.
+
+    Replaces the old _source_files, which skipped only .git and node_modules and
+    so walked target/, dist/, and every nested .claude/worktrees copy of a fixture.
+    """
     for path in root.rglob("*"):
         rel = path.relative_to(root).as_posix()
         if is_skipped(rel) or not path.is_file():
             continue
         yield rel.lower(), path
-
-
-def _source_files(root: Path) -> list[str]:
-    return [rel for rel, _ in _walk(root)]
 
 
 def _marker_files(files: list[str]) -> list[str]:
