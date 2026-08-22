@@ -341,8 +341,8 @@ After `gh pr create` succeeds, the heartbeat and GitHub `autospec-run-state`
 comment MUST both record the `pr_created` step with the captured PR number before
 any later handoff, notification, claim-guard release, review, or merge step runs.
 `pr_created` is a step, never a state: the claim stays `claimed` until
-`autospec claim release` completes it, and `--state` only accepts a recognized
-claim state.
+`autospec claim release` completes it. `claim state upsert --state` accepts
+`claimed` only -- any other state fails its own next ownership operation.
 
 ### No accidental main merges
 

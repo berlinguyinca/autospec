@@ -2868,7 +2868,7 @@ fn claim_state_upsert_rejects_a_progress_step_as_a_claim_state() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--state must be one of"), "{stderr}");
+    assert!(stderr.contains("--state must be claimed"), "{stderr}");
     assert!(stderr.contains("--step"), "{stderr}");
     assert_eq!(claim_ref_oid(&repo, 42), original_oid);
 }
@@ -3041,15 +3041,6 @@ fn the_phase4_claim_sequence_leaves_the_claim_releasable() {
 /// script surface so no caller reintroduces a step name as a state.
 #[test]
 fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
-    const RECOGNIZED: [&str; 7] = [
-        "available",
-        "claimed",
-        "failed",
-        "merged",
-        "needs-human",
-        "released",
-        "retryable",
-    ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
@@ -3066,7 +3057,7 @@ fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
                 collect(&path, found);
             } else if matches!(
                 path.extension().and_then(|value| value.to_str()),
-                Some("md") | Some("sh")
+                Some("md") | Some("sh") | Some("bats")
             ) {
                 found.push(path);
             }
@@ -3074,7 +3065,7 @@ fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
     }
 
     let mut files = Vec::new();
-    for directory in ["skills", "scripts"] {
+    for directory in ["skills", "scripts", "tests"] {
         collect(&root.join(directory), &mut files);
     }
     assert!(!files.is_empty(), "no prompt or script surface to scan");
@@ -3094,9 +3085,10 @@ fn no_shipped_caller_upserts_an_unrecognized_claim_state() {
             let state = rest.split_whitespace().next().unwrap_or_default();
             inspected += 1;
             assert!(
-                RECOGNIZED.contains(&state),
-                "{}: `claim state upsert --state {state}` is not a claim state; \
-                 record progress with --step",
+                state == "claimed",
+                "{}: `claim state upsert --state {state}` cannot survive its own \
+                 upsert; record progress with --step and complete the claim with \
+                 `autospec claim release`",
                 path.display()
             );
         }

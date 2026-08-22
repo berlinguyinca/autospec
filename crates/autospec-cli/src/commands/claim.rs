@@ -1729,26 +1729,18 @@ pub(crate) fn refresh_claim_generation(
     }
 }
 
-/// Claim `state` is a closed lifecycle vocabulary. Free-form progress belongs in
-/// `step`; writing a step name into `state` used to succeed and then silently
-/// disable every later ownership operation on that claim.
-const RECOGNIZED_CLAIM_STATES: [&str; 7] = [
-    "available",
-    "claimed",
-    "failed",
-    "merged",
-    "needs-human",
-    "released",
-    "retryable",
-];
-
-fn recognized_claim_state(value: String) -> Result<String, CommandFailure> {
-    if RECOGNIZED_CLAIM_STATES.contains(&value.as_str()) {
+/// `claimed` is the only state an upsert can leave behind and still own the
+/// claim: `has_exact_claim_generation` rejects every other state, so an upsert
+/// that writes one disables its own successors. Terminal states are
+/// `claim release`'s to write -- it also transitions the issue labels and
+/// projects the terminal record. Progress belongs in `step`.
+fn active_claim_state(value: String) -> Result<String, CommandFailure> {
+    if value == "claimed" {
         return Ok(value);
     }
     Err(CommandFailure::diagnostic(format!(
-        "--state must be one of {}; record progress such as \"{value}\" with --step",
-        RECOGNIZED_CLAIM_STATES.join(", ")
+        "--state must be claimed; record progress such as \"{value}\" with --step, \
+         and complete the claim with `autospec claim release`"
     )))
 }
 
@@ -3810,7 +3802,7 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
         claim_id: claim_id
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
-        state: recognized_claim_state(
+        state: active_claim_state(
             state.ok_or_else(|| CommandFailure::diagnostic("--state is required"))?,
         )?,
         step,
@@ -7262,7 +7254,7 @@ fn print_help() {
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available\n\nCLAIM STATES:\n    --state accepts available, claimed, failed, merged, needs-human, released, or retryable.\n    Progress within a held claim belongs in --step; the claim stays claimed until it is released."
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available\n\nCLAIM STATE:\n    upsert --state accepts claimed only. Progress belongs in --step;\n    terminal transitions go through `autospec claim release`."
     );
 }
 

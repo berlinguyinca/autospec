@@ -215,7 +215,7 @@ JSON
     run grep -Fq '[ -n "$pr_number" ] && [ "$pr_number" != "null" ]' "$prompt"
     [ "$status" -eq 0 ]
     heartbeat_cmd='heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID" || exit 1'
-    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1'
+    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state claimed --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1'
     run grep -Fq "$heartbeat_cmd" "$prompt"
     [ "$status" -eq 0 ]
     run grep -Fq "$run_state_cmd" "$prompt"
@@ -237,7 +237,7 @@ JSON
 
     pr_number=1858
     bash "$heartbeat_write" --issue 42 --repo testorg/testrepo --branch feat/test --step pr_created --pr "$pr_number"
-    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state pr_created --step pr_created --branch feat/test --pr "$pr_number" >/dev/null
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step pr_created --branch feat/test --pr "$pr_number" >/dev/null
 
     state="$(run_state read --issue 42 --repo testorg/testrepo)"
     [ "$(printf '%s' "$state" | jq -r '.state')" = "pr_created" ]
