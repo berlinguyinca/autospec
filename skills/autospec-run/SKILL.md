@@ -1135,9 +1135,15 @@ do not fall back to an inline label-swap path.
 >    ```bash
 >    # pr-size-helper:begin
 >    run_pr_size_gate() {
->      PR_SIZE_PHASE="$1"
->      PR_SIZE_BASE_OID="$2"
->      PR_SIZE_HEAD_OID="$3"
+>      # Takes no arguments. A harness substitutes its slash-command argument
+>      # into $1/$2/$3 when it renders this skill body, so reading positionals
+>      # here would let a caller's argument overwrite the gate's own inputs
+>      # (issue #3101). Inputs arrive as named variables set by the call site.
+>      if [ -z "${PR_SIZE_PHASE:-}" ] || [ -z "${PR_SIZE_BASE_OID:-}" ] \
+>        || [ -z "${PR_SIZE_HEAD_OID:-}" ]; then
+>        printf 'ERROR:PR_SIZE: missing PR_SIZE_PHASE/PR_SIZE_BASE_OID/PR_SIZE_HEAD_OID\n'
+>        return 1
+>      fi
 >      PR_SIZE_DIFF=$(mktemp -t autospec-pr-size-XXXXXX.diff) || return 1
 >      git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID" >"$PR_SIZE_DIFF" || {
 >        rm -f "$PR_SIZE_DIFF"
@@ -1157,9 +1163,10 @@ do not fall back to an inline label-swap path.
 >    }
 >    # pr-size-helper:end
 >    # pr-size-pre-push-exec:begin
+>    PR_SIZE_PHASE=pre-push
 >    PR_SIZE_BASE_OID=$(git merge-base "origin/${AUTOSPEC_BASE_BRANCH:-main}" HEAD) || exit 1
 >    PR_SIZE_HEAD_OID=$(git rev-parse HEAD) || exit 1
->    PR_SIZE_EVIDENCE=$(run_pr_size_gate pre-push "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate) || {
 >      printf '%s\n' "$PR_SIZE_EVIDENCE"
 >      exit 1
 >    }
@@ -1498,8 +1505,8 @@ do not fall back to an inline label-swap path.
 >    [ "$(git rev-parse "origin/${AUTOSPEC_BASE_BRANCH:-main}")" = "$PR_SIZE_BASE_OID" ] || exit 1
 >    [ "$(git rev-parse "origin/<BRANCH>")" = "$PR_SIZE_HEAD_OID" ] || exit 1
 >    [ "$(git rev-parse HEAD)" = "$PR_SIZE_HEAD_OID" ] || exit 1
->    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge \
->      "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>    PR_SIZE_PHASE=final-pre-merge
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate) || {
 >      printf '%s\n' "$PR_SIZE_EVIDENCE"
 >      exit 1
 >    }
