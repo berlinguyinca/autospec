@@ -89,8 +89,8 @@ Cleanup, Step 11 Report, and the monitor hard rules.
 >    [ "$(git rev-parse "origin/${AUTOSPEC_BASE_BRANCH:-main}")" = "$PR_SIZE_BASE_OID" ] || exit 1
 >    [ "$(git rev-parse "origin/<BRANCH>")" = "$PR_SIZE_HEAD_OID" ] || exit 1
 >    [ "$(git rev-parse HEAD)" = "$PR_SIZE_HEAD_OID" ] || exit 1
->    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge \
->      "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>    PR_SIZE_PHASE=final-pre-merge
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate) || {
 >      printf '%s\n' "$PR_SIZE_EVIDENCE"
 >      exit 1
 >    }

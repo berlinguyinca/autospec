@@ -244,3 +244,87 @@ run_pr_size_slice() {
     ! grep -q . "$TEST_TMPDIR/mutations"
     done
 }
+
+# ── issue #3101: run_pr_size_gate must not read positional parameters ────────
+
+# The harness substitutes its slash-command argument into $1/$2/$3 when it
+# renders a skill body, so the helper defined inside that body must take its
+# inputs from named variables only. These fakes differ from make_pr_size_fakes:
+# `git diff` here rejects anything other than the exact expected OIDs, so a
+# clobbered PR_SIZE_BASE_OID cannot look like a pass, and the linter records
+# that it ran so "fails closed" can be asserted as "never reached the linter".
+make_pr_size_env_fakes() {
+    cat > "$TEST_TMPDIR/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    diff)
+        if [ "$3" = "base-oid" ] && [ "$4" = "head-oid" ]; then
+            printf 'diff-body\n'
+        else
+            printf 'fatal: bad revision\n' >&2
+            exit 128
+        fi ;;
+    *) exit 1 ;;
+esac
+EOF
+    cat > "$TEST_TMPDIR/scripts/lint-implementation.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'linted\n' >> "$MUTATION_LOG"
+exit 0
+EOF
+    chmod +x "$TEST_TMPDIR/bin/git" "$TEST_TMPDIR/scripts/lint-implementation.sh"
+}
+
+# run_pr_size_helper <extra-args-string>
+# Runs the helper slice alone with PR_SIZE_* supplied as named variables.
+# <extra-args-string> stands in for the harness-substituted argument.
+run_pr_size_helper() {
+    local extra="$1" script
+    script="$(extract_shell_slice '# pr-size-helper:begin' '# pr-size-helper:end' \
+        "$REPO_ROOT/skills/autospec-run/SKILL.md")"
+    script="${script//<ISSUE>/3101}"
+    script="${script}"$'\n'"run_pr_size_gate $extra"
+    : > "$TEST_TMPDIR/mutations"
+    # PR_SIZE_* are inherited from this shell's exported environment, not
+    # injected here: a default injected at this seam would silently re-supply
+    # the very variable the unset cases below are trying to withhold.
+    run env PATH="$TEST_TMPDIR/bin:$PATH" \
+        AUTOSPEC_SCRIPTS_DIR="$TEST_TMPDIR/scripts" \
+        MUTATION_LOG="$TEST_TMPDIR/mutations" \
+        bash -c "$script"
+}
+
+@test "PR_SIZE gate ignores a harness-substituted argument and reads named vars" {
+    make_pr_size_env_fakes
+    export PR_SIZE_PHASE=pre-push PR_SIZE_BASE_OID=base-oid PR_SIZE_HEAD_OID=head-oid
+    # A rendered body sees the caller's slash-command argument in $1. If the
+    # helper still read positionals, PR_SIZE_BASE_OID/HEAD_OID would be clobbered
+    # to empty here and `git diff` would reject them.
+    run_pr_size_helper "'/autospec-run --profile local'"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF 'INFO:PR_SIZE: acceptance' <<< "$output"
+    grep -qxF linted "$TEST_TMPDIR/mutations"
+}
+
+@test "PR_SIZE gate fails closed when any named input is unset or empty" {
+    make_pr_size_env_fakes
+    for missing in PR_SIZE_PHASE PR_SIZE_BASE_OID PR_SIZE_HEAD_OID; do
+        for value in "" "unset"; do
+            export PR_SIZE_PHASE=pre-push PR_SIZE_BASE_OID=base-oid PR_SIZE_HEAD_OID=head-oid
+            if [ "$value" = unset ]; then
+                unset "$missing"
+            else
+                export "$missing="
+            fi
+            run_pr_size_helper ""
+            [ "$status" -ne 0 ] || { echo "$missing/$value accepted: $output"; return 1; }
+            # A named diagnostic, not an incidental `git diff` blow-up: the gate
+            # has to recognise its own missing input rather than trip over it.
+            grep -q 'ERROR:PR_SIZE' <<< "$output" \
+                || { echo "$missing/$value gave no ERROR:PR_SIZE line: $output"; return 1; }
+            # Fail closed means the linter is never reached, not just a bad exit.
+            [ ! -s "$TEST_TMPDIR/mutations" ] || { echo "$missing/$value reached linter"; return 1; }
+        done
+    done
+    unset PR_SIZE_PHASE PR_SIZE_BASE_OID PR_SIZE_HEAD_OID
+}
