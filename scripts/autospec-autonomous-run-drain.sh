@@ -36,6 +36,14 @@ if ! command -v omx >/dev/null 2>&1; then
     exit 127
 fi
 
+PROCESS_TREE_HELPER="$SCRIPT_DIR/lib/autospec-process-tree.sh"
+if [ ! -f "$PROCESS_TREE_HELPER" ]; then
+    printf 'autospec-autonomous-run-drain: process-tree helper missing: %s\n' "$PROCESS_TREE_HELPER" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$PROCESS_TREE_HELPER"
+
 stat_size() {
     stat -c '%s' /dev/fd/1 2>/dev/null || stat -f '%z' /dev/fd/1 2>/dev/null || printf ''
 }
@@ -99,33 +107,24 @@ progress_signature() {
     done
 }
 
-kill_tree() {
-    _pid="$1"
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        kill_tree "$_child"
-    done
-    kill "$_pid" 2>/dev/null || true
-    # A shell blocked in `wait` may defer TERM until its child exits. Escalate
-    # immediately after recursively signalling descendants so stall recovery
-    # never inherits the child's full sleep/runtime.
-    kill -KILL "$_pid" 2>/dev/null || true
-}
-
+# The omx child is launched in its own session (see below), so its pid is also
+# its process-group id. A group-directed liveness probe reports "alive" while
+# any member of that group still runs — the stale wait-handle case the old
+# parent-chain walk covered — and "dead" only when the whole tree is gone.
+# The direct child is checked with jobs -pr first, exactly as before, so the
+# loop condition holds even in the startup window before the child's new
+# session exists.
 child_is_running() {
-    jobs -pr | grep -qx "$child_pid" || has_live_descendant "$child_pid"
+    jobs -pr 2>/dev/null | grep -qx "$child_pid" || has_live_descendant "$child_pid"
 }
 
+# Descendant liveness: the group is still alive but the direct child is gone —
+# a stale wrapper that died while its work lives on.
 has_live_descendant() {
     _pid="$1"
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        if kill -0 "$_child" 2>/dev/null; then
-            return 0
-        fi
-        if has_live_descendant "$_child"; then
-            return 0
-        fi
-    done
-    return 1
+    kill -0 -- "-$_pid" 2>/dev/null || return 1
+    jobs -pr 2>/dev/null | grep -qx "$_pid" && return 1
+    return 0
 }
 
 detect_repo() {
@@ -288,7 +287,21 @@ EOF
 # not interpolate `$autospec-run` as an unset shell variable under `set -u`.
 export AUTOSPEC_RESUME_COMMAND="${AUTOSPEC_RESUME_COMMAND:-cd $(printf '%q' "$REPO_DIR") && omx exec '\$autospec-run'}"
 
-omx exec \
+# Launch the omx child in its own session so it becomes its own process-group
+# leader: the shared reaper's 'separate-recursive' policy and the group
+# liveness probe above both require the child to own the group that gets
+# signalled. A plain `&` child stays in this script's group, which the helper
+# refuses to signal and the group probe would misread as this script's own
+# liveness.
+if ! command -v setsid >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    printf 'autospec-autonomous-run-drain: neither setsid nor python3 found; cannot launch omx in its own session\n' >&2
+    exit 127
+fi
+NEW_SESSION_CMD=(python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
+if command -v setsid >/dev/null 2>&1; then
+    NEW_SESSION_CMD=(setsid)
+fi
+"${NEW_SESSION_CMD[@]}" omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     '$autospec-run' &
@@ -328,7 +341,10 @@ while child_is_running; do
         record_closeout_hang || true
         printf 'autospec-autonomous-run-drain: stalled after %ss with no output; terminating autospec-run child pid %s\n' \
             "$DRAIN_STALL_SECS" "$child_pid" >&2
-        kill_tree "$child_pid"
+        # grace_ticks=0 keeps the old immediate TERM->KILL escalation: a shell
+        # blocked in `wait` defers TERM until its child exits, so stall
+        # recovery must never inherit the child's full sleep/runtime.
+        autospec_kill_tree "$child_pid" separate-recursive 0
         wait "$child_pid" 2>/dev/null || true
         if recover_green_in_progress_pr; then
             exit 0
