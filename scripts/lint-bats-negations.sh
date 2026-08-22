@@ -32,8 +32,10 @@ root="$(cd "${script_dir}/.." && pwd -P)"
 allowlist=""
 mode="check"
 
+# Print the header comment block (everything from line 2 up to the first
+# non-comment line) as the usage text, so --help cannot drift from the header.
 usage() {
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
 while [ "$#" -gt 0 ]; do
