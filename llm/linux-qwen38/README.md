@@ -150,6 +150,48 @@ will not co-reside on this card. That is also why concurrent sessions must all
 pick tiers of the **same** model — a text session and a vision session running
 together make the router reload on every request.
 
+**A tier's usable window is `context - output`, not `context`.** The client
+spends the difference on input, so the reply reserve is subtracted from the
+window you thought you picked. The generator used to write a flat 32,768
+reserve on every entry, which left the 40k tier 8,192 tokens to hold an entire
+session -- and the failure is silent. OpenCode does not error on a window it
+cannot fit into; it compacts, retries, exceeds again, and never answers. Two
+runs of seven minutes produced nothing, while the same prompt on the whole-pool
+entry answered in 26 seconds. The reserve now scales with the tier
+(`output_reserve()`), and `--floor N` keeps a tier that cannot seat a starting
+session from being the one a fresh client lands on:
+
+```
+configure-opencode.py --presets ... --floor 37873   # the default; 0 disables
+```
+
+37,873 is this operator's p90 measured by `analyze-session-contexts.py` -- the
+system prompt, project instructions, memory and tool schemas a primary carries
+*before any work*. Measure your own; a client's floor is not a property of the
+server. Tiers under the floor stay offered, because a pinned subagent floors far
+lower (37,113 for a stock child, 18,030 with the skill tool denied) and those
+pins are what the ladder is for.
+
+**The generator asks the server what it serves.** Presets say what a deployment
+*could* serve; `/v1/models` says what is loaded and answering, and only the
+second one bills. When they disagree the client loses: llama.cpp answers for a
+model it does not have by substituting whatever is loaded -- 200, no error, a
+reply from weights nobody chose. So a model the server has not loaded is dropped
+by name, with every tier in its family, and any entry declaring more context
+than the live `n_ctx` is capped. A `-NNk` alias of a model that *is* loaded
+survives even when the server never declared the alias: it resolves to those
+same weights, and the number is a cap the client enforces -- which is the whole
+mechanism. (Verified on this node: `-80k` is absent from its `/v1/models` and
+drives it correctly, while `-vision` would have answered from the text model.)
+Modality comes from the same probe: a model whose capability list says
+`multimodal` has its tiers marked for images even when the preset that
+describes it loads no projector, so dropping a vision family the server has not
+loaded does not also drop images the server does serve.
+If the server does not answer, the run warns and falls back to the presets;
+`--no-server-check` skips the probe for provisioning a config before the server
+is up. A server that shares no id with the presets is refused outright, because
+every id in that config would resolve only by substitution.
+
 ## Running several sessions at once
 
 The server holds **one 196,608-token KV pool shared across 4 slots**

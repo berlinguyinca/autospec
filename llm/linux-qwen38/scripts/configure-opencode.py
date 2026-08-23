@@ -21,6 +21,8 @@ import re
 import shutil
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Shared with context-budget-check.py so the pinner and the pricer cannot
@@ -36,9 +38,66 @@ from agentmodes import spawnable  # noqa: E402
 # actually gets rationed. See the header of router-presets.ini.
 TIER_RE = re.compile(r"-(\d+)k$")
 
+# The floor a PRIMARY session starts at: system prompt, project instructions,
+# memory, skill and MCP tool schemas, before a single line of work. Measured
+# with analyze-session-contexts.py across this operator's own OpenCode sessions
+# -- 14,492 tokens at the median but 37,873 at p90, and 39,843 sampled off
+# /slots for one plain question asked inside the autospec repo. A tier whose
+# INPUT budget sits under this cannot start a session; it does not error, it
+# compacts on every turn and never answers.
+DEFAULT_PRIMARY_FLOOR = 37873
+
 DEFAULT_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 DEFAULT_PRESETS = Path("/opt/qwen-vllm/etc/router-presets.ini")
 DEFAULT_AGENTS = Path.home() / ".config" / "opencode" / "agent"
+
+
+def output_reserve(ctx: int) -> int:
+    """How much of a tier to hold back for the reply.
+
+    The client spends `context - output` on input, so a reserve copied
+    unchanged across every tier quietly eats the small ones: 32,768 held back
+    from a 40,960 tier leaves 8,192 tokens to say everything in, which is less
+    than any real session's opening context. The failure is silent -- OpenCode
+    compacts, retries, exceeds again, and never answers -- so the reserve has
+    to scale with the window rather than be a constant.
+    """
+    return max(4096, min(32768, ctx // 4))
+
+
+def read_served(base_url: str, timeout: float) -> dict[str, dict] | None:
+    """{served id: {n_ctx, vision}} from the server's /v1/models, or None.
+
+    The presets say what a deployment COULD serve; this says what is loaded and
+    answering right now, and only the second one bills. They diverge in the way
+    that hurts: llama.cpp answers for a model it does not have, substituting
+    whatever is loaded, 200 and no error. So a client offered an id the server
+    never declared gets a fluent reply from the wrong tier and no way to tell.
+    """
+    url = base_url.rstrip("/") + "/models"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as fh:
+            payload = json.loads(fh.read().decode())
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    # Two shapes in one payload: "data" carries the OpenAI-style entries with
+    # meta.n_ctx, "models" carries llama.cpp's capability list. A model that
+    # loaded a projector says so here, which is how a client learns it may send
+    # images without the presets having to be right about it.
+    caps = {m.get("name"): set(m.get("capabilities") or [])
+            for m in payload.get("models") or [] if m.get("name")}
+    served: dict[str, dict] = {}
+    for item in payload.get("data") or []:
+        mid = item.get("id")
+        if not mid:
+            continue
+        meta = item.get("meta") or {}
+        ctx = meta.get("n_ctx")
+        served[mid] = {
+            "n_ctx": int(ctx) if isinstance(ctx, int) and ctx > 0 else 0,
+            "vision": bool(caps.get(mid, set()) & {"multimodal", "vision"}),
+        }
+    return served or None
 
 
 def read_presets(path: Path) -> dict[str, dict]:
@@ -122,6 +181,21 @@ def pick_default(models: dict, entries: dict, owner: dict, args) -> str:
     plain = {mid: e for mid, e in text.items() if owner[mid] == base}
     if plain:
         text = plain
+
+    # A tier a session cannot START in must not be the one a fresh client
+    # lands on. This filters the default only: the small tiers stay offered,
+    # because a pinned subagent floors far lower than a primary does (a stock
+    # child measured 37,113 and the same child with the skill tool denied
+    # 18,030 -- the skill roster alone is ~16.3k), and those pins are the whole
+    # point of the ladder.
+    if args.floor:
+        startable = {mid: e for mid, e in text.items()
+                     if e["limit"]["context"] - e["limit"]["output"] >= args.floor}
+        if startable:
+            text = startable
+        else:
+            print(f"no tier leaves {args.floor:,} tokens of input budget; "
+                  f"defaulting to the roomiest anyway", file=sys.stderr)
 
     def pool_of(model_id: str) -> int:
         return models[owner[model_id]]["context"] or 0
@@ -240,6 +314,21 @@ def main() -> int:
                          "(default: the smallest text tier offered)")
     ap.add_argument("--agents", type=Path, default=DEFAULT_AGENTS,
                     help="directory of agent definitions to pin")
+    ap.add_argument("--floor", type=int, default=DEFAULT_PRIMARY_FLOOR,
+                    help="tokens a primary session carries before any work. A "
+                         "tier whose input budget (context minus output) is "
+                         "under this is still offered but never made the "
+                         "default; 0 disables the check. Measure yours with "
+                         "analyze-session-contexts.py rather than guessing")
+    ap.add_argument("--no-server-check", action="store_true",
+                    help="do not ask the server which models it actually "
+                         "serves. The check exists because llama.cpp answers "
+                         "for a model it does not have by substituting "
+                         "whatever is loaded, so an id the server never "
+                         "declared looks like it works. Skip it only when "
+                         "generating a config before the server is up")
+    ap.add_argument("--server-timeout", type=float, default=5.0,
+                    help="seconds to wait for /v1/models")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -286,7 +375,8 @@ def main() -> int:
                 # told a server accepts images when no projector is loaded
                 # fails in a way that looks nothing like the cause.
                 "attachment": info["vision"],
-                "limit": {"context": ctx or 32768, "output": 32768},
+                "limit": {"context": ctx or 32768,
+                          "output": output_reserve(ctx or 32768)},
             }
 
         if not args.no_solo_tier:
@@ -297,7 +387,58 @@ def main() -> int:
                                    key=lambda kv: -kv[1]):
             add(alias, limit)
 
-    options = {"baseURL": f"http://{args.host}:{args.port}/v1"}
+    base_url = f"http://{args.host}:{args.port}/v1"
+    if not args.no_server_check:
+        served = read_served(base_url, args.server_timeout)
+        if served is None:
+            print(f"warning: {base_url}/models did not answer; the config "
+                  f"below is what the PRESETS promise, unverified against "
+                  f"what is loaded", file=sys.stderr)
+        else:
+            # Keep a family iff its own model id is loaded. A "-NNk" alias of a
+            # loaded model is not a lie even when the server never declared it:
+            # it resolves to those same weights and the number is a cap the
+            # CLIENT enforces, which is the whole mechanism. A family the
+            # server does not serve is a different matter -- ask for a vision
+            # or abliterated id that is not loaded and llama.cpp substitutes
+            # the plain model, 200 and no error, and the answer comes from
+            # weights nobody chose.
+            dropped = sorted(mid for mid in entries if owner[mid] not in served)
+            families = sorted({owner[mid] for mid in dropped})
+            for mid in dropped:
+                del entries[mid]
+                owner.pop(mid, None)
+            if dropped:
+                print(f"dropping {len(dropped)} id(s) from {len(families)} "
+                      f"model(s) the server has not loaded "
+                      f"({', '.join(families)}): {', '.join(dropped)}",
+                      file=sys.stderr)
+                print("  asking for one of those does not fail -- the server "
+                      "substitutes whatever IS loaded, so the answer comes "
+                      "from weights nobody chose. Load them, or leave them out.",
+                      file=sys.stderr)
+            for mid, entry in entries.items():
+                info = served.get(owner[mid]) or {}
+                # The server loaded a projector for a model the presets call
+                # text-only. Believe the server: dropping its vision family
+                # would otherwise take away images this node demonstrably
+                # serves, and the tier is a cap, not a modality.
+                if info.get("vision") and not entry["attachment"]:
+                    print(f"marking {mid} multimodal: the loaded model has a "
+                          f"projector", file=sys.stderr)
+                    entry["attachment"] = True
+                live = info.get("n_ctx") or 0
+                if live and entry["limit"]["context"] > live:
+                    print(f"capping {mid}: {entry['limit']['context']:,} "
+                          f"declared, {live:,} served", file=sys.stderr)
+                    entry["limit"]["context"] = live
+                    entry["limit"]["output"] = output_reserve(live)
+            if not entries:
+                print(f"the server at {base_url} serves none of the models in "
+                      f"{args.presets}", file=sys.stderr)
+                return 1
+
+    options = {"baseURL": base_url}
     if args.api_key:
         options["apiKey"] = args.api_key
     cfg["provider"][args.provider] = {
