@@ -2426,6 +2426,224 @@ fn foreground_recovers_active_claim_without_executor_invocation() {
 }
 
 #[test]
+fn foreground_recovers_retained_executor_predecessor_after_claim_advances() {
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
+    let worker = "rust-foreground-conductor-recovered";
+    let branch = "feat/autonomous-issue-42";
+    let predecessor = "claim-generation-41";
+    let foreign = "claim-generation-40";
+
+    let run_case = |authorize: bool| {
+        let fixture = ForegroundFixture::new();
+        let bridge = fixture.configure_real_bridge();
+        let origin_main_oid = git_fixture(
+            &fixture.repo_dir,
+            &["rev-parse", "--verify", "origin/main^{commit}"],
+        );
+        if !bridge.executor_fixture.exists() {
+            fs::create_dir_all(&bridge.executor_fixture).expect("create executor scope root");
+        }
+        fs::set_permissions(&bridge.executor_fixture, fs::Permissions::from_mode(0o700))
+            .expect("make executor scope root private");
+        let scope_root =
+            fs::canonicalize(&bridge.executor_fixture).expect("canonical executor scope root");
+        let worktree_path = scope_root.join("issue-42");
+        if !worktree_path.exists() {
+            git_fixture(
+                &fixture.repo_dir,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    worktree_path.to_str().expect("worktree path"),
+                    &origin_main_oid,
+                ],
+            );
+        }
+        let worktree = fs::canonicalize(&worktree_path).expect("canonical executor worktree");
+        let repository = fs::canonicalize(&fixture.repo_dir).expect("canonical repository path");
+        let base_oid_key = format!("branch.{branch}.autospecBaseOid");
+        let base_ref_key = format!("branch.{branch}.autospecBaseRef");
+        let base_repo_key = format!("branch.{branch}.autospecRepositoryPath");
+        let repo_display = repository.display().to_string();
+        git_fixture(
+            &fixture.repo_dir,
+            &["config", base_oid_key.as_str(), origin_main_oid.as_str()],
+        );
+        git_fixture(
+            &fixture.repo_dir,
+            &["config", base_ref_key.as_str(), "origin/main"],
+        );
+        git_fixture(
+            &fixture.repo_dir,
+            &["config", base_repo_key.as_str(), repo_display.as_str()],
+        );
+        fixture.seed_interrupted_executor_invocation(
+            worker,
+            branch,
+            predecessor,
+            &origin_main_oid,
+            &repository,
+            &worktree,
+        );
+        fixture.seed_available_ownership_transfer(
+            worker,
+            branch,
+            predecessor,
+            &origin_main_oid,
+            &repository,
+            &worktree,
+        );
+        fs::create_dir_all(fixture.state_path().parent().unwrap())
+            .expect("create recovery state directory");
+        fs::write(
+            fixture.state_path(),
+            selected_foreground_state()
+                .transition(ConductorEvent::Claimed)
+                .expect("seed claimed conductor")
+                .transition(ConductorEvent::DispatchRecorded {
+                    outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+                })
+                .expect("seed receipt failure")
+                .to_json(),
+        )
+        .expect("persist receipt-failed conductor state");
+        fixture.seed_claim_state_with_id(
+            worker,
+            branch,
+            "claimed",
+            &fresh_iso_timestamp(),
+            EXECUTOR_CLAIM_ID,
+        );
+        fixture.seed_claim_acquisition_receipt(worker, branch, EXECUTOR_CLAIM_ID);
+        let seeded = git_fixture(
+            &fixture.claim_repo,
+            &[
+                "ls-remote",
+                "--refs",
+                fixture.claim_remote.to_str().expect("claim remote"),
+                "refs/autospec/claims/issue-42",
+            ],
+        );
+        let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+        git_fixture(
+            &fixture.claim_repo,
+            &[
+                "push",
+                bridge.remote.to_str().expect("bridge remote"),
+                &format!("{seeded}:refs/autospec/claims/issue-42"),
+            ],
+        );
+        fs::write(&fixture.mode, "claimed\n").expect("seed claim label projection");
+        fixture.seed_completed_claim_heartbeat_handoff(
+            worker,
+            branch,
+            if authorize { predecessor } else { foreign },
+        );
+
+        let output = fixture
+            .command()
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
+            .output()
+            .expect("run retained recovery foreground");
+        let transfer = scope_root.join("issue-42.ownership-transfer.json");
+        let successor_invocation = fixture.scoped_dir().join("executor").join(format!(
+            "issue-42-{}",
+            &sha256_hex(EXECUTOR_CLAIM_ID.as_bytes())[..16]
+        ));
+        let calls = fs::read_to_string(&fixture.calls).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if authorize {
+            assert!(
+                output.status.success(),
+                "match: stdout={} stderr={} calls={}",
+                String::from_utf8_lossy(&output.stdout),
+                stderr,
+                calls
+            );
+            assert_eq!(
+                fixture.read_state().phase(),
+                ConductorPhase::Scan,
+                "match: retained predecessor authority must authorize recovery"
+            );
+            let transfer_doc: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&transfer).expect("match: read ownership transfer"),
+            )
+            .expect("match: parse ownership transfer");
+            assert_eq!(
+                transfer_doc["state"], "adopted",
+                "match: transfer must be adopted"
+            );
+            assert_eq!(
+                transfer_doc["from_claim_id"], predecessor,
+                "match: predecessor origin"
+            );
+            assert_eq!(
+                transfer_doc["to_claim_id"], EXECUTOR_CLAIM_ID,
+                "match: successor claim"
+            );
+            assert_eq!(
+                transfer_doc["to_invocation_id"],
+                format!("42-{EXECUTOR_CLAIM_ID}"),
+                "match: successor invocation"
+            );
+            assert_eq!(
+                calls.matches("\npr\ncreate\n").count(), 1,
+                "match: one PR create"
+            );
+            assert_eq!(
+                calls.matches("\npr\nmerge\n").count(), 1,
+                "match: one PR merge"
+            );
+        } else {
+            assert!(
+                stderr.contains("interrupted executor predecessor claim is not released"),
+                "mismatch: bridge must reject the foreign handoff; status={:?} stdout={} stderr={} calls={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                stderr,
+                calls
+            );
+            let transfer_doc: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&transfer).expect("mismatch: read ownership transfer"),
+            )
+            .expect("mismatch: parse ownership transfer");
+            assert_eq!(
+                transfer_doc["state"], "available",
+                "mismatch: foreign handoff must not authorize adoption"
+            );
+            assert_eq!(
+                transfer_doc["from_claim_id"], predecessor,
+                "mismatch: predecessor origin unchanged"
+            );
+            assert!(
+                transfer_doc.get("to_claim_id").is_none(),
+                "mismatch: no successor adoption"
+            );
+            assert!(
+                !successor_invocation.exists(),
+                "mismatch: no successor invocation may be persisted"
+            );
+            assert_eq!(
+                calls.matches("\npr\ncreate\n").count(), 0,
+                "mismatch: no PR create"
+            );
+        }
+    };
+
+    run_case(true);
+    run_case(false);
+}
+
+#[test]
 fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
@@ -7326,6 +7544,102 @@ printf '%s\n' '[]' > "$report"
         );
     }
 
+    fn seed_interrupted_executor_invocation(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+        base_oid: &str,
+        repository: &Path,
+        worktree: &Path,
+    ) {
+        let state_dir = self.scoped_dir().join("executor");
+        fs::create_dir_all(&state_dir).expect("create executor state directory");
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))
+            .expect("make executor state directory private");
+        let generation = &sha256_hex(claim_id.as_bytes())[..16];
+        let path = state_dir.join(format!("issue-42-{generation}.json"));
+        let body = serde_json::json!({
+            "schema": 1,
+            "identity": {
+                "repository": "test/repo",
+                "repository_path": repository,
+                "issue": 42,
+                "worker_id": worker_id,
+                "branch": branch,
+                "claim_id": claim_id,
+                "invocation_id": format!("42-{claim_id}"),
+                "base_ref": "origin/main",
+                "base_oid": base_oid,
+                "worktree": worktree,
+                "runtime_environment_dir": null,
+                "runtime_session_id": null
+            },
+            "harness": "claude",
+            "phase": "interrupted",
+            "supervisor": null,
+            "process": null,
+            "progress_at": 1,
+            "pr": null,
+            "head_oid": null,
+            "closeout_path": null,
+            "closeout_digest": null,
+            "remote_snapshot_digest": null,
+            "draft_process": null,
+            "terminal_result": null,
+            "umbrella": null,
+            "current_child": null
+        });
+        fs::write(&path, format!("{body}\n")).expect("seed interrupted executor invocation");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make interrupted executor invocation private");
+    }
+
+    fn seed_available_ownership_transfer(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+        base_oid: &str,
+        repository: &Path,
+        worktree: &Path,
+    ) {
+        let scope_root = worktree.parent().expect("ownership transfer scope root");
+        fs::create_dir_all(scope_root).expect("create ownership transfer scope root");
+        fs::set_permissions(scope_root, fs::Permissions::from_mode(0o700))
+            .expect("make ownership transfer scope root private");
+        let path = scope_root.join("issue-42.ownership-transfer.json");
+        let cleanup_binding = sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}",
+                "test/repo",
+                42,
+                worker_id,
+                claim_id,
+                format!("42-{claim_id}"),
+                worktree.display()
+            )
+            .as_bytes(),
+        );
+        let document = serde_json::json!({
+            "schema": 1,
+            "state": "available",
+            "repository_path": repository,
+            "issue": 42,
+            "worktree": worktree,
+            "branch": branch,
+            "from_claim_id": claim_id,
+            "from_invocation_id": format!("42-{claim_id}"),
+            "head_oid": base_oid,
+            "status_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "runtime_receipt": "",
+            "cleanup_binding": cleanup_binding
+        });
+        fs::write(&path, format!("{document}\n")).expect("seed available ownership transfer");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make available ownership transfer private");
+    }
+
     fn seed_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {
         let pid = std::process::id();
         let (_, process_start) = process_identity(pid).expect("current process identity");
@@ -7377,6 +7691,43 @@ printf '%s\n' '[]' > "$report"
         fs::rename(self.heartbeats.join("o4_test_r4_repo/42.json"), archive)
             .expect("seed moved heartbeat archive");
         (pending, completed)
+    }
+
+    fn seed_completed_claim_heartbeat_handoff(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) {
+        self.seed_expired_claim_heartbeat(worker_id, branch, claim_id);
+        let mut identity = Vec::new();
+        for field in [
+            "test/repo",
+            "42",
+            worker_id,
+            branch,
+            "",
+            claim_id,
+            "claimed",
+        ] {
+            identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            identity.extend_from_slice(field.as_bytes());
+        }
+        let digest = sha256_hex(&identity);
+        let quarantine = self.heartbeats.join("o4_test_r4_repo/quarantine");
+        let handoff = quarantine.join("startup-heartbeat-handoffs");
+        fs::create_dir_all(&handoff).expect("create completed handoff directory");
+        for private in [&quarantine, &handoff] {
+            fs::set_permissions(private, fs::Permissions::from_mode(0o700))
+                .expect("make completed handoff directory private");
+        }
+        let completed = handoff.join(format!("completed-42-{digest}.receipt"));
+        let archive = handoff.join(format!("completed-42-{digest}.json"));
+        fs::write(&completed, "").expect("seed completed heartbeat receipt");
+        fs::set_permissions(&completed, fs::Permissions::from_mode(0o600))
+            .expect("make completed heartbeat receipt private");
+        fs::rename(self.heartbeats.join("o4_test_r4_repo/42.json"), archive)
+            .expect("seed moved heartbeat archive");
     }
 
     fn seed_claim_heartbeat_record(
