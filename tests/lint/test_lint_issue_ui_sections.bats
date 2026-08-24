@@ -379,3 +379,46 @@ MD
     run bash -c "bash '$LINT' '$TMP/c.md' 2>&1"
     ! printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
 }
+
+@test "BODY_TOO_LONG: authored prose after a generated block is still counted" {
+    # The mirror of the test above. strip_ui_sections must resume counting once a
+    # generated block ends the UI section; otherwise the skip runs past the block
+    # and silently exempts real authored prose that follows it.
+    write_good_body "$TMP/b.md"
+    {
+        cat "$TMP/b.md"
+        printf '\n<!-- ui-feature -->\n\n'
+        echo "## Design reference"
+        echo ""
+        echo "DESIGN.md#buttons"
+        echo ""
+        echo "## Interaction states"
+        echo ""
+        echo "default/hover/focus"
+        echo ""
+        echo "## UX flows"
+        echo ""
+        echo "happy: click -> submit"
+        echo ""
+        echo "## Motion & feedback"
+        echo ""
+        echo "Motion: fade-in; reduced: opacity-only"
+        echo ""
+        echo "## Device & viewport"
+        echo ""
+        echo "Devices: iPhone SE; reflow-320: no h-scroll"
+        echo ""
+        echo "<!-- autospec-classify:begin -->"
+        echo "## Model fit"
+        echo ""
+        echo "- ctx"
+        echo "<!-- autospec-classify:end -->"
+        echo ""
+        for _ in $(seq 1 60); do
+            echo "authored authored authored authored authored authored authored authored"
+        done
+    } > "$TMP/c.md"
+    run bash -c "bash '$LINT' '$TMP/c.md' 2>&1"
+    [ "$status" -ge 1 ]
+    printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
+}

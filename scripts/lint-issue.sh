@@ -150,6 +150,12 @@ strip_ui_sections() {
             line = $0
             sub(/[[:space:]]+$/, "", line)
             if (line in headings) { skip = 1; next }
+            # A generated block ends the UI section just as a new heading does.
+            # Without this, the skip swallows the block'"'"'s opening marker (it is not
+            # a "## " line), strip_generated_metadata then sees an unmatched end
+            # marker, declines to strip, and the whole block is charged to the
+            # authored count -- the leak the exemption exists to prevent.
+            if (skip && line ~ /^<!-- autospec-[a-z-]+:begin -->$/) { skip = 0 }
             if (skip && substr($0, 1, 3) == "## ") { skip = 0 }
             if (skip) { next }
             print
@@ -184,17 +190,13 @@ strip_generated_metadata() {
     '
 }
 
-# Order is load-bearing: generated metadata MUST be removed first.
-#
-# strip_ui_sections skips every line after a UI heading until the next line
-# beginning '## '. Generated blocks open with '<!-- autospec-*:begin -->', which
-# is not such a line, so running strip_ui_sections first on a body whose trailing
-# section is a UI one DELETES the opening marker. strip_generated_metadata then
-# sees an end marker with no begin, declines to strip, and the whole block is
-# charged to the authored count - the exact leak this exemption exists to prevent,
-# and worse than if the marker had never moved.
+# strip_ui_sections must run first so that authored prose following a generated
+# block is still counted: the block is what ends the UI section, and removing it
+# beforehand would let the UI skip run on past it. This is safe only because
+# strip_ui_sections terminates its skip on a generated begin marker; without that
+# it would eat the marker and disable the exemption entirely.
 strip_non_authored_sections() {
-    strip_generated_metadata < "$1" | strip_ui_sections
+    strip_ui_sections < "$1" | strip_generated_metadata
 }
 
 # ── findings accumulator ──────────────────────────────────────────────────────

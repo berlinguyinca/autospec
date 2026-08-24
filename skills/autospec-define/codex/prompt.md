@@ -716,13 +716,11 @@ labels and patches each body with a `## Model fit` block.
 >    `<!-- autospec-classify:begin -->` and `<!-- autospec-classify:end -->`
 >    markers, replace it in place. Never stack duplicates. Apply via
 >    `gh issue edit <N> --body-file <tmp>`.
->    Legacy blocks written before the marker moved have `## Model fit` and its
->    bullets ABOVE `<!-- autospec-classify:begin -->`. Replacing only the
->    marker-delimited region leaves that heading orphaned outside the markers,
->    where it still counts against the word budget, and the replacement adds a
->    second `## Model fit`. So before replacing, delete any `## Model fit`
->    heading and the contiguous non-blank lines under it that sit immediately
->    above the begin marker.
+>    Legacy blocks have `## Model fit` ABOVE
+>    `<!-- autospec-classify:begin -->`. Replacing only the marker-delimited
+>    region orphans that heading outside the markers, where it still counts
+>    against the budget, and adds a second one. Delete the legacy heading
+>    and everything up to the begin marker first.
 >
 > 6. **Board assignment** — read `~/.autospec/project-map.yml` and assign each
 >    just-classified child to the GitHub Projects mapped from its labels.
@@ -767,7 +765,7 @@ labels and patches each body with a `## Model fit` block.
 >    - Run: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/audit-<N>.md`
 >    - On non-zero exit (lint fails):
 >      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
->      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+>      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete it and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
 >        ```markdown
 >        <!-- autospec-quality:begin -->
 >        ## Quality lint
@@ -847,16 +845,18 @@ exactly and for free.
 3. **Patch each child issue body** by appending the (possibly reconciled) block:
 
 ```
-<!-- autospec-shared-contracts:begin -->
-## Shared contracts
-
-<the extract-shared-contracts.sh block, plus any Tier-B reconcile notes>
-<!-- autospec-shared-contracts:end -->
+<the extract-shared-contracts.sh output verbatim, plus any Tier-B reconcile
+notes inserted before its closing marker>
 ```
 
    using `gh issue edit <N> --body "$(gh issue view <N> --json body -q .body)<newblock>"`.
    The patch is idempotent — skip if `<!-- autospec-shared-contracts:begin -->` is already
    present in the body.
+
+   Do NOT add your own `<!-- autospec-shared-contracts:begin -->` wrapper or
+   `## Shared contracts` heading: the script emits both. Nesting a second pair
+   leaves the outer marker and heading outside the region
+   `scripts/lint-issue.sh` strips, so they count against the word budget.
 
 If there are fewer than 2 child issues, or all child issues are in the same
 file (no cross-issue interface), skip Phase 3.75 and log:

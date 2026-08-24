@@ -13,26 +13,33 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 - `scripts/lint-issue.sh` exempts generated blocks from the 400-word `BODY_TOO_LONG`
   cap, but the exemption is line-bounded. The `## Model fit` and `## Quality lint`
   templates emitted their heading ABOVE the opening marker, so the heading and its
-  bullets were counted as authored prose. Phase 3 issues land at 380-399 words, so
-  Phase 3.5's own insertion tipped them over: on a real 30-issue batch the block
-  added 25 counted words to a 362-word body. Marker moved above the heading in 10
-  skill files (20 blocks), matching what `scripts/classify-model-fit.sh` and the
-  shared-contracts template already did.
+  bullets were counted as authored prose. Phase 3 issues land close enough to the
+  cap that Phase 3.5's own insertion tips them over: measured on the new fixture,
+  the block adds 25 counted words to a 362-word body. Marker moved above the
+  heading in 10 skill files (20 blocks), matching what
+  `scripts/classify-model-fit.sh` and the shared-contracts template already did.
 - `strip_generated_metadata` tracked only the `autospec-classify` and
   `autospec-shared-contracts` families. `autospec-quality` was never exempt at all,
   so an issue flagged once could never be brought back under the cap.
-- Ordering fix in `strip_non_authored_sections`: `strip_ui_sections` skips lines
+- Interaction with the UI-section exemption: `strip_ui_sections` skips lines
   after a UI heading until the next `## ` line, so running it first DELETED the
   opening marker of a generated block trailing the UI sections, leaving an
-  unmatched end marker and disabling the exemption entirely. On a `ui-feature`
-  body that raised the counted total from 410 to 419 - worse than before the
-  marker moved. Generated metadata is now stripped before UI sections.
+  unmatched end marker and disabling the exemption entirely - raising the counted
+  total by 9 words on a `ui-feature` body, worse than before the marker moved.
+  `strip_ui_sections` now terminates its skip on a generated begin marker, which
+  closes the leak in both directions regardless of pipeline order: the block stays
+  exempt, and authored prose following it is still counted.
 - `scripts/autospec-explore.sh` and `scripts/extract-shared-contracts.sh` emitted
   generated blocks with no markers at all, so every word counted; both now wrap
   their output, the latter on both exit paths.
-- The classify idempotency clause now tells the classifier to delete a legacy
-  heading sitting above the begin marker, so re-running over an existing backlog
-  does not leave an orphan heading plus a duplicate.
+- The classify and quality idempotency clauses now tell the classifier to delete a
+  legacy heading sitting above the begin marker, so re-running over an existing
+  backlog does not leave an orphan heading plus a duplicate.
+- `crates/autospec-core`'s `word_count_excluding_ui_sections` mirrored
+  `strip_ui_sections` but had no generated-metadata exemption for any family, so
+  `autospec lint issue` reported 535 words where the shell reported 362 on the same
+  fixture. The Rust path now mirrors the full pipeline. Three unrelated
+  shell/Rust rule divergences remain and are unchanged by this entry.
 
 #### Five validate checks that were red for reasons unrelated to their subject (2026-08-19)
 - `lint-implementation.sh` resolved `SCRIPT_DIR` with `dirname`, so on the deliberately stripped

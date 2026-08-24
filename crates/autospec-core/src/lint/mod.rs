@@ -423,22 +423,67 @@ fn is_ui_section_heading(line: &str) -> bool {
     })
 }
 
-/// Mirrors the shell `strip_ui_sections` helper: drop each UI section heading
-/// line plus its body (up to but excluding the next `## ` heading), then count
-/// words over what remains. Line-by-line summation is equivalent to splitting
-/// the whole source on whitespace, since word boundaries never span a newline.
+/// Generated-metadata marker families, mirroring the shell
+/// `strip_generated_metadata` helper. Content between a family's begin and end
+/// marker is written by autospec itself, not by the issue author, so it is
+/// exempt from the authored word budget.
+const GENERATED_MARKER_FAMILIES: [&str; 3] = [
+    "autospec-classify",
+    "autospec-quality",
+    "autospec-shared-contracts",
+];
+
+fn generated_marker(line: &str, side: &str) -> Option<&'static str> {
+    let trimmed = line.trim();
+    GENERATED_MARKER_FAMILIES
+        .into_iter()
+        .find(|family| trimmed == format!("<!-- {family}:{side} -->"))
+}
+
+/// Mirrors the shell `strip_ui_sections | strip_generated_metadata` pipeline:
+/// drop each UI section heading line plus its body (up to but excluding the next
+/// `## ` heading or a generated begin marker), drop every marker-bounded
+/// generated block, then count words over what remains. Line-by-line summation is
+/// equivalent to splitting the whole source on whitespace, since word boundaries
+/// never span a newline.
+///
+/// A generated block terminates a UI section exactly as a new heading does. Without
+/// that, the UI skip swallows the block's opening marker -- it is not a `## ` line --
+/// leaving an unmatched end marker, and the whole block is charged to the count.
 fn word_count_excluding_ui_sections(document: &IssueDocument<'_>) -> usize {
+    // Only well-formed pairs are exempt, matching the shell's
+    // `begin && end && begin < end` guard: a half-written block must not
+    // suppress counting.
+    let mut exempt = vec![false; document.lines.len()];
+    for family in GENERATED_MARKER_FAMILIES {
+        let begin = format!("<!-- {family}:begin -->");
+        let end = format!("<!-- {family}:end -->");
+        let last = |needle: &str| {
+            document
+                .lines
+                .iter()
+                .rposition(|line| line.trim() == needle)
+        };
+        if let (Some(b), Some(e)) = (last(&begin), last(&end)) {
+            if b < e {
+                for slot in &mut exempt[b..=e] {
+                    *slot = true;
+                }
+            }
+        }
+    }
+
     let mut skip = false;
     let mut count = 0usize;
-    for line in &document.lines {
+    for (index, line) in document.lines.iter().enumerate() {
         if is_ui_section_heading(line) {
             skip = true;
             continue;
         }
-        if skip && line.starts_with("## ") {
+        if skip && (line.starts_with("## ") || generated_marker(line, "begin").is_some()) {
             skip = false;
         }
-        if skip {
+        if skip || exempt[index] {
             continue;
         }
         count += line.split_whitespace().count();

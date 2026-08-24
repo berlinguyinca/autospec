@@ -221,19 +221,11 @@ For each candidate issue:
    `<!-- autospec-classify:begin -->` / `<!-- autospec-classify:end -->`
    markers), replace it in place. Never stack duplicate blocks.
 
-   Legacy blocks written before the marker moved have `## Model fit` and its
-
-   bullets ABOVE `<!-- autospec-classify:begin -->`. Replacing only the
-
-   marker-delimited region leaves that heading orphaned outside the markers,
-
-   where it still counts against the word budget, and the replacement adds a
-
-   second `## Model fit`. So before replacing, delete any `## Model fit`
-
-   heading and the contiguous non-blank lines under it that sit immediately
-
-   above the begin marker.
+   Legacy blocks have `## Model fit` ABOVE
+   `<!-- autospec-classify:begin -->`. Replacing only the marker-delimited
+   region orphans that heading outside the markers, where it still counts
+   against the budget, and adds a second one. Delete the legacy heading and
+   everything up to the begin marker first.
 
    Apply via `gh issue edit <N> --body-file <tmp>`.
 
@@ -280,7 +272,7 @@ For each candidate issue:
    - Run: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/audit-<N>.md`
    - On non-zero exit (lint fails):
      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
-     - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+     - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete it and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
        ```markdown
        <!-- autospec-quality:begin -->
        ## Quality lint
