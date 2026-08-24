@@ -450,6 +450,147 @@ else
     if [ -s "$TMP_DIR/unsafe-override.privileged.log" ]; then
         fail "unsafe root override reached sudo"
     fi
+
+    # Regression: npm installs `codex` as a JS wrapper at <pkg>/bin/codex.js
+    # that locates its platform-specific native binary through Node resolution
+    # and exec()s it. Granting the sandbox read access to the wrapper alone
+    # leaves that binary invisible inside bwrap, and the probe dies with
+    # `execvp: <path>: No such file or directory` for a file that exists.
+    #
+    # The platform package sits in a different place per install layout, so
+    # every supported layout is exercised and the assertion is CONTAINMENT of
+    # the real vendored binary, not equality with one hard-coded directory.
+    run_layout_case() {
+        layout_name=$1
+        layout_wrapper=$2
+        layout_vendor_bin=$3
+
+        layout_dir="$TMP_DIR/layout-$layout_name"
+        layout_path_bin="$layout_dir/pathbin"
+        layout_sysroot="$layout_dir/root"
+        mkdir -p "$layout_path_bin" "$layout_sysroot/etc/apparmor.d" \
+            "$layout_dir/codex-home" \
+            "$(dirname "$layout_wrapper")" "$(dirname "$layout_vendor_bin")"
+        printf '%s\n' 'ID=ubuntu' > "$layout_sysroot/etc/os-release"
+        cp "$FAKE_BIN/codex" "$layout_wrapper"
+        chmod +x "$layout_wrapper"
+        printf '%s\n' 'native' > "$layout_vendor_bin"
+        chmod +x "$layout_vendor_bin"
+        ln -sf "$layout_wrapper" "$layout_path_bin/codex"
+        : > "$layout_dir/codex.log"
+
+        set +e
+        layout_output=$(env \
+            PATH="$layout_path_bin:$FAKE_BIN:$PATH" \
+            AUTOSPEC_CODEX_SANDBOX_ROOT="$layout_sysroot" \
+            AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
+            CODEX_LOG="$layout_dir/codex.log" \
+            SYSCTL_LOG="$layout_dir/sysctl.log" \
+            PARSER_LOG="$layout_dir/parser.log" \
+            PRIVILEGED_LOG="$layout_dir/privileged.log" \
+            REPAIRED_MARKER="$layout_dir/repaired" \
+            CODEX_HOME="$layout_dir/codex-home" \
+            CODEX_MODE=healthy \
+            bash "$HELPER" 2>&1)
+        layout_status=$?
+        set -e
+        if [ "$layout_status" -ne 0 ]; then
+            fail "$layout_name Codex layout was rejected: $layout_output"
+            return 0
+        fi
+
+        layout_covered=0
+        for layout_granted in $(grep -o '"[^"]*"="read"' "$layout_dir/codex.log" |
+            sed 's/^"//; s/"="read"$//'); do
+            case "$layout_vendor_bin" in
+                "$layout_granted"/*) layout_covered=1 ;;
+            esac
+        done
+        if [ "$layout_covered" -ne 1 ]; then
+            fail "$layout_name layout: sandbox grant does not cover the vendored native binary"
+        fi
+    }
+
+    # Global `npm i -g`: platform package nested under the wrapper's package.
+    run_layout_case npm-global \
+        "$TMP_DIR/layout-npm-global/lib/node_modules/@openai/codex/bin/codex.js" \
+        "$TMP_DIR/layout-npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+
+    # Hoisted npm/yarn: platform package is a sibling of the wrapper's package.
+    run_layout_case hoisted \
+        "$TMP_DIR/layout-hoisted/node_modules/@openai/codex/bin/codex.js" \
+        "$TMP_DIR/layout-hoisted/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+
+    # pnpm/bun: wrapper and platform package live in peer store entries.
+    run_layout_case pnpm \
+        "$TMP_DIR/layout-pnpm/node_modules/.pnpm/@openai+codex@1.0.0/node_modules/@openai/codex/bin/codex.js" \
+        "$TMP_DIR/layout-pnpm/node_modules/.pnpm/@openai+codex-linux-x64@1.0.0/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+
+    # A standalone native build must not gain a directory grant. The healthy
+    # case resolves to $TMP_DIR/codex-package/bin/codex, so that package dir is
+    # the path an over-broad implementation would emit.
+    if grep -Fq -- "\"$TMP_DIR/codex-package\"=\"read\"" "$TMP_DIR/healthy/codex.log"; then
+        fail "non-npm Codex executable was granted an unnecessary directory read"
+    fi
+
+    # A standalone native build that happens to sit inside node_modules must
+    # not gain a grant either: only the JS wrapper needs the escape hatch, so
+    # the wrapper check must stay load-bearing.
+    native_nm="$TMP_DIR/native-nm"
+    native_nm_bin="$native_nm/node_modules/@openai/codex/bin"
+    mkdir -p "$native_nm_bin" "$native_nm/pathbin" \
+        "$native_nm/root/etc/apparmor.d" "$native_nm/codex-home"
+    printf '%s\n' 'ID=ubuntu' > "$native_nm/root/etc/os-release"
+    cp "$FAKE_BIN/codex" "$native_nm_bin/codex"
+    chmod +x "$native_nm_bin/codex"
+    ln -sf "$native_nm_bin/codex" "$native_nm/pathbin/codex"
+    : > "$native_nm/codex.log"
+    set +e
+    env \
+        PATH="$native_nm/pathbin:$FAKE_BIN:$PATH" \
+        AUTOSPEC_CODEX_SANDBOX_ROOT="$native_nm/root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
+        CODEX_LOG="$native_nm/codex.log" \
+        SYSCTL_LOG="$native_nm/sysctl.log" \
+        PARSER_LOG="$native_nm/parser.log" \
+        PRIVILEGED_LOG="$native_nm/privileged.log" \
+        REPAIRED_MARKER="$native_nm/repaired" \
+        CODEX_HOME="$native_nm/codex-home" \
+        CODEX_MODE=healthy \
+        bash "$HELPER" >/dev/null 2>&1
+    set -e
+    if grep -Fq -- "\"$native_nm/node_modules\"=\"read\"" "$native_nm/codex.log"; then
+        fail "native Codex build inside node_modules was granted a directory read"
+    fi
+
+    # A JS wrapper outside node_modules must not lift the grant to an ancestor
+    # such as $HOME, which the credential deny-list would not contain.
+    stray_home="$TMP_DIR/stray-home"
+    mkdir -p "$stray_home/bin" "$stray_home/root/etc/apparmor.d" "$stray_home/codex-home"
+    printf '%s\n' 'ID=ubuntu' > "$stray_home/root/etc/os-release"
+    printf '%s\n' '{"name":"home"}' > "$stray_home/package.json"
+    cp "$FAKE_BIN/codex" "$stray_home/bin/codex.js"
+    chmod +x "$stray_home/bin/codex.js"
+    mkdir -p "$stray_home/pathbin"
+    ln -sf "$stray_home/bin/codex.js" "$stray_home/pathbin/codex"
+    : > "$stray_home/codex.log"
+    set +e
+    env \
+        PATH="$stray_home/pathbin:$FAKE_BIN:$PATH" \
+        AUTOSPEC_CODEX_SANDBOX_ROOT="$stray_home/root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
+        CODEX_LOG="$stray_home/codex.log" \
+        SYSCTL_LOG="$stray_home/sysctl.log" \
+        PARSER_LOG="$stray_home/parser.log" \
+        PRIVILEGED_LOG="$stray_home/privileged.log" \
+        REPAIRED_MARKER="$stray_home/repaired" \
+        CODEX_HOME="$stray_home/codex-home" \
+        CODEX_MODE=healthy \
+        bash "$HELPER" >/dev/null 2>&1
+    set -e
+    if grep -Fq -- "\"$stray_home\"=\"read\"" "$stray_home/codex.log"; then
+        fail "wrapper outside node_modules granted read on its whole ancestor directory"
+    fi
 fi
 
 dry_output=$(AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \

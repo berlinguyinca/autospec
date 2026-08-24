@@ -12,6 +12,7 @@ SYSTEM_ROOT="${AUTOSPEC_CODEX_SANDBOX_ROOT:-}"
 TEST_MODE="${AUTOSPEC_CODEX_SANDBOX_TEST_MODE:-0}"
 CODEX_EXECUTABLE=""
 CODEX_EXECUTABLE_TOML=""
+CODEX_VENDOR_READ_TOML=""
 ORIGINAL_CODEX_HOME="${CODEX_HOME:-}"
 PROBE_CODEX_HOME=""
 IGNORE_USER_CONFIG_SUPPORTED=0
@@ -98,8 +99,52 @@ toml_escape() {
     printf '%s' "$escaped"
 }
 
+# Resolve the dependency root to grant the sandbox when `codex` on PATH is the
+# JS wrapper npm installs at <pkg>/bin/codex.js. That wrapper locates its
+# platform-specific native binary with `require.resolve`, i.e. normal Node
+# resolution walking *up* the directory chain, then exec()s it. Granting read
+# on the wrapper path alone leaves that binary invisible inside bwrap and the
+# probe fails with
+#   bwrap: execvp <path>: No such file or directory
+# for a file that plainly exists on the host.
+#
+# The platform package is NOT reliably under <pkg>: it is nested there only for
+# a global `npm i -g` install. A hoisted npm/yarn install puts it in the same
+# node_modules as a *sibling* of <pkg>, and pnpm/bun place it in a peer store
+# entry under node_modules/.pnpm. The one directory enclosing every one of
+# those layouts is the OUTERMOST node_modules on the path, so grant that.
+#
+# Requiring node_modules containment also floors how far up the grant can
+# reach: without it a stray ~/bin/codex.js beside a ~/package.json would grant
+# read on the entire home directory, and the profile's credential deny-list
+# enumerates only specific paths rather than containing a broad grant.
+#
+# Prints nothing and returns 1 when the executable is not an npm wrapper (e.g.
+# a standalone native build), leaving the profile unchanged.
+codex_vendor_read_root() {
+    candidate=$1
+    case "$candidate" in
+        *.js) ;;
+        *) return 1 ;;
+    esac
+    case "$candidate" in
+        */node_modules/*) ;;
+        *) return 1 ;;
+    esac
+    # `%%` strips from the FIRST /node_modules/, yielding the outermost one.
+    vendor_read_root="${candidate%%/node_modules/*}/node_modules"
+    [ -d "$vendor_read_root" ] && [ ! -L "$vendor_read_root" ] || return 1
+    printf '%s\n' "$vendor_read_root"
+}
+
 permission_profile_filesystem() {
     filesystem="permissions.$PROFILE_NAME.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},\"$CODEX_EXECUTABLE_TOML\"=\"read\""
+    # The npm entry point is a JS wrapper that exec()s a vendored native
+    # binary; granting read on the wrapper alone leaves that binary invisible
+    # inside the sandbox. See codex_vendor_read_root.
+    if [ -n "$CODEX_VENDOR_READ_TOML" ]; then
+        filesystem="$filesystem,\"$CODEX_VENDOR_READ_TOML\"=\"read\""
+    fi
     # shellcheck disable=SC2088 # Codex expands these config paths, not Bash.
     for denied_path in \
         '~/.aws' \
@@ -396,6 +441,10 @@ if [ -z "$CODEX_EXECUTABLE" ] || [ ! -f "$CODEX_EXECUTABLE" ]; then
     exit 1
 fi
 CODEX_EXECUTABLE_TOML="$(toml_escape "$CODEX_EXECUTABLE")"
+codex_vendor_root="$(codex_vendor_read_root "$CODEX_EXECUTABLE" || true)"
+if [ -n "$codex_vendor_root" ]; then
+    CODEX_VENDOR_READ_TOML="$(toml_escape "$codex_vendor_root")"
+fi
 # `codex exec` supports --ignore-user-config on 0.144.4, but `codex sandbox`
 # does not. Probe the exact subcommand capability instead of assuming parity.
 if "$CODEX_EXECUTABLE" sandbox --help 2>/dev/null |
