@@ -371,3 +371,49 @@ esac
     assert!(format!("{error:?}").contains("not an ancestor"));
     assert_eq!(fs::read_to_string(&calls).expect("rewritten-tip calls"), "");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executor_supervision_live_harness_retains_executor_worktree() {
+    // Break caught: the executor worktree was removed while its harness, Cargo, and test
+    // descendants stayed alive with deleted working directories. Spec section 13.3
+    // precondition 9 requires termination proof before deletion.
+    let _environment = test_environment();
+    let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("cleanup-live-harness");
+    commit_implementation(&state);
+    state.phase = bridge::BridgePhase::CleanupPending;
+    state.identity.runtime_environment_dir = None;
+    state.identity.runtime_session_id = None;
+    let mut harness = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 30"])
+        .spawn()
+        .expect("spawn live harness");
+    let birth = bridge::observe_process_birth(harness.id())
+        .expect("observe live harness")
+        .expect("live harness birth");
+    state.process = Some(bridge::ProcessIdentity {
+        pid: birth.pid,
+        process_group: birth.process_group,
+        executable: std::path::PathBuf::from("/bin/sh"),
+        argv_digest: "cleanup-live-harness".to_string(),
+        boot_id: birth.boot_id,
+        start_identity: birth.start_identity,
+    });
+    let state_path = fixture.root.join("state/invocation.json");
+    bridge::write_invocation_atomic(&state_path, &state).expect("cleanup state");
+
+    let failure = bridge::finalize_merged_executor(&state_path, &mut state, None)
+        .expect_err("a live known child must retain the worktree");
+    let _ = harness.kill();
+    let _ = harness.wait();
+
+    assert!(failure.contains("still uses"), "{failure}");
+    assert!(state.identity.worktree.exists(), "worktree must survive");
+    assert!(
+        bridge::registered_worktree_paths(&state.identity.repository_path)
+            .expect("registered worktrees")
+            .iter()
+            .any(|path| path == &state.identity.worktree),
+        "worktree registration must survive"
+    );
+}

@@ -13428,6 +13428,7 @@ fn remove_exact_owned_worktree(
     state: &PersistedInvocation,
     removal_intent: &Path,
 ) -> Result<(), String> {
+    known_children_released_worktree(state)?;
     let intent_preexisted = removal_intent.exists();
     ensure_cleanup_record(
         removal_intent,
@@ -17193,6 +17194,92 @@ fn cleanup_proof_failure(mut failure: AdoptionFailure, detail: &str) -> Adoption
     failure
 }
 
+/// Retained descendant pidfds are the bridge's only unbounded descriptor consumer: a live
+/// run reached EMFILE while holding one per process in a Rust test tree, and the fail-closed
+/// path then had no descriptor left to record the failure. Capture stops while this many
+/// slots are still free so the failure path can still open files.
+#[cfg(target_os = "linux")]
+const DESCENDANT_DESCRIPTOR_RESERVE: u64 = 32;
+
+#[cfg(all(test, target_os = "linux"))]
+static DESCRIPTOR_LIMIT_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+
+/// Test-only ceiling. Lowering the real `RLIMIT_NOFILE` is process-global and would poison
+/// every concurrently running test, so the budget arithmetic stays real and only the ceiling
+/// is simulated. `0` restores the observed limit.
+#[cfg(all(test, target_os = "linux"))]
+fn set_descriptor_limit_override(limit: u64) {
+    DESCRIPTOR_LIMIT_OVERRIDE.store(limit, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_soft_limit() -> Result<u64, String> {
+    #[cfg(test)]
+    {
+        let simulated = DESCRIPTOR_LIMIT_OVERRIDE.load(Ordering::SeqCst);
+        if simulated != 0 {
+            return Ok(simulated);
+        }
+    }
+    let limits = fs::read_to_string("/proc/self/limits")
+        .map_err(|error| format!("read descriptor limits: {error}"))?;
+    for line in limits.lines() {
+        let Some(rest) = line.strip_prefix("Max open files") else {
+            continue;
+        };
+        let soft = rest.split_whitespace().next().unwrap_or_default();
+        if soft == "unlimited" {
+            return Ok(u64::MAX);
+        }
+        return soft
+            .parse::<u64>()
+            .map_err(|error| format!("parse descriptor soft limit {soft:?}: {error}"));
+    }
+    Err("descriptor soft limit is absent from /proc/self/limits".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn open_descriptor_count() -> Result<u64, String> {
+    let mut count = 0u64;
+    for entry in
+        fs::read_dir("/proc/self/fd").map_err(|error| format!("read open descriptors: {error}"))?
+    {
+        entry.map_err(|error| format!("read an open descriptor entry: {error}"))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+#[cfg(target_os = "linux")]
+fn free_descriptor_slots() -> Result<u64, String> {
+    Ok(descriptor_soft_limit()?.saturating_sub(open_descriptor_count()?))
+}
+
+/// Spec section 13.3 precondition 9: no known child process still uses the directory. A live
+/// supervisor or harness keeps the worktree registered and present rather than deleting the
+/// working directory out from under a running process.
+#[cfg(target_os = "linux")]
+fn known_children_released_worktree(state: &PersistedInvocation) -> Result<(), String> {
+    for identity in [state.supervisor.as_ref(), state.process.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if cleanup_instance_is_live(identity)? {
+            return Err(format!(
+                "executor worktree removal is unproven: known child {} still uses {}",
+                identity.pid,
+                state.identity.worktree.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn known_children_released_worktree(_state: &PersistedInvocation) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn cleanup_instance_is_live(expected: &ProcessIdentity) -> Result<bool, String> {
     match OwnedProcess::capture_cleanup_instance(expected) {
@@ -17548,6 +17635,13 @@ impl OwnedProcessSet {
                     .exited_descendants
                     .contains_key(&(birth.pid, birth.start_identity.clone()))
             {
+                let free = free_descriptor_slots()?;
+                if free <= DESCENDANT_DESCRIPTOR_RESERVE {
+                    return Err(format!(
+                        "executor descendant capture reached the descriptor budget: {free} slots free is at or below the {DESCENDANT_DESCRIPTOR_RESERVE}-slot reserve while capturing {}",
+                        birth.pid
+                    ));
+                }
                 let capture = {
                     #[cfg(test)]
                     if cleanup_failpoint() == CLEANUP_FAILPOINT_DESCENDANT_CAPTURE {

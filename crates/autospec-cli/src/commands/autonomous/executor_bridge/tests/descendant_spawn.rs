@@ -500,3 +500,56 @@ fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_windo
         "descendant forked during cleanup survived"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
+    // Break caught: a wide real process tree exhausted RLIMIT_NOFILE while descendant pidfds
+    // were retained, so the fail-closed path itself had no descriptor left. Capture must stop
+    // with the reserve still free instead of walking into EMFILE.
+    let _environment = test_environment();
+    let mut leader = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do /bin/sleep 30 & done; wait",
+        ])
+        .spawn()
+        .expect("spawn descendant tree leader");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut observed = 0usize;
+    while Instant::now() < deadline {
+        observed = bridge::process_table_entries()
+            .expect("read process table")
+            .into_iter()
+            .filter(|(parent, _)| *parent == leader.id())
+            .count();
+        if observed >= 12 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(observed >= 12, "descendant tree never materialized: {observed}");
+
+    let mut set =
+        bridge::OwnedProcessSet::from_forked_child(leader.id()).expect("capture tree leader");
+    let ceiling = bridge::open_descriptor_count().expect("open descriptor count") + 36;
+    bridge::set_descriptor_limit_override(ceiling);
+    let constrained = set.capture_descendants_while_leader_live();
+    let free = bridge::free_descriptor_slots().expect("free descriptor slots");
+    bridge::set_descriptor_limit_override(0);
+
+    let error = constrained.expect_err("a constrained descriptor budget must fail closed");
+    assert!(error.contains("descriptor budget"), "{error}");
+    assert!(
+        free >= 32,
+        "descendant capture must leave at least 32 descriptor slots free, saw {free}"
+    );
+
+    let mut guard = bridge::AdoptedProcessGuard::new(set);
+    guard
+        .processes_mut()
+        .capture_descendants_while_leader_live()
+        .expect("recapture the unconstrained tree");
+    guard.terminate().expect("terminate the descendant tree");
+    let _ = leader.wait();
+}
