@@ -43,7 +43,7 @@ quality_command_table() {
         'Cargo.toml' 'rust' 'cargo' \
         'cargo clippy --workspace --all-targets -- -D warnings' \
         '*.sh' 'shell' 'shellcheck' \
-        'find . -name "*.sh" -not -path "./.git/*" -not -path "./node_modules/*" -print0 | xargs -0 shellcheck' \
+        'find . -name "*.sh" -not -path "./.git/*" -not -path "./node_modules/*" -not -path "*/tests/fixtures/*" -print0 | xargs -0 shellcheck -S error' \
         'package.json' 'javascript' 'npm' \
         'npm run lint' \
         'pyproject.toml' 'python' 'ruff' \

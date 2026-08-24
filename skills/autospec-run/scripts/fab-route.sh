@@ -45,7 +45,8 @@ route_for_labels() {
     raw="${1:-}"
     saved_ifs="$IFS"
     IFS=','
-    # shellcheck disable=SC2086 — intentional word-split on comma.
+    # Intentional word-split on comma.
+    # shellcheck disable=SC2086
     set -- $raw
     IFS="$saved_ifs"
 

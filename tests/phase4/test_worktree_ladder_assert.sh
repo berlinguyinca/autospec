@@ -114,6 +114,8 @@ done
 # ── 4. Ladder bash extracted from each SKILL.md is well-formed ───────────────
 # Extract the LADDER fenced block (delimited by sentinel comments) and bash -n it.
 
+# RUN_SKILL is a single file; the loop runs once by design.
+# shellcheck disable=SC2066
 for f in "$RUN_SKILL"; do
     name="${f#"$SCRIPT_DIR"/}"
     block="$(awk '
