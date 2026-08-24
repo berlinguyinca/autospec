@@ -770,7 +770,7 @@ labels and patches each body with a `## Model fit` block.
 >    - Run: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/audit-<N>.md`
 >    - On non-zero exit (lint fails):
 >      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
->      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete it and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
+>      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete the legacy heading and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
 >        ```markdown
 >        <!-- autospec-quality:begin -->
 >        ## Quality lint

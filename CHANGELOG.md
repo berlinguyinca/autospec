@@ -38,8 +38,12 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 - `crates/autospec-core`'s `word_count_excluding_ui_sections` mirrored
   `strip_ui_sections` but had no generated-metadata exemption for any family, so
   `autospec lint issue` reported 535 words where the shell reported 362 on the same
-  fixture. The Rust path now mirrors the full pipeline. Three unrelated
-  shell/Rust rule divergences remain and are unchanged by this entry.
+  fixture. The Rust path now mirrors the full pipeline: a differential sweep of
+  every `tests/fixtures/issue-quality/*.md` through both engines goes from 9
+  divergent fixtures to 8, and the one that converges is the BODY_TOO_LONG case.
+  The remaining 8 are unrelated rules (`AC_NOT_CHECKABLE`, `GOAL_NOT_ONE_SENTENCE`,
+  `SMOKE_NOT_FENCED`, `MISSING_SECTION_DEPENDENCIES`) and are byte-identical on
+  `main`.
 
 #### Five validate checks that were red for reasons unrelated to their subject (2026-08-19)
 - `lint-implementation.sh` resolved `SCRIPT_DIR` with `dirname`, so on the deliberately stripped
