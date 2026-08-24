@@ -340,10 +340,11 @@ MD
 @test "BODY_TOO_LONG: a generated block trailing the UI sections is still exempt" {
     # Regression: strip_ui_sections skips every line after a UI heading until the
     # next '## ' line. A generated block opens with '<!-- autospec-*:begin -->',
-    # which is not one, so stripping UI sections FIRST deletes the opening marker
-    # and strip_generated_metadata then declines to strip anything -- charging the
-    # whole block to the authored count. strip_non_authored_sections therefore
-    # removes generated metadata before UI sections; this pins that ordering.
+    # which is not one, so the old skip swallowed the opening marker and
+    # strip_generated_metadata then declined to strip anything -- charging the
+    # whole block to the authored count. The fix terminates the UI-section skip
+    # on a generated begin marker so the marker survives for the next pipeline
+    # stage; this pins that behavior.
     write_good_body "$TMP/b.md"
     {
         printf '\n<!-- ui-feature -->\n\n'
