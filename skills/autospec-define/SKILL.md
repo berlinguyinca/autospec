@@ -863,7 +863,7 @@ notes inserted before its closing marker>
    Do NOT add your own `<!-- autospec-shared-contracts:begin -->` wrapper or
    `## Shared contracts` heading: the script emits both. Nesting a second pair
    leaves the outer marker and heading outside the region
-   `scripts/lint-issue.sh` strips, so they count against the word budget.
+    `lint-issue.sh` strips, so they count against the word budget.
 
 If there are fewer than 2 child issues, or all child issues are in the same
 file (no cross-issue interface), skip Phase 3.75 and log:
