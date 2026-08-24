@@ -52,6 +52,8 @@ done
 # branch must appear BEFORE (i.e. at a lower line number than) the _REGEN check.
 # This ensures detection always runs regardless of auto_regenerate setting.
 
+# RUN_SKILL is a single file; the loop runs once by design.
+# shellcheck disable=SC2066
 for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
 
@@ -72,6 +74,8 @@ done
 # Verify the orchestrator call appears after the _REGEN=1 branch open and before
 # the matching else/fi in each SKILL.md.
 
+# RUN_SKILL is a single file; the loop runs once by design.
+# shellcheck disable=SC2066
 for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
 
@@ -121,6 +125,8 @@ extract_gate_bash() {
     ' "$skill"
 }
 
+# RUN_SKILL is a single file; the loop runs once by design.
+# shellcheck disable=SC2066
 for SKILL in "$RUN_SKILL"; do
     name="${SKILL#"$SCRIPT_DIR"/}"
     gate_bash="$(extract_gate_bash "$SKILL")"

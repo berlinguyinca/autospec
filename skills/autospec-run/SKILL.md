@@ -1446,23 +1446,43 @@ do not fall back to an inline label-swap path.
 >    #
 >    # Final quality gate (pre-merge, fail-closed): after the full suite passes and
 >    # before admin-merging, discover repository-specific whole-workspace quality
->    # commands and run each one from the target repo root. Discovery is additive:
->    #   1. If AUTOSPEC_FINAL_QUALITY_COMMAND is set, run it exactly as provided.
->    #   2. If a root Cargo.toml exists and `cargo metadata --no-deps --format-version=1`
->    #      succeeds, this is a Rust workspace; run:
->    #      `cargo clippy --workspace --all-targets -- -D warnings`
+>    # commands and run each one from the target repo root. Discovery covers every
+>    # language whose marker is present, not only Rust:
+>    #   1. If AUTOSPEC_FINAL_QUALITY_COMMAND is set it OVERRIDES discovery: that
+>    #      command is the only one run, and no marker is inspected.
+>    #   2. Otherwise `discover-quality-commands.sh` emits one `marker<TAB>command`
+>    #      line per present marker - Cargo.toml -> `cargo clippy --workspace --all-targets -- -D warnings`,
+>    #      `*.sh` -> shellcheck, package.json -> `npm run lint`, pyproject.toml ->
+>    #      `ruff check`, go.mod -> `go vet ./... && golangci-lint run`.
+>    #   3. A marker present whose linter is NOT installed is never a silent pass:
+>    #      the gate fails closed with rule=<language>-unavailable before running anything.
 >    # Treat every discovered command as required merge evidence. Do NOT run `gh pr merge` while the final quality gate is failing.
 >    # On failure, post/comment a
 >    # `FINAL_QUALITY_GATE_FAILED` block that includes the command plus one finding
 >    # record with `crate`, `file`, `line`, and `rule` fields (use `unknown` only when
 >    # the tool output genuinely omits a field), then return to the fix/recommit/retry
 >    # loop and rerun the full suite plus final quality gate before merge.
->    if [ -n "${AUTOSPEC_FINAL_QUALITY_COMMAND:-}" ]; then
->      sh -lc "$AUTOSPEC_FINAL_QUALITY_COMMAND" || {
->        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=AUTOSPEC_FINAL_QUALITY_COMMAND crate=unknown file=unknown line=unknown rule=unknown"
+>    _QG="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/discover-quality-commands.sh"
+>    # Fail closed first: a present marker whose linter is absent blocks the merge.
+>    bash "$_QG" --missing-tools > /tmp/autospec-quality-missing.txt
+>    if [ -s /tmp/autospec-quality-missing.txt ]; then
+>      IFS="$(printf '\t')" read -r _marker _cmd _lang _tool < /tmp/autospec-quality-missing.txt
+>      gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=$_cmd crate=unknown file=$_marker line=1 rule=${_lang}-unavailable tool=$_tool"
+>      exit 1
+>    fi
+>    # Run every discovered command from the repo root. Cargo.toml is skipped in this
+>    # loop because the Rust-specialized block below runs clippy exactly once and
+>    # parses its diagnostics into crate/file/line/rule.
+>    bash "$_QG" > /tmp/autospec-quality-commands.txt
+>    while IFS="$(printf '\t')" read -r _marker _cmd; do
+>      if [ "$_marker" = "Cargo.toml" ]; then continue; fi
+>      sh -lc "$_cmd" || {
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=$_cmd crate=unknown file=$_marker line=unknown rule=quality-command-failed"
 >        exit 1
 >      }
->    fi
+>    done < /tmp/autospec-quality-commands.txt
+>    # The Rust marker keeps its specialized evidence path; the override skips it too.
+>    if [ -z "${AUTOSPEC_FINAL_QUALITY_COMMAND:-}" ]; then
 >    if [ -f Cargo.toml ]; then
 >      if ! command -v cargo >/dev/null 2>&1; then
 >        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=cargo-unavailable"
@@ -1485,6 +1505,7 @@ do not fall back to an inline label-swap path.
 >        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=${_file:-unknown} line=${_line:-unknown} rule=${_rule:-unknown}"
 >        exit 1
 >      fi
+>    fi
 >    fi
 >    <!-- pr-size-final-merge:begin -->
 >    # Query GitHub after update-branch, review, and final local proof. The live PR

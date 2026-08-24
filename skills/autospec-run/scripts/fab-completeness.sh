@@ -143,7 +143,8 @@ trap 'rm -f "$MODELS_FILE"' EXIT
 if [ -n "$MODELS_CSV" ]; then
   saved_ifs="$IFS"
   IFS=','
-  # shellcheck disable=SC2086 — intentional word-split on comma.
+  # Intentional word-split on comma.
+  # shellcheck disable=SC2086
   set -- $MODELS_CSV
   IFS="$saved_ifs"
   for m in "$@"; do
