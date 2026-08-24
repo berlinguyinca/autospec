@@ -49,7 +49,7 @@ Rules enforced (§3 quality contract):
                         'Depends on issue #N' nor exactly 'none'.
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
   BODY_TOO_LONG         Authored body exceeds 400 words (the five ui-feature
-    sections and marker-bounded generated classification/shared-contract
+    sections and marker-bounded generated classification/shared-contract/quality
     metadata are excluded from this count).
   OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
   UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any
@@ -168,6 +168,8 @@ strip_generated_metadata() {
             if ($0 ~ /<!-- autospec-classify:end -->/) classify_end = NR
             if ($0 ~ /<!-- autospec-shared-contracts:begin -->/) shared_begin = NR
             if ($0 ~ /<!-- autospec-shared-contracts:end -->/) shared_end = NR
+            if ($0 ~ /<!-- autospec-quality:begin -->/) quality_begin = NR
+            if ($0 ~ /<!-- autospec-quality:end -->/) quality_end = NR
         }
         END {
             for (line = 1; line <= NR; line++) {
@@ -175,7 +177,9 @@ strip_generated_metadata() {
                     && line >= classify_begin && line <= classify_end
                 in_shared = shared_begin && shared_end && shared_begin < shared_end \
                     && line >= shared_begin && line <= shared_end
-                if (!in_classify && !in_shared) print lines[line]
+                in_quality = quality_begin && quality_end && quality_begin < quality_end \
+                    && line >= quality_begin && line <= quality_end
+                if (!in_classify && !in_shared && !in_quality) print lines[line]
             }
         }
     '

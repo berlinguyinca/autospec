@@ -211,12 +211,12 @@ For each candidate issue:
    `## Dependencies` line (or, if absent, at end of body). Block format:
 
    ```markdown
+   <!-- autospec-classify:begin -->
    ## Model fit
 
    - **ctx:** `ctx:<tier>` — <1-line rationale>.
    - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
 
-   <!-- autospec-classify:begin -->
    *Auto-classified by `/autospec-classify` on YYYY-MM-DD.*
    <!-- autospec-classify:end -->
    ```
@@ -272,13 +272,13 @@ For each candidate issue:
      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
        ```markdown
+       <!-- autospec-quality:begin -->
        ## Quality lint
 
        - **GOAL** — <1-line finding>.
        - **AC#<n>** — <1-line finding>.
        - **SMOKE** — <1-line finding>.
 
-       <!-- autospec-quality:begin -->
        *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
        <!-- autospec-quality:end -->
        ```

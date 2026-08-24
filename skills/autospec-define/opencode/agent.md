@@ -707,12 +707,12 @@ labels and patches each body with a `## Model fit` block.
 >    `## Dependencies` line (or at end of body if absent):
 >
 >    ```markdown
+>    <!-- autospec-classify:begin -->
 >    ## Model fit
 >
 >    - **ctx:** `ctx:<tier>` — <1-line rationale>.
 >    - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
 >
->    <!-- autospec-classify:begin -->
 >    *Auto-classified by Phase 3.5 on YYYY-MM-DD.*
 >    <!-- autospec-classify:end -->
 >    ```
@@ -767,13 +767,13 @@ labels and patches each body with a `## Model fit` block.
 >      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
 >      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
 >        ```markdown
+>        <!-- autospec-quality:begin -->
 >        ## Quality lint
 >
 >        - **GOAL** — <1-line finding>.
 >        - **AC#<n>** — <1-line finding>.
 >        - **SMOKE** — <1-line finding>.
 >
->        <!-- autospec-quality:begin -->
 >        *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
 >        <!-- autospec-quality:end -->
 >        ```
