@@ -30,9 +30,9 @@ none
 bash scripts/lint-issue.sh tests/fixtures/issue-quality/good-generated-metadata.md
 ```
 
+<!-- autospec-classify:begin -->
 ## Model fit
 
-<!-- autospec-classify:begin -->
 generated generated generated generated generated generated generated generated generated generated
 generated generated generated generated generated generated generated generated generated generated
 generated generated generated generated generated generated generated generated generated generated
@@ -55,9 +55,9 @@ generated generated generated generated generated generated generated generated 
 generated generated generated generated generated generated generated generated generated generated
 <!-- autospec-classify:end -->
 
+<!-- autospec-shared-contracts:begin -->
 ## Shared contracts
 
-<!-- autospec-shared-contracts:begin -->
 generated generated generated generated generated generated generated generated generated generated
 generated generated generated generated generated generated generated generated generated generated
 generated generated generated generated generated generated generated generated generated generated
@@ -79,3 +79,13 @@ generated generated generated generated generated generated generated generated 
 generated generated generated generated generated generated generated generated generated generated
 generated generated generated generated generated generated generated generated generated generated
 <!-- autospec-shared-contracts:end -->
+
+<!-- autospec-quality:begin -->
+## Quality lint
+
+generated generated generated generated generated generated generated generated generated generated
+generated generated generated generated generated generated generated generated generated generated
+generated generated generated generated generated generated generated generated generated generated
+generated generated generated generated generated generated generated generated generated generated
+generated generated generated generated generated generated generated generated generated generated
+<!-- autospec-quality:end -->

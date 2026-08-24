@@ -211,12 +211,12 @@ For each candidate issue:
    `## Dependencies` line (or, if absent, at end of body). Block format:
 
    ```markdown
+   <!-- autospec-classify:begin -->
    ## Model fit
 
    - **ctx:** `ctx:<tier>` — <1-line rationale>.
    - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
 
-   <!-- autospec-classify:begin -->
    *Auto-classified by `/autospec-classify` on YYYY-MM-DD.*
    <!-- autospec-classify:end -->
    ```
@@ -224,6 +224,12 @@ For each candidate issue:
    **Idempotency:** if a `## Model fit` block already exists (delimited by the
    `<!-- autospec-classify:begin -->` / `<!-- autospec-classify:end -->`
    markers), replace it in place. Never stack duplicate blocks.
+
+   Legacy blocks have `## Model fit` ABOVE
+   `<!-- autospec-classify:begin -->`. Replacing only the marker-delimited
+   region orphans that heading outside the markers, where it still counts
+   against the budget, and adds a second one. Delete the legacy heading and
+   everything up to the begin marker first.
 
    Apply via `gh issue edit <N> --body-file <tmp>`.
 
@@ -270,15 +276,15 @@ For each candidate issue:
    - Run: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/audit-<N>.md`
    - On non-zero exit (lint fails):
      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
-     - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+     - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete the legacy heading and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
        ```markdown
+       <!-- autospec-quality:begin -->
        ## Quality lint
 
        - **GOAL** — <1-line finding>.
        - **AC#<n>** — <1-line finding>.
        - **SMOKE** — <1-line finding>.
 
-       <!-- autospec-quality:begin -->
        *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
        <!-- autospec-quality:end -->
        ```

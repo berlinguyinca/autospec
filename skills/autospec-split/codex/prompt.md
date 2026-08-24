@@ -342,12 +342,12 @@ labels and patches each body with a `## Model fit` block.
 >    `## Dependencies` line (or at end of body if absent):
 >
 >    ```markdown
+>    <!-- autospec-classify:begin -->
 >    ## Model fit
 >
 >    - **ctx:** `ctx:<tier>` — <1-line rationale>.
 >    - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
 >
->    <!-- autospec-classify:begin -->
 >    *Auto-classified by Phase 3.5 on YYYY-MM-DD.*
 >    <!-- autospec-classify:end -->
 >    ```
@@ -356,6 +356,11 @@ labels and patches each body with a `## Model fit` block.
 >    `<!-- autospec-classify:begin -->` and `<!-- autospec-classify:end -->`
 >    markers, replace it in place. Never stack duplicates. Apply via
 >    `gh issue edit <N> --body-file <tmp>`.
+>    Legacy blocks have `## Model fit` ABOVE
+>    `<!-- autospec-classify:begin -->`. Replacing only the marker-delimited
+>    region orphans that heading outside the markers, where it still counts
+>    against the budget, and adds a second one. Delete the legacy heading
+>    and everything up to the begin marker first.
 >
 > 6. **Board assignment** — read `~/.autospec/project-map.yml` and assign each
 >    just-classified child to the GitHub Projects mapped from its labels.
@@ -400,15 +405,15 @@ labels and patches each body with a `## Model fit` block.
 >    - Run: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/audit-<N>.md`
 >    - On non-zero exit (lint fails):
 >      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
->      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+>      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. A legacy block has the heading ABOVE the begin marker: delete the legacy heading and everything up to that marker first, or it keeps counting and a duplicate is added. Block format:
 >        ```markdown
+>        <!-- autospec-quality:begin -->
 >        ## Quality lint
 >
 >        - **GOAL** — <1-line finding>.
 >        - **AC#<n>** — <1-line finding>.
 >        - **SMOKE** — <1-line finding>.
 >
->        <!-- autospec-quality:begin -->
 >        *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
 >        <!-- autospec-quality:end -->
 >        ```

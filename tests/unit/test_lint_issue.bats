@@ -106,6 +106,23 @@ setup() {
     [ -z "$output" ]
 }
 
+@test "lint-issue: near-cap authored body passes only because generated blocks are exempt" {
+    run bash "$LINT" "$FIX/good-near-cap-generated-metadata.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "lint-issue: dropping the quality exemption pushes the near-cap fixture over budget" {
+    # Guards the autospec-quality family in strip_generated_metadata: without it,
+    # a Phase 3.5 quality block is counted as authored prose and the issue can
+    # never be brought back under the cap.
+    local patched="$BATS_TEST_TMPDIR/lint-no-quality.sh"
+    sed 's/ && !in_quality//' "$LINT" > "$patched"
+    run bash "$patched" "$FIX/good-near-cap-generated-metadata.md"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "BODY_TOO_LONG"
+}
+
 # ── multi-rule case ───────────────────────────────────────────────────────────
 
 @test "lint-issue: bad-multiple.md exits >=3 with all three rule families flagged" {

@@ -49,7 +49,7 @@ Rules enforced (§3 quality contract):
                         'Depends on issue #N' nor exactly 'none'.
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
   BODY_TOO_LONG         Authored body exceeds 400 words (the five ui-feature
-    sections and marker-bounded generated classification/shared-contract
+    sections and marker-bounded generated classification/shared-contract/quality
     metadata are excluded from this count).
   OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
   UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any
@@ -134,7 +134,6 @@ extract_subsection() {
 # children. Uses exact string membership (not regex) so literal '&' in
 # 'Motion & feedback' needs no escaping.
 strip_ui_sections() {
-    local file="$1"
     awk '
         BEGIN {
             headings["## Design reference"] = 1
@@ -151,11 +150,17 @@ strip_ui_sections() {
             line = $0
             sub(/[[:space:]]+$/, "", line)
             if (line in headings) { skip = 1; next }
+            # A generated block ends the UI section just as a new heading does.
+            # Without this, the skip swallows the block'"'"'s opening marker (it is not
+            # a "## " line), strip_generated_metadata then sees an unmatched end
+            # marker, declines to strip, and the whole block is charged to the
+            # authored count -- the leak the exemption exists to prevent.
+            if (skip && line ~ /^<!-- autospec-[a-z-]+:begin -->$/) { skip = 0 }
             if (skip && substr($0, 1, 3) == "## ") { skip = 0 }
             if (skip) { next }
             print
         }
-    ' "$file"
+    '
 }
 
 # Strip marker-bounded metadata appended after the authored child body has
@@ -168,6 +173,8 @@ strip_generated_metadata() {
             if ($0 ~ /<!-- autospec-classify:end -->/) classify_end = NR
             if ($0 ~ /<!-- autospec-shared-contracts:begin -->/) shared_begin = NR
             if ($0 ~ /<!-- autospec-shared-contracts:end -->/) shared_end = NR
+            if ($0 ~ /<!-- autospec-quality:begin -->/) quality_begin = NR
+            if ($0 ~ /<!-- autospec-quality:end -->/) quality_end = NR
         }
         END {
             for (line = 1; line <= NR; line++) {
@@ -175,14 +182,21 @@ strip_generated_metadata() {
                     && line >= classify_begin && line <= classify_end
                 in_shared = shared_begin && shared_end && shared_begin < shared_end \
                     && line >= shared_begin && line <= shared_end
-                if (!in_classify && !in_shared) print lines[line]
+                in_quality = quality_begin && quality_end && quality_begin < quality_end \
+                    && line >= quality_begin && line <= quality_end
+                if (!in_classify && !in_shared && !in_quality) print lines[line]
             }
         }
     '
 }
 
+# strip_ui_sections must run first so that authored prose following a generated
+# block is still counted: the block is what ends the UI section, and removing it
+# beforehand would let the UI skip run on past it. This is safe only because
+# strip_ui_sections terminates its skip on a generated begin marker; without that
+# it would eat the marker and disable the exemption entirely.
 strip_non_authored_sections() {
-    strip_ui_sections "$1" | strip_generated_metadata
+    strip_ui_sections < "$1" | strip_generated_metadata
 }
 
 # ── findings accumulator ──────────────────────────────────────────────────────

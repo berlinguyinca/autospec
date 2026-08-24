@@ -142,6 +142,10 @@ paths="$(shared_tokens extract_paths)"
 sigs="$(shared_tokens extract_signatures)"
 names="$(shared_tokens extract_names)"
 
+# The marker pair is load-bearing, not decoration: scripts/lint-issue.sh
+# exempts generated metadata from the authored word budget only between
+# these markers, and the heading must sit inside them to be exempt too.
+printf '<!-- autospec-shared-contracts:begin -->\n'
 printf '## Shared contracts\n\n'
 
 emit_section() {  # emit_section <heading> <newline-list>
@@ -157,11 +161,14 @@ emit_section() {  # emit_section <heading> <newline-list>
 
 if [ -z "$paths" ] && [ -z "$sigs" ] && [ -z "$names" ]; then
     printf '_No cross-issue contracts detected (no token appears in >=2 issues)._\n'
+    printf '<!-- autospec-shared-contracts:end -->\n'
     exit 0
 fi
 
 emit_section 'File paths' "$paths"
 emit_section 'Signatures' "$sigs"
 emit_section 'Names / env vars' "$names"
+
+printf '<!-- autospec-shared-contracts:end -->\n'
 
 exit 0
