@@ -87,7 +87,7 @@ for p in "${levels[@]}"; do
     ctx=$((ctx - STEP))
   done
   if [ -n "$found" ]; then
-    free="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+    free="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
     printf '%-9s %-12s %-9s %s\n' "$p" "$found" "$((found / p))" "${free} MiB free"
   else
     printf '%-9s %-12s %-9s %s\n' "$p" "none" "-" "no context fits"

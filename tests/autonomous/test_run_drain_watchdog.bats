@@ -277,3 +277,58 @@ EOF
   [[ "$output" == *"stale wait handle recovery merged PR #1578 for issue #1545"* ]]
   grep -q "gh pr merge 1578" "$HOME/gh.log"
 }
+
+@test "run-drain: escalates to KILL for a TERM-resistant descendant" {
+  cat > "$HOME/term-resistant.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$HOME/term-resistant.pid"
+trap '' TERM
+sleep 30
+EOF
+  chmod +x "$HOME/term-resistant.sh"
+
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$HOME/omx.pid"
+"$HOME/term-resistant.sh" &
+wait
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain-kill.out" 2>&1 &
+  drain_pid="$!"
+
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$drain_pid" 2>/dev/null; then
+      status=0
+      wait "$drain_pid" || status="$?"
+      break
+    fi
+    sleep 1
+  done
+
+  if kill -0 "$drain_pid" 2>/dev/null; then
+    kill "$drain_pid" 2>/dev/null || true
+    wait "$drain_pid" 2>/dev/null || true
+    cat "$TEST_TMP/drain-kill.out"
+    false
+  fi
+
+  [ "${status:-0}" -eq 124 ]
+  grep -q "stalled after 1s with no output" "$TEST_TMP/drain-kill.out"
+  [ -f "$HOME/omx.pid" ]
+  [ -f "$HOME/term-resistant.pid" ]
+  ! kill -0 "$(cat "$HOME/term-resistant.pid")" 2>/dev/null
+  ! kill -0 -- "-$(cat "$HOME/omx.pid")" 2>/dev/null
+}
+
+@test "run-drain: delegates tree teardown to the shared process-tree reaper" {
+  DRAIN="$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
+  grep -q 'lib/autospec-process-tree.sh' "$DRAIN"
+  grep -q 'autospec_kill_tree "\$child_pid" separate-recursive' "$DRAIN"
+  ! grep -q 'pgrep -P' "$DRAIN"
+  ! grep -q '^kill_tree()' "$DRAIN"
+}

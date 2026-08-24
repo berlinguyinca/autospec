@@ -175,15 +175,15 @@ _acquire_claim() {
 
 _upsert_claim() {
   claim_id="$1"
-  state="$2"
+  step="$2"
   "$AUTOSPEC" claim state upsert \
     --issue 42 \
     --repo o/n \
     --worker-id worker-a \
     --claim-id "$claim_id" \
     --branch feat/telemetry \
-    --state "$state" \
-    --step "$state"
+    --state claimed \
+    --step "$step"
 }
 
 @test "heartbeat write emits exactly one heartbeat event" {

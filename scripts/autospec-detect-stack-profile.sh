@@ -19,10 +19,15 @@
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 python3 "$SCRIPT_DIR/autospec-autonomy-v2-lib.py" --command detect-stack "$@"
+# The detector owns the one exclusion list; PYTHONPATH lets this walker import it
+# instead of keeping a second copy that can drift.
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 - "$@" <<'PY'
 import argparse
 import json
 from pathlib import Path
+
+from autospec_autonomy_stack import is_skipped
 
 ACCESSIBLE_PRIMITIVE_PREFIXES = (
     "@radix-ui", "react-aria", "@headlessui", "@ariakit",
@@ -31,7 +36,6 @@ ACCESSIBLE_PRIMITIVE_PREFIXES = (
 MOTION_LIBRARIES = {"framer-motion", "motion", "gsap", "@formkit/auto-animate", "auto-animate"}
 MOTION_PREFIXES = ("@react-spring", "@motionone")
 UI_SOURCE_SUFFIXES = {".css", ".scss", ".sass", ".less", ".tsx", ".jsx", ".ts", ".js", ".html", ".vue", ".svelte"}
-SKIP_DIRS = {".git", "node_modules", "dist", "build", ".next", "out", "coverage", "target"}
 WEB_UI_PROFILES = {"react-vite-typescript", "nextjs-web-app"}
 CAPABILITY_NAMES = ("accessible_primitives", "motion_library", "reduced_motion_reset")
 
@@ -60,9 +64,14 @@ def declared_dependencies(root):
 
 
 def ui_source_files(root):
+    """UI sources under the detector's shared exclusion list.
+
+    The exclusion is matched on the repo-relative path, so a checkout living
+    under a directory named e.g. "build" no longer hides its own sources.
+    """
     return (p for p in root.rglob("*")
             if p.suffix.lower() in UI_SOURCE_SUFFIXES
-            and not SKIP_DIRS.intersection(p.parts)
+            and not is_skipped(p.relative_to(root).as_posix())
             and p.is_file())
 
 

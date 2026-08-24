@@ -50,7 +50,7 @@ echo "os/arch : ${OS}/${ARCH}"
 echo "accel   : ${ACCEL}"
 if [ "$ACCEL" = "cuda" ]; then
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed 's/^/gpu     : /'
-  vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)"
+  vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
   [ "${vram}" -ge 23000 ] || die "need >=23 GiB VRAM for this preset set, found ${vram} MiB"
 fi
 [ "$OS" = "Linux" ] || die "this installer targets Linux/systemd; on macOS use launchd (see ../QWEN-NODE-SPEC.md B.3)"

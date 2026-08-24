@@ -68,7 +68,7 @@ acquire_worker_a() {
 
     run claim_state upsert --issue 42 --repo testorg/testrepo \
         --worker-id worker-a --claim-id "$claim_id" --branch feat/worker-a \
-        --state worktree_ready --step worktree_ready
+        --state claimed --step worktree_ready
     [ "$status" -eq 0 ]
     [ "$(claim_oid)" != "$before" ]
     [ "$(git --git-dir "$CLAIM_REMOTE" for-each-ref --format='%(refname)' \

@@ -106,6 +106,31 @@
       "seen_at": [
         "hpc-cluster"
       ]
+    },
+    "NVIDIA GeForce RTX 2080 Ti": {
+      "vram_mib": 11264,
+      "compute_cap": "7.5",
+      "bandwidth_gbs": 616,
+      "fp8": false,
+      "nvfp4": false,
+      "measured_tps": {
+        "Qwen3.8-27B-UD-Q4_K_M.gguf": 28.7,
+        "Qwen3.5-9B-Q4_K_M.gguf": 77.92
+      },
+      "seen_at": [
+        "dual-turing-node"
+      ],
+      "_notes": [
+        "Turing TU102. No bf16, no FP8, no NVFP4, no Marlin -- which is what",
+        "rules out the W4A16 vLLM recipes the 4090 node uses.",
+        "Observed on the card: vram_mib 11264, compute_cap 7.5, 10820 MiB free",
+        "per card once headless. bandwidth_gbs is the vendor figure and is the",
+        "one number here that is not measured.",
+        "Two of these are PHB-connected on one NUMA node with NO NVLink bridge",
+        "fitted (nvidia-smi nvlink -s: all links inActive), so cross-card",
+        "traffic crosses PCIe and --split-mode row is not worth measuring.",
+        "measured_tps: the 27B figure is a PAIR of cards layer-split; the 9B is a SINGLE card. Layer split does not sum bandwidth, so the 27B number is what one card's 616 GB/s yields against 16.46 GB of weights, not two cards'."
+      ]
     }
   }
 }

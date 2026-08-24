@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inference node — load</title>
+<style>
+  :root{ --bg:#f6f7f9; --panel:#fff; --ink:#14181d; --muted:#5c6672;
+         --line:#e3e7ec; --accent:#2f6feb; --warn:#c2410c; --ok:#15803d; --bar:#e9edf2; }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0f1216; --panel:#161b21; --ink:#e6eaef; --muted:#93a0ad;
+           --line:#242b33; --accent:#5b8cf7; --warn:#fb923c; --ok:#4ade80; --bar:#232a32; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{max-width:620px;margin:0 auto;padding:28px 22px 40px}
+  h1{font-size:17px;margin:0 0 4px;font-weight:650;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px;margin-bottom:12px}
+  .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .v{font-size:30px;font-weight:640;margin-top:3px;
+     font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .u{font-size:13px;color:var(--muted);font-weight:400;margin-left:4px}
+  .row{display:flex;gap:12px}.row>.card{flex:1}
+  .bar{height:8px;background:var(--bar);border-radius:99px;overflow:hidden;margin-top:10px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;
+         transition:width .4s ease}
+  .bar>i.over{background:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  td{padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+  td:last-child{text-align:right;font-weight:600}
+  tr:last-child td{border-bottom:0}
+  .note{color:var(--muted);font-size:11.5px;margin-top:8px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);
+       display:inline-block;vertical-align:middle}
+  .dot.up{background:var(--ok)} .dot.down{background:var(--warn)}
+  footer{color:var(--muted);font-size:11px;margin-top:22px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Inference node — current load</h1>
+  <div class="sub"><span id="dot" class="dot"></span> <span id="state">connecting…</span>
+    · <span id="stamp"></span></div>
+
+  <div class="row">
+    <div class="card"><div class="k">In progress</div>
+      <div class="v"><span id="proc">–</span><span class="u">of <span id="slots">–</span> seats</span></div></div>
+    <div class="card"><div class="k">Waiting in queue</div>
+      <div class="v" id="queued">–</div></div>
+  </div>
+
+  <div class="card">
+    <div class="k">Capacity</div>
+    <div class="v"><span id="pct">–</span><span class="u">%</span></div>
+    <div class="bar"><i id="bar" style="width:0"></i></div>
+    <div class="note" id="overnote"></div>
+  </div>
+
+  <div class="card">
+    <div class="k">Estimated wait if you send now</div>
+    <div class="v" id="wait">–</div>
+    <div class="note" id="waitnote"></div>
+  </div>
+
+  <div class="card">
+    <table>
+      <tr><td>Typical time per request</td><td id="mean">–</td></tr>
+      <tr><td>Completions observed</td><td id="completions">–</td></tr>
+      <tr><td>Samples in window</td><td id="samples">–</td></tr>
+      <tr><td>Model loaded</td><td id="loaded">–</td></tr>
+    </table>
+  </div>
+
+  <footer>
+    Load only — this page shows no prompts, no model names and no configuration.
+    Figures come from a rolling five-minute window and are estimates: a request
+    that starts and finishes between samples is not counted, which biases the
+    wait estimate high. Refreshes every 3&nbsp;s.
+  </footer>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const n = v => (v === null || v === undefined) ? '–' : v.toLocaleString();
+
+function secs(v){
+  if(v === null || v === undefined) return '—';
+  if(v < 90) return Math.round(v) + 's';
+  return Math.round(v / 60) + ' min';
+}
+
+async function tick(){
+  try{
+    // No Authorization header: this endpoint is deliberately public.
+    // The body is read BEFORE deciding what to do with the status. An unread
+    // body leaves the stream open, and this page polls -- so a run of errors
+    // would accumulate one stalled request per interval until the page stopped
+    // updating entirely. Measured on the dashboard, fixed the same way here.
+    const r = await fetch('/api/queue', {cache:'no-store'});
+    const text = await r.text();
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const d = JSON.parse(text);
+
+    $('dot').className = 'dot ' + (d.model_loaded ? 'up' : 'down');
+    $('state').textContent = d.model_loaded ? 'serving' : 'idle — no model loaded';
+    $('proc').textContent = n(d.processing);
+    $('slots').textContent = n(d.slots);
+    $('queued').textContent = n(d.queued);
+
+    // Clamp the BAR, never the number: a queue at 300% must read as 300%.
+    const pct = d.fullness === null ? null : Math.round(d.fullness * 100);
+    $('pct').textContent = pct === null ? '–' : pct;
+    $('bar').style.width = pct === null ? '0' : Math.min(100, pct) + '%';
+    $('bar').className = (pct !== null && pct > 100) ? 'over' : '';
+    $('overnote').textContent = (pct !== null && pct > 100)
+      ? 'More requests than seats — the excess is queued, not rejected.' : '';
+
+    // null means "not measured yet" and must never render as 0.
+    $('wait').textContent = secs(d.est_wait_seconds);
+    $('waitnote').textContent = (d.est_wait_seconds === null)
+      ? 'not enough completions observed yet'
+      : 'from ' + n(d.completions) + ' completions in the last 5 min';
+
+    $('mean').textContent = d.mean_service_seconds ? secs(d.mean_service_seconds) : '—';
+    $('completions').textContent = n(d.completions);
+    $('samples').textContent = n(d.samples);
+    $('loaded').textContent = d.model_loaded ? 'yes' : 'no';
+    $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  }catch(e){
+    $('dot').className = 'dot down';
+    $('state').textContent = 'node unreachable';
+  }
+}
+tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

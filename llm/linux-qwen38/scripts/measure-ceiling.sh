@@ -45,7 +45,7 @@ PROFILE_CONF="${CONF_DIR}/profiles.d/${PROFILE}.conf"
 [ "${QWEN38_RUNTIME:-vllm}" = "vllm" ] || {
   echo "profile ${PROFILE} is not served by vLLM" >&2; exit 64; }
 
-free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)"
+free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
 if [ "${free_mib}" -lt "${QWEN38_MIN_FREE_VRAM_MIB}" ]; then
   echo "need a free GPU: only ${free_mib} MiB available" >&2
   echo "hint: 'qwen38ctl stop' or 'qwen-localctl pause'" >&2
@@ -226,7 +226,7 @@ for _ in 1 2 3 4; do
   fi
 
   out="$("${QWEN38_VENV}/bin/python" "${HELPER}" "$BASE" "$QWEN38_SERVED_NAME" "$usable")"
-  used_vram="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)"
+  used_vram="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{s+=$1} END{print s+0}')"
   echo "  long-prompt probe: ${out}"
   kill "$srv" 2>/dev/null; srv=""; sleep 5
 

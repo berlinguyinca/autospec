@@ -666,6 +666,12 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
             2,
         ));
     };
+    if let Some(state) = inactive_claim_state(&selected.record) {
+        return Err(CommandFailure::status(
+            format!("claim release requires an active claim; the claim ref reads {state}"),
+            2,
+        ));
+    }
     if !has_exact_claim_generation(
         &selected.record,
         &worker_id,
@@ -1472,6 +1478,11 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
     let selected = read_claim_ref(&repo, options.issue)?.ok_or_else(|| {
         CommandFailure::diagnostic("claim state upsert requires an active claim ref")
     })?;
+    if let Some(state) = inactive_claim_state(&selected.record) {
+        return Err(CommandFailure::diagnostic(format!(
+            "claim state upsert requires an active claim; the claim ref reads {state}"
+        )));
+    }
     if !has_exact_claim_generation(
         &selected.record,
         &options.worker_id,
@@ -1490,7 +1501,7 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         options.state.clone(),
         options.branch,
         options.pr,
-        options.step.unwrap_or(options.state),
+        options.step.unwrap_or_else(|| selected.record.step.clone()),
         options.paths,
         claimed_at,
         now,
@@ -1716,6 +1727,34 @@ pub(crate) fn refresh_claim_generation(
         }
         ClaimRefAdvance::Lost => Ok(ClaimRefreshResult::OwnershipLost),
     }
+}
+
+/// `claimed` is the only state an upsert can leave behind and still own the
+/// claim: `has_exact_claim_generation` rejects every other state, so an upsert
+/// that writes one disables its own successors. Terminal states are
+/// `claim release`'s to write -- it also transitions the issue labels and
+/// projects the terminal record. Progress belongs in `step`.
+fn active_claim_state(value: String) -> Result<String, CommandFailure> {
+    if value == "claimed" {
+        return Ok(value);
+    }
+    let remedy = if matches!(
+        value.as_str(),
+        "available" | "failed" | "merged" | "needs-human" | "released" | "retryable"
+    ) {
+        "complete the claim with `autospec claim release`"
+    } else {
+        "record progress with --step"
+    };
+    Err(CommandFailure::diagnostic(format!(
+        "--state must be claimed, not \"{value}\"; {remedy}"
+    )))
+}
+
+/// `claimed` is the only state that means the claim is still held. Report that
+/// term separately so an inactive claim does not read as a stolen one.
+fn inactive_claim_state(record: &RunStateRecord) -> Option<&str> {
+    (record.state != "claimed").then_some(record.state.as_str())
 }
 
 fn has_exact_claim_generation(
@@ -3770,7 +3809,9 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
         claim_id: claim_id
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
-        state: state.ok_or_else(|| CommandFailure::diagnostic("--state is required"))?,
+        state: active_claim_state(
+            state.ok_or_else(|| CommandFailure::diagnostic("--state is required"))?,
+        )?,
         step,
         branch: (!branch.trim().is_empty())
             .then_some(branch)
@@ -7220,7 +7261,7 @@ fn print_help() {
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available\n\nCLAIM STATE:\n    upsert --state accepts claimed only. Progress belongs in --step;\n    terminal transitions go through `autospec claim release`."
     );
 }
 
