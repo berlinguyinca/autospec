@@ -148,6 +148,7 @@ impl ForegroundWaterfallFixture {
                 "main",
             ])
             .env("PATH", path_with(&self.bin))
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
             .env("FW_MODE", &self.mode)
             .env("FW_CALLS", &self.calls)
             .env("FW_AUTO_CALLS", &self.auto_calls)
