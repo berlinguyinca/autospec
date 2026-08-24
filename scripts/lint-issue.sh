@@ -134,7 +134,6 @@ extract_subsection() {
 # children. Uses exact string membership (not regex) so literal '&' in
 # 'Motion & feedback' needs no escaping.
 strip_ui_sections() {
-    local file="$1"
     awk '
         BEGIN {
             headings["## Design reference"] = 1
@@ -155,7 +154,7 @@ strip_ui_sections() {
             if (skip) { next }
             print
         }
-    ' "$file"
+    '
 }
 
 # Strip marker-bounded metadata appended after the authored child body has
@@ -185,8 +184,17 @@ strip_generated_metadata() {
     '
 }
 
+# Order is load-bearing: generated metadata MUST be removed first.
+#
+# strip_ui_sections skips every line after a UI heading until the next line
+# beginning '## '. Generated blocks open with '<!-- autospec-*:begin -->', which
+# is not such a line, so running strip_ui_sections first on a body whose trailing
+# section is a UI one DELETES the opening marker. strip_generated_metadata then
+# sees an end marker with no begin, declines to strip, and the whole block is
+# charged to the authored count - the exact leak this exemption exists to prevent,
+# and worse than if the marker had never moved.
 strip_non_authored_sections() {
-    strip_ui_sections "$1" | strip_generated_metadata
+    strip_generated_metadata < "$1" | strip_ui_sections
 }
 
 # ── findings accumulator ──────────────────────────────────────────────────────

@@ -360,6 +360,13 @@ labels and patches each body with a `## Model fit` block.
 >    `<!-- autospec-classify:begin -->` and `<!-- autospec-classify:end -->`
 >    markers, replace it in place. Never stack duplicates. Apply via
 >    `gh issue edit <N> --body-file <tmp>`.
+>    Legacy blocks written before the marker moved have `## Model fit` and its
+>    bullets ABOVE `<!-- autospec-classify:begin -->`. Replacing only the
+>    marker-delimited region leaves that heading orphaned outside the markers,
+>    where it still counts against the word budget, and the replacement adds a
+>    second `## Model fit`. So before replacing, delete any `## Model fit`
+>    heading and the contiguous non-blank lines under it that sit immediately
+>    above the begin marker.
 >
 > 6. **Board assignment** — read `~/.autospec/project-map.yml` and assign each
 >    just-classified child to the GitHub Projects mapped from its labels.

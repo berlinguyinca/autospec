@@ -105,3 +105,32 @@ teardown() {
     [[ "$output" == *"## Shared contracts"* ]]
     [[ "$output" != *"scripts/solo.sh"* ]]
 }
+
+@test "block is wrapped in shared-contracts markers on the populated path" {
+    # scripts/lint-issue.sh exempts generated metadata from the authored word
+    # budget only BETWEEN these markers, and only when the heading sits inside
+    # them. Emitting the block bare charges every word to the issue's budget.
+    printf 'edit `scripts/shared.sh` and SHARED_VAR\n' > "$TMP/a.md"
+    printf 'also `scripts/shared.sh` and SHARED_VAR\n' > "$TMP/b.md"
+    run "$EXTRACT" "$TMP/a.md" "$TMP/b.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<!-- autospec-shared-contracts:begin -->"* ]]
+    [[ "$output" == *"<!-- autospec-shared-contracts:end -->"* ]]
+    # The heading must fall inside the pair, not above it.
+    printf '%s\n' "$output" > "$TMP/out.md"
+    begin="$(grep -n 'autospec-shared-contracts:begin' "$TMP/out.md" | cut -d: -f1)"
+    head="$(grep -n '^## Shared contracts' "$TMP/out.md" | cut -d: -f1)"
+    end="$(grep -n 'autospec-shared-contracts:end' "$TMP/out.md" | cut -d: -f1)"
+    [ "$begin" -lt "$head" ]
+    [ "$head" -lt "$end" ]
+}
+
+@test "block is wrapped in shared-contracts markers on the no-overlap path" {
+    # The early-return branch is a separate exit path and needs its own end marker;
+    # an unbalanced pair makes strip_generated_metadata decline to strip at all.
+    printf 'edit `scripts/solo.sh` and SOLO_VAR\n' > "$TMP/a.md"
+    run "$EXTRACT" "$TMP/a.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<!-- autospec-shared-contracts:begin -->"* ]]
+    [[ "$output" == *"<!-- autospec-shared-contracts:end -->"* ]]
+}

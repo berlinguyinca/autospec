@@ -336,3 +336,46 @@ MD
     printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
     ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
 }
+
+@test "BODY_TOO_LONG: a generated block trailing the UI sections is still exempt" {
+    # Regression: strip_ui_sections skips every line after a UI heading until the
+    # next '## ' line. A generated block opens with '<!-- autospec-*:begin -->',
+    # which is not one, so stripping UI sections FIRST deletes the opening marker
+    # and strip_generated_metadata then declines to strip anything -- charging the
+    # whole block to the authored count. strip_non_authored_sections therefore
+    # removes generated metadata before UI sections; this pins that ordering.
+    write_good_body "$TMP/b.md"
+    {
+        printf '\n<!-- ui-feature -->\n\n'
+        echo "## Design reference"
+        echo ""
+        echo "DESIGN.md#buttons"
+        echo ""
+        echo "## Interaction states"
+        echo ""
+        echo "default/hover/focus"
+        echo ""
+        echo "## UX flows"
+        echo ""
+        echo "happy: click -> submit"
+        echo ""
+        echo "## Motion & feedback"
+        echo ""
+        echo "Motion: fade-in; reduced: opacity-only"
+        echo ""
+        echo "## Device & viewport"
+        echo ""
+        echo "Devices: iPhone SE; reflow-320: no h-scroll"
+        echo ""
+        echo "<!-- autospec-classify:begin -->"
+        echo "## Model fit"
+        echo ""
+        for _ in $(seq 1 40); do
+            echo "generated generated generated generated generated generated generated generated"
+        done
+        echo "<!-- autospec-classify:end -->"
+    } > "$TMP/b.md.new"
+    cat "$TMP/b.md" "$TMP/b.md.new" > "$TMP/c.md"
+    run bash -c "bash '$LINT' '$TMP/c.md' 2>&1"
+    ! printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
+}

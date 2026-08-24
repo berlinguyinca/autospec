@@ -221,6 +221,20 @@ For each candidate issue:
    `<!-- autospec-classify:begin -->` / `<!-- autospec-classify:end -->`
    markers), replace it in place. Never stack duplicate blocks.
 
+   Legacy blocks written before the marker moved have `## Model fit` and its
+
+   bullets ABOVE `<!-- autospec-classify:begin -->`. Replacing only the
+
+   marker-delimited region leaves that heading orphaned outside the markers,
+
+   where it still counts against the word budget, and the replacement adds a
+
+   second `## Model fit`. So before replacing, delete any `## Model fit`
+
+   heading and the contiguous non-blank lines under it that sit immediately
+
+   above the begin marker.
+
    Apply via `gh issue edit <N> --body-file <tmp>`.
 
 5. **Board assignment** (only if `--apply-boards`):
