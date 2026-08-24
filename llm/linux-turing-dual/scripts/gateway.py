@@ -856,46 +856,40 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._proxy(method)
 
+    # Exact-match endpoints: (path, method or None for "any method", handler).
+    # Adding an endpoint is one row rather than another if-branch, and the
+    # dispatcher below is the only code that walks the table. Parameterised
+    # routes carry an extraction step and stay in _owned, after this table --
+    # the same order the branches ran in before.
+    _ROUTES: tuple[tuple[str, str | None, str], ...] = (
+        ("/auth/login", "GET", "_login"),
+        ("/auth/callback", "GET", "_callback"),
+        ("/auth/logout", None, "_logout"),
+        ("/api/me", None, "_me"),
+        ("/api/gateway-health", None, "_health"),
+        ("/api/stats", None, "_stats"),
+        ("/v1/models", None, "_models"),
+        ("/api/servers", None, "_servers"),
+        ("/api/chat", "POST", "_chat"),
+        ("/api/servers/enrol", "POST", "_enrol"),
+        ("/api/agent/enrol", "POST", "_agent_enrol"),
+        ("/api/agent/control", "GET", "_agent_control"),
+        ("/api/agent/pipe", "GET", "_agent_pipe"),
+        ("/api/usage", None, "_usage_api"),
+        ("/api/keys", "GET", "_list_keys"),
+        ("/api/keys", "POST", "_mint"),
+    )
+
     def _owned(self, method: str, path: str) -> None:
-        if path == "/auth/login" and method == "GET":
-            return self._login()
-        if path == "/auth/callback" and method == "GET":
-            return self._callback()
-        if path == "/auth/logout":
-            return self._logout()
-        if path == "/api/me":
-            return self._me()
-        if path == "/api/gateway-health":
-            return self._health()
-        if path == "/api/stats":
-            return self._stats()
-        if path == "/v1/models":
-            return self._models()
-        if path == "/api/servers":
-            return self._servers()
-        if path == "/api/chat" and method == "POST":
-            return self._chat()
-        if path == "/api/servers/enrol" and method == "POST":
-            return self._enrol()
-        if path == "/api/agent/enrol" and method == "POST":
-            return self._agent_enrol()
-        if path == "/api/agent/control" and method == "GET":
-            return self._agent_control()
-        if path == "/api/agent/pipe" and method == "GET":
-            return self._agent_pipe()
+        for route_path, route_method, handler in self._ROUTES:
+            if path == route_path and route_method in (None, method):
+                return getattr(self, handler)()
         if path.startswith("/api/servers/"):
             rest = path[len("/api/servers/"):].split("/")
             if len(rest) == 1 and method == "DELETE":
                 return self._detach(rest[0])
             if len(rest) == 2 and method == "POST" and rest[1] in ("pool", "priority"):
                 return self._server_setting(rest[0], rest[1])
-        if path == "/api/usage":
-            return self._usage_api()
-        if path == "/api/keys":
-            if method == "GET":
-                return self._list_keys()
-            if method == "POST":
-                return self._mint()
         if path.startswith("/api/keys/") and method == "DELETE":
             return self._revoke(path.rsplit("/", 1)[-1])
         self._err(404, "no such endpoint")
