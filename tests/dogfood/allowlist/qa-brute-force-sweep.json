@@ -154,5 +154,41 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
+  },
+  {
+    "file": "llm/agent/ws.go",
+    "function": "<unknown>",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "RFC 6455 client framing. The branches select the payload-length encodings the wire format mandates (7-bit, 16-bit extended, 64-bit extended) and the opcode cases; each does distinct byte packing rather than repeating one row shape. A dispatch table would hide the RFC structure that the published-vector tests in ws_test.go check this file against."
+  },
+  {
+    "file": "llm/agent/ws_test.go",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only file. The strings are RFC 6455 published handshake vectors and error-message substring assertions; they are test expectations, not a domain representation."
+  },
+  {
+    "file": "llm/linux-turing-dual/scripts/chat.py",
+    "function": "validate",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Sequential guard clauses over heterogeneous predicates: JSON decode failure, two isinstance checks, model-id membership, list emptiness, message count, then per-message role and content checks. The branches share only the (None, reason) return shape; each predicate reads a different field with a different type, so a table would need one lambda per row and lose the early-return reading order."
+  },
+  {
+    "file": "llm/linux-turing-dual/scripts/collect-stats.py",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "kind_of() takes the vision flag from a config key (mmproj) and only the uncensored flag from the fleet's model-naming convention; urllib.parse is imported for the metrics URL, not for model names. Sourcing that one flag from explicit model metadata would require a capability field in the node config, which is a deployment-affecting schema change rather than a rewrite of this collector. Recorded as a known simplification."
+  },
+  {
+    "file": "llm/linux-turing-dual/scripts/modelpeek.py",
+    "function": "peek_model",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Incremental JSON scanner. The branches are tokenizer states -- string scan, key position at depth 1, nesting push/pop, terminator -- with different control flow (continue, early return, depth tracking) over a shared cursor. It is a state machine, not repeated rows; reading a prefix without buffering the request body is the point of the function."
+  },
+  {
+    "file": "llm/linux-turing-dual/scripts/usage.py",
+    "function": "_from_obj",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Two precedence-ordered accounting sources: llama.cpp timings first, then the OpenAI-style usage object which deliberately overrides it, plus a nested prompt_tokens_details lookup. The ordering is the logic, so flattening the isinstance-guarded assignments into one table would drop the 'usage overrides timings' precedence the surrounding tests pin."
   }
 ]
