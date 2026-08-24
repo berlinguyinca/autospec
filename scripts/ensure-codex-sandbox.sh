@@ -12,6 +12,7 @@ SYSTEM_ROOT="${AUTOSPEC_CODEX_SANDBOX_ROOT:-}"
 TEST_MODE="${AUTOSPEC_CODEX_SANDBOX_TEST_MODE:-0}"
 CODEX_EXECUTABLE=""
 CODEX_EXECUTABLE_TOML=""
+CODEX_VENDOR_READ_TOML=""
 ORIGINAL_CODEX_HOME="${CODEX_HOME:-}"
 PROBE_CODEX_HOME=""
 IGNORE_USER_CONFIG_SUPPORTED=0
@@ -98,8 +99,39 @@ toml_escape() {
     printf '%s' "$escaped"
 }
 
+# Resolve the npm package root when `codex` on PATH is the JS wrapper that npm
+# installs at <pkg>/bin/codex.js. That wrapper exec()s a platform-specific
+# native binary vendored under <pkg>/node_modules, so the sandbox must be able
+# to read the whole package; granting only the wrapper path makes the native
+# binary invisible and the probe fails with
+#   bwrap: execvp <path>: No such file or directory
+# for a file that plainly exists on the host. Prints nothing and returns 1 when
+# the executable is not an npm wrapper (e.g. a standalone native build).
+codex_npm_package_root() {
+    candidate=$1
+    case "$candidate" in
+        *.js) ;;
+        *) return 1 ;;
+    esac
+    case "$candidate" in
+        */bin/*) ;;
+        *) return 1 ;;
+    esac
+    pkg_root=${candidate%/bin/*}
+    [ -n "$pkg_root" ] || return 1
+    [ -d "$pkg_root" ] && [ ! -L "$pkg_root" ] || return 1
+    [ -f "$pkg_root/package.json" ] || return 1
+    printf '%s\n' "$pkg_root"
+}
+
 permission_profile_filesystem() {
     filesystem="permissions.$PROFILE_NAME.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},\"$CODEX_EXECUTABLE_TOML\"=\"read\""
+    # The npm entry point is a JS wrapper that exec()s a vendored native
+    # binary; granting read on the wrapper alone leaves that binary invisible
+    # inside the sandbox. See codex_npm_package_root.
+    if [ -n "$CODEX_VENDOR_READ_TOML" ]; then
+        filesystem="$filesystem,\"$CODEX_VENDOR_READ_TOML\"=\"read\""
+    fi
     # shellcheck disable=SC2088 # Codex expands these config paths, not Bash.
     for denied_path in \
         '~/.aws' \
@@ -396,6 +428,10 @@ if [ -z "$CODEX_EXECUTABLE" ] || [ ! -f "$CODEX_EXECUTABLE" ]; then
     exit 1
 fi
 CODEX_EXECUTABLE_TOML="$(toml_escape "$CODEX_EXECUTABLE")"
+codex_pkg_root="$(codex_npm_package_root "$CODEX_EXECUTABLE" || true)"
+if [ -n "$codex_pkg_root" ]; then
+    CODEX_VENDOR_READ_TOML="$(toml_escape "$codex_pkg_root")"
+fi
 # `codex exec` supports --ignore-user-config on 0.144.4, but `codex sandbox`
 # does not. Probe the exact subcommand capability instead of assuming parity.
 if "$CODEX_EXECUTABLE" sandbox --help 2>/dev/null |

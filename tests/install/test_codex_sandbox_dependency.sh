@@ -450,6 +450,51 @@ else
     if [ -s "$TMP_DIR/unsafe-override.privileged.log" ]; then
         fail "unsafe root override reached sudo"
     fi
+
+    # Regression: npm installs `codex` as a JS wrapper at <pkg>/bin/codex.js
+    # that exec()s a platform-specific native binary vendored under
+    # <pkg>/node_modules. Granting the sandbox read access to the wrapper alone
+    # leaves that binary invisible inside bwrap, and the probe dies with
+    # `execvp: <path>: No such file or directory` for a file that exists.
+    npm_pkg="$TMP_DIR/npm-wrapper/pkg"
+    npm_bin="$TMP_DIR/npm-wrapper/bin"
+    mkdir -p "$npm_pkg/bin" "$npm_bin"
+    printf '%s\n' '{"name":"@openai/codex"}' > "$npm_pkg/package.json"
+    cp "$FAKE_BIN/codex" "$npm_pkg/bin/codex.js"
+    chmod +x "$npm_pkg/bin/codex.js"
+    ln -s "$npm_pkg/bin/codex.js" "$npm_bin/codex"
+
+    npm_case="$TMP_DIR/npm-wrapper-case"
+    npm_root="$npm_case/root"
+    mkdir -p "$npm_root/etc/apparmor.d" "$npm_case/codex-home"
+    printf '%s\n' 'ID=ubuntu' > "$npm_root/etc/os-release"
+    : > "$npm_case/codex.log"
+    set +e
+    npm_output=$(env \
+        PATH="$npm_bin:$FAKE_BIN:$PATH" \
+        AUTOSPEC_CODEX_SANDBOX_ROOT="$npm_root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
+        CODEX_LOG="$npm_case/codex.log" \
+        SYSCTL_LOG="$npm_case/sysctl.log" \
+        PARSER_LOG="$npm_case/parser.log" \
+        PRIVILEGED_LOG="$npm_case/privileged.log" \
+        REPAIRED_MARKER="$npm_case/repaired" \
+        CODEX_HOME="$npm_case/codex-home" \
+        CODEX_MODE=healthy \
+        bash "$HELPER" 2>&1)
+    npm_status=$?
+    set -e
+    if [ "$npm_status" -ne 0 ]; then
+        fail "npm-wrapper Codex layout was rejected: $npm_output"
+    fi
+    if ! grep -Fq -- "\"$npm_pkg\"=\"read\"" "$npm_case/codex.log"; then
+        fail "probe did not grant sandbox read access to the Codex npm package root"
+    fi
+
+    # A standalone native executable must not gain an extra grant.
+    if grep -Fq -- '"'"$FAKE_BIN"'"="read"' "$TMP_DIR/healthy/codex.log"; then
+        fail "non-npm Codex executable was granted an unnecessary directory read"
+    fi
 fi
 
 dry_output=$(AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
