@@ -91,11 +91,11 @@ def _base_url() -> str:
 
 def _poll_once() -> dict:
     """The ONLY place that talks to the backend or forks. Never per request."""
-    models = COLLECT.read_models(_base_url(), Handler.api_key)
+    models = COLLECT.read_models(_base_url(), Handler.runtime_key)
     model = COLLECT.pick_loaded_model(models)
     url = (f"{Handler.metrics_url}?model={model}" if model else Handler.metrics_url)
-    metrics = COLLECT.read_metrics(url, Handler.api_key)
-    slots = COLLECT.read_slot_total(_base_url(), Handler.api_key, model)
+    metrics = COLLECT.read_metrics(url, Handler.runtime_key)
+    slots = COLLECT.read_slot_total(_base_url(), Handler.runtime_key, model)
     cards, smi_stderr, smi_failed = COLLECT.read_gpus_with_faults()
     # Liveness from the endpoint this build actually permits: a model list that
     # answers proves the runtime is there, whatever /metrics says about auth.
@@ -221,6 +221,9 @@ def snapshot() -> dict:
 class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-turing-dashboard"
     api_key: str | None = None
+    # Inbound: what a caller must present to READ this dashboard.
+    # runtime_key is outbound: what this dashboard presents to the RUNTIME.
+    runtime_key: str | None = None
     metrics_url: str = "http://127.0.0.1:8080/metrics"
     # Set for the duration of one HEAD. A class attribute, not per-request
     # state, because do_HEAD() reuses do_GET() wholesale.
@@ -343,6 +346,15 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--metrics-url", default="http://127.0.0.1:8080/metrics")
     ap.add_argument("--api-key-file")
+    # SEPARATE from --api-key-file, and the separation is the point. One value
+    # was doing two opposite jobs: proving callers may read this dashboard, and
+    # proving this dashboard may read the runtime. They are different secrets --
+    # the runtime accepts internal.key, callers present dashboard.key -- so a
+    # single value could only ever satisfy one of them. It satisfied the inbound
+    # one, and every /metrics poll was rejected: `metrics_readable: false`,
+    # tokens/s stuck at 0, and ~2 failed auths per second in the router's log
+    # for as long as the node was up.
+    ap.add_argument("--runtime-key-file")
     args = ap.parse_args()
 
     if args.api_key_file:
@@ -356,6 +368,18 @@ def main() -> int:
         except OSError:
             print(f"cannot read {args.api_key_file}", file=sys.stderr)
             return 78
+    if args.runtime_key_file:
+        try:
+            # First line only, for the same reason as above.
+            Handler.runtime_key = (open(args.runtime_key_file).readline()
+                                   or "").strip() or None
+        except OSError:
+            print(f"cannot read {args.runtime_key_file}", file=sys.stderr)
+            return 78
+    else:
+        # Backwards compatible: an installation that has not been updated keeps
+        # the old (broken) behaviour rather than losing the polls entirely.
+        Handler.runtime_key = Handler.api_key
     Handler.metrics_url = args.metrics_url
 
     threading.Thread(target=_refresher, daemon=True).start()
