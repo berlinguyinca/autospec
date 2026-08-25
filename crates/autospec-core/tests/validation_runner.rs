@@ -1275,16 +1275,20 @@ fn runner_checks_worktree_ladder_parity_with_typed_stdin_commands() {
 
 #[test]
 fn runner_checks_phase4_policy_gates_with_direct_bats_commands() {
-    for (id, owner, fixture) in [
+    for (id, owner, fixture, minimum_spawns, maximum_spawns) in [
         (
             "check_phase4_single_agent_discipline",
             ExternalCheck::Phase4SingleAgentDiscipline,
             "phase4-single-agent",
+            0,
+            1,
         ),
         (
             "check_phase4_final_quality_gate",
             ExternalCheck::Phase4FinalQualityGate,
             "phase4-final-quality",
+            0,
+            2,
         ),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
@@ -1296,11 +1300,39 @@ fn runner_checks_phase4_policy_gates_with_direct_bats_commands() {
             owner: CheckOwner::ExternalBatch(owner),
         }]);
 
-        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+        let report =
+            ValidationRunner::run(&catalog, &validation_fixture(fixture));
 
         assert_eq!(report.results[0].exit_code, Some(0), "{id}");
-        assert!((0..=1).contains(&report.results[0].spawn_count), "{id}");
+        assert!(
+            (minimum_spawns..=maximum_spawns).contains(&report.results[0].spawn_count),
+            "{id}"
+        );
     }
+}
+
+#[test]
+fn runner_phase4_final_quality_gate_fails_closed_when_discovery_suite_is_missing() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_phase4_final_quality_gate",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::Phase4FinalQualityGate),
+    }]);
+
+    let report = ValidationRunner::run(
+        &catalog,
+        &validation_fixture("phase4-final-quality-missing-discovery"),
+    );
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 0);
+    assert_eq!(
+        report.results[0].stderr_bytes,
+        b"tests/unit/test_quality_gate_discovery.bats: bats coverage missing".len()
+    );
 }
 
 #[test]
