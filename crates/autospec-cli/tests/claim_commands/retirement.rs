@@ -551,3 +551,93 @@ fn every_release_state_the_run_trio_emits_is_accepted_by_the_parser() {
         );
     }
 }
+
+/// #3357, past the parser: a `needs-human` release has to reach the end of the
+/// terminal transition, and it must not put the issue back on the queue. The
+/// fence quarantines a PR pending human review; re-adding `auto-implement` is
+/// what made a fenced issue re-implement and re-quarantine forever.
+#[test]
+fn a_needs_human_release_completes_and_does_not_requeue_the_issue() {
+    let fixture = temp_dir("autospec-claim-needs-human");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-14T00:00:00Z",
+            "2026-07-14T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id: ((map(.id)|max) + 1),updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then exit 0; fi\nexit 17\n",
+    );
+    std::fs::write(
+        &comments,
+        r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#,
+    )
+    .expect("comments fixture");
+
+    let output = autospec()
+        .args([
+            "claim",
+            "release",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--claim-id",
+            "claim-a",
+            "--state",
+            "needs-human",
+            "--branch",
+            "feat/test",
+            "--pr",
+            "99",
+        ])
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .output()
+        .expect("autospec claim release starts");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "needs-human release failed: {stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"released\":true"), "stdout: {stdout}");
+    assert!(stdout.contains("\"state\":\"needs-human\""), "stdout: {stdout}");
+    let calls = std::fs::read_to_string(&log).expect("gh call log");
+    assert!(
+        calls.contains("--remove-label\nin-progress-by-bot"),
+        "the active label must still come off: {calls}"
+    );
+    assert!(
+        !calls.contains("--add-label\nauto-implement"),
+        "a quarantined issue must not go back on the queue: {calls}"
+    );
+}
