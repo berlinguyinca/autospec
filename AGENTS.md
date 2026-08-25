@@ -174,13 +174,17 @@ rejects `="$1"` / `="$2"` in the block; put the shell in a `.sh` file instead.
 
 Generated child issues are sized for 32B-class local LLMs. Pre-staged context, sectional spec anchors, checkbox AC, one Primary smoke test per inner loop.
 
-The nodes that serve those models live in [`llm/`](llm/) — start at
-[`llm/README.md`](llm/README.md). `llm/QWEN-NODE-SPEC.md` is the portable
-method (hardware audit, quantisation from memory rather than name, measuring a
+The nodes that serve those models now live in their own private repository,
+**[berlinguyinca/autospec-node](https://github.com/berlinguyinca/autospec-node)**,
+extracted from this one with history. It holds `QWEN-NODE-SPEC.md` (the portable
+method: hardware audit, quantisation from memory rather than name, measuring a
 context ceiling that survives a prompt actually filling it, serving concurrent
-sessions); `llm/linux-qwen38/` is the measured RTX 4090 build and its operator
-toolkit; `llm/linux-qwen38/slurm/` deploys the same stack onto the the cluster
-Slurm cluster with one command.
+sessions), `linux-qwen38/` (the measured RTX 4090 build, its operator toolkit,
+and the Slurm deployment) and `linux-turing-dual/` (the dual-Turing node), along
+with the design documents that describe them.
+
+It is a pointer rather than a subtree because two copies drift the moment either
+is edited, and the drift is silent.
 
 Two results from that work bind anything that sizes a local context window:
 the usable window is **client-specific** — the context present before any work
