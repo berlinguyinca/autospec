@@ -160,6 +160,10 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
     assert!(!fast.ids().contains(&"check_python_suites"));
+    // The orphan ratchet itself is filesystem-only, so it stays in --fast; the two
+    // suites it caught are BatsSuite owners and drop out.
+    assert!(fast.ids().contains(&"check_bats_suite_registration"));
+    assert_eq!(fast.ids().len(), 137);
     assert!(!fast.ids().contains(&"check_install_tests"));
     assert!(fast.ids().iter().all(|id| {
         !matches!(
@@ -170,6 +174,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_autonomous_phase2_suite"
                 | "check_persona_suite"
                 | "check_reuse_lens_suite"
+                | "check_bats_negation_ratchet"
+                | "check_quality_gate_discovery"
         )
     }));
 }
