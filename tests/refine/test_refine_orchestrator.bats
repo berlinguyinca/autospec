@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tests/refine/test_refine_orchestrator.bats — orchestrator behaviour (issue #670).
 # Covers: happy path, convergence, degradation, round cap, context-sparse,
-# forbidden path.
+# forbidden path, slug handling.
 
 SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-prompt.sh"
 
@@ -169,5 +169,54 @@ teardown() {
 
 @test "script avoids ambiguous static-audit token" {
     run grep -nEi '\bany\b' "$SCRIPT"
+    [ "$status" -eq 1 ]
+}
+
+@test "multi-line --from-file prompt → exactly one single-line .json artifact" {
+    local pfile="$TEST_TMP/prompt.txt"
+    printf 'Fix the login button\nand the search page\nplus the export job\n' > "$pfile"
+    run bash "$SCRIPT" --from-file "$pfile" --rounds 1 --dry-run \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
+    [ "$status" -eq 0 ]
+    local files lines
+    # -print0 counts NUL-terminated records (immune to newlines in names);
+    # the -print line count proves the single name has no embedded newline.
+    files=$(find "$ART_DIR" -maxdepth 1 -name '*.json' -print0 | tr -cd '\0' | wc -c | tr -d '[:space:]')
+    lines=$(find "$ART_DIR" -maxdepth 1 -name '*.json' -print | wc -l | tr -d '[:space:]')
+    [ "$files" -eq 1 ]
+    [ "$lines" -eq 1 ]
+}
+
+@test "single-line prompt keeps the byte-identical legacy slug" {
+    local legacy
+    legacy=$(printf '%s' "Fix The Login Button Now" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+        | cut -c1-40)
+    run bash "$SCRIPT" "Fix The Login Button Now" --rounds 1 --dry-run \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
+    [ "$status" -eq 0 ]
+    local name f slug
+    f=$(ls "$ART_DIR"/*.json | head -1)
+    name=${f##*/}
+    slug=$(printf '%s' "$name" | sed -E 's/\.json$//; s/-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$//')
+    [ "$slug" = "$legacy" ]
+}
+
+@test "all-punctuation prompt still falls back to the literal slug prompt" {
+    run bash "$SCRIPT" "!!??,,,,..." --rounds 1 --dry-run \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
+    [ "$status" -eq 0 ]
+    local name f
+    f=$(ls "$ART_DIR"/*.json | head -1)
+    name=${f##*/}
+    [[ "$name" == prompt-*.json ]]
+}
+
+@test "slug_from_prompt is defined exactly once and the _early duplicate is gone" {
+    run grep -cE '^[[:space:]]*slug_from_prompt\(\)' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+    run grep -c 'slug_from_prompt_early' "$SCRIPT"
     [ "$status" -eq 1 ]
 }

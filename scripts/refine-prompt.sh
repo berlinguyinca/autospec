@@ -241,9 +241,13 @@ if [ -n "$SIM_ITER_DIR" ]; then
     fi
 fi
 
-# ── slug helper (early — needed by --continue) ────────────────────
-slug_from_prompt_early() {
+# ── slug helper (single definition — needed by --continue and the artifact step) ──
+# slug_from_prompt: stable lowercase-dashed slug for artifact filenames.
+# Whitespace (including newlines) collapses to single spaces before
+# dashification so a multi-line prompt yields one single-line filename.
+slug_from_prompt() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+        | tr -s '[:space:]' ' ' \
         | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
         | cut -c1-40
 }
@@ -384,7 +388,7 @@ run_continue_loop() {
         return $?
     fi
     local loop_slug
-    loop_slug="$(slug_from_prompt_early "$PROMPT")"
+    loop_slug="$(slug_from_prompt "$PROMPT")"
     [ -n "$loop_slug" ] || loop_slug="prompt"
     mkdir -p "$ARTIFACT_DIR"
     local loop_json="$ARTIFACT_DIR/${loop_slug}-loop.json"
@@ -1006,12 +1010,6 @@ apply_lens_routed() {
 
 # ── helpers ───────────────────────────────────────────────────────
 word_count() { printf '%s' "$1" | wc -w | tr -d ' '; }
-
-slug_from_prompt() {
-    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
-        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
-        | cut -c1-40
-}
 
 iso_ts() { date -u +'%Y-%m-%dT%H-%M-%SZ'; }
 
