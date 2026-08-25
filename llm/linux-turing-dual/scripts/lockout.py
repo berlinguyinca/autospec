@@ -37,11 +37,18 @@ import time
 FAILS = int(os.environ.get("QT_LOCKOUT_FAILS", "5"))
 WINDOW = float(os.environ.get("QT_LOCKOUT_WINDOW", "600"))
 BAN = float(os.environ.get("QT_LOCKOUT_BAN", "3600"))
+# An address that fails once creates a dict entry. Nothing rotates source
+# addresses faster than the thing this module exists to stop, so without a
+# ceiling the counter map is a memory-exhaustion vector wearing the costume of a
+# security control. Sweeping is O(n) and therefore amortised, not per-request.
+MAX_TRACKED = int(os.environ.get("QT_LOCKOUT_MAX_TRACKED", "20000"))
+SWEEP_EVERY = 512
 
 _LOCK = threading.Lock()
 _FAILS: dict[str, list[float]] = {}     # ip -> failure timestamps in-window
 _BANS: dict[str, float] = {}            # ip -> expiry epoch
 _DB: str | None = None
+_since_sweep = 0
 
 
 def configure(db_path: str | None) -> None:
@@ -56,6 +63,8 @@ def configure(db_path: str | None) -> None:
                       "ip TEXT PRIMARY KEY, until REAL NOT NULL, "
                       "reason TEXT, at REAL)")
             now = time.time()
+            # Expired rows are dead weight; a restart is the natural moment.
+            c.execute("DELETE FROM lockout WHERE until <= ?", (now,))
             rows = c.execute("SELECT ip, until FROM lockout WHERE until > ?",
                              (now,)).fetchall()
         with _LOCK:
@@ -102,12 +111,33 @@ def banned_until(ip: str, now: float | None = None) -> float | None:
         return until
 
 
+def _sweep_locked(now: float) -> None:
+    """Drop what can no longer matter. Caller holds _LOCK."""
+    for k in [k for k, v in _FAILS.items() if not v or v[-1] <= now - WINDOW]:
+        _FAILS.pop(k, None)
+    for k in [k for k, v in _BANS.items() if v <= now]:
+        _BANS.pop(k, None)
+    # Still over the ceiling after dropping the dead: shed the counters closest
+    # to expiring. Bans are never shed -- forgetting one is the failure this
+    # module is for, and they are bounded by how many addresses got far enough
+    # to earn one.
+    if len(_FAILS) > MAX_TRACKED:
+        for k, _ in sorted(_FAILS.items(), key=lambda kv: kv[1][-1])[
+                :len(_FAILS) - MAX_TRACKED]:
+            _FAILS.pop(k, None)
+
+
 def record_failure(ip: str, now: float | None = None) -> float | None:
     """Count one bad credential. Returns the ban expiry if this caused a ban."""
+    global _since_sweep
     now = time.time() if now is None else now
     if is_loopback(ip):
         return None
     with _LOCK:
+        _since_sweep += 1
+        if _since_sweep >= SWEEP_EVERY or len(_FAILS) > MAX_TRACKED:
+            _since_sweep = 0
+            _sweep_locked(now)
         hits = [t for t in _FAILS.get(ip, []) if t > now - WINDOW]
         hits.append(now)
         _FAILS[ip] = hits
@@ -147,7 +177,8 @@ def clear(ip: str) -> None:
 
 
 def reset_for_tests() -> None:
-    global _DB
+    global _DB, _since_sweep
+    _since_sweep = 0
     with _LOCK:
         _FAILS.clear()
         _BANS.clear()

@@ -125,3 +125,39 @@ def test_an_unusable_database_does_not_stop_the_gateway():
     ban table is unavailable trades a small security property for an outage."""
     lk.configure("/nonexistent-dir/nope.sqlite3")
     assert lk.record_failure("203.0.113.77", 1000.0) is None   # no exception
+
+
+# --- bounded ----------------------------------------------------------------
+# A counter map keyed by address, with no ceiling, is a memory-exhaustion vector
+# wearing the costume of a security control -- and nothing rotates source
+# addresses faster than the thing this module exists to stop.
+
+def test_rotating_sources_do_not_grow_the_counter_map_without_bound():
+    lk.MAX_TRACKED = 500          # keep the test quick; the mechanism is the point
+    now = 1000.0
+    for i in range(5000):
+        lk.record_failure(f"198.51.{i // 256 % 256}.{i % 256}", now)
+    assert len(lk._FAILS) <= lk.MAX_TRACKED + lk.SWEEP_EVERY, len(lk._FAILS)
+
+
+def test_a_sweep_never_forgets_a_live_ban():
+    """Shedding counters is fine; shedding a ban would undo the whole point."""
+    lk.MAX_TRACKED = 100
+    now = 1000.0
+    for i in range(lk.FAILS):
+        until = lk.record_failure("203.0.113.200", now + i)
+    assert until is not None
+    for i in range(3000):
+        lk.record_failure(f"198.51.{i // 256 % 256}.{i % 256}", now + 10)
+    assert lk.banned_until("203.0.113.200", now + 20) is not None
+
+
+def test_stale_counters_are_dropped_once_their_window_has_passed():
+    lk.MAX_TRACKED = 20000
+    now = 1000.0
+    for i in range(600):          # enough to cross SWEEP_EVERY
+        lk.record_failure(f"203.0.114.{i % 256}", now)
+    before = len(lk._FAILS)
+    for i in range(600):          # long after the first window closed
+        lk.record_failure(f"203.0.115.{i % 256}", now + lk.WINDOW + 60)
+    assert len(lk._FAILS) < before + 600, "old windows were never dropped"
