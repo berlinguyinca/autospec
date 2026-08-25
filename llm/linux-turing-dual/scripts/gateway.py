@@ -63,6 +63,7 @@ import usage as _usage          # noqa: E402
 import publicview as _public    # noqa: E402
 import chat as _chat            # noqa: E402
 import gpuhealth as _gpuhealth  # noqa: E402
+import lockout as _lockout      # noqa: E402
 import health as _health        # noqa: E402
 import admission as _adm        # noqa: E402
 from keystore import KeyStore   # noqa: E402
@@ -829,6 +830,15 @@ class Handler(BaseHTTPRequestHandler):
         # not in __init__.
         self._body_left = int(self.headers.get("Content-Length") or 0)
         self._peeked = b""
+        # Before anything else: a banned caller costs nothing but a drained body.
+        # _err drains, which matters on keep-alive -- an undrained body is parsed
+        # as the next request line.
+        _ban = _lockout.banned_until(self._client_ip())
+        if _ban is not None:
+            self._err(429, "too many failed credentials; try later",
+                      "too_many_requests",
+                      {"Retry-After": str(max(1, int(_ban - time.time())))})
+            return
         self._auto_choice = None
         self._route_why = None
         self._route_est = None
@@ -1015,7 +1025,27 @@ class Handler(BaseHTTPRequestHandler):
         the same credential could run inference but not read the dashboard. Two
         copies of an auth check is two answers to one question.
         """
-        return STORE.authenticate(presented, time.time()) if STORE else None
+        row = STORE.authenticate(presented, time.time()) if STORE else None
+        if row is None and (presented or "").strip():
+            # Only a credential that was PRESENTED and did not work. Absent
+            # credentials are not counted: "I have not signed in yet" is every
+            # browser's first request, not an attack.
+            ip = self._client_ip()
+            until = _lockout.record_failure(ip)
+            if until is not None:
+                sys.stderr.write(f"lockout: {ip} banned until "
+                                 f"{time.strftime('%H:%M:%S', time.localtime(until))} "
+                                 f"after repeated bad credentials\n")
+        return row
+
+    def _client_ip(self) -> str:
+        """Who to hold responsible for a bad credential.
+
+        Behind nginx the socket peer is always 127.0.0.1, so the real caller is
+        in X-Real-IP -- trusted only because this process binds loopback and
+        nginx sets it. See lockout.client_ip.
+        """
+        return _lockout.client_ip(self.headers.get, self.client_address[0])
 
     def _bearer(self) -> str:
         presented = self.headers.get("Authorization", "")
@@ -2526,6 +2556,9 @@ def main() -> int:
     _poll_local()
 
     STORE = KeyStore(args.mirror, dsn=dsn)
+    # Bans persist beside the key mirror: restarting the gateway must not hand
+    # an attacker a clean slate, and restarts are cheap to cause.
+    _lockout.configure(args.mirror)
     STORE.migrate_local()
     if dsn:
         STORE.refresh()
