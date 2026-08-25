@@ -570,11 +570,18 @@ mod implementation_contract_tests {
     fn autonomous_discovery_issue_matches_implementation_lint() {
         let target_path = "src/status-panel.rs";
         let regression_path = "scripts/test-autonomous-status-panel.mjs";
+        // The regression path is declared in NEITHER section, so it is genuinely
+        // undeclared. Before scope became the union of `## Implementation
+        // outline` and `## Files touched`, this fixture listed the regression
+        // path under `## Files touched` and still failed — the gate could not
+        // see that section. That is the defect fixed in #3359, so the fixture
+        // now omits the path outright to keep testing what its name claims:
+        // an issue that never declares its regression artifact must not publish.
         let malformed = format!(
             "## Goal\n\nFix the autonomous status panel.\n\n\
              ## Implementation outline\n\n- Update `{target_path}` for the status panel behavior.\n\n\
              ## Tests required\n\n- smoke\n\n\
-             ## Files touched\n\n- `{target_path}`\n- `{regression_path}`\n"
+             ## Files touched\n\n- `{target_path}`\n"
         );
 
         let error =
@@ -596,6 +603,22 @@ mod implementation_contract_tests {
         );
         admit_expected_implementation_contract(&corrected, target_path, regression_path)
             .expect("corrected outline and project-native regression evidence must publish");
+
+        // Declaring the regression path under `## Files touched` alone is also
+        // sufficient — the case #3359 was filed for, and the one `render_draft`
+        // relies on when the outline is prose.
+        let declared_in_files_touched =
+            malformed.replace(&format!("- `{target_path}`\n"), &format!("- `{target_path}`\n- `{regression_path}`\n"));
+        assert!(
+            declared_in_files_touched.contains(&format!("## Files touched\n\n- `{target_path}`\n- `{regression_path}`")),
+            "fixture must declare the regression path under ## Files touched only: {declared_in_files_touched}"
+        );
+        admit_expected_implementation_contract(
+            &declared_in_files_touched,
+            target_path,
+            regression_path,
+        )
+        .expect("a regression path declared under ## Files touched must publish");
     }
 
     #[test]
