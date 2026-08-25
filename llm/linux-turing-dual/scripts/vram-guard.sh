@@ -22,11 +22,13 @@ set -euo pipefail
 NVIDIA_SMI="${NVIDIA_SMI:-nvidia-smi}"
 MIN_TOTAL=0
 MIN_PER_CARD=0
+EXPECT_DEVICES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --min-total)    MIN_TOTAL="${2:?--min-total needs a value}";    shift 2 ;;
     --min-per-card) MIN_PER_CARD="${2:?--min-per-card needs a value}"; shift 2 ;;
+    --expect-devices) EXPECT_DEVICES="${2:?--expect-devices needs a value}"; shift 2 ;;
     -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "vram-guard: unknown argument: $1" >&2; exit 64 ;;
   esac
@@ -54,6 +56,13 @@ done <<< "$raw"
 
 if [ "$n" -eq 0 ]; then
   echo "vram-guard: ${NVIDIA_SMI} reported no devices" >&2
+  exit 69
+fi
+
+# A device-count mismatch is 69 (unavailable hardware), not 75 (transient
+# pressure): a card that is gone will not come back on a retry timer.
+if [ "$EXPECT_DEVICES" -gt 0 ] && [ "$n" -ne "$EXPECT_DEVICES" ]; then
+  echo "vram-guard: refusing to start: ${n} device(s) visible, expected ${EXPECT_DEVICES}" >&2
   exit 69
 fi
 

@@ -932,3 +932,59 @@ def test_the_first_delta_carrying_a_null_content_is_not_fatal(streaming_node):
         "model": MODEL_LOCAL, "messages": [{"role": "user", "content": "x"}]})
     assert status == 200
     assert '"content":null' in body.decode()
+
+
+# --- dead GPUs are a routing input, not a late refusal ----------------------
+# Measured 2026-08-24 on the real fleet: the GPU check was applied AFTER the
+# balancer had already chosen this node, so a single degraded provider refused
+# balanced traffic while a healthy peer sat idle -- one node's fault became a
+# fleet-wide outage. Health has to reach candidate SELECTION.
+
+@pytest.fixture
+def gpus_down():
+    """Make this node's GPUs report unusable, as the dashboard would."""
+    real = gw._gpuhealth.verdict
+    gw._gpuhealth.verdict = lambda *a, **k: (False, "a GPU has fallen off the bus")
+    yield
+    gw._gpuhealth.verdict = real
+
+
+@pytest.fixture
+def gpu_telemetry_unavailable():
+    """No verdict obtainable. gpuhealth fails open, so this must change nothing."""
+    real = gw._gpuhealth.verdict
+    gw._gpuhealth.verdict = lambda *a, **k: (True, "")
+    yield
+    gw._gpuhealth.verdict = real
+
+
+def test_dead_gpus_move_the_default_route_to_the_remote(fleet, gpus_down):
+    """THE REGRESSION. The runtime still answers /health -- llama.cpp does that
+    while CUDA is dead -- so only the GPU verdict can tell the balancer to skip
+    this node. Before the fix this returned 503 with a healthy peer available."""
+    srv, runtime, remote, key = fleet
+    status, to, why, _ = infer(srv, key, MODEL_BOTH)
+    assert (status, to) == (200, "remote"), f"expected failover, got {status}/{to}"
+    assert len(remote.seen) == 1
+    assert len(runtime.seen) == 0, "a GPU-dead node must not be handed work"
+
+
+def test_a_pin_to_a_gpu_dead_node_still_refuses_loudly(fleet, gpus_down):
+    """A pin names the MACHINE on purpose. Quietly serving it somewhere else
+    would be a worse answer than refusing -- the caller asked for this box."""
+    srv, runtime, remote, key = fleet
+    status, _, _, payload = infer(srv, key, MODEL_BOTH,
+                                  path="/u/local/v1/chat/completions")
+    assert status == 503
+    # and it must say WHICH failure: GPUs, not liveness.
+    assert b"GPU" in payload or b"fallen off" in payload, payload[:200]
+    assert len(runtime.seen) == 0
+
+
+def test_gpu_telemetry_that_cannot_be_read_changes_nothing(fleet,
+                                                           gpu_telemetry_unavailable):
+    """Failing closed on telemetry would turn a monitoring outage into an
+    inference outage. Unknown is not down."""
+    srv, runtime, remote, key = fleet
+    status, to, _, _ = infer(srv, key, MODEL_LOCAL)
+    assert (status, to) == (200, "local")

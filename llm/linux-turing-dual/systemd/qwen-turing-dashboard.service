@@ -15,6 +15,11 @@ Environment=QT_CONF_DIR=/opt/qwen-turing/etc
 # Its OWN key, not the shared one. The gateway holds a copy and is the only
 # caller; nothing reaches this process except through nginx and the gateway.
 LoadCredential=apikey:/etc/qwen-turing/dashboard.key
+# Outbound credential: the runtime accepts internal.key, not dashboard.key.
+# Without this the dashboard polls /metrics with the wrong secret -- every poll
+# is rejected, metrics_readable stays false, and the router logs ~2 failed
+# auths per second for the life of the boot.
+LoadCredential=runtimekey:/etc/qwen-turing/internal.key
 
 # Read access to the journal, so the config-health panel can report model
 # evictions and silently-disabled options from the router's own log.

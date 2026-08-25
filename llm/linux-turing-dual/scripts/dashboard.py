@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import threading
@@ -90,11 +91,11 @@ def _base_url() -> str:
 
 def _poll_once() -> dict:
     """The ONLY place that talks to the backend or forks. Never per request."""
-    models = COLLECT.read_models(_base_url(), Handler.api_key)
+    models = COLLECT.read_models(_base_url(), Handler.runtime_key)
     model = COLLECT.pick_loaded_model(models)
     url = (f"{Handler.metrics_url}?model={model}" if model else Handler.metrics_url)
-    metrics = COLLECT.read_metrics(url, Handler.api_key)
-    slots = COLLECT.read_slot_total(_base_url(), Handler.api_key, model)
+    metrics = COLLECT.read_metrics(url, Handler.runtime_key)
+    slots = COLLECT.read_slot_total(_base_url(), Handler.runtime_key, model)
     cards, smi_stderr, smi_failed = COLLECT.read_gpus_with_faults()
     # Liveness from the endpoint this build actually permits: a model list that
     # answers proves the runtime is there, whatever /metrics says about auth.
@@ -119,6 +120,82 @@ def _poll_once() -> dict:
     return summary
 
 
+def _gpu_gate(snap: dict) -> dict:
+    """A GPU verdict the gateway can act on, refreshed on the FAST tick.
+
+    Published here rather than computed in the gateway because the gateway runs
+    with PrivateDevices=true -- /dev/nvidia* is hidden from it, so nvidia-smi
+    there runs and honestly reports no cards. Asking it to probe GPUs meant
+    either weakening the sandbox of the internet-facing process or believing a
+    false negative; this is neither. (Measured 2026-08-24: the first version of
+    that gate 503'd a healthy node for exactly this reason.)
+
+    NOT derived from `problems`: that list is merged from several sources on a
+    30 s timer and includes entries about OTHER servers, so a remote node's
+    fault could refuse local inference. This uses only the GPU detectors, on
+    this node's own fresh nvidia-smi data.
+    """
+    try:
+        expect = int(os.environ.get("QT_EXPECT_DEVICES", "0"))
+    except ValueError:
+        expect = 0
+    cards = snap.get("gpus") or []
+    failed = bool(snap.get("_smi_failed"))
+    problems = HEALTH.gpu_problems(snap.get("_smi_stderr") or "", cards, failed)
+    down = [p for p in problems if p.get("severity") == HEALTH.DOWN]
+    if down:
+        return {"ok": False, "reason": down[0]["text"]}
+    # "could not run nvidia-smi" is WARNING, not DOWN: a telemetry outage must
+    # not become an inference outage.
+    if not failed and expect > 0 and len(cards) < expect:
+        return {"ok": False,
+                "reason": f"only {len(cards)} of {expect} GPUs are visible "
+                          f"to this node"}
+    return {"ok": True, "reason": ""}
+
+
+# Memory below this is driver/context overhead, not a model. A CUDA context on
+# an idle card is tens of MiB; the smallest thing this node serves is ~7 GiB.
+PLACEMENT_FLOOR_MIB = 512
+
+
+def _placement(snap: dict) -> dict:
+    """Which model, at what context, is sitting on which card.
+
+    The question an operator actually asks -- "what is on GPU 1?" -- had no
+    answer here: the panel drew utilisation per card and the model list
+    separately, and joining them was left to the reader.
+
+    DERIVED, and labelled as such. llama.cpp does not report per-device
+    placement over the API, so this attributes the resident model to the cards
+    that are actually holding memory. With --models-max 1 that is unambiguous
+    while a model is loaded.
+
+    The interesting case is when it is NOT loaded and memory is still held. That
+    is not idle and must not render as idle: a defunct llama-server whose
+    allocations the driver never released will sit on a card indefinitely. One
+    was holding 8.9 GiB on this node with the runtime stopped, and nothing on
+    the page said so.
+    """
+    cards = snap.get("gpus") or []
+    catalog = snap.get("catalog") or []
+    resident = next((c for c in catalog if c.get("resident")), None)
+    busy = [c for c in cards
+            if (c.get("mem_used_mib") or 0) >= PLACEMENT_FLOOR_MIB]
+    out = {
+        "model": (resident or {}).get("id"),
+        "context": (resident or {}).get("context"),
+        "slots": (resident or {}).get("slots"),
+        "kind": (resident or {}).get("kind"),
+        "cards": [c.get("index") for c in busy],
+        "derived": True,
+        # Memory held with nothing loaded to account for it.
+        "unattributed_mib": (0 if resident else
+                             sum((c.get("mem_used_mib") or 0) for c in busy)),
+    }
+    return out
+
+
 def _refresher() -> None:
     while True:
         try:
@@ -129,6 +206,10 @@ def _refresher() -> None:
                 # Both written by the slow journal timer; the fast poll must not
                 # blank them between its ticks.
                 snap["problems"] = _CACHE.get("problems") or []
+                # Fast tick: the gate must see a card vanish within a second,
+                # not on the 30 s journal timer.
+                snap["gpu_gate"] = _gpu_gate(snap)
+                snap["placement"] = _placement(snap)
                 _CACHE.clear()
                 _CACHE.update(snap)
         except Exception:
@@ -183,6 +264,9 @@ def snapshot() -> dict:
 class Handler(BaseHTTPRequestHandler):
     server_version = "qwen-turing-dashboard"
     api_key: str | None = None
+    # Inbound: what a caller must present to READ this dashboard.
+    # runtime_key is outbound: what this dashboard presents to the RUNTIME.
+    runtime_key: str | None = None
     metrics_url: str = "http://127.0.0.1:8080/metrics"
     # Set for the duration of one HEAD. A class attribute, not per-request
     # state, because do_HEAD() reuses do_GET() wholesale.
@@ -305,6 +389,15 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--metrics-url", default="http://127.0.0.1:8080/metrics")
     ap.add_argument("--api-key-file")
+    # SEPARATE from --api-key-file, and the separation is the point. One value
+    # was doing two opposite jobs: proving callers may read this dashboard, and
+    # proving this dashboard may read the runtime. They are different secrets --
+    # the runtime accepts internal.key, callers present dashboard.key -- so a
+    # single value could only ever satisfy one of them. It satisfied the inbound
+    # one, and every /metrics poll was rejected: `metrics_readable: false`,
+    # tokens/s stuck at 0, and ~2 failed auths per second in the router's log
+    # for as long as the node was up.
+    ap.add_argument("--runtime-key-file")
     args = ap.parse_args()
 
     if args.api_key_file:
@@ -318,6 +411,18 @@ def main() -> int:
         except OSError:
             print(f"cannot read {args.api_key_file}", file=sys.stderr)
             return 78
+    if args.runtime_key_file:
+        try:
+            # First line only, for the same reason as above.
+            Handler.runtime_key = (open(args.runtime_key_file).readline()
+                                   or "").strip() or None
+        except OSError:
+            print(f"cannot read {args.runtime_key_file}", file=sys.stderr)
+            return 78
+    else:
+        # Backwards compatible: an installation that has not been updated keeps
+        # the old (broken) behaviour rather than losing the polls entirely.
+        Handler.runtime_key = Handler.api_key
     Handler.metrics_url = args.metrics_url
 
     threading.Thread(target=_refresher, daemon=True).start()

@@ -80,12 +80,50 @@ echo "starting profile=${PROFILE} version=${QT_PROFILE_VERSION} runtime=${QT_RUN
 echo "  presets=${RENDERED} max-loaded=${QT_ROUTER_MAX_LOADED}"
 echo "  bind=127.0.0.1:${QT_LLAMA_PORT} (public port is nginx's business)"
 
+# --- devices ----------------------------------------------------------------
+# Refuse to start unless every device named in QT_DEVICES is actually present.
+# --device would catch a missing device on its own (exit 1), but doing the check
+# here names WHICH device vanished and prints what llama.cpp could see, which is
+# the difference between a five-second diagnosis and a long one.
+AVAIL="$("${QT_LLAMA_DIR}/llama-server" --list-devices 2>&1 || true)"
+missing=""
+ndev=0
+IFS=',' read -r -a _want <<< "${QT_DEVICES:?QT_DEVICES unset in common.conf}"
+for d in "${_want[@]}"; do
+  if printf '%s\n' "$AVAIL" | grep -qE "^[[:space:]]*${d}:"; then
+    ndev=$(( ndev + 1 ))
+  else
+    missing="${missing}${missing:+,}${d}"
+  fi
+done
+if [ -n "$missing" ]; then
+  echo "refusing to start: GPU device(s) not present: ${missing}" >&2
+  echo "llama-server --list-devices reported:" >&2
+  printf '%s\n' "$AVAIL" >&2
+  echo "NOT starting on CPU: this node is sized for GPU offload only." >&2
+  exit 69
+fi
+# Config consistency, NOT a hardware count: every name in QT_DEVICES was found
+# above, so ndev can only disagree with QT_EXPECT_DEVICES when the two settings
+# contradict each other. The hardware count is vram-guard.sh's job (it counts
+# nvidia-smi rows) and the dashboard's gpu_gate. Catching the contradiction here
+# stops a node booting with a guard that silently means something else.
+if [ -n "${QT_EXPECT_DEVICES:-}" ] && [ "${QT_EXPECT_DEVICES}" -gt 0 ] \
+   && [ "$ndev" -ne "${QT_EXPECT_DEVICES}" ]; then
+  echo "refusing to start: QT_DEVICES names ${ndev} device(s) but" >&2
+  echo "QT_EXPECT_DEVICES says ${QT_EXPECT_DEVICES}; fix common.conf" >&2
+  exit 78
+fi
+echo "  devices=${QT_DEVICES} (${ndev} present)"
+
 # --models-preset, NOT --models. There is no --models flag; the earlier value
 # was arrived at by grepping the docs for "--models", which matches inside
 # --models-preset, --models-dir and --models-max. The binary rejected it with
 # "invalid argument: --models" and restart-looped. Verify long options against
 # the BUILT BINARY by exact match -- install-node.sh now does exactly that.
+
 exec "${QT_LLAMA_DIR}/llama-server" \
+  --device "${QT_DEVICES}" \
   --models-preset "${RENDERED}" \
   --models-max "${QT_ROUTER_MAX_LOADED}" \
   --host 127.0.0.1 \
