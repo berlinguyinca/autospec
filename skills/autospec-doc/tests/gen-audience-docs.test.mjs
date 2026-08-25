@@ -983,3 +983,117 @@ test('failOnIdenticalAudiences: true does NOT throw when per-audience prose diff
   });
   assert.ok(result.files.length > 0, 'should produce files when prose differs per audience');
 });
+
+// ── Issue #2968: single-file audiences (audience path ending in .md) ──────────
+
+test('issue #2968: a .md audience path renders exactly one file at that exact path', async () => {
+  const result = await generateAudienceDocs({
+    features: SAMPLE_FEATURES,
+    audiences: [{ name: 'user', path: 'MANUAL.md', focus: 'tasks, workflows' }],
+  });
+  assert.equal(result.files.length, 1, 'a single-file audience produces exactly one page');
+  assert.equal(result.files[0].path, 'MANUAL.md', 'the page lands at the exact .md path, not a folder subtree');
+  assert.equal(result.files[0].feature, null, 'the composed page is not a per-feature page');
+});
+
+test('issue #2968: the composed single-file doc orders index, getting-started, tutorials, features', async () => {
+  const result = await generateAudienceDocs({
+    features: SAMPLE_FEATURES,
+    audiences: [{ name: 'user', path: 'MANUAL.md', focus: 'tasks' }],
+  });
+  const content = result.files[0].content;
+  const at = label => {
+    const i = content.indexOf(label);
+    assert.ok(i >= 0, `composed doc is missing ${label}`);
+    return i;
+  };
+  const overview = at('## Overview');
+  const gettingStarted = at('## Getting started');
+  const tutExport = at('## Export Pipeline');
+  const tutAuth = at('## Authentication');
+  assert.ok(overview < gettingStarted, 'index section comes before getting-started');
+  assert.ok(gettingStarted < tutExport, 'getting-started comes before tutorials');
+  assert.ok(tutExport < tutAuth, 'tutorials appear in feature order');
+  const featureAuth = content.indexOf('## Authentication', tutAuth + 1);
+  assert.ok(featureAuth > tutAuth, 'feature sections follow the tutorial sections');
+  const scopeCount = countOccurrences(content, '<!-- autospec-doc-scope:');
+  assert.ok(scopeCount >= 4, `every composed section keeps its own scope block (got ${scopeCount})`);
+  assert.ok(content.includes('generated: true'), 'composed sections carry generated: true');
+});
+
+test('issue #2968: a hand-edited line outside a scope block survives single-file regeneration', async () => {
+  const root = makeTmpDir();
+  try {
+    const seeded = [
+      '# User manual',
+      '',
+      'A hand-curated paragraph that lives outside any scope block.',
+      '',
+      '## Overview',
+      '',
+      '<!-- autospec-doc-scope:',
+      '  src: ["*"]',
+      '  reason: "curated overview"',
+      '  generated: true',
+      '-->',
+      '',
+      'Generated overview prose.',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(root, 'MANUAL.md'), seeded, 'utf8');
+    const result = await generateAudienceDocs({
+      features: SAMPLE_FEATURES,
+      audiences: [{ name: 'user', path: 'MANUAL.md', focus: 'tasks' }],
+      outputDir: root,
+    });
+    const onDisk = fs.readFileSync(path.join(root, 'MANUAL.md'), 'utf8');
+    assert.ok(
+      onDisk.includes('A hand-curated paragraph that lives outside any scope block.'),
+      'hand-edited line outside a scope block must survive regeneration',
+    );
+    assert.equal(onDisk, seeded, 'the curated single-file doc is preserved untouched');
+    assert.equal(result.files[0].content, seeded, 'in-memory content matches the preserved file');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('issue #2968: a new single-file doc is written as a file under outputDir', async () => {
+  const root = makeTmpDir();
+  try {
+    const result = await generateAudienceDocs({
+      features: [SAMPLE_FEATURES[0]],
+      audiences: [{ name: 'user', path: 'MANUAL.md', focus: 'tasks' }],
+      outputDir: root,
+    });
+    assert.equal(result.files[0].written, true, 'a new single-file doc is written');
+    const outPath = path.join(root, 'MANUAL.md');
+    assert.ok(fs.existsSync(outPath), 'MANUAL.md exists on disk');
+    assert.ok(fs.statSync(outPath).isFile(), 'MANUAL.md is a regular file, not a directory');
+    assert.ok(!fs.existsSync(path.join(root, 'MANUAL', 'index.md')),
+      'no directory subtree is generated for a .md audience');
+    const content = fs.readFileSync(outPath, 'utf8');
+    assert.ok(content.includes('## Overview'), 'composed doc contains the index section');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('issue #2968: an audience path without a .md suffix still generates a directory subtree', async () => {
+  const result = await generateAudienceDocs({
+    features: SAMPLE_FEATURES,
+    audiences: [FOUR_AUDIENCES[0]],
+  });
+  const paths = result.files.map(f => f.path);
+  assert.ok(paths.includes('docs/user/index.md'), 'folder contract: index.md');
+  assert.ok(paths.includes('docs/user/getting-started.md'), 'folder contract: getting-started.md');
+  assert.ok(paths.includes('docs/user/features/export-pipeline.md'), 'folder contract: features/<slug>.md');
+  assert.ok(paths.includes('docs/user/tutorials/export-pipeline.md'), 'folder contract: tutorials/<slug>.md');
+});
+
+test('issue #2968: .autospec/autospec.yml does not point the security audience at docs/SECURITY.md', () => {
+  const repoRoot = path.resolve(__dirname, '../../..');
+  const yaml = fs.readFileSync(path.join(repoRoot, '.autospec/autospec.yml'), 'utf8');
+  assert.ok(!yaml.includes('docs/SECURITY.md'),
+    'the security audience must be repointed from docs/SECURITY.md to root SECURITY.md');
+});

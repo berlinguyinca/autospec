@@ -76,6 +76,19 @@ function collectAudiencePages(cfg, repoRoot) {
     if (!audPath) continue;
     const dir = path.resolve(repoRoot, audPath);
     if (!fs.existsSync(dir)) continue;
+    let stat;
+    try { stat = fs.statSync(dir); } catch { continue; }
+    if (stat.isFile()) {
+      // Single-file audience (issue #2968): the configured path is the document
+      // itself, not a directory to walk.
+      const relPath = path.relative(repoRoot, dir).replace(/\\/g, '/');
+      let content;
+      try { content = fs.readFileSync(dir, 'utf8'); } catch { continue; }
+      const featureMatch = relPath.match(/\/(?:tutorials|features)\/([^/]+)\.md$/);
+      const feature = featureMatch ? featureMatch[1] : null;
+      pages.push({ audience: audName, feature, path: relPath, content });
+      continue;
+    }
     const walk = (d) => {
       let entries;
       try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
