@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import threading
@@ -119,6 +120,40 @@ def _poll_once() -> dict:
     return summary
 
 
+def _gpu_gate(snap: dict) -> dict:
+    """A GPU verdict the gateway can act on, refreshed on the FAST tick.
+
+    Published here rather than computed in the gateway because the gateway runs
+    with PrivateDevices=true -- /dev/nvidia* is hidden from it, so nvidia-smi
+    there runs and honestly reports no cards. Asking it to probe GPUs meant
+    either weakening the sandbox of the internet-facing process or believing a
+    false negative; this is neither. (Measured 2026-08-24: the first version of
+    that gate 503'd a healthy node for exactly this reason.)
+
+    NOT derived from `problems`: that list is merged from several sources on a
+    30 s timer and includes entries about OTHER servers, so a remote node's
+    fault could refuse local inference. This uses only the GPU detectors, on
+    this node's own fresh nvidia-smi data.
+    """
+    try:
+        expect = int(os.environ.get("QT_EXPECT_DEVICES", "0"))
+    except ValueError:
+        expect = 0
+    cards = snap.get("gpus") or []
+    failed = bool(snap.get("_smi_failed"))
+    problems = HEALTH.gpu_problems(snap.get("_smi_stderr") or "", cards, failed)
+    down = [p for p in problems if p.get("severity") == HEALTH.DOWN]
+    if down:
+        return {"ok": False, "reason": down[0]["text"]}
+    # "could not run nvidia-smi" is WARNING, not DOWN: a telemetry outage must
+    # not become an inference outage.
+    if not failed and expect > 0 and len(cards) < expect:
+        return {"ok": False,
+                "reason": f"only {len(cards)} of {expect} GPUs are visible "
+                          f"to this node"}
+    return {"ok": True, "reason": ""}
+
+
 def _refresher() -> None:
     while True:
         try:
@@ -129,6 +164,9 @@ def _refresher() -> None:
                 # Both written by the slow journal timer; the fast poll must not
                 # blank them between its ticks.
                 snap["problems"] = _CACHE.get("problems") or []
+                # Fast tick: the gate must see a card vanish within a second,
+                # not on the 30 s journal timer.
+                snap["gpu_gate"] = _gpu_gate(snap)
                 _CACHE.clear()
                 _CACHE.update(snap)
         except Exception:

@@ -26,7 +26,11 @@ LoadCredential=apikey:/etc/qwen-turing/internal.key
 # 15 GiB weight load, which reads as a runtime fault rather than a full card.
 # --min-total is a TOTAL across both cards; the earlier single-card form of this
 # check read nvidia-smi's first row and refused to start a node that fits.
-ExecStartPre=/opt/qwen-turing/bin/vram-guard.sh --min-total 19000 --min-per-card 8000
+# --expect-devices 2 catches the half-failure: one card dropping off the bus
+# leaves a working CUDA0, and a split model would otherwise reload onto one card
+# at half the VRAM instead of refusing. serve-router.sh additionally pins
+# --device CUDA0,CUDA1, which is what stops a CPU fallback being served silently.
+ExecStartPre=/opt/qwen-turing/bin/vram-guard.sh --min-total 19000 --min-per-card 8000 --expect-devices 2
 ExecStart=/opt/qwen-turing/bin/serve-router.sh %i
 
 Restart=on-failure
