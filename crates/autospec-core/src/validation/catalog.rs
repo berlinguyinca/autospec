@@ -147,6 +147,15 @@ impl ValidationCheck {
             "check_lint_reuse_triage" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
                 "tests/lint/test_reuse_triage.bats",
             )),
+            "check_bats_suite_registration" => {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)
+            }
+            "check_bats_negation_ratchet" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/lint/test_bats_negation_checker.bats",
+            )),
+            "check_quality_gate_discovery" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/unit/test_quality_gate_discovery.bats",
+            )),
             "check_ship_completeness" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuite("tests/ship-completeness.bats"))
             }

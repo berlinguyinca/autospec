@@ -8,6 +8,10 @@ use super::command::{
 };
 use super::results::{output_digest, CheckResult};
 
+mod bats_registration_baseline;
+
+use bats_registration_baseline::BATS_REGISTRATION_BASELINE;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalCheck {
     BashSyntax,
@@ -29,6 +33,7 @@ pub enum ExternalCheck {
     RunSummaryContract,
     DbModuleInstall,
     BatsDirectory(&'static str),
+    BatsSuiteRegistration,
     AutospecUpgradeContract,
     ClaimGuardContract,
     ClaimCasGuard,
@@ -139,6 +144,7 @@ impl ExternalCheck {
             Self::RunSummaryContract => run_run_summary_contract(id, required, root),
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
+            Self::BatsSuiteRegistration => run_bats_suite_registration(id, required, root),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
             Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
             Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
@@ -658,6 +664,110 @@ fn run_bats_directory_allow_empty_if_available(
     suites.sort();
     let commands = suites.into_iter().map(|suite| bats_command(suite.as_str()));
     run_commands(id, required, root, commands)
+}
+
+/// Test directories whose suites must each be invoked by some validate check.
+///
+/// Deliberately not `tests/**`: `tests/fixtures/**` holds `.bats` files that are
+/// input DATA for other suites, so they are unreferenced by design and would be
+/// permanent false positives.
+const SUITE_SCAN_DIRECTORIES: &[&str] = &["tests/unit", "tests/lint"];
+
+/// Where the suite registrations live. A suite counts as registered when its
+/// path appears anywhere in this tree.
+const VALIDATION_SOURCE_DIRECTORY: &str = "crates/autospec-core/src/validation";
+
+/// Skipped when scanning for registrations: it lists orphans, not registrations,
+/// so counting it would make every baselined suite look wired up.
+const BASELINE_SOURCE_FILE: &str = "bats_registration_baseline.rs";
+
+/// Fails when a Bats suite under [`SUITE_SCAN_DIRECTORIES`] is invoked by nothing.
+///
+/// Suites are registered one path constant at a time in this module, so adding a
+/// file to `tests/unit` or `tests/lint` is otherwise a silent no-op: the suite
+/// passes when run by hand and no validate check ever runs it. Measured on
+/// 25855847, 97 of 144 suites were in that state.
+fn run_bats_suite_registration(id: &str, required: bool, root: &Path) -> CheckResult {
+    let source_directory = root.join(VALIDATION_SOURCE_DIRECTORY);
+    if !source_directory.is_dir() {
+        // Not the autospec repository; there is no registry to cross-reference.
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let mut sources = String::new();
+    collect_rust_sources(&source_directory, &mut sources);
+
+    let mut unregistered = Vec::new();
+    for directory in SUITE_SCAN_DIRECTORIES {
+        // A whole-directory registration covers every suite inside it.
+        if sources.contains(&format!("BatsDirectory(\"{directory}\")")) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(root.join(directory)) else {
+            continue;
+        };
+        let mut suites = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "bats")
+            })
+            .map(|path| relative_path(root, &path))
+            .collect::<Vec<_>>();
+        suites.sort();
+        for suite in suites {
+            if sources.contains(&format!("\"{suite}\"")) {
+                continue;
+            }
+            if BATS_REGISTRATION_BASELINE.contains(&suite.as_str()) {
+                continue;
+            }
+            unregistered.push(suite);
+        }
+    }
+
+    if unregistered.is_empty() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    failure(
+        id,
+        required,
+        &format!(
+            "{}: bats suite invoked by no validate check; register it in {VALIDATION_SOURCE_DIRECTORY} \
+             or, if it is genuinely not a suite, say so in {BASELINE_SOURCE_FILE}",
+            unregistered.join(", ")
+        ),
+    )
+}
+
+/// Appends every `.rs` file under `directory` to `sources`, skipping the
+/// baseline module so its orphan list cannot satisfy the check it feeds.
+fn collect_rust_sources(directory: &Path, sources: &mut String) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+            continue;
+        }
+        if path.file_name().is_some_and(|name| name == BASELINE_SOURCE_FILE) {
+            continue;
+        }
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            if let Ok(text) = fs::read_to_string(&path) {
+                sources.push_str(&text);
+                sources.push('\n');
+            }
+        }
+    }
 }
 
 fn run_bash_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {

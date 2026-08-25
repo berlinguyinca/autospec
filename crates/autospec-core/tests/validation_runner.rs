@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 144); // +1: check_reference_pointer_integrity (#3158)
-    assert_eq!(full.unique_ids().len(), 139); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 147); // +3: orphaned-suite ratchet and the two suites it caught (#3360)
+    assert_eq!(full.unique_ids().len(), 142); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -1864,6 +1864,126 @@ fn runner_runs_phase4_and_docs_shell_tests_with_a_typed_fleet_environment() {
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
+}
+
+#[test]
+fn runner_fails_a_bats_suite_that_no_validate_check_invokes() {
+    let root = bats_registration_root("orphaned", &["registered.bats", "orphan.bats"]);
+
+    let report = run_bats_registration(&root);
+
+    assert_eq!(
+        report.results[0].exit_code,
+        Some(1),
+        "a suite referenced by nothing must fail the check"
+    );
+    // The message text is not carried on CheckResult, only its length and digest,
+    // so this pins the exact rendered string rather than merely "non-empty".
+    let expected = "tests/unit/orphan.bats: bats suite invoked by no validate check; \
+register it in crates/autospec-core/src/validation or, if it is genuinely not a \
+suite, say so in bats_registration_baseline.rs";
+    assert_eq!(
+        report.results[0].stderr_bytes,
+        expected.len(),
+        "the failure must name the orphaned suite and how to resolve it"
+    );
+}
+
+#[test]
+fn runner_accepts_bats_suites_that_a_validate_check_references() {
+    let root = bats_registration_root("registered-only", &["registered.bats"]);
+
+    let report = run_bats_registration(&root);
+
+    assert_eq!(
+        report.results[0].exit_code,
+        Some(0),
+        "a suite whose path appears in the validation sources is registered"
+    );
+}
+
+/// The real repository, not a fixture: this is the check's whole point, and it is
+/// what caught `tests/lint/test_bats_negation_checker.bats` and
+/// `tests/unit/test_quality_gate_discovery.bats` before they were wired up.
+#[test]
+fn every_unbaselined_bats_suite_in_this_repository_is_registered() {
+    let report = run_bats_registration(&repository_root());
+
+    assert_eq!(
+        report.results[0].exit_code,
+        Some(0),
+        "a bats suite under tests/unit or tests/lint is invoked by no validate check; \
+         register it, or add it to BATS_REGISTRATION_BASELINE if it is not a suite"
+    );
+}
+
+/// The registration is only worth anything if the runner can actually execute the
+/// suites it now owns. Registry-red while standalone-green is the defect #3360
+/// describes, mirrored.
+#[test]
+fn runner_executes_the_two_newly_registered_bats_suites() {
+    for (id, suite) in [
+        (
+            "check_bats_negation_ratchet",
+            "tests/lint/test_bats_negation_checker.bats",
+        ),
+        (
+            "check_quality_gate_discovery",
+            "tests/unit/test_quality_gate_discovery.bats",
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(suite)),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &repository_root());
+
+        assert_eq!(
+            report.results[0].exit_code,
+            Some(0),
+            "{id} must pass when the runner invokes {suite}, not only when bats is run by hand"
+        );
+    }
+}
+
+fn run_bats_registration(root: &std::path::Path) -> ValidationExecutionReport {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_bats_suite_registration",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration),
+    }]);
+    ValidationRunner::run(&catalog, root)
+}
+
+/// Builds a throwaway repository whose validation sources register exactly
+/// `tests/unit/registered.bats`, plus whichever suite files are asked for.
+fn bats_registration_root(name: &str, suites: &[&str]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-bats-registration-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sources = root.join("crates/autospec-core/src/validation");
+    fs::create_dir_all(&sources).expect("validation source directory");
+    fs::write(
+        sources.join("catalog.rs"),
+        "ExternalCheck::BatsSuite(\"tests/unit/registered.bats\")\n",
+    )
+    .expect("registry source");
+    let unit = root.join("tests/unit");
+    fs::create_dir_all(&unit).expect("unit suite directory");
+    for suite in suites {
+        fs::write(unit.join(suite), "@test \"placeholder\" { true; }\n").expect("suite file");
+    }
+    root
 }
 
 fn validation_fixture(name: &str) -> PathBuf {
