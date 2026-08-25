@@ -368,3 +368,41 @@ directives_for_touch() {
     printf '%s\n' "$output" | grep -q '^Fix TODO_LEFT: '
     printf '%s\n' "$output" | grep -q '^Consider COMPLEXITY: '
 }
+
+# ── #3092: function-LOC record shape + inline escape hatch ────────────────────
+# The awk record was built from $2, so `def f():` produced `f()::1:700` — a 4-field
+# record the 3-field read loop split into an empty line and an LOC of `1:700`, and
+# the finding never passed through is_line_allowed, so a `# linter:allow-COMPLEXITY
+# <reason>` comment had nothing to attach to.
+
+# stage_small_edit_to_oversized_file with an inline directive on the def line, where
+# the function-LOC finding points.
+stage_directive_edit_to_oversized_file() {
+    local directive="$1"
+    stage_small_edit_to_oversized_file
+    sed -i "1s/.*/def f():  ${directive}/" "$WORK/repo/src/big.py"
+}
+
+@test "#3092: def f(): reports a numeric line and a bare LOC count" {
+    stage_small_edit_to_oversized_file
+    run bash -c "cd '$WORK/repo' && AUTOSPEC_COMPLEXITY_ENFORCE=1 AUTOSPEC_MAX_FILE_LOC=1000 bash '$LINT_SH' --diff-file '$WORK/small.diff'"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -qE "^COMPLEXITY:src/big\.py:[0-9]+: function 'f' is 700 LOC \(AUTOSPEC_MAX_FUNC_LOC=50\)"
+    ! printf '%s\n' "$output" | grep -qE 'function .f\(\).|is 1:700 LOC|^COMPLEXITY:src/big\.py::'
+}
+
+@test "#3092: linter:allow-COMPLEXITY <reason> on the def line downgrades to INFO under enforce" {
+    stage_directive_edit_to_oversized_file '# linter:allow-COMPLEXITY split tracked in #3093'
+    run bash -c "cd '$WORK/repo' && AUTOSPEC_COMPLEXITY_ENFORCE=1 AUTOSPEC_MAX_FILE_LOC=1000 bash '$LINT_SH' --diff-file '$WORK/small.diff'"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^INFO:COMPLEXITY:src/big.py:1: suppressed by linter:allow-COMPLEXITY'
+    ! printf '%s\n' "$output" | grep -qE '^COMPLEXITY:'
+}
+
+@test "#3092: a bare linter:allow-COMPLEXITY without a reason does not downgrade" {
+    stage_directive_edit_to_oversized_file '# linter:allow-COMPLEXITY'
+    run bash -c "cd '$WORK/repo' && AUTOSPEC_COMPLEXITY_ENFORCE=1 AUTOSPEC_MAX_FILE_LOC=1000 bash '$LINT_SH' --diff-file '$WORK/small.diff'"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -qE "^COMPLEXITY:src/big\.py:[0-9]+: function 'f' is 700 LOC"
+    ! printf '%s\n' "$output" | grep -q 'suppressed by linter:allow-COMPLEXITY'
+}

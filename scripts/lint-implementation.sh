@@ -1394,14 +1394,14 @@ check_function_loc() {
         # counters survive (Fix 7); func_name below is awk's, not the shell's.
         while IFS=: read -r fname fstart floc; do
             [ -z "$fname" ] && continue
-            emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+            is_line_allowed "COMPLEXITY" "$diff_file" "$fstart" || emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
         done <<EOF
 $(awk '
                 /^[[:space:]]*(def |class )[A-Za-z_]/ {
                     if (func_name && NR - func_start > max_loc) {
                         print func_name ":" func_start ":" (NR - func_start)
                     }
-                    func_name=$2; func_start=NR
+                    func_name=$2; sub(/[(:].*$/, "", func_name); func_start=NR
                 }
                 END {
                     if (func_name && NR - func_start > max_loc) {
