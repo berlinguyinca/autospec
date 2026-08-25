@@ -36,8 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 144); // +1: check_reference_pointer_integrity (#3158)
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 139); // a call no gate repeats
+    assert_eq!(calls.len(), 147); // +3: orphaned-suite ratchet and the two suites it caught (#3360)
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 142); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +66,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 155);
+    assert_eq!(frozen_catalog_ids().len(), 158);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 155);
+    assert_eq!(ids.len(), 158);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -623,6 +623,16 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         "check_brute_force_rule_ids must have a direct Rust owner"
     );
 
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_bats_suite_registration")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)),
+        "check_bats_suite_registration must own the orphaned-suite ratchet"
+    );
+
     for (id, suite) in [
         (
             "check_lint_heredoc_handling",
@@ -633,6 +643,15 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
             "tests/lint/test_reuse_triage.bats",
         ),
         ("check_ship_completeness", "tests/ship-completeness.bats"),
+        // Registered by #3360: both suites shipped invoked by nothing.
+        (
+            "check_bats_negation_ratchet",
+            "tests/lint/test_bats_negation_checker.bats",
+        ),
+        (
+            "check_quality_gate_discovery",
+            "tests/unit/test_quality_gate_discovery.bats",
+        ),
     ] {
         assert_eq!(
             catalog
