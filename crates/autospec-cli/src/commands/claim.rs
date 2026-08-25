@@ -729,7 +729,10 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         "--remove-label".to_string(),
         "in-progress-by-bot".to_string(),
     ];
-    if options.state != "merged" {
+    // `merged` is done and `needs-human` is waiting on a person -- neither goes
+    // back on the queue. Re-adding `auto-implement` to a fence-quarantined issue
+    // is what made it re-implement and re-quarantine forever (#3357).
+    if !matches!(options.state.as_str(), "merged" | "needs-human") {
         arguments.push("--add-label".to_string());
         arguments.push("auto-implement".to_string());
     }
@@ -4000,9 +4003,12 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
                         "--state accepts exactly one state",
                     ));
                 }
-                if !matches!(value.as_str(), "released" | "failed" | "merged") {
+                if !matches!(
+                    value.as_str(),
+                    "released" | "failed" | "merged" | "needs-human"
+                ) {
                     return Err(CommandFailure::diagnostic(
-                        "--state must be released, failed, or merged",
+                        "--state must be released, failed, merged, or needs-human",
                     ));
                 }
                 state_seen = true;
@@ -4751,6 +4757,84 @@ fn retire_released_startup_heartbeat_with_hook(
         "issue",
         boundary,
     )
+}
+/// Retire a session binding whose issue heartbeat is already gone.
+///
+/// [`retire_released_startup_heartbeat_with_hook`] reaches the session file
+/// through the issue heartbeat's own `session_id`, so it cannot act once that
+/// heartbeat has been collected -- and the watchdog collects stale issue
+/// heartbeats without touching session bindings. The binding is create-once, so
+/// the one it leaves behind stops that session from ever claiming another issue
+/// (#3356): every later acquire refuses with `heartbeat_write_failed`, and the
+/// caller's evidence probe skipped retirement silently, with no diagnostic.
+///
+/// Only a binding whose own evidence names this exact claim is retired; a
+/// concurrent session's binding is left alone.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn retire_orphaned_session_binding(
+    identity: ClaimMutationIdentity<'_>,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    let root_path = heartbeat_root()?;
+    let root = match open(
+        &root_path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(()),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "heartbeat root open: {error}"
+            )))
+        }
+        Ok(root) => fs::File::from(root),
+    };
+    private_heartbeat_directory_identity(&root, "terminal root")?;
+    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
+    let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_name))? else {
+        return Ok(());
+    };
+    let Some(sessions) = open_optional_heartbeat_directory(&repo, Path::new("sessions"))? else {
+        return Ok(());
+    };
+    let sessions_path = root_path.join(&repo_name).join("sessions");
+    let entries = fs::read_dir(&sessions_path).map_err(|error| {
+        CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
+        })?;
+        let name = entry.file_name();
+        if Path::new(&name).extension() != Some("json".as_ref()) {
+            continue;
+        }
+        // A binding this claim does not own -- another session's, or a legacy
+        // record this reader cannot vouch for -- is not ours to remove.
+        let Ok(snapshot) = terminal_heartbeat_snapshot(&sessions, name.as_ref(), identity) else {
+            continue;
+        };
+        let evidence = &snapshot.evidence;
+        if evidence.repo != identity.repo
+            || evidence.issue != identity.issue.to_string()
+            || evidence.worker_id != identity.worker_id
+            || evidence.branch != identity.branch
+            || evidence.claim_id != identity.claim_id
+        {
+            continue;
+        }
+        handoff_terminal_heartbeat(
+            &sessions_path,
+            &sessions,
+            name.as_ref(),
+            &snapshot,
+            "session",
+            boundary,
+        )?;
+    }
+    Ok(())
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn retire_released_startup_heartbeat(

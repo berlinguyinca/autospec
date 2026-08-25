@@ -94,7 +94,12 @@ pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(),
     // umask, so it then fails its own 0700 private-directory check. Releases of
     // claims that never published a local heartbeat must stay silent.
     if !released_predecessor_heartbeat_evidence_exists(identity)? {
-        return Ok(());
+        // No issue heartbeat. Either this claim never published one -- in which
+        // case there is nothing to do and staying silent is right -- or the
+        // watchdog collected it and left the create-once session binding
+        // behind, which wedges the session for good (#3356). Only the second
+        // case has anything to retire, and it names itself.
+        return retire_orphaned_session_binding(identity, &mut |_, _| Ok(()));
     }
     retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
 }

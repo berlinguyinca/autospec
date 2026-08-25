@@ -1553,7 +1553,7 @@ do not fall back to an inline label-swap path.
 >    else
 >      _gm_rc=$?
 >      if [ "$_gm_rc" -eq 1 ]; then
->        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state blocked --branch "<BRANCH>" --pr "<PR>" || true
+>        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state needs-human --branch "<BRANCH>" --pr "<PR>" || true
 >        echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
 >      else
 >        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
