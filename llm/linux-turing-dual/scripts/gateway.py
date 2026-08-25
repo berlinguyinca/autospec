@@ -47,6 +47,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
@@ -1709,10 +1710,29 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": [], "scope": "public", "you": None,
                 "is_admin": False, "public": True})
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        q = urllib.parse.parse_qs(query)
         mine = "mine=1" in query
+        # Bounded, because these are the only two knobs a caller can turn and an
+        # unbounded window is a way to ask the node to read its whole history on
+        # demand.
+        try:
+            days = max(1, min(90, int((q.get("days") or ["14"])[0])))
+        except ValueError:
+            days = 14
+        bucket = "hour" if (q.get("bucket") or ["day"])[0] == "hour" else "day"
+        scoped = who["sub"] if mine else None
+        sessions = STORE.usage_sessions(days=days, sub=scoped)
         self._json(200, {
             "leaderboard": STORE.leaderboard(),
-            "usage": STORE.usage(sub=who["sub"] if mine else None),
+            "usage": STORE.usage(sub=scoped),
+            # The audit view. Behind authentication with the rest of this
+            # payload: an activity timeline says when identifiable people were
+            # at their desks, which is not a public fact about a shared node.
+            "series": STORE.usage_series(days=days, bucket=bucket, sub=scoped),
+            "sessions": sessions[:200],
+            "session_total": len(sessions),
+            "session_gap_minutes": 30,
+            "days": days, "bucket": bucket,
             "scope": "mine" if mine else "everyone",
             "you": who["sub"],
             "is_admin": who["is_admin"]})

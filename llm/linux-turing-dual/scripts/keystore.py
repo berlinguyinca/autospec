@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import sqlite3
+import time
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -350,6 +351,95 @@ class KeyStore:
                f"ORDER BY total_tokens DESC, requests DESC")
         with self._lock, self._conn() as c:
             return [dict(r) for r in c.execute(sql, args)]
+
+    def usage_series(self, days: int = 14, bucket: str = "day",
+                     sub: str | None = None) -> list[dict]:
+        """Activity over time: requests, tokens, and how many distinct people
+        and keys were active in each bucket.
+
+        Bucketed by string prefix on the ISO timestamp rather than by parsing
+        it, which is exact for ISO-8601 and needs no timezone opinion from
+        SQLite. Hour is the first 13 characters, day the first 10.
+
+        DISTINCT sub per bucket is the honest answer to "how many people used
+        this". Summing per-bucket users across buckets is NOT a user count and
+        the caller must not do it -- somebody active on ten days is one person.
+        """
+        width = 13 if bucket == "hour" else 10
+        where = ["e.ts >= ?"]
+        args: list = [_iso(time.time() - days * 86400)]
+        if sub:
+            where.append("e.sub = ?")
+            args.append(sub)
+        sql = (f"SELECT substr(e.ts,1,{width}) AS bucket, COUNT(*) AS requests, "
+               f"COUNT(DISTINCT e.sub) AS users, "
+               f"COUNT(DISTINCT e.key_id) AS keys, "
+               f"SUM(COALESCE(e.prompt_tokens,0)) AS prompt_tokens, "
+               f"SUM(COALESCE(e.completion_tokens,0)) AS completion_tokens, "
+               f"SUM(COALESCE(e.prompt_tokens,0)+COALESCE(e.completion_tokens,0)) "
+               f"  AS total_tokens, "
+               f"SUM(CASE WHEN e.status_code >= 400 THEN 1 ELSE 0 END) AS errors "
+               f"FROM usage_events e WHERE {' AND '.join(where)} "
+               f"GROUP BY bucket ORDER BY bucket")
+        with self._lock, self._conn() as c:
+            return [dict(r) for r in c.execute(sql, args)]
+
+    def usage_sessions(self, days: int = 14, gap_minutes: int = 30,
+                       sub: str | None = None) -> list[dict]:
+        """Sessions, DERIVED -- nothing here records one.
+
+        A session is a run of requests by one identity with no gap longer than
+        `gap_minutes`. That is a convention, not a measurement, and it is the
+        same convention web analytics has used for decades; it is reported as
+        derived so nobody reads it as something the node observed.
+
+        Sessionising in Python rather than SQL because the recursive window
+        query that does this is unreadable and this dataset is small: it is one
+        pass over the events already filtered by time.
+        """
+        where = ["ts >= ?"]
+        args: list = [_iso(time.time() - days * 86400)]
+        if sub:
+            where.append("sub = ?")
+            args.append(sub)
+        # Join the name here: an audit table whose "who" column is a truncated
+        # subject id answers the question with an identifier nobody recognises.
+        wq = " AND ".join("e." + w for w in where)
+        sql = (f"SELECT e.sub AS sub, e.key_id AS key_id, e.ts AS ts, "
+               f"e.model AS model, u.display_name AS display_name, "
+               f"u.email AS email, "
+               f"COALESCE(e.prompt_tokens,0)+COALESCE(e.completion_tokens,0) AS tok "
+               f"FROM usage_events e LEFT JOIN users u ON u.sub = e.sub "
+               f"WHERE {wq} AND e.sub IS NOT NULL ORDER BY e.sub, e.ts")
+        gap = gap_minutes * 60
+        out: list[dict] = []
+        cur: dict | None = None
+        with self._lock, self._conn() as c:
+            rows = list(c.execute(sql, args))
+        for r in rows:
+            t = _epoch(r["ts"]) or 0.0
+            if cur and cur["sub"] == r["sub"] and t - cur["_last"] <= gap:
+                cur["requests"] += 1
+                cur["tokens"] += r["tok"] or 0
+                cur["_last"] = t
+                cur["models"].add(r["model"] or "?")
+                cur["keys"].add(r["key_id"] or "?")
+                continue
+            if cur:
+                out.append(cur)
+            cur = {"sub": r["sub"], "display_name": r["display_name"],
+                   "email": r["email"], "started": t, "_last": t, "requests": 1,
+                   "tokens": r["tok"] or 0, "models": {r["model"] or "?"},
+                   "keys": {r["key_id"] or "?"}}
+        if cur:
+            out.append(cur)
+        for s in out:
+            s["ended"] = s.pop("_last")
+            s["seconds"] = max(0.0, s["ended"] - s["started"])
+            s["models"] = sorted(s["models"])
+            s["keys"] = len(s["keys"])
+        out.sort(key=lambda s: s["started"], reverse=True)
+        return out
 
     def last_upstream(self, key_id: str,
                       endpoints: "tuple[str, ...] | None" = None) -> str | None:

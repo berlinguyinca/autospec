@@ -192,6 +192,109 @@
     border-color:color-mix(in srgb,var(--accent) 28%,transparent);margin-left:10%}
   .turn .who{display:block;font:600 10px/1.5 var(--mono);color:var(--faint);
     margin-bottom:5px;text-transform:uppercase;letter-spacing:.1em}
+
+  /* ---- fleet: built for dozens, not for three ----------------------------
+     A card per server is fine at three and unusable at thirty: you cannot
+     compare boxes, rank them, or find the broken one. So the fleet is a table
+     -- one line per server, sortable by the number that matters -- with the
+     prose moved into a row you open on demand. */
+  .fleetbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:16px 0 6px}
+  .fleetbar input[type=search]{flex:1;min-width:180px;max-width:320px}
+  /* A grid, not flex: wrapped flex items keep their left divider and it hangs
+     at the start of the new row. With fixed column counts the divider can be
+     removed from whichever cell actually begins a row. */
+  .fleetsum{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+            border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+            margin:6px 0 0}
+  .fleetsum > div{padding:11px 18px 12px;border-left:1px solid var(--hair);min-width:0;
+                  display:flex;flex-direction:column}
+  /* Reserve two lines for every label so a wrapped one ("Not answering") does
+     not push its number off the baseline its neighbours sit on. A row of
+     figures that does not line up is unreadable as a row. */
+  .fleetsum .k{min-height:2.8em}
+  .fleetsum .n{margin-top:auto}
+  .fleetsum > div:nth-child(4n+1){border-left:0;padding-left:0}
+  @media(min-width:1180px){
+    .fleetsum{grid-template-columns:repeat(8,minmax(0,1fr))}
+    .fleetsum > div:nth-child(4n+1){border-left:1px solid var(--hair);padding-left:18px}
+    .fleetsum > div:nth-child(8n+1){border-left:0;padding-left:0}
+  }
+  .fleetsum .n{font:600 20px/1.15 var(--mono);font-variant-numeric:tabular-nums;
+               letter-spacing:-.03em;margin-top:5px}
+  .fleetsum .n.zero{color:var(--faint);font-weight:400}
+  .fleetsum .n.bad{color:var(--down)}
+  .fleetsum .n.warn{color:var(--warn)}
+
+  table.fleet{margin-top:4px}
+  table.fleet th{cursor:pointer;user-select:none;white-space:nowrap}
+  table.fleet th[aria-sort]:after{content:"";opacity:.5;margin-left:5px}
+  table.fleet th[aria-sort=descending]:after{content:"\2193"}
+  table.fleet th[aria-sort=ascending]:after{content:"\2191"}
+  table.fleet td{vertical-align:top}
+  tr.srv{cursor:pointer}
+  tr.srv > td:first-child{font-family:var(--sans);font-size:13px}
+  .srvname{display:flex;align-items:center;gap:8px;font-weight:600}
+  .srvname .dot{width:6px;height:6px;animation:none}
+  .srvid{font:400 11px/1.4 var(--mono);color:var(--faint);margin-top:2px}
+  .chev{color:var(--faint);transition:rotate .18s ease;display:inline-block}
+  tr.srv[aria-expanded=true] .chev{rotate:90deg}
+  tr.detail > td{padding:0 0 16px;border-bottom:1px solid var(--hair)}
+  .detailwrap{border-left:2px solid var(--line);padding:2px 0 2px 16px;margin-left:2px}
+  .modelchips{display:flex;gap:4px;flex-wrap:wrap}
+  .modelchips code{font-size:11px;padding:1px 5px;border:1px solid var(--line);
+                   border-radius:3px;color:var(--muted)}
+  .more{font-size:11px;color:var(--faint)}
+  .empty{padding:22px 0;color:var(--faint);font-size:13px}
+
+  /* ---- charts ------------------------------------------------------------
+     Colours are not the UI accent: they are the step from the same hue that
+     passes as a chart mark. Validated with the dataviz six-checks against each
+     surface -- lightness band, chroma floor, CVD separation, normal-vision
+     floor and contrast. The UI accent (#4ad0e8) FAILED the dark lightness band
+     at L 0.795, so the mark is a deeper step of the same hue.
+
+     Requests and active people are two charts, never two axes on one. They are
+     different measures at wildly different scale (thousands vs single digits),
+     and a second y-scale is the way to make any two lines appear to correlate. */
+  :root{ --chart:#0891b2; --chart-bad:#c0392f; --chartgrid:#dde1e7; }
+  @media (prefers-color-scheme: dark){
+    :root{ --chart:#22a5c4; --chart-bad:#e5675c; --chartgrid:#1e242b; }
+  }
+  .chart{margin:14px 0 0}
+  .charthead{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+  .chartttl{font:640 10.5px/1.4 var(--mono);text-transform:uppercase;
+            letter-spacing:.14em;color:var(--faint)}
+  .chartmax{font:400 10.5px/1.4 var(--mono);color:var(--faint);
+            font-variant-numeric:tabular-nums}
+  .plot{position:relative;display:flex;align-items:flex-end;gap:2px;height:132px;
+        margin-top:10px;border-bottom:1px solid var(--line);
+        background:linear-gradient(var(--chartgrid),var(--chartgrid)) 0 50%/100% 1px no-repeat}
+  .plot.tall{height:74px}
+  .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
+       gap:2px;height:100%;position:relative;cursor:default}
+  /* The mark is thin and anchored to the baseline, with only the data-end
+     rounded -- a bar rounded at both ends reads as floating. */
+  .col i{display:block;background:var(--chart);border-radius:3px 3px 0 0;
+         transition:opacity .12s ease;min-height:1px}
+  .col i.bad{background:var(--chart-bad);border-radius:3px 3px 0 0}
+  .col:hover i{opacity:.72}
+  .col.empty i{background:var(--chartgrid)}
+  .xaxis{display:flex;justify-content:space-between;margin-top:7px;
+         font:400 10px/1.4 var(--mono);color:var(--faint)}
+  .legend{display:flex;gap:14px;margin-top:9px;font:400 11px/1.4 var(--sans);
+          color:var(--muted);align-items:center}
+  .legend i{width:9px;height:9px;border-radius:2px;display:inline-block;
+            margin-right:6px;vertical-align:-1px}
+  .ranked{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+  .rrow{display:grid;grid-template-columns:minmax(90px,180px) 1fr auto;gap:12px;
+        align-items:center;font-size:12.5px}
+  .rbar{height:9px;background:var(--chartgrid);border-radius:0 3px 3px 0;overflow:hidden}
+  .rbar>i{display:block;height:100%;background:var(--chart);border-radius:0 3px 3px 0}
+  .rval{font:500 12px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted)}
+  #tip{position:fixed;z-index:50;pointer-events:none;opacity:0;transition:opacity .1s;
+       background:var(--panel);border:1px solid var(--line);border-radius:4px;
+       padding:7px 10px;font:400 11.5px/1.5 var(--mono);color:var(--ink);
+       box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:260px}
   .scroll{overflow-x:auto}
 
   /* ---- motion: hierarchy, not noise ---- */
@@ -939,6 +1042,129 @@ const KIND_BADGE = {
   file:   '<span class="badge">configured</span>',
 };
 
+
+// ---------- fleet, at scale ----------
+// A card per server reads fine at three and collapses at thirty: nothing lines
+// up, so you cannot compare two boxes or find the one that is broken. This is a
+// table sorted by the number that decides routing, with a summary that answers
+// "is the fleet healthy" before any row is read, and the prose kept in a detail
+// row you open when you actually want it.
+let FQ = '', FSTATE = 'all', FSORT = 'rate', FDESC = true, FOPEN = new Set();
+let FLEET_D = null, FLEET_ALL = [], FLEET_ME = {};
+
+const STATE_LABEL = {online:'online', offline:'not answering',
+                     disabled:'parked', unknown:'not probed'};
+
+function fleetSummary(all){
+  const by = st => all.filter(s => s.state === st).length;
+  const pooled = all.filter(s => s.kind !== 'local' && s.pool_member).length;
+  const rated  = all.filter(s => s.prefill_rate);
+  const total  = rated.reduce((a, s) => a + s.prefill_rate, 0);
+  const sat    = all.filter(s => s.kind === 'tunnel' && s.idle_pipes === 0).length;
+  const flight = all.reduce((a, s) => a + (s.in_flight || 0), 0);
+  const cell = (k, v, cls) =>
+    `<div><div class="k">${k}</div><div class="n ${cls || (v ? '' : 'zero')}">${v}</div></div>`;
+  return '<div class="fleetsum">' +
+    cell('Servers', all.length) +
+    cell('Online', by('online')) +
+    cell('Not answering', by('offline'), by('offline') ? 'bad' : 'zero') +
+    cell('Parked', by('disabled')) +
+    cell('In balanced pool', pooled) +
+    cell('Saturated', sat, sat ? 'warn' : 'zero') +
+    cell('In flight', flight) +
+    cell('Fleet prefill', total ? Math.round(total).toLocaleString() +
+         '<span class="u"> tok/s</span>' : '–') +
+    '</div>';
+}
+
+function fleetControls(all){
+  const counts = {all: all.length};
+  ['online','offline','disabled','unknown'].forEach(k =>
+    counts[k] = all.filter(s => s.state === k).length);
+  const chip = (k, label) => counts[k] || k === 'all'
+    ? `<button class="tab${FSTATE===k?' sel':''}" data-fstate="${k}">${label}` +
+      ` <span class="more">${counts[k]}</span></button>` : '';
+  return '<div class="fleetbar">' +
+    `<input type="search" id="fq" placeholder="Filter by name, id or model…" value="${esc(FQ)}">` +
+    chip('all','All') + chip('online','Online') + chip('offline','Not answering') +
+    chip('disabled','Parked') + chip('unknown','Not probed') +
+    '</div>';
+}
+
+function matches(s){
+  if(FSTATE !== 'all' && s.state !== FSTATE) return false;
+  if(!FQ) return true;
+  const q = FQ.toLowerCase();
+  return (s.name||'').toLowerCase().includes(q)
+      || (s.id||'').toLowerCase().includes(q)
+      || (s.models||[]).some(m => m.toLowerCase().includes(q));
+}
+
+// Sorting is what makes a long fleet usable, so the default is the number that
+// actually decides where a request goes -- measured prefill, fastest first.
+// Unmeasured servers sink rather than sorting as zero: "not measured yet" and
+// "measured slow" are different facts and must not interleave.
+function sortFleet(rows){
+  const key = {
+    name:  s => (s.name || s.id || '').toLowerCase(),
+    state: s => ['online','unknown','disabled','offline'].indexOf(s.state),
+    rate:  s => s.prefill_rate || -1,
+    load:  s => s.in_flight || 0,
+    models:s => (s.models || []).length,
+  }[FSORT] || (s => 0);
+  const out = rows.slice().sort((a, b) => {
+    const ka = key(a), kb = key(b);
+    if(ka < kb) return FDESC ? 1 : -1;
+    if(ka > kb) return FDESC ? -1 : 1;
+    return (a.id || '').localeCompare(b.id || '');
+  });
+  // This node first regardless of sort: it is the one you are looking at.
+  return out.sort((a, b) => (a.kind === 'local' ? -1 : 0) - (b.kind === 'local' ? -1 : 0));
+}
+
+function serverRow(o, me){
+  const cls = {online:'up', offline:'down'}[o.state] || '';
+  const models = o.models || [];
+  const shown = models.slice(0, 3).map(m => `<code>${esc(m)}</code>`).join('');
+  const extra = models.length > 3 ? `<span class="more">+${models.length-3}</span>` : '';
+  const rate = o.prefill_rate
+    ? Math.round(o.prefill_rate).toLocaleString()
+    : '<span class="more">not measured</span>';
+  const load = o.kind === 'tunnel' && o.idle_pipes === 0
+    ? '<span style="color:var(--warn)">saturated</span>'
+    : (o.in_flight ? n(o.in_flight) : '<span class="more">idle</span>');
+  const pool = o.kind === 'local' ? '<span class="more">this node</span>'
+    : (o.pool_member ? '<span class="badge on">pooled</span>'
+                     : '<span class="badge u">pinned only</span>');
+  const open = FOPEN.has(o.id);
+  return `<tr class="srv" data-srv="${esc(o.id)}" aria-expanded="${open}">
+    <td><div class="srvname"><span class="chev">&rsaquo;</span>
+        <span class="dot ${cls}"></span>${esc(o.name || o.id)}</div>
+        <div class="srvid">${esc(o.id)} · ${esc(STATE_LABEL[o.state] || o.state)}</div></td>
+    <td>${KIND_BADGE[o.kind] || ''}</td>
+    <td><div class="modelchips">${shown}${extra}</div></td>
+    <td class="num">${rate}</td>
+    <td class="num">${load}</td>
+    <td>${pool}</td></tr>` +
+    (open ? `<tr class="detail"><td colspan="6"><div class="detailwrap">
+        ${serverCard(o, me)}</div></td></tr>` : '');
+}
+
+function renderFleet(d, all, me){
+  const rows = sortFleet(all.filter(matches));
+  const head = (k, label, num) =>
+    `<th${num?' class="num"':''} data-fsort="${k}"` +
+    (FSORT===k?` aria-sort="${FDESC?'descending':'ascending'}"`:'') + `>${label}</th>`;
+  const table = rows.length
+    ? '<div class="scroll"><table class="fleet"><thead><tr>' +
+        head('name','Server') + head('kind','Kind') + head('models','Models') +
+        head('rate','Prefill tok/s', true) + head('load','In flight', true) +
+        '<th>Routing</th></tr></thead><tbody>' +
+        rows.map(s => serverRow(s, me)).join('') + '</tbody></table></div>'
+    : `<div class="empty">No server matches that filter.</div>`;
+  return fleetSummary(all) + fleetControls(all) + table;
+}
+
 function serverCard(o, me){
   const badge = {
     online:   '<span class="badge on">online</span>',
@@ -1171,9 +1397,20 @@ async function loadServers(){
     : s);
   const remotes = all.filter(s => s.kind !== 'local');
 
+  FLEET_D = d; FLEET_ALL = all; FLEET_ME = me;
+  paintFleet();
+}
+
+// Repaint from what we already have. Filtering and sorting a fleet must not
+// re-probe it: the probe is on a timer for a reason, and typing in a search box
+// is not new information about anyone's GPUs.
+function paintFleet(){
+  const d = FLEET_D, all = FLEET_ALL, me = FLEET_ME;
+  if(!d) return;
+  const remotes = all.filter(s => s.kind !== 'local');
   $('servers').innerHTML =
-    '<div class="grid">' + defaultCard(d) +
-      all.map(s => serverCard(s, me)).join('') + '</div>' +
+    renderFleet(d, all, me) +
+    defaultCard(d) +
     routingTally(d.routing) +
     attachForm(me) +
     (remotes.length
@@ -1209,6 +1446,33 @@ async function loadServers(){
   [...document.querySelectorAll('[data-detach]')].forEach(b => b.onclick = () => {
     if(confirm('Detach ' + b.dataset.detach + '? Its credential stops working.'))
       serverAction('/api/servers/' + encodeURIComponent(b.dataset.detach));
+  });
+
+  // --- fleet controls -------------------------------------------------------
+  const q = $('fq');
+  if(q) q.oninput = () => {
+    FQ = q.value;
+    const at = q.selectionStart;
+    paintFleet();
+    // Repainting replaces the input, so the caret has to be put back or typing
+    // a second character jumps to the end of the box.
+    const nq = $('fq');
+    if(nq){ nq.focus(); try{ nq.setSelectionRange(at, at); }catch(e){} }
+  };
+  [...document.querySelectorAll('[data-fstate]')].forEach(b => b.onclick = () => {
+    FSTATE = b.dataset.fstate; paintFleet();
+  });
+  [...document.querySelectorAll('[data-fsort]')].forEach(h => h.onclick = () => {
+    const k = h.dataset.fsort;
+    if(FSORT === k) FDESC = !FDESC; else { FSORT = k; FDESC = k !== 'name'; }
+    paintFleet();
+  });
+  [...document.querySelectorAll('tr.srv')].forEach(tr => tr.onclick = ev => {
+    // A click on a control inside an open row is not a request to close it.
+    if(ev.target.closest('button,a,input,code')) return;
+    const id = tr.dataset.srv;
+    FOPEN.has(id) ? FOPEN.delete(id) : FOPEN.add(id);
+    paintFleet();
   });
 }
 
@@ -1662,7 +1926,103 @@ async function doRevoke(keyId){
   loadKeys(); loadUsage();
 }
 
+
+// ---------- charts ----------
+// HTML/CSS marks rather than SVG: the radii stay exact at any width, the chart
+// is responsive without a viewBox that distorts the geometry, and hover is a
+// real element rather than hit-testing. There is no charting library here
+// because this node may have no route to the internet.
+function tipEl(){
+  let t = document.getElementById('tip');
+  if(!t){ t = document.createElement('div'); t.id = 'tip'; document.body.appendChild(t); }
+  return t;
+}
+function bindTips(root){
+  const t = tipEl();
+  [...root.querySelectorAll('[data-tip]')].forEach(el => {
+    el.onmousemove = ev => {
+      // textContent, not innerHTML: this string is assembled from key labels,
+      // display names and model ids -- none of which this page should be
+      // executing. It also removes the attribute-escaping puzzle entirely.
+      t.textContent = el.dataset.tip;
+      t.style.opacity = 1;
+      const pad = 14, w = t.offsetWidth, h = t.offsetHeight;
+      let x = ev.clientX + pad, y = ev.clientY - h - pad;
+      if(x + w > innerWidth - 8) x = ev.clientX - w - pad;   // flip near the edge
+      if(y < 8) y = ev.clientY + pad;
+      t.style.left = x + 'px'; t.style.top = y + 'px';
+    };
+    el.onmouseleave = () => { t.style.opacity = 0; };
+  });
+}
+
+function bucketLabel(b, bucket){
+  // "2026-08-25T13" or "2026-08-25"
+  if(bucket === 'hour'){
+    const [d, h] = b.split('T');
+    return h + ':00 ' + d.slice(5).replace('-', '/');
+  }
+  return b.slice(5).replace('-', '/');
+}
+
+// One measure, one chart. `bad` stacks a status segment on top of the same bar
+// -- part of the same total, not a second series on a second scale.
+function timeChart(rows, opts){
+  const {title, value, bad, bucket, unit} = opts;
+  if(!rows.length)
+    return `<div class="chart"><div class="chartttl">${title}</div>
+      <div class="empty">no activity in this window</div></div>`;
+  const max = Math.max(1, ...rows.map(r => value(r)));
+  const cols = rows.map(r => {
+    const v = value(r), e = bad ? bad(r) : 0, ok = Math.max(0, v - e);
+    const h = x => (x / max * 100).toFixed(2) + '%';
+    const tip = `${bucketLabel(r.bucket, bucket)} · ${n(v)} ${unit}` +
+                (e ? ` · ${n(e)} failed` : '');
+    return `<div class="col${v ? '' : ' empty'}" data-tip="${esc(tip)}">` +
+      (e ? `<i class="bad" style="height:${h(e)}"></i>` : '') +
+      `<i style="height:${h(ok)}"></i></div>`;
+  }).join('');
+  const first = bucketLabel(rows[0].bucket, bucket);
+  const last  = bucketLabel(rows[rows.length - 1].bucket, bucket);
+  const legend = bad && rows.some(r => bad(r))
+    ? `<div class="legend"><span><i style="background:var(--chart)"></i>succeeded</span>
+       <span><i style="background:var(--chart-bad)"></i>failed</span></div>` : '';
+  return `<div class="chart">
+    <div class="charthead"><span class="chartttl">${title}</span>
+      <span class="chartmax">peak ${n(max)} ${esc(unit)}</span></div>
+    <div class="plot">${cols}</div>
+    <div class="xaxis"><span>${esc(first)}</span><span>${esc(last)}</span></div>
+    ${legend}</div>`;
+}
+
+// Magnitude across identities: ranked horizontal bars, sorted, labelled at the
+// end. A pie would ask the reader to compare angles for the same job.
+function rankedBars(rows, opts){
+  const {title, label, tipText, value, unit, limit} = opts;
+  const top = rows.slice(0, limit || 8);
+  if(!top.length) return '';
+  const max = Math.max(1, ...top.map(value));
+  return `<div class="chart"><div class="chartttl">${title}</div><div class="ranked">` +
+    top.map(r => `<div class="rrow" data-tip="${esc((tipText ? tipText(r) : '') + ' · ' + n(value(r)) + ' ' + unit)}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label(r)}</span>
+      <span class="rbar"><i style="width:${(value(r)/max*100).toFixed(1)}%"></i></span>
+      <span class="rval">${n(value(r))}</span></div>`).join('') +
+    '</div></div>';
+}
+
+function fmtDur(sec){
+  if(sec < 60) return Math.round(sec) + 's';
+  if(sec < 3600) return Math.round(sec / 60) + 'm';
+  return (sec / 3600).toFixed(1) + 'h';
+}
+function fmtWhen(epoch){
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString([], {month:'short', day:'numeric',
+                               hour:'2-digit', minute:'2-digit'});
+}
+
 let USAGE_MINE = false;
+let U_DAYS = 14, U_BUCKET = 'day';
 
 function personName(r){
   // A row should name a person, not an opaque subject id. Prefer the display
@@ -1676,8 +2036,8 @@ function personName(r){
 async function loadUsage(){
   let d;
   try{
-    d = (await req('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
-                   {cache:'no-store'})).data;
+    d = (await req('/api/usage?days=' + U_DAYS + '&bucket=' + U_BUCKET +
+                   (USAGE_MINE ? '&mine=1' : ''), {cache:'no-store'})).data;
   }catch(e){ $('usagebox').innerHTML = '<div class="banner">Could not read usage.</div>'; return; }
 
   const board = d.leaderboard || [];
@@ -1716,7 +2076,67 @@ async function loadUsage(){
       '</td></tr>';
   }).join('');
 
-  $('usagebox').innerHTML =
+  // --- the audit view -------------------------------------------------------
+  const series = d.series || [], sess = d.sessions || [];
+  const sumReq = series.reduce((a, r) => a + (r.requests || 0), 0);
+  const sumTok = series.reduce((a, r) => a + (r.total_tokens || 0), 0);
+  const sumErr = series.reduce((a, r) => a + (r.errors || 0), 0);
+  // DISTINCT across the window, not the sum of per-bucket counts: somebody
+  // active on ten days is one person, and summing the buckets says ten.
+  const people = new Set(sess.map(x => x.sub)).size;
+  const win = [[1,'24 h'],[7,'7 days'],[14,'14 days'],[30,'30 days'],[90,'90 days']];
+
+  const audit =
+    '<div class="grid">' +
+      '<div class="card"><div class="k">Requests</div><div class="v">' + n(sumReq) + '</div>' +
+        (sumErr ? '<div class="sub" style="color:var(--warn);margin-top:7px">' +
+                  n(sumErr) + ' failed</div>' : '') + '</div>' +
+      '<div class="card"><div class="k">People active</div><div class="v">' +
+        (people || '<span class="idle">none</span>') + '</div>' +
+        '<div class="sub" style="margin-top:7px">distinct, over the window</div></div>' +
+      '<div class="card"><div class="k">Sessions</div><div class="v">' +
+        n(d.session_total || 0) + '</div><div class="sub" style="margin-top:7px">' +
+        'derived — a run with no gap over ' + (d.session_gap_minutes || 30) +
+        ' min</div></div>' +
+      '<div class="card"><div class="k">Tokens</div><div class="v">' + n(sumTok) + '</div></div>' +
+    '</div>' +
+    '<div class="seg" style="margin-top:16px">' +
+      win.map(w => '<button class="tab' + (U_DAYS === w[0] ? ' sel' : '') +
+                   '" data-udays="' + w[0] + '">' + w[1] + '</button>').join('') +
+      '<span style="flex:1"></span>' +
+      '<button class="tab' + (U_BUCKET === 'hour' ? ' sel' : '') + '" data-ubucket="hour">by hour</button>' +
+      '<button class="tab' + (U_BUCKET === 'day'  ? ' sel' : '') + '" data-ubucket="day">by day</button>' +
+    '</div>' +
+    timeChart(series, {title:'Requests', unit:'requests', bucket:U_BUCKET,
+                       value:r => r.requests || 0, bad:r => r.errors || 0}) +
+    timeChart(series, {title:'People active', unit:'people', bucket:U_BUCKET,
+                       value:r => r.users || 0}) +
+    timeChart(series, {title:'Tokens', unit:'tokens', bucket:U_BUCKET,
+                       value:r => r.total_tokens || 0}) +
+    rankedBars((d.usage || []).slice(), {title:'Busiest keys', unit:'tokens', limit:8,
+      label:r => esc(r.label || String(r.key_id || '?').slice(0,8)) +
+                 ' <span class="sub">' + personName(r) + '</span>',
+      tipText:r => (r.label || String(r.key_id || '?').slice(0,8)) +
+                   ' — ' + (r.display_name || r.email || r.sub || 'unknown'),
+      value:r => r.total_tokens || 0}) +
+    '<h2>Sessions</h2>' +
+    (sess.length
+      ? '<div class="scroll"><table><thead><tr><th>Who</th><th>Started</th>' +
+        '<th class="num">For</th><th class="num">Requests</th><th class="num">Tokens</th>' +
+        '<th class="num">Keys</th><th>Models</th></tr></thead><tbody>' +
+        sess.slice(0, 50).map(x =>
+          '<tr><td>' + personName(x) + '</td><td>' + esc(fmtWhen(x.started)) +
+          '</td><td class="num">' + esc(fmtDur(x.seconds)) + '</td><td class="num">' +
+          n(x.requests) + '</td><td class="num">' + n(x.tokens) + '</td><td class="num">' +
+          n(x.keys) + '</td><td class="sub">' + esc((x.models||[]).join(' ')) +
+          '</td></tr>').join('') +
+        '</tbody></table></div>' +
+        (d.session_total > 50 ? '<div class="note">Showing the 50 most recent of ' +
+          n(d.session_total) + '.</div>' : '')
+      : '<div class="empty">No sessions in this window.</div>') +
+    '<h2>Leaderboard</h2>';
+
+  $('usagebox').innerHTML = audit +
     (board.length
       ? '<div class="card scroll"><table><thead><tr>' +
         '<th class="num">#</th><th>Who</th><th class="num">Tokens</th><th></th>' +
@@ -1751,6 +2171,19 @@ async function loadUsage(){
   const all = $('u-all'), mine = $('u-mine');
   if(all)  all.onclick  = () => { USAGE_MINE = false; loadUsage(); };
   if(mine) mine.onclick = () => { USAGE_MINE = true;  loadUsage(); };
+  [...document.querySelectorAll('[data-udays]')].forEach(b => b.onclick = () => {
+    U_DAYS = parseInt(b.dataset.udays, 10);
+    // An hour bucket over 90 days is 2,160 columns of one pixel. Snap the
+    // resolution to something the window can actually show.
+    if(U_DAYS > 7) U_BUCKET = 'day';
+    loadUsage();
+  });
+  [...document.querySelectorAll('[data-ubucket]')].forEach(b => b.onclick = () => {
+    U_BUCKET = b.dataset.ubucket;
+    if(U_BUCKET === 'hour' && U_DAYS > 7) U_DAYS = 7;
+    loadUsage();
+  });
+  bindTips($('usagebox'));
 }
 
 // ---------- bootstrap ----------
