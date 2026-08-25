@@ -3441,7 +3441,10 @@ fn run_phase4_single_agent_discipline(id: &str, required: bool, root: &Path) -> 
 }
 
 fn run_phase4_final_quality_gate(id: &str, required: bool, root: &Path) -> CheckResult {
-    const SUITE: &str = "tests/unit/test_final_quality_gate.bats";
+    const SUITES: &[&str] = &[
+        "tests/unit/test_final_quality_gate.bats",
+        "tests/unit/test_quality_gate_discovery.bats",
+    ];
     for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
         let relative = format!("skills/autospec-run/{member}");
         let path = root.join(&relative);
@@ -3457,7 +3460,7 @@ fn run_phase4_final_quality_gate(id: &str, required: bool, root: &Path) -> Check
             }
         }
     }
-    run_bats_suites(id, required, root, &[SUITE])
+    run_bats_suites(id, required, root, SUITES)
 }
 
 fn run_autospec_refine_contract(id: &str, required: bool, root: &Path) -> CheckResult {
