@@ -11,6 +11,9 @@
 # where <repo-slug> is the canonical owner__name form produced by
 # scripts/repo-slug.sh (F4). Readers resolve canonical-first with a legacy
 # (owner_name) fallback for one release so in-flight heartbeats aren't orphaned.
+# That sidecar is created once and is otherwise immutable, with one exception:
+# a branch left empty by the first write (expand_start runs before the worktree
+# exists) may be filled in later by the same session/issue/worker/claim (#3358).
 #
 # Environment:
 #   AUTOSPEC_HEARTBEAT_DIR   base dir (default: ~/.autospec/process-heartbeats);
@@ -162,9 +165,34 @@ if [ "$binding_fields" -eq 3 ]; then
             --arg worker_id "$WORKER_ID" --arg branch "${BRANCH:-}" --arg claim_id "$CLAIM_ID" \
             '.session_id == $session_id and .issue == $issue and .worker_id == $worker_id and .branch == $branch and .claim_id == $claim_id' \
             "$session_file" >/dev/null 2>&1; then
-            rm -f "$session_tmp"
-            printf 'heartbeat-write: session binding identity conflict\n' >&2
-            exit 1
+            # The first bound write of a run is `expand_start`, which happens
+            # before the worktree exists, so its branch argument is empty. Every
+            # later call carries the real one, and against a create-once binding
+            # that mismatch wedged the session for the rest of the issue (#3358)
+            # -- and left the recovery reader an empty branch forever.
+            #
+            # Filling in that one unknown is a refinement of THIS binding, not a
+            # rebind to another identity: session, issue, worker and claim must
+            # all still match, the stored branch must still be the empty
+            # placeholder, and the caller must actually have a branch now. Once
+            # filled the branch is immutable again, so a different branch, claim,
+            # worker or issue still fails closed.
+            #
+            # Compared as one exact string rather than field by field, so a value
+            # containing regex or jq metacharacters cannot widen the match.
+            stored_identity="$(jq -r '[.session_id, .issue, .worker_id, .claim_id, .branch] | @tsv' "$session_file" 2>/dev/null || true)"
+            placeholder_identity="$(printf '%s\t%s\t%s\t%s\t' "$SESSION_ID" "$ISSUE" "$WORKER_ID" "$CLAIM_ID")"
+            if [ -n "${BRANCH:-}" ] && [ "$stored_identity" = "$placeholder_identity" ]; then
+                # Same-directory rename, so a concurrent reader sees either the
+                # placeholder or the filled binding and never a partial file.
+                session_upgrade="${session_file}.up.$$"
+                cp "$session_tmp" "$session_upgrade"
+                mv -f "$session_upgrade" "$session_file"
+            else
+                rm -f "$session_tmp"
+                printf 'heartbeat-write: session binding identity conflict\n' >&2
+                exit 1
+            fi
         fi
     fi
     cp "$session_tmp" "${TARGET_DIR}/${ISSUE}.json"
