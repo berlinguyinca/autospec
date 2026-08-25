@@ -192,6 +192,59 @@
     border-color:color-mix(in srgb,var(--accent) 28%,transparent);margin-left:10%}
   .turn .who{display:block;font:600 10px/1.5 var(--mono);color:var(--faint);
     margin-bottom:5px;text-transform:uppercase;letter-spacing:.1em}
+
+  /* ---- fleet: built for dozens, not for three ----------------------------
+     A card per server is fine at three and unusable at thirty: you cannot
+     compare boxes, rank them, or find the broken one. So the fleet is a table
+     -- one line per server, sortable by the number that matters -- with the
+     prose moved into a row you open on demand. */
+  .fleetbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:16px 0 6px}
+  .fleetbar input[type=search]{flex:1;min-width:180px;max-width:320px}
+  /* A grid, not flex: wrapped flex items keep their left divider and it hangs
+     at the start of the new row. With fixed column counts the divider can be
+     removed from whichever cell actually begins a row. */
+  .fleetsum{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+            border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+            margin:6px 0 0}
+  .fleetsum > div{padding:11px 18px 12px;border-left:1px solid var(--hair);min-width:0;
+                  display:flex;flex-direction:column}
+  /* Reserve two lines for every label so a wrapped one ("Not answering") does
+     not push its number off the baseline its neighbours sit on. A row of
+     figures that does not line up is unreadable as a row. */
+  .fleetsum .k{min-height:2.8em}
+  .fleetsum .n{margin-top:auto}
+  .fleetsum > div:nth-child(4n+1){border-left:0;padding-left:0}
+  @media(min-width:1180px){
+    .fleetsum{grid-template-columns:repeat(8,minmax(0,1fr))}
+    .fleetsum > div:nth-child(4n+1){border-left:1px solid var(--hair);padding-left:18px}
+    .fleetsum > div:nth-child(8n+1){border-left:0;padding-left:0}
+  }
+  .fleetsum .n{font:600 20px/1.15 var(--mono);font-variant-numeric:tabular-nums;
+               letter-spacing:-.03em;margin-top:5px}
+  .fleetsum .n.zero{color:var(--faint);font-weight:400}
+  .fleetsum .n.bad{color:var(--down)}
+  .fleetsum .n.warn{color:var(--warn)}
+
+  table.fleet{margin-top:4px}
+  table.fleet th{cursor:pointer;user-select:none;white-space:nowrap}
+  table.fleet th[aria-sort]:after{content:"";opacity:.5;margin-left:5px}
+  table.fleet th[aria-sort=descending]:after{content:"\2193"}
+  table.fleet th[aria-sort=ascending]:after{content:"\2191"}
+  table.fleet td{vertical-align:top}
+  tr.srv{cursor:pointer}
+  tr.srv > td:first-child{font-family:var(--sans);font-size:13px}
+  .srvname{display:flex;align-items:center;gap:8px;font-weight:600}
+  .srvname .dot{width:6px;height:6px;animation:none}
+  .srvid{font:400 11px/1.4 var(--mono);color:var(--faint);margin-top:2px}
+  .chev{color:var(--faint);transition:rotate .18s ease;display:inline-block}
+  tr.srv[aria-expanded=true] .chev{rotate:90deg}
+  tr.detail > td{padding:0 0 16px;border-bottom:1px solid var(--hair)}
+  .detailwrap{border-left:2px solid var(--line);padding:2px 0 2px 16px;margin-left:2px}
+  .modelchips{display:flex;gap:4px;flex-wrap:wrap}
+  .modelchips code{font-size:11px;padding:1px 5px;border:1px solid var(--line);
+                   border-radius:3px;color:var(--muted)}
+  .more{font-size:11px;color:var(--faint)}
+  .empty{padding:22px 0;color:var(--faint);font-size:13px}
   .scroll{overflow-x:auto}
 
   /* ---- motion: hierarchy, not noise ---- */
@@ -939,6 +992,129 @@ const KIND_BADGE = {
   file:   '<span class="badge">configured</span>',
 };
 
+
+// ---------- fleet, at scale ----------
+// A card per server reads fine at three and collapses at thirty: nothing lines
+// up, so you cannot compare two boxes or find the one that is broken. This is a
+// table sorted by the number that decides routing, with a summary that answers
+// "is the fleet healthy" before any row is read, and the prose kept in a detail
+// row you open when you actually want it.
+let FQ = '', FSTATE = 'all', FSORT = 'rate', FDESC = true, FOPEN = new Set();
+let FLEET_D = null, FLEET_ALL = [], FLEET_ME = {};
+
+const STATE_LABEL = {online:'online', offline:'not answering',
+                     disabled:'parked', unknown:'not probed'};
+
+function fleetSummary(all){
+  const by = st => all.filter(s => s.state === st).length;
+  const pooled = all.filter(s => s.kind !== 'local' && s.pool_member).length;
+  const rated  = all.filter(s => s.prefill_rate);
+  const total  = rated.reduce((a, s) => a + s.prefill_rate, 0);
+  const sat    = all.filter(s => s.kind === 'tunnel' && s.idle_pipes === 0).length;
+  const flight = all.reduce((a, s) => a + (s.in_flight || 0), 0);
+  const cell = (k, v, cls) =>
+    `<div><div class="k">${k}</div><div class="n ${cls || (v ? '' : 'zero')}">${v}</div></div>`;
+  return '<div class="fleetsum">' +
+    cell('Servers', all.length) +
+    cell('Online', by('online')) +
+    cell('Not answering', by('offline'), by('offline') ? 'bad' : 'zero') +
+    cell('Parked', by('disabled')) +
+    cell('In balanced pool', pooled) +
+    cell('Saturated', sat, sat ? 'warn' : 'zero') +
+    cell('In flight', flight) +
+    cell('Fleet prefill', total ? Math.round(total).toLocaleString() +
+         '<span class="u"> tok/s</span>' : '–') +
+    '</div>';
+}
+
+function fleetControls(all){
+  const counts = {all: all.length};
+  ['online','offline','disabled','unknown'].forEach(k =>
+    counts[k] = all.filter(s => s.state === k).length);
+  const chip = (k, label) => counts[k] || k === 'all'
+    ? `<button class="tab${FSTATE===k?' sel':''}" data-fstate="${k}">${label}` +
+      ` <span class="more">${counts[k]}</span></button>` : '';
+  return '<div class="fleetbar">' +
+    `<input type="search" id="fq" placeholder="Filter by name, id or model…" value="${esc(FQ)}">` +
+    chip('all','All') + chip('online','Online') + chip('offline','Not answering') +
+    chip('disabled','Parked') + chip('unknown','Not probed') +
+    '</div>';
+}
+
+function matches(s){
+  if(FSTATE !== 'all' && s.state !== FSTATE) return false;
+  if(!FQ) return true;
+  const q = FQ.toLowerCase();
+  return (s.name||'').toLowerCase().includes(q)
+      || (s.id||'').toLowerCase().includes(q)
+      || (s.models||[]).some(m => m.toLowerCase().includes(q));
+}
+
+// Sorting is what makes a long fleet usable, so the default is the number that
+// actually decides where a request goes -- measured prefill, fastest first.
+// Unmeasured servers sink rather than sorting as zero: "not measured yet" and
+// "measured slow" are different facts and must not interleave.
+function sortFleet(rows){
+  const key = {
+    name:  s => (s.name || s.id || '').toLowerCase(),
+    state: s => ['online','unknown','disabled','offline'].indexOf(s.state),
+    rate:  s => s.prefill_rate || -1,
+    load:  s => s.in_flight || 0,
+    models:s => (s.models || []).length,
+  }[FSORT] || (s => 0);
+  const out = rows.slice().sort((a, b) => {
+    const ka = key(a), kb = key(b);
+    if(ka < kb) return FDESC ? 1 : -1;
+    if(ka > kb) return FDESC ? -1 : 1;
+    return (a.id || '').localeCompare(b.id || '');
+  });
+  // This node first regardless of sort: it is the one you are looking at.
+  return out.sort((a, b) => (a.kind === 'local' ? -1 : 0) - (b.kind === 'local' ? -1 : 0));
+}
+
+function serverRow(o, me){
+  const cls = {online:'up', offline:'down'}[o.state] || '';
+  const models = o.models || [];
+  const shown = models.slice(0, 3).map(m => `<code>${esc(m)}</code>`).join('');
+  const extra = models.length > 3 ? `<span class="more">+${models.length-3}</span>` : '';
+  const rate = o.prefill_rate
+    ? Math.round(o.prefill_rate).toLocaleString()
+    : '<span class="more">not measured</span>';
+  const load = o.kind === 'tunnel' && o.idle_pipes === 0
+    ? '<span style="color:var(--warn)">saturated</span>'
+    : (o.in_flight ? n(o.in_flight) : '<span class="more">idle</span>');
+  const pool = o.kind === 'local' ? '<span class="more">this node</span>'
+    : (o.pool_member ? '<span class="badge on">pooled</span>'
+                     : '<span class="badge u">pinned only</span>');
+  const open = FOPEN.has(o.id);
+  return `<tr class="srv" data-srv="${esc(o.id)}" aria-expanded="${open}">
+    <td><div class="srvname"><span class="chev">&rsaquo;</span>
+        <span class="dot ${cls}"></span>${esc(o.name || o.id)}</div>
+        <div class="srvid">${esc(o.id)} · ${esc(STATE_LABEL[o.state] || o.state)}</div></td>
+    <td>${KIND_BADGE[o.kind] || ''}</td>
+    <td><div class="modelchips">${shown}${extra}</div></td>
+    <td class="num">${rate}</td>
+    <td class="num">${load}</td>
+    <td>${pool}</td></tr>` +
+    (open ? `<tr class="detail"><td colspan="6"><div class="detailwrap">
+        ${serverCard(o, me)}</div></td></tr>` : '');
+}
+
+function renderFleet(d, all, me){
+  const rows = sortFleet(all.filter(matches));
+  const head = (k, label, num) =>
+    `<th${num?' class="num"':''} data-fsort="${k}"` +
+    (FSORT===k?` aria-sort="${FDESC?'descending':'ascending'}"`:'') + `>${label}</th>`;
+  const table = rows.length
+    ? '<div class="scroll"><table class="fleet"><thead><tr>' +
+        head('name','Server') + head('kind','Kind') + head('models','Models') +
+        head('rate','Prefill tok/s', true) + head('load','In flight', true) +
+        '<th>Routing</th></tr></thead><tbody>' +
+        rows.map(s => serverRow(s, me)).join('') + '</tbody></table></div>'
+    : `<div class="empty">No server matches that filter.</div>`;
+  return fleetSummary(all) + fleetControls(all) + table;
+}
+
 function serverCard(o, me){
   const badge = {
     online:   '<span class="badge on">online</span>',
@@ -1171,9 +1347,20 @@ async function loadServers(){
     : s);
   const remotes = all.filter(s => s.kind !== 'local');
 
+  FLEET_D = d; FLEET_ALL = all; FLEET_ME = me;
+  paintFleet();
+}
+
+// Repaint from what we already have. Filtering and sorting a fleet must not
+// re-probe it: the probe is on a timer for a reason, and typing in a search box
+// is not new information about anyone's GPUs.
+function paintFleet(){
+  const d = FLEET_D, all = FLEET_ALL, me = FLEET_ME;
+  if(!d) return;
+  const remotes = all.filter(s => s.kind !== 'local');
   $('servers').innerHTML =
-    '<div class="grid">' + defaultCard(d) +
-      all.map(s => serverCard(s, me)).join('') + '</div>' +
+    renderFleet(d, all, me) +
+    defaultCard(d) +
     routingTally(d.routing) +
     attachForm(me) +
     (remotes.length
@@ -1209,6 +1396,33 @@ async function loadServers(){
   [...document.querySelectorAll('[data-detach]')].forEach(b => b.onclick = () => {
     if(confirm('Detach ' + b.dataset.detach + '? Its credential stops working.'))
       serverAction('/api/servers/' + encodeURIComponent(b.dataset.detach));
+  });
+
+  // --- fleet controls -------------------------------------------------------
+  const q = $('fq');
+  if(q) q.oninput = () => {
+    FQ = q.value;
+    const at = q.selectionStart;
+    paintFleet();
+    // Repainting replaces the input, so the caret has to be put back or typing
+    // a second character jumps to the end of the box.
+    const nq = $('fq');
+    if(nq){ nq.focus(); try{ nq.setSelectionRange(at, at); }catch(e){} }
+  };
+  [...document.querySelectorAll('[data-fstate]')].forEach(b => b.onclick = () => {
+    FSTATE = b.dataset.fstate; paintFleet();
+  });
+  [...document.querySelectorAll('[data-fsort]')].forEach(h => h.onclick = () => {
+    const k = h.dataset.fsort;
+    if(FSORT === k) FDESC = !FDESC; else { FSORT = k; FDESC = k !== 'name'; }
+    paintFleet();
+  });
+  [...document.querySelectorAll('tr.srv')].forEach(tr => tr.onclick = ev => {
+    // A click on a control inside an open row is not a request to close it.
+    if(ev.target.closest('button,a,input,code')) return;
+    const id = tr.dataset.srv;
+    FOPEN.has(id) ? FOPEN.delete(id) : FOPEN.add(id);
+    paintFleet();
   });
 }
 
