@@ -487,6 +487,35 @@ else
   ok "both streaming locations clear Connection for the keepalive upstream"
 fi
 
+# --- N: the device expectation must not drift between config and unit -------
+# QT_EXPECT_DEVICES lives in common.conf, and the unit passes --expect-devices
+# to vram-guard.sh as a literal. Two homes for one number: during a live drill
+# common.conf was changed to 3 and the unit still said 2, so the dashboard's
+# gate and the boot guard disagreed about how many cards this host has. Neither
+# was wrong on its own, which is exactly why it needs a test.
+conf_expect="$(sed -n 's/^QT_EXPECT_DEVICES="\([0-9]*\)"/\1/p' "${NODE}/config/common.conf" | head -1)"
+unit_expect="$(sed -n 's/.*--expect-devices[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p' "${NODE}/systemd/qwen-turing@.service" | head -1)"
+if [ -z "$conf_expect" ]; then
+  bad "common.conf has no QT_EXPECT_DEVICES"
+elif [ -z "$unit_expect" ]; then
+  bad "the unit does not pass --expect-devices to vram-guard.sh"
+elif [ "$conf_expect" != "$unit_expect" ]; then
+  bad "device expectation drift: common.conf=${conf_expect} unit=${unit_expect}"
+else
+  ok "device expectation agrees (${conf_expect}) in common.conf and the unit"
+fi
+
+# --- N+1: QT_DEVICES must name exactly QT_EXPECT_DEVICES devices ------------
+# serve-router.sh refuses to start on this contradiction; failing here means CI
+# catches it instead of a boot.
+dev_count="$(sed -n 's/^QT_DEVICES="\([^"]*\)"/\1/p' "${NODE}/config/common.conf" | head -1 \
+             | awk -F, '{print NF}')"
+if [ -n "$conf_expect" ] && [ -n "$dev_count" ] && [ "$dev_count" != "$conf_expect" ]; then
+  bad "QT_DEVICES names ${dev_count} device(s) but QT_EXPECT_DEVICES=${conf_expect}"
+else
+  ok "QT_DEVICES names ${dev_count} device(s), matching QT_EXPECT_DEVICES"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
 

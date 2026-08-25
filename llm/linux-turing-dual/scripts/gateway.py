@@ -62,6 +62,7 @@ import upstreams as _ups        # noqa: E402
 import usage as _usage          # noqa: E402
 import publicview as _public    # noqa: E402
 import chat as _chat            # noqa: E402
+import gpuhealth as _gpuhealth  # noqa: E402
 import health as _health        # noqa: E402
 import admission as _adm        # noqa: E402
 from keystore import KeyStore   # noqa: E402
@@ -1772,15 +1773,41 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- planning: where does this request go? ------------------------------
     @staticmethod
-    def _local_online() -> bool:
-        """Is the local runtime answering?
+    def _local_health() -> tuple[bool, str]:
+        """(usable, why-not) for the LOCAL runtime.
 
-        False ONLY when a probe ran and failed. `unknown` -- no probe has
-        completed yet -- counts as available: refusing every request because a
-        liveness probe is late would be failing closed on telemetry, which is
-        the wrong way round for anything that is not authentication.
+        Two independent ways to be unusable, and they need different words:
+
+          * the runtime is not answering        -- liveness
+          * the runtime answers but the GPUs are gone -- capability
+
+        The second is the one that used to be invisible. llama.cpp's /health
+        answers 200 while CUDA is dead, so `local` sat in the fleet as `online`
+        with models it could not serve.
+
+        Consumed by the BALANCER (which must skip a degraded local and keep the
+        fleet serving) and by the pinned path (which must still refuse loudly).
+        Deciding here rather than after a target is chosen is the whole point:
+        refusing after selection turns one degraded provider into a fleet-wide
+        outage, which is exactly what it did when this was a late check --
+        measured 2026-08-24, balanced traffic 503'd while a healthy peer idled.
+
+        False ONLY when something actually said so. `unknown` -- no probe done
+        yet, or GPU telemetry unavailable -- counts as usable: failing closed on
+        telemetry is the wrong way round for anything that is not auth.
         """
-        return (LOCAL_STATE.get("state") or "unknown") != "offline"
+        if (LOCAL_STATE.get("state") or "unknown") == "offline":
+            return False, "this node's runtime is not answering"
+        ok, why = _gpuhealth.verdict()
+        if not ok:
+            return False, f"this node cannot serve right now: {why}"
+        return True, ""
+
+    @staticmethod
+    def _local_online() -> bool:
+        """Balancer-facing form of _local_health. Kept because pick_auto takes a
+        bool, and because every other caller only asks the yes/no question."""
+        return Handler._local_health()[0]
 
     def _last_server(self) -> str | None:
         """The server this key used last, from memory or from recorded usage.
@@ -1900,9 +1927,12 @@ class Handler(BaseHTTPRequestHandler):
             return ANSWERED
         pinned, self._route_path = resolved
         if pinned == _ups.LOCAL:
-            if not self._local_online():
-                self._err(503, "this node's runtime is not answering",
-                          "upstream_offline")
+            _ok, _why = self._local_health()
+            if not _ok:
+                # A pin names this node on purpose, so it fails loudly rather
+                # than being quietly served elsewhere -- but it says which of
+                # the two failures happened.
+                self._err(503, _why, "upstream_offline")
                 return ANSWERED
             self._decided(_ups.LOCAL, "pinned")
             return _ups.LOCAL
@@ -2100,6 +2130,22 @@ class Handler(BaseHTTPRequestHandler):
         # None == the local runtime, which is what both "pinned here" and
         # "balanced here" come to.
         target = None if plan == _ups.LOCAL else plan
+
+        # --- the local GPUs must actually be usable -------------------------
+        # Only for target None -- a federated or tunnelled server runs on its
+        # own hardware, and refusing it because THIS node's card died would take
+        # down capacity that is working. Placed before admission on purpose:
+        # queueing for a seat on a dead GPU only converts a fast 503 into a slow
+        # one. Telemetry failure is NOT down (see gpuhealth), so losing
+        # nvidia-smi cannot take this node offline.
+        if target is None:
+            _ok, _why = self._local_health()
+            if not _ok:
+                # One source for the sentence: _local_health already phrases
+                # both failures. Building it again here meant two places to keep
+                # in step and two chances to describe the same fault differently.
+                self._decided(_ups.LOCAL, "gpu-down")
+                return self._err(503, _why, "gpu_unavailable")
         # Remember where this key went, so the next balanced request goes back
         # to the same warm prefix cache.
         #
@@ -2424,6 +2470,10 @@ def _load_credentials(args) -> str | None:
     if args.dashboard_key_file:
         try:
             DASHBOARD_KEY = (open(args.dashboard_key_file).readline() or "").strip()
+            # The GPU gate reads /api/stats, which is authenticated. Without
+            # this it gets 401, treats it as "no verdict" and fails open -- the
+            # gate would look installed while doing nothing.
+            _gpuhealth.configure(CFG.dash_port, DASHBOARD_KEY)
         except OSError as exc:
             return f"cannot read the dashboard key: {exc}"
 
