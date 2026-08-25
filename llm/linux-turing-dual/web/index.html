@@ -1941,7 +1941,10 @@ function bindTips(root){
   const t = tipEl();
   [...root.querySelectorAll('[data-tip]')].forEach(el => {
     el.onmousemove = ev => {
-      t.innerHTML = el.dataset.tip;
+      // textContent, not innerHTML: this string is assembled from key labels,
+      // display names and model ids -- none of which this page should be
+      // executing. It also removes the attribute-escaping puzzle entirely.
+      t.textContent = el.dataset.tip;
       t.style.opacity = 1;
       const pad = 14, w = t.offsetWidth, h = t.offsetHeight;
       let x = ev.clientX + pad, y = ev.clientY - h - pad;
@@ -1973,9 +1976,9 @@ function timeChart(rows, opts){
   const cols = rows.map(r => {
     const v = value(r), e = bad ? bad(r) : 0, ok = Math.max(0, v - e);
     const h = x => (x / max * 100).toFixed(2) + '%';
-    const tip = `${esc(bucketLabel(r.bucket, bucket))}<br>${n(v)} ${esc(unit)}` +
-                (e ? `<br><span style="color:var(--chart-bad)">${n(e)} failed</span>` : '');
-    return `<div class="col${v ? '' : ' empty'}" data-tip="${tip}">` +
+    const tip = `${bucketLabel(r.bucket, bucket)} · ${n(v)} ${unit}` +
+                (e ? ` · ${n(e)} failed` : '');
+    return `<div class="col${v ? '' : ' empty'}" data-tip="${esc(tip)}">` +
       (e ? `<i class="bad" style="height:${h(e)}"></i>` : '') +
       `<i style="height:${h(ok)}"></i></div>`;
   }).join('');
@@ -1995,12 +1998,12 @@ function timeChart(rows, opts){
 // Magnitude across identities: ranked horizontal bars, sorted, labelled at the
 // end. A pie would ask the reader to compare angles for the same job.
 function rankedBars(rows, opts){
-  const {title, label, value, unit, limit} = opts;
+  const {title, label, tipText, value, unit, limit} = opts;
   const top = rows.slice(0, limit || 8);
   if(!top.length) return '';
   const max = Math.max(1, ...top.map(value));
   return `<div class="chart"><div class="chartttl">${title}</div><div class="ranked">` +
-    top.map(r => `<div class="rrow" data-tip="${esc(label(r))}<br>${n(value(r))} ${esc(unit)}">
+    top.map(r => `<div class="rrow" data-tip="${esc((tipText ? tipText(r) : '') + ' · ' + n(value(r)) + ' ' + unit)}">
       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label(r)}</span>
       <span class="rbar"><i style="width:${(value(r)/max*100).toFixed(1)}%"></i></span>
       <span class="rval">${n(value(r))}</span></div>`).join('') +
@@ -2113,6 +2116,8 @@ async function loadUsage(){
     rankedBars((d.usage || []).slice(), {title:'Busiest keys', unit:'tokens', limit:8,
       label:r => esc(r.label || String(r.key_id || '?').slice(0,8)) +
                  ' <span class="sub">' + personName(r) + '</span>',
+      tipText:r => (r.label || String(r.key_id || '?').slice(0,8)) +
+                   ' — ' + (r.display_name || r.email || r.sub || 'unknown'),
       value:r => r.total_tokens || 0}) +
     '<h2>Sessions</h2>' +
     (sess.length
@@ -2120,7 +2125,7 @@ async function loadUsage(){
         '<th class="num">For</th><th class="num">Requests</th><th class="num">Tokens</th>' +
         '<th class="num">Keys</th><th>Models</th></tr></thead><tbody>' +
         sess.slice(0, 50).map(x =>
-          '<tr><td>' + personName({sub:x.sub}) + '</td><td>' + esc(fmtWhen(x.started)) +
+          '<tr><td>' + personName(x) + '</td><td>' + esc(fmtWhen(x.started)) +
           '</td><td class="num">' + esc(fmtDur(x.seconds)) + '</td><td class="num">' +
           n(x.requests) + '</td><td class="num">' + n(x.tokens) + '</td><td class="num">' +
           n(x.keys) + '</td><td class="sub">' + esc((x.models||[]).join(' ')) +

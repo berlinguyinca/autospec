@@ -137,3 +137,14 @@ def test_newest_session_first(tmp_path):
     ev(s, "bob", now - 60)
     out = s.usage_sessions(days=30)
     assert out[0]["sub"] == "bob"
+
+
+def test_a_session_carries_a_readable_identity(tmp_path):
+    """An audit table whose Who column is a truncated subject id has answered
+    the question with an identifier nobody recognises."""
+    s = store(tmp_path)
+    s.upsert_user("alice", email="alice@example.org", name="Alice Example")
+    ev(s, "alice", time.time() - 60)
+    o = s.usage_sessions(days=1)[0]
+    assert o["display_name"] == "Alice Example"
+    assert o["email"] == "alice@example.org"

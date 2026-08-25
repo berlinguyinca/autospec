@@ -402,10 +402,15 @@ class KeyStore:
         if sub:
             where.append("sub = ?")
             args.append(sub)
-        sql = (f"SELECT sub, key_id, ts, model, "
-               f"COALESCE(prompt_tokens,0)+COALESCE(completion_tokens,0) AS tok "
-               f"FROM usage_events WHERE {' AND '.join(where)} "
-               f"AND sub IS NOT NULL ORDER BY sub, ts")
+        # Join the name here: an audit table whose "who" column is a truncated
+        # subject id answers the question with an identifier nobody recognises.
+        wq = " AND ".join("e." + w for w in where)
+        sql = (f"SELECT e.sub AS sub, e.key_id AS key_id, e.ts AS ts, "
+               f"e.model AS model, u.display_name AS display_name, "
+               f"u.email AS email, "
+               f"COALESCE(e.prompt_tokens,0)+COALESCE(e.completion_tokens,0) AS tok "
+               f"FROM usage_events e LEFT JOIN users u ON u.sub = e.sub "
+               f"WHERE {wq} AND e.sub IS NOT NULL ORDER BY e.sub, e.ts")
         gap = gap_minutes * 60
         out: list[dict] = []
         cur: dict | None = None
@@ -422,7 +427,8 @@ class KeyStore:
                 continue
             if cur:
                 out.append(cur)
-            cur = {"sub": r["sub"], "started": t, "_last": t, "requests": 1,
+            cur = {"sub": r["sub"], "display_name": r["display_name"],
+                   "email": r["email"], "started": t, "_last": t, "requests": 1,
                    "tokens": r["tok"] or 0, "models": {r["model"] or "?"},
                    "keys": {r["key_id"] or "?"}}
         if cur:
