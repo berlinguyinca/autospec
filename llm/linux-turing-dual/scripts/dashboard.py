@@ -154,6 +154,48 @@ def _gpu_gate(snap: dict) -> dict:
     return {"ok": True, "reason": ""}
 
 
+# Memory below this is driver/context overhead, not a model. A CUDA context on
+# an idle card is tens of MiB; the smallest thing this node serves is ~7 GiB.
+PLACEMENT_FLOOR_MIB = 512
+
+
+def _placement(snap: dict) -> dict:
+    """Which model, at what context, is sitting on which card.
+
+    The question an operator actually asks -- "what is on GPU 1?" -- had no
+    answer here: the panel drew utilisation per card and the model list
+    separately, and joining them was left to the reader.
+
+    DERIVED, and labelled as such. llama.cpp does not report per-device
+    placement over the API, so this attributes the resident model to the cards
+    that are actually holding memory. With --models-max 1 that is unambiguous
+    while a model is loaded.
+
+    The interesting case is when it is NOT loaded and memory is still held. That
+    is not idle and must not render as idle: a defunct llama-server whose
+    allocations the driver never released will sit on a card indefinitely. One
+    was holding 8.9 GiB on this node with the runtime stopped, and nothing on
+    the page said so.
+    """
+    cards = snap.get("gpus") or []
+    catalog = snap.get("catalog") or []
+    resident = next((c for c in catalog if c.get("resident")), None)
+    busy = [c for c in cards
+            if (c.get("mem_used_mib") or 0) >= PLACEMENT_FLOOR_MIB]
+    out = {
+        "model": (resident or {}).get("id"),
+        "context": (resident or {}).get("context"),
+        "slots": (resident or {}).get("slots"),
+        "kind": (resident or {}).get("kind"),
+        "cards": [c.get("index") for c in busy],
+        "derived": True,
+        # Memory held with nothing loaded to account for it.
+        "unattributed_mib": (0 if resident else
+                             sum((c.get("mem_used_mib") or 0) for c in busy)),
+    }
+    return out
+
+
 def _refresher() -> None:
     while True:
         try:
@@ -167,6 +209,7 @@ def _refresher() -> None:
                 # Fast tick: the gate must see a card vanish within a second,
                 # not on the 30 s journal timer.
                 snap["gpu_gate"] = _gpu_gate(snap)
+                snap["placement"] = _placement(snap)
                 _CACHE.clear()
                 _CACHE.update(snap)
         except Exception:
