@@ -245,6 +245,56 @@
                    border-radius:3px;color:var(--muted)}
   .more{font-size:11px;color:var(--faint)}
   .empty{padding:22px 0;color:var(--faint);font-size:13px}
+
+  /* ---- charts ------------------------------------------------------------
+     Colours are not the UI accent: they are the step from the same hue that
+     passes as a chart mark. Validated with the dataviz six-checks against each
+     surface -- lightness band, chroma floor, CVD separation, normal-vision
+     floor and contrast. The UI accent (#4ad0e8) FAILED the dark lightness band
+     at L 0.795, so the mark is a deeper step of the same hue.
+
+     Requests and active people are two charts, never two axes on one. They are
+     different measures at wildly different scale (thousands vs single digits),
+     and a second y-scale is the way to make any two lines appear to correlate. */
+  :root{ --chart:#0891b2; --chart-bad:#c0392f; --chartgrid:#dde1e7; }
+  @media (prefers-color-scheme: dark){
+    :root{ --chart:#22a5c4; --chart-bad:#e5675c; --chartgrid:#1e242b; }
+  }
+  .chart{margin:14px 0 0}
+  .charthead{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+  .chartttl{font:640 10.5px/1.4 var(--mono);text-transform:uppercase;
+            letter-spacing:.14em;color:var(--faint)}
+  .chartmax{font:400 10.5px/1.4 var(--mono);color:var(--faint);
+            font-variant-numeric:tabular-nums}
+  .plot{position:relative;display:flex;align-items:flex-end;gap:2px;height:132px;
+        margin-top:10px;border-bottom:1px solid var(--line);
+        background:linear-gradient(var(--chartgrid),var(--chartgrid)) 0 50%/100% 1px no-repeat}
+  .plot.tall{height:74px}
+  .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
+       gap:2px;height:100%;position:relative;cursor:default}
+  /* The mark is thin and anchored to the baseline, with only the data-end
+     rounded -- a bar rounded at both ends reads as floating. */
+  .col i{display:block;background:var(--chart);border-radius:3px 3px 0 0;
+         transition:opacity .12s ease;min-height:1px}
+  .col i.bad{background:var(--chart-bad);border-radius:3px 3px 0 0}
+  .col:hover i{opacity:.72}
+  .col.empty i{background:var(--chartgrid)}
+  .xaxis{display:flex;justify-content:space-between;margin-top:7px;
+         font:400 10px/1.4 var(--mono);color:var(--faint)}
+  .legend{display:flex;gap:14px;margin-top:9px;font:400 11px/1.4 var(--sans);
+          color:var(--muted);align-items:center}
+  .legend i{width:9px;height:9px;border-radius:2px;display:inline-block;
+            margin-right:6px;vertical-align:-1px}
+  .ranked{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+  .rrow{display:grid;grid-template-columns:minmax(90px,180px) 1fr auto;gap:12px;
+        align-items:center;font-size:12.5px}
+  .rbar{height:9px;background:var(--chartgrid);border-radius:0 3px 3px 0;overflow:hidden}
+  .rbar>i{display:block;height:100%;background:var(--chart);border-radius:0 3px 3px 0}
+  .rval{font:500 12px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted)}
+  #tip{position:fixed;z-index:50;pointer-events:none;opacity:0;transition:opacity .1s;
+       background:var(--panel);border:1px solid var(--line);border-radius:4px;
+       padding:7px 10px;font:400 11.5px/1.5 var(--mono);color:var(--ink);
+       box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:260px}
   .scroll{overflow-x:auto}
 
   /* ---- motion: hierarchy, not noise ---- */
@@ -1876,7 +1926,100 @@ async function doRevoke(keyId){
   loadKeys(); loadUsage();
 }
 
+
+// ---------- charts ----------
+// HTML/CSS marks rather than SVG: the radii stay exact at any width, the chart
+// is responsive without a viewBox that distorts the geometry, and hover is a
+// real element rather than hit-testing. There is no charting library here
+// because this node may have no route to the internet.
+function tipEl(){
+  let t = document.getElementById('tip');
+  if(!t){ t = document.createElement('div'); t.id = 'tip'; document.body.appendChild(t); }
+  return t;
+}
+function bindTips(root){
+  const t = tipEl();
+  [...root.querySelectorAll('[data-tip]')].forEach(el => {
+    el.onmousemove = ev => {
+      t.innerHTML = el.dataset.tip;
+      t.style.opacity = 1;
+      const pad = 14, w = t.offsetWidth, h = t.offsetHeight;
+      let x = ev.clientX + pad, y = ev.clientY - h - pad;
+      if(x + w > innerWidth - 8) x = ev.clientX - w - pad;   // flip near the edge
+      if(y < 8) y = ev.clientY + pad;
+      t.style.left = x + 'px'; t.style.top = y + 'px';
+    };
+    el.onmouseleave = () => { t.style.opacity = 0; };
+  });
+}
+
+function bucketLabel(b, bucket){
+  // "2026-08-25T13" or "2026-08-25"
+  if(bucket === 'hour'){
+    const [d, h] = b.split('T');
+    return h + ':00 ' + d.slice(5).replace('-', '/');
+  }
+  return b.slice(5).replace('-', '/');
+}
+
+// One measure, one chart. `bad` stacks a status segment on top of the same bar
+// -- part of the same total, not a second series on a second scale.
+function timeChart(rows, opts){
+  const {title, value, bad, bucket, unit} = opts;
+  if(!rows.length)
+    return `<div class="chart"><div class="chartttl">${title}</div>
+      <div class="empty">no activity in this window</div></div>`;
+  const max = Math.max(1, ...rows.map(r => value(r)));
+  const cols = rows.map(r => {
+    const v = value(r), e = bad ? bad(r) : 0, ok = Math.max(0, v - e);
+    const h = x => (x / max * 100).toFixed(2) + '%';
+    const tip = `${esc(bucketLabel(r.bucket, bucket))}<br>${n(v)} ${esc(unit)}` +
+                (e ? `<br><span style="color:var(--chart-bad)">${n(e)} failed</span>` : '');
+    return `<div class="col${v ? '' : ' empty'}" data-tip="${tip}">` +
+      (e ? `<i class="bad" style="height:${h(e)}"></i>` : '') +
+      `<i style="height:${h(ok)}"></i></div>`;
+  }).join('');
+  const first = bucketLabel(rows[0].bucket, bucket);
+  const last  = bucketLabel(rows[rows.length - 1].bucket, bucket);
+  const legend = bad && rows.some(r => bad(r))
+    ? `<div class="legend"><span><i style="background:var(--chart)"></i>succeeded</span>
+       <span><i style="background:var(--chart-bad)"></i>failed</span></div>` : '';
+  return `<div class="chart">
+    <div class="charthead"><span class="chartttl">${title}</span>
+      <span class="chartmax">peak ${n(max)} ${esc(unit)}</span></div>
+    <div class="plot">${cols}</div>
+    <div class="xaxis"><span>${esc(first)}</span><span>${esc(last)}</span></div>
+    ${legend}</div>`;
+}
+
+// Magnitude across identities: ranked horizontal bars, sorted, labelled at the
+// end. A pie would ask the reader to compare angles for the same job.
+function rankedBars(rows, opts){
+  const {title, label, value, unit, limit} = opts;
+  const top = rows.slice(0, limit || 8);
+  if(!top.length) return '';
+  const max = Math.max(1, ...top.map(value));
+  return `<div class="chart"><div class="chartttl">${title}</div><div class="ranked">` +
+    top.map(r => `<div class="rrow" data-tip="${esc(label(r))}<br>${n(value(r))} ${esc(unit)}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label(r)}</span>
+      <span class="rbar"><i style="width:${(value(r)/max*100).toFixed(1)}%"></i></span>
+      <span class="rval">${n(value(r))}</span></div>`).join('') +
+    '</div></div>';
+}
+
+function fmtDur(sec){
+  if(sec < 60) return Math.round(sec) + 's';
+  if(sec < 3600) return Math.round(sec / 60) + 'm';
+  return (sec / 3600).toFixed(1) + 'h';
+}
+function fmtWhen(epoch){
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString([], {month:'short', day:'numeric',
+                               hour:'2-digit', minute:'2-digit'});
+}
+
 let USAGE_MINE = false;
+let U_DAYS = 14, U_BUCKET = 'day';
 
 function personName(r){
   // A row should name a person, not an opaque subject id. Prefer the display
@@ -1890,8 +2033,8 @@ function personName(r){
 async function loadUsage(){
   let d;
   try{
-    d = (await req('/api/usage' + (USAGE_MINE ? '?mine=1' : ''),
-                   {cache:'no-store'})).data;
+    d = (await req('/api/usage?days=' + U_DAYS + '&bucket=' + U_BUCKET +
+                   (USAGE_MINE ? '&mine=1' : ''), {cache:'no-store'})).data;
   }catch(e){ $('usagebox').innerHTML = '<div class="banner">Could not read usage.</div>'; return; }
 
   const board = d.leaderboard || [];
@@ -1930,7 +2073,65 @@ async function loadUsage(){
       '</td></tr>';
   }).join('');
 
-  $('usagebox').innerHTML =
+  // --- the audit view -------------------------------------------------------
+  const series = d.series || [], sess = d.sessions || [];
+  const sumReq = series.reduce((a, r) => a + (r.requests || 0), 0);
+  const sumTok = series.reduce((a, r) => a + (r.total_tokens || 0), 0);
+  const sumErr = series.reduce((a, r) => a + (r.errors || 0), 0);
+  // DISTINCT across the window, not the sum of per-bucket counts: somebody
+  // active on ten days is one person, and summing the buckets says ten.
+  const people = new Set(sess.map(x => x.sub)).size;
+  const win = [[1,'24 h'],[7,'7 days'],[14,'14 days'],[30,'30 days'],[90,'90 days']];
+
+  const audit =
+    '<div class="grid">' +
+      '<div class="card"><div class="k">Requests</div><div class="v">' + n(sumReq) + '</div>' +
+        (sumErr ? '<div class="sub" style="color:var(--warn);margin-top:7px">' +
+                  n(sumErr) + ' failed</div>' : '') + '</div>' +
+      '<div class="card"><div class="k">People active</div><div class="v">' +
+        (people || '<span class="idle">none</span>') + '</div>' +
+        '<div class="sub" style="margin-top:7px">distinct, over the window</div></div>' +
+      '<div class="card"><div class="k">Sessions</div><div class="v">' +
+        n(d.session_total || 0) + '</div><div class="sub" style="margin-top:7px">' +
+        'derived — a run with no gap over ' + (d.session_gap_minutes || 30) +
+        ' min</div></div>' +
+      '<div class="card"><div class="k">Tokens</div><div class="v">' + n(sumTok) + '</div></div>' +
+    '</div>' +
+    '<div class="seg" style="margin-top:16px">' +
+      win.map(w => '<button class="tab' + (U_DAYS === w[0] ? ' sel' : '') +
+                   '" data-udays="' + w[0] + '">' + w[1] + '</button>').join('') +
+      '<span style="flex:1"></span>' +
+      '<button class="tab' + (U_BUCKET === 'hour' ? ' sel' : '') + '" data-ubucket="hour">by hour</button>' +
+      '<button class="tab' + (U_BUCKET === 'day'  ? ' sel' : '') + '" data-ubucket="day">by day</button>' +
+    '</div>' +
+    timeChart(series, {title:'Requests', unit:'requests', bucket:U_BUCKET,
+                       value:r => r.requests || 0, bad:r => r.errors || 0}) +
+    timeChart(series, {title:'People active', unit:'people', bucket:U_BUCKET,
+                       value:r => r.users || 0}) +
+    timeChart(series, {title:'Tokens', unit:'tokens', bucket:U_BUCKET,
+                       value:r => r.total_tokens || 0}) +
+    rankedBars((d.usage || []).slice(), {title:'Busiest keys', unit:'tokens', limit:8,
+      label:r => esc(r.label || String(r.key_id || '?').slice(0,8)) +
+                 ' <span class="sub">' + personName(r) + '</span>',
+      value:r => r.total_tokens || 0}) +
+    '<h2>Sessions</h2>' +
+    (sess.length
+      ? '<div class="scroll"><table><thead><tr><th>Who</th><th>Started</th>' +
+        '<th class="num">For</th><th class="num">Requests</th><th class="num">Tokens</th>' +
+        '<th class="num">Keys</th><th>Models</th></tr></thead><tbody>' +
+        sess.slice(0, 50).map(x =>
+          '<tr><td>' + personName({sub:x.sub}) + '</td><td>' + esc(fmtWhen(x.started)) +
+          '</td><td class="num">' + esc(fmtDur(x.seconds)) + '</td><td class="num">' +
+          n(x.requests) + '</td><td class="num">' + n(x.tokens) + '</td><td class="num">' +
+          n(x.keys) + '</td><td class="sub">' + esc((x.models||[]).join(' ')) +
+          '</td></tr>').join('') +
+        '</tbody></table></div>' +
+        (d.session_total > 50 ? '<div class="note">Showing the 50 most recent of ' +
+          n(d.session_total) + '.</div>' : '')
+      : '<div class="empty">No sessions in this window.</div>') +
+    '<h2>Leaderboard</h2>';
+
+  $('usagebox').innerHTML = audit +
     (board.length
       ? '<div class="card scroll"><table><thead><tr>' +
         '<th class="num">#</th><th>Who</th><th class="num">Tokens</th><th></th>' +
@@ -1965,6 +2166,19 @@ async function loadUsage(){
   const all = $('u-all'), mine = $('u-mine');
   if(all)  all.onclick  = () => { USAGE_MINE = false; loadUsage(); };
   if(mine) mine.onclick = () => { USAGE_MINE = true;  loadUsage(); };
+  [...document.querySelectorAll('[data-udays]')].forEach(b => b.onclick = () => {
+    U_DAYS = parseInt(b.dataset.udays, 10);
+    // An hour bucket over 90 days is 2,160 columns of one pixel. Snap the
+    // resolution to something the window can actually show.
+    if(U_DAYS > 7) U_BUCKET = 'day';
+    loadUsage();
+  });
+  [...document.querySelectorAll('[data-ubucket]')].forEach(b => b.onclick = () => {
+    U_BUCKET = b.dataset.ubucket;
+    if(U_BUCKET === 'hour' && U_DAYS > 7) U_DAYS = 7;
+    loadUsage();
+  });
+  bindTips($('usagebox'));
 }
 
 // ---------- bootstrap ----------
