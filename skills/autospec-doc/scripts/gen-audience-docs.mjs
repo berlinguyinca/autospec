@@ -486,6 +486,24 @@ function renderFeature(audience, feature, directive, sourceRoot) {
   return lines.join('\n');
 }
 
+// ── Single-file mode (issue #2968) ────────────────────────────────────────────
+//
+// An audience whose path ends in .md renders ONE composed document at that exact
+// path instead of the folder-contract subtree: index, getting-started, then all
+// per-feature tutorials, then all per-feature reference sections — in that order,
+// each part keeping its own scope block so drift checking and mergeWithExisting
+// still apply at the section level.
+
+function renderSingleFile(audience, features, directive, sourceRoot) {
+  const parts = [
+    renderIndex(audience, features, directive),
+    renderGettingStarted(audience, features, directive),
+  ];
+  for (const feature of features) parts.push(renderTutorial(audience, feature, directive));
+  for (const feature of features) parts.push(renderFeature(audience, feature, directive, sourceRoot));
+  return parts.join('\n');
+}
+
 // ── Default validator: scope-comment well-formedness ──────────────────────────
 // Reuses scan-doc-scope's parser to confirm every generated page has at least
 // one well-formed `generated: true` scope block.
@@ -534,7 +552,7 @@ function defaultValidator(content) {
 // Returns the built page WITHOUT ai-review annotation; ai-review is applied in
 // batch by generateAudienceDocs (ONE call per audience — §D6).
 
-async function buildPage({ relPath, render, validator, maxRetries, existingDocs, audience, feature }) {
+async function buildPage({ relPath, render, validator, maxRetries, existingDocs, audience, feature, existingDrives = false }) {
   let directive = '';
   const directiveLog = [];
   let attempt = 0;
@@ -572,13 +590,21 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
   // relPath only — a basename fallback would collide across audiences (every
   // audience has an index.md) and across tutorials/ vs features/ (same
   // <feature>.md basename), risking preservation of the wrong human content.
+  //
+  // existingDrives (single-file mode, issue #2968): a curated single-file doc is
+  // the source of truth — iterate its sections instead of the composed ones so
+  // every section (hand-written OR previously generated) survives byte-identical
+  // instead of being reshaped or dropped by the folder-contract merge.
   const existing = existingDocs[relPath] || null;
-  const { merged, preserved } = mergeWithExisting(content, existing);
+  const { merged, preserved } = (existingDrives && existing)
+    ? mergeWithExisting(existing, content)
+    : mergeWithExisting(content, existing);
 
   return {
     path: relPath,
     content: merged,
     preserved_sections: preserved,
+    preserved_existing: Boolean(existingDrives && existing),
     audience: audience.name,
     feature: feature ? feature.slug : null,
     unresolved_findings: lastFindings.length ? lastFindings : undefined,
@@ -661,6 +687,13 @@ function computeSamenessWarnings(files) {
 /**
  * Generate the per-audience doc tree for a set of features.
  *
+ * Single-file mode (issue #2968): an audience whose `path` ends in `.md`
+ * renders ONE composed document at that exact path (index, getting-started,
+ * tutorials, feature reference — in that order) instead of a folder-contract
+ * subtree. If that file already exists under `outputDir`, it is read from disk
+ * and the merge is existing-driven, so a curated document survives regeneration
+ * byte-identical (and is never re-sent to the AI reviewer).
+ *
  * @param {{
  *   features?: Array<object>,
  *   audiences: Array<{ name: string, path: string, focus: string }>,
@@ -699,25 +732,49 @@ export async function generateAudienceDocs({
     }
     assertSafeRelative(audience.path, `audience "${audience.name}" path`);
     const base = audience.path.replace(/\/+$/, '');
+    // Single-file mode (issue #2968): a path ending in .md renders ONE composed
+    // document at that exact path. Anything else keeps the folder contract.
+    const isSingleFile = base.endsWith('.md');
 
-    // Folder-contract base files (always emitted, even with zero features).
-    const pageSpecs = [
-      { relPath: `${base}/index.md`, render: d => renderIndex(audience, features, d), feature: null },
-      { relPath: `${base}/getting-started.md`, render: d => renderGettingStarted(audience, features, d), feature: null },
-    ];
-    // Per-feature tutorial + feature pages.
-    for (const feature of features) {
-      assertSafeRelative(feature.slug, `feature slug`);
-      pageSpecs.push({
-        relPath: `${base}/tutorials/${feature.slug}.md`,
-        render: d => renderTutorial(audience, feature, d),
-        feature,
-      });
-      pageSpecs.push({
-        relPath: `${base}/features/${feature.slug}.md`,
-        render: d => renderFeature(audience, feature, d, sourceRoot),
-        feature,
-      });
+    let pageSpecs;
+    if (isSingleFile) {
+      pageSpecs = [
+        { relPath: base, render: d => renderSingleFile(audience, features, d, sourceRoot), feature: null },
+      ];
+    } else {
+      // Folder-contract base files (always emitted, even with zero features).
+      pageSpecs = [
+        { relPath: `${base}/index.md`, render: d => renderIndex(audience, features, d), feature: null },
+        { relPath: `${base}/getting-started.md`, render: d => renderGettingStarted(audience, features, d), feature: null },
+      ];
+      // Per-feature tutorial + feature pages.
+      for (const feature of features) {
+        assertSafeRelative(feature.slug, `feature slug`);
+        pageSpecs.push({
+          relPath: `${base}/tutorials/${feature.slug}.md`,
+          render: d => renderTutorial(audience, feature, d),
+          feature,
+        });
+        pageSpecs.push({
+          relPath: `${base}/features/${feature.slug}.md`,
+          render: d => renderFeature(audience, feature, d, sourceRoot),
+          feature,
+        });
+      }
+    }
+
+    // A single-file audience must not clobber a curated document already on
+    // disk: the merge is existing-driven (buildPage), so the existing file wins
+    // section by section. Callers (e.g. the orchestrator) do not pre-load
+    // existing docs, so read the single target from disk here — single-file
+    // mode only; folder mode keeps its current contract untouched.
+    let audienceExistingDocs = existingDocs;
+    if (isSingleFile && outputDir && !(base in existingDocs)) {
+      let diskContent = null;
+      try { diskContent = fs.readFileSync(path.join(outputDir, base), 'utf8'); } catch {}
+      if (diskContent !== null) {
+        audienceExistingDocs = { ...existingDocs, [base]: diskContent };
+      }
     }
 
     // Build all pages for this audience (deterministic-first, no per-page LLM calls).
@@ -728,9 +785,10 @@ export async function generateAudienceDocs({
         render: spec.render,
         validator,
         maxRetries,
-        existingDocs,
+        existingDocs: audienceExistingDocs,
         audience,
         feature: spec.feature,
+        existingDrives: isSingleFile,
       });
       audiencePages.push(page);
     }
@@ -742,7 +800,12 @@ export async function generateAudienceDocs({
       heading: path.basename(p.path, '.md'),
       body: p.content,
     }));
-    const reviewMap = await reviewSectionBatch(batchSections, aiReviewStub);
+    // A fully preserved single-file doc is human-curated content that will not be
+    // rewritten — reviewing it (and then discarding the annotation) wastes the
+    // §D6 batch call, so skip the review when every page is preserved.
+    const reviewMap = audiencePages.every(p => p.preserved_existing)
+      ? new Map()
+      : await reviewSectionBatch(batchSections, aiReviewStub);
 
     for (const page of audiencePages) {
       const heading = path.basename(page.path, '.md');

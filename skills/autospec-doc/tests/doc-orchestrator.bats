@@ -458,3 +458,75 @@ EOF
   [[ "$output" == *"domain coverage:"* ]]
   [[ "$output" != *"INVALID_TARGET"* ]]
 }
+
+# ── Single-file audience mode in the orchestrator (issue #2968) ───────────────
+#
+# A .md-suffixed audience path renders ONE composed document at that exact
+# path (features folded in). The page collector must count the file itself,
+# and the completeness audit must not expect per-feature folder pages for it.
+
+seed_single_file_config() {
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'EOF'
+documentation:
+  audiences:
+    - {name: user, path: docs/user, focus: "tasks"}
+    - {name: security, path: docs/SECURITY.md, focus: "security"}
+EOF
+  cat > .autospec/doc-features.json <<'EOF'
+{
+  "features": [
+    {
+      "slug": "audit-log",
+      "title": "Audit Log",
+      "summary": {
+        "user": "See what happened to your data.",
+        "security": "Tamper-evident audit trail."
+      },
+      "spec_sections": ["Events are recorded immutably."]
+    }
+  ]
+}
+EOF
+}
+
+@test "--full renders a .md audience as one document and audits 0 missing" {
+  seed_single_file_config
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  # The .md path is a FILE, not a folder subtree.
+  [ -f docs/SECURITY.md ]
+  [ ! -d docs/SECURITY.md ]
+  [ ! -e docs/SECURITY.md/features ]
+  # The folder audience still gets its per-feature page.
+  [ -f docs/user/features/audit-log.md ]
+  # The audit summary printed by --full reports zero missing pages.
+  [[ "$output" == *"0 missing page(s)"* ]]
+}
+
+@test "--audit does not expect per-feature folder pages for a .md audience" {
+  seed_single_file_config
+  node "$ORCH" --full >/dev/null
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  # No false "missing" finding for the folded feature page.
+  [[ "$output" != *"docs/SECURITY.md/features/audit-log.md"* ]]
+  [[ "$output" == *"0 missing page(s)"* ]]
+}
+
+@test "page collector ignores a non-.md file audience (renderer .md contract)" {
+  # A file at a non-.md audience path is a misconfiguration: the renderer
+  # keeps the folder contract for it, so the collector must not count the
+  # file itself as an audience page either.
+  mkdir -p .autospec docs
+  cat > .autospec/autospec.yml <<'EOF'
+documentation:
+  audiences:
+    - {name: notes, path: docs/NOTES.txt, focus: "notes"}
+EOF
+  echo "hello world, a short note" > docs/NOTES.txt
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 page(s) on disk"* ]]
+  [[ "$output" != *"docs/NOTES.txt"* ]]
+}

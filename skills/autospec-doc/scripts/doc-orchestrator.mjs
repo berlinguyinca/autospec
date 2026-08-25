@@ -76,6 +76,20 @@ function collectAudiencePages(cfg, repoRoot) {
     if (!audPath) continue;
     const dir = path.resolve(repoRoot, audPath);
     if (!fs.existsSync(dir)) continue;
+    let stat;
+    try { stat = fs.statSync(dir); } catch { continue; }
+    if (stat.isFile() && audPath.replace(/\/+$/, '').endsWith('.md')) {
+      // Single-file audience (issue #2968): the configured path is the document
+      // itself, not a directory to walk. Mirrors the renderer's `.md` suffix
+      // contract — a non-.md file keeps the folder (misconfiguration) behavior.
+      const relPath = path.relative(repoRoot, dir).replace(/\\/g, '/');
+      let content;
+      try { content = fs.readFileSync(dir, 'utf8'); } catch { continue; }
+      const featureMatch = relPath.match(/\/(?:tutorials|features)\/([^/]+)\.md$/);
+      const feature = featureMatch ? featureMatch[1] : null;
+      pages.push({ audience: audName, feature, path: relPath, content });
+      continue;
+    }
     const walk = (d) => {
       let entries;
       try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
@@ -240,6 +254,9 @@ async function runAudit(cfg, projRoot, features) {
   for (const aud of audiences) {
     const audName = aud.name || aud.id;
     if (!aud.path) continue;
+    // Single-file audience (issue #2968): features fold into the one composed
+    // document, so per-feature folder pages are not expected.
+    if (aud.path.replace(/\/+$/, '').endsWith('.md')) continue;
     for (const f of features) {
       if (!f || !f.slug) continue;
       const rel = `${aud.path.replace(/\/+$/, '')}/features/${f.slug}.md`;

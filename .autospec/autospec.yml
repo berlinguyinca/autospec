@@ -141,7 +141,7 @@ documentation:
     - id: security-reviewers
       label: Security reviewers
       name: Security reviewers
-      path: docs/SECURITY.md
+      path: SECURITY.md
       focus: Trust boundaries, secret handling, production access, and abuse cases.
       require_scope: true
   scopes:
