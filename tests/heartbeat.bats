@@ -144,6 +144,55 @@ teardown() {
     grep -q '"step":"tests_started"' "$TEST_TMP/testorg__testrepo/42.json"
 }
 
+@test "heartbeat session binding fills in a branch that was unknown at the first write" {
+    bash "$HB_WRITE" --issue 42 --step expand_start --branch "" --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-late-branch
+    session_key="$(printf '%s' session-late-branch | od -An -tx1 | tr -d ' \n')"
+    binding="$TEST_TMP/testorg__testrepo/sessions/${session_key}.json"
+    grep -q '"branch":""' "$binding"
+
+    run bash "$HB_WRITE" --issue 42 --step worktree_ready --branch feat/late --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-late-branch
+
+    [ "$status" -eq 0 ]
+    grep -q '"branch":"feat/late"' "$binding"
+    grep -q '"branch":"feat/late"' "$TEST_TMP/testorg__testrepo/42.json"
+    read_back="$(bash "$HB_READ" --session-id session-late-branch --repo testorg/testrepo)"
+    echo "$read_back" | jq -e '.branch == "feat/late"' >/dev/null
+}
+
+@test "a branch filled in once is not re-writable by a third branch" {
+    bash "$HB_WRITE" --issue 42 --step expand_start --branch "" --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-branch-once
+    bash "$HB_WRITE" --issue 42 --step worktree_ready --branch feat/late --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-branch-once
+    session_key="$(printf '%s' session-branch-once | od -An -tx1 | tr -d ' \n')"
+    binding="$TEST_TMP/testorg__testrepo/sessions/${session_key}.json"
+    filled="$(cat "$binding")"
+
+    run bash "$HB_WRITE" --issue 42 --step tests_started --branch feat/other --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-branch-once
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'session binding identity conflict'
+    [ "$(cat "$binding")" = "$filled" ]
+}
+
+@test "an unknown branch does not let a different claim adopt the session" {
+    bash "$HB_WRITE" --issue 42 --step expand_start --branch "" --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-branch-guard
+    session_key="$(printf '%s' session-branch-guard | od -An -tx1 | tr -d ' \n')"
+    binding="$TEST_TMP/testorg__testrepo/sessions/${session_key}.json"
+    original="$(cat "$binding")"
+
+    run bash "$HB_WRITE" --issue 43 --step worktree_ready --branch feat/other --repo testorg/testrepo \
+        --worker-id worker-b --claim-id claim-b --session-id session-branch-guard
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'session binding identity conflict'
+    [ "$(cat "$binding")" = "$original" ]
+}
+
 @test "concurrent heartbeat writers cannot overwrite one session identity" {
     set +e
     (bash "$HB_WRITE" --issue 42 --step claimed --branch feat/a --repo testorg/testrepo \
