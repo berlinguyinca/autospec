@@ -652,7 +652,19 @@ fn detect_out_of_scope(
     };
     let outline = section(issue_body, &["Implementation outline"])
         .or_else(|| section(issue_body, &["Implementation scope"]));
-    let allowed = outline.map(path_tokens).unwrap_or_default();
+    let mut allowed = outline.map(path_tokens).unwrap_or_default();
+    // `## Files touched` is a mandatory heading (see `lint::issue`), and the
+    // decomposer frequently writes the outline as prose bullets naming
+    // behaviours rather than paths. Reading only the outline therefore flagged
+    // issues on the very files they declare, and the documented workaround was
+    // for the implementer to amend the issue body — i.e. to rewrite the scope
+    // it is being measured against. Take the union instead: scope stays
+    // fail-closed when *neither* section names a path.
+    allowed.extend(
+        section(issue_body, &["Files touched"])
+            .map(path_tokens)
+            .unwrap_or_default(),
+    );
     if allowed.is_empty() && !fail_closed_on_missing_outline {
         return;
     }
@@ -669,7 +681,7 @@ fn detect_out_of_scope(
                 ImplementationLintRule::OutOfScope,
                 &file.path,
                 None,
-                "file not listed in ## Implementation outline",
+                "file not listed in ## Implementation outline or ## Files touched",
             );
         }
     }
@@ -2195,6 +2207,75 @@ mod tests {
             .findings
             .iter()
             .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_accepts_files_touched_path_with_prose_outline() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        // The decomposer routinely writes prose bullets in the outline while
+        // still declaring the concrete paths under the mandatory
+        // `## Files touched` heading; both sections define the scope.
+        let body = "## Implementation outline\n\n\
+                    - Update the shared classifier before delivery\n\n\
+                    ## Files touched\n\n\
+                    - `src/changed.rs`\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|finding| finding.rule != ImplementationLintRule::OutOfScope),
+            "a path declared under ## Files touched must be in scope even when \
+             the outline names no path: {:?}",
+            result.findings
+        );
+        assert_eq!(result.blocking_count, 0);
+        assert_eq!(result.exit_code(), 0);
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_changed_path_when_neither_section_names_a_path() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        // Neither bullet contains `/` or `.`, so `path_tokens` yields nothing
+        // from either section and the fail-closed branch — not the per-file
+        // comparison loop — is the one under test.
+        let body = "## Implementation outline\n\n\
+                    - Update the shared classifier before delivery\n\n\
+                    ## Files touched\n\n\
+                    - To be determined\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+        let out_of_scope = result
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == ImplementationLintRule::OutOfScope)
+            .collect::<Vec<_>>();
+
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(out_of_scope[0].path, "src/changed.rs");
+        assert_eq!(out_of_scope[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(result.blocking_count, 1);
+        assert_eq!(result.exit_code(), 1);
     }
 
     #[test]

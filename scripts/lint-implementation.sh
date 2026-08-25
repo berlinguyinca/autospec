@@ -46,7 +46,7 @@ Flags:
 
 RULE_IDs enforced (deterministic detectors):
 
-  OUT_OF_SCOPE      Files touched are not listed in issue's ## Implementation outline.
+  OUT_OF_SCOPE      Files touched are not listed in the issue's ## Implementation outline or ## Files touched.
   PR_SIZE           Patch exceeds 400 changed lines, 8 files, 3 logical units,
                     or contains binary diff evidence.
   MISSING_TEST      Required test type from ## Tests required absent in diff.
