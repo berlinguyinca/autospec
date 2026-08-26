@@ -2,14 +2,17 @@ use std::collections::BTreeSet;
 
 use crate::autonomous::waterfall::sha256_hex;
 
+mod project_board;
 mod tier4;
 
+pub use project_board::ProjectBoardConfig;
 pub use tier4::{Tier4Config, Tier4SourceDescriptor};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutonomousConfig {
     pub main_health: MainHealthConfig,
     pub tier4: Tier4Config,
+    pub project_board: ProjectBoardConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -187,6 +190,7 @@ impl AutonomousConfig {
         }
 
         config.tier4 = tier4::parse(source)?;
+        config.project_board = project_board::parse(source)?;
         Ok(config)
     }
 }
