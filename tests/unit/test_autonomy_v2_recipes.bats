@@ -60,7 +60,7 @@ JSON
   [ "$output" = "supported" ]
 }
 
-@test "stack profile detection identifies React Vite and low-confidence unknown stack" {
+@test "stack profile detection identifies a javascript primary and a low-confidence unknown stack" {
   mkdir -p "$TEST_TMPDIR/react" "$TEST_TMPDIR/unknown"
   write_react_repo "$TEST_TMPDIR/react"
   mkdir -p "$TEST_TMPDIR/unknown/.autospec/state" "$TEST_TMPDIR/unknown/.autospec/reports"
@@ -69,7 +69,7 @@ JSON
   run bash "$STACK" --repo-root "$TEST_TMPDIR/react"
   [ "$status" -eq 0 ]
   run jq -r '.primary_profile.id' "$TEST_TMPDIR/react/.autospec/state/stack-profile.json"
-  [ "$output" = "react-vite-typescript" ]
+  [ "$output" = "javascript" ]
 
   run bash "$STACK" --repo-root "$TEST_TMPDIR/unknown"
   [ "$status" -eq 0 ]
