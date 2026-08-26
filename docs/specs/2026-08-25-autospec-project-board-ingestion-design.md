@@ -129,6 +129,18 @@ Contract:
 - Empty or malformed `gh` output yields an empty plan and exit 0, matching
   `list-groomable.sh`'s fail-closed envelope.
 - Exit codes: `0` success, `2` usage error, `3` auth/scope failure, `4` truncated read.
+- **Item state is read from a second source.** The Projects `item-list` payload carries
+  no issue open/closed state (verified against captured fixtures — `.content` on both
+  boards is exactly `{body, number, repository, title, type, url}`). The resolver queries
+  `gh issue list --repo <R> --state closed` once per **distinct repo** — O(distinct repos),
+  never O(items) — and joins each item's `state` from that per-repo closed-number set. A
+  closed-list query that is truncated or fails degrades that repo's items to `"open"`
+  rather than aborting the plan or exiting non-zero; this is fail-closed the same direction
+  as the rest of the resolver (it can only delay a promotion, never cause a wrong one), and
+  is deliberately not the same policy as item-list truncation above, which exits 4. State
+  is never sourced from the board's own status column, which is operator-maintained and
+  lags reality (measured: 1/80 items marked `Done` on P2 despite more issues actually
+  closed on GitHub).
 
 ## Component 2 — normalization and the dependency DAG
 
@@ -169,9 +181,13 @@ three ship together and P1's `autospec:blocked-prerequisite` + `cross-repo` labe
 an additional hard gate the DAG can clear.
 
 An edge is **satisfied** when the referenced issue is closed *and* its linked PR is merged
-(when one exists). Unresolvable references (deleted issue, cross-org, outside the
-allowlist) are treated as **unsatisfied**, never as satisfied — under-promotion is far
-safer than feeding ill-formed work to an admin-auto-merge loop.
+(when one exists). Issue state comes from the resolver's per-repo closed-issue join
+(Component 1), never from the board's status column; a truncated or failed closed-list
+query for that repo degrades the issue to unresolved-closed (i.e. treated as not closed),
+so the edge stays **unsatisfied** — fail-closed. Unresolvable references (deleted issue,
+cross-org, outside the allowlist) are likewise treated as **unsatisfied**, never as
+satisfied — under-promotion is far safer than feeding ill-formed work to an admin-auto-merge
+loop.
 
 ### Cycles
 
@@ -291,6 +307,7 @@ an item pointing at an arbitrary repository.
 | token lacks `project` scope | read still works; write-back disabled with one warning |
 | board unreachable or deleted | Tier 1.5 board source is dry; conductor descends to Tier 2 |
 | truncated item read | exit 4; no promotion this cycle (never promote from a partial plan) |
+| closed-issue query fails or is truncated (per repo) | that repo's items degrade to `state: "open"`; plan still emits, exit 0 — under-reporting closed is safe, it only delays a promotion |
 | dependency cycle | `code_health:project_board_dependency_cycle`; participants `needs-human`; acyclic remainder proceeds |
 | item repo outside allowlist | skipped, `code_health:project_board_repo_out_of_scope` |
 | write-back failure | `code_health:project_board_writeback_failed`; continue |

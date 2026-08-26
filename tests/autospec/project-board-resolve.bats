@@ -108,12 +108,18 @@ SH
 }
 
 @test "missing gh exits 3" {
-  # A PATH containing only /usr/bin:/bin keeps bash and jq resolvable (both
-  # live there) while dropping gh, which lives elsewhere (e.g. /opt/homebrew/bin).
-  # Fully emptying PATH (the brief's original approach) makes `env` unable to
-  # find bash itself, so `run` observes exit 127 from env, not exit 3 from the
-  # script — verified directly against this shell before changing the test.
-  run env PATH="/usr/bin:/bin" bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  # A blanket "/usr/bin:/bin" PATH happens to work on this machine (gh lives
+  # at /opt/homebrew/bin/gh here) but is not portable: apt installs gh to
+  # /usr/bin/gh on Debian/Ubuntu, where that PATH would make gh resolvable
+  # again and this test would silently stop testing what it claims. Guarantee
+  # gh's absence instead of assuming it: symlink only the tools the script
+  # itself needs (bash, jq, sh, grep, sed) into a scratch bin dir and point
+  # PATH at that alone.
+  mkdir -p "$TMP/only"
+  for tool in bash jq sh grep sed; do
+    ln -s "$(command -v "$tool")" "$TMP/only/$tool"
+  done
+  run env PATH="$TMP/only" bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
   [ "$status" -eq 3 ]
 }
 
@@ -132,4 +138,90 @@ SH
   run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.fields == {}'
+}
+
+@test "an item whose number is in the closed set resolves state closed" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p2-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p2-items.json" ;;
+  *"issue list"*)         printf '[{"number":1}]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==1) | .state == "closed"'
+}
+
+@test "an item whose number is not in the closed set resolves state open" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p2-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p2-items.json" ;;
+  *"issue list"*)         printf '[{"number":1}]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==2) | .state == "open"'
+}
+
+@test "a multi-repo board issues exactly one closed-issue query per distinct repo" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p1-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p1-items.json" ;;
+  *"issue list"*)         echo "\$*" >> "$TMP/issue-list-calls.log"; printf '[]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit plan
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$TMP/issue-list-calls.log" | tr -d ' ')" -eq 6 ]
+  [ "$(sort -u "$TMP/issue-list-calls.log" | wc -l | tr -d ' ')" -eq 6 ]
+}
+
+@test "a truncated closed-issue list leaves an unlisted closed issue as open, not exit 4" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p2-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p2-items.json" ;;
+  *"issue list"*)         printf '[{"number":1}]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  # Issue 5 is actually closed on GitHub but does not appear in this
+  # (truncated) closed-list response, so it must fall back to "open" — never
+  # exit 4. Item-truncation and closed-list-truncation are different risks:
+  # only the former can silently drop whole items and must fail closed.
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==5) | .state == "open"'
+}
+
+@test "a failed closed-issue query degrades that repo to open, not an abort" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p2-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p2-items.json" ;;
+  *"issue list"*)         exit 1 ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq '.items | length')" -eq 80 ]
+  echo "$output" | jq -e '[.items[].state] | unique == ["open"]'
 }

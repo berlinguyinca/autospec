@@ -112,24 +112,55 @@ fields_map="$(printf '%s' "$fields_json" | jq --argjson candidates "$candidates_
   | if $f == null then {} else {autospec_state: $f} end' 2>/dev/null || printf '{}')"
 [ -n "$fields_map" ] || fields_map='{}'
 
-plan="$(printf '%s' "$items_json" | jq --argjson id "$identity" --argjson fields "$fields_map" '
+repos_json="$(printf '%s' "$items_json" | jq -c '
+  [.items[]? | select(.content.type == "Issue") | .content.repository] | unique')"
+
+# The Projects item-list payload carries no issue open/closed state — verified
+# against both fixtures: .content keys are exactly {body, number, repository,
+# title, type, url}. Issue state is joined from a SECOND source, queried once
+# per distinct repo (O(repos), never O(items)): `gh issue list --state closed`.
+# A repo whose closed-list query fails, or is truncated, degrades that repo's
+# items to "open" rather than aborting the plan or exiting non-zero — an
+# unlisted-but-actually-closed issue just delays a downstream promotion; it
+# can never cause a wrong one. This is deliberately NOT the same truncation
+# policy as the item-list read above, which fails closed with exit 4: a
+# truncated *item* list can silently drop whole items from the plan, while a
+# truncated *closed-issue* list only ever under-reports "closed" — the safe
+# direction. Never sourced from the board's status column: that is an
+# operator-maintained field that lags reality (measured: 1/80 "Done" on p2
+# despite issues actually closed on GitHub).
+closed_map='{}'
+if [ "$emit" = "plan" ]; then
+    for repo in $(printf '%s' "$repos_json" | jq -r '.[]'); do
+        closed_json="$(gh issue list --repo "$repo" --state closed --limit "$limit" --json number 2>/dev/null)" || closed_json=""
+        if ! printf '%s' "$closed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            closed_json='[]'
+        fi
+        numbers_json="$(printf '%s' "$closed_json" | jq -c '[.[].number]')"
+        closed_map="$(printf '%s' "$closed_map" | jq -c --arg repo "$repo" --argjson nums "$numbers_json" '. + {($repo): $nums}')"
+    done
+fi
+
+plan="$(printf '%s' "$items_json" | jq --argjson id "$identity" --argjson fields "$fields_map" --argjson closed "$closed_map" '
   [.items[]? | select(.content.type == "Issue")] as $issues
   | {project: $id,
      fields: $fields,
      repos: ($issues | map(.content.repository) | unique),
-     items: ($issues | map({
-        item_id: .id,
-        repo:    .content.repository,
-        number:  .content.number,
-        title:   .content.title,
-        body:    (.content.body // ""),
-        state:   (if .content.state == "CLOSED" then "closed" else "open" end),
-        status:  (.status // null),
-        labels:  (.labels // [])
-     }))}')"
+     items: ($issues | map(
+        .content.repository as $repo
+        | .content.number as $num
+        | {item_id: .id,
+           repo:    $repo,
+           number:  $num,
+           title:   .content.title,
+           body:    (.content.body // ""),
+           state:   (if (($closed[$repo] // []) | index($num)) then "closed" else "open" end),
+           status:  (.status // null),
+           labels:  (.labels // [])
+        }))}')"
 
 case "$emit" in
     plan)  printf '%s\n' "$plan" ;;
-    repos) printf '%s\n' "$plan" | jq '.repos' ;;
+    repos) printf '%s\n' "$repos_json" ;;
     *) die_usage "unsupported --emit: $emit" ;;
 esac
