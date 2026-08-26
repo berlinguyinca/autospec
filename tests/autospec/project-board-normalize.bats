@@ -64,3 +64,58 @@ YML
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.items[0].normalized.priority == "critical"'
 }
+
+@test "stdin is not JSON at all: exit 0 with no output" {
+  printf '%s' "this is not json at all" > "$TMP/in.txt"
+  run bash "$SCRIPT" < "$TMP/in.txt"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "JSON stdin with no .items key: exit 0 and pass through" {
+  printf '%s' '{"foo":"bar"}' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.foo == "bar"'
+  echo "$output" | jq -e 'has("items") | not'
+}
+
+@test "an item with no labels key: exit 0 and add normalized with nulls" {
+  printf '%s' '{"items":[{"number":1}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].normalized.priority == null'
+  echo "$output" | jq -e '.items[0].normalized.ctx == null'
+}
+
+@test "an item with labels: null: exit 0 and add normalized with nulls" {
+  printf '%s' '{"items":[{"number":1,"labels":null}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].normalized.priority == null'
+  echo "$output" | jq -e '.items[0].normalized.area == null'
+}
+
+@test "an item with labels containing non-string elements: exit 0 and skip them" {
+  printf '%s' '{"items":[{"number":1,"labels":["priority:p0",null,123,"area:security"]}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].normalized.priority == "critical"'
+  echo "$output" | jq -e '.items[0].normalized.area == "security"'
+}
+
+@test "label-map valid YAML but wrong shape (list): degrade to fallback" {
+  printf '%s' "$(plan '["priority:p0"]')" > "$TMP/in.json"
+  printf '%s' '- item1\n- item2\n' > "$TMP/map.yml"
+  run bash "$SCRIPT" --label-map "$TMP/map.yml" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].normalized.priority == "critical"'
+}
+
+@test "label-map valid YAML but wrong shape (scalar): degrade to fallback" {
+  printf '%s' "$(plan '["priority:p0"]')" > "$TMP/in.json"
+  printf '%s' 'just a string' > "$TMP/map.yml"
+  run bash "$SCRIPT" --label-map "$TMP/map.yml" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].normalized.priority == "critical"'
+}
