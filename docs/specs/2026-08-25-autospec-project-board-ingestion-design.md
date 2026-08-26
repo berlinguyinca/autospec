@@ -43,7 +43,7 @@ Measured against the two live boards on `2026-08-25`:
 | `auto-implement` | 9 | few |
 | Hard-blocked | 15 `autospec:blocked-prerequisite` | **77/80** |
 | Dependency encoding | `autospec:blocked-prerequisite` + `cross-repo` labels | `## Dependencies` → `Blocked by: #N` in body (78/80) |
-| Priority labels | `priority:p0`, `priority:high` | `priority/critical`, `priority/normal` |
+| Priority labels | `priority:p0`, `priority:p1`, `priority:high` | `priority/critical`, `priority/high`, `priority/normal` |
 | Area labels | `area:security` | `area/security` |
 
 Three findings drive the design:
