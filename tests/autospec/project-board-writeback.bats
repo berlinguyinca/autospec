@@ -44,7 +44,8 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --plan "$TMP/blocked.json" --item PVTI_a --state Blocked
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'already in state Blocked'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a gh failure is fail-open and emits the code_health marker" {
@@ -56,22 +57,26 @@ teardown() { rm -rf "$TMP"; }
 @test "a token without the project scope disables write-back with one warning" {
   GH_SCOPE_OK=0 run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
   echo "$output" | grep -q 'project scope'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a board without an AutoSpec state field is skipped, never created" {
   jq 'del(.fields.autospec_state)' "$TMP/plan.json" > "$TMP/nofield.json"
   run bash "$SCRIPT" --plan "$TMP/nofield.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
-  ! grep -q 'field-create' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+  run grep -q 'field-create' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "an unknown state name is skipped, never invented as an option" {
   run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Nonsense
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 # ── Controller amendment: candidate resolution ──────────────────────────────
@@ -89,15 +94,18 @@ teardown() { rm -rf "$TMP"; }
      "$TMP/plan.json" > "$TMP/both.json"
   run bash "$SCRIPT" --plan "$TMP/both.json" --item PVTI_a --state Implementation
   grep -q 'o_impl' "$GH_CALLS"
-  ! grep -q 'o_ip' "$GH_CALLS"
+  run grep -q 'o_ip' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a canonical state with no matching candidate skips without creating an option" {
   jq '.fields.autospec_state.options = {"Ready":"o_r"}' "$TMP/plan.json" > "$TMP/thin.json"
   run bash "$SCRIPT" --plan "$TMP/thin.json" --item PVTI_a --state Testing
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
-  ! grep -q 'field-create' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+  run grep -q 'field-create' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 # ── Degenerate-input guards ──────────────────────────────────────────────────
@@ -106,7 +114,8 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'missing --plan'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a --plan file that is not JSON exits 0 with a reason" {
@@ -114,14 +123,16 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --plan "$TMP/bad.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'not valid JSON'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a plan with no .fields is skipped, never crashes" {
   echo '{"project":{"id":"PVT_1"},"items":[{"item_id":"PVTI_a","autospec_state":"Blocked"}]}' > "$TMP/nofields.json"
   run bash "$SCRIPT" --plan "$TMP/nofields.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a plan with no .items is skipped, never crashes" {
@@ -129,35 +140,40 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --plan "$TMP/noitems.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'not found in plan'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "an --item id not present in the plan is skipped" {
   run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_ZZZ --state Ready
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'not found in plan'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "an empty --state is skipped" {
   run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state ""
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'missing --state'
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a null .fields.autospec_state.options is skipped, never crashes" {
   jq '.fields.autospec_state.options = null' "$TMP/plan.json" > "$TMP/nulloptions.json"
   run bash "$SCRIPT" --plan "$TMP/nulloptions.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 @test "a wrong-type .fields.autospec_state.options is skipped, never crashes" {
   jq '.fields.autospec_state.options = ["Ready","Done"]' "$TMP/plan.json" > "$TMP/arrayoptions.json"
   run bash "$SCRIPT" --plan "$TMP/arrayoptions.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  ! grep -q 'item-edit' "$GH_CALLS"
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
 }
 
 # ── Finding I3 / NEW-1: the token-scope probe is cached for at most one run,
