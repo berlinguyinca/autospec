@@ -120,9 +120,13 @@ SH
 #    instead of `#N` references. ─────────────────────────────────────────────
 
 @test "an item with an unparseable declared dependency is never promotable" {
-  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
-    {"item_id":"PVTI_audit","repo":"o/r","number":80,"state":"open","labels":[],"body":"## Dependencies\nBlocked by the whole IW-WB-001..078 portfolio.\n"}
-  ]}'
+  # Verbatim body (not a paraphrase) so this cannot drift from the real
+  # board: the whole point is that item #80's REAL prose keeps the final
+  # audit from promoting ahead of the 78 issues it audits.
+  audit_body="$(jq -r '.items[] | select(.content.number == 80) | .content.body' "${BATS_TEST_DIRNAME}/../fixtures/project-board/p2-items.json")"
+  [ -n "$audit_body" ]
+  board_fixture="$(jq -n --arg body "$audit_body" '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_audit","repo":"o/r","number":80,"state":"open","labels":[],"body":$body}]}')"
+  board "$board_fixture"
   run bash "$SCRIPT" --repo o/r
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.board.ready == 0'
@@ -175,4 +179,93 @@ SH
   AUTOSPEC_GROOMING_POLICY=off run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   [ ! -s "$TMP/wb.log" ]
+}
+
+# ── Admission control: board promotions share ONE per-cycle budget with the
+#    GROOM_LIST path (budget.max_issues_per_cycle), never a second one ─────
+
+@test "a board with more ready items than the budget promotes exactly budget, in ranked order, and reports the truncation" {
+  export AUTOSPEC_GROOMING_MAX_ISSUES=2
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_1","repo":"o/r","number":1,"state":"open","labels":[],"body":"Blocked by: none."},
+    {"item_id":"PVTI_2","repo":"o/r","number":2,"state":"open","labels":["priority:critical"],"body":"Blocked by: none."},
+    {"item_id":"PVTI_3","repo":"o/r","number":3,"state":"open","labels":["priority:high"],"body":"Blocked by: none."},
+    {"item_id":"PVTI_4","repo":"o/r","number":4,"state":"open","labels":[],"body":"Blocked by: none."}
+  ]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  # ranked order is [2,3,1,4] (critical, high, then null-priority by number);
+  # a budget of 2 promotes exactly the top two of that ranking.
+  echo "$output" | jq -e '.board.promotable == [2,3,1,4]'
+  echo "$output" | jq -e '(.promoted | sort) == [2,3]'
+  echo "$output" | jq -e '.board.truncated == 2'
+}
+
+@test "a shared budget already partly consumed by the grooming path leaves only the remainder for the board" {
+  export AUTOSPEC_GROOMING_MAX_ISSUES=3
+  export AUTOSPEC_GROOM_LIST_SCRIPT="$TMP/list.sh"
+  cat > "$TMP/list.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"candidates":[{"number":101,"title":"t","class":"unlabeled"},{"number":102,"title":"t","class":"unlabeled"}],"skipped":[]}'
+SH
+  chmod +x "$TMP/list.sh"
+
+  export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/elig.sh"
+  cat > "$TMP/elig.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"decision":"eligible","reason":"stub"}'
+SH
+  chmod +x "$TMP/elig.sh"
+
+  # gh: `issue view` returns a pre-classified fixture (finalize_ready then
+  # skips classification); everything else still logs to GH_CALLS.
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "gh $*" >> "$GH_CALLS"
+case "$*" in
+  *"issue view"*) printf '{"number":%s,"title":"t","body":"b","labels":[{"name":"ctx:64k"},{"name":"reasoning:medium"}]}' "$3" ;;
+  *"issue list"*) printf '[]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"
+
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."},
+    {"item_id":"PVTI_b","repo":"o/r","number":6,"state":"open","labels":[],"body":"Blocked by: none."}
+  ]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  # grooming already promoted 2 of the shared budget of 3, leaving exactly 1
+  # for the board (item 5, the lower ranked number) — item 6 is truncated.
+  echo "$output" | jq -e '(.promoted | sort) == [5,101,102]'
+  echo "$output" | jq -e '.board.truncated == 1'
+}
+
+@test "a zero board budget promotes nothing and reports every ready item as truncated" {
+  export AUTOSPEC_GROOMING_MAX_ISSUES=0
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board.promotable == [5]'
+  echo "$output" | jq -e '.board.truncated == 1'
+  echo "$output" | jq -e '(.promoted | length) == 0'
+}
+
+@test "a malformed budget falls back to the existing default, not zero admission" {
+  cat > "$TMP/config.sh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"policy"*) printf 'auto\n' ;;
+  *"budget.max_issues_per_cycle"*) printf 'not-a-number\n' ;;
+  *) printf '\n' ;;
+esac
+SH
+  chmod +x "$TMP/config.sh"
+  export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/config.sh"
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board.truncated == 0'
+  echo "$output" | jq -e '(.promoted | index(5)) != null'
 }

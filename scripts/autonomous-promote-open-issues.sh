@@ -224,6 +224,12 @@ if ! printf '%s' "$board_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
     board_json='{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
 fi
 
+# Admission control (shared with GROOM_LIST — see the board apply loop below):
+# how many ready board items were withheld this cycle purely because the
+# shared per-cycle budget ran out. Always defined (0 outside --apply) so the
+# envelope can report it honestly rather than reading as "nothing was ready".
+board_truncated=0
+
 # Write-back is advisory: a board mutation failure must never fail a
 # promotion that already succeeded. Fires only under --apply AND policy
 # auto|on — never in report-only mode.
@@ -283,7 +289,7 @@ emit_json() {
         --slurpfile held "$HELD_FILE" \
         --slurpfile quarantined "$QUARANTINED_FILE" \
         --slurpfile routed "$ROUTED_FILE" \
-        --argjson board "$(printf '%s' "$board_json" | jq 'del(.items)' 2>/dev/null || printf '%s' "$board_json")" \
+        --argjson board "$(printf '%s' "$board_json" | jq --argjson truncated "$board_truncated" 'del(.items) + {truncated: $truncated}' 2>/dev/null || printf '%s' "$board_json")" \
         --arg reason "$reason" \
         '{dry:$dry, filed:$filed, promoted:$promoted,
           skipped:$skipped[0], held:$held[0],
@@ -537,6 +543,27 @@ done
 #   promoted to auto-implement    -> Ready
 #   carries in-progress-by-bot    -> Implementation
 #   carries autospec:needs-human  -> Blocked
+#
+# Admission control: board promotions share ONE per-cycle budget
+# (budget.max_issues_per_cycle) with the GROOM_LIST path above — never a
+# second, independent budget. `grooming_promoted_count` is however many the
+# GROOM_LIST loop already promoted this cycle (via `eligible`); the board may
+# promote at most `budget - grooming_promoted_count`. board_json's `items`
+# list is already ranked (ready-first, then priority, null-priority last),
+# so processing it in order and stopping at the remaining budget always
+# keeps the top of the ranking — never an arbitrary slice. Anything past the
+# cutoff is left untouched (no mutation, no write-back) and counted in
+# board_truncated so the envelope reports the truncation instead of reading
+# as "nothing else was ready".
+grooming_promoted_count=0
+if [ -n "$promoted_nums" ]; then
+    grooming_promoted_count="$(printf '%s\n' $promoted_nums | awk 'NF' | wc -l | tr -d ' ')"
+fi
+board_budget_remaining=$((budget - grooming_promoted_count))
+if [ "$board_budget_remaining" -lt 0 ]; then
+    board_budget_remaining=0
+fi
+
 board_apply_item() {
     bai_item="$1"; bai_num="$2"; bai_ready="$3"; bai_labels="$4"
 
@@ -557,12 +584,18 @@ board_apply_item() {
         return 0
     fi
 
+    if [ "$board_budget_remaining" -le 0 ]; then
+        board_truncated=$((board_truncated + 1))
+        return 0
+    fi
+
     rust_safety_result="hold"
     ensure_label "auto-implement"
     if review_admitted_issue "$bai_num"; then
         audit_comment "$bai_num" "grooming: promoted to auto-implement — board-ready."
         promoted_nums="${promoted_nums}${promoted_nums:+ }${bai_num}"
         board_writeback "$bai_item" "Ready"
+        board_budget_remaining=$((board_budget_remaining - 1))
     else
         record_rust_safety_result "$bai_num"
     fi
