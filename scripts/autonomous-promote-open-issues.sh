@@ -67,6 +67,17 @@ GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-elig
 GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
 GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
 
+# Tier 1.5 board source (Tasks 8/10): env vars are the shell-side contract —
+# the conductor exports them from the validated Rust ProjectBoardConfig, so
+# this script never parses the board YAML itself.
+BOARD_RESOLVE="${AUTOSPEC_BOARD_RESOLVE_SCRIPT:-$SCRIPT_DIR/project-board-resolve.sh}"
+BOARD_NORMALIZE="${AUTOSPEC_BOARD_NORMALIZE_SCRIPT:-$SCRIPT_DIR/project-board-normalize.sh}"
+BOARD_DEPS="${AUTOSPEC_BOARD_DEPS_SCRIPT:-$SCRIPT_DIR/project-board-deps.sh}"
+BOARD_TTL="${AUTOSPEC_PROJECT_BOARD_TTL:-300}"
+case "$BOARD_TTL" in
+    ''|*[!0-9]*) BOARD_TTL=300 ;;
+esac
+
 usage() {
     cat <<'EOF'
 autonomous-promote-open-issues.sh — Tier 1.5 backlog-grooming orchestrator
@@ -126,6 +137,92 @@ case "$budget" in
     ''|*[!0-9]*) budget=10 ;;
 esac
 
+# ── Board source (Tasks 8/10) ──────────────────────────────────────────────────
+# BOARD_CACHE is set as a side effect of board_plan() to the path of the cached
+# plan JSON so downstream readers (board_stage, write-back) share one file.
+BOARD_CACHE=""
+
+# Resolve the board once per TTL. N repo workers across a fleet each invoke
+# this orchestrator independently, so caching the resolved+normalized+
+# dependency-resolved plan on disk keyed by URL means the fleet costs one
+# board read per TTL, not one per worker.
+board_plan() {
+    _url="${AUTOSPEC_PROJECT_BOARD_URL:-}"
+    if [ -z "$_url" ]; then
+        BOARD_CACHE="$(mktemp -t board-empty.XXXXXX)"
+        printf '{"items":[]}' > "$BOARD_CACHE"
+        return 0
+    fi
+
+    _cache_dir="${AUTOSPEC_STATE_DIR:-$HOME/.autospec}/board-cache"
+    mkdir -p "$_cache_dir"
+    _cache="$_cache_dir/$(printf '%s' "$_url" | shasum | cut -c1-16).json"
+    if [ -f "$_cache" ]; then
+        _mtime="$(stat -f %m "$_cache" 2>/dev/null || stat -c %Y "$_cache" 2>/dev/null || printf '0')"
+        _age=$(( $(date +%s) - _mtime ))
+        if [ "$_age" -lt "$BOARD_TTL" ]; then
+            BOARD_CACHE="$_cache"
+            return 0
+        fi
+    fi
+
+    # Fail-closed: any resolver failure (bad URL, auth, truncated read) yields
+    # an empty board, never a partial/garbage promotion.
+    if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --emit plan 2>/dev/null)"; then
+        if printf '%s' "$_plan" \
+             | bash "$BOARD_NORMALIZE" ${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:+--label-map "$AUTOSPEC_PROJECT_BOARD_LABEL_MAP"} \
+             | bash "$BOARD_DEPS" --resolve > "$_cache.tmp" 2>/dev/null; then
+            mv "$_cache.tmp" "$_cache"
+        else
+            printf '{"items":[]}' > "$_cache"
+        fi
+    else
+        printf '{"items":[]}' > "$_cache"
+    fi
+    BOARD_CACHE="$_cache"
+}
+
+# Reduce the cached plan to the Tier 1.5 board envelope. Allowlist matching
+# uses --arg + a literal prefix/equality compare, never jq test() — a repo
+# name is board-controlled data and may contain regex metacharacters.
+board_stage() {
+    jq --arg repo "$repo" --arg allow "${AUTOSPEC_PROJECT_BOARD_ALLOWLIST:-}" '
+      def allowed($r):
+        ($allow | split(",") | map(select(length > 0))) as $pats
+        | if ($pats | length) == 0 then false
+          else $pats | map(
+              (. | rtrimstr("*")) as $p
+              | if endswith("*") then ($r | startswith($p)) else ($r == .) end) | any
+          end;
+      # Priority rank for stable promotion ordering. A missing/unrecognized
+      # priority label ranks LAST (4) — never highest — so an unprioritized
+      # item never jumps ahead of a genuinely prioritized one. Measured: 30
+      # of 80 items on the p1 board carry no priority label at all.
+      def prio_rank:
+        {"critical":0,"high":1,"normal":2,"low":3}[(.normalized.priority // "")] // 4;
+      ([.items[]? | select(.repo == $repo and allowed(.repo))]
+        | sort_by([(if .ready == true then 0 else 1 end), prio_rank, .number])) as $own
+      | ([$own[] | select(.ready == true)]) as $ready
+      | {
+          ready:        ($ready | length),
+          promotable:   [$ready[] | .number],
+          out_of_scope: [.items[]? | select(allowed(.repo) | not) | {repo: .repo, number: .number}],
+          demoted:      [],
+          items:        [$own[] | {
+                           item_id: .item_id,
+                           number:  .number,
+                           ready:   (.ready == true),
+                           labels:  ([.labels[]? | select(type == "string")] | join(","))
+                         }]
+        }' "$BOARD_CACHE" 2>/dev/null || printf '{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
+}
+
+board_plan
+board_json="$(board_stage)"
+if ! printf '%s' "$board_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    board_json='{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
+fi
+
 # ── Accumulators ──────────────────────────────────────────────────────────────
 promoted_nums=""
 SKIPPED_FILE="$(mktemp -t promote-skipped.XXXXXX)"
@@ -175,10 +272,12 @@ emit_json() {
         --slurpfile held "$HELD_FILE" \
         --slurpfile quarantined "$QUARANTINED_FILE" \
         --slurpfile routed "$ROUTED_FILE" \
+        --argjson board "$(printf '%s' "$board_json" | jq 'del(.items)' 2>/dev/null || printf '%s' "$board_json")" \
         --arg reason "$reason" \
         '{dry:$dry, filed:$filed, promoted:$promoted,
           skipped:$skipped[0], held:$held[0],
-          quarantined:$quarantined[0], routed:$routed[0], reason:$reason}'
+          quarantined:$quarantined[0], routed:$routed[0], reason:$reason,
+          board:$board}'
 }
 
 # ── Fetch candidate set from the deterministic selector ───────────────────────
@@ -417,6 +516,33 @@ while [ "$i" -lt "$cand_count" ]; do
             ;;
     esac
 done
+
+# ── Board apply loop (Task 8) ───────────────────────────────────────────────
+# A genuinely ready board item is routed through the SAME Rust safety-stamp +
+# auto-implement transition used above for `eligible` candidates — no second
+# mutation path.
+if [ "$apply_enabled" = "1" ]; then
+    board_promo_count="$(printf '%s' "$board_json" | jq '.promotable | length' 2>/dev/null || printf '0')"
+    case "$board_promo_count" in
+        ''|*[!0-9]*) board_promo_count=0 ;;
+    esac
+    bpi=0
+    while [ "$bpi" -lt "$board_promo_count" ]; do
+        b_num="$(printf '%s' "$board_json" | jq -r ".promotable[$bpi] // empty" 2>/dev/null || printf '')"
+        bpi=$((bpi + 1))
+        if [ -z "$b_num" ]; then
+            continue
+        fi
+        rust_safety_result="hold"
+        ensure_label "auto-implement"
+        if review_admitted_issue "$b_num"; then
+            audit_comment "$b_num" "grooming: promoted to auto-implement — board-ready."
+            promoted_nums="${promoted_nums}${promoted_nums:+ }${b_num}"
+        else
+            record_rust_safety_result "$b_num"
+        fi
+    done
+fi
 
 # ── Emit result ───────────────────────────────────────────────────────────────
 if [ -n "$promoted_nums" ]; then
