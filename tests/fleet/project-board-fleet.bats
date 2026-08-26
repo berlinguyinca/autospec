@@ -57,6 +57,17 @@ SH
     chmod +x "$TMP/bin/autospec"
     export PATH="$TMP/bin:$PATH"
 
+    # fleet-run.sh resolves its queue binary as
+    # AUTOSPEC_FLEET_QUEUE_BIN -> AUTOSPEC_QUEUE_BIN -> AUTOSPEC_BIN ->
+    # $repo_root/target/debug/autospec -> `command -v autospec` (PATH) — the
+    # built target/debug binary is preferred *over* PATH. Prepending PATH
+    # above is not enough: in a worktree that has ever been `cargo build`-ed,
+    # target/debug/autospec exists and wins, so queue_has_work would invoke
+    # the REAL autospec binary against these fake o/a and o/b repos instead
+    # of this stub. Pin the highest-precedence seam explicitly so the stub
+    # always wins regardless of what exists in target/ or on PATH.
+    export AUTOSPEC_FLEET_QUEUE_BIN="$TMP/bin/autospec"
+
     cat > "$TMP/fleet.yml" <<YML
 version: 1
 workspace: $TMP/ws
