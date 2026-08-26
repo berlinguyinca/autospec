@@ -28,7 +28,7 @@ Or via the top-level suite installer:
 
 ```text
 /autospec-project <url>          # resolve and print the plan; zero mutation
-/autospec-project ship <url>     # resolve -> fleet config -> conductors, unattended
+/autospec-project ship <url>     # resolve -> fleet config -> pending-execution report
 /autospec-project sync <url>     # one promotion pass, no drain
 /autospec-project status <url>   # board-scoped queue, workers, PRs, blockers
 ```
