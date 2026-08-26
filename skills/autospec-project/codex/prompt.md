@@ -66,9 +66,13 @@ retry rather than trusting the partial plan.
 
 `sync <url>` runs exactly one Tier 1.5 promotion cycle against the board and
 stops — it does not start a conductor, does not drain the queue, and does
-not loop. This is the on-demand version of the promotion pass the
-autonomous conductor already runs every `AUTOSPEC_PROJECT_BOARD_TTL` seconds
-when `project_board.url` is configured in `.autospec/autonomous.yml`.
+not loop. As of this writing, `/autospec-autonomous` does NOT read
+`project_board:` from `.autospec/autonomous.yml` on its own: the Rust
+`ProjectBoardConfig` parses and validates that block, but nothing wires its
+values into the shell conductor or exports the env vars the promoter reads
+(`AUTOSPEC_PROJECT_BOARD_URL`, `_ALLOWLIST`, `_TTL`, `_LABEL_MAP`). Until
+that wiring lands, this `sync` mode — invoked by hand, or on a schedule —
+is the only way a configured board actually reaches the promoter.
 
 Read `project_board.repo_allowlist` from `.autospec/autonomous.yml` (it is
 required whenever `project_board.url` is set — the Rust config parser

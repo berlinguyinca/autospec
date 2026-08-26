@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # Coverage for the Tier 1.5 board source in scripts/autonomous-promote-open-issues.sh.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   TMP="$(mktemp -d)"; mkdir -p "$TMP/bin"
   SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/autonomous-promote-open-issues.sh"
@@ -252,6 +254,51 @@ SH
   echo "$output" | jq -e '(.promoted | length) == 0'
 }
 
+# ── C1: concurrent workers must never crash the whole Tier 1.5 pass ─────────
+# board_plan() used to write every worker's resolved plan to the SAME fixed
+# "$_cache.tmp" path before mv-ing it into place. The winner's mv succeeded;
+# every other worker's mv then failed (source already renamed away) and
+# aborted the whole script under `set -eu`, before the grooming loop even
+# ran — a fleet-wide silent Tier 1.5 stall. A small sleep in the resolver
+# stub widens the race window so N workers reliably overlap at the mv step
+# regardless of process-spawn jitter, without weakening the assertion (a
+# false pass would still need real overlap; this only removes flakiness).
+
+@test "C1: N concurrent workers racing the same board cache all exit 0 with a valid envelope" {
+  cat > "$TMP/resolve.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.2
+cat <<'JSON'
+{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+
+  n=6
+  for i in $(seq 1 "$n"); do
+    # Under bats' `set -e`, "cmd; echo $?" never reaches the echo when cmd
+    # fails — the subshell aborts right after the failing command. Capture
+    # the status through `||` (a checked context) instead.
+    ( rc=0
+      bash "$SCRIPT" --repo o/r >"$TMP/out.$i" 2>"$TMP/err.$i" || rc="$?"
+      printf '%s' "$rc" >"$TMP/rc.$i"
+    ) &
+  done
+  wait
+
+  fail_count=0
+  for i in $(seq 1 "$n"); do
+    rc="$(cat "$TMP/rc.$i")"
+    if [ "$rc" -ne 0 ]; then
+      fail_count=$((fail_count + 1))
+      echo "worker $i rc=$rc stderr=$(cat "$TMP/err.$i")"
+    fi
+    [ "$rc" -eq 0 ]
+    jq -e 'type == "object"' "$TMP/out.$i" >/dev/null
+  done
+  [ "$fail_count" -eq 0 ]
+}
+
 @test "a malformed budget falls back to the existing default, not zero admission" {
   cat > "$TMP/config.sh" <<'SH'
 #!/usr/bin/env bash
@@ -268,4 +315,74 @@ SH
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.board.truncated == 0'
   echo "$output" | jq -e '(.promoted | index(5)) != null'
+}
+
+# ── I6: cycle handling must not be a silent dead end ────────────────────────
+
+@test "I6: a dependency cycle surfaces the code_health marker on stderr" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_1","repo":"o/r","number":1,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #2.\n"},
+    {"item_id":"PVTI_2","repo":"o/r","number":2,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}
+  ]}'
+  run --separate-stderr bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board.ready == 0'
+  [[ "$stderr" == *"code_health:project_board_dependency_cycle"* ]]
+}
+
+@test "I6: cycle participants are reported in the envelope and never promotable" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_1","repo":"o/r","number":1,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #2.\n"},
+    {"item_id":"PVTI_2","repo":"o/r","number":2,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}
+  ]}'
+  run --separate-stderr bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '(.board.cycle_participants | sort) == [1,2]'
+  echo "$output" | jq -e '[.board.promotable[]?] | length == 0'
+}
+
+@test "I6: --apply labels cycle participants autospec:needs-human and audits, without promoting them" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_1","repo":"o/r","number":1,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #2.\n"},
+    {"item_id":"PVTI_2","repo":"o/r","number":2,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}
+  ]}'
+  AUTOSPEC_GROOMING_POLICY=auto run --separate-stderr bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '(.promoted | length) == 0'
+  grep -q -- 'issue edit 1 --repo o/r --add-label autospec:needs-human' "$GH_CALLS"
+  grep -q -- 'issue edit 2 --repo o/r --add-label autospec:needs-human' "$GH_CALLS"
+}
+
+@test "I6: without --apply, cycle participants are never labeled" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[
+    {"item_id":"PVTI_1","repo":"o/r","number":1,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #2.\n"},
+    {"item_id":"PVTI_2","repo":"o/r","number":2,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}
+  ]}'
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  ! grep -q 'add-label autospec:needs-human' "$GH_CALLS"
+}
+
+@test "I6: an acyclic board reports zero cycle participants" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board.cycle_participants == []'
+}
+
+# ── M4: `.board.promotable` must mean what it says ──────────────────────────
+
+@test "M4: a ready item already labeled autospec:needs-human is excluded from promotable" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":["autospec:needs-human"],"body":"Blocked by: none."}]}'
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board.ready == 1'
+  echo "$output" | jq -e '[.board.promotable[]?] | index(5) == null'
+}
+
+@test "M4: a ready item already labeled in-progress-by-bot is excluded from promotable" {
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":["in-progress-by-bot"],"body":"Blocked by: none."}]}'
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.board.promotable[]?] | index(5) == null'
 }

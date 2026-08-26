@@ -103,6 +103,21 @@ die() {
     exit 2
 }
 
+# ── Audit-comment / label helpers ───────────────────────────────────────────
+# Defined early (used both by the report-only-vs-apply gate below for I6
+# cycle labeling, and by the later grooming/board apply loops) — depend only
+# on $repo, resolved just below.
+audit_comment() {
+    # $1 = issue number, $2 = body text
+    gh issue comment "$1" --repo "$repo" --body "$2" >/dev/null 2>&1 || true
+}
+
+ensure_label() {
+    # $1 = label name. Created WITHOUT --force so we never recolor a pre-existing
+    # repo label (cosmetic-mutation guard).
+    gh label create "$1" --repo "$repo" >/dev/null 2>&1 || true
+}
+
 repo=""
 apply_flag=0
 
@@ -167,17 +182,39 @@ board_plan() {
         fi
     fi
 
+    # Per-process tmp path (C1 fix): N fleet workers can race board_plan() at
+    # the same TTL boundary. The old code wrote every worker's output to the
+    # SAME fixed "$_cache.tmp" path — the winner's mv succeeded, then every
+    # other worker's mv failed (source already renamed away by the winner)
+    # and aborted the whole script under `set -eu`, BEFORE the non-board
+    # grooming loop below ever ran. That meant a multi-worker fleet's
+    # ordinary Tier 1.5 pass silently died too, every TTL boundary. Suffixing
+    # with $$ and $RANDOM gives every worker its own source path, so no mv
+    # can ever race another worker's. The mv (and the two fallback writes,
+    # which used to write "$_cache" directly and non-atomically) are all
+    # guarded with `|| true` as defense-in-depth: any leftover failure (e.g.
+    # the cache dir vanishing mid-run) degrades to an empty/stale board
+    # rather than crashing this script.
+    _tmp="$_cache.$$.${RANDOM:-0}.tmp"
+
     # Fail-closed: any resolver failure (bad URL, auth, truncated read) yields
     # an empty board, never a partial/garbage promotion.
-    if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --emit plan 2>/dev/null)"; then
-        if printf '%s' "$_plan" \
+    if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --emit plan 2>/dev/null)" \
+        && printf '%s' "$_plan" \
              | bash "$BOARD_NORMALIZE" ${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:+--label-map "$AUTOSPEC_PROJECT_BOARD_LABEL_MAP"} \
-             | bash "$BOARD_DEPS" --resolve > "$_cache.tmp" 2>/dev/null; then
-            mv "$_cache.tmp" "$_cache"
-        else
-            printf '{"items":[]}' > "$_cache"
-        fi
+             | bash "$BOARD_DEPS" --resolve > "$_tmp" 2>/dev/null; then
+        mv -f "$_tmp" "$_cache" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
     else
+        rm -f "$_tmp" 2>/dev/null || true
+        if printf '{"items":[]}' > "$_tmp" 2>/dev/null; then
+            mv -f "$_tmp" "$_cache" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+        fi
+    fi
+
+    if [ ! -f "$_cache" ]; then
+        # Extremely defensive: even the fallback write failed (e.g. disk
+        # full, cache dir gone) — never crash, synthesize an empty board.
+        _cache="$(mktemp -t board-empty.XXXXXX)"
         printf '{"items":[]}' > "$_cache"
     fi
     BOARD_CACHE="$_cache"
@@ -188,6 +225,7 @@ board_plan() {
 # name is board-controlled data and may contain regex metacharacters.
 board_stage() {
     jq --arg repo "$repo" --arg allow "${AUTOSPEC_PROJECT_BOARD_ALLOWLIST:-}" '
+      def key($it): "\($it.repo)#\($it.number)";
       def allowed($r):
         ($allow | split(",") | map(select(length > 0))) as $pats
         | if ($pats | length) == 0 then false
@@ -201,27 +239,74 @@ board_stage() {
       # of 80 items on the p1 board carry no priority label at all.
       def prio_rank:
         {"critical":0,"high":1,"normal":2,"low":3}[(.normalized.priority // "")] // 4;
-      ([.items[]? | select(.repo == $repo and allowed(.repo))]
+      # M4: an item the apply loop will hard-stop on before it ever reaches
+      # the safety authority (already carries autospec:needs-human or
+      # in-progress-by-bot — see board_apply_item) must not be reported as
+      # `promotable`; that field previously meant only "ready", which
+      # overstated what the code would actually promote.
+      def blocked_from_promotion:
+        ((.labels // []) | map(select(type == "string"))) as $ls
+        | ($ls | any(. == "autospec:needs-human" or . == "in-progress-by-bot"));
+      # I6: project-board-deps.sh --resolve computes a graph-wide .cycles —
+      # a fixpoint over every item NOT already deps-satisfied, so it lumps
+      # genuine cycle members with anything transitively downstream of one
+      # (documented, accepted imprecision — deferred item 4). Scoped down to
+      # $own below so only items in the owning repo, inside the allowlist,
+      # are ever surfaced or labeled.
+      ((.cycles // []) | flatten) as $cycle_keys
+      | ([.items[]? | select(.repo == $repo and allowed(.repo))]
         | sort_by([(if .ready == true then 0 else 1 end), prio_rank, .number])) as $own
       | ([$own[] | select(.ready == true)]) as $ready
       | {
           ready:        ($ready | length),
-          promotable:   [$ready[] | .number],
+          promotable:   [$ready[] | select(blocked_from_promotion | not) | .number],
           out_of_scope: [.items[]? | select(allowed(.repo) | not) | {repo: .repo, number: .number}],
           demoted:      [],
+          cycle_participants: [$own[] | select((key(.)) as $k | ($cycle_keys | index($k)) != null) | .number],
           items:        [$own[] | {
                            item_id: .item_id,
                            number:  .number,
                            ready:   (.ready == true),
                            labels:  ([.labels[]? | select(type == "string")] | join(","))
                          }]
-        }' "$BOARD_CACHE" 2>/dev/null || printf '{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
+        }' "$BOARD_CACHE" 2>/dev/null || printf '{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"cycle_participants":[],"items":[]}'
 }
 
 board_plan
 board_json="$(board_stage)"
 if ! printf '%s' "$board_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    board_json='{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
+    board_json='{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"cycle_participants":[],"items":[]}'
+fi
+
+# ── I6: cycle visibility ────────────────────────────────────────────────────
+# Cycle members are already ready:false (fail-closed, computed upstream by
+# project-board-deps.sh --resolve — verified end to end), so they were never
+# promotable; a stalled board previously gave the operator zero signal ("Tier
+# 1.5 dry" forever). This surfaces the spec'd code_health marker unconditionally
+# (pure observability — runs in report-only mode too, before the report-only
+# early exit below) and, only under --apply, labels each participant
+# `autospec:needs-human` — scoped to $own by board_stage, so only items in
+# the owning repo, inside the allowlist, are ever touched.
+cycle_count="$(printf '%s' "$board_json" | jq '.cycle_participants | length' 2>/dev/null || printf '0')"
+case "$cycle_count" in
+    ''|*[!0-9]*) cycle_count=0 ;;
+esac
+if [ "$cycle_count" -gt 0 ]; then
+    printf 'code_health:project_board_dependency_cycle repo=%s participants=%s\n' \
+        "$repo" "$cycle_count" >&2
+    if [ "$apply_enabled" = "1" ]; then
+        ci=0
+        while [ "$ci" -lt "$cycle_count" ]; do
+            c_num="$(printf '%s' "$board_json" | jq -r ".cycle_participants[$ci] // empty" 2>/dev/null || printf '')"
+            ci=$((ci + 1))
+            if [ -z "$c_num" ]; then
+                continue
+            fi
+            ensure_label "autospec:needs-human"
+            gh issue edit "$c_num" --repo "$repo" --add-label "autospec:needs-human" >/dev/null 2>&1 || true
+            audit_comment "$c_num" "grooming: dependency chain contains a cycle - held for human (autospec:needs-human)."
+        done
+    fi
 fi
 
 # Admission control (shared with GROOM_LIST — see the board apply loop below):
@@ -324,18 +409,6 @@ while [ "$i" -lt "$list_skip_count" ]; do
     fi
     i=$((i + 1))
 done
-
-# ── Audit-comment helper ──────────────────────────────────────────────────────
-audit_comment() {
-    # $1 = issue number, $2 = body text
-    gh issue comment "$1" --repo "$repo" --body "$2" >/dev/null 2>&1 || true
-}
-
-ensure_label() {
-    # $1 = label name. Created WITHOUT --force so we never recolor a pre-existing
-    # repo label (cosmetic-mutation guard).
-    gh label create "$1" --repo "$repo" >/dev/null 2>&1 || true
-}
 
 finalize_ready() {
     # $1 = issue number, $2 = authoritative body file used for classification,
