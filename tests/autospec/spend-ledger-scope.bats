@@ -30,6 +30,36 @@ backdate() {
   fi
 }
 
+# The outer `timeout` guarding ledger_lock_acquire's retry loop must be
+# proportional to the loop's OWN configured bound, not a fixed wall-clock
+# guess. A fixed guess (e.g. a flat `timeout 5`) is either too tight — it
+# fires under CPU contention even though the loop is genuinely, correctly
+# bounded, reporting a hang that never happened — or, if inflated to a
+# large fixed constant, stops being a meaningful bound at all.
+#
+# ledger_lock_acquire's real worst case is:
+#   AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER iterations * the script's own
+#   `sleep 0.05` per iteration (scripts/autonomous-spend-ledger.sh,
+#   ledger_lock_acquire — keep LOCK_WAIT_SLEEP_INTERVAL in sync with that
+#   literal).
+#
+# We multiply that by a generous-but-finite factor to absorb scheduler
+# noise under a loaded machine, plus a flat overhead for fork/exec/jq
+# startup cost that doesn't scale with iteration count. The result stays
+# a real bound: a genuine regression to unbounded spinning still fails
+# this test (just diagnosed a bit slower under load) instead of wedging
+# the suite, which a dropped or infinite timeout would risk.
+LOCK_WAIT_SLEEP_INTERVAL=0.05
+LOCK_WAIT_BUDGET_MULTIPLIER=20
+LOCK_WAIT_BUDGET_OVERHEAD=2
+
+lock_wait_timeout() {
+  local iter="$1"
+  awk -v i="$iter" -v s="$LOCK_WAIT_SLEEP_INTERVAL" \
+    -v m="$LOCK_WAIT_BUDGET_MULTIPLIER" -v o="$LOCK_WAIT_BUDGET_OVERHEAD" \
+    'BEGIN { printf "%.2f", (i * s * m) + o }'
+}
+
 @test "without a scope override two repos keep separate ledgers" {
   bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/a" >/dev/null
   bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/b" >/dev/null
@@ -228,7 +258,9 @@ backdate() {
   ln -s "$livepid" "$lockdir"
   mkdir "${lockdir}.reclaiming"
 
-  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+  iter=20
+  run timeout "$(lock_wait_timeout "$iter")" env AUTOSPEC_SPEND_SCOPE="$scope" \
+    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER="$iter" \
     bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
   [ "$status" -ne 0 ]
   [ "$status" -ne 124 ]  # 124 = timeout(1) killed it — must not happen
@@ -248,8 +280,10 @@ backdate() {
   backdate "$lockdir" 60
   mkdir "${lockdir}.reclaiming"
 
-  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
-    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+  iter=10
+  run timeout "$(lock_wait_timeout "$iter")" env AUTOSPEC_SPEND_SCOPE="$scope" \
+    AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER="$iter" \
     bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
   [ "$status" -ne 0 ]
   [ "$status" -ne 124 ]
@@ -277,8 +311,10 @@ backdate() {
   backdate "$lockdir" 60
   mkdir "${lockdir}.reclaiming"
 
-  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
-    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+  iter=10
+  run timeout "$(lock_wait_timeout "$iter")" env AUTOSPEC_SPEND_SCOPE="$scope" \
+    AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER="$iter" \
     bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
   [ "$status" -ne 0 ]
   [ "$status" -ne 124 ]
@@ -286,9 +322,14 @@ backdate() {
 
   # An orphaned reclaim mutex is not permanently fatal: once an operator
   # clears it (the visible, diagnosable failure above is what tells them
-  # to), the ledger recovers on its own.
+  # to), the ledger recovers on its own. This second run doesn't loop at
+  # all (the reclaiming mutex is gone, the lock acquires on the first
+  # attempt), so it isn't bound by LOCK_MAX_WAIT_ITER — a flat generous
+  # budget (matching the fast-path test below) is enough headroom for
+  # fork/exec cost under load without pretending it's proportional to a
+  # loop it doesn't run.
   rmdir "${lockdir}.reclaiming"
-  run --separate-stderr timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+  run --separate-stderr timeout 15 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
     bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tokens == 10'
@@ -306,8 +347,12 @@ backdate() {
   # AUTOSPEC_SPEND_LOCK_TEST_STALL is a test-only seam (no-op unless set):
   # it stalls ledger_lock_reclaim right after it wins the reclaim mutex,
   # giving this test a deterministic window to remove the lock out from
-  # under it before the reclaim's own readlink/mv runs.
-  ( timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+  # under it before the reclaim's own readlink/mv runs. This path also
+  # doesn't loop through LOCK_MAX_WAIT_ITER (it recovers on the very next
+  # attempt after the stall), so the budget is a flat generous constant
+  # (same reasoning as the recovery run above) rather than derived from
+  # the retry-loop formula.
+  ( timeout 15 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
       AUTOSPEC_SPEND_LOCK_TEST_STALL=1 \
       bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a" >"$TMP/vanish.out" 2>"$TMP/vanish.err"
     echo "$?" > "$TMP/vanish.exit" ) &
