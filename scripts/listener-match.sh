@@ -642,6 +642,41 @@ EOF
         return 0
     fi
 
+    # ── GitHub Projects board URL — route to /autospec-project (Task 12) ────
+    # A message containing a GitHub Projects v2 board URL
+    # (https://github.com/(orgs|users)/<name>/projects/<n>, optional
+    # /views/<n> suffix) carries board intent. Checked BEFORE the generic
+    # autospec/implement/build/ship branch below so this more specific route
+    # wins over a bare "autospec" or "ship" word in the same message (the
+    # acceptance phrase "autospec ship this project for me: <url>" contains
+    # both). URL + ship verb -> ship mode (autonomous multi-repo drain); URL
+    # alone -> bare resolve mode (zero mutation, prints the plan). The
+    # asymmetry is deliberate: reading a board is not a commitment to drain
+    # it. Extracted from the ORIGINAL (non-lower-cased) argument so org/user
+    # casing in the URL is preserved for the caller.
+    _project_url="$(printf '%s' "$1" | grep -oE 'https://github\.com/(orgs|users)/[A-Za-z0-9._-]+/projects/[0-9]+(/views/[0-9]+)?' | head -n1 || true)"
+    if [ -n "$_project_url" ]; then
+        _has_ship_verb=0
+        if has_word "$text_lc" "ship" || has_word "$text_lc" "build" \
+            || has_word "$text_lc" "implement"; then
+            _has_ship_verb=1
+        fi
+        if [ "$_has_ship_verb" -eq 1 ]; then
+            if is_imperative "$text_lc"; then
+                emit_classify_json true autospec-project project-ship imperative 0.85 "$is_auto" "" ""
+            else
+                emit_classify_json false autospec-project project-ship incidental 0.2 false "" ""
+            fi
+        else
+            if is_imperative "$text_lc"; then
+                emit_classify_json true autospec-project project-resolve imperative 0.7 false "" ""
+            else
+                emit_classify_json false autospec-project project-resolve incidental 0.2 false "" ""
+            fi
+        fi
+        return 0
+    fi
+
     # Existing branches (preserved in order).
     if has_word "$text_lc" "autospec"; then
         skill="autospec"; trigger="autospec"

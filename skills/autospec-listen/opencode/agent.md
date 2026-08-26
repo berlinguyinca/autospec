@@ -97,6 +97,30 @@ The two new trailing fields:
 | `explore` / `discover` (only with an explicit build/ship/improve action connector, e.g. "explore and ship", "discover features to build") | `/autospec-explore` (gate `explore-confirm`) |
 | `fix` (imperative, e.g. "fix the login flow"; trivial-fix phrasings like "fix the typo", "quick fix", "fix the formatting" stay plain) | the umbrella `/autospec` (no gate) |
 | `autospec …` | the umbrella `/autospec` |
+| GitHub Projects board URL (`https://github.com/(orgs\|users)/<name>/projects/<n>`, optional `/views/<n>`) **with** a build/ship verb (`ship` / `build` / `implement`) | `/autospec-project ship <url>` (no gate) |
+| GitHub Projects board URL alone, **no** build/ship verb | `/autospec-project <url>` (bare resolve — zero mutation, no gate) |
+
+**GitHub Projects board routing (Task 12).** A message that contains a GitHub
+Projects v2 board URL — `https://github.com/orgs/<org>/projects/<n>` or
+`https://github.com/users/<user>/projects/<n>`, optionally with a trailing
+`/views/<n>` — carries board intent, checked before the generic
+implement/build/ship and `autospec …` rows above so it wins over a bare
+`autospec` or `ship` word in the same message. The classifier reports this as
+skill `autospec-project` with trigger `project-ship` or `project-resolve`;
+extract the URL from the user's message with the same regex and build the
+command yourself, since the classifier does not echo the URL back:
+
+- **URL + ship verb** (e.g. "autospec ship this project for me:
+  `https://github.com/orgs/InferWeave/projects/2`") → invoke
+  `/autospec-project ship <url>`. `ship` starts autonomous multi-repo work,
+  so this requires the verb explicitly present — a bare URL never implies it.
+- **URL alone**, no ship verb (e.g. a pasted board link, or "what's on
+  `<url>`") → invoke `/autospec-project <url>` (bare mode: resolves and
+  prints the plan, performs zero mutation). Reading a board is not a
+  commitment to drain it — this asymmetry is deliberate.
+
+Both rows still honor the intent gate (biased to false-negatives) and the
+one-line opt-out below.
 
 **Auto-route behavior.** When the classifier returns `match:true` with `intent:imperative`, print exactly one line then invoke the mapped skill via the harness skill-invocation primitive:
 

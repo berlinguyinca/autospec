@@ -568,3 +568,148 @@ setup() {
     [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
     [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-run" ]
 }
+
+# ── GitHub Projects board URL routing (Task 12) ──────────────────────────────
+# A message with a GitHub Projects v2 board URL
+# (https://github.com/(orgs|users)/<name>/projects/<n>, optional
+# /views/<n>) routes to autospec-project. URL + ship/build/implement verb ->
+# trigger project-ship; URL alone -> trigger project-resolve, NEVER ship.
+# Checked before the generic autospec/implement/build/ship branch so it wins
+# over a bare "autospec" or "ship" word in the same message.
+
+@test "classify: operator's literal acceptance phrase → autospec-project, project-ship" {
+    run "$MATCH" --classify "autospec ship this project for me: https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+@test "classify: 'ship <url>' → autospec-project, project-ship" {
+    run "$MATCH" --classify "ship https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+@test "classify: 'implement <url>' → autospec-project, project-ship" {
+    run "$MATCH" --classify "implement https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+@test "classify: 'build everything on <url>' → autospec-project, project-ship" {
+    run "$MATCH" --classify "build everything on https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+@test "classify: 'ship' + a /users/ board URL → autospec-project, project-ship" {
+    run "$MATCH" --classify "ship https://github.com/users/berlinguyinca/projects/7"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+@test "classify: 'ship' + a board URL with a /views/3 suffix → autospec-project, project-ship" {
+    run "$MATCH" --classify "ship https://github.com/orgs/InferWeave/projects/2/views/3"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-ship" ]
+}
+
+# Asymmetry (the safety property): a board URL with NO ship/build/implement
+# verb resolves and prints the plan — it must NEVER route to ship.
+
+@test "classify: bare board URL alone → autospec-project, project-resolve (never ship)" {
+    run "$MATCH" --classify "https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-resolve" ]
+}
+
+@test "classify: \"what's on <url>\" → autospec-project, project-resolve (never ship)" {
+    run "$MATCH" --classify "what's on https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-resolve" ]
+}
+
+@test "classify: 'show me <url>' → autospec-project, project-resolve (never ship)" {
+    run "$MATCH" --classify "show me https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-resolve" ]
+}
+
+@test "classify: 'look at <url>' → autospec-project, project-resolve (never ship)" {
+    run "$MATCH" --classify "look at https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-project" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "project-resolve" ]
+}
+
+# Negative: non-Projects GitHub URLs must NOT route to autospec-project at all
+# — only /projects/<n> board URLs qualify, not issues, PRs, plain repos, or a
+# bare /repositories listing URL.
+
+@test "classify: 'ship' + a GitHub issue URL → NOT autospec-project" {
+    run "$MATCH" --classify "ship https://github.com/berlinguyinca/autospec/issues/42"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" != "autospec-project" ]
+}
+
+@test "classify: 'ship' + a GitHub PR URL → NOT autospec-project" {
+    run "$MATCH" --classify "ship https://github.com/berlinguyinca/autospec/pull/42"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" != "autospec-project" ]
+}
+
+@test "classify: 'ship' + a plain repo URL → NOT autospec-project" {
+    run "$MATCH" --classify "ship https://github.com/berlinguyinca/autospec"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" != "autospec-project" ]
+}
+
+@test "classify: 'ship' + a /repositories listing URL → NOT autospec-project" {
+    run "$MATCH" --classify "ship https://github.com/orgs/InferWeave/repositories"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" != "autospec-project" ]
+}
+
+# Negation must still win over the ship+URL co-occurrence: "please don't ship
+# yet, just look at <url>" must produce no route at all.
+
+@test "classify: \"please don't ship yet, just look at <url>\" → match:false, no route" {
+    run "$MATCH" --classify "please don't ship yet, just look at https://github.com/orgs/InferWeave/projects/2"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# Regression guards: a ship verb or bare "autospec" phrase with NO board URL
+# must keep its pre-existing route unchanged — this branch must never hijack
+# them.
+
+@test "classify: 'ship this feature for me' (no URL) → autospec-run, ship (unchanged)" {
+    run "$MATCH" --classify "ship this feature for me"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-run" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "ship" ]
+}
+
+@test "classify: 'autospec do the release' (no URL) → autospec, autospec (unchanged)" {
+    run "$MATCH" --classify "autospec do the release"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "autospec" ]
+}
