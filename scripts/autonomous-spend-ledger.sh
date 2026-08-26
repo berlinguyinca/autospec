@@ -6,6 +6,13 @@
 # Path-scoped per repo-slug to prevent cross-repo collisions
 # (feedback_heartbeat_cross_repo_collision).
 #
+# AUTOSPEC_SPEND_SCOPE overrides the per-repo slug with a fixed directory
+# name, so a fleet of repos driven off one board can share a single ledger
+# (and therefore one lifetime budget) instead of multiplying it per repo.
+# Unset (the default) is byte-identical to legacy per-repo behavior. When
+# set, the value becomes a ledger directory name, so it is validated against
+# an allowlist charset before use — see validate_scope().
+#
 # Subcommands:
 #   add --tokens N [--issues N] [--filed-issues N] [--budget-issues N] [--repo-dir DIR]
 #       Increment the cumulative totals in the ledger. Creates the file if
@@ -81,14 +88,55 @@ resolve_repo_slug() {
     printf '%s' "$slug"
 }
 
+# A scope becomes a directory name verbatim, so validate against an
+# allowlist charset (never a denylist) before it ever touches the
+# filesystem. Rejects empty, ".", "..", any path separator, and anything
+# outside [A-Za-z0-9._-] (which also rules out newlines and other control
+# characters).
+validate_scope() {
+    local s="$1"
+    if [ -z "$s" ]; then
+        return 1
+    fi
+    case "$s" in
+        .|..) return 1 ;;
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# resolve_scope prefers AUTOSPEC_SPEND_SCOPE (already validated by the
+# caller) over the per-repo slug. Using ${VAR+set} rather than ${VAR:-}
+# distinguishes "unset" (legacy per-repo behavior) from "set but empty"
+# (an explicit override attempt, rejected by validate_scope upstream).
+resolve_scope() {
+    local repo_dir="${1:-$(pwd)}"
+    if [ "${AUTOSPEC_SPEND_SCOPE+set}" = "set" ]; then
+        printf '%s' "${AUTOSPEC_SPEND_SCOPE}"
+        return 0
+    fi
+    resolve_repo_slug "$repo_dir"
+}
+
 ledger_path() {
     local repo_dir="${1:-$(pwd)}"
     local slug
-    slug="$(resolve_repo_slug "$repo_dir")"
+    slug="$(resolve_scope "$repo_dir")"
     printf '%s/%s/spend.json' "$LEDGER_BASE" "$slug"
 }
 
-# Atomic write: write to temp file in same dir, then mv.
+# Atomic write: write to a unique per-call temp file in the same dir, then
+# mv. mktemp's XXXXXX suffix is randomized per invocation, so concurrent
+# writers never share a temp path (that failure mode — a FIXED temp path
+# shared by concurrent writers, where the mv is atomic but the source path
+# collides — was a Critical finding elsewhere in this feature tonight).
+# That said, mv atomicity alone does not make the read-modify-write in
+# `add`/`check` atomic: two writers can both read the same ledger, compute
+# their own increment, and the second mv silently discards the first's
+# update. ledger_lock_acquire/release below close that gap by serializing
+# the whole read-modify-write critical section per ledger path — which
+# matters more now that a shared AUTOSPEC_SPEND_SCOPE puts multiple
+# concurrent workers on the same ledger file instead of one each.
 write_json_atomic() {
     local target="$1"
     mkdir -p "$(dirname "$target")"
@@ -96,6 +144,29 @@ write_json_atomic() {
     tmp="$(mktemp "${target}.XXXXXX")"
     cat > "$tmp"
     mv "$tmp" "$target"
+}
+
+# mkdir is atomic on POSIX filesystems, so it doubles as a lock primitive
+# with no external dependency (no flock on stock macOS). Spin with a short
+# sleep until the lock directory can be created, or give up after ~10s so a
+# stuck lock can never wedge the whole fleet.
+ledger_lock_acquire() {
+    local ledger="$1"
+    local lockdir="${ledger}.lock"
+    mkdir -p "$(dirname "$ledger")"
+    local waited=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        waited=$((waited + 1))
+        if [ "$waited" -gt 200 ]; then
+            die "timed out waiting for ledger lock: $lockdir"
+        fi
+        sleep 0.05
+    done
+}
+
+ledger_lock_release() {
+    local ledger="$1"
+    rmdir "${ledger}.lock" 2>/dev/null || true
 }
 
 read_ledger() {
@@ -168,6 +239,15 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Validate AUTOSPEC_SPEND_SCOPE at top level (not inside a command
+# substitution) so `die`'s exit actually terminates this process rather
+# than just the subshell that would otherwise swallow it.
+if [ "${AUTOSPEC_SPEND_SCOPE+set}" = "set" ]; then
+    if ! validate_scope "${AUTOSPEC_SPEND_SCOPE}"; then
+        die "invalid AUTOSPEC_SPEND_SCOPE: ${AUTOSPEC_SPEND_SCOPE}"
+    fi
+fi
+
 LEDGER="$(ledger_path "$REPO_DIR")"
 
 # ── Subcommand: add ──────────────────────────────────────────────────────────
@@ -184,6 +264,9 @@ if [ "$SUBCMD" = "add" ]; then
     case "$ADD_FILED_ISSUES" in *[!0-9]*|'') die "--filed-issues must be a non-negative integer" ;; esac
     case "$ADD_BUDGET_ISSUES" in *[!0-9]*|'') die "--budget-issues must be a non-negative integer" ;; esac
 
+    ledger_lock_acquire "$LEDGER"
+    trap 'ledger_lock_release "$LEDGER"' EXIT
+
     current="$(read_ledger "$LEDGER")"
     updated="$(printf '%s' "$current" | jq \
         --argjson t "$ADD_TOKENS" \
@@ -196,6 +279,9 @@ if [ "$SUBCMD" = "add" ]; then
          | .issues = .budget_issues
          | .updated_at = $ts')"
     printf '%s\n' "$updated" | write_json_atomic "$LEDGER"
+
+    ledger_lock_release "$LEDGER"
+    trap - EXIT
     printf '%s\n' "$updated"
     exit 0
 fi
@@ -203,6 +289,8 @@ fi
 # ── Subcommand: check ────────────────────────────────────────────────────────
 if [ "$SUBCMD" = "check" ]; then
     require_jq
+    ledger_lock_acquire "$LEDGER"
+    trap 'ledger_lock_release "$LEDGER"' EXIT
     current="$(read_ledger "$LEDGER")"
     total_tokens="$(printf '%s' "$current" | jq -r '.tokens // 0')"
     total_issues="$(printf '%s' "$current" | jq -r '.budget_issues // .issues // 0')"
@@ -254,6 +342,8 @@ fi
 # ── Subcommand: reset ────────────────────────────────────────────────────────
 if [ "$SUBCMD" = "reset" ]; then
     require_jq
+    ledger_lock_acquire "$LEDGER"
+    trap 'ledger_lock_release "$LEDGER"' EXIT
     jq -n \
         --arg ts "$(iso_now)" \
         '{"schema":1,"tokens":0,"issues":0,"filed_issues":0,"budget_issues":0,"created_at":$ts,"updated_at":$ts,"parked":false}' \
