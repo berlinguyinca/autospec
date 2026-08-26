@@ -53,6 +53,23 @@ DEFAULT_LIFETIME_ISSUES=500
 LIFETIME_TOKENS="${AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS:-$DEFAULT_LIFETIME_TOKENS}"
 LIFETIME_ISSUES="${AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES:-$DEFAULT_LIFETIME_ISSUES}"
 
+# A scope becomes a directory name; keep it well under filesystem name
+# limits (typically 255 bytes) so a bad value fails with a clear message
+# here instead of a confusing ENAMETOOLONG from mkdir/mv later.
+SCOPE_MAX_LEN=200
+
+# A lock is only reclaimed once BOTH (a) its recorded owner PID is
+# provably gone and (b) it has aged past this threshold — see
+# ledger_lock_is_stale(). Overridable so tests don't have to sleep for
+# the production default.
+LOCK_STALE_AGE_SECONDS="${AUTOSPEC_SPEND_LOCK_STALE_SECONDS:-30}"
+case "$LOCK_STALE_AGE_SECONDS" in *[!0-9]*|'') LOCK_STALE_AGE_SECONDS=30 ;; esac
+
+# Max polls (at 0.05s apiece, ~10s by default) before ledger_lock_acquire
+# gives up on a lock that never becomes free or reclaimable.
+LOCK_MAX_WAIT_ITER="${AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER:-200}"
+case "$LOCK_MAX_WAIT_ITER" in *[!0-9]*|'') LOCK_MAX_WAIT_ITER=200 ;; esac
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 die() {
@@ -62,6 +79,12 @@ die() {
 
 info() {
     printf '[autonomous-spend-ledger] %s\n' "$*"
+}
+
+# Diagnostics that must never land on stdout (stdout carries machine-read
+# JSON/decision text for add/check/status) go to stderr instead.
+warn() {
+    printf '[autonomous-spend-ledger] %s\n' "$*" >&2
 }
 
 require_jq() {
@@ -90,18 +113,38 @@ resolve_repo_slug() {
 
 # A scope becomes a directory name verbatim, so validate against an
 # allowlist charset (never a denylist) before it ever touches the
-# filesystem. Rejects empty, ".", "..", any path separator, and anything
-# outside [A-Za-z0-9._-] (which also rules out newlines and other control
-# characters).
+# filesystem. Rejects empty, ".", "..", a leading "-" (a foot-gun for any
+# later command that takes the scope as a bare argument), anything outside
+# [A-Za-z0-9._-] (which also rules out path separators, newlines, and other
+# control characters), and anything over SCOPE_MAX_LEN. Sets
+# SCOPE_REJECT_REASON on failure so the caller can report a clear cause.
+SCOPE_REJECT_REASON=""
 validate_scope() {
     local s="$1"
     if [ -z "$s" ]; then
+        SCOPE_REJECT_REASON="empty"
         return 1
     fi
     case "$s" in
-        .|..) return 1 ;;
-        *[!A-Za-z0-9._-]*) return 1 ;;
+        .|..)
+            SCOPE_REJECT_REASON="'.' and '..' are reserved"
+            return 1
+            ;;
+        -*)
+            SCOPE_REJECT_REASON="must not start with '-'"
+            return 1
+            ;;
     esac
+    case "$s" in
+        *[!A-Za-z0-9._-]*)
+            SCOPE_REJECT_REASON="only [A-Za-z0-9._-] is allowed"
+            return 1
+            ;;
+    esac
+    if [ "${#s}" -gt "$SCOPE_MAX_LEN" ]; then
+        SCOPE_REJECT_REASON="longer than ${SCOPE_MAX_LEN} characters"
+        return 1
+    fi
     return 0
 }
 
@@ -146,18 +189,127 @@ write_json_atomic() {
     mv "$tmp" "$target"
 }
 
-# mkdir is atomic on POSIX filesystems, so it doubles as a lock primitive
-# with no external dependency (no flock on stock macOS). Spin with a short
-# sleep until the lock directory can be created, or give up after ~10s so a
-# stuck lock can never wedge the whole fleet.
+# The lock is a symlink, not a plain directory: `ln -s <pid> <lockdir>`
+# both claims the lock AND records its owner in one atomic syscall. A
+# two-step "mkdir, then separately write a pid file" design leaves a real
+# TOCTOU window between the two steps — under heavy contention (many
+# workers spinning) that window can stretch far enough for another worker
+# to see "no pid recorded yet" and mistake a live, just-acquired lock for
+# orphaned. Embedding the pid directly as the symlink target closes that
+# window entirely: no other process can ever observe the lock before its
+# owner is recorded, because the two never exist independently.
+#
+# A held lock survives its owning process being SIGKILLed/OOM-killed — the
+# EXIT trap in the subcommand bodies below only fires on clean exits. Left
+# alone that wedges every future caller on this ledger forever (the ~10s
+# timeout just makes every call fail forever, not once). ledger_lock_is_stale
+# + ledger_lock_reclaim below reclaim such an orphaned lock safely:
+#   - a lock is only ever considered stale when its recorded PID is
+#     provably dead (kill -0 fails) AND the lock is older than
+#     LOCK_STALE_AGE_SECONDS (belt-and-suspenders against PID reuse) — this
+#     can never reclaim a live holder's lock, however old, because kill -0
+#     on a live PID always returns success;
+#   - a lock whose target isn't a bare PID (unrecognized/foreign) is never
+#     auto-reclaimed;
+#   - reclaiming itself is serialized through a second mkdir-based mutex
+#     ("<lockdir>.reclaiming") so at most one process is ever mid-reclaim
+#     for a given lock at a time. This matters even though the final `mv`
+#     is atomic: "read the current owner, decide it's stale, then mv" is
+#     three separate steps, not one. Under heavy contention, two processes
+#     can both read the same stale owner and both decide to reclaim before
+#     either mv's; the first to mv wins and immediately re-acquires the
+#     lock for itself, and — without the mutex — the second's *already
+#     stale-approved* mv would still fire moments later and blindly steal
+#     whatever is now at that path, even though it's a brand new, live
+#     lock. Gating the whole read-decide-mv sequence behind one mutex
+#     means only the winner ever gets far enough to call mv, so a late
+#     second reclaimer just finds the mutex held and backs off instead of
+#     re-verifying and racing anyway. (Verified empirically: without this
+#     mutex, tight 8-way contention against a single pre-staged stale lock
+#     reproducibly stole a live sibling's lock and lost an update; ~100
+#     runs with the mutex in place saw zero.)
+ledger_lock_is_stale() {
+    local lockdir="$1"
+    local pid
+    pid="$(readlink "$lockdir" 2>/dev/null || true)"
+    case "$pid" in
+        *[!0-9]*|'')
+            # Not a lock we recognize (foreign object, or a race where the
+            # symlink vanished between the failed ln and this check) —
+            # never auto-reclaim something we don't understand.
+            return 1
+            ;;
+    esac
+    if kill -0 "$pid" 2>/dev/null; then
+        return 1
+    fi
+    if ledger_lock_is_old_enough "$lockdir"; then
+        STALE_LOCK_PID="$pid"
+        return 0
+    fi
+    return 1
+}
+
+ledger_lock_is_old_enough() {
+    local lockdir="$1"
+    local mtime now age
+    mtime="$( (stat -f %m "$lockdir" 2>/dev/null || stat -c %Y "$lockdir" 2>/dev/null) || true)"
+    case "$mtime" in *[!0-9]*|'') return 1 ;; esac
+    now="$(date +%s)"
+    age=$((now - mtime))
+    if [ "$age" -ge "$LOCK_STALE_AGE_SECONDS" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Set by ledger_lock_is_stale on a positive staleness verdict, to the exact
+# PID that verdict was based on. ledger_lock_reclaim re-verifies against
+# this value (not a fresh staleness recomputation) so it only ever acts on
+# the specific state it was authorized for.
+STALE_LOCK_PID=""
+
+# Attempt to reclaim a stale lock. Only one process at a time gets past the
+# "${lockdir}.reclaiming" mutex (mkdir is atomic/exclusive), so the
+# read-current -> compare -> mv sequence below never runs concurrently with
+# itself for a given lock — see the block comment above for why that
+# matters beyond the atomicity of `mv` alone.
+ledger_lock_reclaim() {
+    local lockdir="$1"
+    local expected="$STALE_LOCK_PID"
+    local reclaim_mutex="${lockdir}.reclaiming"
+    if ! mkdir "$reclaim_mutex" 2>/dev/null; then
+        # Someone else is already reclaiming this lock; let them finish
+        # and fall through to retry in the normal wait loop.
+        return 0
+    fi
+    local current
+    current="$(readlink "$lockdir" 2>/dev/null || true)"
+    if [ "$current" = "$expected" ]; then
+        local graveyard="${lockdir}.stale.$$"
+        if mv "$lockdir" "$graveyard" 2>/dev/null; then
+            warn "reclaimed a stale ledger lock (owner process gone): $lockdir"
+            rm -f "$graveyard"
+        fi
+    fi
+    rmdir "$reclaim_mutex" 2>/dev/null || true
+}
+
 ledger_lock_acquire() {
     local ledger="$1"
     local lockdir="${ledger}.lock"
     mkdir -p "$(dirname "$ledger")"
     local waited=0
-    while ! mkdir "$lockdir" 2>/dev/null; do
+    while :; do
+        if ln -s "$$" "$lockdir" 2>/dev/null; then
+            return 0
+        fi
+        if ledger_lock_is_stale "$lockdir"; then
+            ledger_lock_reclaim "$lockdir"
+            continue
+        fi
         waited=$((waited + 1))
-        if [ "$waited" -gt 200 ]; then
+        if [ "$waited" -gt "$LOCK_MAX_WAIT_ITER" ]; then
             die "timed out waiting for ledger lock: $lockdir"
         fi
         sleep 0.05
@@ -166,7 +318,7 @@ ledger_lock_acquire() {
 
 ledger_lock_release() {
     local ledger="$1"
-    rmdir "${ledger}.lock" 2>/dev/null || true
+    rm -f "${ledger}.lock" 2>/dev/null || true
 }
 
 read_ledger() {
@@ -244,7 +396,11 @@ done
 # than just the subshell that would otherwise swallow it.
 if [ "${AUTOSPEC_SPEND_SCOPE+set}" = "set" ]; then
     if ! validate_scope "${AUTOSPEC_SPEND_SCOPE}"; then
-        die "invalid AUTOSPEC_SPEND_SCOPE: ${AUTOSPEC_SPEND_SCOPE}"
+        SCOPE_DISPLAY="${AUTOSPEC_SPEND_SCOPE}"
+        if [ "${#SCOPE_DISPLAY}" -gt 40 ]; then
+            SCOPE_DISPLAY="${SCOPE_DISPLAY:0:40}...(truncated, ${#AUTOSPEC_SPEND_SCOPE} chars total)"
+        fi
+        die "invalid AUTOSPEC_SPEND_SCOPE (${SCOPE_REJECT_REASON}): ${SCOPE_DISPLAY}"
     fi
 fi
 
