@@ -212,7 +212,10 @@ MARKER_TITLE='[autospec] project-board control relay (do not edit manually)'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.mirrored == [] and (.skipped | length == 1)'
-  ! grep -q -- 'issue edit 12' "$GH_CALLS"
+  # $output-dependent check above must come before the `run` below, since
+  # `run` overwrites $output.
+  run grep -q -- 'issue edit 12' "$GH_CALLS"
+  [ "$status" -ne 0 ]
   ! grep -q -- 'issue create' "$GH_CALLS"
 }
 
