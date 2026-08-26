@@ -93,3 +93,8 @@ read_var() {
     *) echo "unregistered: list-groomable.sh"; false ;;
   esac
 }
+
+@test "the control mirror script is registered" {
+  grep -q 'project-board-control-mirror.sh' "$INSTALL"
+  [ -x "$REPO/scripts/project-board-control-mirror.sh" ]
+}
