@@ -58,6 +58,21 @@
 #   does not have that lag. This removes the search-lag hazard at the
 #   source rather than merely tolerating it.
 #
+#   ADOPTION GATE: the label alone is NOT proof of ownership. Anyone with
+#   triage rights can apply $MARKER_LABEL to an unrelated issue (by
+#   mistake, or by copying labels while triaging), and that issue's
+#   number is just as arbitrary with respect to this script as the
+#   control issue's own number was in the brief's rejected sketch — i.e.
+#   this is the SAME hazard reopened through the label-lookup door
+#   instead of the ctl_num door. So a candidate found by label is only
+#   adopted if its TITLE is also an exact, literal match for
+#   $MARKER_TITLE (never a substring/regex check). A label-match with a
+#   foreign title is never edited and never used to justify creating a
+#   second marker either — creating on ambiguity is exactly what the
+#   find-failure handling above removes, and adopting the impostor is
+#   exactly what this gate removes. The only safe outcome is to skip that
+#   repo for the cycle with reason "marker_label_title_mismatch".
+#
 #   FIND-FAILURE HANDLING: a marker lookup that errors (non-zero gh exit)
 #   or returns something that is not a JSON array (malformed payload, an
 #   API error object, a rate-limit message that still happens to be valid
@@ -69,14 +84,13 @@
 #   repo over a multi-week unattended run, which is worse than a missed
 #   mirror cycle (recoverable on the next poll).
 #
-#   MULTIPLE MATCHES: if more than one open issue carries $MARKER_LABEL
-#   (e.g. an operator manually relabeled something, or a prior bug created
-#   a duplicate), this script picks the one with the LOWEST issue number
-#   — the oldest, i.e. the first marker this script ever created for that
-#   repo — deterministically, via `sort_by(.number)`, never the API's
-#   default response order (which is not guaranteed stable). It edits that
-#   one and never creates a new one when at least one match already
-#   exists.
+#   MULTIPLE MATCHES: if more than one owned candidate (label AND title
+#   both match) exists (e.g. a prior bug created a duplicate), this
+#   script picks the one with the LOWEST issue number — the oldest, i.e.
+#   the first marker this script ever created for that repo —
+#   deterministically, via `sort_by(.number)`, never the API's default
+#   response order (which is not guaranteed stable). It edits that one
+#   and never creates a new one when at least one owned match exists.
 #
 # Usage:
 #   project-board-control-mirror.sh [--control-issue owner/repo#N] \
@@ -234,7 +248,7 @@ for repo in $repos; do
     # assignment, and we need the failure signal, not just a fallback value.
     marker_raw=""
     marker_lookup_ok=0
-    if marker_raw="$("$GH" issue list --repo "$repo" --label "$MARKER_LABEL" --state open --json number 2>/dev/null)"; then
+    if marker_raw="$("$GH" issue list --repo "$repo" --label "$MARKER_LABEL" --state open --json number,title 2>/dev/null)"; then
         marker_lookup_ok=1
     fi
 
@@ -255,10 +269,36 @@ for repo in $repos; do
         continue
     fi
 
+    # ADOPTION GATE: the label alone is not proof of ownership — anyone
+    # (a human triaging, a copy-paste) can apply $MARKER_LABEL to an
+    # unrelated issue, and that issue's number is arbitrary with respect
+    # to this script, which is exactly the original "edit a random issue"
+    # hazard the marker design exists to close. So a candidate is only
+    # ever adopted if BOTH the label matches (already true — that's how it
+    # was found) AND its title is an exact, literal match for
+    # $MARKER_TITLE (never a regex/substring check, and never derived from
+    # board/user input). Candidates that carry the label but not the exact
+    # title are impostors: never adopted, never edited, and — critically —
+    # never used to justify skipping creation either; they are excluded
+    # from the pool the way an empty lookup would be, but the outcome is a
+    # skip with a distinct reason, NOT a create. Creating a second marker
+    # alongside an impostor would just add a second thing to get confused
+    # about, and adopting the impostor is the exact hazard we're closing;
+    # skipping is the only option that cannot mislabel or duplicate.
+    owned_json="$(printf '%s' "$marker_raw" | jq --arg t "$MARKER_TITLE" '[.[] | select(.title == $t)]' 2>/dev/null || printf '[]')"
+    owned_count="$(printf '%s' "$owned_json" | jq 'length' 2>/dev/null || printf '0')"
+    total_count="$(printf '%s' "$marker_raw" | jq 'length' 2>/dev/null || printf '0')"
+
+    if [ "$owned_count" -eq 0 ] && [ "$total_count" -gt 0 ]; then
+        skipped="$(printf '%s' "$skipped" | jq --arg r "$repo" --arg reason "marker_label_title_mismatch" '. + [{repo:$r,reason:$reason}]')"
+        IFS=','
+        continue
+    fi
+
     # Deterministic pick on multiple matches: the lowest issue number (the
     # oldest, i.e. the first marker this script ever created for this
     # repo) via sort_by — never the API's default response order.
-    marker_num="$(printf '%s' "$marker_raw" | jq -r 'sort_by(.number) | .[0].number // empty' 2>/dev/null || printf '')"
+    marker_num="$(printf '%s' "$owned_json" | jq -r 'sort_by(.number) | .[0].number // empty' 2>/dev/null || printf '')"
 
     if [ -n "$marker_num" ]; then
         for label in $labels_to_mirror; do

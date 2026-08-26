@@ -29,6 +29,8 @@ SH
 }
 teardown() { rm -rf "$TMP"; }
 
+MARKER_TITLE='[autospec] project-board control relay (do not edit manually)'
+
 @test "a project-level pause is mirrored into every fleet repo" {
   export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a,o/b --allowlist 'o/*'
@@ -151,18 +153,23 @@ teardown() { rm -rf "$TMP"; }
   ! grep -q -- 'issue create' "$GH_CALLS"
 }
 
-@test "a valid empty marker lookup creates the marker issue" {
+@test "a valid empty marker lookup creates the marker issue, labeled so it is findable next cycle" {
   export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
   export GH_MARKER_JSON='[]'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.mirrored | length == 1'
   grep -q -- 'issue create' "$GH_CALLS"
+  # This is the property the whole marker design depends on: if the
+  # create call ever stops attaching MARKER_LABEL, the marker becomes
+  # unfindable on the next cycle and the script would create a fresh
+  # duplicate every single time. Pin it directly.
+  grep -q -- 'issue create.*--label autospec:project-board-marker' "$GH_CALLS"
 }
 
 @test "multiple marker matches: picks the lowest issue number and never creates" {
   export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
-  export GH_MARKER_JSON='[{"number":42},{"number":7},{"number":99}]'
+  export GH_MARKER_JSON='[{"number":42,"title":"'"$MARKER_TITLE"'"},{"number":7,"title":"'"$MARKER_TITLE"'"},{"number":99,"title":"'"$MARKER_TITLE"'"}]'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.mirrored | length == 1'
@@ -174,10 +181,45 @@ teardown() { rm -rf "$TMP"; }
 
 @test "an existing marker issue is edited in place, never recreated" {
   export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
-  export GH_MARKER_JSON='[{"number":55}]'
+  export GH_MARKER_JSON='[{"number":55,"title":"'"$MARKER_TITLE"'"}]'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.mirrored | length == 1'
   grep -q -- 'issue edit 55 --repo o/a --add-label autospec:pause' "$GH_CALLS"
   ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+# --- adoption gate: label alone is not proof of ownership (Finding 2) ---
+# A candidate found by --label is only adopted if its title is an exact
+# match for MARKER_TITLE too. A foreign issue that merely carries the
+# marker label (mislabeled by a human, copied while triaging, ...) must
+# never be edited, and must never trigger creating a second marker either
+# — it is skipped with a distinct reason.
+
+@test "a label-match with the correct title is adopted" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":55,"title":"'"$MARKER_TITLE"'"}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored | length == 1'
+  grep -q -- 'issue edit 55 --repo o/a --add-label autospec:pause' "$GH_CALLS"
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "a label-match with a foreign title is not adopted, edited, or duplicated" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":12,"title":"Fix flaky test"}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == [] and (.skipped | length == 1)'
+  ! grep -q -- 'issue edit 12' "$GH_CALLS"
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "a foreign-title skip surfaces a distinct reason in the skipped array" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":12,"title":"Fix flaky test"}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.skipped[0].reason == "marker_label_title_mismatch"'
 }
