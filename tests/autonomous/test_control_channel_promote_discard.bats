@@ -42,14 +42,23 @@ setup() {
     GH_LOG="$TEST_TMP/gh-calls.log"
     INTBRANCH_LOG="$TEST_TMP/intbranch-calls.log"
     SEQ_LOG="$TEST_TMP/seq.log"
-    touch "$GH_LOG" "$INTBRANCH_LOG" "$SEQ_LOG"
+    WRITEBACK_LOG="$TEST_TMP/writeback-calls.log"
+    touch "$GH_LOG" "$INTBRANCH_LOG" "$SEQ_LOG" "$WRITEBACK_LOG"
 
     # repo_root inside the conductor = parent of CONDUCTOR_SCRIPTS_DIR.
     mkdir -p "$TEST_TMP/.autospec"
     PAUSE_FILE="$TEST_TMP/.autospec/self-originated-pause.json"
 
+    # No board configured unless a test calls _write_board_cache /
+    # _install_board_writeback: AUTOSPEC_STATE_DIR defaults to
+    # $HOME/.autospec (== TEST_TMP/.autospec here), so with no board-cache
+    # dir created, _autospec_conductor_board_state's very first check
+    # returns immediately — this is the default, common-case posture for
+    # every pre-existing test in this file.
+    unset AUTOSPEC_BOARD_WRITEBACK_SCRIPT
+
     export LOOP_LIB REPO_ROOT FAKE_SCRIPTS TEST_TMP FAKE_BIN \
-        GH_LOG INTBRANCH_LOG SEQ_LOG PAUSE_FILE
+        GH_LOG INTBRANCH_LOG SEQ_LOG PAUSE_FILE WRITEBACK_LOG
 }
 
 teardown() {
@@ -160,6 +169,34 @@ EOF
     chmod +x "$FAKE_SCRIPTS/autonomous-integration-branch.sh"
 }
 
+# Board-cache fixture consumed by _autospec_conductor_board_state: a plan
+# JSON mapping (repo, issue number) -> item_id, dropped straight into
+# $HOME/.autospec/board-cache (HOME == TEST_TMP per setup()) — the exact
+# location _autospec_conductor_board_state scans.
+_write_board_cache() {
+    local repo="$1" issue="$2" item_id="$3"
+    mkdir -p "$TEST_TMP/.autospec/board-cache"
+    cat > "$TEST_TMP/.autospec/board-cache/plan.json" <<EOF
+{"items":[{"repo":"$repo","number":$issue,"item_id":"$item_id"}]}
+EOF
+}
+
+# project-board-writeback.sh stub: logs every invocation ("--item X --state
+# Y") to WRITEBACK_LOG, exits with the rc recorded in
+# $TEST_TMP/writeback-rc (default 0, mirroring the real script's
+# always-exits-0 contract unless a test deliberately overrides it to prove
+# the failure is swallowed).
+_install_board_writeback() {
+    cat > "$FAKE_SCRIPTS/project-board-writeback.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$WRITEBACK_LOG"
+rc="\$(cat "$TEST_TMP/writeback-rc" 2>/dev/null || printf '0')"
+exit "\$rc"
+EOF
+    chmod +x "$FAKE_SCRIPTS/project-board-writeback.sh"
+    export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$FAKE_SCRIPTS/project-board-writeback.sh"
+}
+
 _run_cycle() {
     run bash -c "
         . '$LOOP_LIB'
@@ -168,6 +205,26 @@ _run_cycle() {
         CONDUCTOR_MAX_CYCLES=1 \
         CONDUCTOR_POLL_INTERVAL=0 \
         CONDUCTOR_DRY_RUN=0 \
+        CONDUCTOR_NO_DIGEST=1 \
+        AUTOSPEC_RUN_CMD= \
+        AUTOSPEC_INTEGRATION_BRANCH_BIN='$FAKE_SCRIPTS/autonomous-integration-branch.sh' \
+        autospec_conductor_run
+    " 2>&1
+}
+
+# Same cycle, but with CONDUCTOR_DRY_RUN=1 — used only by the board
+# write-back dry-run proof; the promote/merge control decision path itself
+# is not gated by CONDUCTOR_DRY_RUN (a pre-existing, unrelated fact), so
+# this still merges — it only proves _autospec_conductor_board_state's own
+# dry-run guard.
+_run_cycle_dry() {
+    run bash -c "
+        . '$LOOP_LIB'
+        CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+        CONDUCTOR_REPO='test-owner/test-repo' \
+        CONDUCTOR_MAX_CYCLES=1 \
+        CONDUCTOR_POLL_INTERVAL=0 \
+        CONDUCTOR_DRY_RUN=1 \
         CONDUCTOR_NO_DIGEST=1 \
         AUTOSPEC_RUN_CMD= \
         AUTOSPEC_INTEGRATION_BRANCH_BIN='$FAKE_SCRIPTS/autonomous-integration-branch.sh' \
@@ -562,4 +619,113 @@ DISCARD_ISSUE:602"
     ! grep -q "^issue reopen" "$GH_LOG"
     grep -q "^issue comment 602 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 602 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Board write-back (project-board-fleet-execution Plan B Task 5): promote
+# fires Testing (checks polled) then Done (merged + issue closed) via
+# _autospec_conductor_board_state — decorative only, must never affect the
+# merge path.
+# ---------------------------------------------------------------------------
+
+@test "promote fires board Testing then Done, in order, with the resolved item id" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:701"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"}]' > "$TEST_TMP/ci.json"
+    _install_board_writeback
+    _write_board_cache "test-owner/test-repo" 701 "PVTI_xyz"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    # Merge still happened — board write-back is decorative, not a gate.
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^issue close 701 --repo test-owner/test-repo$" "$GH_LOG"
+
+    grep -q -- "--item PVTI_xyz --state Testing" "$WRITEBACK_LOG"
+    grep -q -- "--item PVTI_xyz --state Done" "$WRITEBACK_LOG"
+    testing_line="$(grep -n -- "--state Testing" "$WRITEBACK_LOG" | head -1 | cut -d: -f1)"
+    done_line="$(grep -n -- "--state Done" "$WRITEBACK_LOG" | head -1 | cut -d: -f1)"
+    [ -n "$testing_line" ]
+    [ -n "$done_line" ]
+    [ "$testing_line" -lt "$done_line" ]
+}
+
+@test "a failing board write-back does not fail promote or change its exit status" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:702"
+    _install_gh
+    _install_intbranch 43 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"}]' > "$TEST_TMP/ci.json"
+    _install_board_writeback
+    _write_board_cache "test-owner/test-repo" 702 "PVTI_fails"
+    printf '1\n' > "$TEST_TMP/writeback-rc"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    # The write-back was attempted (and failed) but the merge path is
+    # completely unaffected: merge + reset + close all still happened.
+    grep -q -- "--item PVTI_fails --state Testing" "$WRITEBACK_LOG"
+    grep -q "^pr merge 43 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
+    grep -q "^issue close 702 --repo test-owner/test-repo$" "$GH_LOG"
+}
+
+@test "no board cache configured: promote merges cleanly with zero write-back calls" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:703"
+    _install_gh
+    _install_intbranch 44 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"}]' > "$TEST_TMP/ci.json"
+    _install_board_writeback
+    # Deliberately no _write_board_cache call: no board-cache dir exists.
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr merge 44 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    run cat "$WRITEBACK_LOG"
+    [ -z "$output" ]
+}
+
+@test "board cache present but no matching item: promote merges cleanly with zero write-back calls" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:704"
+    _install_gh
+    _install_intbranch 45 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"}]' > "$TEST_TMP/ci.json"
+    _install_board_writeback
+    # Cache exists, but for a different repo/issue entirely.
+    _write_board_cache "some-other/repo" 999 "PVTI_unrelated"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr merge 45 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    run cat "$WRITEBACK_LOG"
+    [ -z "$output" ]
+}
+
+@test "CONDUCTOR_DRY_RUN=1: zero board write-back calls even though a matching item exists" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:705"
+    _install_gh
+    _install_intbranch 46 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"}]' > "$TEST_TMP/ci.json"
+    _install_board_writeback
+    _write_board_cache "test-owner/test-repo" 705 "PVTI_dryrun"
+
+    _run_cycle_dry
+    [ "$status" -eq 0 ]
+
+    run cat "$WRITEBACK_LOG"
+    [ -z "$output" ]
 }
