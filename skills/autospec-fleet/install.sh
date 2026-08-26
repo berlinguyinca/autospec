@@ -18,6 +18,12 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+# Skill-specific scripts fleet-run.sh actually sources/invokes at runtime:
+# fleet-run.sh `source`s fleet-lib.sh and shells out to fleet-config-lint.sh
+# (both resolved relative to its own directory), so all three must land
+# together in the same installed directory or the launcher cannot run on a
+# clean install.
+FLEET_SCRIPT_FILES="fleet-run.sh fleet-lib.sh fleet-config-lint.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn: %s\n' "$*" >&2; }
@@ -57,6 +63,9 @@ fetch_source_files() {
     for rel in $SHARED_SCRIPT_FILES; do
         curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel" || { err "failed to download $rel"; exit 1; }
     done
+    for rel in $FLEET_SCRIPT_FILES; do
+        curl -fsSL "$SKILL_RAW_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel" || { err "failed to download $rel"; exit 1; }
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
 }
 
@@ -95,6 +104,19 @@ install_shared_scripts() {
     done
 }
 
+# fleet-run.sh, fleet-lib.sh, and fleet-config-lint.sh all resolve each other
+# relative to fleet-run.sh's own directory (script_dir="$(cd "$(dirname
+# "${BASH_SOURCE[0]}")" && pwd)"), so they must be installed together in the
+# same directory — the shared scripts directory used by every other
+# autospec skill's helper scripts.
+install_fleet_scripts() {
+    [ -n "$SKILL_DIR" ] && [ -d "$SKILL_DIR/scripts" ] || { err "missing fleet scripts directory"; return 1; }
+    for rel in $FLEET_SCRIPT_FILES; do
+        install_one "$SKILL_DIR/scripts/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        run "chmod +x \"$HOME/.autospec/scripts/$rel\""
+    done
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --harness) shift; HARNESS="${1:-}" ;;
@@ -129,6 +151,10 @@ done
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+info ""
+info "autospec-fleet skill scripts:"
+install_fleet_scripts
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"

@@ -104,7 +104,11 @@ fleet_worker_command() {
 
     [ -n "$repo" ] || { printf 'fleet: repo is required\n' >&2; return 2; }
     [ -n "$checkout" ] || { printf 'fleet: checkout path is required\n' >&2; return 2; }
-    printf 'autospec-autonomous start --detach --repo-dir %s --repo %s\n' \
+    # `start` already detaches by default (see usage: "Start the detached
+    # autonomous conductor (default)."); the parser has no `--detach` case
+    # at all, so passing it makes every spawn fail with "unknown argument:
+    # --detach". Never add it back.
+    printf 'autospec-autonomous start --repo-dir %s --repo %s\n' \
         "$(printf '%q' "$checkout")" "$(printf '%q' "$repo")"
 }
 

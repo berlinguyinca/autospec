@@ -161,7 +161,7 @@ while [ "$idx" -lt "$repo_count" ]; do
         autonomous_bin="$(fleet_autonomous_bin)" || autonomous_bin=""
         if [ -z "$autonomous_bin" ]; then
             printf 'code_health:fleet_worker_spawn_failed repo=%s reason=autospec-autonomous-not-found\n' "$normalized" >&2
-        elif "$autonomous_bin" start --detach --repo-dir "$checkout_path" --repo "$normalized"; then
+        elif "$autonomous_bin" start --repo-dir "$checkout_path" --repo "$normalized"; then
             # A single repo's spawn failure must never abort the fleet — the
             # whole script runs under `set -euo pipefail`, so this branch is
             # a deliberate if/then, never a one-sided `&&`.

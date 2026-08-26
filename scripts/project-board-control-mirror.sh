@@ -97,7 +97,17 @@
 #       --repos a,b --allowlist 'pat,pat'
 #
 # Output (stdout): single JSON object:
-#   {"mirrored":[{"repo","label"}],"skipped":[{"repo","reason"}]}
+#   {"mirrored":[{"repo","label"}],"skipped":[{"repo","reason"}],
+#    "failed":[{"repo","label","reason"}]}
+#
+#   `mirrored` is populated ONLY when the underlying `gh` call genuinely
+#   succeeded (exit 0) — never on `|| true`-swallowed failure. `skipped`
+#   is for pre-flight decisions made before any gh call for that
+#   repo/label was attempted (out of scope, marker lookup failed, title
+#   mismatch). `failed` is for a gh call that was actually attempted and
+#   returned a non-zero exit — a distinct outcome from `skipped` because a
+#   caller alerting on "gh is broken" should not have to filter it out of
+#   ordinary scope/config skips.
 #
 # Exit codes: always 0 on recognized usage (fail-open by design — this is a
 # read-mostly relay, never allowed to abort a caller's loop). 2 on a
@@ -177,7 +187,7 @@ allowed() {
 }
 
 emit_empty() {
-    printf '{"mirrored":[],"skipped":[]}\n'
+    printf '{"mirrored":[],"skipped":[],"failed":[]}\n'
 }
 
 # No control issue configured: project-level control is disabled entirely.
@@ -219,6 +229,7 @@ done
 
 mirrored='[]'
 skipped='[]'
+failed='[]'
 
 _old_ifs="$IFS"
 IFS=','
@@ -301,26 +312,49 @@ for repo in $repos; do
     marker_num="$(printf '%s' "$owned_json" | jq -r 'sort_by(.number) | .[0].number // empty' 2>/dev/null || printf '')"
 
     if [ -n "$marker_num" ]; then
+        # Each label is its own `gh issue edit --add-label` call, so each
+        # one succeeds or fails independently: only a call that genuinely
+        # exits 0 is recorded under `mirrored`. A failing call — API error,
+        # rate limit, permissions — must never be reported as propagated;
+        # for a `autospec:stop` label that is the worst possible lie (an
+        # operator believing a stop signal reached a repo it never did).
+        # Failures go to `failed`, not `skipped`: `skipped` is reserved for
+        # pre-flight decisions made before any gh call was attempted
+        # (out-of-scope repo, lookup-failed, title-mismatch); `failed` means
+        # the call was actually made and the API said no. Keeping them
+        # separate lets a caller alert on "gh is broken" without confusing
+        # it with ordinary scope/config skips.
         for label in $labels_to_mirror; do
-            "$GH" issue edit "$marker_num" --repo "$repo" --add-label "$label" >/dev/null 2>&1 || true
-            mirrored="$(printf '%s' "$mirrored" | jq --arg r "$repo" --arg l "$label" '. + [{repo:$r,label:$l}]')"
+            if "$GH" issue edit "$marker_num" --repo "$repo" --add-label "$label" >/dev/null 2>&1; then
+                mirrored="$(printf '%s' "$mirrored" | jq --arg r "$repo" --arg l "$label" '. + [{repo:$r,label:$l}]')"
+            else
+                failed="$(printf '%s' "$failed" | jq --arg r "$repo" --arg l "$label" --arg reason "gh_add_label_failed" '. + [{repo:$r,label:$l,reason:$reason}]')"
+            fi
         done
     else
         # Confirmed-empty lookup: safe to create. The marker label is
         # attached at creation time so the NEXT cycle's --label filter
-        # finds it immediately (no search-index lag to race).
+        # finds it immediately (no search-index lag to race). This is a
+        # single `gh issue create` call carrying every label to mirror, so
+        # success/failure applies to all of them together: only record
+        # `mirrored` when the call actually succeeded, else `failed`.
         set -- "$GH" issue create --repo "$repo" --title "$MARKER_TITLE" --body "$MARKER_BODY" --label "$MARKER_LABEL"
         for label in $labels_to_mirror; do
             set -- "$@" --label "$label"
         done
-        "$@" >/dev/null 2>&1 || true
-        for label in $labels_to_mirror; do
-            mirrored="$(printf '%s' "$mirrored" | jq --arg r "$repo" --arg l "$label" '. + [{repo:$r,label:$l}]')"
-        done
+        if "$@" >/dev/null 2>&1; then
+            for label in $labels_to_mirror; do
+                mirrored="$(printf '%s' "$mirrored" | jq --arg r "$repo" --arg l "$label" '. + [{repo:$r,label:$l}]')"
+            done
+        else
+            for label in $labels_to_mirror; do
+                failed="$(printf '%s' "$failed" | jq --arg r "$repo" --arg l "$label" --arg reason "gh_issue_create_failed" '. + [{repo:$r,label:$l,reason:$reason}]')"
+            done
+        fi
     fi
 
     IFS=','
 done
 IFS="$_old_ifs"
 
-printf '{"mirrored":%s,"skipped":%s}\n' "$mirrored" "$skipped"
+printf '{"mirrored":%s,"skipped":%s,"failed":%s}\n' "$mirrored" "$skipped" "$failed"

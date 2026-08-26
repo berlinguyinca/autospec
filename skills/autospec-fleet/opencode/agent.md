@@ -8,12 +8,27 @@ mode: primary
 
 Autospec Fleet is the workspace-level supervisor for a cluster of autospec
 workers. It starts from an empty directory, accepts GitHub repository URLs,
-clones or syncs those repositories into a managed workspace, and launches the
-existing `/autospec-run` monitor inside each eligible checkout.
+and (once checkouts exist in the managed workspace) `run` launches a
+per-repo `autospec-autonomous` conductor for each eligible checkout — not a
+single one-shot `/autospec-run` session. Each conductor is itself perpetual:
+it walks the same priority waterfall `/autospec-autonomous` runs standalone,
+of which draining the repo's `/autospec-run` queue is one tier among several.
 
-It does **not** replace `/autospec-run`. Fleet owns repo-level orchestration;
-`/autospec-run` owns issue-level claiming, implementation, review, CI, and
-merge behavior.
+It does **not** replace `/autospec-run` or `/autospec-autonomous`. Fleet owns
+cross-repo scheduling (which repos get a worker, how many run in parallel,
+liveness/idempotence so a repo is never double-spawned); the per-repo
+conductor it launches owns everything inside that checkout — issue-level
+claiming, implementation, review, CI, and merge behavior all still happen
+inside `/autospec-run`, which the conductor drives.
+
+Be precise, not optimistic, about what is wired up today: `fleet-run.sh`
+does launch real conductor processes now, but it does **not** clone or sync
+checkouts — a repo missing from the workspace is skipped with "checkout not
+found" rather than being created. `--emit fleet-config` and
+`AUTOSPEC_SPEND_SCOPE` have no production consumer yet, and the project-board
+control-label mirror (`project-board-control-mirror.sh`) has no caller
+wired into this flow. Do not describe fleet as an end-to-end,
+fully-unattended multi-repo shipping pipeline until those land.
 
 Design source:
 `docs/specs/2026-05-28-autospec-fleet-design.md`.
@@ -56,8 +71,9 @@ and exit.
 - `init` creates `autospec-fleet.yml` in the current directory and prepares the
   managed workspace for the listed GitHub repository URLs.
 - `sync` updates the local copy of a fleet control repository when configured.
-- `run` loads fleet config plus node-local capacity and launches per-repo
-  `/autospec-run` workers.
+- `run` loads fleet config plus node-local capacity and launches a per-repo
+  `autospec-autonomous` conductor for each eligible checkout that has ready
+  queue work and is not already live (never a raw `/autospec-run` one-shot).
 - `status` summarizes queue state, active workers, open PRs, and recent
   failures across configured repositories.
 - `stop` forwards existing autospec stop semantics to active repo workers.
@@ -143,7 +159,13 @@ helpers for authentication.
 
 ## Current scaffold status
 
-This scaffold defines the skill surface and install contract. Follow-up issues
-land the schemas, URL/workspace helpers, config linting, scheduler, status,
-stop, docs, and dry-run smoke tests. Until those land, subcommands may report
-that implementation is pending.
+`init`, `sync`, config linting, `run` (scheduling, liveness/idempotence, and
+the real per-repo `autospec-autonomous` conductor launch), `status`, and
+`stop` are implemented and tested (`tests/fleet/`, `tests/install/`). `run`
+does not yet clone or sync checkouts into the workspace — a repo missing
+from `workspace/<owner>__<repo>` is skipped with a "checkout not found"
+message rather than being created, so an operator (or a follow-up cloning
+capability, not yet built) still has to populate the workspace first.
+`--emit fleet-config` and `AUTOSPEC_SPEND_SCOPE` have no production consumer
+yet, and the project-board control-label mirror has no caller wired into
+this flow.
