@@ -34,8 +34,16 @@ teardown() { rm -rf "$TMP"; }
 }
 
 @test "skips a no-op write when the item already holds that state" {
-  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Blocked
+  # The shared plan.json fixture never lists "Blocked" as a board option, so
+  # asserting idempotence against it would pass via the "no matching option"
+  # skip branch rather than the real already-in-state branch. Give this test
+  # its own fixture where Blocked IS a valid option and the item already
+  # holds it, so it genuinely exercises the idempotence check.
+  jq '.fields.autospec_state.options = {"Ready":"opt_ready","Blocked":"opt_blocked"}' \
+     "$TMP/plan.json" > "$TMP/blocked.json"
+  run bash "$SCRIPT" --plan "$TMP/blocked.json" --item PVTI_a --state Blocked
   [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'already in state Blocked'
   ! grep -q 'item-edit' "$GH_CALLS"
 }
 
