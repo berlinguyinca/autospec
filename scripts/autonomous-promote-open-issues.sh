@@ -68,12 +68,61 @@ GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
 GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
 
 # Tier 1.5 board source (Tasks 8/10): env vars are the shell-side contract —
-# the conductor exports them from the validated Rust ProjectBoardConfig, so
-# this script never parses the board YAML itself.
+# this script never parses the board YAML itself. AUTOSPEC_PROJECT_BOARD_*
+# is meant to come from the validated Rust ProjectBoardConfig, bridged below
+# (final review I4) via `autospec autonomous project-board-config`, which
+# re-runs the same parse+validate as `.autospec/autonomous.yml` and refuses
+# to emit a url unless it also carries a non-empty repo_allowlist. An
+# operator who exports AUTOSPEC_PROJECT_BOARD_URL directly (as this script's
+# own tests do) always wins — the bridge only fills in what isn't already set.
 BOARD_RESOLVE="${AUTOSPEC_BOARD_RESOLVE_SCRIPT:-$SCRIPT_DIR/project-board-resolve.sh}"
 BOARD_NORMALIZE="${AUTOSPEC_BOARD_NORMALIZE_SCRIPT:-$SCRIPT_DIR/project-board-normalize.sh}"
 BOARD_DEPS="${AUTOSPEC_BOARD_DEPS_SCRIPT:-$SCRIPT_DIR/project-board-deps.sh}"
 BOARD_WRITEBACK="${AUTOSPEC_BOARD_WRITEBACK_SCRIPT:-$SCRIPT_DIR/project-board-writeback.sh}"
+BOARD_CONFIG_BIN="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
+BOARD_CONFIG_REPO_DIR="${AUTOSPEC_REPO_DIR:-.}"
+
+# Never `eval` this output — it is parsed field-by-field with jq. Any
+# failure (binary missing, subcommand missing on a stale install, malformed
+# config that fails the url/repo_allowlist gate, no config file at all)
+# degrades silently to "no board configured": board_plan() already treats
+# an unset AUTOSPEC_PROJECT_BOARD_URL as a dry/empty board, so this can
+# never crash and can never park a worker.
+if [ -z "${AUTOSPEC_PROJECT_BOARD_URL:-}" ]; then
+    _pb_json="$("$BOARD_CONFIG_BIN" autonomous project-board-config \
+        --repo-dir "$BOARD_CONFIG_REPO_DIR" 2>/dev/null || true)"
+    if [ -n "$_pb_json" ]; then
+        _pb_url="$(printf '%s' "$_pb_json" | jq -r '.url // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_url" ]; then
+            AUTOSPEC_PROJECT_BOARD_URL="$_pb_url"
+            export AUTOSPEC_PROJECT_BOARD_URL
+            if [ -z "${AUTOSPEC_PROJECT_BOARD_ALLOWLIST:-}" ]; then
+                _pb_allow="$(printf '%s' "$_pb_json" \
+                    | jq -r '(.allowlist // []) | join(",")' 2>/dev/null || true)"
+                if [ -n "$_pb_allow" ]; then
+                    AUTOSPEC_PROJECT_BOARD_ALLOWLIST="$_pb_allow"
+                    export AUTOSPEC_PROJECT_BOARD_ALLOWLIST
+                fi
+            fi
+            if [ -z "${AUTOSPEC_PROJECT_BOARD_TTL:-}" ]; then
+                _pb_ttl="$(printf '%s' "$_pb_json" | jq -r '.ttl // empty' 2>/dev/null || true)"
+                if [ -n "$_pb_ttl" ]; then
+                    AUTOSPEC_PROJECT_BOARD_TTL="$_pb_ttl"
+                    export AUTOSPEC_PROJECT_BOARD_TTL
+                fi
+            fi
+            if [ -z "${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:-}" ]; then
+                _pb_labels="$(printf '%s' "$_pb_json" \
+                    | jq -r '.label_map // empty' 2>/dev/null || true)"
+                if [ -n "$_pb_labels" ]; then
+                    AUTOSPEC_PROJECT_BOARD_LABEL_MAP="$_pb_labels"
+                    export AUTOSPEC_PROJECT_BOARD_LABEL_MAP
+                fi
+            fi
+        fi
+    fi
+fi
+
 BOARD_TTL="${AUTOSPEC_PROJECT_BOARD_TTL:-300}"
 case "$BOARD_TTL" in
     ''|*[!0-9]*) BOARD_TTL=300 ;;
