@@ -1,0 +1,95 @@
+#!/usr/bin/env bats
+# The board scripts, and the Tier 1.5 grooming dependency set they run
+# inside of, must ship on a clean install. An unregistered runtime script is
+# silently absent after `install.sh` and hard-crashes the conductor's
+# Tier 1.5 board stage the first time it is exercised.
+#
+# The expected sets are derived from real sources (scripts/project-board-*.sh
+# on disk, and the *_SCRIPT seam variables in
+# scripts/autonomous-promote-open-issues.sh) rather than hardcoded, so this
+# test does not silently rot if the dependency set changes.
+
+setup() {
+  REPO="${BATS_TEST_DIRNAME}/../.."
+  INSTALL="$REPO/skills/autospec-autonomous/install.sh"
+  PROMOTER="$REPO/scripts/autonomous-promote-open-issues.sh"
+}
+
+# Pull a shell array variable's value out of install.sh without sourcing it
+# (sourcing would run the script's arg-parsing / harness-prompt logic).
+read_var() {
+  awk -F'"' -v name="$1" '$0 ~ "^"name"=\"" { print $2; exit }' "$INSTALL"
+}
+
+@test "every project-board-*.sh script on disk exists and is executable" {
+  found=0
+  for f in "$REPO"/scripts/project-board-*.sh; do
+    [ -f "$f" ]
+    [ -x "$f" ]
+    found=$((found + 1))
+  done
+  [ "$found" -ge 4 ]
+}
+
+@test "every project-board-*.sh script on disk is registered in AUTONOMOUS_SCRIPT_FILES" {
+  autonomous_files="$(read_var AUTONOMOUS_SCRIPT_FILES)"
+  for f in "$REPO"/scripts/project-board-*.sh; do
+    name="$(basename "$f")"
+    case " $autonomous_files " in
+      *" $name "*) : ;;
+      *) echo "unregistered: $name"; false ;;
+    esac
+  done
+}
+
+@test "the Tier 1.5 promoter and its repo-root grooming dependencies are registered in AUTONOMOUS_SCRIPT_FILES" {
+  autonomous_files="$(read_var AUTONOMOUS_SCRIPT_FILES)"
+  case " $autonomous_files " in
+    *" autonomous-promote-open-issues.sh "*) : ;;
+    *) echo "unregistered: autonomous-promote-open-issues.sh"; false ;;
+  esac
+  # Derive the repo-root-scripts seam deps from the promoter's own
+  # `${AUTOSPEC_..._SCRIPT:-$SCRIPT_DIR/<name>.sh}` seam declarations.
+  deps="$(grep -oE '\$SCRIPT_DIR/[a-zA-Z0-9_.-]+\.sh' "$PROMOTER" | sed 's#\$SCRIPT_DIR/##' | sort -u)"
+  [ -n "$deps" ]
+  for dep in $deps; do
+    case " $autonomous_files " in
+      *" $dep "*) : ;;
+      *) echo "unregistered repo-root grooming dependency: $dep"; false ;;
+    esac
+  done
+}
+
+@test "the promoter's shared-lib dependency (grooming-config.sh) is registered in SHARED_LIB_SCRIPT_FILES, not AUTONOMOUS_SCRIPT_FILES" {
+  autonomous_files="$(read_var AUTONOMOUS_SCRIPT_FILES)"
+  shared_lib_files="$(read_var SHARED_LIB_SCRIPT_FILES)"
+
+  deps="$(grep -oE '\$SHARED_DIR/[a-zA-Z0-9_.-]+\.sh' "$PROMOTER" | sed 's#\$SHARED_DIR/##' | sort -u)"
+  [ -n "$deps" ]
+  for dep in $deps; do
+    case " $shared_lib_files " in
+      *" $dep "*) : ;;
+      *) echo "missing from SHARED_LIB_SCRIPT_FILES: $dep"; false ;;
+    esac
+    # A shared-lib dependency must not also be miscategorized into the
+    # repo-root group — that was a known past install.sh bug.
+    case " $autonomous_files " in
+      *" $dep "*) echo "shared-lib dep wrongly also in AUTONOMOUS_SCRIPT_FILES: $dep"; false ;;
+      *) : ;;
+    esac
+    [ -f "$REPO/skills/autospec-shared/scripts/$dep" ]
+  done
+}
+
+@test "install.sh installs shared-lib scripts from skills/autospec-shared/scripts, not repo-root scripts/" {
+  grep -q 'resolve_shared_lib_scripts_dir' "$INSTALL"
+  grep -q 'skills/autospec-shared/scripts' "$INSTALL"
+}
+
+@test "list-groomable.sh is registered (candidate-set feeder for the promoter)" {
+  autonomous_files="$(read_var AUTONOMOUS_SCRIPT_FILES)"
+  case " $autonomous_files " in
+    *" list-groomable.sh "*) : ;;
+    *) echo "unregistered: list-groomable.sh"; false ;;
+  esac
+}
