@@ -319,3 +319,84 @@ two() { printf '{"items":[%s,%s]}' "$1" "$2" > "$TMP/in.json"; }
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.items == [] and .cycles == []'
 }
+
+# --- Task 6 fix: malformed .blocked_by shapes must never crash --resolve --
+
+@test "malformed shape: blocked_by as a bare string is treated as unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":"not-an-array"}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: blocked_by as a number is treated as unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":5}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: blocked_by as an object is treated as unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":{"a":1}}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: blocked_by explicitly null is treated as no blockers (not malformed)" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":null}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == false and .items[0].ready == true'
+}
+
+@test "malformed shape: blocked_by array of bare strings/numbers/nulls is unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":["x",1,null]}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: blocked_by array entry missing repo is unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":[{"number":2}]}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: blocked_by array entry missing number is unresolvable, not a crash" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":[{"repo":"o/r"}]}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and .items[0].ready == false'
+}
+
+@test "malformed shape: a well-formed blocked_by array still resolves normally after the guard" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"closed","blocked_by":[]},{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"o/r","number":1}]}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==2) | .ready == true'
+}
+
+@test "malformed shape: top-level .cycles being a non-array on input does not crash --resolve" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":[]}],"cycles":"nope"}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.cycles == []'
+}
+
+@test "malformed shape: top-level .items being a non-array on input passes through without crashing" {
+  printf '{"items":"nope"}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.'
+  echo "$output" | jq -e '.items == "nope"'
+}
