@@ -616,6 +616,55 @@ _autospec_conductor_clear_discard_pending() {
     fi
 }
 
+# _autospec_conductor_board_state REPO ISSUE STATE — best-effort project-board
+# write-back for the PR lifecycle (project-board-fleet-execution Plan B Task
+# 5). This is DECORATIVE only: it mirrors what the conductor already knows
+# onto a board for human visibility. It must NEVER affect the merge path —
+# every failure mode below (no board configured, no cache yet, no matching
+# item, missing project-board-writeback.sh, a write-back error) is a silent,
+# zero-cost no-op. The `|| true` / early-return chain here is the deliberate
+# contract, mirroring scripts/autonomous-promote-open-issues.sh::
+# board_writeback — do NOT "fix" the swallowed errors; a board mutation
+# failure must never fail, delay, or alter a real merge. Never fires under
+# CONDUCTOR_DRY_RUN=1 — dry-run must not touch anything external.
+#
+# The overwhelmingly common case is a repo with no board at all: the
+# board-cache directory (only ever created by the board-consuming callers,
+# e.g. autonomous-promote-open-issues.sh's board_plan()) will not exist, so
+# the very first check below returns immediately — no jq, no subprocess, no
+# added latency on the merge path.
+_autospec_conductor_board_state() {
+    local _bs_repo="$1" _bs_issue="$2" _bs_state="$3"
+    [ -n "$_bs_repo" ] && [ -n "$_bs_state" ] || return 0
+    case "$_bs_issue" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "${CONDUCTOR_DRY_RUN:-0}" = "1" ] && return 0
+
+    local _bs_cache_dir="${AUTOSPEC_STATE_DIR:-$HOME/.autospec}/board-cache"
+    [ -d "$_bs_cache_dir" ] || return 0
+
+    local _bs_writeback="${AUTOSPEC_BOARD_WRITEBACK_SCRIPT:-$_AUTOSPEC_LOOP_LIB_DIR/../project-board-writeback.sh}"
+    [ -f "$_bs_writeback" ] || return 0
+
+    # Board caches are keyed by board URL (shasum), not by repo, so more
+    # than one cache file can exist for a fleet spanning several boards.
+    # Scan every cached plan for a matching (repo, issue) item — typically
+    # 0 or 1 file, so this stays cheap.
+    local _bs_item="" _bs_cache
+    for _bs_cache in "$_bs_cache_dir"/*.json; do
+        [ -f "$_bs_cache" ] || continue
+        _bs_item="$(jq -r --arg r "$_bs_repo" --argjson n "$_bs_issue" \
+            '(.items // [])[] | select(.repo == $r and .number == $n) | .item_id // empty' \
+            "$_bs_cache" 2>/dev/null | head -1 || true)"
+        [ -n "$_bs_item" ] && break
+    done
+    [ -n "$_bs_item" ] || return 0
+
+    bash "$_bs_writeback" --plan "$_bs_cache" --item "$_bs_item" --state "$_bs_state" \
+        >/dev/null 2>&1 || true
+}
+
 # _autospec_conductor_rollup_ci_green REPO PR — exit 0 only when the roll-up
 # PR's status checks are fully settled with no failures. An empty rollup (no
 # CI configured) counts as green; a failed probe fails CLOSED (refuse the
@@ -678,6 +727,7 @@ _autospec_conductor_handle_promote() {
                     --body "promote: roll-up PR #${rollup_pr} was already merged; integration-branch reset completed (recovered)." \
                     >/dev/null 2>&1 || true
                 gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+                _autospec_conductor_board_state "$repo" "$issue" "Done"
             else
                 gh issue comment "$issue" --repo "$repo" \
                     --body "promote: roll-up PR #${rollup_pr} is merged but the integration-branch reset failed again. Re-apply autospec:promote to retry, or reset manually." \
@@ -693,6 +743,12 @@ _autospec_conductor_handle_promote() {
         _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
         return 0
     fi
+
+    # Board write-back: the roll-up PR's checks are about to be polled —
+    # this is the real, observable "checks running" moment (see
+    # _autospec_conductor_board_state's contract above; never blocks or
+    # alters the merge decision below).
+    _autospec_conductor_board_state "$repo" "$issue" "Testing"
 
     # Red/unsettled CI must never be admin-merged; manual GitHub merge is
     # the operator's explicit override.
@@ -723,6 +779,7 @@ _autospec_conductor_handle_promote() {
             --body "promote: merged roll-up PR #${rollup_pr} and reset the integration branch." \
             >/dev/null 2>&1 || true
         gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+        _autospec_conductor_board_state "$repo" "$issue" "Done"
     else
         gh issue comment "$issue" --repo "$repo" \
             --body "promote: merged roll-up PR #${rollup_pr} but the integration-branch reset failed. Re-apply autospec:promote to retry the reset (recovery is idempotent)." \
@@ -2629,6 +2686,14 @@ EOF_PROV_BATCH
                                                                 --parent "$_prov_parent_branch" --issue "$_sm_issue" --pr "$_sm_pr" \
                                                                 ${_repo:+--repo "$_repo"} 2>&1)" || _sm_rollup_rc=$?
                                                             printf '%s\n' "$_sm_rollup_out" >&2
+                                                            # Board write-back: rollup-update succeeding is the real,
+                                                            # observable "issue rolled into the integration branch /
+                                                            # its roll-up PR exists" moment — fire Review regardless
+                                                            # of red/green CI (that distinction belongs to the
+                                                            # Testing state at promote time), never on a failed roll.
+                                                            if [ "$_sm_rollup_rc" -eq 0 ]; then
+                                                                _autospec_conductor_board_state "$_repo" "$_sm_issue" "Review"
+                                                            fi
                                                             if [ "$_sm_rollup_rc" -ne 0 ]; then
                                                                 # rollup-update itself already parks/notifies on gh
                                                                 # failure (exit 8/9) or multi-open (exit 9), but that

@@ -85,7 +85,11 @@ EOF
   RUN_CMD_LOG="$TEST_TMP/run-cmd.log"
   INT_CALL_LOG="$TEST_TMP/intbranch-calls.log"
   PROV_CALL_LOG="$TEST_TMP/prov-calls.log"
-  touch "$RUN_CMD_LOG" "$INT_CALL_LOG" "$PROV_CALL_LOG"
+  WRITEBACK_LOG="$TEST_TMP/writeback-calls.log"
+  touch "$RUN_CMD_LOG" "$INT_CALL_LOG" "$PROV_CALL_LOG" "$WRITEBACK_LOG"
+  # No board configured unless a test opts in via _write_board_cache /
+  # _install_board_writeback — matches every pre-existing test's posture.
+  unset AUTOSPEC_BOARD_WRITEBACK_SCRIPT
 
   cat > "$TEST_TMP/run-cmd.sh" <<EOF
 #!/usr/bin/env bash
@@ -100,7 +104,8 @@ EOF
   export AUTOSPEC_RUN_CMD="bash $TEST_TMP/run-cmd.sh"
 
   export LOOP_LIB REPO_ROOT FAKE_SCRIPTS TEST_TMP FAKE_BIN \
-    MODE_FILE PAUSE_FILE OUTCOME_FILE RUN_CMD_LOG INT_CALL_LOG PROV_CALL_LOG NOTIFY_LOG
+    MODE_FILE PAUSE_FILE OUTCOME_FILE RUN_CMD_LOG INT_CALL_LOG PROV_CALL_LOG NOTIFY_LOG \
+    WRITEBACK_LOG
 }
 
 teardown() {
@@ -196,6 +201,28 @@ esac
 exit 0
 EOF
   chmod +x "$FAKE_SCRIPTS/autonomous-integration-branch.sh"
+}
+
+# Board-cache fixture consumed by _autospec_conductor_board_state (mapping
+# repo/issue -> item_id), dropped into $HOME/.autospec/board-cache (HOME ==
+# TEST_TMP per setup()).
+_write_board_cache() {
+  local repo="$1" issue="$2" item_id="$3"
+  mkdir -p "$TEST_TMP/.autospec/board-cache"
+  cat > "$TEST_TMP/.autospec/board-cache/plan.json" <<EOF
+{"items":[{"repo":"$repo","number":$issue,"item_id":"$item_id"}]}
+EOF
+}
+
+# project-board-writeback.sh stub: logs every invocation to WRITEBACK_LOG.
+_install_board_writeback() {
+  cat > "$FAKE_SCRIPTS/project-board-writeback.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$WRITEBACK_LOG"
+exit 0
+EOF
+  chmod +x "$FAKE_SCRIPTS/project-board-writeback.sh"
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$FAKE_SCRIPTS/project-board-writeback.sh"
 }
 
 _run_cycle() {
@@ -407,4 +434,122 @@ EOF
   grep -q '^issues=101 kind=integration$' "$RUN_CMD_LOG"
   ! grep -q '^rollup-update' "$INT_CALL_LOG"
   [ ! -f "$PAUSE_FILE" ]
+}
+
+# ---------------------------------------------------------------------------
+# Board write-back (project-board-fleet-execution Plan B Task 5): a
+# successful rollup-update is the real "issue rolled into the integration
+# branch / its roll-up PR exists" moment — fires board state Review for the
+# landed issue. Decorative only, must never affect the aftermath path.
+# ---------------------------------------------------------------------------
+
+@test "clean rollup-update fires board Review for the landed issue" {
+  _install_common_stubs
+  _install_provenance
+  _install_intbranch
+  _install_queue "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+  _install_board_writeback
+  _write_board_cache "test-owner/test-repo" 101 "PVTI_landed"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  grep -q -- "--item PVTI_landed --state Review" "$WRITEBACK_LOG"
+}
+
+@test "rollup-red still fires board Review (issue is in review; red is a separate signal)" {
+  _install_common_stubs
+  _install_provenance
+  _install_intbranch
+  _install_queue "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+  : > "$TEST_TMP/rollup-red"
+  _install_board_writeback
+  _write_board_cache "test-owner/test-repo" 101 "PVTI_red"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  grep -q -- "--item PVTI_red --state Review" "$WRITEBACK_LOG"
+}
+
+@test "rollup-update failure (nonzero exit) fires no board Review call" {
+  _install_common_stubs
+  _install_provenance
+  _install_queue "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+  _install_board_writeback
+  _write_board_cache "test-owner/test-repo" 101 "PVTI_neverlanded"
+
+  cat > "$FAKE_SCRIPTS/autonomous-integration-branch.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$INT_CALL_LOG"
+case "\${1:-}" in
+  ensure)
+    mkdir -p "$TEST_TMP/.autospec"
+    printf '{"branch":"autospec/autonomous-main","slug":"test-owner/test-repo","base":"main","head_sha":"abc123","kind":"integration"}\n' > "$MODE_FILE"
+    ;;
+  sync)
+    exit 0
+    ;;
+  status)
+    printf '{"branch":"autospec/autonomous-main","rollup_pr":{"number":null,"state":null},"accumulated_pr_count":1,"age_days":1,"diff_lines":10}\n'
+    ;;
+  rollup-update)
+    exit 7
+    ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKE_SCRIPTS/autonomous-integration-branch.sh"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$PAUSE_FILE" ]
+  run cat "$WRITEBACK_LOG"
+  [ -z "$output" ]
+}
+
+@test "no board configured: self-originated merge aftermath runs cleanly with zero write-back calls" {
+  _install_common_stubs
+  _install_provenance
+  _install_intbranch
+  _install_queue "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+  _install_board_writeback
+  # Deliberately no _write_board_cache call: no board-cache dir exists.
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  grep -q -- "^rollup-update --parent main --issue 101 --pr 501" "$INT_CALL_LOG"
+  run cat "$WRITEBACK_LOG"
+  [ -z "$output" ]
+}
+
+@test "CONDUCTOR_DRY_RUN=1: self-originated merge aftermath fires zero board write-back calls" {
+  _install_common_stubs
+  _install_provenance
+  _install_intbranch
+  _install_queue "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+  _install_board_writeback
+  _write_board_cache "test-owner/test-repo" 101 "PVTI_dryrun"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=1 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  run cat "$WRITEBACK_LOG"
+  [ -z "$output" ]
 }
