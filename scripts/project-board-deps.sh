@@ -55,6 +55,16 @@
 #     never names a specific item as "in" the cycle, only that its
 #     dependency chain contains one, so it never asserts something false
 #     about an item that is merely downstream of a cycle.
+#   - An input item whose .blocked_by is already present but malformed (not
+#     an array, or an array containing something other than a {repo,number}
+#     object — e.g. an already-extracted plan re-piped through this script
+#     with a hand-edited or corrupted field) is treated the same as an
+#     unparseable body declaration above: .deps_unresolvable is forced true
+#     with a .deps_reason and the field is reset to []. Reading a shape we
+#     cannot understand as "no blockers" would silently promote a possibly
+#     still-blocked item; failing closed is consistent with every other
+#     "could not understand this dependency declaration" case in this
+#     script.
 #
 # Pure filter: no network, no `gh`, no mutation. Never fails on degenerate
 # input — malformed/missing shapes degrade gracefully rather than crashing.
@@ -228,6 +238,36 @@ printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
   def has_dep_source($item):
     ($item | has("dependencies")) or ($item | has("parent_issue")) or ($item | has("body"));
 
+  # A well-formed edge is an object carrying both "repo" and "number".
+  def is_edge_obj:
+    (type == "object") and has("repo") and has("number");
+
+  # Sanitize an already-populated .blocked_by carried on the input (the
+  # idempotent re-pipe case: a previously extracted plan fed straight back
+  # into this script, possibly with --resolve). A malformed shape here is
+  # untrusted, unparseable input, not "no dependency" — the same "fails
+  # closed" rule the extraction stage already applies to unparseable body
+  # prose (see the header comment): a dependency declaration this script
+  # cannot understand must never be silently promoted to "unblocked".
+  #   - not an array at all (string/number/object/null): entirely malformed.
+  #   - an array containing any non-edge element (a bare string/number/null,
+  #     or an object missing "repo" or "number"): partially malformed, and
+  #     since we cannot trust the intent behind the well-formed entries
+  #     either, the whole declaration is treated as unresolvable.
+  def sanitize_blocked_by:
+    .blocked_by as $bl
+    | if ($bl == null) then
+        {refs: [], unresolvable: false, reason: null}
+      elif ($bl | type) != "array" then
+        {refs: [], unresolvable: true,
+         reason: "blocked_by is present but not an array; treated as an unresolvable declared dependency"}
+      elif ($bl | map(is_edge_obj) | all) then
+        {refs: $bl, unresolvable: false, reason: null}
+      else
+        {refs: [], unresolvable: true,
+         reason: "blocked_by contains an entry that is not a {repo,number} object; treated as an unresolvable declared dependency"}
+      end;
+
   .items |= map(
     . as $item
     | if has_dep_source($item) then
@@ -242,9 +282,10 @@ printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
             deps_reason: $result.reason
           }
       else
-        . + {
-            blocked_by: (.blocked_by // []),
-            deps_unresolvable: (.deps_unresolvable // false),
-            deps_reason: (.deps_reason // null)
+        (sanitize_blocked_by) as $s
+        | . + {
+            blocked_by: $s.refs,
+            deps_unresolvable: (if $s.unresolvable then true else (.deps_unresolvable // false) end),
+            deps_reason: (if $s.unresolvable then $s.reason else (.deps_reason // null) end)
           }
       end)' | if [ "$resolve" -eq 1 ]; then resolve_stage; else cat; fi
