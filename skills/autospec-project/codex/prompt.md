@@ -66,13 +66,17 @@ retry rather than trusting the partial plan.
 
 `sync <url>` runs exactly one Tier 1.5 promotion cycle against the board and
 stops — it does not start a conductor, does not drain the queue, and does
-not loop. As of this writing, `/autospec-autonomous` does NOT read
-`project_board:` from `.autospec/autonomous.yml` on its own: the Rust
-`ProjectBoardConfig` parses and validates that block, but nothing wires its
-values into the shell conductor or exports the env vars the promoter reads
-(`AUTOSPEC_PROJECT_BOARD_URL`, `_ALLOWLIST`, `_TTL`, `_LABEL_MAP`). Until
-that wiring lands, this `sync` mode — invoked by hand, or on a schedule —
-is the only way a configured board actually reaches the promoter.
+not loop. `/autospec-autonomous` DOES now read `project_board:` from
+`.autospec/autonomous.yml`: the promoter (`autonomous-promote-open-issues.sh`)
+sources `AUTOSPEC_PROJECT_BOARD_URL`, `_ALLOWLIST`, `_TTL`, and `_LABEL_MAP`
+from `autospec autonomous project-board-config` — the Rust subcommand that
+parses and validates the config block — whenever those env vars are unset.
+An operator-exported value still wins over the config bridge for each var
+individually. A config whose `url` fails the `repo_allowlist` gate (see
+below) yields no board for that cycle rather than promoting unscoped. This
+`sync` mode remains useful for an ad hoc or scheduled run against a URL that
+isn't in `.autospec/autonomous.yml` at all, or for a one-off dry check
+before wiring the config in.
 
 Read `project_board.repo_allowlist` from `.autospec/autonomous.yml` (it is
 required whenever `project_board.url` is set — the Rust config parser
