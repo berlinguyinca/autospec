@@ -283,6 +283,15 @@ ledger_lock_reclaim() {
         # and fall through to retry in the normal wait loop.
         return 0
     fi
+    # Test-only seam: unset/empty in production (zero cost, no behavior
+    # change). Lets tests deterministically widen the window between
+    # winning the reclaim mutex and re-reading the current target, to
+    # prove the mismatch-abort branch below (the lock changed hands after
+    # we decided it was stale) is exercised and still bounded — not to
+    # simulate any real production condition.
+    if [ -n "${AUTOSPEC_SPEND_LOCK_TEST_STALL:-}" ]; then
+        sleep "$AUTOSPEC_SPEND_LOCK_TEST_STALL"
+    fi
     local current
     current="$(readlink "$lockdir" 2>/dev/null || true)"
     if [ "$current" = "$expected" ]; then
@@ -304,9 +313,18 @@ ledger_lock_acquire() {
         if ln -s "$$" "$lockdir" 2>/dev/null; then
             return 0
         fi
+        # Attempting a reclaim (successful, a no-op because the reclaim
+        # mutex is held/orphaned, or aborted because the target changed)
+        # must NEVER skip the wait/timeout accounting below via `continue`
+        # — doing that turned an orphaned "<lockdir>.reclaiming" mutex into
+        # an unbounded, silent busy-spin (no sleep, no wait counter, never
+        # reaches LOCK_MAX_WAIT_ITER). Every iteration of this loop, no
+        # matter what happened above, falls through to the same bounded
+        # wait/timeout step, so every path out of this function is either
+        # "lock acquired" or "die after LOCK_MAX_WAIT_ITER retries" — never
+        # an infinite loop.
         if ledger_lock_is_stale "$lockdir"; then
             ledger_lock_reclaim "$lockdir"
-            continue
         fi
         waited=$((waited + 1))
         if [ "$waited" -gt "$LOCK_MAX_WAIT_ITER" ]; then

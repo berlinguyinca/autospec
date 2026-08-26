@@ -209,3 +209,115 @@ backdate() {
   run env AUTOSPEC_SPEND_SCOPE="$scope" bash "$SCRIPT" status --repo-dir "$TMP/a"
   echo "$output" | jq -e '.tokens == 80'
 }
+
+# ── Bounded failure paths (never hang, never silently spin) ─────────────────
+#
+# ledger_lock_acquire's retry loop must terminate — either by acquiring the
+# lock or by die()ing after LOCK_MAX_WAIT_ITER — no matter what happens on
+# the reclaim side. Every scenario below wraps the call in `timeout` so a
+# regression to the busy-spin bug (an orphaned reclaim mutex causing
+# `continue` to skip the wait/timeout accounting) fails the test suite fast
+# instead of wedging it.
+
+@test "orphaned .reclaiming mutex + a LIVE lock holder: bounded timeout, no hang" {
+  scope=board-orphan-reclaiming-live
+  lockdir="$TMP/.autospec/autonomous-spend/${scope}/spend.json.lock"
+  mkdir -p "$(dirname "$lockdir")"
+  sleep 5 &
+  livepid=$!
+  ln -s "$livepid" "$lockdir"
+  mkdir "${lockdir}.reclaiming"
+
+  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+    bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]  # 124 = timeout(1) killed it — must not happen
+  echo "$output" | grep -qi 'timed out waiting for ledger lock'
+
+  kill "$livepid" 2>/dev/null || true
+  wait "$livepid" 2>/dev/null || true
+}
+
+@test "orphaned .reclaiming mutex + a DEAD lock holder: bounded timeout, no hang" {
+  scope=board-orphan-reclaiming-dead
+  lockdir="$TMP/.autospec/autonomous-spend/${scope}/spend.json.lock"
+  mkdir -p "$(dirname "$lockdir")"
+  ( : ) & deadpid=$!
+  wait "$deadpid" || true
+  ln -s "$deadpid" "$lockdir"
+  backdate "$lockdir" 60
+  mkdir "${lockdir}.reclaiming"
+
+  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+    bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  echo "$output" | grep -qi 'timed out waiting for ledger lock'
+}
+
+@test "orphaned .reclaiming mutex with NO lock at all: acquires immediately, no hang" {
+  scope=board-orphan-reclaiming-nolock
+  lockdir="$TMP/.autospec/autonomous-spend/${scope}/spend.json.lock"
+  mkdir -p "$(dirname "$lockdir")"
+  mkdir "${lockdir}.reclaiming"
+
+  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tokens == 10'
+}
+
+@test "both lockdir and .reclaiming orphaned: bounded timeout, then recovers once the operator clears .reclaiming" {
+  scope=board-both-orphaned
+  lockdir="$TMP/.autospec/autonomous-spend/${scope}/spend.json.lock"
+  mkdir -p "$(dirname "$lockdir")"
+  ( : ) & deadpid=$!
+  wait "$deadpid" || true
+  ln -s "$deadpid" "$lockdir"
+  backdate "$lockdir" 60
+  mkdir "${lockdir}.reclaiming"
+
+  run timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+    AUTOSPEC_SPEND_LOCK_MAX_WAIT_ITER=20 \
+    bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  echo "$output" | grep -qi 'timed out waiting for ledger lock'
+
+  # An orphaned reclaim mutex is not permanently fatal: once an operator
+  # clears it (the visible, diagnosable failure above is what tells them
+  # to), the ledger recovers on its own.
+  rmdir "${lockdir}.reclaiming"
+  run --separate-stderr timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+    bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tokens == 10'
+}
+
+@test "reclaim mutex won but the lock vanishes before mv: aborts cleanly, still bounded" {
+  scope=board-vanish-before-mv
+  lockdir="$TMP/.autospec/autonomous-spend/${scope}/spend.json.lock"
+  mkdir -p "$(dirname "$lockdir")"
+  ( : ) & deadpid=$!
+  wait "$deadpid" || true
+  ln -s "$deadpid" "$lockdir"
+  backdate "$lockdir" 60
+
+  # AUTOSPEC_SPEND_LOCK_TEST_STALL is a test-only seam (no-op unless set):
+  # it stalls ledger_lock_reclaim right after it wins the reclaim mutex,
+  # giving this test a deterministic window to remove the lock out from
+  # under it before the reclaim's own readlink/mv runs.
+  ( timeout 5 env AUTOSPEC_SPEND_SCOPE="$scope" AUTOSPEC_SPEND_LOCK_STALE_SECONDS=2 \
+      AUTOSPEC_SPEND_LOCK_TEST_STALL=1 \
+      bash "$SCRIPT" add --tokens 10 --repo-dir "$TMP/a" >"$TMP/vanish.out" 2>"$TMP/vanish.err"
+    echo "$?" > "$TMP/vanish.exit" ) &
+  runner=$!
+  sleep 0.3
+  rm -f "$lockdir"
+  wait "$runner"
+
+  exitcode="$(cat "$TMP/vanish.exit")"
+  [ "$exitcode" -eq 0 ]
+  [ "$exitcode" -ne 124 ]
+  cat "$TMP/vanish.out" | jq -e '.tokens == 10'
+}
