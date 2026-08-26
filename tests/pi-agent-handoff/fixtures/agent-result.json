@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "artifact_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "created_at": "2026-08-22T12:15:00Z",
+  "repository": "berlinguyinca/autospec",
+  "role": "repository_critic",
+  "status": "pass",
+  "findings": [
+    {
+      "severity": "info",
+      "claim": "The routed Pi adapter already exists.",
+      "evidence": ["scripts/autospec-pi-dispatch.py"],
+      "confidence": "high"
+    }
+  ],
+  "proposed_artifact": null,
+  "producer": {
+    "agent_id": "codex-critic",
+    "harness": "pi",
+    "bridge": "AskCodex",
+    "provider_family": "openai",
+    "model": "gpt-5.5",
+    "session_isolation": "isolated",
+    "access_mode": "read"
+  },
+  "inputs": [
+    {
+      "artifact_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "commands": ["rg -n autospec-pi-dispatch.py scripts"],
+  "tools": ["read", "grep"],
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "cached_tokens": 10
+  },
+  "unresolved_questions": [],
+  "error_category": null
+}

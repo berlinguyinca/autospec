@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "generated_at": "2026-08-21T12:00:00Z",
+  "routes": [
+    {
+      "id": "qwen-text-48k-a",
+      "endpoint": "https://inferweave.example/v1",
+      "protocol": "openai-compatible",
+      "model": "qwen3.8-27b-48k",
+      "node_class": "dual-1080ti",
+      "modalities": ["text"],
+      "context_window": 60000,
+      "max_input_tokens": 48000,
+      "strength": 20,
+      "queue_seconds": 5,
+      "available": true,
+      "opportunistic": false,
+      "local": true
+    }
+  ]
+}

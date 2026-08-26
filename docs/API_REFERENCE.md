@@ -10,6 +10,23 @@
   generated: true
 -->
 
+## Typed agent handoffs and Pi bridges
+
+`python3 scripts/autospec-handoff.py` is the deterministic artifact boundary between
+planning, implementation, and review agents:
+
+- `validate --kind {spec,implementation,closeout,review,result} --input FILE`
+- `reconcile-spec --proposal FILE --critique FILE --repo DIR --output FILE`
+- `implementation --spec FILE --issue FILE --output FILE`
+- `review --implementation FILE --closeout FILE --base SHA --head SHA --output FILE`
+- `accept-result --handoff FILE --result FILE`
+
+`scripts/autospec-pi-bridge-dispatch.py` loads exactly one pinned Pi extension for an
+isolated `AskClaude` or read-only `AskCodex` call and validates its result. Stable
+refusals include `HANDOFF_SCHEMA_INVALID`, `HANDOFF_LINEAGE_MISMATCH`,
+`HANDOFF_SCOPE_INVALID`, `HANDOFF_BRIDGE_DISABLED`, `HANDOFF_BRIDGE_UNAVAILABLE`,
+`HANDOFF_AGENT_OUTPUT_INVALID`, and `HANDOFF_INDEPENDENCE_UNSATISFIED`.
+
 ## Shared scripts (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Installed to `~/.autospec/scripts/`. The top-level `install.sh` globs every repo-root
@@ -21,6 +38,54 @@ hand-maintained list. The per-skill standalone installers (`skills/*/install.sh`
 The `tests/ship-completeness.bats` guard asserts every `${AUTOSPEC_SCRIPTS_DIR}`-referenced
 script is in the shippable set and that no bare repo-relative script invocation remains in any
 skill surface.
+
+### `autospec-route.py`
+
+Strict v1 harness and InferWeave route resolver. It reads YAML configuration, obtains
+one bounded capability document, validates freshness and safety constraints, and emits
+a deterministic typed envelope. It never dispatches a model itself.
+
+```
+autospec-route.py validate [--config PATH]
+autospec-route.py resolve --kind KIND [--config PATH] [--capabilities PATH]
+  [--available-harness ID] [--proposer-envelope PATH] [--now RFC3339]
+autospec-route.py explain --kind KIND [same options as resolve]
+```
+
+`validate` and successful `resolve` exit 0. Invalid configuration or usage exits 1
+(missing PyYAML exits 2). A safe routing refusal exits 3 and `resolve` writes a
+`fallback_required` envelope naming `existing-routing`; callers then retain the
+legacy selector. `explain` prints the stable dispatch ID and ordered decision facts.
+
+Refusal identifiers are stable API values:
+
+- `ROUTING_CONFIG_MISSING`, `ROUTING_CONFIG_INVALID`
+- `ROUTING_DISCOVERY_FAILED`, `ROUTING_CAPABILITY_INVALID`, `ROUTING_CAPABILITY_STALE`
+- `ROUTING_HARNESS_UNAVAILABLE`, `ROUTING_CAPABILITY_UNAVAILABLE`
+- `ROUTING_INDEPENDENCE_UNSATISFIED`, `ROUTING_ADAPTER_UNSUPPORTED`
+
+InferWeave capabilities use `inferweave-capabilities-v1.schema.json`: `generated_at`
+plus route records containing endpoint, protocol, model, node class, modalities,
+context/input limits, strength, queue delay, availability, opportunistic status, and
+locality. Image routes are valid only on `mac` and `rtx6000`. Dispatch output conforms
+to `autospec-dispatch-envelope-v1.schema.json`; identical validated inputs produce the
+same `sha256:` dispatch ID.
+
+### `autospec-pi-dispatch.py`
+
+Consumes a successful Pi/openai-compatible dispatch envelope and a prompt file:
+
+```
+autospec-pi-dispatch.py --envelope ENVELOPE.json --prompt-file PROMPT.md
+```
+
+The adapter creates an ephemeral `PI_CODING_AGENT_DIR/models.json`, invokes Pi with
+`--mode json --print --no-session --no-extensions --no-skills --no-prompt-templates`,
+and normalizes Pi JSONL to `{message, usage, child_exit_status}`. It preserves Pi's
+child exit status. The provider key defaults to the name `INFERWEAVE_API_KEY`; secret
+values are read from the environment by Pi and are never written into the model file
+or output. Unsupported envelopes exit 3; malformed input/output exits 1; a missing Pi
+binary exits 2.
 
 ### `validate-security-artifact.py`
 

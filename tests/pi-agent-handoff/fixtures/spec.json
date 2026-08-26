@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "artifact_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "created_at": "2026-08-22T12:00:00Z",
+  "repository": "berlinguyinca/autospec",
+  "sources": [
+    {
+      "artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "artifact_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "producer": {
+    "agent_id": "pi-reconciler",
+    "harness": "pi",
+    "bridge": "native",
+    "provider_family": "local",
+    "model": "deterministic",
+    "session_isolation": "isolated",
+    "access_mode": "read"
+  },
+  "status": "approved",
+  "goal": "Add typed agent handoffs that preserve planning and review lineage.",
+  "non_goals": ["Allow arbitrary Pi extensions."],
+  "constraints": ["AutoSpec retains merge authority."],
+  "invariants": ["Unapproved specifications never reach implementation."],
+  "affected_surfaces": [
+    {
+      "path": "scripts/autospec-route.py",
+      "state": "existing",
+      "symbols": ["main"]
+    },
+    {
+      "path": "scripts/autospec-handoff.py",
+      "state": "proposed",
+      "symbols": ["reconcile_spec"]
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Exchange immutable JSON artifacts.",
+      "rationale": "Downstream work remains reproducible.",
+      "rejected_alternatives": ["Share full conversation history."]
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "The handoff CLI validates all four version 1 artifact kinds.",
+      "verification": "python3 -m unittest discover -s tests/pi-agent-handoff -v"
+    }
+  ],
+  "tests_required": ["unit", "integration"],
+  "primary_smoke_test": "bash tests/pi-agent-handoff/test.sh",
+  "risks": [
+    {
+      "risk": "A bridge returns unstructured output.",
+      "mitigation": "Reject output that fails the result schema."
+    }
+  ],
+  "planning_evidence": [
+    {
+      "role": "intent_planner",
+      "result_artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "role": "repository_critic",
+      "result_artifact_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "material_questions": []
+}

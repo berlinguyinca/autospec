@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.dev/schemas/inferweave-capabilities-v1.schema.json",
+  "title": "InferWeave capabilities v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "generated_at", "routes"],
+  "properties": {
+    "version": {"const": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "routes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/candidate"}
+    }
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "endpoint", "protocol", "model", "node_class", "modalities", "context_window", "max_input_tokens", "strength", "queue_seconds", "available", "opportunistic", "local"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "endpoint": {"type": "string", "format": "uri", "minLength": 1},
+        "protocol": {"enum": ["openai-compatible", "native"]},
+        "model": {"type": "string", "minLength": 1},
+        "node_class": {"type": "string", "minLength": 1},
+        "modalities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["text", "image"]}
+        },
+        "context_window": {"type": "integer", "minimum": 1},
+        "max_input_tokens": {"type": "integer", "minimum": 1},
+        "strength": {"type": "integer", "minimum": 0},
+        "queue_seconds": {"type": "integer", "minimum": 0},
+        "available": {"type": "boolean"},
+        "opportunistic": {"type": "boolean"},
+        "local": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"modalities": {"contains": {"const": "image"}}}},
+          "then": {"properties": {"node_class": {"enum": ["mac", "rtx6000"]}}}
+        }
+      ]
+    }
+  }
+}

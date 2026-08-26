@@ -1,0 +1,9 @@
+{
+  "source_implementation": {
+    "artifact_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "changed_paths": ["scripts/autospec-handoff.py"],
+  "claims": [{"claim": "The handoff command validates its output.", "label": "verified", "proof_type": "runtime", "evidence": "python3 -m unittest tests/pi-agent-handoff/test_handoff_cli.py"}],
+  "checks": [{"name": "handoff tests", "status": "pass", "evidence": "python3 -m unittest tests/pi-agent-handoff/test_handoff_cli.py"}]
+}

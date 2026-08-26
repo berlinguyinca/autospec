@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.dev/schemas/autospec-dispatch-envelope-v1.schema.json",
+  "title": "AutoSpec dispatch envelope v1",
+  "oneOf": [
+    {"$ref": "#/$defs/success"},
+    {"$ref": "#/$defs/refusal"}
+  ],
+  "$defs": {
+    "success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "dispatch_id", "kind", "harness", "inference", "policy", "explain"],
+      "properties": {
+        "version": {"const": 1},
+        "dispatch_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "kind": {"type": "string", "minLength": 1},
+        "harness": {"$ref": "#/$defs/harness"},
+        "inference": {"$ref": "#/$defs/inference"},
+        "policy": {"$ref": "#/$defs/policy"},
+        "explain": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "status", "reason", "fallback", "explain"],
+      "properties": {
+        "version": {"const": 1},
+        "status": {"const": "fallback_required"},
+        "reason": {
+          "enum": ["ROUTING_CONFIG_MISSING", "ROUTING_CONFIG_INVALID", "ROUTING_HARNESS_UNAVAILABLE", "ROUTING_DISCOVERY_FAILED", "ROUTING_CAPABILITY_STALE", "ROUTING_CAPABILITY_INVALID", "ROUTING_CAPABILITY_UNAVAILABLE", "ROUTING_INDEPENDENCE_UNSATISFIED", "ROUTING_ADAPTER_UNSUPPORTED"]
+        },
+        "fallback": {"const": "existing-routing"},
+        "explain": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "transport"],
+      "properties": {
+        "id": {"enum": ["pi", "codex", "opencode", "claude"]},
+        "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "transport": {"enum": ["json", "rpc", "cli"]},
+        "endpoint_env": {"type": "string"},
+        "api_key_env": {"type": "string"}
+      }
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "route_id", "endpoint", "protocol", "model", "modalities", "context_window", "max_input_tokens", "reserve_output_tokens", "node_class", "strength", "opportunistic"],
+      "properties": {
+        "source": {"const": "inferweave"},
+        "route_id": {"type": "string", "minLength": 1},
+        "endpoint": {"type": "string", "format": "uri"},
+        "protocol": {"enum": ["openai-compatible", "native"]},
+        "model": {"type": "string", "minLength": 1},
+        "modalities": {"type": "array", "items": {"enum": ["text", "image"]}},
+        "context_window": {"type": "integer", "minimum": 1},
+        "max_input_tokens": {"type": "integer", "minimum": 1},
+        "reserve_output_tokens": {"type": "integer", "minimum": 1},
+        "node_class": {"type": "string", "minLength": 1},
+        "strength": {"type": "integer", "minimum": 0},
+        "opportunistic": {"type": "boolean"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["independent_from", "fallback"],
+      "properties": {
+        "independent_from": {"type": ["string", "null"]},
+        "fallback": {"const": "existing-routing"}
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-implementation-closeout-v1.schema.json",
+  "title": "AutoSpec Implementation Closeout",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_implementation", "changed_paths", "claims", "checks"],
+  "properties": {
+    "source_implementation": {"$ref": "#/$defs/source"},
+    "changed_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/repoPath"}},
+    "claims": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/claim"}},
+    "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/check"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "repoPath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+    "source": {"type": "object", "additionalProperties": false, "required": ["artifact_id", "digest"], "properties": {"artifact_id": {"$ref": "#/$defs/digest"}, "digest": {"$ref": "#/$defs/digest"}}},
+    "claim": {"type": "object", "additionalProperties": false, "required": ["claim", "label", "proof_type", "evidence"], "properties": {"claim": {"type": "string", "minLength": 1}, "label": {"enum": ["verified", "assumed", "couldnt-verify", "likely-wrong"]}, "proof_type": {"enum": ["runtime", "static", "none"]}, "evidence": {"type": "string", "minLength": 1}}},
+    "check": {"type": "object", "additionalProperties": false, "required": ["name", "status", "evidence"], "properties": {"name": {"type": "string", "minLength": 1}, "status": {"enum": ["pass", "fail", "not-run"]}, "evidence": {"type": "string", "minLength": 1}}}
+  }
+}

@@ -11,7 +11,7 @@
 #   - scripts/refine-prompt-lens-llm.sh (LLM dispatcher resolution alignment)
 #
 # Detection order:
-#   1. AUTOSPEC_HANDOFF_DISPATCHER_KIND env override (claude|codex|opencode).
+#   1. AUTOSPEC_HANDOFF_DISPATCHER_KIND env override (claude|codex|opencode|pi).
 #   2. Active harness runtime marker.
 #   3. Skill-mount probe:
 #        ~/.claude/skills/...               → Claude Code
@@ -23,6 +23,7 @@
 #   Claude Code → claude "/autospec" "--autonomous" "$PROMPT"
 #   Codex CLI   → codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"
 #   OpenCode    → opencode "/autospec" "--autonomous" "$PROMPT"
+#   Pi          → pi --mode json --print --no-session "/autospec --autonomous $PROMPT"
 #
 # Path-safety (mirrors PR #693): rejects relative paths and any binary under
 # /tmp, /private/tmp, /var/tmp, /var/folders, or $TMPDIR, before AND after
@@ -154,6 +155,9 @@ autospec_harness_detect() {
     if [ -n "${OPENCODE:-}" ] || [ -n "${OPENCODE_SESSION_ID:-}" ]; then
         printf 'opencode'; return 0
     fi
+    if [ -n "${PI_CODING_AGENT_DIR:-}" ] || [ -n "${PI_SESSION_ID:-}" ]; then
+        printf 'pi'; return 0
+    fi
     local probe_root="${AUTOSPEC_HARNESS_PROBE_ROOT:-$HOME}"
     if [ -d "$probe_root/.claude/skills" ]; then
         printf 'claude'; return 0
@@ -163,6 +167,9 @@ autospec_harness_detect() {
     fi
     if [ -d "$probe_root/.config/opencode/agent" ] || [ -d "$probe_root/.config/opencode" ]; then
         printf 'opencode'; return 0
+    fi
+    if [ -d "$probe_root/.pi/agent" ]; then
+        printf 'pi'; return 0
     fi
     local kind binary
     while IFS= read -r kind; do
@@ -249,6 +256,16 @@ autospec_harness_invoke() {
                 "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec" "$prompt"
             else
                 "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec" "--autonomous" "$prompt"
+            fi
+            return $?
+            ;;
+        pi)
+            if [ "$mode" = "interactive" ]; then
+                "$AUTOSPEC_HARNESS_DISPATCHER" --mode json --print --no-session \
+                    --no-extensions --no-skills --no-prompt-templates "/autospec $prompt"
+            else
+                "$AUTOSPEC_HARNESS_DISPATCHER" --mode json --print --no-session \
+                    --no-extensions --no-skills --no-prompt-templates "/autospec --autonomous $prompt"
             fi
             return $?
             ;;

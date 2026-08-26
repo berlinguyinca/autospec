@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "generated_at": "2026-08-21T12:00:00Z",
+  "routes": [
+    {
+      "id": "qwen-vision-mac",
+      "endpoint": "https://inferweave.example/v1",
+      "protocol": "openai-compatible",
+      "model": "qwen3.8-27b-vision-48k",
+      "node_class": "mac",
+      "modalities": ["text", "image"],
+      "context_window": 60000,
+      "max_input_tokens": 48000,
+      "strength": 20,
+      "queue_seconds": 8,
+      "available": true,
+      "opportunistic": false,
+      "local": true
+    }
+  ]
+}

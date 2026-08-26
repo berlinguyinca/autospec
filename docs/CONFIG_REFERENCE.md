@@ -425,6 +425,38 @@ over the baseline — routing fails closed rather than guessing a price.
 Only `implementer` dispatches are re-routable. The reviewer keeps its own tier, which
 also keeps every safety gate and all spec/decompose work on its existing tier.
 
+## Unified harness and InferWeave routing (opt-in)
+
+The v1 unified router selects both a harness (`pi`, `codex`, `opencode`, or `claude`)
+and an InferWeave inference route. Copy [`examples/routing.yml`](../examples/routing.yml)
+to `~/.autospec/routing.yml` to opt in, or set `AUTOSPEC_ROUTING_CONFIG` to an absolute
+configuration path. The existing profile/tier router remains authoritative when the
+file is absent or when resolution returns a refusal with fallback `existing-routing`.
+
+The configuration has six strict top-level keys: `version`, `harnesses`, `routes`,
+`inference_classes`, `inferweave`, and `fallback`. Unknown keys and references fail
+closed. `inferweave.discovery_url` must be HTTPS; explicitly enabled loopback HTTP is
+intended only for tests. Discovery is one bounded request using `timeout_seconds`; its
+payload must be no older than `maximum_age_seconds`. `local_only: true` excludes remote
+routes. Each inference class constrains modalities, input/output token budgets, queue
+delay, and optionally eligible node classes.
+
+Image-capable routes are deliberately limited to node class `mac` or `rtx6000`.
+Text routes may use the 1080 Ti, 4090, H100, Mac, or RTX 6000 capacity InferWeave
+advertises, but the returned `context_window` and `max_input_tokens` are authoritative;
+AutoSpec does not infer capacity from a GPU or model name.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_ROUTING_CONFIG` | `~/.autospec/routing.yml` | Absolute override for the strict v1 routing file. An absent file preserves legacy routing. |
+| `AUTOSPEC_SCHEMAS_DIR` | `~/.autospec/schemas` | Installation directory for the routing, capability, and envelope JSON schemas. |
+| `INFERWEAVE_API_KEY` | unset | Credential read by Pi at dispatch time; the generated Pi model file stores only this environment-variable name. |
+
+Rollback is immediate and state-free: remove `~/.autospec/routing.yml`, or run
+`unset AUTOSPEC_ROUTING_CONFIG` when an override was exported. The next implementer
+dispatch uses the established `select-model-profile.sh`/tier path. Unified routing
+does not change reviewer tier policy.
+
 ## Local model dispatch
 `scripts/local-dispatch.sh` runs a dispatch on a local model via Codex CLI's native
 `--oss --local-provider` support. It is chosen over a bespoke HTTP client because
@@ -628,3 +660,13 @@ inside every script autospec runs.
 
 For automation toggles (skip-review, stop, no-heal, …) see [`FLAGS.md`](FLAGS.md).
 This reference covers the operator-facing knobs; run `grep -rho 'AUTOSPEC_[A-Z0-9_]*' skills scripts | sort -u` for the exhaustive internal set.
+
+## Pi agent handoffs
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_PI_HANDOFF_CONFIG` | unset | Enables typed planning/review delegation using the named strict YAML file. |
+
+Copy `examples/pi-agent-handoff.yml`, retain exact `npm:<package>@<version>` pins,
+and set `enabled: true`. The shipped example is disabled. Unset the variable (or
+disable the file) for immediate rollback to extension-free AutoSpec behavior.

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "dispatch_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "kind": "execution",
+  "harness": {
+    "id": "pi",
+    "command": ["pi", "--mode", "json"],
+    "transport": "json"
+  },
+  "inference": {
+    "source": "inferweave",
+    "route_id": "qwen-text-48k-a",
+    "endpoint": "https://inferweave.example/v1",
+    "protocol": "openai-compatible",
+    "model": "qwen3.8-27b-48k",
+    "modalities": ["text"],
+    "context_window": 60000,
+    "max_input_tokens": 48000,
+    "reserve_output_tokens": 12000,
+    "node_class": "dual-1080ti",
+    "strength": 20,
+    "opportunistic": false
+  },
+  "policy": {
+    "independent_from": null,
+    "fallback": "existing-routing"
+  },
+  "explain": [
+    "selected harness pi: first available configured harness",
+    "selected route qwen-text-48k-a: eligible text.standard candidate"
+  ]
+}

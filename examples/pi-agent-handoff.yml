@@ -1,0 +1,28 @@
+version: 1
+enabled: false
+orchestrator:
+  provider: ollama
+  model: glm-4.7-flash
+bridges:
+  intent_planner:
+    package: npm:pi-claude-bridge@0.7.0
+    tool: AskClaude
+    provider_family: anthropic
+    model: opus
+    reasoning_effort: high
+  repository_critic:
+    package: npm:@estebanforge/pi-ask-codex@1.0.3
+    tool: AskCodex
+    provider_family: openai
+    model: full
+    reasoning_effort: high
+  reviewer:
+    package: npm:pi-claude-bridge@0.7.0
+    tool: AskClaude
+    provider_family: anthropic
+    model: opus
+    reasoning_effort: high
+policy:
+  max_parallel: 2
+  recursive_delegation: false
+  require_isolated_planning_sessions: true

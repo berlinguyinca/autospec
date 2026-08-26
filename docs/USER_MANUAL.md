@@ -469,3 +469,17 @@ same reason.
 
 Exit 3 means the commit range is empty: there is nothing to open a PR for, and the
 caller must not run `gh pr create`.
+
+## Coordinating agents through specs and handoffs
+
+AutoSpec retains orchestration authority. Pi is an opt-in transport for isolated
+specialists: `AskClaude` can propose intent or review an implementation, while
+read-only `AskCodex` can challenge that proposal against repository evidence.
+Agents exchange schema-validated JSON artifacts with exact SHA-256 lineage, not
+free-form conversation history.
+
+The sequence is intent proposal, repository critique, AutoSpec reconciliation,
+approved spec, bounded implementation handoff, structured closeout, and independent
+review. Existing lint, tests, guardian review, CI, and merge rules remain in force.
+Copy `examples/pi-agent-handoff.yml`, install its exact pinned Pi packages, enable it,
+and export `AUTOSPEC_PI_HANDOFF_CONFIG`; unset the variable to roll back.

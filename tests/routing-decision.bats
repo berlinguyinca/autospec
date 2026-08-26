@@ -222,7 +222,13 @@ EOF
           --argjson b "$(stats_row claude-sonnet-cloud 120k deep 50 0.95 0.01 0.01 0.05 0.9)" \
           '[$a,$b]' > "$TMP/s.json"
     # Make the local profile the expensive one.
-    sed -i 's/  cost_minute: 0.02/  cost_minute: 99.0/' "$PROF"
+    python3 - "$PROF" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("  cost_minute: 0.02", "  cost_minute: 99.0"))
+PY
     run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json"
     [ "$output" = "claude-sonnet-4-6" ]
 }
