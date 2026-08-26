@@ -36,7 +36,7 @@ ACCESSIBLE_PRIMITIVE_PREFIXES = (
 MOTION_LIBRARIES = {"framer-motion", "motion", "gsap", "@formkit/auto-animate", "auto-animate"}
 MOTION_PREFIXES = ("@react-spring", "@motionone")
 UI_SOURCE_SUFFIXES = {".css", ".scss", ".sass", ".less", ".tsx", ".jsx", ".ts", ".js", ".html", ".vue", ".svelte"}
-WEB_UI_PROFILES = {"react-vite-typescript", "nextjs-web-app"}
+WEB_UI_PROFILES = {"typescript", "javascript"}
 CAPABILITY_NAMES = ("accessible_primitives", "motion_library", "reduced_motion_reset")
 
 

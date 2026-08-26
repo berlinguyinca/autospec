@@ -30,6 +30,8 @@ write_react_vite_repo() {
   cat > "$repo/package.json" <<'JSON'
 {"dependencies":{"@vitejs/plugin-react":"latest","react":"latest","typescript":"latest"},"devDependencies":{"@playwright/test":"latest","vite":"latest"},"scripts":{"test":"vitest"}}
 JSON
+  # tsconfig.json pins the package.json marker to typescript; the .tsx source line then carries 100% line share, confidence 0.95 >= 0.8 scaffold gate (language-selection-axis spec, confidence clamp).
+  echo '{}' > "$repo/tsconfig.json"
   echo 'export const App = () => null;' > "$repo/src/App.tsx"
   cat > "$repo/.autospec/state/rule-check-results.json" <<'JSON'
 {"schema":1,"results":[{"rule_id":"product.docs.center","status":"fail","check_type":"required_in_app_documentation","severity":"required","category":"product_baseline"}]}
@@ -45,6 +47,8 @@ write_next_app_repo() {
   cat > "$repo/package.json" <<'JSON'
 {"dependencies":{"next":"latest","react":"latest","typescript":"latest"}}
 JSON
+  # tsconfig.json pins the package.json marker to typescript; the .tsx source line then carries 100% line share, confidence 0.95 >= 0.8 scaffold gate (language-selection-axis spec, confidence clamp).
+  echo '{}' > "$repo/tsconfig.json"
   echo 'export default function Home(){ return null; }' > "$repo/app/page.tsx"
 }
 
@@ -54,6 +58,8 @@ write_next_pages_repo() {
   cat > "$repo/package.json" <<'JSON'
 {"dependencies":{"next":"latest","react":"latest","typescript":"latest"}}
 JSON
+  # tsconfig.json pins the package.json marker to typescript; the .tsx source line then carries 100% line share, confidence 0.95 >= 0.8 scaffold gate (language-selection-axis spec, confidence clamp).
+  echo '{}' > "$repo/tsconfig.json"
   echo 'export default function Home(){ return null; }' > "$repo/pages/index.tsx"
 }
 

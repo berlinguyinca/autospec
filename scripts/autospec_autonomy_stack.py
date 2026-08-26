@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Target stack detection and the confidence score gating stack-specific scaffolds.
 
-Extracted from autospec-autonomy-v2-lib.py to bring that file under the repo's
-file-size gate. Extracted rather than left in place because the worker refusal
-path needs stack_confidence, and modules must never import the lib — its filename
-contains hyphens and is not importable.
-
-Behaviour is identical to the originals — this is a move, not a rewrite. The
-ui_capabilities block is added afterwards by autospec-detect-stack-profile.sh.
+A language is nominated only by a marker file resolved through
+scripts/autospec-language-table.sh — never by substring matching on dependency
+names — and its confidence is the share of tracked source lines the language
+actually occupies, so a minority language cannot pass the scaffold gate.
+The ui_capabilities block is added afterwards by autospec-detect-stack-profile.sh.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from autospec_autonomy_io import load_json, reports, state, write_json, write_text
@@ -36,15 +35,17 @@ SOURCE_SUFFIXES = frozenset({
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
 })
 
-# Which suffixes a language profile is actually written in, for line share.
-_WEB_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte")
-LANGUAGE_SUFFIXES = {
-    "react-vite-typescript": _WEB_SUFFIXES,
-    "nextjs-web-app": _WEB_SUFFIXES,
-    "python-cli-tool": (".py",),
-}
+TABLE_SCRIPT = Path(__file__).resolve().parent / "autospec-language-table.sh"
+
+MARKER_BASENAMES = frozenset({
+    "Cargo.toml", "go.mod", "pyproject.toml", "package.json",
+    "pom.xml", "build.gradle", "Gemfile",
+})
+
 MIN_LINE_SHARE = 0.5
 CLAMPED_CONFIDENCE = 0.5
+
+_SUFFIX_LANGUAGES: dict[str, str] | None = None
 
 
 def is_skipped(rel_path: str) -> bool:
@@ -69,15 +70,55 @@ def _walk(root: Path):
 
 
 def _marker_files(files: list[str]) -> list[str]:
-    """Paths eligible to nominate a candidate; fixture-nested markers never vote."""
-    return [f for f in files if not FIXTURE_DIR_PARTS.intersection(f.split("/")[:-1])]
+    """Lowercased paths eligible to nominate a candidate; fixture-nested markers never vote."""
+    lowered = [rel.lower() for rel in files]
+    return [rel for rel in lowered if not FIXTURE_DIR_PARTS.intersection(rel.split("/")[:-1])]
+
+
+def _table(fn: str, path: Path) -> str | None:
+    """The language autospec-language-table.sh assigns to fn(path), or None."""
+    try:
+        proc = subprocess.run(["bash", str(TABLE_SCRIPT), fn, str(path)],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    lang = proc.stdout.strip()
+    return lang if lang else None
+
+
+def _git_ls_files(root: Path) -> list[str] | None:
+    """Tracked paths in true case, or None when root is not a git worktree."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [rel for rel in proc.stdout.split("\0") if rel]
+
+
+def _tracked_entries(root: Path) -> "list[tuple[str, Path]]":
+    """(repo-relative true-case path, path) for every file that may vote.
+
+    A git worktree walks its index so an untracked file dilutes no line share;
+    a plain directory falls back to the disk walk under the same exclusions.
+    """
+    tracked = _git_ls_files(root)
+    if tracked is not None:
+        return [(rel, root / rel) for rel in tracked
+                if (root / rel).is_file() and not is_skipped(rel)]
+    return [(path.relative_to(root).as_posix(), path) for path in root.rglob("*")
+            if not is_skipped(path.relative_to(root).as_posix()) and path.is_file()]
 
 
 def _line_counts(entries) -> dict[str, int]:
     """Tracked source lines per suffix, over every walked source file."""
     counts: dict[str, int] = {}
     for rel, path in entries:
-        suffix = Path(rel).suffix
+        suffix = Path(rel).suffix.lower()
         if suffix not in SOURCE_SUFFIXES:
             continue
         try:
@@ -88,28 +129,31 @@ def _line_counts(entries) -> dict[str, int]:
     return counts
 
 
-def _clamped(profile: dict, counts: dict[str, int]) -> dict:
-    """Confidence capped below the scaffold gate when the language is a minority.
-
-    Fail-closed: a marker that nominates a language covering under half the
-    tracked source lines is weak evidence, not a licence to scaffold.
-    """
-    suffixes = LANGUAGE_SUFFIXES.get(profile["id"])
-    total = sum(counts.values())
-    if not suffixes or not total or profile["confidence"] <= CLAMPED_CONFIDENCE:
-        return profile
-    share = sum(counts.get(s, 0) for s in suffixes) / total
-    if share >= MIN_LINE_SHARE:
-        return profile
-    return {**profile, "confidence": CLAMPED_CONFIDENCE,
-            "evidence": profile["evidence"] + [f"line share {share:.2f} below {MIN_LINE_SHARE}"]}
-
-
 def _package_text(root: Path) -> str:
     path = root / "package.json"
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore").lower()
+
+
+def _suffix_languages() -> dict[str, str]:
+    """Suffix -> language per the table; suffixes the table refuses are absent."""
+    global _SUFFIX_LANGUAGES
+    if _SUFFIX_LANGUAGES is None:
+        langs: dict[str, str] = {}
+        for suffix in sorted(SOURCE_SUFFIXES):
+            lang = _table("extension_language", Path("probe" + suffix))
+            if lang:
+                langs[suffix] = lang
+        _SUFFIX_LANGUAGES = langs
+    return _SUFFIX_LANGUAGES
+
+
+def _confidence(share: float) -> float:
+    """Fail-closed: under a 50% line share the language is weak evidence."""
+    if share < MIN_LINE_SHARE:
+        return CLAMPED_CONFIDENCE
+    return min(0.95, round(0.5 + 0.45 * share, 2))
 
 
 def _profile(pid: str, confidence: float, evidence: list[str], recipes: list[str] | None = None) -> dict:
@@ -120,32 +164,40 @@ def _profile(pid: str, confidence: float, evidence: list[str], recipes: list[str
 def _detect_profiles(root: Path) -> dict:
     """{"languages": [...], "frameworks": [...]}; only a language may be primary.
 
-    playwright names a test framework, not the language a repo is written in, so
-    it is reported but can never set primary_profile. nextjs-web-app and
-    react-vite-typescript stay language-tier: they are the only profiles carrying
-    TypeScript/JavaScript language evidence, and the runtime adapter/generator
-    pipeline resolves its adapter from primary_profile. Demoting them before the
-    follow-up marker-table issue lands a TS/JS language marker would leave every
-    such repo at unknown @ 0.1.
+    A language exists only when a non-fixture marker file resolves to it in the
+    language table; playwright names a test framework, not the language a repo
+    is written in, so it is reported but can never set primary_profile.
     """
     pkg = _package_text(root)
-    entries = list(_walk(root))
-    markers = _marker_files([rel for rel, _ in entries])
-    languages, frameworks = [], []
-    if "react" in pkg and "vite" in pkg and ("typescript" in pkg or any(f.endswith(".tsx") for f in markers)):
-        languages.append(_profile("react-vite-typescript", 0.95, ["package.json: react/vite/typescript"],
-                                  ["playwright-viewport-matrix", "documentation-route-scaffold", "settings-page-scaffold"]))
-    if "fastapi" in pkg or (root / "pyproject.toml").exists() or any(f.endswith(".py") for f in markers):
-        languages.append(_profile("python-cli-tool", 0.65, ["python files or pyproject"], ["metadata-drift-test"]))
-    if "next" in pkg:
-        languages.append(_profile("nextjs-web-app", 0.9, ["package.json: next"],
-                                  ["documentation-route-scaffold", "settings-page-scaffold"]))
-    if "@playwright/test" in pkg or any("playwright.config" in f for f in markers):
+    entries = _tracked_entries(root)
+    true_by_lower = {rel.lower(): rel for rel, _ in entries}
+    marker_lowers = _marker_files([rel for rel, _ in entries])
+    candidates: dict[str, list[str]] = {}
+    for low in marker_lowers:
+        rel = true_by_lower[low]
+        base = Path(rel).name
+        if base not in MARKER_BASENAMES and not base.endswith(".csproj"):
+            continue
+        lang = _table("marker_language", root / rel)
+        if lang:
+            candidates.setdefault(lang, []).append(rel)
+    counts = _line_counts(entries)
+    suffix_langs = _suffix_languages()
+    total = sum(counts.values()) or 1
+    languages = []
+    for lang in sorted(candidates):
+        lines = sum(n for s, n in counts.items() if suffix_langs.get(s) == lang)
+        share = lines / total
+        evidence = [f"marker {rel}" for rel in candidates[lang]]
+        if share < MIN_LINE_SHARE:
+            evidence.append(f"line share {share:.2f} below {MIN_LINE_SHARE}")
+        languages.append(_profile(lang, _confidence(share), evidence))
+    languages.sort(key=lambda p: (-p["confidence"], p["id"]))
+    frameworks = []
+    if "@playwright/test" in pkg or any("playwright.config" in rel for rel in marker_lowers):
         frameworks.append(_profile("playwright", 0.9, ["Playwright dependency/config"],
                                    ["playwright-viewport-matrix", "accessibility-smoke"]))
-    counts = _line_counts(entries)
-    languages = [_clamped(p, counts) for p in languages]
-    return {"languages": languages or [_profile("unknown", 0.1, ["no recognized stack evidence"], [])],
+    return {"languages": languages or [_profile("unknown", 0.1, ["no recognized marker file"], [])],
             "frameworks": frameworks}
 
 

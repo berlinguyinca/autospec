@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # tests/unit/test_autonomy_stack.bats — target stack detection and confidence
-# (scripts/autospec_autonomy_stack.py), extracted from autospec-autonomy-v2-lib.py.
+# (scripts/autospec_autonomy_stack.py), marker-file driven via
+# scripts/autospec-language-table.sh.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -23,7 +24,7 @@ $1
 "
 }
 
-@test "stack: react plus vite plus tsx detects react-vite-typescript at high confidence" {
+@test "stack: a react plus vite repo without tsconfig is javascript clamped at 0.5" {
     printf '%s\n' '{"dependencies":{"react":"1","vite":"1"}}' > "$WORK/package.json"
     printf 'x\n' > "$WORK/App.tsx"
     run_py "
@@ -33,26 +34,27 @@ d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
 print(d['primary_profile']['id'], d['primary_profile']['confidence'])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'react-vite-typescript 0.95'
+    printf '%s\n' "$output" | grep -Fqx 'javascript 0.5'
 }
 
-@test "stack: next detects nextjs-web-app" {
+@test "stack: a package.json marker alone is javascript at the clamped floor" {
     printf '%s\n' '{"dependencies":{"next":"1"}}' > "$WORK/package.json"
     run_py "
 st.detect_stack(root)
 import json
-print(json.loads((root / '.autospec/state/stack-profile.json').read_text())['primary_profile']['id'])
+d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
+print(d['primary_profile']['id'], d['primary_profile']['confidence'])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'nextjs-web-app'
+    printf '%s\n' "$output" | grep -Fqx 'javascript 0.5'
 }
 
-@test "stack: a python file alone detects python-cli-tool below the scaffold threshold" {
+@test "stack: a python file without a marker is unknown below the scaffold threshold" {
     printf 'print(1)\n' > "$WORK/main.py"
     run_py "
 print(st.detect_stack(root), st.stack_confidence(root) < 0.8)
 "
-    [ "$status" -eq 0 ]
+    [[ "$status" -eq 0 ]]
     printf '%s\n' "$output" | grep -Fqx '0 True'
 }
 
@@ -67,16 +69,17 @@ print(d['primary_profile']['id'], d['primary_profile']['confidence'], len(d['pro
     printf '%s\n' "$output" | grep -Fqx 'unknown 0.1 1'
 }
 
-@test "stack: playwright is reported alongside the primary framework profile" {
+@test "stack: playwright is reported alongside the language profile, never primary" {
     printf '%s\n' '{"dependencies":{"react":"1","vite":"1","typescript":"1"},"devDependencies":{"@playwright/test":"1"}}' > "$WORK/package.json"
     run_py "
 import json
 st.detect_stack(root)
-ids = [p['id'] for p in json.loads((root / '.autospec/state/stack-profile.json').read_text())['profiles']]
-print('playwright' in ids, 'react-vite-typescript' in ids)
+d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
+ids = [p['id'] for p in d['profiles']]
+print('playwright' in ids, 'javascript' in ids, d['primary_profile']['id'])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'True True'
+    printf '%s\n' "$output" | grep -Fqx 'True True javascript'
 }
 
 @test "stack: node_modules and .git are excluded from file evidence" {
@@ -98,7 +101,7 @@ c = st.stack_confidence(root)
 print(c, (root / '.autospec/state/stack-profile.json').is_file())
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx '0.9 True'
+    printf '%s\n' "$output" | grep -Fqx '0.5 True'
 }
 
 @test "stack: the markdown report names the primary profile" {
@@ -108,5 +111,5 @@ st.detect_stack(root)
 print((root / '.autospec/reports/stack-profile.md').read_text().strip().splitlines()[-1])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fq 'nextjs-web-app'
+    printf '%s\n' "$output" | grep -Fq 'javascript'
 }

@@ -50,7 +50,7 @@ fws = [p['id'] for p in d['frameworks']]
 print(d['primary_profile']['id'], 'playwright' in fws, 'playwright' in langs)
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'python-cli-tool True False'
+    printf '%s\n' "$output" | grep -Fqx 'python True False'
 }
 
 @test "stack: a marker nested under tests/fixtures casts zero candidate votes" {
@@ -67,7 +67,7 @@ d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
 print(d['primary_profile']['id'], [p['id'] for p in d['frameworks']])
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'python-cli-tool []'
+    printf '%s\n' "$output" | grep -Fqx 'python []'
 }
 
 @test "stack: a tracked .rs/.sh source under tests/ still counts toward line share" {
@@ -93,7 +93,7 @@ d = json.loads((root / '.autospec/state/stack-profile.json').read_text())
 print(d['primary_profile']['id'], d['primary_profile']['confidence'], st.stack_confidence(root) < 0.8)
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'react-vite-typescript 0.5 True'
+    printf '%s\n' "$output" | grep -Fqx 'javascript 0.5 True'
 }
 
 @test "stack: build-output and worktree directories are excluded from the walk" {
@@ -146,5 +146,5 @@ ids = [p['id'] for p in d['languages']]
 print(max(d['languages'], key=lambda p: p['confidence'])['id'], 'playwright' in ids)
 "
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -Fqx 'python-cli-tool False'
+    printf '%s\n' "$output" | grep -Fqx 'rust False'
 }

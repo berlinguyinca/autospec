@@ -72,25 +72,10 @@ def stack_profile(root: Path) -> dict:
     data = load_json(state(root) / "stack-profile.json", {})
     if data:
         return data
-    pkg = package_text(root)
-    files = [p.relative_to(root).as_posix().lower() for p in root.rglob("*") if p.is_file() and ".git" not in p.parts and "node_modules" not in p.parts]
-    profiles = []
-    def add(pid: str, confidence: float, evidence: list[str]):
-        profiles.append({"id": pid, "confidence": confidence, "evidence": evidence, "supported_recipes": [], "unsupported_recipes": [], "notes": []})
-    if "react" in pkg and "vite" in pkg:
-        add("react-vite-typescript", 0.95, ["package.json: react/vite"])
-    if "next" in pkg:
-        add("nextjs-web-app", 0.9, ["package.json: next"])
-    if "bin" in pkg and "next" not in pkg and "react" not in pkg:
-        add("node-cli-tool", 0.8, ["package.json: bin"])
-    if (root / "pyproject.toml").exists() or any(f.endswith(".py") for f in files):
-        add("python-cli-tool", 0.8, ["python project files"])
-    if not profiles:
-        add("unknown", 0.1, ["no recognized stack evidence"])
-    primary = max(profiles, key=lambda item: item["confidence"])
-    data = {"schema": 1, "profiles": profiles, "primary_profile": primary}
-    write_json(state(root) / "stack-profile.json", data)
-    return data
+    from autospec_autonomy_stack import detect_stack
+
+    detect_stack(root)
+    return load_json(state(root) / "stack-profile.json", {})
 
 
 def built_in_adapters() -> list[dict]:
@@ -102,11 +87,11 @@ def built_in_adapters() -> list[dict]:
         "playwright-viewport-tests", "playwright-accessibility-tests", "playwright-white-screen-tests",
     ]
     return [
-        adapter("react-vite", "React/Vite", ["react-vite-typescript"], base_features, ["src/**", "docs/**", "tests/**", ".autospec/**"], ["src/pages/{pascal}.tsx", "src/components/autospec/{component}.tsx"]),
-        adapter("nextjs-app-router", "Next.js App Router", ["nextjs-web-app"], base_features, ["app/**", "src/**", "docs/**", "tests/**", ".autospec/**"], ["app/{route}/page.tsx", "src/components/autospec/{component}.tsx"], required=["app/page.tsx"]),
-        adapter("nextjs-pages-router", "Next.js Pages Router", ["nextjs-web-app"], base_features, ["pages/**", "src/**", "docs/**", "tests/**", ".autospec/**"], ["pages/{route}.tsx", "src/components/autospec/{component}.tsx"], required=["pages/index.tsx"]),
-        adapter("node-cli", "Node CLI", ["node-cli-tool"], ["playwright-viewport-tests", "report-export-shell"], ["bin/**", "docs/**", ".autospec/**", "tests/**"], ["bin/autospec-status.js"]),
-        adapter("python-cli", "Python CLI", ["python-cli-tool"], ["report-export-shell"], ["src/**", "docs/**", ".autospec/**", "tests/**"], ["src/autospec_status.py"]),
+        adapter("react-vite", "React/Vite", ["javascript", "typescript"], base_features, ["src/**", "docs/**", "tests/**", ".autospec/**"], ["src/pages/{pascal}.tsx", "src/components/autospec/{component}.tsx"]),
+        adapter("nextjs-app-router", "Next.js App Router", ["javascript", "typescript"], base_features, ["app/**", "src/**", "docs/**", "tests/**", ".autospec/**"], ["app/{route}/page.tsx", "src/components/autospec/{component}.tsx"], required=["app/page.tsx"]),
+        adapter("nextjs-pages-router", "Next.js Pages Router", ["javascript", "typescript"], base_features, ["pages/**", "src/**", "docs/**", "tests/**", ".autospec/**"], ["pages/{route}.tsx", "src/components/autospec/{component}.tsx"], required=["pages/index.tsx"]),
+        adapter("node-cli", "Node CLI", ["javascript"], ["playwright-viewport-tests", "report-export-shell"], ["bin/**", "docs/**", ".autospec/**", "tests/**"], ["bin/autospec-status.js"]),
+        adapter("python-cli", "Python CLI", ["python"], ["report-export-shell"], ["src/**", "docs/**", ".autospec/**", "tests/**"], ["src/autospec_status.py"]),
     ]
 
 
@@ -304,10 +289,10 @@ def selected_feature(root: Path, feature_id: str) -> dict:
 
 
 def selected_adapter(root: Path, feature_id: str) -> dict | None:
-    for item in load_adapters(root):
-        if item.get("match_status") == "available" and feature_id in item.get("supported_feature_slices", []):
-            return item
-    return None
+    candidates = [item for item in load_adapters(root) if item.get("match_status") == "available" and feature_id in item.get("supported_feature_slices", [])]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: len(item["detection"].get("required_files", [])))
 
 
 def file_plan_for(root: Path, adapter_item: dict | None, feature_item: dict) -> tuple[list[str], list[str], list[str]]:

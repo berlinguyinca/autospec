@@ -37,6 +37,8 @@ write_evidence_repo() {
 {"scripts":{"dev":"vite --host 127.0.0.1","test:evidence":"playwright test"},"dependencies":{"@vitejs/plugin-react":"latest","react":"latest","typescript":"latest"},"devDependencies":{"@playwright/test":"latest","vite":"latest"}}
 JSON
   echo 'export const App = () => null;' > "$repo/src/App.tsx"
+  # tsconfig.json pairs the package.json marker with typescript, so the single .tsx source line carries 100% line share, confidence 0.95 >= 0.8 scaffold gate (language-selection-axis spec, confidence clamp).
+  echo '{}' > "$repo/tsconfig.json"
   cat > "$repo/.autospec/state/runtime-generations/in-app-docs-center.json" <<'JSON'
 {"schema":1,"feature_id":"in-app-docs-center","runtime_claim_level":"shell","generated_files":["src/pages/Docs.tsx"],"status":"generated"}
 JSON
