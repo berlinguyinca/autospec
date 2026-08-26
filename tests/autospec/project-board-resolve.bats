@@ -67,6 +67,7 @@ stub_gh() {
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$1" ;;
   *"project item-list"*)  cat "$2" ;;
   *) printf '' ;;
@@ -144,6 +145,7 @@ SH
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$FIX/p2-fields.json" ;;
   *"project item-list"*)  cat "$FIX/p2-items.json" ;;
   *"issue list"*)         printf '[{"number":1}]' ;;
@@ -160,6 +162,7 @@ SH
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$FIX/p2-fields.json" ;;
   *"project item-list"*)  cat "$FIX/p2-items.json" ;;
   *"issue list"*)         printf '[{"number":1}]' ;;
@@ -176,6 +179,7 @@ SH
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$FIX/p1-fields.json" ;;
   *"project item-list"*)  cat "$FIX/p1-items.json" ;;
   *"issue list"*)         echo "\$*" >> "$TMP/issue-list-calls.log"; printf '[]' ;;
@@ -193,6 +197,7 @@ SH
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$FIX/p2-fields.json" ;;
   *"project item-list"*)  cat "$FIX/p2-items.json" ;;
   *"issue list"*)         printf '[{"number":1}]' ;;
@@ -213,6 +218,7 @@ SH
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
   *"project field-list"*) cat "$FIX/p2-fields.json" ;;
   *"project item-list"*)  cat "$FIX/p2-items.json" ;;
   *"issue list"*)         exit 1 ;;
@@ -224,4 +230,122 @@ SH
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq '.items | length')" -eq 80 ]
   echo "$output" | jq -e '[.items[].state] | unique == ["open"]'
+}
+
+# ── Finding I1 seam: resolver output satisfies write-back's input contract ──
+
+@test "seam: real resolver output over the real p2 fixture satisfies write-back's input contract" {
+  # This is the seam that finding I1 broke: project-board-resolve.sh emitted
+  # {owner,kind,number} as .project, but write-back requires the GraphQL node
+  # id at .project.id. Nothing asserted that contract, so write-back was
+  # 100% inert (measured: 0 item-edit calls across a full --apply cycle) and
+  # 236 other tests stayed green. Run the REAL resolver over the REAL p2
+  # fixture, pipe its plan straight into the REAL write-back script, and
+  # assert an actual item-edit call happens with the ids the resolver named.
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/gh-calls.log"
+case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_kwTESTPROJECT01"}' ;;
+  *"project field-list"*) cat "$FIX/p2-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p2-items.json" ;;
+  *"issue list"*)         printf '[]' ;;
+  *"auth status"*)        printf "Token scopes: 'project', 'repo'\n" ;;
+  *"item-edit"*)          exit 0 ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$TMP/plan.json"
+
+  proj_id="$(jq -r '.project.id' "$TMP/plan.json")"
+  [ "$proj_id" = "PVT_kwTESTPROJECT01" ]
+  item_id="$(jq -r '.items[0].item_id' "$TMP/plan.json")"
+  field_id="$(jq -r '.fields.autospec_state.id' "$TMP/plan.json")"
+  option_id="$(jq -r '.fields.autospec_state.options.Ready' "$TMP/plan.json")"
+  [ -n "$item_id" ] && [ "$item_id" != "null" ]
+  [ -n "$field_id" ] && [ "$field_id" != "null" ]
+  [ -n "$option_id" ] && [ "$option_id" != "null" ]
+
+  WRITEBACK="${BATS_TEST_DIRNAME}/../../scripts/project-board-writeback.sh"
+  run bash "$WRITEBACK" --plan "$TMP/plan.json" --item "$item_id" --state Ready
+  [ "$status" -eq 0 ]
+
+  edit_call="$(grep 'item-edit' "$TMP/gh-calls.log")"
+  [ -n "$edit_call" ]
+  printf '%s' "$edit_call" | grep -q -- "--id $item_id"
+  printf '%s' "$edit_call" | grep -q -- "--project-id $proj_id"
+  printf '%s' "$edit_call" | grep -q -- "--field-id $field_id"
+  printf '%s' "$edit_call" | grep -q -- "--single-select-option-id $option_id"
+}
+
+# ── Finding I5 seam: dependencies field + parent_issue relation are projected ──
+
+@test "the resolver projects the dependencies field and native parent_issue relation onto each item" {
+  cat > "$TMP/depfields.json" <<'JSON'
+{"fields":[{"id":"F1","name":"Dependencies","type":"ProjectV2Field"},{"id":"F2","name":"Parent issue","type":"ProjectV2Field"}]}
+JSON
+  cat > "$TMP/depitems.json" <<'JSON'
+{"items":[
+  {"id":"PVTI_dep1",
+   "content":{"type":"Issue","number":9,"repository":"o/r","title":"t",
+              "body":"## Dependencies\n\n- Blocked by: #99.\n",
+              "url":"https://github.com/o/r/issues/9"},
+   "dependencies":"#5",
+   "parent issue":"o/r#7"}
+]}
+JSON
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"project view"*)       printf '{"id":"PVT_x"}' ;;
+  *"project field-list"*) cat "$TMP/depfields.json" ;;
+  *"project item-list"*)  cat "$TMP/depitems.json" ;;
+  *"issue list"*)         printf '[]' ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit plan
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].dependencies == "#5"'
+  echo "$output" | jq -e '.items[0].parent_issue == "o/r#7"'
+
+  # End-to-end precedence proof: the dependencies field (#5) must beat the
+  # body's declared #99 once fed through the real project-board-deps.sh.
+  DEPS="${BATS_TEST_DIRNAME}/../../scripts/project-board-deps.sh"
+  plan="$output"
+  run bash "$DEPS" <<< "$plan"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.items[0].blocked_by[].number] == [5]'
+}
+
+# ── Finding M2: --emit is validated before any network call ────────────────
+
+@test "an unsupported --emit exits 2 and makes zero gh calls" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/gh-calls.log"
+printf ''
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit bogus
+  [ "$status" -eq 2 ]
+  [ ! -f "$TMP/gh-calls.log" ]
+}
+
+@test "--emit fleet-config is a clean exit-2 usage error with zero gh calls" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/gh-calls.log"
+printf ''
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit fleet-config
+  [ "$status" -eq 2 ]
+  [ ! -f "$TMP/gh-calls.log" ]
 }

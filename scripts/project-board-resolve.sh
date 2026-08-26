@@ -48,6 +48,15 @@ done
 
 [ -n "$url" ] || die_usage "--url is required"
 
+# --emit is validated BEFORE any network call: an invalid mode (including the
+# legitimately-unimplemented "fleet-config", owned by a follow-up plan) must
+# fail with exit 2 usage and zero `gh` calls, never after paying for a
+# field-list + item-list round trip first.
+case "$emit" in
+    identity|plan|repos) ;;
+    *) die_usage "unsupported --emit: $emit" ;;
+esac
+
 # ── Identity ────────────────────────────────────────────────────────────────
 # Anchored so trailing garbage (".../projects/2x") is rejected, not truncated.
 # Accepts optional /views/N suffix (normalized away). Normalizes leading zeros.
@@ -91,6 +100,24 @@ if [ "$item_count" -ge "$limit" ]; then
     exit 4
 fi
 
+# The project's GraphQL node id (PVT_...) is fetched from a real API response
+# rather than invented from the URL-derived owner/kind/number — write-back
+# requires it verbatim as `.project.id` to target `gh project item-edit`.
+# Only "plan" ever feeds write-back, so "repos" skips this call. Failure is
+# fail-closed (exit 3), matching the field-list/item-list fetches above: an
+# inert write-back that silently discards every mutation is worse than an
+# explicit failure here.
+project_id=""
+if [ "$emit" = "plan" ]; then
+    project_json="$(gh project view "$number" --owner "$owner" --format json 2>/dev/null)" || {
+        printf 'project-board-resolve: gh project view failed\n' >&2; exit 3; }
+    project_id="$(printf '%s' "$project_json" | jq -r '.id // empty' 2>/dev/null)" || project_id=""
+    if [ -z "$project_id" ]; then
+        printf 'project-board-resolve: gh project view returned no project id\n' >&2
+        exit 3
+    fi
+fi
+
 # The state field is resolved through an ordered candidate list rather than a
 # single hardcoded literal — different boards name it differently (measured:
 # "AutoSpec state" on p2, "Delivery status" on p1). Override the candidates
@@ -111,6 +138,21 @@ fields_map="$(printf '%s' "$fields_json" | jq --argjson candidates "$candidates_
    )) as $f
   | if $f == null then {} else {autospec_state: $f} end' 2>/dev/null || printf '{}')"
 [ -n "$fields_map" ] || fields_map='{}'
+
+# The dependency field is resolved through the same ordered-candidate-list
+# mechanism as the state field, and for the same reason: p1 names it
+# "Depends on" and p2 names it "Dependencies". Only the matched field's NAME
+# is needed here (to look it up, lowercased, as a per-item payload key) —
+# unlike the state field, project-board-writeback.sh never needs its id or
+# options. `Parent issue` is not resolved through a candidate list: both
+# boards name the native relation identically.
+dep_candidates_raw="${AUTOSPEC_PROJECT_BOARD_DEP_FIELDS:-Dependencies,Depends on}"
+dep_candidates_json="$(printf '%s' "$dep_candidates_raw" | jq -R -c 'split(",")')"
+dep_field_name="$(printf '%s' "$fields_json" | jq -r --argjson candidates "$dep_candidates_json" '
+  (first(
+     $candidates[] as $name
+     | (.fields[]? | select(.name == $name) | .name)
+   )) // empty' 2>/dev/null)" || dep_field_name=""
 
 repos_json="$(printf '%s' "$items_json" | jq -c '
   [.items[]? | select(.content.type == "Issue") | .content.repository] | unique')"
@@ -141,9 +183,12 @@ if [ "$emit" = "plan" ]; then
     done
 fi
 
-plan="$(printf '%s' "$items_json" | jq --argjson id "$identity" --argjson fields "$fields_map" --argjson closed "$closed_map" '
+plan="$(printf '%s' "$items_json" | jq \
+  --argjson id "$identity" --arg pid "$project_id" \
+  --argjson fields "$fields_map" --argjson closed "$closed_map" \
+  --arg depfield "$dep_field_name" '
   [.items[]? | select(.content.type == "Issue")] as $issues
-  | {project: $id,
+  | {project: ($id + {id: ($pid | if length > 0 then . else null end)}),
      fields: $fields,
      repos: ($issues | map(.content.repository) | unique),
      items: ($issues | map(
@@ -156,7 +201,13 @@ plan="$(printf '%s' "$items_json" | jq --argjson id "$identity" --argjson fields
            body:    (.content.body // ""),
            state:   (if (($closed[$repo] // []) | index($num)) then "closed" else "open" end),
            status:  (.status // null),
-           labels:  (.labels // [])
+           labels:  (.labels // []),
+           autospec_state:
+             (($fields.autospec_state.name // "") as $sn
+              | if $sn == "" then null else (.[($sn | ascii_downcase)] // null) end),
+           dependencies:
+             (if $depfield == "" then null else (.[($depfield | ascii_downcase)] // null) end),
+           parent_issue: (."parent issue" // null)
         }))}')"
 
 case "$emit" in

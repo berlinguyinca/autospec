@@ -159,3 +159,42 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   ! grep -q 'item-edit' "$GH_CALLS"
 }
+
+# ── Finding I3: the token-scope probe is cached per run, not repeated per item ─
+
+@test "gh auth status is probed at most once across a multi-item run against the same plan" {
+  # The caller (autonomous-promote-open-issues.sh) invokes this script once
+  # per item, always with the SAME --plan file for the whole cycle (measured:
+  # 80 `gh auth status` calls in one p2 cycle before this fix). Simulate a
+  # multi-item run by invoking this script three times against the same
+  # shared plan.json, and assert the underlying gh binary was asked for
+  # 'auth status' at most once across all three.
+  # The shared plan.json fixture's item already holds "Blocked" — pick three
+  # target states that all genuinely differ from it, so every call is a real
+  # edit rather than tripping the (separately tested) idempotence skip.
+  jq '.fields.autospec_state.options = {"Ready":"opt_ready","Done":"opt_done","Testing":"opt_testing"}' \
+     "$TMP/plan.json" > "$TMP/multi.json"
+
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Done
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Testing
+  [ "$status" -eq 0 ]
+
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
+  [ "$auth_calls" -eq 1 ]
+  # The cache must not have suppressed real work: all three edits still fired.
+  edit_calls="$(grep -c 'item-edit' "$GH_CALLS")"
+  [ "$edit_calls" -eq 3 ]
+}
+
+@test "a fresh plan file (new run) re-probes gh auth status" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  jq '.' "$TMP/plan.json" > "$TMP/plan2.json"
+  run bash "$SCRIPT" --plan "$TMP/plan2.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
+  [ "$auth_calls" -eq 2 ]
+}
