@@ -146,6 +146,28 @@ teardown() {
     [ "$status" -eq 4 ]
 }
 
+@test "unwritable --artifact-dir → code_health:refine_artifact_write_failed, exit 4" {
+    local rodir
+    rodir=$(mktemp -d -t refine-ro.XXXXXX)
+    chmod a-w "$rodir"
+    run bash "$SCRIPT" "fix login button" --rounds 1 --dry-run \
+        --artifact-dir "$rodir" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
+    chmod u+w "$rodir"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"code_health:refine_artifact_write_failed"* ]]
+    [ -z "$(ls -A "$rodir" 2>/dev/null)" ]
+    rm -rf "$rodir"
+}
+
+@test "normal run exits 0 and leaves a non-empty .json artifact" {
+    run bash "$SCRIPT" "fix login button" --rounds 1 --dry-run \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
+    [ "$status" -eq 0 ]
+    local f
+    f=$(ls "$ART_DIR"/*.json | head -1)
+    [ -s "$f" ]
+}
+
 @test "unknown lens → exit 2" {
     run bash "$SCRIPT" "x" --rounds 1 --lenses bogus --dry-run \
         --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT"
