@@ -49,6 +49,35 @@
 #   safe: this script can only ever mutate an issue it created itself,
 #   never an arbitrary pre-existing one.
 #
+#   The marker is FOUND by filtering on a dedicated, non-reserved label
+#   ($MARKER_LABEL, always applied alongside the mirrored labels at create
+#   time) — not by `gh issue list --search ... in:title`. GitHub's search
+#   index lags real-time issue state by seconds to minutes, so a
+#   just-created marker can look invisible to a text search on the very
+#   next cycle; a plain `--label` filter is a direct, non-search query and
+#   does not have that lag. This removes the search-lag hazard at the
+#   source rather than merely tolerating it.
+#
+#   FIND-FAILURE HANDLING: a marker lookup that errors (non-zero gh exit)
+#   or returns something that is not a JSON array (malformed payload, an
+#   API error object, a rate-limit message that still happens to be valid
+#   JSON) is "could not determine", NOT "found nothing". Only a
+#   successful lookup that parses to an actual (possibly empty) JSON array
+#   is trustworthy enough to decide create-vs-edit. On "could not
+#   determine" the repo is skipped for this cycle with a reason — creating
+#   on uncertainty would pile up duplicate marker issues in the operator's
+#   repo over a multi-week unattended run, which is worse than a missed
+#   mirror cycle (recoverable on the next poll).
+#
+#   MULTIPLE MATCHES: if more than one open issue carries $MARKER_LABEL
+#   (e.g. an operator manually relabeled something, or a prior bug created
+#   a duplicate), this script picks the one with the LOWEST issue number
+#   — the oldest, i.e. the first marker this script ever created for that
+#   repo — deterministically, via `sort_by(.number)`, never the API's
+#   default response order (which is not guaranteed stable). It edits that
+#   one and never creates a new one when at least one match already
+#   exists.
+#
 # Usage:
 #   project-board-control-mirror.sh [--control-issue owner/repo#N] \
 #       --repos a,b --allowlist 'pat,pat'
@@ -68,12 +97,19 @@
 #   - jq: never interpolate host/board-derived values into test()/match();
 #     use --arg + index()/== for equality matching
 #   - no eval, ever
+#
+# Reserved-label matching is intentionally CASE-SENSITIVE (plain string
+# equality against a fixed literal set) — "Autospec:Stop" or
+# "autospec:STOP" is not one of the four reserved labels and must never be
+# mirrored. Do not "helpfully" make this case-insensitive; that would
+# widen the set of board labels that carry control authority.
 
 set -eu
 
 RESERVED="autospec:stop autospec:pause autospec:priority autospec:steer"
 MARKER_TITLE="[autospec] project-board control relay (do not edit manually)"
 MARKER_BODY="This issue is a machine-managed relay target for project-board-control-mirror.sh. It exists so Tier-0 control labels mirrored from the fleet's designated control issue land on an issue this script owns, never on an arbitrary pre-existing one. Do not close or repurpose it."
+MARKER_LABEL="autospec:project-board-marker"
 
 GH="${AUTOSPEC_GH_CMD:-gh}"
 
@@ -191,14 +227,38 @@ for repo in $repos; do
         continue
     fi
 
-    # Find this script's own marker issue in the target repo (search is a
-    # fixed constant string, never board/user-derived, so this is safe even
-    # though gh --search accepts a query string).
-    marker_json="$("$GH" issue list --repo "$repo" --search "\"${MARKER_TITLE}\" in:title" --state open --json number --limit 1 2>/dev/null || printf '[]')"
-    if ! printf '%s' "$marker_json" | jq -e . >/dev/null 2>&1; then
-        marker_json='[]'
+    # Find this script's own marker issue in the target repo via a plain
+    # label filter (not full-text --search — see FIND-FAILURE HANDLING in
+    # the header). Capture success/failure explicitly: an `if cmd; then`
+    # guard does not trip `set -e`, unlike a bare `cmd || fallback` on an
+    # assignment, and we need the failure signal, not just a fallback value.
+    marker_raw=""
+    marker_lookup_ok=0
+    if marker_raw="$("$GH" issue list --repo "$repo" --label "$MARKER_LABEL" --state open --json number 2>/dev/null)"; then
+        marker_lookup_ok=1
     fi
-    marker_num="$(printf '%s' "$marker_json" | jq -r '(if type == "array" then . else empty end) | .[0].number // empty' 2>/dev/null || printf '')"
+
+    marker_valid=0
+    if [ "$marker_lookup_ok" -eq 1 ]; then
+        if printf '%s' "$marker_raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            marker_valid=1
+        fi
+    fi
+
+    # "Could not determine" (gh failed, or the payload isn't a JSON array —
+    # malformed output, a rate-limit/error object that still parses as
+    # JSON) is NEVER treated as "found nothing". Skip this repo for this
+    # cycle instead of risking a duplicate marker issue.
+    if [ "$marker_valid" -ne 1 ]; then
+        skipped="$(printf '%s' "$skipped" | jq --arg r "$repo" --arg reason "marker_lookup_failed" '. + [{repo:$r,reason:$reason}]')"
+        IFS=','
+        continue
+    fi
+
+    # Deterministic pick on multiple matches: the lowest issue number (the
+    # oldest, i.e. the first marker this script ever created for this
+    # repo) via sort_by — never the API's default response order.
+    marker_num="$(printf '%s' "$marker_raw" | jq -r 'sort_by(.number) | .[0].number // empty' 2>/dev/null || printf '')"
 
     if [ -n "$marker_num" ]; then
         for label in $labels_to_mirror; do
@@ -206,7 +266,10 @@ for repo in $repos; do
             mirrored="$(printf '%s' "$mirrored" | jq --arg r "$repo" --arg l "$label" '. + [{repo:$r,label:$l}]')"
         done
     else
-        set -- "$GH" issue create --repo "$repo" --title "$MARKER_TITLE" --body "$MARKER_BODY"
+        # Confirmed-empty lookup: safe to create. The marker label is
+        # attached at creation time so the NEXT cycle's --label filter
+        # finds it immediately (no search-index lag to race).
+        set -- "$GH" issue create --repo "$repo" --title "$MARKER_TITLE" --body "$MARKER_BODY" --label "$MARKER_LABEL"
         for label in $labels_to_mirror; do
             set -- "$@" --label "$label"
         done

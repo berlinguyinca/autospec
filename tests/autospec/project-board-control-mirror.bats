@@ -10,8 +10,18 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_CALLS"
 case "$*" in
-  *"issue view"*"--json labels"*) printf '%s' "${GH_CONTROL_LABELS:-[]}" ;;
-  *"issue list"*)                 printf '%s' "${GH_REPO_LABELS:-[]}" ;;
+  *"issue view"*"--json labels"*)
+    printf '%s' "${GH_CONTROL_LABELS:-[]}"
+    ;;
+  *"issue list"*"--label autospec:project-board-marker"*)
+    if [ "${GH_MARKER_EXIT:-0}" -ne 0 ]; then
+      exit "${GH_MARKER_EXIT}"
+    fi
+    printf '%s' "${GH_MARKER_JSON:-[]}"
+    ;;
+  *"issue list"*)
+    printf '%s' "${GH_REPO_LABELS:-[]}"
+    ;;
   *) printf '' ;;
 esac
 SH
@@ -91,6 +101,7 @@ teardown() { rm -rf "$TMP"; }
 @test "no gh call ever names a repo outside the allowlist, for the control issue either" {
   export GH_CONTROL_LABELS='[{"name":"autospec:stop"}]'
   run bash "$SCRIPT" --control-issue evil/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
   ! grep -q 'evil' "$GH_CALLS"
 }
 
@@ -106,4 +117,67 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.mirrored == [] and .skipped == []'
+}
+
+# --- marker find-failure handling (Finding 1) ---------------------------
+# A transient/errored marker lookup must be treated as "could not
+# determine", never as "found nothing" — the latter would create a
+# duplicate marker issue on every flaky cycle.
+
+@test "a gh non-zero exit during marker lookup skips the repo and creates nothing" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_EXIT=1
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == [] and (.skipped | length == 1)'
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "malformed JSON during marker lookup skips the repo and creates nothing" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='not-json'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == [] and (.skipped | length == 1)'
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "a valid-but-non-array marker lookup (e.g. an error object) skips and creates nothing" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='{"message":"API rate limit exceeded"}'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == [] and (.skipped | length == 1)'
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "a valid empty marker lookup creates the marker issue" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored | length == 1'
+  grep -q -- 'issue create' "$GH_CALLS"
+}
+
+@test "multiple marker matches: picks the lowest issue number and never creates" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":42},{"number":7},{"number":99}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored | length == 1'
+  grep -q -- 'issue edit 7 --repo o/a --add-label autospec:pause' "$GH_CALLS"
+  ! grep -q -- 'issue create' "$GH_CALLS"
+}
+
+# --- marker exists-branch coverage (Finding 2) ---------------------------
+
+@test "an existing marker issue is edited in place, never recreated" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":55}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored | length == 1'
+  grep -q -- 'issue edit 55 --repo o/a --add-label autospec:pause' "$GH_CALLS"
+  ! grep -q -- 'issue create' "$GH_CALLS"
 }
