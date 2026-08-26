@@ -34,7 +34,7 @@ profiles:
 YAML
 }
 
-@test "mocked fleet dry-run discovers two repos with distinct worker IDs" {
+@test "mocked fleet dry-run discovers two repos with distinct checkout paths" {
     write_configs
 
     run bash "$FLEET_RUN" --dry-run --once \
@@ -43,10 +43,12 @@ YAML
         --queue-bin "$FIXTURES/mock-autospec.sh"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"fleet:smoke-node:org__repo-a"* ]]
-    [[ "$output" == *"fleet:smoke-node:org__repo-b"* ]]
-    worker_count="$(printf '%s\n' "$output" | grep -o 'fleet:smoke-node:org__[A-Za-z0-9._-]*' | sort -u | wc -l | tr -d ' ')"
-    [ "$worker_count" = "2" ]
+    printf '%s\n' "$output" | grep -q -- '--repo org/repo-a'
+    printf '%s\n' "$output" | grep -q -- '--repo org/repo-b'
+    repo_count="$(printf '%s\n' "$output" | grep -o -- '--repo org/repo-[a-z]*' | sort -u | wc -l | tr -d ' ')"
+    [ "$repo_count" = "2" ]
+    checkout_count="$(printf '%s\n' "$output" | grep -o 'org__repo-[a-z]*' | sort -u | wc -l | tr -d ' ')"
+    [ "$checkout_count" = "2" ]
 }
 
 @test "live fleet E2E remains opt-in behind AUTOSPEC_FLEET_LIVE_E2E" {

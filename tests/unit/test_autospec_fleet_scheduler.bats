@@ -74,9 +74,11 @@ YAML
         --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/autospec-run --profile qwen3-6-35b-a3b-laptop"* ]]
-    [[ "$output" == *"--worker-id fleet:test-node:org__repo-a"* ]]
-    [[ "$output" == *"--worker-id fleet:test-node:org__repo-b"* ]]
+    printf '%s\n' "$output" | grep -q -- 'autospec-autonomous start --detach'
+    printf '%s\n' "$output" | grep -q -- '--repo org/repo-a'
+    printf '%s\n' "$output" | grep -q -- '--repo org/repo-b'
+    printf '%s\n' "$output" | grep -q -- 'org__repo-a'
+    printf '%s\n' "$output" | grep -q -- 'org__repo-b'
 }
 
 @test "fleet-run caps output at parallel_repos 2" {
@@ -90,9 +92,11 @@ YAML
         --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
-    count="$(printf '%s\n' "$output" | grep -c '/autospec-run --profile')"
+    count="$(printf '%s\n' "$output" | grep -c -- 'autospec-autonomous start --detach')"
     [ "$count" -eq 2 ]
-    [[ "$output" != *"org/repo-c"* ]]
+    if printf '%s\n' "$output" | grep -q -- 'org/repo-c'; then
+        false
+    fi
 }
 
 @test "fleet-run skips repos with profiles unavailable on the node" {
