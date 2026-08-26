@@ -69,9 +69,31 @@ if ! jq -e . "$plan" >/dev/null 2>&1; then
     skip "plan file is not valid JSON: $plan"
 fi
 
-# Probe the token's project scope once. A token without it still resolves
-# boards fine for the reader scripts; only write-back is disabled here.
-if ! gh auth status 2>&1 | grep -q "'project'"; then
+# Probe the token's project scope at most once per run, not once per item.
+# The caller (autonomous-promote-open-issues.sh) invokes this script once per
+# item against the SAME --plan file for an entire cycle (measured: 80
+# `gh auth status` calls on one p2 cycle, one per item, before this fix). This
+# script is a fresh process per invocation, so the cache has to live on disk,
+# keyed to the plan file it was computed for: a sibling dotfile next to the
+# plan. A new cycle always starts from a freshly `mktemp`'d plan path, so the
+# cache can never outlive the run it belongs to; there is no TTL to get
+# wrong. Cache writes/reads are best-effort — a filesystem that will not let
+# us write the cache file just means every call re-probes, which is exactly
+# today's (correct, if wasteful) behavior.
+auth_cache="$(dirname -- "$plan")/.$(basename -- "$plan").authscope"
+auth_ok=""
+if [ -f "$auth_cache" ]; then
+    auth_ok="$(cat "$auth_cache" 2>/dev/null || printf '')"
+fi
+if [ "$auth_ok" != "0" ] && [ "$auth_ok" != "1" ]; then
+    if gh auth status 2>&1 | grep -q "'project'"; then
+        auth_ok=1
+    else
+        auth_ok=0
+    fi
+    printf '%s' "$auth_ok" > "$auth_cache" 2>/dev/null || true
+fi
+if [ "$auth_ok" != "1" ]; then
     skip "token lacks the project scope; write-back disabled for this run"
 fi
 
