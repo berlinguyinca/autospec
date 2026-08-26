@@ -128,6 +128,19 @@ JSON contract:
   matching the model-fit classifier's convention.
 - Exit codes: `0` success, `1` usage error / body file not found, `2` escalation failed.
 
+### Implementation status
+
+- Ranks 1–2 (explicit-with-path, inherited) are implemented in
+  `scripts/classify-language.sh` per issue #3107; ranks 3–5 (repo-dominant,
+  chosen, step-4 LLM tie-break) are not implemented yet, so
+  `source` in practice is `explicit | inherited | unknown` and
+  `deterministic` is always `true` until rank 4 lands.
+- An **existing but empty** body file is a valid input: it classifies as
+  `lang:unknown`, `confidence:0.0`, exit `0` (abstention with telemetry).
+  Exit `1` is reserved for a missing body file or usage errors.
+- `install.sh` ships the script unchanged: `copy_repo_scripts` globs
+  `scripts/*.sh`, so no install.sh edit was required.
+
 ### Label vocabulary (closed set)
 
 `lang:rust` `lang:go` `lang:python` `lang:typescript` `lang:javascript`
