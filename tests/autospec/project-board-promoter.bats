@@ -129,3 +129,50 @@ SH
   echo "$output" | jq -e '[.board.promotable[]?] | index(80) == null'
 }
 
+
+# ── Task 10: write-back into the promoter's lifecycle points ────────────────
+
+@test "promotion writes Ready back to the board" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$TMP/wb.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$TMP/wb.log"\n' > "$TMP/wb.sh"
+  chmod +x "$TMP/wb.sh"; export TMP
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  grep -q -- '--state Ready' "$TMP/wb.log"
+}
+
+@test "a blocked item writes Blocked back to the board" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$TMP/wb.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$TMP/wb.log"\n' > "$TMP/wb.sh"
+  chmod +x "$TMP/wb.sh"; export TMP
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":1,"state":"open","labels":[],"body":"Blocked by: none."},{"item_id":"PVTI_b","repo":"o/r","number":5,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  grep -q -- '--item PVTI_b --state Blocked' "$TMP/wb.log"
+}
+
+@test "write-back never runs without --apply" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$TMP/wb.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$TMP/wb.log"\n' > "$TMP/wb.sh"
+  chmod +x "$TMP/wb.sh"; export TMP; : > "$TMP/wb.log"
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  run bash "$SCRIPT" --repo o/r
+  [ ! -s "$TMP/wb.log" ]
+}
+
+@test "a write-back failure does not fail the promotion" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$TMP/wb.sh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/wb.sh"; chmod +x "$TMP/wb.sh"
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+}
+
+@test "write-back never fires when grooming policy is off" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="$TMP/wb.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$TMP/wb.log"\n' > "$TMP/wb.sh"
+  chmod +x "$TMP/wb.sh"; export TMP; : > "$TMP/wb.log"
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}'
+  AUTOSPEC_GROOMING_POLICY=off run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  [ ! -s "$TMP/wb.log" ]
+}

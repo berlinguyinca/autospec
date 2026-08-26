@@ -73,6 +73,7 @@ GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
 BOARD_RESOLVE="${AUTOSPEC_BOARD_RESOLVE_SCRIPT:-$SCRIPT_DIR/project-board-resolve.sh}"
 BOARD_NORMALIZE="${AUTOSPEC_BOARD_NORMALIZE_SCRIPT:-$SCRIPT_DIR/project-board-normalize.sh}"
 BOARD_DEPS="${AUTOSPEC_BOARD_DEPS_SCRIPT:-$SCRIPT_DIR/project-board-deps.sh}"
+BOARD_WRITEBACK="${AUTOSPEC_BOARD_WRITEBACK_SCRIPT:-$SCRIPT_DIR/project-board-writeback.sh}"
 BOARD_TTL="${AUTOSPEC_PROJECT_BOARD_TTL:-300}"
 case "$BOARD_TTL" in
     ''|*[!0-9]*) BOARD_TTL=300 ;;
@@ -222,6 +223,16 @@ board_json="$(board_stage)"
 if ! printf '%s' "$board_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
     board_json='{"ready":0,"promotable":[],"out_of_scope":[],"demoted":[],"items":[]}'
 fi
+
+# Write-back is advisory: a board mutation failure must never fail a
+# promotion that already succeeded. Fires only under --apply AND policy
+# auto|on — never in report-only mode.
+board_writeback() {
+    _wb_item="$1"; _wb_state="$2"
+    [ "$apply_enabled" -eq 1 ] || return 0
+    [ -f "$BOARD_WRITEBACK" ] || return 0
+    bash "$BOARD_WRITEBACK" --plan "$BOARD_CACHE" --item "$_wb_item" --state "$_wb_state" >/dev/null 2>&1 || true
+}
 
 # ── Accumulators ──────────────────────────────────────────────────────────────
 promoted_nums=""
@@ -517,30 +528,62 @@ while [ "$i" -lt "$cand_count" ]; do
     esac
 done
 
-# ── Board apply loop (Task 8) ───────────────────────────────────────────────
-# A genuinely ready board item is routed through the SAME Rust safety-stamp +
-# auto-implement transition used above for `eligible` candidates — no second
-# mutation path.
-if [ "$apply_enabled" = "1" ]; then
-    board_promo_count="$(printf '%s' "$board_json" | jq '.promotable | length' 2>/dev/null || printf '0')"
-    case "$board_promo_count" in
-        ''|*[!0-9]*) board_promo_count=0 ;;
+# ── Board apply loop (Tasks 8/10) ──────────────────────────────────────────────
+# Board items are a separate candidate source from GROOM_LIST; a genuinely
+# ready item is routed through the SAME Rust safety-stamp + auto-implement
+# transition used above for `eligible` candidates — no second mutation path.
+# State map (Task 10), applied here at promotion time:
+#   ready == false                -> Blocked
+#   promoted to auto-implement    -> Ready
+#   carries in-progress-by-bot    -> Implementation
+#   carries autospec:needs-human  -> Blocked
+board_apply_item() {
+    bai_item="$1"; bai_num="$2"; bai_ready="$3"; bai_labels="$4"
+
+    case ",${bai_labels}," in
+        *",autospec:needs-human,"*)
+            board_writeback "$bai_item" "Blocked"
+            return 0
+            ;;
     esac
-    bpi=0
-    while [ "$bpi" -lt "$board_promo_count" ]; do
-        b_num="$(printf '%s' "$board_json" | jq -r ".promotable[$bpi] // empty" 2>/dev/null || printf '')"
-        bpi=$((bpi + 1))
-        if [ -z "$b_num" ]; then
+    case ",${bai_labels}," in
+        *",in-progress-by-bot,"*)
+            board_writeback "$bai_item" "Implementation"
+            return 0
+            ;;
+    esac
+    if [ "$bai_ready" != "true" ]; then
+        board_writeback "$bai_item" "Blocked"
+        return 0
+    fi
+
+    rust_safety_result="hold"
+    ensure_label "auto-implement"
+    if review_admitted_issue "$bai_num"; then
+        audit_comment "$bai_num" "grooming: promoted to auto-implement — board-ready."
+        promoted_nums="${promoted_nums}${promoted_nums:+ }${bai_num}"
+        board_writeback "$bai_item" "Ready"
+    else
+        record_rust_safety_result "$bai_num"
+    fi
+}
+
+if [ "$apply_enabled" = "1" ]; then
+    board_own_count="$(printf '%s' "$board_json" | jq '.items | length' 2>/dev/null || printf '0')"
+    case "$board_own_count" in
+        ''|*[!0-9]*) board_own_count=0 ;;
+    esac
+    bi=0
+    while [ "$bi" -lt "$board_own_count" ]; do
+        b_item="$(printf '%s' "$board_json" | jq -r ".items[$bi].item_id // empty" 2>/dev/null || printf '')"
+        b_num="$(printf '%s' "$board_json" | jq -r ".items[$bi].number // empty" 2>/dev/null || printf '')"
+        b_ready="$(printf '%s' "$board_json" | jq -r ".items[$bi].ready // false" 2>/dev/null || printf 'false')"
+        b_labels="$(printf '%s' "$board_json" | jq -r ".items[$bi].labels // \"\"" 2>/dev/null || printf '')"
+        bi=$((bi + 1))
+        if [ -z "$b_item" ] || [ -z "$b_num" ]; then
             continue
         fi
-        rust_safety_result="hold"
-        ensure_label "auto-implement"
-        if review_admitted_issue "$b_num"; then
-            audit_comment "$b_num" "grooming: promoted to auto-implement — board-ready."
-            promoted_nums="${promoted_nums}${promoted_nums:+ }${b_num}"
-        else
-            record_rust_safety_result "$b_num"
-        fi
+        board_apply_item "$b_item" "$b_num" "$b_ready" "$b_labels"
     done
 fi
 
