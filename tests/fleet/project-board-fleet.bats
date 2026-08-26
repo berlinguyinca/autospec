@@ -19,10 +19,33 @@ setup() {
     # tests must never leak liveness markers into each other.
     export AUTOSPEC_HEARTBEAT_DIR="$TMP/hb"
 
-    # Stub the conductor so no real process is ever started.
+    # Stub the conductor so no real process is ever started. This stub
+    # VALIDATES its arguments the way scripts/autospec-autonomous.sh's real
+    # parser does for `start`: known flags are accepted, anything else is
+    # rejected with "unknown argument: $1" and a non-zero exit — exactly
+    # what the real binary does. An argument-blind stub (`printf '%s\n'
+    # "$*"`) accepts anything, including a rejected flag like `--detach`,
+    # and so can never catch fleet-lib.sh/fleet-run.sh building a command
+    # the real conductor refuses. Do not weaken this back to argument-blind.
     cat > "$TMP/bin/autospec-autonomous" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FLEET_SPAWN_LOG"
+set -euo pipefail
+orig="$*"
+sub="${1:-}"
+shift || true
+case "$sub" in
+    start) ;;
+    *) printf 'autospec-autonomous: unknown subcommand: %s\n' "$sub" >&2; exit 1 ;;
+esac
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo-dir|--repo) shift 2 ;;
+        --repo-dir=*|--repo=*) shift ;;
+        --foreground|--force) shift ;;
+        *) printf 'autospec-autonomous: unknown argument: %s\n' "$1" >&2; exit 1 ;;
+    esac
+done
+printf '%s\n' "$orig" >> "$FLEET_SPAWN_LOG"
 SH
     chmod +x "$TMP/bin/autospec-autonomous"
 
@@ -64,6 +87,19 @@ teardown() {
     run bash "$RUN" --config "$TMP/fleet.yml"
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$FLEET_SPAWN_LOG")" -eq 2 ]
+}
+
+@test "the spawned command uses only flags the real conductor accepts (C1 regression pin)" {
+    # scripts/autospec-autonomous.sh's `start` has no --detach case and its
+    # catch-all is `die "unknown argument: $1"`; `start` already detaches by
+    # default. The stub in setup() validates arguments the same way, so this
+    # test is RED against the old `start --detach ...` command shape and
+    # GREEN against the fixed one — a real regression pin, not a tautology.
+    run bash "$RUN" --config "$TMP/fleet.yml"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$FLEET_SPAWN_LOG")" -eq 2 ]
+    run grep -q -- '--detach' "$FLEET_SPAWN_LOG"
+    [ "$status" -ne 0 ]
 }
 
 @test "the spawned command is a conductor, not a one-shot autospec-run" {
