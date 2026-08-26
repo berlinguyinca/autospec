@@ -308,6 +308,9 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "timeline" => timeline(options).map_err(CommandFailure::diagnostic),
         "cleanup" => cleanup(options).map_err(CommandFailure::diagnostic),
         "main-health" => main_health(options).map_err(CommandFailure::diagnostic),
+        "project-board-config" => {
+            project_board_config(options).map_err(CommandFailure::diagnostic)
+        }
         "drain" => drain::run(options),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
@@ -1965,6 +1968,58 @@ fn effective_main_health_policy_digest(
         &health.branch
     };
     config.main_health.effective_policy_digest(branch_identity)
+}
+
+/// `autospec autonomous project-board-config` — the shell/Rust bridge for
+/// Tier 1.5 board ingestion (final review finding I4). The promoter script
+/// (`scripts/autonomous-promote-open-issues.sh`) reads board settings from
+/// plain `AUTOSPEC_PROJECT_BOARD_*` env vars, but the validated config —
+/// including the mandatory `url` requires non-empty `repo_allowlist` gate —
+/// lives only in `.autospec/autonomous.yml`, parsed by
+/// `autospec_core::autonomous::config::project_board`. Nothing bridged the
+/// two, so a configured board silently never ran.
+///
+/// This command loads and re-validates that config and prints it as a single
+/// JSON object on stdout so the shell can `jq` it rather than `eval` it — a
+/// shell eval of Rust-produced text is an injection surface, and board
+/// config values (url, allowlist entries) are operator-supplied. Fields:
+///   - "url": the board URL, or `null` if unset OR if validation failed.
+///   - "allowlist": the repo allowlist entries (empty when `url` is null).
+///   - "ttl", "label_map": always `null` today — `ProjectBoardConfig` has no
+///     schema fields for board-cache TTL or label remapping yet, so the
+///     bridge cannot source them from validated config; the shell keeps its
+///     own existing defaults/overrides for those two names.
+///
+/// Security invariant: `project_board::parse` itself enforces that a
+/// configured `url` requires a non-empty `repo_allowlist` (parse fails
+/// otherwise), and `load_autonomous_config` propagates that failure as
+/// `Err`. This function does not duplicate that check — it cannot emit a
+/// `url` without a valid allowlist because a config that fails the gate
+/// never reaches the printer at all; the command exits non-zero and prints
+/// nothing on stdout instead.
+fn project_board_config(options: Options) -> Result<(), String> {
+    let config = load_autonomous_config(&options.repo_dir)?;
+    println!("{}", format_project_board_config(&config.project_board));
+    Ok(())
+}
+
+fn format_project_board_config(
+    board: &autospec_core::autonomous::config::ProjectBoardConfig,
+) -> String {
+    let url_json = match &board.url {
+        Some(url) => format!("\"{}\"", json_escape(url)),
+        None => "null".to_string(),
+    };
+    let allowlist_json = format!(
+        "[{}]",
+        board
+            .repo_allowlist
+            .iter()
+            .map(|entry| format!("\"{}\"", json_escape(entry)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    format!("{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":null,\"label_map\":null}}")
 }
 
 fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
@@ -7327,7 +7382,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|resume|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous start [--epic N] [OPTIONS]\n    autospec autonomous resume --epic N [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --epic N             adopt only a verified managed accountability epic\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|resume|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health|project-board-config] [OPTIONS]\n    autospec autonomous start [--epic N] [OPTIONS]\n    autospec autonomous resume --epic N [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n    autospec autonomous project-board-config --repo-dir DIR   emit validated project_board config as JSON\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --epic N             adopt only a verified managed accountability epic\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
     );
 }
 
@@ -8009,5 +8064,84 @@ mod foreground_tests {
 
         assert!(resumed);
         assert!(!probed, "terminal evidence must precede the receipt probe");
+    }
+}
+
+#[cfg(test)]
+mod project_board_config_tests {
+    use super::*;
+    use autospec_core::autonomous::config::AutonomousConfig;
+
+    // format_project_board_config is a pure formatter over an already-parsed
+    // ProjectBoardConfig, so these tests exercise it directly against
+    // AutonomousConfig::parse output — the same path load_autonomous_config
+    // uses — rather than touching the filesystem or git.
+
+    fn board(source: &str) -> autospec_core::autonomous::config::ProjectBoardConfig {
+        AutonomousConfig::parse(source)
+            .expect("config should parse")
+            .project_board
+    }
+
+    #[test]
+    fn valid_config_emits_all_four_keys_with_url_and_allowlist_populated() {
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\", \"acme/gadgets\"]\n";
+        let json = format_project_board_config(&board(source));
+        assert_eq!(
+            json,
+            "{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],\"ttl\":null,\"label_map\":null}"
+        );
+    }
+
+    #[test]
+    fn url_without_repo_allowlist_fails_to_parse_so_the_bridge_never_sees_a_url() {
+        // The security gate lives in project_board::parse itself: a
+        // configured url with an empty/absent repo_allowlist is a parse
+        // error, not a value the formatter could ever be asked to print.
+        // load_autonomous_config propagates that Err, so
+        // `autospec autonomous project-board-config` exits non-zero and
+        // prints nothing on stdout — it is structurally impossible for a
+        // url to reach format_project_board_config without a valid
+        // allowlist alongside it.
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n";
+        let result = AutonomousConfig::parse(source);
+        assert!(
+            result.is_err(),
+            "url without repo_allowlist must fail validation, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn absent_project_board_block_yields_null_url_and_empty_allowlist() {
+        let json = format_project_board_config(&board("main_health:\n  branch: main\n"));
+        assert_eq!(
+            json,
+            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+        );
+    }
+
+    #[test]
+    fn absent_config_file_defaults_to_no_board_configured() {
+        // Mirrors load_autonomous_config's NotFound branch: a missing
+        // .autospec/autonomous.yml yields AutonomousConfig::default(),
+        // whose project_board has no url and an empty allowlist.
+        let json = format_project_board_config(&AutonomousConfig::default().project_board);
+        assert_eq!(
+            json,
+            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+        );
+    }
+
+    #[test]
+    fn config_with_only_some_keys_set_still_emits_all_four_keys() {
+        // control_issue and write_back are set but url/repo_allowlist are
+        // not present at all — a legal, non-board-ingesting configuration.
+        let source =
+            "project_board:\n  control_issue: 7\n  write_back: false\n  max_parallel_repos: 2\n";
+        let json = format_project_board_config(&board(source));
+        assert_eq!(
+            json,
+            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+        );
     }
 }

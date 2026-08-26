@@ -1,0 +1,221 @@
+#!/usr/bin/env bats
+# Coverage for scripts/project-board-writeback.sh — fail-open board field mutation.
+
+setup() {
+  TMP="$(mktemp -d)"; mkdir -p "$TMP/bin"
+  SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/project-board-writeback.sh"
+  export GH_CALLS="$TMP/gh-calls.log"; : > "$GH_CALLS"
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_CALLS"
+case "$*" in
+  *"auth status"*) [ "${GH_SCOPE_OK:-1}" = "1" ] && printf "Token scopes: 'project', 'repo'\n" || printf "Token scopes: 'repo'\n" ;;
+  *"item-edit"*)   exit "${GH_EDIT_RC:-0}" ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  cat > "$TMP/plan.json" <<'JSON'
+{"project":{"id":"PVT_1"},
+ "fields":{"autospec_state":{"id":"PVTSSF_1","options":{"Ready":"opt_ready","Done":"opt_done"}}},
+ "items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"autospec_state":"Blocked"}]}
+JSON
+}
+teardown() { rm -rf "$TMP"; }
+
+# ── Brief's six tests ────────────────────────────────────────────────────────
+
+@test "writes the mapped single-select option id" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  grep -q 'item-edit' "$GH_CALLS"
+  grep -q 'opt_ready' "$GH_CALLS"
+  grep -q 'PVTSSF_1' "$GH_CALLS"
+}
+
+@test "skips a no-op write when the item already holds that state" {
+  # The shared plan.json fixture never lists "Blocked" as a board option, so
+  # asserting idempotence against it would pass via the "no matching option"
+  # skip branch rather than the real already-in-state branch. Give this test
+  # its own fixture where Blocked IS a valid option and the item already
+  # holds it, so it genuinely exercises the idempotence check.
+  jq '.fields.autospec_state.options = {"Ready":"opt_ready","Blocked":"opt_blocked"}' \
+     "$TMP/plan.json" > "$TMP/blocked.json"
+  run bash "$SCRIPT" --plan "$TMP/blocked.json" --item PVTI_a --state Blocked
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'already in state Blocked'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a gh failure is fail-open and emits the code_health marker" {
+  GH_EDIT_RC=1 run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'code_health:project_board_writeback_failed'
+}
+
+@test "a token without the project scope disables write-back with one warning" {
+  GH_SCOPE_OK=0 run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'project scope'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a board without an AutoSpec state field is skipped, never created" {
+  jq 'del(.fields.autospec_state)' "$TMP/plan.json" > "$TMP/nofield.json"
+  run bash "$SCRIPT" --plan "$TMP/nofield.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+  run grep -q 'field-create' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "an unknown state name is skipped, never invented as an option" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Nonsense
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+# ── Controller amendment: candidate resolution ──────────────────────────────
+
+@test "a canonical state resolves to the p1-style option name" {
+  jq '.fields.autospec_state.options = {"Ready":"o_r","In progress":"o_ip","Done":"o_d"}' \
+     "$TMP/plan.json" > "$TMP/p1style.json"
+  run bash "$SCRIPT" --plan "$TMP/p1style.json" --item PVTI_a --state Implementation
+  [ "$status" -eq 0 ]
+  grep -q 'o_ip' "$GH_CALLS"
+}
+
+@test "the p2-style option still wins when both candidates exist" {
+  jq '.fields.autospec_state.options = {"Implementation":"o_impl","In progress":"o_ip"}' \
+     "$TMP/plan.json" > "$TMP/both.json"
+  run bash "$SCRIPT" --plan "$TMP/both.json" --item PVTI_a --state Implementation
+  grep -q 'o_impl' "$GH_CALLS"
+  run grep -q 'o_ip' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a canonical state with no matching candidate skips without creating an option" {
+  jq '.fields.autospec_state.options = {"Ready":"o_r"}' "$TMP/plan.json" > "$TMP/thin.json"
+  run bash "$SCRIPT" --plan "$TMP/thin.json" --item PVTI_a --state Testing
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+  run grep -q 'field-create' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+# ── Degenerate-input guards ──────────────────────────────────────────────────
+
+@test "missing --plan entirely exits 0 with a reason" {
+  run bash "$SCRIPT" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'missing --plan'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a --plan file that is not JSON exits 0 with a reason" {
+  printf 'not json at all {' > "$TMP/bad.json"
+  run bash "$SCRIPT" --plan "$TMP/bad.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'not valid JSON'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a plan with no .fields is skipped, never crashes" {
+  echo '{"project":{"id":"PVT_1"},"items":[{"item_id":"PVTI_a","autospec_state":"Blocked"}]}' > "$TMP/nofields.json"
+  run bash "$SCRIPT" --plan "$TMP/nofields.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a plan with no .items is skipped, never crashes" {
+  echo '{"project":{"id":"PVT_1"},"fields":{"autospec_state":{"id":"F1","options":{"Ready":"o_r"}}}}' > "$TMP/noitems.json"
+  run bash "$SCRIPT" --plan "$TMP/noitems.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'not found in plan'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "an --item id not present in the plan is skipped" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_ZZZ --state Ready
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'not found in plan'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "an empty --state is skipped" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state ""
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'missing --state'
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a null .fields.autospec_state.options is skipped, never crashes" {
+  jq '.fields.autospec_state.options = null' "$TMP/plan.json" > "$TMP/nulloptions.json"
+  run bash "$SCRIPT" --plan "$TMP/nulloptions.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "a wrong-type .fields.autospec_state.options is skipped, never crashes" {
+  jq '.fields.autospec_state.options = ["Ready","Done"]' "$TMP/plan.json" > "$TMP/arrayoptions.json"
+  run bash "$SCRIPT" --plan "$TMP/arrayoptions.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run grep -q 'item-edit' "$GH_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+# ── Finding I3 / NEW-1: the token-scope probe is cached for at most one run,
+# never on disk. This script is a fresh process per invocation and no longer
+# does any caching of its own (an earlier fix cached it in a dotfile beside
+# --plan, which is the PERSISTENT board cache — that froze a stale answer
+# forever across separate runs; see project-board-promoter.bats "NEW-1" for
+# the caller-level regression test that proves the real bug and its fix).
+# The caller (autonomous-promote-open-issues.sh) now probes once per run as
+# an in-process shell variable and passes the result via
+# AUTOSPEC_PROJECT_BOARD_AUTH_OK. This script trusts that value when set and
+# never re-probes; without it (e.g. standalone use) it probes live every
+# call — correct, if wasteful, and with nothing written to disk.
+
+@test "AUTOSPEC_PROJECT_BOARD_AUTH_OK from the caller is trusted across multiple items, no re-probe" {
+  # Simulate what the promoter does for a multi-item run: resolve the scope
+  # once and export it to every child invocation.
+  export AUTOSPEC_PROJECT_BOARD_AUTH_OK=1
+  jq '.fields.autospec_state.options = {"Ready":"opt_ready","Done":"opt_done","Testing":"opt_testing"}' \
+     "$TMP/plan.json" > "$TMP/multi.json"
+
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Done
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Testing
+  [ "$status" -eq 0 ]
+
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS" || true)"
+  [ "$auth_calls" -eq 0 ]
+  # A pre-resolved OK must not have suppressed real work: all three edits fired.
+  edit_calls="$(grep -c 'item-edit' "$GH_CALLS")"
+  [ "$edit_calls" -eq 3 ]
+}
+
+@test "without a caller-supplied AUTOSPEC_PROJECT_BOARD_AUTH_OK, every invocation probes live" {
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
+  [ "$status" -eq 0 ]
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
+  [ "$auth_calls" -eq 2 ]
+  # And nothing was written to disk beside the (possibly persistent) plan.
+  [ ! -e "$TMP/.plan.json.authscope" ]
+}

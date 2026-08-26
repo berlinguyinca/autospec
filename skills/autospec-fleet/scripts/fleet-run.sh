@@ -135,12 +135,41 @@ while [ "$idx" -lt "$repo_count" ]; do
     queue_has_work "$normalized" || { idx=$((idx + 1)); continue; }
 
     worker_id="$(fleet_worker_id "$node_id" "$normalized")"
-    command="$(autospec_run_command "$profile" "$worker_id")"
     checkout_path="$(repo_checkout_path "$workspace" "$normalized")"
+    display_command="$(fleet_worker_command "$profile" "$worker_id" "$normalized" "$checkout_path")"
+
     if [ "$dry_run" -eq 1 ]; then
-        printf 'fleet: %s: cd %s && %s\n' "$normalized" "$checkout_path" "$command"
+        # Dry-run is a pure preview: it never touches the filesystem (no
+        # checkout-existence check, no heartbeat read/write) and never
+        # spawns anything.
+        printf 'fleet: %s: cd %s && %s\n' "$normalized" "$checkout_path" "$display_command"
+    elif [ ! -d "$checkout_path" ]; then
+        # A missing checkout means "clone this repo first" — spawning a
+        # conductor against a directory that doesn't exist would be worse
+        # than skipping it (a broken worker instead of no worker), so skip
+        # with a clear message and let the next fleet-run pick it up once
+        # the checkout exists.
+        printf 'fleet: %s: checkout not found at %s; skipping launch\n' "$normalized" "$checkout_path"
+    elif fleet_worker_live "$normalized"; then
+        # Idempotence: never start a second conductor for a repo that
+        # already has one. Liveness is decided by the shared
+        # process-heartbeats store (see fleet_worker_live in fleet-lib.sh),
+        # never a PID guess or a `pgrep` on a command string.
+        printf 'fleet: %s: worker already live; skipping\n' "$normalized"
     else
-        printf 'fleet: launch %s: cd %s && %s\n' "$normalized" "$checkout_path" "$command"
+        autonomous_bin=""
+        autonomous_bin="$(fleet_autonomous_bin)" || autonomous_bin=""
+        if [ -z "$autonomous_bin" ]; then
+            printf 'code_health:fleet_worker_spawn_failed repo=%s reason=autospec-autonomous-not-found\n' "$normalized" >&2
+        elif "$autonomous_bin" start --repo-dir "$checkout_path" --repo "$normalized"; then
+            # A single repo's spawn failure must never abort the fleet — the
+            # whole script runs under `set -euo pipefail`, so this branch is
+            # a deliberate if/then, never a one-sided `&&`.
+            fleet_worker_mark_live "$normalized" "$worker_id" || true
+            printf 'fleet: launch %s: cd %s && %s\n' "$normalized" "$checkout_path" "$display_command"
+        else
+            printf 'code_health:fleet_worker_spawn_failed repo=%s\n' "$normalized" >&2
+        fi
     fi
     scheduled=$((scheduled + 1))
     idx=$((idx + 1))
