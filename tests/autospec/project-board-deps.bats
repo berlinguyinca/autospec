@@ -211,3 +211,111 @@ item() { printf '{"items":[{"repo":"o/r","number":9,"body":%s,"dependencies":%s,
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":4}]'
 }
+
+two() { printf '{"items":[%s,%s]}' "$1" "$2" > "$TMP/in.json"; }
+
+@test "an item with no blockers is ready" {
+  two '{"repo":"o/r","number":1,"state":"open","blocked_by":[]}' \
+      '{"repo":"o/r","number":2,"state":"open","blocked_by":[]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==1) | .ready == true'
+}
+
+@test "an item blocked by an open item is not ready and names its blocker" {
+  two '{"repo":"o/r","number":1,"state":"open","blocked_by":[]}' \
+      '{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"o/r","number":1}]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  echo "$output" | jq -e '.items[] | select(.number==2) | .ready == false'
+  echo "$output" | jq -e '.items[] | select(.number==2) | .reason | test("o/r#1")'
+}
+
+@test "an item blocked by a closed item is ready" {
+  two '{"repo":"o/r","number":1,"state":"closed","blocked_by":[]}' \
+      '{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"o/r","number":1}]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  echo "$output" | jq -e '.items[] | select(.number==2) | .ready == true'
+}
+
+@test "an unresolvable blocker is unsatisfied, never satisfied" {
+  two '{"repo":"o/r","number":1,"state":"closed","blocked_by":[]}' \
+      '{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"gone/repo","number":404}]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  echo "$output" | jq -e '.items[] | select(.number==2) | .ready == false'
+  echo "$output" | jq -e '.items[] | select(.number==2) | .reason | test("unresolvable")'
+}
+
+@test "a cross-repo chain stays blocked until the upstream repo closes" {
+  two '{"repo":"o/up","number":1,"state":"open","blocked_by":[]}' \
+      '{"repo":"o/down","number":5,"state":"open","blocked_by":[{"repo":"o/up","number":1}]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  echo "$output" | jq -e '.items[] | select(.repo=="o/down") | .ready == false'
+}
+
+@test "a dependency cycle is reported and its participants are not ready" {
+  two '{"repo":"o/r","number":1,"state":"open","blocked_by":[{"repo":"o/r","number":2}]}' \
+      '{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"o/r","number":1}]}'
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq '.cycles | length')" -gt 0 ]
+  echo "$output" | jq -e '.items[] | select(.number==1) | .ready == false'
+  echo "$output" | jq -e '.items[] | select(.number==1) | .reason | test("cycle")'
+}
+
+@test "an acyclic item stays ready alongside a cycle elsewhere on the board" {
+  printf '{"items":[%s,%s,%s]}' \
+    '{"repo":"o/r","number":1,"state":"open","blocked_by":[{"repo":"o/r","number":2}]}' \
+    '{"repo":"o/r","number":2,"state":"open","blocked_by":[{"repo":"o/r","number":1}]}' \
+    '{"repo":"o/r","number":3,"state":"open","blocked_by":[]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  echo "$output" | jq -e '.items[] | select(.number==3) | .ready == true'
+}
+
+# --- Task 6 controller rulings -----------------------------------------
+
+@test "ruling 1: an item with deps_unresolvable=true is never ready, even with empty blocked_by" {
+  printf '{"items":[{"repo":"o/r","number":1,"state":"open","blocked_by":[],"deps_unresolvable":true,"deps_reason":"prose only"}]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].ready == false'
+  echo "$output" | jq -e '.items[0].reason | test("unresolvable")'
+}
+
+@test "ruling 1: the real p2 fixture — item 80 (unresolvable prose) is never ready, item 1 (clean none) is ready" {
+  jq '{items: [.items[] | {repo: .content.repository, number: .content.number, state: "open", body: .content.body, dependencies: null, parent_issue: null}]}' \
+     "$FIX/p2-items.json" > "$TMP/p2.json"
+  run bash "$SCRIPT" --resolve < "$TMP/p2.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[] | select(.number == 80) | .ready == false and (.reason | test("unresolvable"))'
+  echo "$output" | jq -e '.items[] | select(.number == 1) | .ready == true'
+}
+
+@test "ruling 2: the no-flag output is byte-identical to the pre-Task-6 extraction output" {
+  jq '{items: [.items[] | {repo: .content.repository, number: .content.number, body: .content.body, dependencies: null, parent_issue: null}]}' \
+     "$FIX/p1-items.json" > "$TMP/p1.json"
+  run bash "$SCRIPT" < "$TMP/p1.json"
+  [ "$status" -eq 0 ]
+  # no .ready, .reason, or top-level .cycles anywhere when --resolve is absent
+  echo "$output" | jq -e '[.items[] | has("ready") or has("reason")] | any | not'
+  echo "$output" | jq -e '(has("cycles")) | not'
+}
+
+@test "degenerate: --resolve on non-JSON stdin exits 0 with no crash" {
+  printf 'not json {{{' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "degenerate: --resolve on JSON with no .items passes through, no cycles/ready added" {
+  printf '{"foo":"bar"}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.foo == "bar" and (has("cycles") | not)'
+}
+
+@test "degenerate: --resolve on an empty items array yields no cycles and no items" {
+  printf '{"items":[]}' > "$TMP/in.json"
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items == [] and .cycles == []'
+}

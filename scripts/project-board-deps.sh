@@ -33,19 +33,41 @@
 # do not try to parse such prose into edges — bodies are untrusted data and
 # inferring edges from free text is exactly what this script refuses to do.
 #
+# --resolve turns on a second stage that computes readiness from
+# .items[].blocked_by (populated by the extraction stage above, or already
+# present on the input plan): adds .items[].ready (bool), .items[].reason
+# (string), and a top-level .cycles array of participant-key lists.
+#
+#   - An edge is satisfied only when the referenced item's .state is
+#     "closed". A reference that does not resolve to any item on the board
+#     is unsatisfied (fails closed), never treated as satisfied.
+#   - An item with .deps_unresolvable == true (set by the extraction stage
+#     when a body declared a dependency marker but no #N could be parsed
+#     from it) is never ready, regardless of its (empty) .blocked_by — an
+#     unparseable declared dependency is not the same thing as no
+#     dependency, and must not be promoted as if it were.
+#   - Cycle detection is a fixpoint over resolvable (index-hit) edges only:
+#     repeatedly mark items whose blockers are all already marked, until
+#     nothing new gets marked. Anything left unmarked is either an actual
+#     cycle member or depends (transitively) on one — both are genuinely
+#     unschedulable, so both are reported as not-ready with a cycle reason.
+#     This is deliberately imprecise about which is which; the reason text
+#     never names a specific item as "in" the cycle, only that its
+#     dependency chain contains one, so it never asserts something false
+#     about an item that is merely downstream of a cycle.
+#
 # Pure filter: no network, no `gh`, no mutation. Never fails on degenerate
 # input — malformed/missing shapes degrade gracefully rather than crashing.
 #
-# Usage: project-board-deps.sh < plan.json
-#
-# NOTE for Task 6: argument parsing lives in the loop below so a --resolve
-# flag can be added here without restructuring.
+# Usage: project-board-deps.sh [--resolve] < plan.json
 
 set -eu
 
+resolve=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --help|-h) printf 'project-board-deps.sh < plan.json\n'; exit 0 ;;
+        --resolve) resolve=1; shift ;;
+        --help|-h) printf 'project-board-deps.sh [--resolve] < plan.json\n'; exit 0 ;;
         *) printf 'project-board-deps: unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -66,6 +88,57 @@ if ! printf '%s' "$parsed" | jq -e '.items | type == "array"' >/dev/null 2>&1; t
     printf '%s' "$parsed"
     exit 0
 fi
+
+# Readiness resolution: reads the extracted plan (with .items[].blocked_by
+# and .items[].deps_unresolvable) on stdin, adds .items[].ready,
+# .items[].reason, and top-level .cycles.
+#
+# Cycle detection is an iterative fixpoint rather than unbounded recursion:
+# repeatedly mark items whose (index-resolvable) blockers are all already
+# marked, starting from items with no such blockers, for at most
+# (item count + 1) rounds — a directed graph over N nodes cannot have a
+# resolution chain longer than N, so that many rounds is always enough to
+# reach the fixpoint. Anything never marked is in a cycle or depends on
+# one. This avoids the unbounded/deep-recursion cost (and depth-cap
+# guesswork) of a per-branch recursive walk on a board with many edges.
+resolve_stage() {
+jq '
+  def key($r): "\($r.repo)#\($r.number)";
+
+  (.items) as $items
+  | (reduce $items[] as $i ({}; . + {(key($i)): $i})) as $index
+  | def resolvable_refs($item):
+      ($item.blocked_by // []) | map(key(.)) | map(select($index[.] != null));
+  (reduce range(0; ($items | length) + 1) as $r
+       ([];
+         . as $resolved
+         | ($items
+            | map(select(. as $it | ($resolved | index(key($it))) | not))
+            | map(select((resolvable_refs(.) - $resolved) | length == 0))
+            | map(key(.))) as $newly
+         | $resolved + $newly)
+    ) as $resolved
+
+  | ($items | map(key(.)) | map(select(. as $s | ($resolved | index($s)) | not))) as $cyclic
+
+  | .cycles = (if ($cyclic | length) > 0 then [$cyclic] else [] end)
+  | .items |= map(
+      . as $item
+      | key($item) as $k
+      | (.blocked_by // []) as $bl
+      | ($bl | map(select($index[key(.)] == null)) | map(key(.))) as $missing
+      | ($bl | map(select($index[key(.)] != null and $index[key(.)].state != "closed")) | map(key(.))) as $open
+      | if ($item.deps_unresolvable // false) then
+          . + {ready: false,
+               reason: "unresolvable declared dependency: \($item.deps_reason // "no #N reference could be parsed from a declared dependency")"}
+        elif ($cyclic | index($k)) then
+          . + {ready: false, reason: "dependency chain contains a cycle (unschedulable)"}
+        elif ($missing | length) > 0 then
+          . + {ready: false, reason: "unresolvable blocker: \($missing | join(", "))"}
+        elif ($open | length) > 0 then
+          . + {ready: false, reason: "blocked-by \($open | join(", "))"}
+        else . + {ready: true, reason: "all blockers satisfied"} end)'
+}
 
 printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
   # Regex-escape a literal string (used for user-configured marker phrases,
@@ -148,15 +221,30 @@ printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
     ($item[$key]) as $v
     | if ($v | type) == "string" then refs($v; $item.repo) else [] end;
 
+  # An item with none of these three source keys at all gives extraction
+  # nothing to derive from; in that case an already-populated blocked_by
+  # (e.g. a plan piped straight into --resolve, or extraction run twice)
+  # is preserved rather than clobbered with a freshly-derived empty result.
+  def has_dep_source($item):
+    ($item | has("dependencies")) or ($item | has("parent_issue")) or ($item | has("body"));
+
   .items |= map(
     . as $item
-    | (field_refs($item; "dependencies")) as $f
-    | (field_refs($item; "parent_issue")) as $p
-    | (if ($f | length) > 0 then {refs: $f, unresolvable: false, reason: null}
-       elif ($p | length) > 0 then {refs: $p, unresolvable: false, reason: null}
-       else from_body($item) end) as $result
-    | . + {
-        blocked_by: $result.refs,
-        deps_unresolvable: $result.unresolvable,
-        deps_reason: $result.reason
-      })'
+    | if has_dep_source($item) then
+        (field_refs($item; "dependencies")) as $f
+        | (field_refs($item; "parent_issue")) as $p
+        | (if ($f | length) > 0 then {refs: $f, unresolvable: false, reason: null}
+           elif ($p | length) > 0 then {refs: $p, unresolvable: false, reason: null}
+           else from_body($item) end) as $result
+        | . + {
+            blocked_by: $result.refs,
+            deps_unresolvable: $result.unresolvable,
+            deps_reason: $result.reason
+          }
+      else
+        . + {
+            blocked_by: (.blocked_by // []),
+            deps_unresolvable: (.deps_unresolvable // false),
+            deps_reason: (.deps_reason // null)
+          }
+      end)' | if [ "$resolve" -eq 1 ]; then resolve_stage; else cat; fi
