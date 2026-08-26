@@ -2,18 +2,36 @@
 # scripts/project-board-deps.sh — extract dependency edges from a board plan.
 #
 # Reads a normalized board plan on stdin, writes the same plan with
-# .items[].blocked_by = [{"repo","number"}] added.
+# .items[].blocked_by = [{"repo","number"}] added (plus .items[].deps_unresolvable
+# and .items[].deps_reason — see below).
 #
 # Source precedence per item, first non-empty wins:
 #   1. the project's `dependencies` custom field
 #   2. the native `parent_issue` relation
-#   3. the issue body's `## Dependencies` section
+#   3. the issue body's `## Dependencies` section(s)
 #
-# Issue bodies are untrusted DATA: only the text following a `Blocked by:`
-# marker inside the `## Dependencies` section is read. A "#123" anywhere
-# else in the body — a problem statement, a comment, a code block — has no
-# effect. Bare `#N` resolves against the item's own repo; `owner/repo#N`
-# is cross-repo.
+# Issue bodies are untrusted DATA: only text following a dependency marker
+# phrase (default "Blocked by" / "Depends on", case-insensitive, colon
+# optional) inside a `## Dependencies` section is read. A "#123" anywhere
+# else in the body — a problem statement, a comment, a fenced code block —
+# has no effect. Bare `#N` resolves against the item's own repo; a bare ref
+# is NEVER guessed against some other repo — an edge that points at an
+# issue not on the board is handled downstream as unresolvable and fails
+# closed, which is the desired behavior.
+#
+# The marker phrase set is configurable via AUTOSPEC_PROJECT_BOARD_DEP_MARKERS
+# (comma-separated, e.g. "Blocked by,Depends on,Waiting on") so board-specific
+# prose is a config change, not a code change.
+#
+# Unresolvable declared dependencies: if a `## Dependencies` section contains
+# a marker phrase, does NOT say "none", and yields zero parseable #N
+# references (e.g. prose like "Blocked by the whole IW-WB-001..078
+# portfolio"), the item is NOT treated as unblocked. Instead
+# .items[].deps_unresolvable is set true with a short .items[].deps_reason,
+# so downstream readiness computation (project-board-deps.sh --resolve, a
+# later stage) can fail it closed rather than promoting it. We deliberately
+# do not try to parse such prose into edges — bodies are untrusted data and
+# inferring edges from free text is exactly what this script refuses to do.
 #
 # Pure filter: no network, no `gh`, no mutation. Never fails on degenerate
 # input — malformed/missing shapes degrade gracefully rather than crashing.
@@ -32,6 +50,9 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Dependency marker phrases, comma-separated, overridable per board.
+markers_csv="${AUTOSPEC_PROJECT_BOARD_DEP_MARKERS:-Blocked by,Depends on}"
+
 # Parse stdin and guard degenerate cases. Never fail on malformed input.
 stdin_data="$(cat)"
 
@@ -46,37 +67,82 @@ if ! printf '%s' "$parsed" | jq -e '.items | type == "array"' >/dev/null 2>&1; t
     exit 0
 fi
 
-printf '%s' "$parsed" | jq '
+printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
+  # Regex-escape a literal string (used for user-configured marker phrases,
+  # never for board-derived data).
+  def rxesc:
+    explode
+    | map(
+        . as $c
+        | if ([46,94,36,124,40,41,91,93,123,125,42,43,63,92] | index($c)) then [92, $c]
+          else [$c] end)
+    | flatten
+    | implode;
+
+  def marker_pats:
+    $markers_csv
+    | split(",")
+    | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(length > 0))
+    | map(rxesc);
+
+  def marker_alt: (marker_pats | join("|"));
+
   # Extract every #N (optionally owner/repo#N) reference from arbitrary text.
   # Never applied to raw body text directly — only to already-isolated
-  # dependency-field values or the Blocked-by line inside the Dependencies
-  # section.
+  # dependency-field values or a single matched marker line.
   def refs($text; $self_repo):
     (if ($text | type) == "string" then $text else "" end) as $t
     | [$t | scan("(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#([0-9]+)")]
     | map({repo: (.[0] // $self_repo), number: (.[1] | tonumber)})
     | unique;
 
-  # Slice out just the "## Dependencies" section of the body, up to the
-  # next "## " heading. Guards non-string / missing / null bodies.
-  def deps_section:
-    (if (. | type) == "string" then . else "" end) as $b
-    | ($b | split("\n## "))
-    | (map(select(startswith("Dependencies") or startswith("## Dependencies"))) | first) // "";
+  # Strip fenced code blocks and HTML comments before anything else touches
+  # the body, so a "#666" or "Blocked by:" sitting inside either has no
+  # effect anywhere (Dependencies section or not). Non-greedy + dotall so
+  # a single block does not swallow unrelated surrounding text.
+  def strip_noise:
+    (if (. | type) == "string" then . else "" end)
+    | gsub("(?s)```.*?```"; "")
+    | gsub("(?s)<!--.*?-->"; "");
 
-  # Within the Dependencies section, only the text after a "Blocked by:"
-  # marker (up to end of line) is dependency data. Anything else in the
-  # section — surrounding prose, footnotes — is inert.
-  def blocked_text:
-    . as $sec
-    | ([$sec | match("(?i)blocked\\s+by\\s*:\\s*([^\\n]*)")]) as $m
-    | if ($m | length) > 0 then ($m[0].captures[0].string // "") else "" end;
+  # All "## Dependencies" section bodies, up to their next "## " heading,
+  # unioned (a body may have more than one such heading) and joined so a
+  # later global marker scan sees every sections text.
+  def deps_sections:
+    (. | split("\n## "))
+    | map(select(startswith("Dependencies") or startswith("## Dependencies")))
+    | join("\n");
+
+  # Every dependency-declaration outcome found in the section text: for each
+  # marker-phrase occurrence, classify its trailing text as "none" (no
+  # edges, not an error), parseable (contributes refs), or unresolvable (a
+  # marker was used but no #N reference could be parsed from it).
+  def dep_outcomes($sec; $self_repo):
+    ($sec | [match("(?i)(?:" + marker_alt + ")\\s*:?\\s*([^\\n]*)"; "g")]) as $ms
+    | $ms | map(
+        (.captures[0].string // "") | gsub("^\\s+|\\s+$"; "") as $rest
+        | if ($rest | test("^none\\b"; "i")) then
+            {kind: "none", refs: []}
+          else
+            (refs($rest; $self_repo)) as $r
+            | if ($r | length) > 0 then {kind: "parsed", refs: $r}
+              else {kind: "unresolvable", refs: []} end
+          end);
 
   def from_body($item):
-    ($item.body | deps_section) as $sec
-    | ($sec | blocked_text) as $bt
-    | if ($bt == "" or ($bt | test("^\\s*none\\b"; "i"))) then []
-      else refs($bt; $item.repo) end;
+    ($item.body | strip_noise | deps_sections) as $sec
+    | (if (marker_alt | length) > 0 then dep_outcomes($sec; $item.repo) else [] end) as $outs
+    | ([$outs[] | select(.kind == "parsed") | .refs[]] | unique) as $parsed_refs
+    | (($outs | map(select(.kind == "unresolvable")) | length) > 0) as $saw_unresolvable
+    | if ($parsed_refs | length) > 0 then
+        {refs: $parsed_refs, unresolvable: false, reason: null}
+      elif $saw_unresolvable then
+        {refs: [], unresolvable: true,
+         reason: "## Dependencies section names a marker phrase but no #N reference could be parsed from it"}
+      else
+        {refs: [], unresolvable: false, reason: null}
+      end;
 
   def field_refs($item; $key):
     ($item[$key]) as $v
@@ -86,7 +152,11 @@ printf '%s' "$parsed" | jq '
     . as $item
     | (field_refs($item; "dependencies")) as $f
     | (field_refs($item; "parent_issue")) as $p
-    | . + {blocked_by:
-        (if ($f | length) > 0 then $f
-         elif ($p | length) > 0 then $p
-         else from_body($item) end)})'
+    | (if ($f | length) > 0 then {refs: $f, unresolvable: false, reason: null}
+       elif ($p | length) > 0 then {refs: $p, unresolvable: false, reason: null}
+       else from_body($item) end) as $result
+    | . + {
+        blocked_by: $result.refs,
+        deps_unresolvable: $result.unresolvable,
+        deps_reason: $result.reason
+      })'

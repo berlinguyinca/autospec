@@ -118,3 +118,96 @@ item() { printf '{"items":[{"repo":"o/r","number":9,"body":%s,"dependencies":%s,
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '[.items[0].blocked_by[].number] == [4]'
 }
+
+# --- Review findings ---------------------------------------------------
+
+@test "finding 1: 'Depends on issue #N' marker phrase is parsed by default" {
+  item '"## Dependencies\n\nDepends on issue #22\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":22}]'
+}
+
+@test "finding 1: the real project-1 fixture yields blockers on 54 of 80 items" {
+  jq '{items: [.items[] | {repo: .content.repository, number: .content.number, body: .content.body, dependencies: null, parent_issue: null}]}' \
+     "$FIX/p1-items.json" > "$TMP/p1.json"
+  run bash "$SCRIPT" < "$TMP/p1.json"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq '[.items[] | select((.blocked_by | length) > 0)] | length')" -eq 54 ]
+}
+
+@test "finding 1: the marker set is overridable via AUTOSPEC_PROJECT_BOARD_DEP_MARKERS" {
+  item '"## Dependencies\n\nWaiting on #9\n"' > "$TMP/in.json"
+  # not parsed under the default marker set
+  run bash "$SCRIPT" < "$TMP/in.json"
+  echo "$output" | jq -e '.items[0].blocked_by == []'
+  # parsed once the board configures its own marker phrase
+  AUTOSPEC_PROJECT_BOARD_DEP_MARKERS="Waiting on" run bash "$SCRIPT" < "$TMP/in.json"
+  echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":9}]'
+}
+
+@test "finding 1: a marker phrase still has no effect outside the Dependencies section" {
+  item '"## Notes\n\nDepends on issue #123 historically.\n\n## Dependencies\n\nnone\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == []'
+}
+
+@test "finding 2: the real p2 fixture distinguishes item 1 (clean 'none') from item 80 (unresolvable prose)" {
+  jq '{items: [.items[] | {repo: .content.repository, number: .content.number, body: .content.body, dependencies: null, parent_issue: null}]}' \
+     "$FIX/p2-items.json" > "$TMP/p2.json"
+  run bash "$SCRIPT" < "$TMP/p2.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    (.items[] | select(.number == 1) | .blocked_by == [] and .deps_unresolvable == false) and
+    (.items[] | select(.number == 80) | .blocked_by == [] and .deps_unresolvable == true and (.deps_reason | length) > 0)'
+}
+
+@test "finding 2: a marker phrase with no parseable #N sets deps_unresolvable and a reason" {
+  item '"## Dependencies\n\nBlocked by the whole prior portfolio.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == true and (.items[0].deps_reason | type) == "string"'
+}
+
+@test "finding 2: 'Blocked by: none' stays cleanly unblocked, no unresolvable flag" {
+  item '"## Dependencies\n\n- Blocked by: none.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [] and .items[0].deps_unresolvable == false and .items[0].deps_reason == null'
+}
+
+@test "finding 3: a '#N' inside a fenced code block in Dependencies is not a real edge" {
+  item '"## Dependencies\n\n```\nBlocked by: #666\n```\n\n- Blocked by: none.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == []'
+}
+
+@test "finding 4: a '#N' inside an HTML comment in Dependencies is not a real edge" {
+  item '"## Dependencies\n\n<!-- Blocked by: #666 -->\n\n- Blocked by: none.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == []'
+}
+
+@test "finding 4: surrounding text is intact after stripping unrelated HTML comments" {
+  item '"<!-- autospec-classify:begin -->\nsome notes\n<!-- autospec-classify:end -->\n\n## Dependencies\n\n- Blocked by: #7.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":7}]'
+}
+
+@test "finding 5: two '## Dependencies' sections are unioned when the first has no marker" {
+  item '"## Dependencies\n\nSee below.\n\n## Other\n\ntext\n\n## Dependencies\n\n- Blocked by: #11.\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":11}]'
+}
+
+@test "not-a-regression: a bare '#N' still resolves against the item's own repo, never guessed cross-repo" {
+  item '"## Dependencies\n\nDepends on issue #4\n"' > "$TMP/in.json"
+  run bash "$SCRIPT" < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"o/r","number":4}]'
+}
