@@ -21,7 +21,8 @@
 #   0  — happy path (completed | converged | round_cap_reached)
 #   2  — usage / bad args
 #   3  — code_health:refine_path_violation
-#   4  — empty prompt
+#   4  — empty prompt; code_health:refine_artifact_write_failed
+#        (artifact dir unwritable, or artifact missing/empty after write)
 
 set -u
 
@@ -1022,8 +1023,15 @@ json_escape() {
 SLUG="$(slug_from_prompt "$PROMPT")"
 [ -n "$SLUG" ] || SLUG="prompt"
 TS="$(iso_ts)"
-mkdir -p "$ARTIFACT_DIR"
 ARTIFACT="$ARTIFACT_DIR/${SLUG}-${TS}.json"
+if ! mkdir -p "$ARTIFACT_DIR"; then
+    echo "code_health:refine_artifact_write_failed path=$ARTIFACT" >&2
+    exit 4
+fi
+if [ ! -w "$ARTIFACT_DIR" ]; then
+    echo "code_health:refine_artifact_write_failed path=$ARTIFACT" >&2
+    exit 4
+fi
 
 PREV_PROMPT="$PROMPT"
 ROUNDS_JSON=""
@@ -1154,6 +1162,10 @@ write_artifact() {
 EOF
 }
 write_artifact
+if [ ! -s "$ARTIFACT" ]; then
+    echo "code_health:refine_artifact_write_failed path=$ARTIFACT" >&2
+    exit 4
+fi
 
 if [ -n "$OUTPUT" ]; then
     if ! check_path_allowed "$OUTPUT"; then
@@ -1172,6 +1184,10 @@ if [ -x "$RENDER_SH" ]; then
     "$RENDER_SH" --json "$ARTIFACT" --slug "$SLUG" \
         --output-dir "$ARTIFACT_DIR" >/dev/null 2>&1 || \
         echo "refine-prompt: WARN — overview render failed for $ARTIFACT" >&2
+fi
+if [ ! -s "$ARTIFACT" ]; then
+    echo "code_health:refine_artifact_write_failed path=$ARTIFACT" >&2
+    exit 4
 fi
 
 echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$ARTIFACT"
