@@ -91,9 +91,20 @@ teardown() {
 }
 
 @test "a spawn failure quarantines that repo and continues to the next" {
+    # Two separate facts, two separate logs: FLEET_SPAWN_ATTEMPT_LOG records
+    # every invocation the stub receives regardless of outcome (proves
+    # fleet-run actually tried o/a), while FLEET_SPAWN_LOG only gains a line
+    # on a successful (simulated) launch. Without the attempt log, "o/a is
+    # absent from FLEET_SPAWN_LOG" is true by construction for a stub that
+    # never logs a failing repo — a tautology, not a real check. Recording
+    # the attempt first makes "o/a was tried but did not succeed" falsifiable.
+    export FLEET_SPAWN_ATTEMPT_LOG="$TMP/spawn-attempt.log"
+    : > "$FLEET_SPAWN_ATTEMPT_LOG"
     cat > "$TMP/bin/autospec-autonomous" <<'SH'
 #!/usr/bin/env bash
-case "$*" in *"o/a"*) exit 1 ;; *) printf '%s\n' "$*" >> "$FLEET_SPAWN_LOG" ;; esac
+printf '%s\n' "$*" >> "$FLEET_SPAWN_ATTEMPT_LOG"
+case "$*" in *"o/a"*) exit 1 ;; esac
+printf '%s\n' "$*" >> "$FLEET_SPAWN_LOG"
 SH
     chmod +x "$TMP/bin/autospec-autonomous"
 
@@ -101,6 +112,7 @@ SH
     [ "$status" -eq 0 ]
     grep -q 'o/b' "$FLEET_SPAWN_LOG"
     echo "$output" | grep -q 'code_health:fleet_worker_spawn_failed repo=o/a'
+    grep -q 'o/a' "$FLEET_SPAWN_ATTEMPT_LOG"
     run grep -q 'o/a' "$FLEET_SPAWN_LOG"
     [ "$status" -ne 0 ]
 }
