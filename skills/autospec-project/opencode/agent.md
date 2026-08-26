@@ -105,8 +105,12 @@ mutates `.autospec/autonomous.yml` — allowlist changes are an operator edit.
 `ship <url>` resolves the board, projects it onto an `autospec-fleet.yml`
 covering the board's distinct repositories, and hands off to
 `/autospec-fleet` — but be honest with the operator about what actually
-runs today. `fleet-run.sh` currently plans and *prints* per-repo
-`/autospec-run` worker commands; it does not launch them. So `ship`:
+runs today. `fleet-run.sh` now genuinely launches a per-repo
+`autospec-autonomous` conductor (not just a `/autospec-run` one-shot) for
+each eligible checkout — but only for a repo that already has a checkout in
+the fleet workspace; it still does not clone or sync checkouts, so a board
+repo with no local checkout is skipped with "checkout not found," not
+launched. So `ship`:
 
 1. Resolves the plan (same as bare mode) and extracts the distinct
    `repos[]` from it.
@@ -117,15 +121,16 @@ runs today. `fleet-run.sh` currently plans and *prints* per-repo
 3. Writes or updates `autospec-fleet.yml` in the current directory with the
    allowlisted repos as entries (creating the file via `/autospec-fleet
    init` semantics if it does not exist yet).
-4. Runs `/autospec-fleet run --once` in dry-run reporting mode and surfaces
-   its per-repo worker-command output to the operator as "pending fleet
-   execution" — this is the honest end state today: the board is resolved,
-   the fleet config exists, and the operator (or a follow-up fleet-run
-   launch capability, not yet built) is what actually starts the workers.
+4. Runs `/autospec-fleet run --once` and surfaces its per-repo output to the
+   operator: a repo with an existing checkout and ready queue work gets a
+   real conductor launched; a repo with no checkout yet is reported as
+   "checkout not found — clone it into the fleet workspace first," not as
+   running.
 
-Do not describe `ship` as launching workers unattended. Multi-repo execution
-launch is a separate follow-up plan; until it lands, `ship`'s job ends at
-"board resolved, fleet config written, N repos pending fleet execution."
+Do not describe `ship` as a fully unattended multi-repo pipeline — checkout
+cloning is a separate follow-up plan; until it lands, `ship`'s job is "board
+resolved, fleet config written, checkouts that already exist get a
+conductor launched, the rest are reported as pending a manual clone."
 
 ### `status` mode: board-scoped read
 
@@ -207,7 +212,9 @@ failure while preserving parent context.
 `project-board-deps.sh`, `autonomous-promote-open-issues.sh`). `status`
 composes those same scripts with `autospec-fleet`'s existing
 `fleet-status.sh`. `ship` resolves the board and writes `autospec-fleet.yml`
-today, but the launch step it hands off to — live, unattended multi-repo
-worker execution — is not implemented in `autospec-fleet` yet; `ship`
-reports which repos are pending fleet execution rather than claiming they
-are running.
+today, and the launch step it hands off to — `autospec-fleet run` spawning
+a real per-repo `autospec-autonomous` conductor — is implemented and tested.
+What is still missing is checkout provisioning: `fleet-run.sh` never clones
+or syncs a repo into the workspace, so `ship` only launches conductors for
+repos that already have a local checkout; repos without one are reported as
+pending a manual clone, not as running.
