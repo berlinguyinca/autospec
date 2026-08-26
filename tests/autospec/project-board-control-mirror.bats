@@ -22,6 +22,16 @@ case "$*" in
   *"issue list"*)
     printf '%s' "${GH_REPO_LABELS:-[]}"
     ;;
+  *"issue edit"*"--add-label"*)
+    if [ "${GH_ADD_LABEL_EXIT:-0}" -ne 0 ]; then
+      exit "${GH_ADD_LABEL_EXIT}"
+    fi
+    printf '' ;;
+  *"issue create"*)
+    if [ "${GH_ISSUE_CREATE_EXIT:-0}" -ne 0 ]; then
+      exit "${GH_ISSUE_CREATE_EXIT}"
+    fi
+    printf '' ;;
   *) printf '' ;;
 esac
 SH
@@ -225,4 +235,41 @@ MARKER_TITLE='[autospec] project-board control relay (do not edit manually)'
   run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.skipped[0].reason == "marker_label_title_mismatch"'
+}
+
+# --- I4: a failing gh call must never be reported as mirrored (Plan B) ---
+# The `--add-label` call used to end in `|| true`, with the label appended
+# to `mirrored` regardless of whether the API call actually succeeded — the
+# worst possible lie for a stop signal an operator believes propagated.
+
+@test "a failing gh add-label on an existing marker is NOT reported as mirrored" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":55,"title":"'"$MARKER_TITLE"'"}]'
+  export GH_ADD_LABEL_EXIT=1
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == []'
+  echo "$output" | jq -e '.failed | length == 1'
+  echo "$output" | jq -e '.failed[0].repo == "o/a" and .failed[0].label == "autospec:pause"'
+  grep -q -- 'issue edit 55 --repo o/a --add-label autospec:pause' "$GH_CALLS"
+}
+
+@test "a failing gh issue create is NOT reported as mirrored" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[]'
+  export GH_ISSUE_CREATE_EXIT=1
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored == []'
+  echo "$output" | jq -e '.failed | length == 1'
+  echo "$output" | jq -e '.failed[0].reason == "gh_issue_create_failed"'
+}
+
+@test "a successful gh call is still reported as mirrored (control: failed stays empty)" {
+  export GH_CONTROL_LABELS='[{"name":"autospec:pause"}]'
+  export GH_MARKER_JSON='[{"number":55,"title":"'"$MARKER_TITLE"'"}]'
+  run bash "$SCRIPT" --control-issue o/ctl#1 --repos o/a --allowlist 'o/*'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.mirrored | length == 1'
+  echo "$output" | jq -e '.failed == []'
 }
