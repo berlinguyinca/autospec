@@ -34,7 +34,11 @@ extension_language() {
     *.go) printf 'go\n' ;;
     *.py) printf 'python\n' ;;
     *.ts) printf 'typescript\n' ;;
+    *.tsx) printf 'typescript\n' ;;
     *.js) printf 'javascript\n' ;;
+    *.jsx) printf 'javascript\n' ;;
+    *.mjs) printf 'javascript\n' ;;
+    *.cjs) printf 'javascript\n' ;;
     *.java) printf 'java\n' ;;
     *.sh) printf 'bash\n' ;;
     *.rb) printf 'ruby\n' ;;

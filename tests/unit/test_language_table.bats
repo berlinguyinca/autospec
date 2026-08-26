@@ -82,6 +82,14 @@ PY
   [ "$status" -eq 0 ]; [ "$output" = "typescript" ]
   run bash "$TABLE" extension_language main.js
   [ "$status" -eq 0 ]; [ "$output" = "javascript" ]
+  run bash "$TABLE" extension_language App.tsx
+  [ "$status" -eq 0 ]; [ "$output" = "typescript" ]
+  run bash "$TABLE" extension_language App.jsx
+  [ "$status" -eq 0 ]; [ "$output" = "javascript" ]
+  run bash "$TABLE" extension_language tool.mjs
+  [ "$status" -eq 0 ]; [ "$output" = "javascript" ]
+  run bash "$TABLE" extension_language tool.cjs
+  [ "$status" -eq 0 ]; [ "$output" = "javascript" ]
   run bash "$TABLE" extension_language Main.java
   [ "$status" -eq 0 ]; [ "$output" = "java" ]
   run bash "$TABLE" extension_language build.sh
@@ -100,7 +108,7 @@ PY
 
 @test "extension_language refuses unlisted extensions with no output and no guess" {
   local name
-  for name in main.c Main.kt App.tsx index.html App.vue; do
+  for name in main.c Main.kt index.html App.vue App.svelte; do
     run bash "$TABLE" extension_language "$name"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
@@ -193,4 +201,10 @@ PY
   done
   [ "$shipped" -eq 1 ]
   bash -n "$REPO_ROOT/scripts/autospec-language-table.sh"
+  run bash "$REPO_ROOT/scripts/autospec-language-table.sh" extension_language main.rs
+  [ "$status" -eq 0 ]; [ "$output" = "rust" ]
+  run bash "$REPO_ROOT/scripts/autospec-language-table.sh" marker_language Cargo.toml
+  [ "$status" -eq 0 ]; [ "$output" = "rust" ]
+  run bash "$REPO_ROOT/scripts/autospec-language-table.sh" extension_language nope.zzz
+  [ "$status" -ne 0 ]
 }

@@ -531,7 +531,7 @@ if worker_recipe_execution:
     }
     dimensions.append(dimension("template_application_review", template_application_review["status"], template_application_review["summary"], template_application_review["evidence"], "Do not overwrite non-generated files." if unsafe_overwrite else ""))
 
-    primary_stack = stack_profile.get("primary") or {}
+    primary_stack = stack_profile.get("primary_profile") or {}
     confidence = float(primary_stack.get("confidence", 0) or 0)
     stack_specific = capability in {"ui_scaffold", "api_scaffold", "settings_scaffold"}
     stack_status = "pass" if (not stack_specific or confidence >= 0.8) else "fail"
