@@ -100,17 +100,19 @@ SH
     run bash "$RUN" --config "$TMP/fleet.yml"
     [ "$status" -eq 0 ]
     grep -q 'o/b' "$FLEET_SPAWN_LOG"
-    ! grep -q 'o/a' "$FLEET_SPAWN_LOG"
     echo "$output" | grep -q 'code_health:fleet_worker_spawn_failed repo=o/a'
+    run grep -q 'o/a' "$FLEET_SPAWN_LOG"
+    [ "$status" -ne 0 ]
 }
 
 @test "a missing checkout directory is skipped with a clear message, not spawned" {
     rm -rf "$TMP/ws/o__a"
     run bash "$RUN" --config "$TMP/fleet.yml"
     [ "$status" -eq 0 ]
-    ! grep -q 'o/a' "$FLEET_SPAWN_LOG"
     grep -q 'o/b' "$FLEET_SPAWN_LOG"
     echo "$output" | grep -q "o/a: checkout not found"
+    run grep -q 'o/a' "$FLEET_SPAWN_LOG"
+    [ "$status" -ne 0 ]
 }
 
 @test "dry-run does not require the checkout to exist and still previews it" {
