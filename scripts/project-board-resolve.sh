@@ -19,8 +19,20 @@ emit="plan"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --url)  url="${2:-}";  shift 2 ;;
-        --emit) emit="${2:-}"; shift 2 ;;
+        --url)
+            if [ "$#" -lt 2 ]; then
+                die_usage "--url requires a value"
+            fi
+            url="$2"
+            shift 2
+            ;;
+        --emit)
+            if [ "$#" -lt 2 ]; then
+                die_usage "--emit requires a value"
+            fi
+            emit="$2"
+            shift 2
+            ;;
         --help|-h)
             cat <<'EOF'
 project-board-resolve.sh — resolve a GitHub Projects v2 board into a board plan
@@ -38,17 +50,19 @@ done
 
 # ── Identity ────────────────────────────────────────────────────────────────
 # Anchored so trailing garbage (".../projects/2x") is rejected, not truncated.
+# Accepts optional /views/N suffix (normalized away). Normalizes leading zeros.
 parse_identity() {
     local u="$1" kind="" owner="" number=""
-    if printf '%s' "$u" | grep -Eq '^https://github\.com/orgs/[^/]+/projects/[0-9]+/?$'; then
+    if printf '%s' "$u" | grep -Eq '^https://github\.com/orgs/[^/]+/projects/[0-9]+(/views/[0-9]+)?/?$'; then
         kind="org"
-    elif printf '%s' "$u" | grep -Eq '^https://github\.com/users/[^/]+/projects/[0-9]+/?$'; then
+    elif printf '%s' "$u" | grep -Eq '^https://github\.com/users/[^/]+/projects/[0-9]+(/views/[0-9]+)?/?$'; then
         kind="user"
     else
         die_usage "not a GitHub Projects v2 URL: $u"
     fi
-    owner="$(printf '%s' "$u" | sed -E 's#^https://github\.com/(orgs|users)/([^/]+)/projects/[0-9]+/?$#\2#')"
-    number="$(printf '%s' "$u" | sed -E 's#^.*/projects/([0-9]+)/?$#\1#')"
+    owner="$(printf '%s' "$u" | sed -E 's#^https://github\.com/(orgs|users)/([^/]+)/projects/[0-9]+(/views/[0-9]+)?/?$#\2#')"
+    number="$(printf '%s' "$u" | sed -E 's#^.*/projects/([0-9]+)(/views/[0-9]+)?/?$#\1#')"
+    number="$((10#${number}))"
     printf '{"owner":"%s","kind":"%s","number":%s}\n' "$owner" "$kind" "$number"
 }
 
