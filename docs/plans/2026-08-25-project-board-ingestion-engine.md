@@ -1472,10 +1472,10 @@ Exit 3 from `gen-skill-goldens.sh` means regeneration did not happen — fix the
 Run in a dedicated detached worktree, never while switching branches:
 
 ```bash
-bash scripts/validate.sh 2>&1 | tail -40
+autospec validate 2>&1 | tail -40
 ```
 
-Expected: the lockstep and `check_derive_trio_consistency` checks report OK for `autospec-project`. `validate.sh` is red on `main`, so compare the failure **set** against a clean `origin/main` worktree — per-suite spot checks give false all-clears.
+Expected: the lockstep and `check_derive_trio_consistency` checks report OK for `autospec-project`. `autospec validate` is red on `main`, so compare the failure **set** against a clean `origin/main` worktree — per-suite spot checks give false all-clears.
 
 - [ ] **Step 4: Verify install registration**
 

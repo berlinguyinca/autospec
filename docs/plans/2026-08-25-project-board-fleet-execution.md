@@ -665,12 +665,12 @@ Append `project-board-control-mirror.sh` to `AUTONOMOUS_SCRIPT_FILES` at `skills
 
 - [ ] **Step 4: Run the full gate against a clean baseline**
 
-`validate.sh` is red on `main`, so compare failure **sets**, not counts. Run it in a dedicated detached worktree — mutating the tree mid-run corrupts the checkout and produces false "required file missing" errors.
+`autospec validate` is red on `main`, so compare failure **sets**, not counts. Run it in a dedicated detached worktree — mutating the tree mid-run corrupts the checkout and produces false "required file missing" errors.
 
 ```bash
 git worktree add /tmp/as-baseline origin/main
-( cd /tmp/as-baseline && bash scripts/validate.sh 2>&1 | tee /tmp/baseline.log | tail -5 )
-bash scripts/validate.sh 2>&1 | tee /tmp/head.log | tail -5
+( cd /tmp/as-baseline && autospec validate 2>&1 | tee /tmp/baseline.log | tail -5 )
+autospec validate 2>&1 | tee /tmp/head.log | tail -5
 diff <(grep -oE '^(FAIL|ERROR):.*' /tmp/baseline.log | sort) \
      <(grep -oE '^(FAIL|ERROR):.*' /tmp/head.log | sort)
 git worktree remove /tmp/as-baseline
