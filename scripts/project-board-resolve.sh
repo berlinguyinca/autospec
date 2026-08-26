@@ -53,7 +53,7 @@ done
 # fail with exit 2 usage and zero `gh` calls, never after paying for a
 # field-list + item-list round trip first.
 case "$emit" in
-    identity|plan|repos) ;;
+    identity|plan|repos|fleet-config) ;;
     *) die_usage "unsupported --emit: $emit" ;;
 esac
 
@@ -213,5 +213,33 @@ plan="$(printf '%s' "$items_json" | jq \
 case "$emit" in
     plan)  printf '%s\n' "$plan" ;;
     repos) printf '%s\n' "$repos_json" ;;
+    fleet-config)
+        # Only needs the repo set, sourced from repos_json (derived from
+        # items_json alone) — no gh project view call and no per-repo
+        # closed-issue join, both of which are gated on `$emit = "plan"`
+        # above and never run here. This mode's gh calls are exactly the
+        # field-list + item-list pair, same as `--emit repos`.
+        parallel="${AUTOSPEC_PROJECT_BOARD_PARALLEL:-2}"
+        case "$parallel" in
+            [1-9]|[1-9][0-9]*) ;;
+            *) parallel=2 ;;
+        esac
+        # Board-derived repo strings are untrusted: a name carrying a quote,
+        # newline, '#', or other YAML metacharacter must not be able to
+        # break the document structure or inject a sibling key. Two layers:
+        # (1) hard filter to strict owner/name (matches GitHub's own repo
+        # naming rules) — anything else is silently dropped rather than
+        # emitted; (2) even a conforming name is still wrapped in `tojson`
+        # (a JSON string is a valid YAML flow scalar) rather than spliced in
+        # raw, so quoting is never load-bearing on its own.
+        printf '%s\n' "$repos_json" | jq -r --arg parallel "$parallel" '
+          "version: 1",
+          "workspace: .autospec-fleet/repos",
+          ("parallel_repos: " + $parallel),
+          "repos:",
+          ( [ .[] | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) ]
+            | .[]
+            | "  - url: " + (("https://github.com/" + . + ".git") | tojson) + "\n    enabled: true" )'
+        ;;
     *) die_usage "unsupported --emit: $emit" ;;
 esac

@@ -338,14 +338,100 @@ SH
   [ ! -f "$TMP/gh-calls.log" ]
 }
 
-@test "--emit fleet-config is a clean exit-2 usage error with zero gh calls" {
+@test "an unsupported --emit that is not fleet-config still exits 2 with zero gh calls" {
   cat > "$TMP/bin/gh" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/gh-calls.log"
 printf ''
 SH
   chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
-  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit fleet-config
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/2 --emit nope
   [ "$status" -eq 2 ]
   [ ! -f "$TMP/gh-calls.log" ]
+}
+
+# ── fleet-config ─────────────────────────────────────────────────────────
+
+@test "fleet-config lists every board repo as an enabled entry" {
+  stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  [ "$status" -eq 0 ]
+  echo "$output" | yq -e '.repos | length == 6'
+  echo "$output" | yq -e '.repos[0].enabled == true'
+  echo "$output" | yq -e '.version == 1'
+}
+
+@test "fleet-config repo urls are clone-ready https urls" {
+  stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  echo "$output" | yq -e '.repos[] | select(.url == "https://github.com/InferWeave/inferweave-protocol.git")'
+}
+
+@test "fleet-config validates against the fleet schema" {
+  stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
+  bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config > "$TMP/fleet.yml"
+  run bash "${BATS_TEST_DIRNAME}/../../skills/autospec-fleet/scripts/fleet-config-lint.sh" --config "$TMP/fleet.yml"
+  [ "$status" -eq 0 ]
+}
+
+@test "fleet-config makes exactly field-list and item-list gh calls, not project view or issue list" {
+  cat > "$TMP/bin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/gh-calls.log"
+case "\$*" in
+  *"project field-list"*) cat "$FIX/p1-fields.json" ;;
+  *"project item-list"*)  cat "$FIX/p1-items.json" ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"; export PATH="$TMP/bin:$PATH"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  [ "$status" -eq 0 ]
+  run grep -q 'project view' "$TMP/gh-calls.log"
+  [ "$status" -ne 0 ]
+  run grep -q 'issue list' "$TMP/gh-calls.log"
+  [ "$status" -ne 0 ]
+  grep -q 'project field-list' "$TMP/gh-calls.log"
+  grep -q 'project item-list' "$TMP/gh-calls.log"
+}
+
+@test "fleet-config honors AUTOSPEC_PROJECT_BOARD_PARALLEL" {
+  stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
+  AUTOSPEC_PROJECT_BOARD_PARALLEL=5 run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  [ "$status" -eq 0 ]
+  echo "$output" | yq -e '.parallel_repos == 5'
+}
+
+@test "fleet-config defaults parallel_repos to 2 when unset" {
+  stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  [ "$status" -eq 0 ]
+  echo "$output" | yq -e '.parallel_repos == 2'
+}
+
+@test "fleet-config drops a hostile repo name without breaking YAML structure or injecting a key" {
+  cat > "$TMP/hostile-items.json" <<'JSON'
+{"items":[
+  {"id":"PVTI_1",
+   "content":{"type":"Issue","number":1,"repository":"InferWeave/inferweave-protocol",
+              "title":"t","body":"","url":"https://github.com/InferWeave/inferweave-protocol/issues/1"}},
+  {"id":"PVTI_2",
+   "content":{"type":"Issue","number":2,
+              "repository":"evil/repo\"\n    enabled: false\n  - url: \"https://evil.example.com",
+              "title":"t","body":"","url":"https://github.com/evil/repo/issues/2"}}
+]}
+JSON
+  cat > "$TMP/empty-fields.json" <<'JSON'
+{"fields":[]}
+JSON
+  stub_gh "$TMP/empty-fields.json" "$TMP/hostile-items.json"
+  run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit fleet-config
+  [ "$status" -eq 0 ]
+  # Only the well-formed repo survives; the hostile one is dropped entirely.
+  echo "$output" | yq -e '.repos | length == 1'
+  echo "$output" | yq -e '.repos[0].url == "https://github.com/InferWeave/inferweave-protocol.git"'
+  # No injected top-level "enabled: false" key or extra repos entry sneaked in.
+  run bash -c "printf '%s' \"\$1\" | grep -q 'evil.example.com'" _ "$output"
+  [ "$status" -ne 0 ]
+  echo "$output" | yq -e '(.enabled // "absent") == "absent"'
 }
