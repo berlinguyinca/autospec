@@ -367,10 +367,29 @@ board_truncated=0
 # Write-back is advisory: a board mutation failure must never fail a
 # promotion that already succeeded. Fires only under --apply AND policy
 # auto|on — never in report-only mode.
+#
+# The token's project-scope probe (`gh auth status`) is expensive to repeat
+# once per item, so it is cached here as a plain in-process shell variable —
+# NOT on disk. --plan is the persistent, URL-keyed board cache, reused across
+# both items in one cycle AND separate cycles within its TTL, so a disk cache
+# keyed to that path (an earlier fix's approach) would outlive this run
+# entirely and could freeze a stale answer forever. A shell variable has no
+# such lifetime problem: it starts unset in every fresh process, is computed
+# at most once per run on first use, and is gone the moment this process
+# exits — nothing to clean up, nothing that can go stale across runs.
+AUTOSPEC_PROJECT_BOARD_AUTH_OK=""
 board_writeback() {
     _wb_item="$1"; _wb_state="$2"
     [ "$apply_enabled" -eq 1 ] || return 0
     [ -f "$BOARD_WRITEBACK" ] || return 0
+    if [ "$AUTOSPEC_PROJECT_BOARD_AUTH_OK" != "0" ] && [ "$AUTOSPEC_PROJECT_BOARD_AUTH_OK" != "1" ]; then
+        if gh auth status 2>&1 | grep -q "'project'"; then
+            AUTOSPEC_PROJECT_BOARD_AUTH_OK=1
+        else
+            AUTOSPEC_PROJECT_BOARD_AUTH_OK=0
+        fi
+    fi
+    export AUTOSPEC_PROJECT_BOARD_AUTH_OK
     bash "$BOARD_WRITEBACK" --plan "$BOARD_CACHE" --item "$_wb_item" --state "$_wb_state" >/dev/null 2>&1 || true
 }
 

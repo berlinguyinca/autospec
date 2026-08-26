@@ -183,6 +183,60 @@ SH
   [ ! -s "$TMP/wb.log" ]
 }
 
+# ── NEW-1: the auth-scope probe cache must not outlive its own run ─────────
+# The earlier fix cached project-board-writeback.sh's `gh auth status` probe
+# on disk beside --plan (BOARD_CACHE), which is the PERSISTENT, URL-keyed
+# board cache — reused across separate promoter invocations, not a fresh
+# per-run temp file. That permanently froze a stale scope answer on the host.
+# The fix moves the cache into the promoter's own in-process shell variable
+# (AUTOSPEC_PROJECT_BOARD_AUTH_OK, exported to each child), so it never
+# touches disk and cannot survive past this process. These two tests invoke
+# the REAL project-board-writeback.sh (not the wb.sh stub used elsewhere in
+# this file) so the probe/cache path actually executes end to end.
+
+real_writeback_gh_stub() {
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "gh $*" >> "$GH_CALLS"
+case "$*" in
+  *"issue list"*)   printf '[]' ;;
+  *"auth status"*)  printf "Token scopes: 'project', 'repo'\n" ;;
+  *"item-edit"*)    exit 0 ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"
+}
+
+@test "NEW-1: gh auth status is probed at most once per run across multiple board items" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/project-board-writeback.sh"
+  real_writeback_gh_stub
+  # Two items in one cycle: PVTI_a promotes to Ready, PVTI_b (blocked on #1)
+  # writes Blocked — two separate board_writeback calls, same run.
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":1,"state":"open","labels":[],"body":"Blocked by: none.","autospec_state":"Blocked"},{"item_id":"PVTI_b","repo":"o/r","number":5,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n","autospec_state":"Blocked"}]}'
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
+  [ "$auth_calls" -eq 1 ]
+}
+
+@test "NEW-1: a fresh promoter run re-probes gh auth status rather than reusing a previous run's cached answer" {
+  export AUTOSPEC_BOARD_WRITEBACK_SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/project-board-writeback.sh"
+  real_writeback_gh_stub
+  # Same URL/AUTOSPEC_STATE_DIR across both invocations (unchanged from
+  # setup()), so --plan resolves to the SAME persistent, URL-keyed cache file
+  # both times — exactly the production scenario the bug depended on.
+  board '{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none.","autospec_state":"Blocked"}]}'
+
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
+  [ "$auth_calls" -eq 2 ]
+}
+
 # ── Admission control: board promotions share ONE per-cycle budget with the
 #    GROOM_LIST path (budget.max_issues_per_cycle), never a second one ─────
 

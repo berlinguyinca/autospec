@@ -160,18 +160,22 @@ teardown() { rm -rf "$TMP"; }
   ! grep -q 'item-edit' "$GH_CALLS"
 }
 
-# ── Finding I3: the token-scope probe is cached per run, not repeated per item ─
+# ── Finding I3 / NEW-1: the token-scope probe is cached for at most one run,
+# never on disk. This script is a fresh process per invocation and no longer
+# does any caching of its own (an earlier fix cached it in a dotfile beside
+# --plan, which is the PERSISTENT board cache — that froze a stale answer
+# forever across separate runs; see project-board-promoter.bats "NEW-1" for
+# the caller-level regression test that proves the real bug and its fix).
+# The caller (autonomous-promote-open-issues.sh) now probes once per run as
+# an in-process shell variable and passes the result via
+# AUTOSPEC_PROJECT_BOARD_AUTH_OK. This script trusts that value when set and
+# never re-probes; without it (e.g. standalone use) it probes live every
+# call — correct, if wasteful, and with nothing written to disk.
 
-@test "gh auth status is probed at most once across a multi-item run against the same plan" {
-  # The caller (autonomous-promote-open-issues.sh) invokes this script once
-  # per item, always with the SAME --plan file for the whole cycle (measured:
-  # 80 `gh auth status` calls in one p2 cycle before this fix). Simulate a
-  # multi-item run by invoking this script three times against the same
-  # shared plan.json, and assert the underlying gh binary was asked for
-  # 'auth status' at most once across all three.
-  # The shared plan.json fixture's item already holds "Blocked" — pick three
-  # target states that all genuinely differ from it, so every call is a real
-  # edit rather than tripping the (separately tested) idempotence skip.
+@test "AUTOSPEC_PROJECT_BOARD_AUTH_OK from the caller is trusted across multiple items, no re-probe" {
+  # Simulate what the promoter does for a multi-item run: resolve the scope
+  # once and export it to every child invocation.
+  export AUTOSPEC_PROJECT_BOARD_AUTH_OK=1
   jq '.fields.autospec_state.options = {"Ready":"opt_ready","Done":"opt_done","Testing":"opt_testing"}' \
      "$TMP/plan.json" > "$TMP/multi.json"
 
@@ -182,19 +186,20 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --plan "$TMP/multi.json" --item PVTI_a --state Testing
   [ "$status" -eq 0 ]
 
-  auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
-  [ "$auth_calls" -eq 1 ]
-  # The cache must not have suppressed real work: all three edits still fired.
+  auth_calls="$(grep -c 'auth status' "$GH_CALLS" || true)"
+  [ "$auth_calls" -eq 0 ]
+  # A pre-resolved OK must not have suppressed real work: all three edits fired.
   edit_calls="$(grep -c 'item-edit' "$GH_CALLS")"
   [ "$edit_calls" -eq 3 ]
 }
 
-@test "a fresh plan file (new run) re-probes gh auth status" {
+@test "without a caller-supplied AUTOSPEC_PROJECT_BOARD_AUTH_OK, every invocation probes live" {
   run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
-  jq '.' "$TMP/plan.json" > "$TMP/plan2.json"
-  run bash "$SCRIPT" --plan "$TMP/plan2.json" --item PVTI_a --state Ready
+  run bash "$SCRIPT" --plan "$TMP/plan.json" --item PVTI_a --state Ready
   [ "$status" -eq 0 ]
   auth_calls="$(grep -c 'auth status' "$GH_CALLS")"
   [ "$auth_calls" -eq 2 ]
+  # And nothing was written to disk beside the (possibly persistent) plan.
+  [ ! -e "$TMP/.plan.json.authscope" ]
 }
