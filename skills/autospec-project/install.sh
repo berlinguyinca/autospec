@@ -23,7 +23,14 @@ project-board-normalize.sh
 project-board-deps.sh
 project-board-writeback.sh
 autonomous-promote-open-issues.sh
+project-ship.sh
 "
+# project-ship.sh (the `ship` chain) sources fleet-lib.sh and shells out to
+# fleet-run.sh at runtime — both must land alongside it or `ship` hard-
+# crashes on a clean install. Mirrors autospec-fleet/install.sh's own
+# FLEET_SCRIPT_FILES set (fleet-config-lint.sh is fleet-run.sh's own
+# same-directory dependency, so it rides along too).
+FLEET_SCRIPT_FILES="fleet-run.sh fleet-lib.sh fleet-config-lint.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn: %s\n' "$*" >&2; }
@@ -63,6 +70,9 @@ fetch_source_files() {
     for rel in $SHARED_SCRIPT_FILES; do
         curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel" || { err "failed to download $rel"; exit 1; }
     done
+    for rel in $FLEET_SCRIPT_FILES; do
+        curl -fsSL "$RAW_REPO_BASE/skills/autospec-fleet/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel" || { err "failed to download $rel"; exit 1; }
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
 }
 
@@ -71,6 +81,19 @@ resolve_shared_scripts_dir() {
     if [ -n "$checkout_root" ] && [ -d "$checkout_root/scripts" ]; then
         printf '%s\n' "$checkout_root/scripts"
     elif [ -d "$SKILL_DIR/scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/scripts"
+    else
+        printf ''
+    fi
+}
+
+resolve_fleet_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-fleet/scripts" ]; then
+        printf '%s\n' "$checkout_root/skills/autospec-fleet/scripts"
+    elif [ -d "$SKILL_DIR/scripts" ]; then
+        # Fetched (curl) layout: fleet scripts land alongside the shared
+        # ones in the same flat scripts/ dir — see fetch_source_files.
         printf '%s\n' "$SKILL_DIR/scripts"
     else
         printf ''
@@ -98,6 +121,20 @@ install_shared_scripts() {
     for rel in $SHARED_SCRIPT_FILES; do
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         case "$rel" in *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;; esac
+    done
+}
+
+# project-ship.sh sources fleet-lib.sh and shells out to fleet-run.sh at its
+# own directory (falling back to the flattened $HOME/.autospec/scripts/
+# layout every autospec script targets) — installed alongside the shared
+# scripts above, same destination directory, so both resolution paths land
+# on the same files.
+install_fleet_scripts() {
+    src_dir="$(resolve_fleet_scripts_dir)"
+    [ -n "$src_dir" ] || { err "missing fleet scripts directory"; return 1; }
+    for rel in $FLEET_SCRIPT_FILES; do
+        install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        run "chmod +x \"$HOME/.autospec/scripts/$rel\""
     done
 }
 
@@ -135,6 +172,10 @@ done
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+info ""
+info "autospec-fleet scripts (required by ship):"
+install_fleet_scripts
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
