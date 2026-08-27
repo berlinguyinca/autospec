@@ -1763,6 +1763,56 @@ fi'
         esac
         [ -n "$_inferred_confidence" ] || _inferred_confidence="none"
 
+        # ── Step 1c: Project-board control mirror (before Tier-0 reads) ───────
+        # A board-driven fleet's operator applies autospec:stop/pause/priority/
+        # steer to ONE designated control issue; each repo's own Tier-0 poll
+        # (Step 2, immediately below) only ever reads labels on ITS repo. This
+        # step mirrors the control issue's reserved labels into every fleet
+        # repo's dedicated marker issue via project-board-control-mirror.sh
+        # BEFORE Step 2 reads this cycle — mirroring after Step 2 would leave
+        # a board-level stop honored a full cycle late.
+        #
+        # Config-driven only: project_board.control_issue (and the repo
+        # allowlist it must live inside) come from .autospec/autonomous.yml
+        # via the same `autospec autonomous project-board-config` bridge
+        # every other project_board consumer uses — no new AUTOSPEC_*
+        # operator-facing env var. The fleet repos this mirrors into are the
+        # board's own repo_allowlist ("allowlist" in the bridge JSON): those
+        # are the only repos both required and permitted to receive a
+        # project-level control signal, so allowlist doubles as the mirror's
+        # --repos and --allowlist arguments — never a wider set.
+        #
+        # Opt-in + advisory: when control_issue is unset (the overwhelming
+        # common case), the mirror script is never invoked at all — zero `gh`
+        # calls, zero behavior change. When it IS set, a mirror failure
+        # (unreachable issue, missing binary, API error) must never fail,
+        # delay, or alter this cycle — the trailing `|| true` is the
+        # contract, not an oversight; do not "fix" it into a hard failure.
+        local _pb_mirror_sh="${AUTOSPEC_BOARD_CONTROL_MIRROR_SCRIPT:-${_sdir}/project-board-control-mirror.sh}"
+        if [ -f "$_pb_mirror_sh" ]; then
+            local _pb_config_bin="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${_queue_bin:-autospec}}"
+            local _pb_json=""
+            _pb_json="$("$_pb_config_bin" autonomous project-board-config \
+                --repo-dir "$_repo_root" 2>/dev/null || true)"
+            if [ -n "$_pb_json" ]; then
+                local _pb_control_issue=""
+                _pb_control_issue="$(printf '%s' "$_pb_json" \
+                    | jq -r '.control_issue // empty' 2>/dev/null || true)"
+                if [ -n "$_pb_control_issue" ]; then
+                    local _pb_allowlist_csv=""
+                    _pb_allowlist_csv="$(printf '%s' "$_pb_json" \
+                        | jq -r '(.allowlist // []) | join(",")' 2>/dev/null || true)"
+                    if [ -n "$_pb_allowlist_csv" ]; then
+                        bash "$_pb_mirror_sh" \
+                            --control-issue "$_pb_control_issue" \
+                            --repos "$_pb_allowlist_csv" \
+                            --allowlist "$_pb_allowlist_csv" \
+                            >/dev/null 2>&1 || true
+                    fi
+                fi
+            fi
+        fi
+
         # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
         local _ctrl_decision=""
         if [ -f "$_control_ch" ]; then

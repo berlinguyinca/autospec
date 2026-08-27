@@ -1985,6 +1985,16 @@ fn effective_main_health_policy_digest(
 /// config values (url, allowlist entries) are operator-supplied. Fields:
 ///   - "url": the board URL, or `null` if unset OR if validation failed.
 ///   - "allowlist": the repo allowlist entries (empty when `url` is null).
+///   - "control_issue": `project_board.control_issue` (`owner/repo#N`), or
+///     `null` if unset. Consumed by the conductor to mirror project-level
+///     Tier-0 control labels (autospec:stop/pause/priority/steer) from this
+///     one issue into every fleet repo before each cycle's control-channel
+///     read — see `scripts/project-board-control-mirror.sh` and its caller
+///     in `scripts/lib/autospec-loop.sh`. Unlike `url`, `control_issue` does
+///     NOT require a non-empty `repo_allowlist` to be present — the mirror
+///     caller independently no-ops when `allowlist` is empty (the control
+///     issue and every target repo must both be inside it), so this field
+///     is emitted whenever configured, without gating on `url`.
 ///   - "ttl": board-cache TTL in seconds (`project_board.ttl`, default 300 —
 ///     the same default the shell used to hardcode).
 ///   - "label_map": `project_board.label_map`, or `null` if unset.
@@ -2028,6 +2038,10 @@ fn format_project_board_config(
         None => "null".to_string(),
     };
     let allowlist_json = json_string_array(&board.repo_allowlist);
+    let control_issue_json = match &board.control_issue {
+        Some(control_issue) => format!("\"{}\"", json_escape(control_issue)),
+        None => "null".to_string(),
+    };
     let label_map_json = match &board.label_map {
         Some(label_map) => format!("\"{}\"", json_escape(label_map)),
         None => "null".to_string(),
@@ -2058,7 +2072,7 @@ fn format_project_board_config(
     let dep_markers_json = format!("\"{}\"", json_escape(&board.dep_markers.join(",")));
     let write_back_json = if board.write_back { "true" } else { "false" };
     format!(
-        "{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":{ttl},\"label_map\":{label_map_json},\"state_fields\":{state_fields_json},\"state_options\":{state_options_json},\"dep_fields\":{dep_fields_json},\"dep_markers\":{dep_markers_json},\"parallel\":{parallel},\"limit\":{limit},\"spend_scope\":{spend_scope_json},\"write_back\":{write_back_json}}}",
+        "{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"control_issue\":{control_issue_json},\"ttl\":{ttl},\"label_map\":{label_map_json},\"state_fields\":{state_fields_json},\"state_options\":{state_options_json},\"dep_fields\":{dep_fields_json},\"dep_markers\":{dep_markers_json},\"parallel\":{parallel},\"limit\":{limit},\"spend_scope\":{spend_scope_json},\"write_back\":{write_back_json}}}",
         ttl = board.ttl_seconds,
         parallel = board.max_parallel_repos,
         limit = board.item_limit,
@@ -8140,8 +8154,23 @@ mod project_board_config_tests {
         assert_eq!(
             json,
             format!(
-                "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],{DEFAULT_TAIL},\"write_back\":true}}"
+                "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],\"control_issue\":null,{DEFAULT_TAIL},\"write_back\":true}}"
             )
+        );
+    }
+
+    #[test]
+    fn control_issue_flows_through_alongside_a_configured_url_and_allowlist() {
+        // control_issue is independent of the url/repo_allowlist gate — it is
+        // emitted whenever set, whether or not a board url is configured
+        // (see the field's doc comment above format_project_board_config).
+        // This proves both can be set together without one suppressing the
+        // other's emission.
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\"]\n  control_issue: acme/widgets#42\n";
+        let json = format_project_board_config(&board(source));
+        assert!(
+            json.contains("\"control_issue\":\"acme/widgets#42\""),
+            "expected control_issue to flow through in {json}"
         );
     }
 
@@ -8168,7 +8197,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board("main_health:\n  branch: main\n"));
         assert_eq!(
             json,
-            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
+            format!("{{\"url\":null,\"allowlist\":[],\"control_issue\":null,{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
@@ -8180,7 +8209,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&AutonomousConfig::default().project_board);
         assert_eq!(
             json,
-            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
+            format!("{{\"url\":null,\"allowlist\":[],\"control_issue\":null,{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
@@ -8195,7 +8224,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":9,\"limit\":500,\"spend_scope\":null,\"write_back\":false"
+            "{\"url\":null,\"allowlist\":[],\"control_issue\":\"7\",\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":9,\"limit\":500,\"spend_scope\":null,\"write_back\":false"
                 .to_string()
                 + "}"
         );
@@ -8207,7 +8236,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":60,\"label_map\":\"bug=defect\",\"state_fields\":\"Status\",\"state_options\":\"Done=Complete\",\"dep_fields\":\"Blocks\",\"dep_markers\":\"Waiting on\",\"parallel\":2,\"limit\":1000,\"spend_scope\":\"fleet-1\",\"write_back\":false}"
+            "{\"url\":null,\"allowlist\":[],\"control_issue\":null,\"ttl\":60,\"label_map\":\"bug=defect\",\"state_fields\":\"Status\",\"state_options\":\"Done=Complete\",\"dep_fields\":\"Blocks\",\"dep_markers\":\"Waiting on\",\"parallel\":2,\"limit\":1000,\"spend_scope\":\"fleet-1\",\"write_back\":false}"
         );
     }
 
