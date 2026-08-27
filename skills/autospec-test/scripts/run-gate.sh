@@ -113,7 +113,7 @@ else
     S25_EXIT=0
     if [ "$S2_PASSED" = "true" ] && [ -f "$SCRIPT_DIR/gate-stage-2-5.sh" ]; then
         if STAGE25_RESULT=$(bash "$SCRIPT_DIR/gate-stage-2-5.sh" "$TARGET_DIR" 2>/dev/null); then
-            S25_PASSED=$(printf '%s' "$STAGE25_RESULT" | jq -r '.passed // true')
+            S25_PASSED=$(printf '%s' "$STAGE25_RESULT" | jq -r 'if .passed == false then false else true end')
             S25_EXIT=0
         else
             S25_EXIT=$?
@@ -185,7 +185,7 @@ if [ -n "$PR_NUMBER" ] && [ "$DRY_RUN" = "false" ] && command -v gh >/dev/null 2
     S2_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.reason // ""')
     ASSERTION_SHIFT=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.assertion_shift // "none"')
     SCOPE_VIOLATION=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.scope_violation // false')
-    RESTORE_SUCCEEDED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.restore_succeeded // true')
+    RESTORE_SUCCEEDED=$(printf '%s' "$GATE_JSON" | jq -r 'if .stage2.metrics.restore_succeeded == false then false else true end')
 
     # Bootstrap the label set idempotently first
     bash "$SCRIPT_DIR/bootstrap-labels.sh" $REPO_FLAG 2>/dev/null || true

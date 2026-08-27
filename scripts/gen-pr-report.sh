@@ -167,7 +167,7 @@ done
 # ---------------------------------------------------------------------------
 DRIFT_BLOCK=""
 if [ -n "$DRIFT_FILE" ] && [ -f "$DRIFT_FILE" ]; then
-  DRIFT_PASSED="$(jq -r '.passed // true' "$DRIFT_FILE")"
+  DRIFT_PASSED="$(jq -r 'if .passed == false then false else true end' "$DRIFT_FILE")"
   if [ "$DRIFT_PASSED" = "false" ]; then
     DRIFT_COUNT="$(jq '.drift | length' "$DRIFT_FILE" 2>/dev/null || echo 0)"
     if [ "$DRIFT_COUNT" -gt 0 ]; then

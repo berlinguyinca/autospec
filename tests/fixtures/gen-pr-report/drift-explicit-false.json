@@ -1,0 +1,8 @@
+{
+  "passed": false,
+  "drift": [
+    {"doc_file": "docs/COERCION_TEST.md", "heading": "## jq alternative operator", "matching_source_files": ["scripts/example.sh"], "reason": "coercion regression fixture"}
+  ],
+  "drift_warn": [],
+  "missing_scope": []
+}
