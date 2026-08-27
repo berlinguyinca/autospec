@@ -151,13 +151,13 @@ printf '[]\n' > "$GAPS_TMP"
 test_cmd="$(yq -r '.project.findings.commands.test // ""' "$CONFIG")"
 e2e_cmd="$(yq -r '.project.findings.commands.e2e // ""' "$CONFIG")"
 deploy_cmd="$(yq -r '.project.findings.commands.deploy // ""' "$CONFIG")"
-spec_sync_enabled="$(yq -r '.sweep.spec_sync.enabled // true' "$CONFIG")"
-docs_enabled="$(yq -r '.continuous_improvement.docs.enabled // true' "$CONFIG")"
-documentation_enabled="$(yq -r '.documentation.enabled // true' "$CONFIG")"
-tests_enabled="$(yq -r '.continuous_improvement.tests.enabled // true' "$CONFIG")"
-code_enabled="$(yq -r '.continuous_improvement.code.enabled // true' "$CONFIG")"
+spec_sync_enabled="$(yq -r '.sweep.spec_sync.enabled != false' "$CONFIG")"
+docs_enabled="$(yq -r '.continuous_improvement.docs.enabled != false' "$CONFIG")"
+documentation_enabled="$(yq -r '.documentation.enabled != false' "$CONFIG")"
+tests_enabled="$(yq -r '.continuous_improvement.tests.enabled != false' "$CONFIG")"
+code_enabled="$(yq -r '.continuous_improvement.code.enabled != false' "$CONFIG")"
 code_checks="$(yq -r '.continuous_improvement.code.checks // [] | .[]' "$CONFIG" 2>/dev/null || true)"
-deploy_if_tests_require="$(yq -r '.execution.deployment.deploy_if_tests_require // true' "$CONFIG")"
+deploy_if_tests_require="$(yq -r '.execution.deployment.deploy_if_tests_require != false' "$CONFIG")"
 
 while IFS= read -r check; do
   case "$check" in
@@ -250,12 +250,12 @@ if [ "$docs_enabled" = "true" ] && [ ! -f "$REPO_ROOT/README.md" ]; then
 fi
 
 if [ "$docs_enabled" = "true" ] && [ "$documentation_enabled" = "true" ]; then
-  yq -r '.documentation.audiences[]? | [.id, .label, .path, .focus, (.require_scope // true)] | @tsv' "$CONFIG" |
+  yq -r '.documentation.audiences[]? | [.id, .label, .path, .focus, (.require_scope != false)] | @tsv' "$CONFIG" |
     while IFS="$(printf '\t')" read -r id label path focus require_scope; do
       add_documentation_target_gap "audience" "$id" "$label" "$path" "$focus" "$require_scope"
     done
 
-  yq -r '.documentation.scopes[]? | [.id, .label, .path, .focus, (.require_scope // true)] | @tsv' "$CONFIG" |
+  yq -r '.documentation.scopes[]? | [.id, .label, .path, .focus, (.require_scope != false)] | @tsv' "$CONFIG" |
     while IFS="$(printf '\t')" read -r id label path focus require_scope; do
       add_documentation_target_gap "scope" "$id" "$label" "$path" "$focus" "$require_scope"
     done
