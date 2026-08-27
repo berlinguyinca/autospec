@@ -177,6 +177,11 @@ Ties break toward languages already present in the repo (`source: chosen`,
 rationale `repo-affinity`), then to the operator default in
 `.autospec/autospec.yml`. Only a genuine remaining tie escalates.
 
+The operator default is the `language:` key in `.autospec/autospec.yml`
+(e.g. `language: rust`): the value is canonicalized, must name a member of
+the closed language set, and applies only when it is one of the tied
+candidates. An absent key, or a value outside the set, means no default.
+
 ## Data model
 
 **`.autospec/state/stack-profile.json`** gains a language/framework split. The
