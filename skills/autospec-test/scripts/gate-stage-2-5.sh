@@ -15,6 +15,125 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Live-server lifecycle (metrics G/I need a real HTTP origin) ─────────────
+#
+# window_contracts (G) and contract_symmetry (I) can't be evaluated against a
+# file:// fixture — they must observe a real network request / fetch a real
+# API response. This section starts the target's own server.mjs on a
+# harness-chosen loopback port, polls it to readiness, and guarantees
+# teardown on every exit path (success, metric failure, readiness timeout,
+# fatal error, or an interrupt) via an EXIT/INT/TERM trap. Per this project's
+# standing rule, RETURN traps leak into caller frames under `set -u`; an
+# EXIT trap is the accepted pattern instead.
+
+LIVE_SERVER_PID=""
+LIVE_SERVER_LOG=""
+
+cleanup_live_server() {
+    if [ -n "$LIVE_SERVER_PID" ]; then
+        if kill -0 "$LIVE_SERVER_PID" 2>/dev/null; then
+            kill -TERM "$LIVE_SERVER_PID" 2>/dev/null || true
+            i=0
+            while [ "$i" -lt 20 ]; do
+                kill -0 "$LIVE_SERVER_PID" 2>/dev/null || break
+                sleep 0.1
+                i=$((i + 1))
+            done
+            if kill -0 "$LIVE_SERVER_PID" 2>/dev/null; then
+                kill -KILL "$LIVE_SERVER_PID" 2>/dev/null || true
+            fi
+        fi
+        wait "$LIVE_SERVER_PID" 2>/dev/null || true
+        LIVE_SERVER_PID=""
+    fi
+    if [ -n "$LIVE_SERVER_LOG" ] && [ -f "$LIVE_SERVER_LOG" ]; then
+        rm -f "$LIVE_SERVER_LOG"
+        LIVE_SERVER_LOG=""
+    fi
+}
+trap cleanup_live_server EXIT INT TERM
+
+# Ask the OS for a free loopback port by binding to port 0 and reading back
+# what the kernel assigned, then releasing it. Small TOCTOU race window
+# (another process could grab the port before we start our server) is
+# acceptable here — it is bounded and readiness polling below still fails
+# loudly if the server never comes up.
+find_free_port() {
+    node -e '
+      const net = require("node:net");
+      const s = net.createServer();
+      s.listen(0, "127.0.0.1", () => {
+        const { port } = s.address();
+        s.close(() => process.stdout.write(String(port)));
+      });
+      s.on("error", () => process.exit(1));
+    ' 2>/dev/null
+}
+
+# Resolve e2e.start_cmd: an explicit contract value wins; otherwise
+# auto-detect from package.json using the exact same convention
+# autodetect.sh already uses for this field (scripts["start:e2e"] // dev).
+resolve_start_cmd() {
+    local contract_json="$1"
+    local target_dir="$2"
+    local cmd
+    cmd=$(printf '%s' "$contract_json" | jq -r '.e2e.start_cmd // empty' 2>/dev/null || true)
+    if [ -n "$cmd" ]; then
+        printf '%s' "$cmd"
+        return 0
+    fi
+    if [ -f "$target_dir/package.json" ] && command -v jq >/dev/null 2>&1; then
+        cmd=$(jq -r '(.scripts["start:e2e"] // .scripts.dev // empty)' "$target_dir/package.json" 2>/dev/null || true)
+        if [ -n "$cmd" ]; then
+            printf '%s' "$cmd"
+            return 0
+        fi
+    fi
+    printf ''
+}
+
+# start_live_server <target_dir> <start_cmd> <port>
+# Launches <start_cmd> (a bare "node path/to/file.mjs" style command — no
+# shell metacharacters) with PORT/HOST set, from a subshell whose PID
+# survives both execs (env execs the target directly rather than forking),
+# so $LIVE_SERVER_PID is the real server process, not a wrapper shell.
+start_live_server() {
+    local target_dir="$1"
+    local start_cmd="$2"
+    local port="$3"
+    # No suffix after the X's: BSD/macOS mktemp only substitutes a trailing
+    # run of X's — a literal suffix like ".log" after them is not
+    # recognized as a template, so it silently creates (or collides on) a
+    # file named literally "...-XXXXXX" instead of a random one.
+    LIVE_SERVER_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-gate25-server-XXXXXX")"
+    # shellcheck disable=SC2086 # start_cmd is a controlled "node file.mjs" token, intentionally split
+    (
+        cd "$target_dir" || exit 1
+        exec env PORT="$port" HOST="127.0.0.1" $start_cmd
+    ) >"$LIVE_SERVER_LOG" 2>&1 &
+    LIVE_SERVER_PID=$!
+}
+
+# wait_for_ready <url> <timeout_seconds>
+# Polls <url> until it answers (any HTTP status = ready) or the server
+# process dies, bounded by <timeout_seconds>. Never sleeps a fixed amount —
+# returns as soon as the origin actually answers.
+wait_for_ready() {
+    local url="$1"
+    local timeout_s="$2"
+    local start_s="$SECONDS"
+    while [ "$((SECONDS - start_s))" -lt "$timeout_s" ]; do
+        if curl -s -o /dev/null -m 2 "$url" 2>/dev/null; then
+            return 0
+        fi
+        if [ -n "$LIVE_SERVER_PID" ] && ! kill -0 "$LIVE_SERVER_PID" 2>/dev/null; then
+            return 2
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 TARGET_DIR="${1:-}"
 if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
     printf 'gate-stage-2-5: fatal: target directory not found: %s\n' "$TARGET_DIR" >&2
@@ -135,19 +254,72 @@ NEEDS_WINDOW_SERVER=$(printf '%s' "$CONTRACT_JSON" | jq -r '((.e2e.invariants_v2
 NEEDS_SYMMETRY_SERVER=$(printf '%s' "$CONTRACT_JSON" | jq -r '((.e2e.invariants_v2.contract_symmetry // []) | length) > 0' 2>/dev/null || echo "false")
 HAS_NONROOT_ROUTES=$(printf '%s' "$CONTRACT_JSON" | jq -r '[(.e2e.invariants_v2.invariants // [])[].apply_on_routes[]?] | map(select(. != "/")) | length > 0' 2>/dev/null || echo "false")
 
+# ── Stand up a live server if G/I need one ───────────────────────────────────
+#
+# LIVE_SERVER_SKIP_REASON: the contract needs a live origin but we could not
+# even discover a start command — a structural incapability, same shape as
+# the other "wiring doesn't support this" skips.
+# LIVE_SERVER_FAIL_REASON: a start command was found and we tried, but the
+# server never came up (port alloc failed, process died, readiness timeout)
+# — a real runtime failure, must fail the metric loudly, never a silent pass.
+LIVE_BASE_URL=""
+LIVE_SERVER_STARTED=false
+LIVE_SERVER_SKIP_REASON=""
+LIVE_SERVER_FAIL_REASON=""
+
+if [ "$NEEDS_WINDOW_SERVER" = "true" ] || [ "$NEEDS_SYMMETRY_SERVER" = "true" ]; then
+    START_CMD=$(resolve_start_cmd "$CONTRACT_JSON" "$TARGET_DIR")
+    if [ -z "$START_CMD" ]; then
+        LIVE_SERVER_SKIP_REASON="no e2e.start_cmd declared in .autospec/test.yml and no start:e2e/dev script in package.json to auto-detect one"
+    else
+        FREE_PORT=$(find_free_port || true)
+        if [ -z "$FREE_PORT" ]; then
+            LIVE_SERVER_FAIL_REASON="failed to allocate a free local port for $TARGET_NAME"
+        else
+            start_live_server "$TARGET_DIR" "$START_CMD" "$FREE_PORT"
+            READY_TIMEOUT_S="${AUTOSPEC_SERVER_READY_TIMEOUT_S:-15}"
+            CANDIDATE_URL="http://127.0.0.1:$FREE_PORT/"
+            READY_STATUS=0
+            wait_for_ready "$CANDIDATE_URL" "$READY_TIMEOUT_S" || READY_STATUS=$?
+            if [ "$READY_STATUS" -eq 0 ]; then
+                LIVE_BASE_URL="http://127.0.0.1:$FREE_PORT"
+                LIVE_SERVER_STARTED=true
+            elif [ "$READY_STATUS" -eq 2 ]; then
+                LOG_TAIL=$(tail -c 500 "$LIVE_SERVER_LOG" 2>/dev/null | tr '\n' ' ' | tr '"' "'")
+                LIVE_SERVER_FAIL_REASON="live server for $TARGET_NAME (start_cmd: \"$START_CMD\") exited before becoming ready; last output: $LOG_TAIL"
+                cleanup_live_server
+            else
+                LOG_TAIL=$(tail -c 500 "$LIVE_SERVER_LOG" 2>/dev/null | tr '\n' ' ' | tr '"' "'")
+                LIVE_SERVER_FAIL_REASON="live server for $TARGET_NAME (start_cmd: \"$START_CMD\") never answered at $CANDIDATE_URL within ${READY_TIMEOUT_S}s; last output: $LOG_TAIL"
+                cleanup_live_server
+            fi
+        fi
+    fi
+fi
+
 build_payload() {
-    jq -n --argjson contract "$CONTRACT_JSON" --arg base_url "$BASE_URL" \
+    local url="${1:-$BASE_URL}"
+    jq -n --argjson contract "$CONTRACT_JSON" --arg base_url "$url" \
         '{contract: $contract, base_url: $base_url}'
 }
 
 # Helper: run a Node metric runner (stdin JSON payload) and collect JSON output.
 # $1 = metric name, $2 = runner path relative to $SCRIPT_DIR, $3 = non-empty
-# skip reason (skip without invoking, loud reason), $4 = stdin payload JSON.
+# skip reason (skip without invoking, loud reason — structural incapability),
+# $4 = non-empty hard-fail reason (attempted but failed — never a silent
+# pass), $5 = stdin payload JSON.
 run_metric() {
     local name="$1"
     local runner="$SCRIPT_DIR/$2"
     local skip_reason="$3"
-    local payload="$4"
+    local fail_reason="$4"
+    local payload="$5"
+
+    if [ -n "$fail_reason" ]; then
+        jq -n --arg name "$name" --arg reason "$fail_reason" \
+            '{"metric": $name, "passed": false, "reason": $reason}'
+        return 0
+    fi
 
     if [ -n "$skip_reason" ]; then
         jq -n --arg name "$name" --arg reason "$skip_reason" \
@@ -161,8 +333,16 @@ run_metric() {
         return 0
     fi
 
+    # stdout and stderr are captured separately: a runner's own diagnostic
+    # warnings on stderr (e.g. ui-extractor's "missing attribute" notices)
+    # must never get prepended onto stdout ahead of the JSON verdict — that
+    # silently breaks `jq -e .` parsing downstream and the gate would report
+    # this metric as null instead of surfacing its real passed/failed result.
     local out
-    if out=$(printf '%s' "$payload" | node "$runner" 2>&1); then
+    local err_file
+    # Same mktemp suffix caveat as start_live_server's LIVE_SERVER_LOG above.
+    err_file="$(mktemp "${TMPDIR:-/tmp}/autospec-gate25-metric-XXXXXX")"
+    if out=$(printf '%s' "$payload" | node "$runner" 2>"$err_file"); then
         printf '%s\n' "$out"
     else
         local exit_code=$?
@@ -179,45 +359,73 @@ run_metric() {
                 "$name" "$exit_code" "$(printf '%s' "$out" | head -1 | tr '"' "'")"
         fi
     fi
+    # Forward the runner's own diagnostics to our stderr (visible to a human
+    # or CI log) without letting them touch the JSON verdict on stdout.
+    if [ -s "$err_file" ]; then
+        cat "$err_file" >&2
+    fi
+    rm -f "$err_file"
 }
 
-# 3. Metric F — Structural invariants
+# 3. Metric F — Structural invariants (static file:// fixture only; F must
+# never gain a live server — a target with no start command stays on file://)
 F_SKIP_REASON=""
 if [ -z "$WEB_ROOT" ]; then
     F_SKIP_REASON="no static index.html found under <target>/src or <target>/; F needs a base_url to navigate to and this wiring does not stand up a live server"
 elif [ "$HAS_NONROOT_ROUTES" = "true" ]; then
     F_SKIP_REASON="an invariant's apply_on_routes references a route other than \"/\"; only the root route is supported by the static file:// mapping"
 fi
-F_JSON=$(run_metric "F" "invariants/run-structural.mjs" "$F_SKIP_REASON" "$(build_payload)" || echo '{"metric":"F","passed":true,"skipped":true}')
+F_JSON=$(run_metric "F" "invariants/run-structural.mjs" "$F_SKIP_REASON" "" "$(build_payload)" || echo '{"metric":"F","passed":true,"skipped":true}')
 F_PASSED=$(printf '%s' "$F_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
-# 4. Metric G — Window-contract symmetry
+# 4. Metric G — Window-contract symmetry (needs the live server started above)
 G_SKIP_REASON=""
+G_FAIL_REASON=""
+G_BASE_URL="$BASE_URL"
 if [ "$NEEDS_WINDOW_SERVER" = "true" ]; then
-    G_SKIP_REASON="window_contracts require a live HTTP server to observe a real network request; this wiring only supports static file:// fixtures and does not stand up a dev server"
+    if [ "$LIVE_SERVER_STARTED" = "true" ]; then
+        G_BASE_URL="$LIVE_BASE_URL"
+    elif [ -n "$LIVE_SERVER_SKIP_REASON" ]; then
+        G_SKIP_REASON="window_contracts require a live HTTP server to observe a real network request; $LIVE_SERVER_SKIP_REASON"
+    else
+        G_FAIL_REASON="window_contracts require a live HTTP server to observe a real network request; $LIVE_SERVER_FAIL_REASON"
+    fi
 elif [ -z "$WEB_ROOT" ]; then
     G_SKIP_REASON="no static index.html found under <target>/src or <target>/; G needs a base_url to navigate to and this wiring does not stand up a live server"
 fi
-G_JSON=$(run_metric "G" "window-contract/run-window.mjs" "$G_SKIP_REASON" "$(build_payload)" || echo '{"metric":"G","passed":true,"skipped":true}')
+G_JSON=$(run_metric "G" "window-contract/run-window.mjs" "$G_SKIP_REASON" "$G_FAIL_REASON" "$(build_payload "$G_BASE_URL")" || echo '{"metric":"G","passed":true,"skipped":true}')
 G_PASSED=$(printf '%s' "$G_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
-# 5. Metric H — Extended crawler
+# 5. Metric H — Extended crawler (static fixture only; unaffected by G/I's live server)
 H_SKIP_REASON=""
 if [ -z "$WEB_ROOT" ]; then
     H_SKIP_REASON="no static index.html found under <target>/src or <target>/; H needs a base_url to navigate to and this wiring does not stand up a live server"
 fi
-H_JSON=$(run_metric "H" "crawler-v2/extended-crawler.mjs" "$H_SKIP_REASON" "$(build_payload)" || echo '{"metric":"H","passed":true,"skipped":true}')
+H_JSON=$(run_metric "H" "crawler-v2/extended-crawler.mjs" "$H_SKIP_REASON" "" "$(build_payload)" || echo '{"metric":"H","passed":true,"skipped":true}')
 H_PASSED=$(printf '%s' "$H_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
-# 6. Metric I — Data-source contract symmetry
+# 6. Metric I — Data-source contract symmetry (needs the live server started above)
 I_SKIP_REASON=""
+I_FAIL_REASON=""
+I_BASE_URL="$BASE_URL"
 if [ "$NEEDS_SYMMETRY_SERVER" = "true" ]; then
-    I_SKIP_REASON="contract_symmetry requires a live HTTP server to fetch and compare API responses; this wiring only supports static file:// fixtures and does not stand up a dev server"
+    if [ "$LIVE_SERVER_STARTED" = "true" ]; then
+        I_BASE_URL="$LIVE_BASE_URL"
+    elif [ -n "$LIVE_SERVER_SKIP_REASON" ]; then
+        I_SKIP_REASON="contract_symmetry requires a live HTTP server to fetch and compare API responses; $LIVE_SERVER_SKIP_REASON"
+    else
+        I_FAIL_REASON="contract_symmetry requires a live HTTP server to fetch and compare API responses; $LIVE_SERVER_FAIL_REASON"
+    fi
 elif [ -z "$WEB_ROOT" ]; then
     I_SKIP_REASON="no static index.html found under <target>/src or <target>/; I needs a base_url to navigate to and this wiring does not stand up a live server"
 fi
-I_JSON=$(run_metric "I" "contract-symmetry/run-symmetry.mjs" "$I_SKIP_REASON" "$(build_payload)" || echo '{"metric":"I","passed":true,"skipped":true}')
+I_JSON=$(run_metric "I" "contract-symmetry/run-symmetry.mjs" "$I_SKIP_REASON" "$I_FAIL_REASON" "$(build_payload "$I_BASE_URL")" || echo '{"metric":"I","passed":true,"skipped":true}')
 I_PASSED=$(printf '%s' "$I_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
+
+# Tear down the live server (if one was started) now that G and I are done
+# with it — no need to hold the port open through H/output composition.
+# The EXIT/INT/TERM trap still guarantees teardown on every other path.
+cleanup_live_server
 
 # If any metric failed, overall fails
 if [ "$F_PASSED" != "true" ] || [ "$G_PASSED" != "true" ] || \

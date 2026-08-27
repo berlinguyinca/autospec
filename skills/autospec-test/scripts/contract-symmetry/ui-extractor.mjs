@@ -3,7 +3,13 @@
  *
  * Navigates to a route and extracts attribute tuples from DOM elements
  * matching the ui_source.extract selector. Each matched element produces
- * one tuple via the ui_source.per_match mapping (attribute name → key name).
+ * one tuple via the ui_source.per_match mapping (tuple key → DOM attribute
+ * name), matching the contract convention documented in
+ * docs/specs/2026-05-21-autospec-test-invariants-design.md:
+ *   per_match: { task_id: 'data-task-id', date: 'data-date' }
+ * i.e. the object KEY is the logical field name used later in
+ * api_target.path_template (${task_id}, ${date}...), and the VALUE is the
+ * DOM attribute to read it from.
  *
  * Elements with any null attribute value are warned and skipped.
  *
@@ -30,7 +36,7 @@ export async function extract(page, route, ui_source) {
     const tuple = {};
     let hasNull = false;
 
-    for (const [attrName, tupleKey] of Object.entries(per_match)) {
+    for (const [tupleKey, attrName] of Object.entries(per_match)) {
       const value = await el.getAttribute(attrName);
       if (value === null) {
         process.stderr.write(

@@ -4,6 +4,8 @@ unit:
   test_cmd: "node --test tests/symmetry-bait.test.mjs"
 
 e2e:
+  start_cmd: "node src/server.mjs"
+
   forbidden_url_patterns:
     - "^https?://prod\\.example\\.com"
 
@@ -20,7 +22,14 @@ e2e:
           method: GET
           path_template: '/api/household/timeline?from=${date}&to=${date}&task_id=${task_id}'
           must_contain: '$.events[?(@.task_id=="${task_id}")]'
-          must_be_editable: '$.events[?(@.task_id=="${task_id}")].editable == true'
+          # assertBoolean() (scripts/contract-symmetry/jsonpath-verifier.mjs)
+          # evaluates this JSONPath expression as-is and checks every
+          # matched value is exactly boolean true — it does not parse a
+          # trailing "== true" comparison (that decoration appears only in
+          # the design doc's illustrative pseudocode, not as literal
+          # syntax the runner understands). A bare path ending in the
+          # boolean field is what the implementation actually expects.
+          must_be_editable: '$.events[?(@.task_id=="${task_id}")].editable'
         mismatch_action: hard_fail
 
     thresholds:

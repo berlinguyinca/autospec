@@ -202,7 +202,7 @@ describe('ui-extractor', () => {
     const ui_source = {
       route: '/',
       extract: '[data-testid^="streak-task-"]',
-      per_match: { 'data-task-id': 'task_id', 'data-date': 'date' },
+      per_match: { task_id: 'data-task-id', date: 'data-date' },
     };
     const tuples = await extract(page, baseUrl + '/', ui_source);
     assert.equal(tuples.length, 3);
@@ -227,7 +227,7 @@ describe('Metric I — run-symmetry (in-process)', () => {
   const UI_SOURCE = {
     route: '/',
     extract: '[data-testid^="streak-task-"]',
-    per_match: { 'data-task-id': 'task_id', 'data-date': 'date' },
+    per_match: { task_id: 'data-task-id', date: 'data-date' },
   };
 
   const API_TARGET = {
@@ -304,7 +304,7 @@ describe('Metric I — run-symmetry (in-process)', () => {
             ui_source: {
               route: '/',
               extract: '[data-testid="streak-task-1"]',
-              per_match: { 'data-task-id': 'task_id', 'data-date': 'date' },
+              per_match: { task_id: 'data-task-id', date: 'data-date' },
             },
             api_target: API_TARGET,
             mismatch_action: 'hard_fail',
@@ -373,5 +373,58 @@ describe('Metric I — run-symmetry (in-process)', () => {
     assert.ok(Array.isArray(result.contracts));
     assert.ok(Array.isArray(result.violations));
     assert.ok('violation_count' in result.summary);
+  });
+
+  // Regression pin: a contract whose ui_source.extract selector matches
+  // zero elements must NEVER report passed:true. Before this fix,
+  // `contractPassed = violations.length === 0` was trivially true for a
+  // tuples.length === 0 result — a check that examined nothing silently
+  // reported success, the same fail-open shape this codebase has shipped
+  // repeatedly (a metric skipped-but-marked-passed, a `// true` jq
+  // coercion of a real failure, an app harness reporting a process
+  // "started" that never started). This exercises the REAL
+  // run-symmetry.mjs subprocess (not the in-process reimplementation
+  // above) against a live fixture server, with a selector guaranteed not
+  // to match anything on the page.
+  it('zero tuples extracted: contract reports passed:false, never a vacuous pass', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const contract = {
+      e2e: {
+        invariants_v2: {
+          enabled: true,
+          contract_symmetry: [{
+            id: 'nothing-matches',
+            ui_source: {
+              route: '/',
+              extract: '[data-testid^="does-not-exist-on-this-page-"]',
+              per_match: { task_id: 'data-task-id' },
+            },
+            api_target: { method: 'GET', path_template: '/api/${task_id}', must_contain: '$.x' },
+            mismatch_action: 'hard_fail',
+          }],
+        },
+      },
+    };
+    let stdout;
+    try {
+      stdout = execFileSync('node', ['skills/autospec-test/scripts/contract-symmetry/run-symmetry.mjs'], {
+        input: JSON.stringify({ contract, base_url: baseUrl }),
+        cwd: path.resolve(__dirname, '../../../../..'),
+        timeout: 15_000, encoding: 'utf8',
+      });
+      assert.fail('expected run-symmetry.mjs to exit non-zero (a failing verdict), but it exited 0');
+    } catch (e) {
+      // execFileSync throws on non-zero exit; the real verdict JSON is on
+      // its stdout (e.stdout), same as a normal failing run.
+      stdout = e.stdout;
+    }
+    const result = JSON.parse(stdout);
+    assert.equal(result.passed, false, `zero-tuple contract must not report passed:true; got: ${stdout}`);
+    assert.equal(result.contracts[0].tuples_checked, 0);
+    assert.equal(result.contracts[0].passed, false);
+    assert.ok(
+      result.contracts[0].violations.some(v => v.phase === 'ui_extract' && /matched 0 elements/.test(v.reason)),
+      `expected a ui_extract violation explaining zero elements matched; got: ${JSON.stringify(result.contracts[0].violations)}`,
+    );
   });
 });
