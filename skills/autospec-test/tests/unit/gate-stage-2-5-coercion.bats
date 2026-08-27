@@ -24,13 +24,19 @@ setup() {
     cp -R "$REAL_SCRIPTS_DIR" "$STUB_SCRIPTS"
 
     TARGET_DIR="$TEST_TMPDIR/target"
-    mkdir -p "$TARGET_DIR/.autospec"
+    mkdir -p "$TARGET_DIR/.autospec" "$TARGET_DIR/src"
     cat > "$TARGET_DIR/.autospec/test.yml" <<'EOF'
 mode: strict_isolation
 e2e:
   invariants_v2:
     enabled: true
 EOF
+    # gate-stage-2-5.sh's payload-building step skips a metric loudly instead
+    # of invoking its runner when no static fixture is present (it never
+    # stands up a dev server). A static src/index.html is required here so
+    # the stub runners below are actually reached — these tests are about
+    # jq's "//" coercion, not about the skip-detection wiring itself.
+    printf '<!doctype html><html><body></body></html>' > "$TARGET_DIR/src/index.html"
 }
 
 teardown() {

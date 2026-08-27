@@ -27,7 +27,7 @@
  * Exit codes: 0 = pass, 1 = fail (violations), 2 = fatal error
  */
 
-import { chromium } from 'playwright';
+import { chromium } from '/opt/homebrew/lib/node_modules/playwright/index.mjs';
 import { extract } from './ui-extractor.mjs';
 import { interpolate } from './interpolator.mjs';
 import { assertContains, assertBoolean } from './jsonpath-verifier.mjs';
