@@ -616,6 +616,92 @@ _autospec_conductor_clear_discard_pending() {
     fi
 }
 
+# _autospec_conductor_pb_repos URL TTL RESOLVE_SH — resolve the board's
+# actual repo set (concrete "owner/name" slugs, comma-separated) for Step
+# 1c's control-mirror caller. NEVER returns a glob pattern: repo_allowlist
+# entries (e.g. "InferWeave/*") are a security FILTER, not a repo list —
+# passing an allowlist entry straight through as a --repos target would
+# have the mirror try to operate on a literal repo named "InferWeave/*",
+# which fails against the real API and silently mirrors to nothing while
+# still reporting itself as wired.
+#
+# Prints "" (empty) on any failure — unset/empty url, missing resolver
+# script, a non-array/malformed resolver payload, or a resolved-but-empty
+# repo set. The caller treats an empty result exactly like "no repos known
+# this cycle": no mirror invocation, no gh calls, cycle unaffected. Never
+# invents a repo list from the allowlist as a fallback — an unresolvable
+# board is "unknown", not "assume the allowlist is the repo set" (the
+# latter is the same class of bug this function exists to fix).
+#
+# Caching: shares the SAME board-cache directory and TTL semantics as
+# scripts/autonomous-promote-open-issues.sh's board_plan() (same
+# AUTOSPEC_STATE_DIR override, same URL-shasum keying, same atomic
+# per-process-tmp + mv pattern to avoid races with N fleet workers hitting
+# the same TTL boundary), but writes to a DEDICATED "<hash>-repos.json"
+# filename rather than that script's "<hash>.json" plan cache. Reading the
+# promoter's plan cache opportunistically was considered and rejected:
+# whether a fresh plan cache already exists in a given cycle depends on
+# incidental subsystem execution order (did Tier 1.5 promotion happen to
+# run first this cycle?), not an explicit contract — depending on that
+# would make this caller's correctness depend on scheduling coincidence.
+# A dedicated cache file keeps this read self-contained while still
+# sharing the directory/TTL policy, so a fleet running both subsystems
+# does not need to reason about two different cache lifetimes.
+#
+# Per-cycle cost: a cache hit costs one stat + one jq parse, no `gh` calls
+# and no subprocess exec of the resolver. A cache miss (first call, or
+# every TTL seconds — default 300s / 5 minutes, from project_board.ttl)
+# costs exactly the two `gh` calls project-board-resolve.sh's `--emit
+# repos` mode documents (project field-list + item-list) — it deliberately
+# does NOT pay for the plan mode's O(repos) per-repo closed-issue join,
+# which is gated on `--emit plan` only. So a fleet polling every 60s pays
+# board-resolution network cost roughly once per 5 cache misses, not once
+# per cycle.
+_autospec_conductor_pb_repos() {
+    local _pbr_url="$1" _pbr_ttl="$2" _pbr_resolve_sh="$3"
+    [ -n "$_pbr_url" ] || return 0
+    [ -f "$_pbr_resolve_sh" ] || return 0
+
+    case "$_pbr_ttl" in
+        ''|*[!0-9]*) _pbr_ttl=300 ;;
+    esac
+
+    local _pbr_cache_dir="${AUTOSPEC_STATE_DIR:-$HOME/.autospec}/board-cache"
+    mkdir -p "$_pbr_cache_dir" 2>/dev/null || true
+    local _pbr_hash
+    _pbr_hash="$(printf '%s' "$_pbr_url" | shasum 2>/dev/null | cut -c1-16)"
+    [ -n "$_pbr_hash" ] || return 0
+    local _pbr_cache="$_pbr_cache_dir/${_pbr_hash}-repos.json"
+
+    if [ -f "$_pbr_cache" ]; then
+        local _pbr_mtime _pbr_age
+        _pbr_mtime="$(stat -f %m "$_pbr_cache" 2>/dev/null || stat -c %Y "$_pbr_cache" 2>/dev/null || printf '0')"
+        _pbr_age=$(( $(date +%s) - _pbr_mtime ))
+        if [ "$_pbr_age" -lt "$_pbr_ttl" ]; then
+            printf '%s' "$(jq -r 'join(",")' "$_pbr_cache" 2>/dev/null || true)"
+            return 0
+        fi
+    fi
+
+    local _pbr_repos_json=""
+    _pbr_repos_json="$(bash "$_pbr_resolve_sh" --url "$_pbr_url" --emit repos 2>/dev/null || true)"
+    if ! printf '%s' "$_pbr_repos_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        # Resolver failure or malformed output: do not cache it, and do not
+        # fall back to the allowlist — degrade to "no repos known this
+        # cycle" instead.
+        return 0
+    fi
+
+    local _pbr_tmp="$_pbr_cache.$$.${RANDOM:-0}.tmp"
+    if printf '%s' "$_pbr_repos_json" > "$_pbr_tmp" 2>/dev/null; then
+        mv -f "$_pbr_tmp" "$_pbr_cache" 2>/dev/null || rm -f "$_pbr_tmp" 2>/dev/null || true
+    else
+        rm -f "$_pbr_tmp" 2>/dev/null || true
+    fi
+
+    printf '%s' "$(printf '%s' "$_pbr_repos_json" | jq -r 'join(",")' 2>/dev/null || true)"
+}
+
 # _autospec_conductor_board_state REPO ISSUE STATE — best-effort project-board
 # write-back for the PR lifecycle (project-board-fleet-execution Plan B Task
 # 5). This is DECORATIVE only: it mirrors what the conductor already knows
@@ -1762,6 +1848,80 @@ fi'
             ''|*[!0-9]*) _inferred_source_count=0 ;;
         esac
         [ -n "$_inferred_confidence" ] || _inferred_confidence="none"
+
+        # ── Step 1c: Project-board control mirror (before Tier-0 reads) ───────
+        # A board-driven fleet's operator applies autospec:stop/pause/priority/
+        # steer to ONE designated control issue; each repo's own Tier-0 poll
+        # (Step 2, immediately below) only ever reads labels on ITS repo. This
+        # step mirrors the control issue's reserved labels into every fleet
+        # repo's dedicated marker issue via project-board-control-mirror.sh
+        # BEFORE Step 2 reads this cycle — mirroring after Step 2 would leave
+        # a board-level stop honored a full cycle late.
+        #
+        # Config-driven only: project_board.control_issue, .url and the repo
+        # allowlist all come from .autospec/autonomous.yml via the same
+        # `autospec autonomous project-board-config` bridge every other
+        # project_board consumer uses — no new AUTOSPEC_* operator-facing
+        # env var.
+        #
+        # --repos vs --allowlist are DIFFERENT things and must never be
+        # conflated: repo_allowlist entries are a security FILTER and may
+        # be glob patterns (the canonical example in this codebase is
+        # "InferWeave/*") — they are never concrete repo names on their
+        # own. The concrete "owner/name" slugs to mirror into come from
+        # resolving the board itself (project-board-resolve.sh --emit
+        # repos, cached — see _autospec_conductor_pb_repos above), never
+        # from echoing the allowlist back as if it were a repo list. The
+        # mirror script's own allowed()-gate still independently checks
+        # every resolved repo (and the control issue's own repo) against
+        # --allowlist, so a board repo outside the allowlist is still
+        # never named in any `gh` call even though it came from a live
+        # resolve rather than from the allowlist itself.
+        #
+        # Opt-in + advisory: when control_issue is unset (the overwhelming
+        # common case), NOTHING below runs — no bridge-repos resolve, no
+        # mirror invocation, zero `gh` calls, zero behavior change. When
+        # control_issue IS set but the board has no configured url, or the
+        # resolve fails, or it resolves to an empty set, this cycle simply
+        # has "no repos known" — again no mirror invocation, never a
+        # fallback to the allowlist. When the mirror IS invoked, a failure
+        # (unreachable issue, missing binary, API error) must never fail,
+        # delay, or alter this cycle — the trailing `|| true` is the
+        # contract, not an oversight; do not "fix" it into a hard failure.
+        local _pb_mirror_sh="${AUTOSPEC_BOARD_CONTROL_MIRROR_SCRIPT:-${_sdir}/project-board-control-mirror.sh}"
+        if [ -f "$_pb_mirror_sh" ]; then
+            local _pb_config_bin="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${_queue_bin:-autospec}}"
+            local _pb_json=""
+            _pb_json="$("$_pb_config_bin" autonomous project-board-config \
+                --repo-dir "$_repo_root" 2>/dev/null || true)"
+            if [ -n "$_pb_json" ]; then
+                local _pb_control_issue=""
+                _pb_control_issue="$(printf '%s' "$_pb_json" \
+                    | jq -r '.control_issue // empty' 2>/dev/null || true)"
+                if [ -n "$_pb_control_issue" ]; then
+                    local _pb_allowlist_csv=""
+                    _pb_allowlist_csv="$(printf '%s' "$_pb_json" \
+                        | jq -r '(.allowlist // []) | join(",")' 2>/dev/null || true)"
+                    local _pb_url=""
+                    _pb_url="$(printf '%s' "$_pb_json" \
+                        | jq -r '.url // empty' 2>/dev/null || true)"
+                    local _pb_ttl=""
+                    _pb_ttl="$(printf '%s' "$_pb_json" \
+                        | jq -r '.ttl // empty' 2>/dev/null || true)"
+                    local _pb_resolve_sh="${AUTOSPEC_BOARD_RESOLVE_SCRIPT:-${_sdir}/project-board-resolve.sh}"
+                    local _pb_repos_csv=""
+                    _pb_repos_csv="$(_autospec_conductor_pb_repos \
+                        "$_pb_url" "$_pb_ttl" "$_pb_resolve_sh")"
+                    if [ -n "$_pb_repos_csv" ] && [ -n "$_pb_allowlist_csv" ]; then
+                        bash "$_pb_mirror_sh" \
+                            --control-issue "$_pb_control_issue" \
+                            --repos "$_pb_repos_csv" \
+                            --allowlist "$_pb_allowlist_csv" \
+                            >/dev/null 2>&1 || true
+                    fi
+                fi
+            fi
+        fi
 
         # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
         local _ctrl_decision=""
