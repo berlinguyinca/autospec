@@ -20,20 +20,19 @@
 #      the target's static src/index.html (or index.html) fixture, and pipes
 #      {contract, base_url} to each runner's stdin.
 #
-# Scope limit (intentional, not a bug): this wiring supports only static
-# fixtures reachable at route "/" via a file:// URL. It does NOT stand up a
-# dev server. A target whose contract needs a live HTTP server — declared
-# window_contracts (metric G) or contract_symmetry (metric I), or no static
-# index.html fixture at all — is detected and its metric is skipped with a
-# loud, explicit reason ("...requires a live HTTP server...", "...no static
-# index.html found...") rather than being invoked with a payload that could
-# never produce a real verdict. This means target-window-mismatch-bait,
-# target-contract-symmetry-bait, and target-greenwash-bait — whose baits live
-# behind G, I, and (no static frontend at all) respectively — now report a
-# PASSING gate: their relevant metric is honestly skipped, not silently
-# "passed". Only target-invariant-bait (metric F, static single-page fixture)
-# is fully wired end to end by this change, and its gate now genuinely fails
-# by catching the bait (see the payload/verdict tests below).
+# Scope limit (intentional, not a bug): F and H support only static
+# fixtures reachable at route "/" via a file:// URL — F must never gain a
+# live server. A target whose contract needs a live HTTP server — declared
+# window_contracts (metric G) or contract_symmetry (metric I) — now gets
+# one: gate-stage-2-5.sh starts the target's own server.mjs on a
+# harness-chosen loopback port (see resolve_start_cmd/start_live_server/
+# wait_for_ready), polls it to readiness, and uses it as base_url for G/I.
+# See gate-stage-2-5-live-server.bats for the live-server orchestration
+# coverage (start command discovery, port allocation, readiness polling,
+# teardown guarantees, and the G/I bait-catching verdicts). Only a target
+# with no static index.html at all (target-greenwash-bait) or no
+# discoverable start_cmd still skips loudly, rather than being invoked with
+# a payload that could never produce a real verdict.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd)"
@@ -109,26 +108,26 @@ teardown() {
     printf '%s' "$output" | grep -q 'fatal: stdin must have'
 }
 
-# ── target-window-mismatch-bait: metric G needs a live HTTP server (network-
-# observable request), which this wiring intentionally does not stand up.
-# The gate must skip G loudly, never silently, and never mistake the skip
-# for the stub "runner not installed" fallback. ─────────────────────────────
+# ── target-window-mismatch-bait: metric G needs a live HTTP server
+# (network-observable request). gate-stage-2-5.sh now stands one up (see
+# gate-stage-2-5-live-server.bats for the full orchestration coverage), so
+# G runs for real and must catch the bait, not skip. ────────────────────────
 
 @test "target-window-mismatch-bait: gate output is not the stub-pass reason for any metric" {
     run bash "$GATE" "$TARGETS_DIR/target-window-mismatch-bait" < /dev/null
     ! printf '%s' "$output" | grep -q 'runner not installed'
 }
 
-@test "target-window-mismatch-bait: metric G is loudly skipped as needing a live server, not silently" {
+@test "target-window-mismatch-bait: metric G is genuinely invoked, not skipped" {
     run bash "$GATE" "$TARGETS_DIR/target-window-mismatch-bait" < /dev/null
-    printf '%s' "$output" | jq -e '.metrics.G.skipped == true' >/dev/null
-    printf '%s' "$output" | jq -e '.metrics.G.reason | test("live HTTP server")' >/dev/null
+    printf '%s' "$output" | jq -e '.metrics.G.skipped != true' >/dev/null
+    printf '%s' "$output" | jq -e '.metrics.G.passed == false' >/dev/null
 }
 
-@test "target-window-mismatch-bait: overall gate passes (G honestly skipped, not fabricated)" {
+@test "target-window-mismatch-bait: overall gate now fails (G caught the bait for real)" {
     run bash "$GATE" "$TARGETS_DIR/target-window-mismatch-bait" < /dev/null
-    [ "$status" -eq 0 ]
-    printf '%s' "$output" | jq -e '.passed == true' >/dev/null
+    [ "$status" -eq 1 ]
+    printf '%s' "$output" | jq -e '.passed == false' >/dev/null
 }
 
 # ── target-greenwash-bait: no static index.html fixture at all (its
@@ -154,22 +153,34 @@ teardown() {
 
 # ── target-contract-symmetry-bait: metric I needs a live HTTP server to
 # fetch and compare API responses — same shape as the G case above. ─────────
+#
+# I is now genuinely invoked against a live server (not skipped) and matches
+# the golden's structural claims (passed:false, tuples_checked:3, summary
+# counts). Two real bugs were fixed to get here, both filed as findings, not
+# golden-fitting hacks — see gate-stage-2-5-live-server.bats for the full
+# "catches the bait" and zero-tuple-regression coverage:
+#   1. contract-symmetry/ui-extractor.mjs's per_match loop destructured
+#      `for (const [attrName, tupleKey] of Object.entries(per_match))`, but
+#      per_match is declared as {logical_key: dom_attribute} per the design
+#      spec (docs/specs/2026-05-21-autospec-test-invariants-design.md), so it
+#      called `el.getAttribute("task_id")` (the logical key) instead of
+#      `el.getAttribute("data-task-id")` (the actual DOM attribute) — every
+#      extraction produced 0 tuples.
+#   2. Once fixed, tuples.length === 0 silently reported passed:true (the
+#      systemic fail-open pattern seen elsewhere in this codebase); a
+#      zero-tuple contract now reports an explicit ui_extract violation and
+#      passed:false instead.
 
 @test "target-contract-symmetry-bait: gate output is not the stub-pass reason for any metric" {
     run bash "$GATE" "$TARGETS_DIR/target-contract-symmetry-bait" < /dev/null
     ! printf '%s' "$output" | grep -q 'runner not installed'
 }
 
-@test "target-contract-symmetry-bait: metric I is loudly skipped as needing a live server, not silently" {
+@test "target-contract-symmetry-bait: metric I is genuinely invoked against a live server, not skipped" {
     run bash "$GATE" "$TARGETS_DIR/target-contract-symmetry-bait" < /dev/null
-    printf '%s' "$output" | jq -e '.metrics.I.skipped == true' >/dev/null
-    printf '%s' "$output" | jq -e '.metrics.I.reason | test("live HTTP server")' >/dev/null
-}
-
-@test "target-contract-symmetry-bait: overall gate passes (I honestly skipped, not fabricated)" {
-    run bash "$GATE" "$TARGETS_DIR/target-contract-symmetry-bait" < /dev/null
-    [ "$status" -eq 0 ]
-    printf '%s' "$output" | jq -e '.passed == true' >/dev/null
+    printf '%s' "$output" | jq -e '.metrics.I.skipped != true' >/dev/null
+    printf '%s' "$output" | jq -e '.metrics.I.contracts[0].id == "streak-task-must-be-editable"' >/dev/null
+    printf '%s' "$output" | jq -e '.metrics.I.passed == false' >/dev/null
 }
 
 # ── target-clean-pass: no invariants_v2 block, gate must skip (not run at all) ──

@@ -101,6 +101,28 @@ async function run() {
         continue;
       }
 
+      // A contract that extracted nothing has not been satisfied — it has
+      // failed to run. Without this guard, `violations.length === 0` below
+      // trivially reports passed:true for a check that never actually
+      // compared anything, the same fail-open shape this codebase has
+      // shipped elsewhere (a skipped metric reporting success, a `//
+      // true` coercion of a real failure, a harness that "starts" a
+      // process it never started). ui_source.extract selecting zero
+      // elements usually means the selector broke, the page never
+      // rendered, or navigation landed on the wrong route — all
+      // conditions the operator needs surfaced loudly, not shrugged past
+      // as "nothing to check, so it passed."
+      if (tuples.length === 0) {
+        violations.push({
+          contract_id: id,
+          phase: 'ui_extract',
+          reason: `ui_source.extract selector "${ui_source.extract}" matched 0 elements at route "${ui_source.route}"; a contract that examined nothing cannot be reported as passing`,
+        });
+        contractResults.push({ id, passed: false, tuples_checked: 0, violations });
+        allViolations.push(...violations);
+        continue;
+      }
+
       const declaredScope = cs.access_scope || cs.spec_access_scope || cs.user_access_scope;
       for (const tuple of tuples) {
         const mismatch = accessScopeViolation(ui_source.route, tuple.guard, declaredScope, cs.access_scope_note || cs.scope_documentation);
@@ -129,11 +151,13 @@ async function run() {
         }
 
         // must_contain assertion
+        let mustContainFailed = false;
         if (api_target.must_contain) {
           try {
             const pathExpr = interpolate(api_target.must_contain, tuple);
             assertContains(body, pathExpr, tuple);
           } catch (e) {
+            mustContainFailed = true;
             violations.push({
               contract_id: id,
               tuple,
@@ -144,8 +168,11 @@ async function run() {
           }
         }
 
-        // must_be_editable assertion
-        if (api_target.must_be_editable) {
+        // must_be_editable assertion — skipped once must_contain already
+        // failed for this tuple: if the record itself doesn't exist in the
+        // API response, asserting a property on it is meaningless and only
+        // produces a second, redundant violation for the same root cause.
+        if (api_target.must_be_editable && !mustContainFailed) {
           try {
             const pathExpr = interpolate(api_target.must_be_editable, tuple);
             assertBoolean(body, pathExpr, tuple);

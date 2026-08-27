@@ -38,8 +38,10 @@ const server = http.createServer((req, res) => {
   res.end(INDEX_HTML);
 });
 
-server.listen(PORT, () => {
-  process.stdout.write(`[window-mismatch-bait] listening on http://localhost:${PORT}\n`);
+const HOST = process.env.HOST ?? '127.0.0.1';
+
+server.listen(PORT, HOST, () => {
+  process.stdout.write(`[window-mismatch-bait] listening on http://${HOST}:${PORT}\n`);
 });
 
 export { server };

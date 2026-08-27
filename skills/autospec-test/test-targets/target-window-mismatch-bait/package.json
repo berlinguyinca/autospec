@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/window-mismatch.test.mjs",
-    "serve": "node server.mjs"
+    "serve": "node src/server.mjs"
   },
   "devDependencies": {}
 }
