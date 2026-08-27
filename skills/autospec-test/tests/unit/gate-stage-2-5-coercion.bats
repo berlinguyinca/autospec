@@ -7,11 +7,13 @@
 # `.passed // true` silently coerces a real metric failure back to a pass.
 # This covers the four Stage 2.5 metric sites (F, G, H, I).
 #
-# gate-stage-2-5.sh resolves each metric runner at
-# "$SCRIPT_DIR/../invariants/<runner>.mjs" (SCRIPT_DIR being the scripts/ dir
-# itself), so stub runners live in a sibling `invariants/` directory next to
-# a copy of scripts/ — this mirrors run_metric()'s real path resolution
-# without depending on whether the real runners are wired up at that path.
+# gate-stage-2-5.sh resolves each metric runner at "$SCRIPT_DIR/<subdir>/<name>"
+# (SCRIPT_DIR being the scripts/ dir itself; each metric's runner lives in a
+# different subdirectory — invariants/, window-contract/, crawler-v2/,
+# contract-symmetry/). Stub runners are written directly over the real
+# runner files inside a copy of scripts/, at the exact path run_metric()
+# resolves, so the stub's forced-fail output — not the real runner's own
+# behavior — is what the gate actually observes.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd)"
@@ -20,7 +22,6 @@ setup() {
     TEST_TMPDIR="$(mktemp -d /tmp/autospec-gate25-bats-XXXXXX)"
     STUB_SCRIPTS="$TEST_TMPDIR/scripts"
     cp -R "$REAL_SCRIPTS_DIR" "$STUB_SCRIPTS"
-    mkdir -p "$TEST_TMPDIR/invariants"
 
     TARGET_DIR="$TEST_TMPDIR/target"
     mkdir -p "$TARGET_DIR/.autospec"
@@ -36,22 +37,23 @@ teardown() {
     rm -rf "$TEST_TMPDIR"
 }
 
-# Write a stub Node runner at $TEST_TMPDIR/invariants/<name> that always
-# prints a literal passed:false and exits 0 (the shape a real failed
+# Overwrite the real runner at $STUB_SCRIPTS/<relpath> (the exact path
+# run_metric() resolves for that metric) with a stub that always prints a
+# literal passed:false and exits 0 (the shape a real failed
 # structural/window/crawler/symmetry check would produce).
 make_failing_runner() {
-    local runner_name="$1"
+    local relpath="$1"
     local metric="$2"
-    cat > "$TEST_TMPDIR/invariants/$runner_name" <<EOF
+    cat > "$STUB_SCRIPTS/$relpath" <<EOF
 #!/usr/bin/env node
 console.log(JSON.stringify({metric: "$metric", passed: false, reason: "stub-forced-fail"}));
 process.exit(0);
 EOF
-    chmod +x "$TEST_TMPDIR/invariants/$runner_name"
+    chmod +x "$STUB_SCRIPTS/$relpath"
 }
 
 @test "gate-stage-2-5: Metric F literal passed:false fails the gate" {
-    make_failing_runner "run-structural.mjs" "F"
+    make_failing_runner "invariants/run-structural.mjs" "F"
     run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$TARGET_DIR"
     [ "$status" -eq 1 ]
     local f_passed
@@ -63,7 +65,7 @@ EOF
 }
 
 @test "gate-stage-2-5: Metric G literal passed:false fails the gate" {
-    make_failing_runner "run-window.mjs" "G"
+    make_failing_runner "window-contract/run-window.mjs" "G"
     run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$TARGET_DIR"
     [ "$status" -eq 1 ]
     local g_passed
@@ -75,7 +77,7 @@ EOF
 }
 
 @test "gate-stage-2-5: Metric H literal passed:false fails the gate" {
-    make_failing_runner "extended-crawler.mjs" "H"
+    make_failing_runner "crawler-v2/extended-crawler.mjs" "H"
     run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$TARGET_DIR"
     [ "$status" -eq 1 ]
     local h_passed
@@ -87,7 +89,7 @@ EOF
 }
 
 @test "gate-stage-2-5: Metric I literal passed:false fails the gate" {
-    make_failing_runner "run-symmetry.mjs" "I"
+    make_failing_runner "contract-symmetry/run-symmetry.mjs" "I"
     run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$TARGET_DIR"
     [ "$status" -eq 1 ]
     local i_passed
@@ -99,11 +101,21 @@ EOF
 }
 
 # ── Absent-key default preserved: no runners installed => passed:true ───────
+#
+# Genuinely uninstall each metric runner (delete the file at the exact path
+# run_metric() resolves) rather than faking absence via a stale/wrong path —
+# a directory that merely doesn't exist at the wrong location proves nothing
+# once the real path is correct.
 
 @test "gate-stage-2-5: no runners installed still defaults to passed:true (absent key)" {
+    rm -f "$STUB_SCRIPTS/invariants/run-structural.mjs" \
+          "$STUB_SCRIPTS/window-contract/run-window.mjs" \
+          "$STUB_SCRIPTS/crawler-v2/extended-crawler.mjs" \
+          "$STUB_SCRIPTS/contract-symmetry/run-symmetry.mjs"
     run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$TARGET_DIR"
     [ "$status" -eq 0 ]
     local overall
     overall="$(printf '%s' "$output" | jq -r '.passed')"
     [ "$overall" = "true" ]
+    printf '%s' "$output" | grep -q 'runner not installed'
 }
