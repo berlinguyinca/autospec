@@ -105,3 +105,128 @@ SH
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '[.board.promotable[]?] | index(7) != null'
 }
+
+@test "operator-facing project_board settings reach the resolver's env unaltered" {
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  state_field_candidates: ["Custom state"]
+  dep_field_candidates: ["Custom deps"]
+  dep_markers: ["Waiting on"]
+  max_parallel_repos: 5
+  item_limit: 42
+YML
+
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+{
+  printf 'STATE_FIELDS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_STATE_FIELDS:-}"
+  printf 'DEP_FIELDS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_DEP_FIELDS:-}"
+  printf 'DEP_MARKERS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_DEP_MARKERS:-}"
+  printf 'PARALLEL=%s\n' "\${AUTOSPEC_PROJECT_BOARD_PARALLEL:-}"
+  printf 'LIMIT=%s\n' "\${AUTOSPEC_PROJECT_BOARD_LIMIT:-}"
+} > "$TMP/env-capture.txt"
+cat <<'JSON'
+{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+
+  run cat "$TMP/env-capture.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STATE_FIELDS=Custom state"* ]]
+  [[ "$output" == *"DEP_FIELDS=Custom deps"* ]]
+  [[ "$output" == *"DEP_MARKERS=Waiting on"* ]]
+  [[ "$output" == *"PARALLEL=5"* ]]
+  [[ "$output" == *"LIMIT=42"* ]]
+}
+
+@test "an already-exported env var wins over the bridged YAML value for the new fields" {
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  state_field_candidates: ["Custom state"]
+  max_parallel_repos: 5
+YML
+  export AUTOSPEC_PROJECT_BOARD_STATE_FIELDS="Operator override"
+  export AUTOSPEC_PROJECT_BOARD_PARALLEL="9"
+
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+{
+  printf 'STATE_FIELDS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_STATE_FIELDS:-}"
+  printf 'PARALLEL=%s\n' "\${AUTOSPEC_PROJECT_BOARD_PARALLEL:-}"
+} > "$TMP/env-capture.txt"
+cat <<'JSON'
+{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+
+  run cat "$TMP/env-capture.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STATE_FIELDS=Operator override"* ]]
+  [[ "$output" == *"PARALLEL=9"* ]]
+}
+
+@test "an unconfigured project_board block leaves the resolver seeing the legacy hardcoded defaults" {
+  # Only url/repo_allowlist are set — every other key is absent from YAML.
+  # This proves the "absent key" path is byte-identical to pre-bridge
+  # behavior: the bridge (backed by ProjectBoardConfig::default() for the
+  # unset fields) emits the SAME literal defaults project-board-resolve.sh
+  # used to hardcode, so observed values never change even though the
+  # mechanism producing them now goes through the bridge unconditionally.
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+YML
+
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+{
+  printf 'STATE_FIELDS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_STATE_FIELDS:-}"
+  printf 'DEP_FIELDS=%s\n' "\${AUTOSPEC_PROJECT_BOARD_DEP_FIELDS:-}"
+  printf 'PARALLEL=%s\n' "\${AUTOSPEC_PROJECT_BOARD_PARALLEL:-}"
+  printf 'LIMIT=%s\n' "\${AUTOSPEC_PROJECT_BOARD_LIMIT:-}"
+} > "$TMP/env-capture.txt"
+cat <<'JSON'
+{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+
+  run cat "$TMP/env-capture.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STATE_FIELDS=AutoSpec state,Delivery status"* ]]
+  [[ "$output" == *"DEP_FIELDS=Dependencies,Depends on"* ]]
+  [[ "$output" == *"PARALLEL=2"* ]]
+  [[ "$output" == *"LIMIT=500"* ]]
+}
+
+@test "with no .autospec/autonomous.yml at all, the resolver is never invoked and nothing crashes" {
+  # No config file, no AUTOSPEC_PROJECT_BOARD_URL export: board_plan()
+  # treats this as a dry/empty board, exactly as before this change.
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+touch "$TMP/resolve-was-called"
+printf '{"items":[]}'
+SH
+  chmod +x "$TMP/resolve.sh"
+
+  run bash "$SCRIPT" --repo o/r
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.board == null or (.board.ready // 0) == 0'
+  [ ! -e "$TMP/resolve-was-called" ]
+}

@@ -60,6 +60,70 @@ lock_wait_timeout() {
     'BEGIN { printf "%.2f", (i * s * m) + o }'
 }
 
+@test "a project_board.spend_scope in .autospec/autonomous.yml is bridged into a shared ledger" {
+  REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+  AUTOSPEC_BIN_PATH="$REPO_ROOT/target/debug/autospec"
+  if [ ! -x "$AUTOSPEC_BIN_PATH" ]; then
+    skip "target/debug/autospec not built; run cargo build -p autospec-cli first"
+  fi
+  export AUTOSPEC_PROJECT_BOARD_CONFIG_BIN="$AUTOSPEC_BIN_PATH"
+
+  # A board-driven fleet ships the SAME project_board.spend_scope in every
+  # member repo's .autospec/autonomous.yml — that is what "one budget by
+  # configuration" means; no operator exports AUTOSPEC_SPEND_SCOPE anywhere.
+  mkdir -p "$TMP/a/.autospec" "$TMP/b/.autospec"
+  cat > "$TMP/a/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  spend_scope: board-inferweave-shared
+YML
+  cp "$TMP/a/.autospec/autonomous.yml" "$TMP/b/.autospec/autonomous.yml"
+
+  bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/a" >/dev/null
+  bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/b" >/dev/null
+
+  run bash "$SCRIPT" status --repo-dir "$TMP/a"
+  echo "$output" | jq -e '.tokens == 200'
+  # And it landed at the configured scope's directory, not a per-repo slug.
+  [ -f "$TMP/.autospec/autonomous-spend/board-inferweave-shared/spend.json" ]
+}
+
+@test "an explicitly-exported AUTOSPEC_SPEND_SCOPE wins over the bridged YAML value" {
+  REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+  AUTOSPEC_BIN_PATH="$REPO_ROOT/target/debug/autospec"
+  if [ ! -x "$AUTOSPEC_BIN_PATH" ]; then
+    skip "target/debug/autospec not built; run cargo build -p autospec-cli first"
+  fi
+  export AUTOSPEC_PROJECT_BOARD_CONFIG_BIN="$AUTOSPEC_BIN_PATH"
+
+  mkdir -p "$TMP/a/.autospec"
+  cat > "$TMP/a/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  spend_scope: board-scope-from-yaml
+YML
+
+  AUTOSPEC_SPEND_SCOPE=operator-override bash "$SCRIPT" add --tokens 50 --repo-dir "$TMP/a" >/dev/null
+  [ -f "$TMP/.autospec/autonomous-spend/operator-override/spend.json" ]
+  [ ! -e "$TMP/.autospec/autonomous-spend/board-scope-from-yaml" ]
+}
+
+@test "with no .autospec/autonomous.yml, spend_scope bridging is a no-op and per-repo ledgers still separate" {
+  REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+  AUTOSPEC_BIN_PATH="$REPO_ROOT/target/debug/autospec"
+  if [ ! -x "$AUTOSPEC_BIN_PATH" ]; then
+    skip "target/debug/autospec not built; run cargo build -p autospec-cli first"
+  fi
+  export AUTOSPEC_PROJECT_BOARD_CONFIG_BIN="$AUTOSPEC_BIN_PATH"
+
+  bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/a" >/dev/null
+  bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/b" >/dev/null
+  run bash "$SCRIPT" status --repo-dir "$TMP/a"
+  echo "$output" | jq -e '.tokens == 100'
+}
+
 @test "without a scope override two repos keep separate ledgers" {
   bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/a" >/dev/null
   bash "$SCRIPT" add --tokens 100 --repo-dir "$TMP/b" >/dev/null

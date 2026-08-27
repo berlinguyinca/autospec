@@ -17,6 +17,12 @@ pub struct ProjectBoardConfig {
     pub max_parallel_repos: u32,
     pub state_field_candidates: Vec<String>,
     pub state_option_candidates: BTreeMap<String, Vec<String>>,
+    pub dep_field_candidates: Vec<String>,
+    pub dep_markers: Vec<String>,
+    pub item_limit: u32,
+    pub ttl_seconds: u32,
+    pub label_map: Option<String>,
+    pub spend_scope: Option<String>,
 }
 
 impl Default for ProjectBoardConfig {
@@ -26,15 +32,33 @@ impl Default for ProjectBoardConfig {
             repo_allowlist: Vec::new(),
             control_issue: None,
             write_back: false,
-            max_parallel_repos: 1,
+            // Matches the shell's own hardcoded AUTOSPEC_PROJECT_BOARD_PARALLEL
+            // default (scripts/project-board-resolve.sh) — nothing read this
+            // field before this change, so raising the default from 1 to 2
+            // here does not alter any observed behavior.
+            max_parallel_repos: 2,
             state_field_candidates: default_state_field_candidates(),
             state_option_candidates: default_state_option_candidates(),
+            dep_field_candidates: default_dep_field_candidates(),
+            dep_markers: default_dep_markers(),
+            item_limit: 500,
+            ttl_seconds: 300,
+            label_map: None,
+            spend_scope: None,
         }
     }
 }
 
 fn default_state_field_candidates() -> Vec<String> {
     vec!["AutoSpec state".to_string(), "Delivery status".to_string()]
+}
+
+fn default_dep_field_candidates() -> Vec<String> {
+    vec!["Dependencies".to_string(), "Depends on".to_string()]
+}
+
+fn default_dep_markers() -> Vec<String> {
+    vec!["Blocked by".to_string(), "Depends on".to_string()]
 }
 
 fn default_state_option_candidates() -> BTreeMap<String, Vec<String>> {
@@ -69,6 +93,12 @@ pub(super) fn parse(source: &str) -> Result<ProjectBoardConfig, String> {
     let mut saw_max_parallel_repos = false;
     let mut saw_state_field_candidates = false;
     let mut saw_state_option_candidates = false;
+    let mut saw_dep_field_candidates = false;
+    let mut saw_dep_markers = false;
+    let mut saw_item_limit = false;
+    let mut saw_ttl = false;
+    let mut saw_label_map = false;
+    let mut saw_spend_scope = false;
     let mut write_back_explicit: Option<bool> = None;
     let mut in_state_option_candidates = false;
     let mut state_option_keys: BTreeSet<String> = BTreeSet::new();
@@ -208,6 +238,67 @@ pub(super) fn parse(source: &str) -> Result<ProjectBoardConfig, String> {
                         in_state_option_candidates = true;
                         state_option_keys.clear();
                         config.state_option_candidates = BTreeMap::new();
+                    }
+                    "dep_field_candidates" => {
+                        if saw_dep_field_candidates {
+                            return Err(error(
+                                line_number,
+                                "duplicate project_board.dep_field_candidates",
+                            ));
+                        }
+                        saw_dep_field_candidates = true;
+                        let list = inline_list(value, line_number, "dep_field_candidates")?;
+                        if list.is_empty() {
+                            return Err(error(
+                                line_number,
+                                "project_board.dep_field_candidates must not be an explicitly empty list",
+                            ));
+                        }
+                        config.dep_field_candidates = list;
+                    }
+                    "dep_markers" => {
+                        if saw_dep_markers {
+                            return Err(error(line_number, "duplicate project_board.dep_markers"));
+                        }
+                        saw_dep_markers = true;
+                        let list = inline_list(value, line_number, "dep_markers")?;
+                        if list.is_empty() {
+                            return Err(error(
+                                line_number,
+                                "project_board.dep_markers must not be an explicitly empty list",
+                            ));
+                        }
+                        config.dep_markers = list;
+                    }
+                    "item_limit" => {
+                        if saw_item_limit {
+                            return Err(error(line_number, "duplicate project_board.item_limit"));
+                        }
+                        saw_item_limit = true;
+                        config.item_limit = parse_u32(value, line_number, "item_limit")?;
+                    }
+                    "ttl" => {
+                        if saw_ttl {
+                            return Err(error(line_number, "duplicate project_board.ttl"));
+                        }
+                        saw_ttl = true;
+                        config.ttl_seconds = parse_u32(value, line_number, "ttl")?;
+                    }
+                    "label_map" => {
+                        if saw_label_map {
+                            return Err(error(line_number, "duplicate project_board.label_map"));
+                        }
+                        saw_label_map = true;
+                        config.label_map = Some(scalar(value, line_number, "label_map")?);
+                    }
+                    "spend_scope" => {
+                        if saw_spend_scope {
+                            return Err(error(line_number, "duplicate project_board.spend_scope"));
+                        }
+                        saw_spend_scope = true;
+                        let scope = scalar(value, line_number, "spend_scope")?;
+                        validate_spend_scope(&scope, line_number)?;
+                        config.spend_scope = Some(scope);
                     }
                     field => {
                         return Err(error(
@@ -422,6 +513,47 @@ fn parse_u32(value: &str, line: usize, field: &str) -> Result<u32, String> {
             &format!("project_board.{field} is outside the supported range"),
         )
     })
+}
+
+// Mirrors scripts/autonomous-spend-ledger.sh's validate_scope(): a
+// spend_scope becomes a ledger directory name verbatim, so it is validated
+// against an allowlist charset (never a denylist) at parse time — the same
+// gate the shell enforces at runtime, moved earlier so a bad value is
+// rejected before it ever reaches the shell.
+const SPEND_SCOPE_MAX_LEN: usize = 200;
+
+fn validate_spend_scope(value: &str, line: usize) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(error(line, "project_board.spend_scope must not be empty"));
+    }
+    if value == "." || value == ".." {
+        return Err(error(
+            line,
+            "project_board.spend_scope must not be '.' or '..'",
+        ));
+    }
+    if value.starts_with('-') {
+        return Err(error(
+            line,
+            "project_board.spend_scope must not start with '-'",
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(error(
+            line,
+            "project_board.spend_scope must contain only [A-Za-z0-9._-]",
+        ));
+    }
+    if value.len() > SPEND_SCOPE_MAX_LEN {
+        return Err(error(
+            line,
+            &format!("project_board.spend_scope must be {SPEND_SCOPE_MAX_LEN} characters or fewer"),
+        ));
+    }
+    Ok(())
 }
 
 fn has_unquoted_mapping_delimiter(value: &str) -> bool {

@@ -88,10 +88,18 @@ BOARD_CONFIG_REPO_DIR="${AUTOSPEC_REPO_DIR:-.}"
 # degrades silently to "no board configured": board_plan() already treats
 # an unset AUTOSPEC_PROJECT_BOARD_URL as a dry/empty board, so this can
 # never crash and can never park a worker.
-if [ -z "${AUTOSPEC_PROJECT_BOARD_URL:-}" ]; then
-    _pb_json="$("$BOARD_CONFIG_BIN" autonomous project-board-config \
-        --repo-dir "$BOARD_CONFIG_REPO_DIR" 2>/dev/null || true)"
-    if [ -n "$_pb_json" ]; then
+#
+# The bridge is queried once per run, unconditionally — url/allowlist are
+# not the only operator-facing settings it carries (ttl, label_map,
+# state_fields, state_options, dep_fields, dep_markers, parallel, limit are
+# too), so this must run even when AUTOSPEC_PROJECT_BOARD_URL is already set
+# by an operator/test override. Every individual field below still applies
+# the same override precedence: an already-exported env var always wins
+# over the bridged YAML value.
+_pb_json="$("$BOARD_CONFIG_BIN" autonomous project-board-config \
+    --repo-dir "$BOARD_CONFIG_REPO_DIR" 2>/dev/null || true)"
+if [ -n "$_pb_json" ]; then
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_URL:-}" ]; then
         _pb_url="$(printf '%s' "$_pb_json" | jq -r '.url // empty' 2>/dev/null || true)"
         if [ -n "$_pb_url" ]; then
             AUTOSPEC_PROJECT_BOARD_URL="$_pb_url"
@@ -104,21 +112,67 @@ if [ -z "${AUTOSPEC_PROJECT_BOARD_URL:-}" ]; then
                     export AUTOSPEC_PROJECT_BOARD_ALLOWLIST
                 fi
             fi
-            if [ -z "${AUTOSPEC_PROJECT_BOARD_TTL:-}" ]; then
-                _pb_ttl="$(printf '%s' "$_pb_json" | jq -r '.ttl // empty' 2>/dev/null || true)"
-                if [ -n "$_pb_ttl" ]; then
-                    AUTOSPEC_PROJECT_BOARD_TTL="$_pb_ttl"
-                    export AUTOSPEC_PROJECT_BOARD_TTL
-                fi
-            fi
-            if [ -z "${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:-}" ]; then
-                _pb_labels="$(printf '%s' "$_pb_json" \
-                    | jq -r '.label_map // empty' 2>/dev/null || true)"
-                if [ -n "$_pb_labels" ]; then
-                    AUTOSPEC_PROJECT_BOARD_LABEL_MAP="$_pb_labels"
-                    export AUTOSPEC_PROJECT_BOARD_LABEL_MAP
-                fi
-            fi
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_TTL:-}" ]; then
+        _pb_ttl="$(printf '%s' "$_pb_json" | jq -r '.ttl // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_ttl" ]; then
+            AUTOSPEC_PROJECT_BOARD_TTL="$_pb_ttl"
+            export AUTOSPEC_PROJECT_BOARD_TTL
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:-}" ]; then
+        _pb_labels="$(printf '%s' "$_pb_json" \
+            | jq -r '.label_map // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_labels" ]; then
+            AUTOSPEC_PROJECT_BOARD_LABEL_MAP="$_pb_labels"
+            export AUTOSPEC_PROJECT_BOARD_LABEL_MAP
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_STATE_FIELDS:-}" ]; then
+        _pb_state_fields="$(printf '%s' "$_pb_json" \
+            | jq -r '.state_fields // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_state_fields" ]; then
+            AUTOSPEC_PROJECT_BOARD_STATE_FIELDS="$_pb_state_fields"
+            export AUTOSPEC_PROJECT_BOARD_STATE_FIELDS
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_STATE_OPTIONS:-}" ]; then
+        _pb_state_options="$(printf '%s' "$_pb_json" \
+            | jq -r '.state_options // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_state_options" ]; then
+            AUTOSPEC_PROJECT_BOARD_STATE_OPTIONS="$_pb_state_options"
+            export AUTOSPEC_PROJECT_BOARD_STATE_OPTIONS
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_DEP_FIELDS:-}" ]; then
+        _pb_dep_fields="$(printf '%s' "$_pb_json" \
+            | jq -r '.dep_fields // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_dep_fields" ]; then
+            AUTOSPEC_PROJECT_BOARD_DEP_FIELDS="$_pb_dep_fields"
+            export AUTOSPEC_PROJECT_BOARD_DEP_FIELDS
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_DEP_MARKERS:-}" ]; then
+        _pb_dep_markers="$(printf '%s' "$_pb_json" \
+            | jq -r '.dep_markers // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_dep_markers" ]; then
+            AUTOSPEC_PROJECT_BOARD_DEP_MARKERS="$_pb_dep_markers"
+            export AUTOSPEC_PROJECT_BOARD_DEP_MARKERS
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_PARALLEL:-}" ]; then
+        _pb_parallel="$(printf '%s' "$_pb_json" | jq -r '.parallel // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_parallel" ]; then
+            AUTOSPEC_PROJECT_BOARD_PARALLEL="$_pb_parallel"
+            export AUTOSPEC_PROJECT_BOARD_PARALLEL
+        fi
+    fi
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_LIMIT:-}" ]; then
+        _pb_limit="$(printf '%s' "$_pb_json" | jq -r '.limit // empty' 2>/dev/null || true)"
+        if [ -n "$_pb_limit" ]; then
+            AUTOSPEC_PROJECT_BOARD_LIMIT="$_pb_limit"
+            export AUTOSPEC_PROJECT_BOARD_LIMIT
         fi
     fi
 fi
