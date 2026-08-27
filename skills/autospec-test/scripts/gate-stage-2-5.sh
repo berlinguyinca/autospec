@@ -66,7 +66,7 @@ if command -v yq >/dev/null 2>&1; then
 fi
 
 if [ -n "$SEEDS_DECLARED" ]; then
-    VERIFY_SEEDS="$SCRIPT_DIR/../invariants/verify-seeds.mjs"
+    VERIFY_SEEDS="$SCRIPT_DIR/seed-shapes/verify-seeds.mjs"
     if [ -f "$VERIFY_SEEDS" ]; then
         if ! node "$VERIFY_SEEDS" "$TARGET_DIR" 2>&1; then
             SEED_EXIT=$?
@@ -82,7 +82,10 @@ fi
 # Helper: run a Node metric runner and collect JSON output
 run_metric() {
     local name="$1"
-    local runner="$SCRIPT_DIR/../invariants/$2"
+    # $2 is the runner path relative to $SCRIPT_DIR, subdirectory-qualified by
+    # the call site (each metric's runner lives in a different subdirectory:
+    # invariants/, window-contract/, crawler-v2/, contract-symmetry/).
+    local runner="$SCRIPT_DIR/$2"
     local result_var="$3"
 
     if [ ! -f "$runner" ]; then
@@ -106,19 +109,19 @@ run_metric() {
 }
 
 # 3. Metric F — Structural invariants
-F_JSON=$(run_metric "F" "run-structural.mjs" F_JSON || echo '{"metric":"F","passed":true,"skipped":true}')
+F_JSON=$(run_metric "F" "invariants/run-structural.mjs" F_JSON || echo '{"metric":"F","passed":true,"skipped":true}')
 F_PASSED=$(printf '%s' "$F_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 4. Metric G — Window-contract symmetry
-G_JSON=$(run_metric "G" "run-window.mjs" G_JSON || echo '{"metric":"G","passed":true,"skipped":true}')
+G_JSON=$(run_metric "G" "window-contract/run-window.mjs" G_JSON || echo '{"metric":"G","passed":true,"skipped":true}')
 G_PASSED=$(printf '%s' "$G_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 5. Metric H — Extended crawler
-H_JSON=$(run_metric "H" "extended-crawler.mjs" H_JSON || echo '{"metric":"H","passed":true,"skipped":true}')
+H_JSON=$(run_metric "H" "crawler-v2/extended-crawler.mjs" H_JSON || echo '{"metric":"H","passed":true,"skipped":true}')
 H_PASSED=$(printf '%s' "$H_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 6. Metric I — Data-source contract symmetry
-I_JSON=$(run_metric "I" "run-symmetry.mjs" I_JSON || echo '{"metric":"I","passed":true,"skipped":true}')
+I_JSON=$(run_metric "I" "contract-symmetry/run-symmetry.mjs" I_JSON || echo '{"metric":"I","passed":true,"skipped":true}')
 I_PASSED=$(printf '%s' "$I_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # If any metric failed, overall fails
