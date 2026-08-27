@@ -63,7 +63,7 @@ profiles:
 YAML
 }
 
-@test "fleet-run dry-run emits autospec-run commands for eligible repos" {
+@test "fleet-run dry-run emits autospec-autonomous conductor commands for eligible repos" {
     write_mock_probe
     write_fleet_config
     write_node_config
@@ -74,11 +74,8 @@ YAML
         --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -q -- 'autospec-autonomous start --detach'
-    printf '%s\n' "$output" | grep -q -- '--repo org/repo-a'
-    printf '%s\n' "$output" | grep -q -- '--repo org/repo-b'
-    printf '%s\n' "$output" | grep -q -- 'org__repo-a'
-    printf '%s\n' "$output" | grep -q -- 'org__repo-b'
+    printf '%s\n' "$output" | grep -q -- 'autospec-autonomous start --repo-dir /tmp/fleet/repos/org__repo-a --repo org/repo-a'
+    printf '%s\n' "$output" | grep -q -- 'autospec-autonomous start --repo-dir /tmp/fleet/repos/org__repo-b --repo org/repo-b'
 }
 
 @test "fleet-run caps output at parallel_repos 2" {
@@ -92,7 +89,7 @@ YAML
         --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
-    count="$(printf '%s\n' "$output" | grep -c -- 'autospec-autonomous start --detach')"
+    count="$(printf '%s\n' "$output" | grep -c -E -- 'autospec-autonomous start --repo-dir /tmp/fleet/repos/org__repo-[ab] --repo org/repo-[ab]')"
     [ "$count" -eq 2 ]
     if printf '%s\n' "$output" | grep -q -- 'org/repo-c'; then
         false

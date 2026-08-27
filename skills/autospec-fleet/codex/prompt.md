@@ -17,13 +17,17 @@ claiming, implementation, review, CI, and merge behavior all still happen
 inside `/autospec-run`, which the conductor drives.
 
 Be precise, not optimistic, about what is wired up today: `fleet-run.sh`
-does launch real conductor processes now, but it does **not** clone or sync
-checkouts — a repo missing from the workspace is skipped with "checkout not
-found" rather than being created. `--emit fleet-config` and
-`AUTOSPEC_SPEND_SCOPE` have no production consumer yet, and the project-board
-control-label mirror (`project-board-control-mirror.sh`) has no caller
-wired into this flow. Do not describe fleet as an end-to-end,
-fully-unattended multi-repo shipping pipeline until those land.
+launches real conductor processes, and `fleet-init.sh` provisions real
+checkouts — cloning a repo missing from the workspace and
+fetch+fast-forward-updating one that already exists, idempotently and
+without ever touching a dirty or non-fast-forwardable checkout. A repo
+`fleet-init.sh` has not yet been run for is still skipped by `fleet-run.sh`
+with "checkout not found" rather than being created on the fly — provision
+the workspace first. `--emit fleet-config` and `AUTOSPEC_SPEND_SCOPE` have
+no production consumer yet, and the project-board control-label mirror
+(`project-board-control-mirror.sh`) has no caller wired into this flow. Do
+not describe fleet as an end-to-end, fully-unattended multi-repo shipping
+pipeline until those land.
 
 Design source:
 `docs/specs/2026-05-28-autospec-fleet-design.md`.
@@ -154,13 +158,14 @@ helpers for authentication.
 
 ## Current scaffold status
 
-`init`, `sync`, config linting, `run` (scheduling, liveness/idempotence, and
-the real per-repo `autospec-autonomous` conductor launch), `status`, and
-`stop` are implemented and tested (`tests/fleet/`, `tests/install/`). `run`
-does not yet clone or sync checkouts into the workspace — a repo missing
-from `workspace/<owner>__<repo>` is skipped with a "checkout not found"
-message rather than being created, so an operator (or a follow-up cloning
-capability, not yet built) still has to populate the workspace first.
-`--emit fleet-config` and `AUTOSPEC_SPEND_SCOPE` have no production consumer
-yet, and the project-board control-label mirror has no caller wired into
-this flow.
+`init` (real, idempotent checkout provisioning — clone missing repos,
+fetch+fast-forward-update existing ones, never touching a dirty or
+non-fast-forwardable checkout), `sync`, config linting, `run` (scheduling,
+liveness/idempotence, and the real per-repo `autospec-autonomous` conductor
+launch), `status`, and `stop` are implemented and tested (`tests/fleet/`,
+`tests/install/`). `run` still requires `init` to have populated the
+workspace first — a repo missing from `workspace/<owner>__<repo>` is
+skipped with a "checkout not found" message rather than being created
+on the fly. `--emit fleet-config` and `AUTOSPEC_SPEND_SCOPE` have no
+production consumer yet, and the project-board control-label mirror has no
+caller wired into this flow.

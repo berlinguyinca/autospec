@@ -409,9 +409,33 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# A board-driven fleet shares one budget by CONFIGURATION
+# (project_board.spend_scope in .autospec/autonomous.yml), not by an
+# operator remembering to export AUTOSPEC_SPEND_SCOPE. Bridged the same way
+# scripts/autonomous-promote-open-issues.sh bridges AUTOSPEC_PROJECT_BOARD_*:
+# via `autospec autonomous project-board-config`, never eval'd — parsed
+# field-by-field with jq. An already-exported AUTOSPEC_SPEND_SCOPE always
+# wins (the documented test/override seam); a missing binary, missing
+# config, or malformed config degrades silently to unset — legacy
+# per-repo-slug ledger behavior, unchanged.
+SPEND_CONFIG_BIN="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
+if [ "${AUTOSPEC_SPEND_SCOPE+set}" != "set" ] && command -v jq >/dev/null 2>&1; then
+    _spend_pb_json="$("$SPEND_CONFIG_BIN" autonomous project-board-config \
+        --repo-dir "$REPO_DIR" 2>/dev/null || true)"
+    if [ -n "$_spend_pb_json" ]; then
+        _spend_pb_scope="$(printf '%s' "$_spend_pb_json" \
+            | jq -r '.spend_scope // empty' 2>/dev/null || true)"
+        if [ -n "$_spend_pb_scope" ]; then
+            AUTOSPEC_SPEND_SCOPE="$_spend_pb_scope"
+        fi
+    fi
+fi
+
 # Validate AUTOSPEC_SPEND_SCOPE at top level (not inside a command
 # substitution) so `die`'s exit actually terminates this process rather
-# than just the subshell that would otherwise swallow it.
+# than just the subshell that would otherwise swallow it. This also
+# re-validates a value sourced from the bridge above — belt-and-suspenders
+# alongside the Rust-side parse-time validation in project_board::parse.
 if [ "${AUTOSPEC_SPEND_SCOPE+set}" = "set" ]; then
     if ! validate_scope "${AUTOSPEC_SPEND_SCOPE}"; then
         SCOPE_DISPLAY="${AUTOSPEC_SPEND_SCOPE}"
