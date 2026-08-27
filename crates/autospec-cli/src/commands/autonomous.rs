@@ -1985,10 +1985,27 @@ fn effective_main_health_policy_digest(
 /// config values (url, allowlist entries) are operator-supplied. Fields:
 ///   - "url": the board URL, or `null` if unset OR if validation failed.
 ///   - "allowlist": the repo allowlist entries (empty when `url` is null).
-///   - "ttl", "label_map": always `null` today — `ProjectBoardConfig` has no
-///     schema fields for board-cache TTL or label remapping yet, so the
-///     bridge cannot source them from validated config; the shell keeps its
-///     own existing defaults/overrides for those two names.
+///   - "ttl": board-cache TTL in seconds (`project_board.ttl`, default 300 —
+///     the same default the shell used to hardcode).
+///   - "label_map": `project_board.label_map`, or `null` if unset.
+///   - "state_fields": `project_board.state_field_candidates` joined with
+///     `,` (the shell's own `AUTOSPEC_PROJECT_BOARD_STATE_FIELDS` format).
+///   - "state_options": `project_board.state_option_candidates` rendered as
+///     `Canonical=Cand1|Cand2,...` (the shell's own
+///     `AUTOSPEC_PROJECT_BOARD_STATE_OPTIONS` format).
+///   - "dep_fields": `project_board.dep_field_candidates` joined with `,`.
+///   - "dep_markers": `project_board.dep_markers` joined with `,`.
+///   - "parallel": `project_board.max_parallel_repos`.
+///   - "limit": `project_board.item_limit`.
+///   - "spend_scope": `project_board.spend_scope`, or `null` if unset —
+///     already parse-time validated as a directory-name-safe token.
+///   - "write_back": `project_board.write_back` — the operator's sole kill
+///     switch for board mutations. Defaults to `true` when a url is
+///     configured and `write_back` is absent from YAML (unchanged prior
+///     behavior), `false` when no board is configured at all, or whatever
+///     the operator explicitly set. The write-back script itself is the
+///     single choke point that reads and honors this value — see
+///     `scripts/project-board-writeback.sh`.
 ///
 /// Security invariant: `project_board::parse` itself enforces that a
 /// configured `url` requires a non-empty `repo_allowlist` (parse fails
@@ -2010,16 +2027,42 @@ fn format_project_board_config(
         Some(url) => format!("\"{}\"", json_escape(url)),
         None => "null".to_string(),
     };
-    let allowlist_json = format!(
-        "[{}]",
-        board
-            .repo_allowlist
-            .iter()
-            .map(|entry| format!("\"{}\"", json_escape(entry)))
-            .collect::<Vec<_>>()
-            .join(",")
+    let allowlist_json = json_string_array(&board.repo_allowlist);
+    let label_map_json = match &board.label_map {
+        Some(label_map) => format!("\"{}\"", json_escape(label_map)),
+        None => "null".to_string(),
+    };
+    let spend_scope_json = match &board.spend_scope {
+        Some(scope) => format!("\"{}\"", json_escape(scope)),
+        None => "null".to_string(),
+    };
+    let state_fields_json = format!(
+        "\"{}\"",
+        json_escape(&board.state_field_candidates.join(","))
     );
-    format!("{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":null,\"label_map\":null}}")
+    let state_options_json = format!(
+        "\"{}\"",
+        json_escape(
+            &board
+                .state_option_candidates
+                .iter()
+                .map(|(canonical, candidates)| format!("{canonical}={}", candidates.join("|")))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    );
+    let dep_fields_json = format!(
+        "\"{}\"",
+        json_escape(&board.dep_field_candidates.join(","))
+    );
+    let dep_markers_json = format!("\"{}\"", json_escape(&board.dep_markers.join(",")));
+    let write_back_json = if board.write_back { "true" } else { "false" };
+    format!(
+        "{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":{ttl},\"label_map\":{label_map_json},\"state_fields\":{state_fields_json},\"state_options\":{state_options_json},\"dep_fields\":{dep_fields_json},\"dep_markers\":{dep_markers_json},\"parallel\":{parallel},\"limit\":{limit},\"spend_scope\":{spend_scope_json},\"write_back\":{write_back_json}}}",
+        ttl = board.ttl_seconds,
+        parallel = board.max_parallel_repos,
+        limit = board.item_limit,
+    )
 }
 
 fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
@@ -8083,13 +8126,22 @@ mod project_board_config_tests {
             .project_board
     }
 
+    // The default tail shared by every unconfigured field, in the same
+    // order format_project_board_config emits them. Defaults here MUST
+    // match the shell's own former hardcoded literals byte-for-byte —
+    // that equivalence is what keeps an absent-YAML-key run behaviorally
+    // unchanged.
+    const DEFAULT_TAIL: &str = "\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":2,\"limit\":500,\"spend_scope\":null";
+
     #[test]
-    fn valid_config_emits_all_four_keys_with_url_and_allowlist_populated() {
+    fn valid_config_emits_all_keys_with_url_and_allowlist_populated() {
         let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\", \"acme/gadgets\"]\n";
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],\"ttl\":null,\"label_map\":null}"
+            format!(
+                "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],{DEFAULT_TAIL},\"write_back\":true}}"
+            )
         );
     }
 
@@ -8116,7 +8168,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board("main_health:\n  branch: main\n"));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
@@ -8128,20 +8180,54 @@ mod project_board_config_tests {
         let json = format_project_board_config(&AutonomousConfig::default().project_board);
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
     #[test]
-    fn config_with_only_some_keys_set_still_emits_all_four_keys() {
+    fn config_with_only_some_keys_set_still_emits_defaults_for_the_rest() {
         // control_issue and write_back are set but url/repo_allowlist are
         // not present at all — a legal, non-board-ingesting configuration.
+        // max_parallel_repos is explicitly overridden to prove it flows
+        // through as "parallel" rather than the default.
         let source =
-            "project_board:\n  control_issue: 7\n  write_back: false\n  max_parallel_repos: 2\n";
+            "project_board:\n  control_issue: 7\n  write_back: false\n  max_parallel_repos: 9\n";
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":null,\"label_map\":null}"
+            "{\"url\":null,\"allowlist\":[],\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":9,\"limit\":500,\"spend_scope\":null,\"write_back\":false"
+                .to_string()
+                + "}"
+        );
+    }
+
+    #[test]
+    fn operator_overrides_for_new_fields_flow_through_as_real_values() {
+        let source = "project_board:\n  ttl: 60\n  label_map: bug=defect\n  state_field_candidates: [\"Status\"]\n  state_option_candidates:\n    Done: [\"Complete\"]\n  dep_field_candidates: [\"Blocks\"]\n  dep_markers: [\"Waiting on\"]\n  item_limit: 1000\n  spend_scope: fleet-1\n";
+        let json = format_project_board_config(&board(source));
+        assert_eq!(
+            json,
+            "{\"url\":null,\"allowlist\":[],\"ttl\":60,\"label_map\":\"bug=defect\",\"state_fields\":\"Status\",\"state_options\":\"Done=Complete\",\"dep_fields\":\"Blocks\",\"dep_markers\":\"Waiting on\",\"parallel\":2,\"limit\":1000,\"spend_scope\":\"fleet-1\",\"write_back\":false}"
+        );
+    }
+
+    #[test]
+    fn explicit_write_back_true_flows_through() {
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\"]\n  write_back: true\n";
+        let json = format_project_board_config(&board(source));
+        assert!(
+            json.ends_with("\"write_back\":true}"),
+            "expected write_back:true in {json}"
+        );
+    }
+
+    #[test]
+    fn explicit_write_back_false_flows_through_even_with_a_configured_board() {
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\"]\n  write_back: false\n";
+        let json = format_project_board_config(&board(source));
+        assert!(
+            json.ends_with("\"write_back\":false}"),
+            "expected write_back:false in {json}"
         );
     }
 }
