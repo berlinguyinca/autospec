@@ -150,3 +150,101 @@ start --repo-dir /var/.../ws/o__a --repo o/a
 - No `eval` of any config- or board-derived value; every expansion reaching
   a command is quoted, and directory/URL arguments are passed with `--`
   or `-C` where the git subcommand supports it.
+
+## Post-review fixes (round 2)
+
+An independent review confirmed the four safety requirements (dirty guard,
+idempotence, per-repo isolation, structural path containment) hold and the
+chain closes live, but flagged two real issues, both fixed below.
+
+### Finding 1 — silent dirty/non-ff skip made loud
+
+`fleet_update_checkout` in `fleet-lib.sh` previously printed only a plain
+`fleet: ...` line for both "dirty checkout, skipping" and "would not
+fast-forward, skipping" — no `code_health:` marker, unlike every other
+skip/failure path in the function. In an unattended multi-week fleet this
+meant a repo could stall indefinitely with nothing in the signal stream to
+explain why.
+
+Both branches now emit a `code_health:` marker on stderr, in addition to
+the existing informational `fleet:` line on stdout (skip *behavior* is
+unchanged — still `return 0`, never touches the checkout):
+
+- Dirty checkout: `code_health:fleet_provision_update_skipped repo=<normalized> path=<checkout_path> reason=dirty_checkout`
+- Non-fast-forwardable: `code_health:fleet_provision_update_skipped repo=<normalized> path=<checkout_path> reason=not_fast_forward`
+
+Same marker name (`fleet_provision_update_skipped`) for both, distinguished
+by `reason=`, so a fleet-wide grep for `code_health:fleet_provision_update_skipped`
+finds every stalled repo, and `reason=` tells the operator which response
+applies — clean up the checkout (dirty) vs. resolve a diverged history
+(not-fast-forward). New assertions in tests 4 and 5 (`fleet-provisioning.bats`)
+check for the marker and the specific `reason=` value, and — being
+`[ ]`-based per Finding 2's fix — will actually fail if the marker or
+reason value regresses.
+
+### Finding 2 — vacuous `[[ ]]` assertions rewritten
+
+10 of 11 `[[ ]]` substring assertions in `tests/fleet/fleet-provisioning.bats`
+were non-final `[[ ]]` invocations, which the reviewer proved do not fail a
+bats test under this repo's bash (3.2.57) — verified live by changing the
+fast-forward message text and the dry-run plan message text and observing
+the suite stay green either way before the fix.
+
+Every one was rewritten to a single-bracket form:
+`[ -n "$(printf '%s' "$output" | grep -F -- "needle")" ]` for "contains",
+`[ -z "$(printf '%s' "$output" | grep -F -- "needle")" ]` for "does not
+contain" — safe in any position because `[ ]` (unlike `[[ ]]` on this bash
+patch level) always drives the test's pass/fail status. No assertion was
+merely reordered to land last; every occurrence was replaced at its
+original position.
+
+Full list of rewritten assertions (all in `tests/fleet/fleet-provisioning.bats`):
+
+| Test | Old (vacuous) | New |
+|---|---|---|
+| "a checkout with uncommitted changes is skipped, not reset" | `[[ "$output" == *"local changes present"* ]] \|\| [[ "$output" == *"skipping"* ]]` | separate `[ -n "$(...)" ]` checks for `local changes present`, `skipping`, `code_health:fleet_provision_update_skipped`, and `reason=dirty_checkout` |
+| "a non-fast-forwardable update is skipped, not force-updated" | `[[ "$output" == *"would not fast-forward"* ]]` | `[ -n "$(...)" ]` for `would not fast-forward`, plus new checks for `code_health:fleet_provision_update_skipped` and `reason=not_fast_forward` |
+| "a clone failure for one repo does not abort provisioning of the next" | `[[ "$output" == *"code_health:fleet_provision_clone_failed"* ]] \|\| [[ "$output" == *"code_health"* ]]` | `[ -n "$(...)" ]` for `code_health:fleet_provision_clone_failed` |
+| "a fetch failure emits a code_health marker..." | `[[ "$output" == *"code_health:fleet_provision_fetch_failed"* ]]` | `[ -n "$(...)" ]` |
+| "path containment: traversal-shaped repo URLs..." (×3) | `[[ "$output" == *"unsupported repo URL"* ]]` | `[ -n "$(...)" ]`, once per probe |
+| "dry-run creates nothing and performs no git invocation" | `[[ "$output" == *"fleet: plan clone org/repo-a -> ..."* ]]` | `[ -n "$(...)" ]` |
+| "end-to-end..." (before provisioning) | `[[ "$output" == *"checkout not found"* ]]` | `[ -n "$(...)" ]` |
+| "end-to-end..." (after provisioning) | `[[ "$output" != *"checkout not found"* ]]` | `[ -z "$(...)" ]` |
+
+Confirmed zero `[[ ]]` occurrences remain in the file (`grep -n '\[\[' tests/fleet/fleet-provisioning.bats` → no matches).
+
+### Integrity probe results (re-applied post-fix)
+
+- **Probe A** — changed `fleet-lib.sh`'s fast-forward-skip message from
+  `"would not fast-forward; skipping"` to `"would not FF; skip"`:
+  test 5 ("a non-fast-forwardable update is skipped, not force-updated")
+  went **RED**. Restored via `cp` + `diff` — byte-identical.
+- **Probe B** — changed `fleet-init.sh`'s dry-run plan message from
+  `"fleet: plan clone %s -> %s\n"` to `"fleet: planning clone %s -> %s\n"`:
+  test 11 ("dry-run creates nothing and performs no git invocation") went
+  **RED**. Restored via `cp` + `diff` — byte-identical.
+
+Both probes used `git checkout --` at no point; restoration was always
+`cp` of a pre-edit copy plus a `diff` confirming byte-identity.
+
+### Minor: stale README/SKILL.md claims fixed
+
+`skills/autospec-fleet/README.md` and `skills/autospec-fleet/SKILL.md` said
+clone/sync was "not implemented yet." Updated both to describe the real,
+idempotent `fleet-init.sh` provisioning now shipped, and re-ran
+`scripts/derive-trio.sh skills/autospec-fleet --in-place` (the trio's
+prose lives in `SKILL.md`/`codex/prompt.md`/`opencode/agent.md` in
+lockstep) followed by `scripts/gen-skill-goldens.sh autospec-fleet` to
+regenerate `tests/fixtures/skill-goldens/autospec-fleet.*.sha256` so the
+derived copies and their goldens stay consistent with the edited source.
+
+### Final verification (round 2)
+
+- `bats tests/fleet/` — 41/41 pass.
+- `bats tests/fleet/ tests/unit/test_autospec_fleet_url.bats` — 46/46 pass.
+- `bash -n` clean on both touched scripts.
+- `shellcheck` on both: only the same two pre-existing info-level notices
+  (SC1091, SC2317) as round 1 — no new warnings.
+- `git` stubbed on `PATH` in every test as before; stub-shadow confirmed
+  with `[ "$(command -v git)" = "$TMP/bin/git" ]` in `setup()`. No test
+  touches a real remote or the operator's home directory.

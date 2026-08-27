@@ -6,7 +6,10 @@ multiple GitHub repositories.
 `autospec-fleet` currently provides installable skill docs plus shell helpers for
 config validation, GitHub URL/path planning, dry-run `/autospec-run` command
 generation, JSON status summaries, stop forwarding, and mocked smoke coverage.
-Live repository clone/sync and live worker launch are not implemented yet.
+Live repository clone/sync (`fleet-init.sh`, idempotent: clone missing repos,
+fetch+fast-forward-update existing ones, never touching a dirty or
+non-fast-forwardable checkout) and live per-repo `autospec-autonomous`
+conductor launch (`fleet-run.sh`) are both implemented.
 
 ## Quick install
 
@@ -54,6 +57,9 @@ Implemented surface:
 - Fleet and node config schemas.
 - Config linting.
 - GitHub URL normalization and workspace path planning.
+- Live, idempotent repository clone/sync (`fleet-init.sh`).
+- Live per-repo `autospec-autonomous` conductor launch, with
+  liveness/idempotence so a repo is never double-spawned (`fleet-run.sh`).
 - Dry-run scheduler output for `/autospec-run` commands.
 - JSON status summaries from configured repositories.
 - Stop forwarding for configured local checkout paths.
@@ -61,8 +67,6 @@ Implemented surface:
 
 Not implemented yet:
 
-- Live clone/sync of repositories.
-- Live `/autospec-run` worker launch.
 - A single `/autospec-fleet` command dispatcher for the helper scripts.
 
 ## Configuration

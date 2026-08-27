@@ -110,7 +110,10 @@ teardown() {
 
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/org/repo-a.git"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"local changes present"* ]] || [[ "$output" == *"skipping"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'local changes present')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'skipping')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_update_skipped')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'reason=dirty_checkout')" ]
     run grep -q 'fetch' "$GIT_LOG"
     [ "$status" -ne 0 ]
 }
@@ -121,7 +124,9 @@ teardown() {
 
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/org/repo-a.git"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"would not fast-forward"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'would not fast-forward')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_update_skipped')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'reason=not_fast_forward')" ]
     run grep -q -- '--hard\|reset\|clean' "$GIT_LOG"
     [ "$status" -ne 0 ]
 }
@@ -135,7 +140,7 @@ teardown() {
         "https://github.com/org/repo-fails.git" \
         "https://github.com/org/repo-ok.git"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"code_health:fleet_provision_clone_failed"* ]] || [[ "$output" == *"code_health"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_clone_failed')" ]
 
     # The stub only fails clone when GIT_STUB_CLONE_RESULT=1 is set for
     # every clone call, so re-run cleanly to prove the second repo alone
@@ -152,7 +157,7 @@ teardown() {
 
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/org/repo-a.git"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"code_health:fleet_provision_fetch_failed"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_fetch_failed')" ]
 }
 
 # ── Path containment ─────────────────────────────────────────────────────────
@@ -164,13 +169,13 @@ teardown() {
     # fleet_provision_repo in fleet-init.sh still treats this the same as
     # any other per-repo failure — it never aborts a multi-repo run.
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/../../etc.git"
-    [[ "$output" == *"unsupported repo URL"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'unsupported repo URL')" ]
 
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/a/../../b.git"
-    [[ "$output" == *"unsupported repo URL"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'unsupported repo URL')" ]
 
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com//etc/passwd"
-    [[ "$output" == *"unsupported repo URL"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'unsupported repo URL')" ]
 
     # The workspace root itself may exist (fleet-init.sh always ensures it),
     # but it must contain no repo checkout at all — nothing was cloned
@@ -217,7 +222,7 @@ teardown() {
 @test "dry-run creates nothing and performs no git invocation" {
     run bash "$INIT" --dry-run --workspace "$WORKSPACE" "https://github.com/org/repo-a.git"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"fleet: plan clone org/repo-a -> $WORKSPACE/org__repo-a"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- "fleet: plan clone org/repo-a -> $WORKSPACE/org__repo-a")" ]
     [ ! -e "$WORKSPACE" ]
     [ ! -s "$GIT_LOG" ]
 }
@@ -279,7 +284,7 @@ YML
     # Before provisioning: fleet-run reaches the repo but finds no checkout.
     run bash "$RUN" --config "$TMP/fleet.yml"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"checkout not found"* ]]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'checkout not found')" ]
     [ ! -s "$FLEET_SPAWN_LOG" ]
 
     # Provisioning creates the checkout (stubbed git, no network).
@@ -290,7 +295,7 @@ YML
     # After provisioning: fleet-run finds the checkout and launches.
     run bash "$RUN" --config "$TMP/fleet.yml"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"checkout not found"* ]]
+    [ -z "$(printf '%s' "$output" | grep -F -- 'checkout not found')" ]
     [ -s "$FLEET_SPAWN_LOG" ]
     grep -q -- '--repo-dir' "$FLEET_SPAWN_LOG"
     grep -q -- '--repo o/a' "$FLEET_SPAWN_LOG"

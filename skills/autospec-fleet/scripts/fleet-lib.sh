@@ -177,6 +177,14 @@ fleet_update_checkout() {
         return 1
     }
     if [ -n "$dirty" ]; then
+        # This is a permanent, invisible stall in an unattended multi-week
+        # fleet if it's only a plain `fleet:` line — the operator has no
+        # signal to explain why a repo quietly stopped progressing. Loud
+        # code_health: marker, distinct reason from the non-ff case below
+        # (dirty needs "go clean up the checkout"; non-ff needs "go resolve
+        # a diverged history" — different operator responses).
+        printf 'code_health:fleet_provision_update_skipped repo=%s path=%s reason=dirty_checkout\n' \
+            "$normalized" "$checkout_path" >&2
         printf 'fleet: %s: local changes present at %s; skipping update\n' \
             "$normalized" "$checkout_path"
         return 0
@@ -192,6 +200,8 @@ fleet_update_checkout() {
         printf 'fleet: %s: updated %s\n' "$normalized" "$checkout_path"
         return 0
     fi
+    printf 'code_health:fleet_provision_update_skipped repo=%s path=%s reason=not_fast_forward\n' \
+        "$normalized" "$checkout_path" >&2
     printf 'fleet: %s: update at %s would not fast-forward; skipping\n' \
         "$normalized" "$checkout_path"
     return 0
