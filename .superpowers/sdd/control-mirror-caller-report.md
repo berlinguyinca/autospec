@@ -144,3 +144,146 @@ Final state: `diff /tmp/autospec-loop.sh.bak scripts/lib/autospec-loop.sh`
   to the existing, unmodified `project-board-control-mirror.sh`, whose own
   `--add-label`-only design (never `--remove-label`) is untouched by this
   change.
+
+---
+
+## Addendum: `--repos` was the allowlist, not the fleet (fixed)
+
+A reviewer probe found that the original Step 1c passed the board's
+`repo_allowlist` (which may contain glob patterns, e.g. `"InferWeave/*"`,
+the canonical example in this codebase) as **both** `--repos` and
+`--allowlist` to the mirror script. `--repos` needs concrete `owner/name`
+slugs; a glob pattern there makes the mirror try to operate on a literal
+repo named e.g. `InferWeave/*`, which fails against the real GitHub API —
+so the feature looked wired (a `gh` call happens, `--control-issue` is
+correct) but silently mirrored to **nothing**, and a board-level
+`autospec:stop` still would not reach any real fleet repo.
+
+### Where the repo list now comes from
+
+`--repos` is now sourced from resolving the board itself — the actual
+repo set the board's items live in — never from echoing the allowlist
+back. New helper `_autospec_conductor_pb_repos()` in
+`scripts/lib/autospec-loop.sh` (placed beside the existing
+`_autospec_conductor_board_state()` helper) calls
+`scripts/project-board-resolve.sh --url <board-url> --emit repos`, which
+returns the board's real repos as a JSON array (already the promoter's own
+route to the same information via `--emit plan`, just the lighter `repos`
+mode: no per-repo closed-issue join, only the field-list + item-list `gh`
+call pair). The board URL comes from `.url` in the same
+`autospec autonomous project-board-config` bridge JSON Step 1c already
+parses for `control_issue` and `allowlist` — no new config surface.
+
+`--allowlist` is unchanged: still the board's `repo_allowlist` verbatim
+(globs and all), passed straight to the mirror script, which independently
+re-checks the control issue's own repo AND every resolved repo against it
+via its own `allowed()` gate. Step 1c does not duplicate that gate — it
+relies on the mirror script's existing enforcement, same as before.
+
+If the board has no `.url` configured (control_issue set on its own, no
+board), `_autospec_conductor_pb_repos` returns empty immediately (no
+resolver invocation, no `gh` calls) and Step 1c treats that exactly like
+"no repos known this cycle" — it does **not** fall back to treating
+allowlist entries as a repo list, even for allowlist entries that happen
+to be glob-free literal names. That fallback was considered and rejected:
+it would reintroduce a second, narrower version of the exact bug just
+fixed (an unvalidated assumption that an allowlist string is a repo name),
+for a use case (`control_issue` configured with no board at all) the brief
+never asked for and this session has no test coverage proving safe.
+
+### Caching decision and per-cycle cost
+
+`_autospec_conductor_pb_repos` caches the resolved repo array on disk,
+under `${AUTOSPEC_STATE_DIR:-$HOME/.autospec}/board-cache/<url-shasum>-repos.json`,
+with the SAME TTL semantics `autonomous-promote-open-issues.sh`'s
+`board_plan()` already uses (`project_board.ttl` from the bridge, default
+300s; same URL-shasum keying scheme; same atomic per-process-tmp + `mv`
+write pattern to avoid multi-worker races at a shared TTL boundary).
+
+I deliberately did **not** try to opportunistically read the promoter's
+own plan cache (`<url-shasum>.json`, which also carries a `.repos` field)
+instead of resolving separately. Reusing it would make Step 1c's
+correctness depend on whether Tier 1.5 promotion happened to already run
+earlier in the *same* cycle and populate that cache fresh — an incidental
+scheduling fact, not an explicit contract, and one that varies by whether
+a given fleet even runs board-driven promotion at all. A dedicated
+`-repos.json` cache file keeps Step 1c self-contained (its own cache
+independent of another subsystem's read/write timing) while still sharing
+the same directory and TTL *policy*, so an operator running both
+subsystems on one board only has one TTL number to reason about, not two
+different cache lifetimes.
+
+Per-cycle cost:
+- **Cache hit** (the overwhelming majority of cycles once warm): one
+  `stat` + one `jq` parse of a small cached JSON array. No `gh` calls, no
+  resolver subprocess exec.
+- **Cache miss** (first cycle after start, or once every TTL seconds —
+  default 300s / 5 minutes): exactly the two `gh` calls
+  `project-board-resolve.sh --emit repos` documents (project field-list +
+  item-list). It does not pay the `--emit plan` mode's O(repos) per-repo
+  closed-issue join, which is gated on `--emit plan` only.
+
+So a conductor polling every 60s (`CONDUCTOR_POLL_INTERVAL` typical value)
+pays board-resolution network cost roughly once per 5 cycles, not once per
+cycle — the same amortization ratio the promoter already relies on for its
+own board reads.
+
+### New red/green proofs
+
+`tests/autospec/project-board-control-mirror-caller.bats` grew from 5 to
+**8** tests. All safety properties from the first pass still hold and are
+still covered (opt-in, mirror-failure-never-blocks, same-cycle visibility);
+three tests are new or rewritten specifically for this bug:
+
+1. **`a glob allowlist resolves through the board to concrete repos, never
+   a literal glob`** (rewritten from the original "invoked once with
+   right args" test) — allowlist `["o/*"]`, board resolves to
+   `["o/a","o/b"]`. Asserts (via the REAL, unmodified
+   `project-board-control-mirror.sh` and a logging `gh` stub) that no `gh`
+   call anywhere contains a literal `*`, and that `o/a`/`o/b` are both
+   named — end-to-end proof the glob never reaches the API and the real
+   resolved repos do.
+2. **`the control issue's own out-of-allowlist repo makes no gh call
+   naming it`** (kept from the first pass, now exercised with a live
+   resolve returning real in-scope repos so the mirror script's own
+   `allowed(ctl_repo)` gate is what's actually being tested, not an
+   incidentally-empty repo set).
+3. **`a board-resolved repo outside the allowlist is skipped while allowed
+   repos are still reached`** (new) — allowlist `["o/a"]`, board resolves
+   to `["o/a","o/b"]`. Proves `o/b` (a genuine board repo the operator
+   never allowlisted) never appears in any `gh` call while `o/a` does.
+4. **`a resolver failure makes zero mirror invocations and leaves the
+   cycle unaffected`** (new) — resolver exits 1; asserts zero
+   `project-board-control-mirror.sh` invocations and the gate still runs.
+5. **`an empty resolved repo set makes zero mirror invocations and leaves
+   the cycle unaffected`** (new) — resolver returns `[]`; same assertions.
+
+RED proof: reverted `--repos "$_pb_repos_csv"` back to
+`--repos "$_pb_allowlist_csv"` (the exact bug reported) via a scripted
+in-place edit, ran the suite:
+
+```
+not ok 1 conductor: a glob allowlist resolves through the board to concrete repos, never a literal glob
+not ok 7 conductor: a resolver failure makes zero mirror invocations and leaves the cycle unaffected
+not ok 8 conductor: an empty resolved repo set makes zero mirror invocations and leaves the cycle unaffected
+```
+(tests 2–6 stayed green — expected, since those properties are independent
+of where `--repos` is sourced from). Restored via
+`cp /tmp/autospec-loop.sh.bak3 scripts/lib/autospec-loop.sh` followed by
+`diff` confirming byte-identical restoration. `git checkout --` was never
+used at any point in this session.
+
+### Final test numbers (foreground, real)
+
+- `tests/autospec/project-board-control-mirror-caller.bats`: **8 passed**
+- `tests/autospec/project-board-control-mirror.bats`: **23 passed**
+  (unmodified script; confirmed independently grown to 23, matching the
+  reviewer's note — not the original brief's estimate of 20)
+- `tests/autospec/project-board-config-wiring.bats`: **8 passed**
+- `tests/autospec/test_conductor_wiring.bats`: **34 passed** (no
+  regressions)
+- `tests/autospec/test_conductor_accountability.bats`: **2 passed** (no
+  regressions)
+- `bash -n` clean on `scripts/lib/autospec-loop.sh`,
+  `scripts/project-board-control-mirror.sh`, and
+  `scripts/project-board-resolve.sh`
