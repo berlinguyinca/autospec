@@ -124,7 +124,7 @@ repo_count="$(yq -r '.repos | length' "$config")"
 idx=0
 while [ "$idx" -lt "$repo_count" ]; do
     [ "$scheduled" -lt "$capacity" ] || break
-    enabled="$(yq -r ".repos[$idx].enabled // true" "$config")"
+    enabled="$(yq -r ".repos[$idx].enabled != false" "$config")"
     if [ "$enabled" != "true" ]; then idx=$((idx + 1)); continue; fi
 
     repo_url="$(yq -r ".repos[$idx].url" "$config")"
