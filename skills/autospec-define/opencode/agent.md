@@ -153,26 +153,28 @@ git remote get-url origin 2>/dev/null   # must contain github.com
 
 If **either** check fails — no git repo, or no GitHub remote — bootstrap a new repo:
 
-1. **Suggest a name.** Slugify the feature description: lowercase, hyphens, drop stop-words, prefix with the obvious stack if inferable (e.g. "Go TUI for X" → `go-tui-x`; "Python ML pipeline that does Y" → `py-ml-y`). Offer 1–2 candidates.
+1. **Resolve the language.** Write the feature description to a temp file and call `scripts/classify-language.sh <temp-file> --json`. Parse the JSON: `lang`, `source`, `rationale`, `deterministic`, `confidence`. If `lang` is not `unknown` and `deterministic` is `true`, the language is unambiguous — pre-fill it in the bootstrap question below. If `lang` is `unknown` or `deterministic` is `false`, ask the operator which language to use. If `classify-language.sh` is missing or exits non-zero, fail closed: do not bootstrap; tell the user the classifier is unavailable and stop.
 
-2. **Ask the user once** (single interactive question; combine the three sub-questions if your harness supports it, otherwise ask sequentially):
-   - **Name** (your top suggestion as default).
+2. **Suggest a name.** Slugify the feature description: lowercase, hyphens, drop stop-words, prefix with the resolved language if present (e.g. `go` → `go-tui-x`; `python` → `py-ml-y`). Offer 1–2 candidates.
+
+3. **Ask the user once** (single interactive question; combine the three sub-questions if your harness supports it, otherwise ask sequentially):
+   - **Name** (your top suggestion as default, pre-filled with the resolved language prefix).
    - **Visibility**: `private` | `public` (default: private).
    - **Owner**: enumerate via `gh org list`; default to the user's personal account.
 
-3. **Initialize locally**:
+4. **Initialize locally**:
    - If `.git` is absent: `git init -b main`.
-   - Write a stack-appropriate `.gitignore` (Go: `bin/ vendor/ *.exe *.test`; Node: `node_modules/ dist/ .next/ .env*`; Python: `__pycache__/ .venv/ *.egg-info/ build/ dist/`; mixed/unknown: skip).
+   - Write a `.gitignore` matching the resolved language (Go: `bin/ vendor/ *.exe *.test`; Node: `node_modules/ dist/ .next/ .env*`; Python: `__pycache__/ .venv/ *.egg-info/ build/ dist/`; Rust: `target/`; mixed/unknown: skip).
    - Write a one-line `README.md` containing the feature description.
    - Write a starter `AGENTS.md` listing the project's coding standards (TDD non-negotiable, no DB mocks, conventional commits, branch-per-issue, no force-push) — this is the source of truth every agent reads.
    - `git add -A && git commit -m "chore: initial scaffold"`.
 
-4. **Create the remote and push**:
+5. **Create the remote and push**:
    ```bash
    gh repo create <owner>/<name> --<private|public> --source=. --remote=origin --push
    ```
 
-5. **Verify**: `gh repo view <owner>/<name> --json url,defaultBranchRef`. Capture `<owner>/<name>` as `{repo}` — every subsequent phase uses this value.
+6. **Verify**: `gh repo view <owner>/<name> --json url,defaultBranchRef`. Capture `<owner>/<name>` as `{repo}` — every subsequent phase uses this value.
 
 If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>` remote), capture that as `{repo}` and skip the bootstrap.
 

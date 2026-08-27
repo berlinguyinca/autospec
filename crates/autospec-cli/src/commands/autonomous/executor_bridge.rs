@@ -904,24 +904,50 @@ pub(crate) fn recoverable_interrupted_harness_receipt(
     interrupted_harness_receipt_is_recoverable(&state_path, &state)
 }
 
+/// A probe of an exact executor invocation failed.
+#[derive(Debug)]
+pub(crate) enum InvocationProbeError {
+    /// The persisted invocation's identity does not match the durable local
+    /// acquisition; the probe fails closed.
+    IdentityMismatch,
+    /// A file-system or invocation-state failure while inspecting the probe path.
+    State(String),
+}
+
+impl std::fmt::Display for InvocationProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IdentityMismatch => formatter
+                .write_str("executor invocation does not match the durable local acquisition"),
+            Self::State(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
 pub(crate) fn exact_invocation_exists(
     state_dir: &Path,
     lease: &crate::commands::claim::ClaimLease,
-) -> Result<bool, String> {
+) -> Result<bool, InvocationProbeError> {
     let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
     let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
     match fs::symlink_metadata(&state_path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect executor invocation: {error}")),
+        Err(error) => {
+            return Err(InvocationProbeError::State(format!(
+                "inspect executor invocation: {error}"
+            )))
+        }
     }
-    validate_private_state_file(&state_path)?;
+    validate_private_state_file(&state_path).map_err(InvocationProbeError::State)?;
     let state = PersistedInvocation::from_json(
-        &fs::read_to_string(&state_path)
-            .map_err(|error| format!("read executor invocation: {error}"))?,
-    )?;
+        &fs::read_to_string(&state_path).map_err(|error| {
+            InvocationProbeError::State(format!("read executor invocation: {error}"))
+        })?,
+    )
+    .map_err(InvocationProbeError::State)?;
     if !invocation_matches_lease(&state, lease) {
-        return Err("executor invocation does not match the durable local acquisition".to_string());
+        return Err(InvocationProbeError::IdentityMismatch);
     }
     Ok(true)
 }

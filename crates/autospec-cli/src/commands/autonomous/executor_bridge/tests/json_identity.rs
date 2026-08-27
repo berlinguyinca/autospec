@@ -106,9 +106,12 @@ fn autonomous_executor_bridge_exact_invocation_probe_rejects_foreign_state() {
     foreign.identity.worker_id = "foreign-worker".to_string();
     write_invocation_atomic(&state_path, &foreign).expect("persist foreign invocation");
 
-    assert!(bridge::exact_invocation_exists(&state_dir, &lease)
-        .expect_err("foreign invocation must fail closed")
-        .contains("does not match"));
+    let error = bridge::exact_invocation_exists(&state_dir, &lease)
+        .expect_err("foreign invocation must fail closed");
+    assert!(
+        matches!(error, bridge::InvocationProbeError::IdentityMismatch),
+        "foreign invocation must fail closed as an identity mismatch, got: {error:?}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 

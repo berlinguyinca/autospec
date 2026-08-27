@@ -3016,7 +3016,7 @@ fn executor_receipt_failure_is_recoverable(
     }
     executor_bridge::exact_invocation_exists(&executor_state, &active)
         .map(|exists| !exists)
-        .map_err(CommandFailure::diagnostic)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
 fn recover_completed_bridge_lease(
