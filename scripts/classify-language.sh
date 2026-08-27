@@ -10,33 +10,39 @@
 # Output (--json):  {"lang":"rust","source":"inherited","rationale":"...","deterministic":true,"confidence":0.95}
 #
 #   lang          closed label set: rust|go|python|typescript|javascript|java|bash|ruby|csharp|markdown|mixed|unknown
-#   source        explicit | inherited | unknown   (repo-dominant and chosen arrive with ranks 3-5)
-#   deterministic false only on a step-4 tie (ranks 3-5, not implemented here)
+#   source        explicit | inherited | repo-dominant | chosen | unknown
+#   deterministic false only when a rank-5 tie reaches a Tier-B (omc) call
 #
-# Precedence (ranks 1-2, per docs/specs/2026-08-12-language-selection-axis-design.md):
+# Precedence (ranks 1-5, per docs/specs/2026-08-12-language-selection-axis-design.md):
 #   rank 1  explicit-with-path — a language named within one line of a target path or a
 #           create/add/touch/write <path> phrase; outranks inheritance
 #   rank 2  inherited — ## Files touched paths resolve via extension to one language;
 #           2+ distinct languages -> lang:mixed
-#   neither -> lang:unknown, confidence 0.0 (abstention, never a guess)
+#   rank 3  explicit-prose — the body names exactly one canonical language in prose
+#   rank 4  repo-dominant — the repo's dominant language at confidence > 0.5
+#   rank 5  chosen — a spec-table row matches the body; ties resolve by repo affinity,
+#           then the operator default, then a single Tier-B (omc) call
+#   none    -> lang:unknown, confidence 0.0 (abstention, never a guess)
 #
 # Telemetry: appends one JSON line per invocation to .autospec/telemetry/classify-language.jsonl
 #
 # Exit codes:
 #   0  — success
 #   1  — usage error / body file not found
-#   2  — escalation failed (ranks 3-5, not implemented here)
+#   2  — escalation failed (Tier-B tie-break unavailable)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+CONFIG_FILE="${AUTOSPEC_CONFIG_FILE:-$REPO_ROOT/.autospec/autospec.yml}"
+EXIT_CODE=0
 
 usage() {
   cat <<'EOF'
 Usage: classify-language.sh <body-file> [--json]
        classify-language.sh --help
 
-Deterministic language classifier for autospec issues (ranks 1-2).
+Deterministic language classifier for autospec issues (ranks 1-5).
 
 Arguments:
   <body-file>    Path to the issue body file (markdown)
@@ -51,7 +57,7 @@ Output (--json):
 Exit codes:
   0  success
   1  usage error / body file not found
-  2  escalation failed (ranks 3-5, not implemented here)
+  2  escalation failed (Tier-B tie-break unavailable)
 EOF
 }
 
@@ -98,6 +104,8 @@ if [ ! -f "$BODY_FILE" ]; then
   err "body file not found: $BODY_FILE"
   exit 1
 fi
+
+BODY="$(cat "$BODY_FILE")"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -243,6 +251,178 @@ json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# Count comma-separated entries in a csv string (empty -> 0).
+count_csv() {
+  local s="${1:-}" commas
+  [ -n "$s" ] || { printf '0'; return 0; }
+  commas="$(printf '%s' "$s" | tr -cd ',' | wc -c)"
+  printf '%s' $((commas + 1))
+}
+
+# Map a lowercased alphabetic token to a canonical closed-set language.
+# Emits nothing for non-language tokens.
+prose_lang() {
+  local t="${1:-}"
+  case "$t" in
+    typescript | ts) printf 'typescript' ;;
+    javascript | js) printf 'javascript' ;;
+    python) printf 'python' ;;
+    rust) printf 'rust' ;;
+    golang | go) printf 'go' ;;
+    java) printf 'java' ;;
+    ruby) printf 'ruby' ;;
+    bash | shell | sh) printf 'bash' ;;
+    csharp) printf 'csharp' ;;
+    markdown | md) printf 'markdown' ;;
+    *) return 0 ;;
+  esac
+}
+
+# Rank 3: explicit-prose. Exactly one canonical language named in the body
+# (path tokens stripped). Sets RANK3_LANG.
+RANK3_LANG=""
+rank3() {
+  local w tok lang distinct=""
+  set -f
+  for w in $(printf '%s\n' "$BODY" | pathless); do
+    tok="$(printf '%s' "$w" | tr -cd '[:alpha:]' | tr '[:upper:]' '[:lower:]')"
+    [ -n "$tok" ] || continue
+    lang="$(prose_lang "$tok")"
+    [ -n "$lang" ] || continue
+    case "$distinct" in
+      *"|${lang}|"*) ;;
+      *) distinct="${distinct}|${lang}|" ;;
+    esac
+  done
+  set +f
+  local pipes
+  pipes="$(printf '%s' "$distinct" | tr -cd '|' | wc -c)"
+  [ $((pipes / 2)) -eq 1 ] || return 1
+  RANK3_LANG="${distinct#|}"
+  RANK3_LANG="${RANK3_LANG%|}"
+  return 0
+}
+
+# Rank 4: repo-dominant. Always well-formed: "<lang|- > <conf> [<csv>]".
+REPO_DOM="- 0.0"
+repo_dominant_call() {
+  REPO_DOM="$(bash "$SCRIPT_DIR/autospec-language-table.sh" repo_dominant "$REPO_ROOT" 2>/dev/null)" || REPO_DOM="- 0.0"
+}
+
+# Rank 5: chosen. Match the lowercased body against the spec's 6-row table;
+# sets CHOSEN_CANDS to a sorted comma list of candidate languages.
+CHOSEN_CANDS=""
+score_chosen_rows() {
+  local low cands=" " l w canon extracted
+  low="$(printf '%s' "$BODY" | tr '[:upper:]' '[:lower:]')"
+  if printf '%s' "$low" | grep -qE 'single binary|no runtime dependency|distributed to users'; then
+    for l in go rust; do
+      case "$cands" in *" $l "*) ;; *) cands="$cands $l" ;; esac
+    done
+  fi
+  if printf '%s' "$low" | grep -qE 'hot loop|parser|memory[- ]bound|gc[- ]pause|must not gc'; then
+    case "$cands" in *" rust "*) ;; *) cands="$cands rust" ;; esac
+  fi
+  if printf '%s' "$low" | grep -qE 'glue over|200 lines|<=200|posix'; then
+    case "$cands" in *" bash "*) ;; *) cands="$cands bash" ;; esac
+  fi
+  if printf '%s' "$low" | grep -qE 'web ui|browser'; then
+    case "$cands" in *" typescript "*) ;; *) cands="$cands typescript" ;; esac
+  fi
+  if printf '%s' "$low" | grep -qE '\bml\b|dataframe|scientific'; then
+    case "$cands" in *" python "*) ;; *) cands="$cands python" ;; esac
+  fi
+  if printf '%s' "$low" | grep -qE 'librar|sdk'; then
+    extracted="$(printf '%s' "$low" | grep -oE '\b(golang|typescript|javascript|python|rust|ruby|bash|csharp|java|go)\b' || true)"
+    for w in $extracted; do
+      canon="$(prose_lang "$w")"
+      [ -n "$canon" ] || continue
+      case "$cands" in *" $canon "*) ;; *) cands="$cands $canon" ;; esac
+    done
+  fi
+  [ -n "${cands// /}" ] || return 1
+  CHOSEN_CANDS="$(printf '%s\n' $cands | awk 'NF' | LC_ALL=C sort -u | paste -sd, -)"
+  return 0
+}
+
+# Operator default from .autospec/autospec.yml ("language: <lang>"),
+# canonicalized; empty when absent or outside the closed set.
+operator_default() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  local v
+  v="$(sed -nE 's/^[[:space:]]*language:[[:space:]]*([A-Za-z]+).*/\1/p' "$CONFIG_FILE" | head -n 1 || true)"
+  [ -n "$v" ] || return 0
+  prose_lang "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
+}
+
+# Tier-B (omc) tie-break: at most one call. Sets CHOSEN_LLM_LANG when omc
+# replies with one of the candidates.
+CHOSEN_LLM_LANG=""
+llm_tiebreak() {
+  local cands="$1" prompt raw canon t
+  command -v omc >/dev/null 2>&1 || return 1
+  prompt="$(printf '%s' "$BODY" | head -c 3000 || true)"
+  raw="$(printf '%s\nCANDIDATE LANGUAGES: %s\nPick exactly one. Reply with the language name only.\n' \
+    "$prompt" "$cands" | omc ask 2>/dev/null | head -n 1 || true)"
+  [ -n "$raw" ] || return 1
+  canon="$(prose_lang "$(printf '%s' "$raw" | tr -cd '[:alpha:]' | tr '[:upper:]' '[:lower:]')")"
+  [ -n "$canon" ] || return 1
+  set -f
+  for t in ${cands//,/ }; do
+    if [ "$t" = "$canon" ]; then
+      CHOSEN_LLM_LANG="$canon"
+      set +f
+      return 0
+    fi
+  done
+  set +f
+  return 1
+}
+
+# Tie-break chain: repo-affinity (exactly one candidate hit) -> operator
+# default (must be among candidates) -> Tier-B. Sets CHOSEN_LANG/CHOSEN_SOURCE.
+CHOSEN_LANG=""
+CHOSEN_SOURCE=""
+resolve_tie() {
+  local cands="$1" affinity="${2:-}"
+  local aff=",$affinity," pool=",$cands," t op
+  local hit_count=0
+  set -f
+  for t in ${cands//,/ }; do
+    case "$aff" in
+      *",$t,"*) hit_count=$((hit_count + 1)) ;;
+    esac
+  done
+  if [ "$hit_count" -eq 1 ]; then
+    for t in ${cands//,/ }; do
+      case "$aff" in
+        *",$t,"*) CHOSEN_LANG="$t" ;;
+      esac
+    done
+    CHOSEN_SOURCE="repo-affinity"
+    set +f
+    return 0
+  fi
+  op="$(operator_default)"
+  if [ -n "$op" ]; then
+    case "$pool" in
+      *",$op,"*)
+        CHOSEN_LANG="$op"
+        CHOSEN_SOURCE="operator default"
+        set +f
+        return 0
+        ;;
+    esac
+  fi
+  set +f
+  if llm_tiebreak "$cands"; then
+    CHOSEN_LANG="$CHOSEN_LLM_LANG"
+    CHOSEN_SOURCE="tier-b"
+    return 0
+  fi
+  return 1
+}
+
 # ── classify ───────────────────────────────────────────────────────────────────
 
 LANG_VAL="unknown"
@@ -270,7 +450,52 @@ elif rank2 "$BODY_FILE"; then
     RATIONALE="Inherited: Files touched span ${RANK2_COUNT} languages (${RANK2_LIST}) (rank 2)"
   fi
 else
-  RATIONALE="Abstained: no explicit-with-path signal and no resolvable Files-touched language (ranks 1-2)"
+  REPO_AFFINITY=""
+  if rank3; then
+    LANG_VAL="$RANK3_LANG"
+    SOURCE="explicit"
+    CONFIDENCE="0.8"
+    RATIONALE="Explicit-prose: body names exactly one language, ${LANG_VAL} (rank 3)"
+  else
+    repo_dominant_call
+    read -r rd_lang rd_conf rd_csv <<< "$REPO_DOM"
+    REPO_AFFINITY="${rd_csv:-}"
+    if [ "$rd_lang" != "-" ]; then
+      LANG_VAL="$rd_lang"
+      SOURCE="repo-dominant"
+      CONFIDENCE="$rd_conf"
+      RATIONALE="Repo-dominant: ${LANG_VAL} dominates the repo at ${rd_conf} (rank 4)"
+    elif score_chosen_rows; then
+      if [ "$(count_csv "$CHOSEN_CANDS")" -eq 1 ]; then
+        LANG_VAL="$CHOSEN_CANDS"
+        SOURCE="chosen"
+        CONFIDENCE="0.7"
+        RATIONALE="Chosen: unique spec-table row match, ${LANG_VAL} (rank 5)"
+      elif resolve_tie "$CHOSEN_CANDS" "$REPO_AFFINITY"; then
+        LANG_VAL="$CHOSEN_LANG"
+        SOURCE="chosen"
+        if [ "$CHOSEN_SOURCE" = "tier-b" ]; then
+          CONFIDENCE="0.6"
+          DETERMINISTIC=false
+        else
+          CONFIDENCE="0.7"
+        fi
+        RATIONALE="Chosen: rank-5 tie among (${CHOSEN_CANDS}) broken by ${CHOSEN_SOURCE} -> ${LANG_VAL}"
+      else
+        LANG_VAL="unknown"
+        SOURCE="unknown"
+        CONFIDENCE="0.0"
+        DETERMINISTIC=false
+        EXIT_CODE=2
+        RATIONALE="Abstained: rank-5 tie among (${CHOSEN_CANDS}) unresolved, Tier-B unavailable"
+      fi
+    else
+      LANG_VAL="unknown"
+      SOURCE="unknown"
+      CONFIDENCE="0.0"
+      RATIONALE="Abstained: no explicit-with-path, Files-touched, prose, repo-dominant, or spec-table signal (ranks 1-5)"
+    fi
+  fi
 fi
 
 # ── telemetry ──────────────────────────────────────────────────────────────────
@@ -301,3 +526,5 @@ else
 <!-- autospec-language:end -->
 EOF
 fi
+
+exit "$EXIT_CODE"
