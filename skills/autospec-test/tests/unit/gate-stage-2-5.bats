@@ -23,6 +23,12 @@ setup() {
     TARGETS_DIR="$REPO_ROOT/skills/autospec-test/test-targets"
 }
 
+teardown() {
+    if [ -n "${TEST_TMPDIR:-}" ]; then
+        rm -rf "$TEST_TMPDIR"
+    fi
+}
+
 # ── Runner paths actually exist where the fixed script looks for them ───────
 
 @test "invariants/run-structural.mjs exists at the path run_metric now resolves" {
@@ -113,4 +119,66 @@ setup() {
 @test "a metric JSON with explicit passed:false is honored, not coerced to true" {
     result=$(printf '{"metric":"F","passed":false}' | jq -r 'if .passed == null then true else .passed end')
     [ "$result" = "false" ]
+}
+
+# ── verify-seeds.mjs path-resolution bug: same shape, fifth site ────────────
+# VERIFY_SEEDS was also resolved at "$SCRIPT_DIR/../invariants/verify-seeds.mjs",
+# a directory that does not exist. It's [ -f ]-gated with a silent skip (no
+# stub-pass JSON, no log line — the whole edge_case_seeds check just never
+# ran), so seed verification silently no-opped for as long as that path was
+# wrong. The real file lives at "$SCRIPT_DIR/seed-shapes/verify-seeds.mjs".
+
+@test "seed-shapes/verify-seeds.mjs exists at the path the seeds check now resolves" {
+    [ -f "$SCRIPTS_DIR/seed-shapes/verify-seeds.mjs" ]
+}
+
+@test "gate-stage-2-5.sh no longer references the nonexistent ../invariants/verify-seeds.mjs path" {
+    run grep -q '\.\./invariants/verify-seeds\.mjs' "$GATE"
+    [ "$status" -ne 0 ]
+}
+
+# Overwrite the real verify-seeds.mjs (at its correct, resolved path) with a
+# stub that writes a distinctive line and exits non-zero. If the gate still
+# resolved the old, nonexistent path, [ -f ] would be false, the whole seeds
+# block would be silently skipped (no output, no log line at all), and this
+# stub would never run. gate-stage-2-5.sh streams the runner's combined
+# stdout+stderr straight through (`node "$VERIFY_SEEDS" ... 2>&1`, not
+# captured into a variable), so the stub's own distinctive line appearing in
+# the gate's output is direct proof the runner was actually invoked.
+#
+# Note: gate-stage-2-5.sh's `if ! node ... 2>&1; then SEED_EXIT=$?` reads
+# $? from the negated `if !` test, not from node's actual exit code — it is
+# always 0, so the `[ "$SEED_EXIT" -eq 2 ]` fatal-exit branch is dead code
+# regardless of what verify-seeds.mjs exits with. That is a separate,
+# pre-existing bug outside the scope of this path fix (see the report); this
+# test does not depend on that branch and asserts only the fall-through
+# ALL_PASSED=false behavior that actually fires today.
+@test "edge_case_seeds declared: verify-seeds.mjs is actually invoked, not silently skipped" {
+    TEST_TMPDIR="$(mktemp -d /tmp/autospec-gate25-seeds-bats-XXXXXX)"
+    STUB_SCRIPTS="$TEST_TMPDIR/scripts"
+    cp -R "$SCRIPTS_DIR" "$STUB_SCRIPTS"
+
+    cat > "$STUB_SCRIPTS/seed-shapes/verify-seeds.mjs" <<'EOF'
+#!/usr/bin/env node
+process.stderr.write('stub-seed-verify-refused\n');
+process.exit(2);
+EOF
+    chmod +x "$STUB_SCRIPTS/seed-shapes/verify-seeds.mjs"
+
+    local target_dir="$TEST_TMPDIR/target"
+    mkdir -p "$target_dir/.autospec"
+    cat > "$target_dir/.autospec/test.yml" <<'YAML'
+mode: strict_isolation
+e2e:
+  invariants_v2:
+    enabled: true
+    edge_case_seeds:
+      household_test_family:
+        require_shapes:
+          - name: overdue_task
+            count_min: 1
+YAML
+
+    run bash "$STUB_SCRIPTS/gate-stage-2-5.sh" "$target_dir" < /dev/null
+    printf '%s' "$output" | grep -q 'stub-seed-verify-refused'
 }

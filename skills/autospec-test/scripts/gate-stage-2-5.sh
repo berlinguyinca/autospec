@@ -66,7 +66,7 @@ if command -v yq >/dev/null 2>&1; then
 fi
 
 if [ -n "$SEEDS_DECLARED" ]; then
-    VERIFY_SEEDS="$SCRIPT_DIR/../invariants/verify-seeds.mjs"
+    VERIFY_SEEDS="$SCRIPT_DIR/seed-shapes/verify-seeds.mjs"
     if [ -f "$VERIFY_SEEDS" ]; then
         if ! node "$VERIFY_SEEDS" "$TARGET_DIR" 2>&1; then
             SEED_EXIT=$?
