@@ -248,3 +248,82 @@ derived copies and their goldens stay consistent with the edited source.
 - `git` stubbed on `PATH` in every test as before; stub-shadow confirmed
   with `[ "$(command -v git)" = "$TMP/bin/git" ]` in `setup()`. No test
   touches a real remote or the operator's home directory.
+
+## Round 3 — marker name split (from independent re-review)
+
+Round 2's fix made the dirty/non-ff skip loud, but used one shared marker
+name (`fleet_provision_update_skipped`) discriminated only by a `reason=`
+field. An independent re-review flagged that this is inconsistent with
+every sibling marker in the same function — `fleet_provision_clone_failed`,
+`_fetch_failed`, `_status_failed`, `_path_escape` — and with the analogous
+set in `worktree-guard.sh` (`code_health:dirty`, `code_health:stale_base`,
+`code_health:wrong_branch`), all of which carry the distinction in the
+marker *name*, not a shared name plus a field. An operator following that
+established convention would grep for a dirty-checkout-shaped name, get
+zero hits, and conclude the condition never fired — the same fail-quiet
+trap this whole fix round exists to close, one level down.
+
+### New marker names
+
+`fleet_update_checkout` in `fleet-lib.sh` now emits two distinct marker
+names, matching the sibling naming shape in the same function:
+
+- Dirty checkout: `code_health:fleet_provision_dirty_checkout repo=<normalized> path=<checkout_path>`
+- Non-fast-forwardable: `code_health:fleet_provision_not_fast_forward repo=<normalized> path=<checkout_path>`
+
+(The `reason=` field was dropped — the name alone now carries the
+distinction, per the reviewer's requirement; `repo=` and `path=` are kept
+on both, matching every other marker in the function.)
+
+Full marker inventory for `fleet_update_checkout`/`fleet_clone_checkout`/
+`fleet_provision_repo` after this round:
+
+| Condition | Marker name |
+|---|---|
+| Clone fails | `fleet_provision_clone_failed` |
+| `git status` fails | `fleet_provision_status_failed` |
+| Dirty checkout (skip) | `fleet_provision_dirty_checkout` |
+| `git fetch` fails | `fleet_provision_fetch_failed` |
+| Update would not fast-forward (skip) | `fleet_provision_not_fast_forward` |
+| Computed checkout path escapes workspace | `fleet_provision_path_escape` |
+| Checkout path occupied by a non-git entry | `fleet_provision_path_occupied` |
+| `mkdir -p` of parent fails | `fleet_provision_mkdir_failed` |
+
+### Test updates
+
+`tests/fleet/fleet-provisioning.bats` test 4 ("a checkout with uncommitted
+changes is skipped, not reset") and test 5 ("a non-fast-forwardable update
+is skipped, not force-updated") now assert the new marker names directly
+(`code_health:fleet_provision_dirty_checkout` and
+`code_health:fleet_provision_not_fast_forward` respectively), using the
+same `[ -n "$(printf '%s' "$output" | grep -F -- '...')" ]` single-bracket
+form as every other rewritten assertion from round 2 — safe in any
+position, never a non-final `[[ ]]` or `!`. `grep -n '\[\[' tests/fleet/fleet-provisioning.bats`
+confirms zero `[[` occurrences remain.
+
+### Integrity probe results (round 3)
+
+- **Probe C** — changed the dirty-checkout marker name in `fleet-lib.sh`
+  from `fleet_provision_dirty_checkout` to `fleet_provision_dirty_repo`:
+  test 4 went **RED**. Restored via `cp` + `diff` — byte-identical.
+- **Probe D** — changed the non-ff marker name from
+  `fleet_provision_not_fast_forward` to `fleet_provision_non_ff`: test 5
+  went **RED**. Restored via `cp` + `diff` — byte-identical. Neither probe
+  used `git checkout --`.
+
+### No prose/trio changes needed
+
+`grep -rn "fleet_provision_update_skipped\|reason=dirty_checkout\|reason=not_fast_forward"`
+across `skills/` and `tests/` returned no hits before this round's edit —
+neither the old nor new marker names are referenced in `SKILL.md`,
+`README.md`, or the codex/opencode mirrors, so `derive-trio.sh --in-place`
+and `gen-skill-goldens.sh` were not needed this round (goldens are
+unchanged from round 2).
+
+### Final verification (round 3)
+
+- `bats tests/fleet/` — 41/41 pass.
+- `bats tests/fleet/ tests/unit/test_autospec_fleet_url.bats` — 46/46 pass.
+- `bash -n` clean on both touched scripts.
+- `shellcheck` on both: only the same two pre-existing info-level notices
+  (SC1091, SC2317) — no new warnings.

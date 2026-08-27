@@ -180,10 +180,15 @@ fleet_update_checkout() {
         # This is a permanent, invisible stall in an unattended multi-week
         # fleet if it's only a plain `fleet:` line — the operator has no
         # signal to explain why a repo quietly stopped progressing. Loud
-        # code_health: marker, distinct reason from the non-ff case below
-        # (dirty needs "go clean up the checkout"; non-ff needs "go resolve
-        # a diverged history" — different operator responses).
-        printf 'code_health:fleet_provision_update_skipped repo=%s path=%s reason=dirty_checkout\n' \
+        # code_health: marker with a name distinct from the non-ff case
+        # below, matching every sibling marker in this function
+        # (fleet_provision_clone_failed, _fetch_failed, _status_failed,
+        # _path_escape all carry the distinction in the NAME, not a shared
+        # name plus a field) — dirty needs "go clean up the checkout";
+        # non-ff needs "go resolve a diverged history"; an operator
+        # grepping by marker name for one must not come up empty because
+        # the other fired instead.
+        printf 'code_health:fleet_provision_dirty_checkout repo=%s path=%s\n' \
             "$normalized" "$checkout_path" >&2
         printf 'fleet: %s: local changes present at %s; skipping update\n' \
             "$normalized" "$checkout_path"
@@ -200,7 +205,7 @@ fleet_update_checkout() {
         printf 'fleet: %s: updated %s\n' "$normalized" "$checkout_path"
         return 0
     fi
-    printf 'code_health:fleet_provision_update_skipped repo=%s path=%s reason=not_fast_forward\n' \
+    printf 'code_health:fleet_provision_not_fast_forward repo=%s path=%s\n' \
         "$normalized" "$checkout_path" >&2
     printf 'fleet: %s: update at %s would not fast-forward; skipping\n' \
         "$normalized" "$checkout_path"

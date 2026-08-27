@@ -112,8 +112,7 @@ teardown() {
     [ "$status" -eq 0 ]
     [ -n "$(printf '%s' "$output" | grep -F -- 'local changes present')" ]
     [ -n "$(printf '%s' "$output" | grep -F -- 'skipping')" ]
-    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_update_skipped')" ]
-    [ -n "$(printf '%s' "$output" | grep -F -- 'reason=dirty_checkout')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_dirty_checkout')" ]
     run grep -q 'fetch' "$GIT_LOG"
     [ "$status" -ne 0 ]
 }
@@ -125,8 +124,7 @@ teardown() {
     run bash "$INIT" --workspace "$WORKSPACE" "https://github.com/org/repo-a.git"
     [ "$status" -eq 0 ]
     [ -n "$(printf '%s' "$output" | grep -F -- 'would not fast-forward')" ]
-    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_update_skipped')" ]
-    [ -n "$(printf '%s' "$output" | grep -F -- 'reason=not_fast_forward')" ]
+    [ -n "$(printf '%s' "$output" | grep -F -- 'code_health:fleet_provision_not_fast_forward')" ]
     run grep -q -- '--hard\|reset\|clean' "$GIT_LOG"
     [ "$status" -ne 0 ]
 }
