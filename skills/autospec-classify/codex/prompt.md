@@ -200,7 +200,14 @@ For each candidate issue:
    - `gh label create reasoning:shallow --color c2e0c6 --force`
      (and reasoning:medium, reasoning:deep).
    - `gh label create needs-quality-bar --color fbca04 --force --repo {repo}` (once at run start, idempotent).
+   - `gh label create lang:<value> --color d4c5f9 --force --repo {repo}` once at run
+     start (idempotent) for each of the 12 values: `lang:rust`, `lang:go`,
+     `lang:python`, `lang:typescript`, `lang:javascript`, `lang:java`,
+     `lang:bash`, `lang:ruby`, `lang:csharp`, `lang:markdown`, `lang:mixed`,
+     `lang:unknown`.
    - `gh issue edit <N> --add-label "ctx:<tier>,reasoning:<depth>" --repo {repo}`.
+     The `lang:<value>` label is applied by the Step 4 language-axis fragment,
+     not here.
    - Skip in `--dry-run`.
 
 4. **Patch body.** Insert a `## Model fit` block immediately before the first
@@ -227,7 +234,132 @@ For each candidate issue:
    against the budget, and adds a second one. Delete the legacy heading and
    everything up to the begin marker first.
 
-   Apply via `gh issue edit <N> --body-file <tmp>`.
+    Apply via `gh issue edit <N> --body-file <tmp>`.
+
+    **Language axis (deterministic).** After the model-fit write, run
+    `apply_lang_step <body-file> <labels-csv>` (function below) on the
+    issue's current body file, with the issue's current label list as the
+    CSV. It invokes the deterministic classifier
+    (`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-language.sh`)
+    twice — once for the canonical `## Language fit` block, once with
+    `--json` for the label value — splices the block into
+    `<body-file>.lang` (idempotent: it replaces the existing
+    `<!-- autospec-language:begin -->` … `<!-- autospec-language:end -->`
+    region in place — including any legacy `## Language fit` heading sitting
+    directly above the markers — or inserts a fresh block before the first
+    `## Dependencies` line, or at end of body if that section is absent),
+    and prints exactly two lines on stdout: the bare language value, then a
+    label fragment — `--add-label lang:<value> --remove-label lang:<old>`
+    if the issue already carries a different `lang:*` label, `--add-label
+    lang:<value>` if it carries none, or `LABEL_NOOP` if it already carries
+    the same one. Apply the fragment with `gh issue edit <N> <fragment>
+    --repo {repo}` and the patched body with `gh issue edit <N> --body-file
+    <body-file>.lang`. `lang:unknown` is a real classification outcome and
+    is applied as-is. Skip both calls in `--dry-run` (print the block and
+    fragment to the preview instead).
+
+    ```bash
+    # autospec-classify lang-step begin
+    apply_lang_step() {
+      # apply_lang_step <body-file> <labels-csv>
+      # Splices the canonical `## Language fit` block (from
+      # scripts/classify-language.sh) into <body-file>.lang and prints
+      # exactly two lines on stdout: the bare language value, then the
+      # label fragment (--add-label lang:<v> [--remove-label lang:<old>]
+      # | LABEL_NOOP).
+      local body_file="$1" labels_csv="${2:-}"
+      local classifier="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-language.sh"
+      local md_block lang old l
+      if ! md_block="$(bash "$classifier" "$body_file")"; then
+        echo "apply_lang_step: classifier failed for $body_file" >&2
+        return 2
+      fi
+      lang="$(bash "$classifier" "$body_file" --json | sed -n 's/.*"lang":"\([^"]*\)".*/\1/p' | sed -n '1p')"
+      if [ -z "$lang" ]; then
+        echo "apply_lang_step: no lang value in classifier --json output" >&2
+        return 2
+      fi
+      old=""
+      if [ -n "$labels_csv" ]; then
+        local IFS=','
+        for l in $labels_csv; do
+          case "$l" in
+            lang:*) old="$l" ;;
+          esac
+        done
+      fi
+      old="${old#lang:}"
+      if ! LANG_BLOCK="$md_block" awk '
+        BEGIN { n = 0 }
+        {
+          n++
+          line[n] = $0
+          b = $0
+          sub(/\r$/, "", b)
+          if (begin == 0 && b ~ /^[[:space:]]*<!-- autospec-language:begin -->[[:space:]]*$/) begin = n
+          if (endm == 0 && b ~ /^[[:space:]]*<!-- autospec-language:end -->[[:space:]]*$/) endm = n
+        }
+        END {
+          if ((begin == 0) != (endm == 0) || (begin != 0 && begin > endm)) {
+            print "lang-splice: unpaired autospec-language markers" > "/dev/stderr"
+            exit 1
+          }
+          if (begin != 0) {
+            del_begin = begin
+            i = begin - 1
+            while (i > 1 && line[i] ~ /^[[:space:]]*$/) i--
+            if (i >= 1 && line[i] ~ /^[[:space:]]*## Language fit[[:space:]]*$/) del_begin = i
+            del_end = endm
+            if (del_begin > 1 && line[del_begin - 1] ~ /^[[:space:]]*$/) del_begin--
+            if (del_end < n && line[del_end + 1] ~ /^[[:space:]]*$/) del_end++
+            k = 0
+            for (i = 1; i <= n; i++) {
+              if (i >= del_begin && i <= del_end) continue
+              k++
+              kept[k] = line[i]
+            }
+          } else {
+            k = n
+            for (i = 1; i <= n; i++) kept[i] = line[i]
+          }
+          ins = 0
+          for (i = 1; i <= k; i++) {
+            t = kept[i]
+            sub(/\r$/, "", t)
+            if (t ~ /^[[:space:]]*## Dependencies[[:space:]]*$/) { ins = i; break }
+          }
+          m = split(ENVIRON["LANG_BLOCK"], bl, "\n")
+          if (ins > 0) {
+            j = ins - 1
+            while (j > 0 && kept[j] ~ /^[[:space:]]*$/) j--
+            for (i = 1; i <= j; i++) print kept[i]
+            if (j > 0) print ""
+            for (i = 1; i <= m; i++) print bl[i]
+            print ""
+            for (i = ins; i <= k; i++) print kept[i]
+          } else {
+            t = k
+            while (t > 0 && kept[t] ~ /^[[:space:]]*$/) t--
+            for (i = 1; i <= t; i++) print kept[i]
+            if (t > 0) print ""
+            for (i = 1; i <= m; i++) print bl[i]
+          }
+        }
+      ' "$body_file" > "$body_file.lang"; then
+        echo "apply_lang_step: splice failed for $body_file" >&2
+        return 2
+      fi
+      printf '%s\n' "$lang"
+      if [ "$old" = "$lang" ]; then
+        printf '%s\n' "LABEL_NOOP"
+      elif [ -n "$old" ]; then
+        printf '%s\n' "--add-label lang:$lang --remove-label lang:$old"
+      else
+        printf '%s\n' "--add-label lang:$lang"
+      fi
+    }
+    # autospec-classify lang-step end
+    ```
 
 5. **Board assignment** (only if `--apply-boards`):
    - Read `~/.autospec/project-map.yml`. If the file is missing, auto-init it
@@ -314,14 +446,18 @@ autospec-classify run summary on {repo}
 - skipped (needs-autospec-template): M
 - ctx:32k=A  ctx:64k=B  ctx:120k=C
 - reasoning:shallow=X  reasoning:medium=Y  reasoning:deep=Z
+- lang:rust=A  lang:go=B  … one entry per observed `lang:*` value
+  (`lang:unknown` is its own entry)
 - boards assigned: <K>  (or "skipped — --apply-boards not set" / "skipped — no project-map.yml")
 ```
 
 ## Hard rules
 
 - Never modify the issue title.
-- Never remove existing labels — only add `ctx:*`, `reasoning:*`,
-  `needs-autospec-template`.
+- Never remove existing labels, except that the language axis may replace a
+  prior `lang:*` label (one `--remove-label lang:<old>` per
+  re-classification). Otherwise only add `ctx:*`, `reasoning:*`,
+  `needs-autospec-template`, `lang:*`.
 - Never call `gh issue edit` in `--dry-run` mode.
 - Always idempotent — running twice on the same issue results in no diff after
   the second run (same labels, same `## Model fit` block).
