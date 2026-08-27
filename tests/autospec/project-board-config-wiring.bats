@@ -57,13 +57,26 @@ project_board:
   repo_allowlist: ["o/*"]
 YML
 
+  # The resolver must actually be invoked with the configured URL — proof
+  # the bridge exported it, not that the board happened to default in.
+  # (Was: `grep -q ... "$GH_CALLS" || true`, which could never fail — gh
+  # never sees the resolver URL, only $TMP/resolve.sh does, so the old
+  # assertion was checking the wrong log AND neutered with `|| true`.)
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/resolve-args.log"
+cat <<'JSON'
+{"project":{},"fields":{},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"Blocked by: none."}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+
   run bash "$SCRIPT" --repo o/r
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.board.ready == 1'
   echo "$output" | jq -e '[.board.promotable[]?] | index(5) != null'
-  # The resolver must actually have been invoked with the configured URL —
-  # proof the bridge exported it, not that the board happened to default in.
-  grep -q 'https://github.com/orgs/o/projects/1' "$GH_CALLS" 2>/dev/null || true
+  [ -f "$TMP/resolve-args.log" ]
+  grep -qF 'https://github.com/orgs/o/projects/1' "$TMP/resolve-args.log"
 }
 
 @test "a project_board block that fails the url/repo_allowlist gate yields no board ingestion" {
@@ -136,13 +149,12 @@ SH
   run bash "$SCRIPT" --repo o/r
   [ "$status" -eq 0 ]
 
-  run cat "$TMP/env-capture.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"STATE_FIELDS=Custom state"* ]]
-  [[ "$output" == *"DEP_FIELDS=Custom deps"* ]]
-  [[ "$output" == *"DEP_MARKERS=Waiting on"* ]]
-  [[ "$output" == *"PARALLEL=5"* ]]
-  [[ "$output" == *"LIMIT=42"* ]]
+  [ -f "$TMP/env-capture.txt" ]
+  grep -qF 'STATE_FIELDS=Custom state' "$TMP/env-capture.txt"
+  grep -qF 'DEP_FIELDS=Custom deps' "$TMP/env-capture.txt"
+  grep -qF 'DEP_MARKERS=Waiting on' "$TMP/env-capture.txt"
+  grep -qF 'PARALLEL=5' "$TMP/env-capture.txt"
+  grep -qF 'LIMIT=42' "$TMP/env-capture.txt"
 }
 
 @test "an already-exported env var wins over the bridged YAML value for the new fields" {
@@ -171,10 +183,9 @@ SH
   run bash "$SCRIPT" --repo o/r
   [ "$status" -eq 0 ]
 
-  run cat "$TMP/env-capture.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"STATE_FIELDS=Operator override"* ]]
-  [[ "$output" == *"PARALLEL=9"* ]]
+  [ -f "$TMP/env-capture.txt" ]
+  grep -qF 'STATE_FIELDS=Operator override' "$TMP/env-capture.txt"
+  grep -qF 'PARALLEL=9' "$TMP/env-capture.txt"
 }
 
 @test "an unconfigured project_board block leaves the resolver seeing the legacy hardcoded defaults" {
@@ -207,12 +218,11 @@ SH
   run bash "$SCRIPT" --repo o/r
   [ "$status" -eq 0 ]
 
-  run cat "$TMP/env-capture.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"STATE_FIELDS=AutoSpec state,Delivery status"* ]]
-  [[ "$output" == *"DEP_FIELDS=Dependencies,Depends on"* ]]
-  [[ "$output" == *"PARALLEL=2"* ]]
-  [[ "$output" == *"LIMIT=500"* ]]
+  [ -f "$TMP/env-capture.txt" ]
+  grep -qF 'STATE_FIELDS=AutoSpec state,Delivery status' "$TMP/env-capture.txt"
+  grep -qF 'DEP_FIELDS=Dependencies,Depends on' "$TMP/env-capture.txt"
+  grep -qF 'PARALLEL=2' "$TMP/env-capture.txt"
+  grep -qF 'LIMIT=500' "$TMP/env-capture.txt"
 }
 
 @test "with no .autospec/autonomous.yml at all, the resolver is never invoked and nothing crashes" {
@@ -229,4 +239,93 @@ SH
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.board == null or (.board.ready // 0) == 0'
   [ ! -e "$TMP/resolve-was-called" ]
+}
+
+# ── project_board.write_back (Finding 2: the operator's kill switch for
+# board mutations) — these three tests drive a FULL --apply cycle through
+# the REAL project-board-writeback.sh (not a stub for it) so the enforcement
+# point itself is exercised, not a hand-written stand-in for it. The gh stub
+# handles `auth status` (project scope present) and `item-edit` (success) so
+# a write, if attempted, actually reaches the log we assert against.
+
+real_writeback_gh_stub() {
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "gh $*" >> "$GH_CALLS"
+case "$*" in
+  *"issue list"*)   printf '[]' ;;
+  *"auth status"*)  printf "Token scopes: 'project', 'repo'\n" ;;
+  *"item-edit"*)    exit 0 ;;
+  *) printf '' ;;
+esac
+SH
+  chmod +x "$TMP/bin/gh"
+}
+
+# An item whose only dependency (#1) is neither closed nor even present in
+# the (empty) `gh issue list` result stays unready, so board_apply_item's
+# blocked branch fires `board_writeback "$item" "Blocked"` unconditionally —
+# no GROOM_SAFETY_BIN stub needed, since the ready/promote branch never runs.
+# project/fields are populated (not the usual tests' `{}`) so a real,
+# non-skipped project-board-writeback.sh actually reaches `gh project
+# item-edit` when write_back allows it — proving these tests actually
+# exercise the mutation path, not a plan shape that always skips regardless
+# of write_back.
+blocked_board_item() {
+  cat > "$TMP/resolve.sh" <<SH
+#!/usr/bin/env bash
+cat <<'JSON'
+{"project":{"id":"PVT_x"},"fields":{"autospec_state":{"id":"FIELD_x","options":{"Blocked":"OPT_blocked"}}},"repos":["o/r"],"items":[{"item_id":"PVTI_a","repo":"o/r","number":5,"state":"open","labels":[],"body":"## Dependencies\n- Blocked by: #1.\n"}]}
+JSON
+SH
+  chmod +x "$TMP/resolve.sh"
+}
+
+@test "write_back: false suppresses every board write across a full --apply cycle" {
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  write_back: false
+YML
+  real_writeback_gh_stub
+  blocked_board_item
+
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+
+  # Assert from the stub's own argument log, not the promoter's return
+  # value — the promoter's fail-open writeback contract means a suppressed
+  # write and a genuinely failed write both leave $status at 0.
+  run grep -c 'item-edit' "$GH_CALLS"
+  [ "$output" -eq 0 ]
+}
+
+@test "write_back: true still writes across a full --apply cycle" {
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+  write_back: true
+YML
+  real_writeback_gh_stub
+  blocked_board_item
+
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -qF 'item-edit' "$GH_CALLS"
+}
+
+@test "an absent write_back key still writes across a full --apply cycle (default unchanged)" {
+  cat > "$TMP/repo/.autospec/autonomous.yml" <<'YML'
+project_board:
+  url: https://github.com/orgs/o/projects/1
+  repo_allowlist: ["o/*"]
+YML
+  real_writeback_gh_stub
+  blocked_board_item
+
+  AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -qF 'item-edit' "$GH_CALLS"
 }

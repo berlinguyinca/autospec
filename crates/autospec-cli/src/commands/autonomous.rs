@@ -1999,6 +1999,13 @@ fn effective_main_health_policy_digest(
 ///   - "limit": `project_board.item_limit`.
 ///   - "spend_scope": `project_board.spend_scope`, or `null` if unset —
 ///     already parse-time validated as a directory-name-safe token.
+///   - "write_back": `project_board.write_back` — the operator's sole kill
+///     switch for board mutations. Defaults to `true` when a url is
+///     configured and `write_back` is absent from YAML (unchanged prior
+///     behavior), `false` when no board is configured at all, or whatever
+///     the operator explicitly set. The write-back script itself is the
+///     single choke point that reads and honors this value — see
+///     `scripts/project-board-writeback.sh`.
 ///
 /// Security invariant: `project_board::parse` itself enforces that a
 /// configured `url` requires a non-empty `repo_allowlist` (parse fails
@@ -2049,8 +2056,9 @@ fn format_project_board_config(
         json_escape(&board.dep_field_candidates.join(","))
     );
     let dep_markers_json = format!("\"{}\"", json_escape(&board.dep_markers.join(",")));
+    let write_back_json = if board.write_back { "true" } else { "false" };
     format!(
-        "{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":{ttl},\"label_map\":{label_map_json},\"state_fields\":{state_fields_json},\"state_options\":{state_options_json},\"dep_fields\":{dep_fields_json},\"dep_markers\":{dep_markers_json},\"parallel\":{parallel},\"limit\":{limit},\"spend_scope\":{spend_scope_json}}}",
+        "{{\"url\":{url_json},\"allowlist\":{allowlist_json},\"ttl\":{ttl},\"label_map\":{label_map_json},\"state_fields\":{state_fields_json},\"state_options\":{state_options_json},\"dep_fields\":{dep_fields_json},\"dep_markers\":{dep_markers_json},\"parallel\":{parallel},\"limit\":{limit},\"spend_scope\":{spend_scope_json},\"write_back\":{write_back_json}}}",
         ttl = board.ttl_seconds,
         parallel = board.max_parallel_repos,
         limit = board.item_limit,
@@ -8132,7 +8140,7 @@ mod project_board_config_tests {
         assert_eq!(
             json,
             format!(
-                "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],{DEFAULT_TAIL}}}"
+                "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],{DEFAULT_TAIL},\"write_back\":true}}"
             )
         );
     }
@@ -8160,7 +8168,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board("main_health:\n  branch: main\n"));
         assert_eq!(
             json,
-            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL}}}")
+            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
@@ -8172,7 +8180,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&AutonomousConfig::default().project_board);
         assert_eq!(
             json,
-            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL}}}")
+            format!("{{\"url\":null,\"allowlist\":[],{DEFAULT_TAIL},\"write_back\":false}}")
         );
     }
 
@@ -8187,7 +8195,7 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":9,\"limit\":500,\"spend_scope\":null"
+            "{\"url\":null,\"allowlist\":[],\"ttl\":300,\"label_map\":null,\"state_fields\":\"AutoSpec state,Delivery status\",\"state_options\":\"Blocked=Blocked,Done=Done,Implementation=Implementation|In progress,Ready=Ready,Review=Review|In review,Testing=Testing|Verify\",\"dep_fields\":\"Dependencies,Depends on\",\"dep_markers\":\"Blocked by,Depends on\",\"parallel\":9,\"limit\":500,\"spend_scope\":null,\"write_back\":false"
                 .to_string()
                 + "}"
         );
@@ -8199,7 +8207,27 @@ mod project_board_config_tests {
         let json = format_project_board_config(&board(source));
         assert_eq!(
             json,
-            "{\"url\":null,\"allowlist\":[],\"ttl\":60,\"label_map\":\"bug=defect\",\"state_fields\":\"Status\",\"state_options\":\"Done=Complete\",\"dep_fields\":\"Blocks\",\"dep_markers\":\"Waiting on\",\"parallel\":2,\"limit\":1000,\"spend_scope\":\"fleet-1\"}"
+            "{\"url\":null,\"allowlist\":[],\"ttl\":60,\"label_map\":\"bug=defect\",\"state_fields\":\"Status\",\"state_options\":\"Done=Complete\",\"dep_fields\":\"Blocks\",\"dep_markers\":\"Waiting on\",\"parallel\":2,\"limit\":1000,\"spend_scope\":\"fleet-1\",\"write_back\":false}"
+        );
+    }
+
+    #[test]
+    fn explicit_write_back_true_flows_through() {
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\"]\n  write_back: true\n";
+        let json = format_project_board_config(&board(source));
+        assert!(
+            json.ends_with("\"write_back\":true}"),
+            "expected write_back:true in {json}"
+        );
+    }
+
+    #[test]
+    fn explicit_write_back_false_flows_through_even_with_a_configured_board() {
+        let source = "project_board:\n  url: https://github.com/orgs/acme/projects/1\n  repo_allowlist: [\"acme/widgets\"]\n  write_back: false\n";
+        let json = format_project_board_config(&board(source));
+        assert!(
+            json.ends_with("\"write_back\":false}"),
+            "expected write_back:false in {json}"
         );
     }
 }

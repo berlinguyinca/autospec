@@ -60,6 +60,46 @@ fi
 command -v gh >/dev/null 2>&1 || skip "gh not found"
 command -v jq >/dev/null 2>&1 || skip "jq not found"
 
+# ── project_board.write_back gate — the single choke point ────────────────
+# Both current callers (autonomous-promote-open-issues.sh's board_writeback()
+# wrapper, and scripts/lib/autospec-loop.sh's _autospec_conductor_board_state
+# at PR lifecycle points) reach a board mutation only by invoking this
+# script — so the gate lives HERE, not duplicated in each caller. A future
+# caller that forgets to check a flag still can't re-enable writes, because
+# there is nothing to forget: this script always checks itself before it
+# ever reaches `gh project item-edit` below.
+#
+# AUTOSPEC_PROJECT_BOARD_WRITE_BACK, when explicitly "0" or "1", wins (same
+# override precedence every other AUTOSPEC_PROJECT_BOARD_* field uses — the
+# promoter sets this once per run from the bridged YAML so this script does
+# not need to re-invoke the Rust binary on every item). When unset (e.g. the
+# conductor loop, which does not run the promoter's bridge step), this
+# script re-derives the value itself from the same validated config via
+# `autospec autonomous project-board-config`. Any failure along that path
+# (binary missing, stale install without the subcommand, unreadable config)
+# degrades to enabled — write-back was unconditional before this fix, so an
+# absent/unreachable config must not silently start suppressing writes.
+write_back_ok="${AUTOSPEC_PROJECT_BOARD_WRITE_BACK:-}"
+if [ "$write_back_ok" != "0" ] && [ "$write_back_ok" != "1" ]; then
+    wb_bin="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
+    wb_repo_dir="${AUTOSPEC_REPO_DIR:-.}"
+    wb_json="$("$wb_bin" autonomous project-board-config --repo-dir "$wb_repo_dir" 2>/dev/null || true)"
+    write_back_ok=1
+    if [ -n "$wb_json" ]; then
+        # NOT `.write_back // true`: jq's `//` treats a literal `false` as
+        # falsy too, so that expression would silently coerce an explicit
+        # `write_back: false` back to "true". `if/then/else` tests the
+        # value directly instead of falling through on any falsy value.
+        wb_flag="$(printf '%s' "$wb_json" | jq -r 'if .write_back == false then "false" else "true" end' 2>/dev/null || true)"
+        if [ "$wb_flag" = "false" ]; then
+            write_back_ok=0
+        fi
+    fi
+fi
+if [ "$write_back_ok" = "0" ]; then
+    skip "project_board.write_back is false; board mutation suppressed"
+fi
+
 # Guard degenerate input up front: a plan file that is not valid JSON must
 # never crash this script. Every jq query below also uses `?`-guarded
 # indexing so a JSON document with an unexpected shape (missing .fields,

@@ -175,6 +175,27 @@ if [ -n "$_pb_json" ]; then
             export AUTOSPEC_PROJECT_BOARD_LIMIT
         fi
     fi
+    # write_back is the operator's sole kill switch for board mutations
+    # (project-board-config-coherence fix I5). It is bridged here purely as
+    # a performance optimization — exporting it once per run means
+    # project-board-writeback.sh (the actual enforcement point; see that
+    # script's own write_back gate) does not need to re-invoke the Rust
+    # binary on every item. If this export is ever skipped or wrong, that
+    # script still re-derives the same value itself, so this is not the
+    # enforcement — just a cache.
+    if [ -z "${AUTOSPEC_PROJECT_BOARD_WRITE_BACK:-}" ]; then
+        # NOT `.write_back // true`: jq's `//` treats a literal `false` as
+        # falsy too, so that expression would silently coerce an explicit
+        # `write_back: false` back to "true" — the exact bug this fix
+        # exists to close. `if/then/else` tests the value directly.
+        _pb_write_back="$(printf '%s' "$_pb_json" | jq -r 'if .write_back == false then "false" else "true" end' 2>/dev/null || true)"
+        if [ "$_pb_write_back" = "false" ]; then
+            AUTOSPEC_PROJECT_BOARD_WRITE_BACK=0
+        else
+            AUTOSPEC_PROJECT_BOARD_WRITE_BACK=1
+        fi
+        export AUTOSPEC_PROJECT_BOARD_WRITE_BACK
+    fi
 fi
 
 BOARD_TTL="${AUTOSPEC_PROJECT_BOARD_TTL:-300}"
