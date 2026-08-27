@@ -96,10 +96,12 @@ fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
     .expect("healthy supervisor resolution starts a fresh attempt");
 
     assert_eq!(recovered[0].terminal, bridge::AttemptTerminal::Exited(0));
-    assert!(fs::read_dir(&artifact_root)
+    let archive_names: Vec<String> = fs::read_dir(&artifact_root)
         .expect("failure archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(archive_names.iter().any(|name| name.contains(".archive-")));
 }
 
 #[cfg(target_os = "linux")]
@@ -145,10 +147,12 @@ fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_rec
     assert!(!launch.exists());
     assert!(!Path::new(&format!("/proc/{supervisor}")).exists());
     assert!(!Path::new(&format!("/proc/{harness}")).exists());
-    assert!(fs::read_dir(&artifact_root)
+    let archive_names: Vec<String> = fs::read_dir(&artifact_root)
         .expect("cleanup archives")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(archive_names.iter().any(|name| name.contains(".archive-")));
 }
 
 #[cfg(target_os = "linux")]
@@ -197,7 +201,12 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
         let archives = fs::read_dir(&artifact_root)
             .expect("archive directory")
             .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("command-000.archive-")
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             archives.len(),
@@ -334,10 +343,12 @@ fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_point
         recovered[0].attempt_id, failed_attempt_id,
         "fresh execution after archived cleanup failure must use a new attempt identity"
     );
-    assert!(fs::read_dir(&artifact_root)
+    let archive_names: Vec<String> = fs::read_dir(&artifact_root)
         .expect("failure archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(archive_names.iter().any(|name| name.contains(".archive-")));
 }
 
 #[cfg(target_os = "linux")]
