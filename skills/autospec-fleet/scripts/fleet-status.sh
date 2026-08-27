@@ -54,7 +54,7 @@ repos_json="[]"
 repo_count="$(yq -r '.repos | length' "$config")"
 idx=0
 while [ "$idx" -lt "$repo_count" ]; do
-    enabled="$(yq -r ".repos[$idx].enabled // true" "$config")"
+    enabled="$(yq -r ".repos[$idx].enabled != false" "$config")"
     repo_url="$(yq -r ".repos[$idx].url" "$config")"
     normalized="$(normalize_repo_url "$repo_url")"
     checkout_path="$(repo_checkout_path "$workspace" "$normalized")"
