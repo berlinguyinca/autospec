@@ -8,8 +8,9 @@ mode: primary
 
 Autospec Project is the operator entrypoint for GitHub Projects v2 board
 ingestion. It wraps the board resolve/normalize/dependency scripts, the
-Tier 1.5 promotion pipeline, and (for `ship`) `autospec-fleet` config
-generation behind one command.
+Tier 1.5 promotion pipeline, and (for `ship`) the full board-to-running-
+fleet chain — fleet config generation, checkout provisioning, and conductor
+launch — behind one command.
 
 It does **not** replace `/autospec-fleet` or `/autospec-run`. This skill
 resolves a board into a plan and drives the existing promotion and fleet
@@ -45,7 +46,7 @@ and exit.
 
 ```text
 /autospec-project <url>          # resolve and print the plan; zero mutation
-/autospec-project ship <url>     # resolve -> fleet config -> pending-execution report
+/autospec-project ship <url>     # resolve -> fleet config -> provision -> launch, end to end
 /autospec-project sync <url>     # one promotion pass, no drain
 /autospec-project status <url>   # board-scoped queue, workers, PRs, blockers
 ```
@@ -100,37 +101,69 @@ Summarize the combined `{promoted, held, quarantined, routed}` output across
 all allowlisted repos. `sync` never adds a repo to the allowlist and never
 mutates `.autospec/autonomous.yml` — allowlist changes are an operator edit.
 
-### `ship` mode: resolve to a fleet config
+### `ship` mode: board to running fleet, end to end
 
-`ship <url>` resolves the board, projects it onto an `autospec-fleet.yml`
-covering the board's distinct repositories, and hands off to
-`/autospec-fleet` — but be honest with the operator about what actually
-runs today. `fleet-run.sh` now genuinely launches a per-repo
-`autospec-autonomous` conductor (not just a `/autospec-run` one-shot) for
-each eligible checkout — but only for a repo that already has a checkout in
-the fleet workspace; it still does not clone or sync checkouts, so a board
-repo with no local checkout is skipped with "checkout not found," not
-launched. So `ship`:
+`ship <url>` runs the full chain — resolve the board, filter to the
+allowlist, write the fleet config, provision every allowlisted checkout,
+launch a conductor for each — via one script,
+`scripts/project-ship.sh --url <url>`. This is the one subcommand backed by
+a dedicated helper script rather than inline prose steps: the chain has a
+hard security boundary (the allowlist gate) and a per-repo failure-isolation
+contract that need to be enforced identically on every invocation, not
+re-derived by an agent each time. Run it and report its output verbatim —
+every line is already in the "repo=X ... provision=... / launch=..." shape
+described below.
 
-1. Resolves the plan (same as bare mode) and extracts the distinct
-   `repos[]` from it.
-2. Filters that repo list down to `project_board.repo_allowlist` from
-   `.autospec/autonomous.yml` (same required-allowlist rule as `sync`); any
-   board repo outside the allowlist is reported under "skipped, not
-   allowlisted" and never written into the fleet config.
-3. Writes or updates `autospec-fleet.yml` in the current directory with the
-   allowlisted repos as entries (creating the file via `/autospec-fleet
-   init` semantics if it does not exist yet).
-4. Runs `/autospec-fleet run --once` and surfaces its per-repo output to the
-   operator: a repo with an existing checkout and ready queue work gets a
-   real conductor launched; a repo with no checkout yet is reported as
-   "checkout not found — clone it into the fleet workspace first," not as
-   running.
+1. **Allowlist gate (first, before anything else).** Reads
+   `project_board.repo_allowlist` via the same `autospec autonomous
+   project-board-config --repo-dir <dir>` bridge `sync` uses. Empty or unset
+   allowlist → refuse outright, exit 3, zero `git`/`gh`/`autospec-autonomous`
+   calls of any kind. This is the same gate the Rust config parser enforces
+   at load time (a configured `project_board.url` with an empty
+   `repo_allowlist` fails to parse at all); the shell side never second-
+   guesses or bypasses it.
+2. **Resolve.** `project-board-resolve.sh --url <url> --emit repos` — one
+   all-or-nothing read, same as bare/sync/status. A resolve failure aborts
+   with the resolver's own exit code (2 usage, 3 auth/scope, 4
+   possibly-truncated) and writes nothing.
+3. **Filter.** Every resolved repo is matched against the allowlist with the
+   same prefix-or-equality rule `autonomous-promote-open-issues.sh`'s
+   `board_stage()` uses (a trailing `*` means "starts with"; never
+   regex/`test()`, since a repo string is board-controlled data). A
+   non-allowlisted repo is reported `action=skipped reason=not-allowlisted`
+   and from this point on is never written into the fleet config, never
+   passed to `git`, and never passed to `autospec-autonomous` — it does not
+   exist for the rest of the run.
+4. **Write the fleet config.** `autospec-fleet.yml` (or `--fleet-config
+   PATH`) is (re)written from scratch each run, listing only the allowlisted
+   repos.
+5. **Provision.** For each allowlisted repo, clone it if the checkout is
+   missing, or fetch + fast-forward-only update it if it exists — the same
+   `fleet_provision_repo` helper `fleet-init.sh` uses (`fleet-lib.sh` is
+   sourced directly rather than shelled out to; both `fleet-lib.sh` and
+   `fleet-run.sh` are installed alongside `project-ship.sh` by this skill's
+   own `install.sh`). A dirty or non-fast-forwardable checkout is left
+   completely untouched and reported `provision=skipped:dirty` /
+   `provision=skipped:not-fast-forward`; a clone/fetch failure is reported
+   `provision=failed`. One repo's provisioning failure never stops the
+   others.
+6. **Launch.** Runs the existing, tested `fleet-run.sh` against the fleet
+   config just written. A repo whose checkout now exists and has ready queue
+   work gets a real `autospec-autonomous` conductor launched
+   (`launch=launched`); one with no checkout (provisioning failed or was
+   skipped) is `launch=skipped:checkout-not-found`; one with no ready work
+   or over capacity is `launch=skipped:no-ready-work-or-capacity`; a spawn
+   failure is `launch=failed`.
 
-Do not describe `ship` as a fully unattended multi-repo pipeline — checkout
-cloning is a separate follow-up plan; until it lands, `ship`'s job is "board
-resolved, fleet config written, checkouts that already exist get a
-conductor launched, the rest are reported as pending a manual clone."
+Every allowlisted repo gets exactly one `provision=` line and one `launch=`
+line; every non-allowlisted repo gets exactly one `action=skipped
+reason=not-allowlisted` line. Nothing is summarized away — an operator can
+tell, per repo, whether it was provisioned, skipped (and why), launched, or
+failed, straight from the output. `ship` genuinely is the unattended
+multi-repo pipeline now: given a board and an allowlist, it clones what's
+missing, updates what exists (never destructively), and launches a
+conductor per eligible repo in one call — there is no more "clone it
+yourself first" step.
 
 ### `status` mode: board-scoped read
 
@@ -211,10 +244,17 @@ failure while preserving parent context.
 (`project-board-resolve.sh`, `project-board-normalize.sh`,
 `project-board-deps.sh`, `autonomous-promote-open-issues.sh`). `status`
 composes those same scripts with `autospec-fleet`'s existing
-`fleet-status.sh`. `ship` resolves the board and writes `autospec-fleet.yml`
-today, and the launch step it hands off to — `autospec-fleet run` spawning
-a real per-repo `autospec-autonomous` conductor — is implemented and tested.
-What is still missing is checkout provisioning: `fleet-run.sh` never clones
-or syncs a repo into the workspace, so `ship` only launches conductors for
-repos that already have a local checkout; repos without one are reported as
-pending a manual clone, not as running.
+`fleet-status.sh`. `ship` is fully backed end to end by
+`scripts/project-ship.sh`, which chains `project-board-resolve.sh`, the
+`repo_allowlist` gate, `fleet-lib.sh`'s checkout provisioning (clone /
+fetch+ff-only-update, the same helper `fleet-init.sh` uses), and
+`fleet-run.sh`'s real per-repo `autospec-autonomous` conductor launch — all
+covered by `tests/fleet/project-ship.bats`. There is no remaining "clone it
+yourself" gap in the `ship` chain itself.
+
+What is still genuinely absent, and should not be overclaimed: `ship`
+launches conductors, it does not babysit them — ongoing health/liveness
+across a run belongs to `autospec-autonomous`'s own monitor/supervise
+surface, not to this skill. Any live-server-dependent metric (e.g.
+stage-2.5-style measurements that need a running app) is out of scope for
+board ingestion entirely and is never fabricated here.
