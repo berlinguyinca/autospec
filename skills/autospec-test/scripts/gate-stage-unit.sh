@@ -84,7 +84,7 @@ COVERAGE_COLLECTOR=$(printf '%s' "$CONTRACT_JSON" | jq -r '.unit.coverage_collec
 THRESHOLD_LINES=$(printf '%s' "$CONTRACT_JSON" | jq -r '.unit.coverage_thresholds.lines // 95')
 THRESHOLD_BRANCHES=$(printf '%s' "$CONTRACT_JSON" | jq -r '.unit.coverage_thresholds.branches // 90')
 THRESHOLD_FUNCTIONS=$(printf '%s' "$CONTRACT_JSON" | jq -r '.unit.coverage_thresholds.functions // 95')
-FUNCTION_PRESENCE=$(printf '%s' "$CONTRACT_JSON" | jq -r '.unit.function_presence_check // true')
+FUNCTION_PRESENCE=$(printf '%s' "$CONTRACT_JSON" | jq -r 'if .unit.function_presence_check == false then false else true end')
 
 if [ -z "$TEST_CMD" ]; then
     fatal "unit.test_cmd not set in contract"

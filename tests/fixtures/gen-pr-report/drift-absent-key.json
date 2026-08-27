@@ -1,0 +1,7 @@
+{
+  "drift": [
+    {"doc_file": "docs/SHOULD_NOT_APPEAR.md", "heading": "## unused", "matching_source_files": [], "reason": "absent passed key must default true"}
+  ],
+  "drift_warn": [],
+  "missing_scope": []
+}

@@ -110,19 +110,19 @@ run_metric() {
 
 # 3. Metric F — Structural invariants
 F_JSON=$(run_metric "F" "invariants/run-structural.mjs" F_JSON || echo '{"metric":"F","passed":true,"skipped":true}')
-F_PASSED=$(printf '%s' "$F_JSON" | jq -r 'if .passed == null then true else .passed end' 2>/dev/null || echo "true")
+F_PASSED=$(printf '%s' "$F_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 4. Metric G — Window-contract symmetry
 G_JSON=$(run_metric "G" "window-contract/run-window.mjs" G_JSON || echo '{"metric":"G","passed":true,"skipped":true}')
-G_PASSED=$(printf '%s' "$G_JSON" | jq -r 'if .passed == null then true else .passed end' 2>/dev/null || echo "true")
+G_PASSED=$(printf '%s' "$G_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 5. Metric H — Extended crawler
 H_JSON=$(run_metric "H" "crawler-v2/extended-crawler.mjs" H_JSON || echo '{"metric":"H","passed":true,"skipped":true}')
-H_PASSED=$(printf '%s' "$H_JSON" | jq -r 'if .passed == null then true else .passed end' 2>/dev/null || echo "true")
+H_PASSED=$(printf '%s' "$H_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # 6. Metric I — Data-source contract symmetry
 I_JSON=$(run_metric "I" "contract-symmetry/run-symmetry.mjs" I_JSON || echo '{"metric":"I","passed":true,"skipped":true}')
-I_PASSED=$(printf '%s' "$I_JSON" | jq -r 'if .passed == null then true else .passed end' 2>/dev/null || echo "true")
+I_PASSED=$(printf '%s' "$I_JSON" | jq -r 'if .passed == false then false else true end' 2>/dev/null || echo "true")
 
 # If any metric failed, overall fails
 if [ "$F_PASSED" != "true" ] || [ "$G_PASSED" != "true" ] || \

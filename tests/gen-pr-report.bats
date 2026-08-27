@@ -75,3 +75,32 @@ FIX="$REPO_ROOT/tests/fixtures/gen-pr-report"
   run grep -E "\bclaude\b|\bcodex\b|\bgemini\b" "$BIN"
   [ "$status" -ne 0 ]  # grep exits 1 when no match found
 }
+
+# Case 7: jq alternative-operator coercion guard — literal drift "passed":false
+# must render the Doc drift block even when the gate file's own outcome/metrics
+# say nothing about drift. This exercises DRIFT_PASSED="$(jq -r '.passed // true' ...)"
+# in isolation from the gate-drift.json metrics-array path used by case 4.
+@test "drift passed:false (literal) renders Doc drift block" {
+  run bash "$BIN" \
+    --gate "$FIX/gate-plain-pass.json" \
+    --drift "$FIX/drift-explicit-false.json" \
+    --mode test
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "### Doc drift"
+  echo "$output" | grep -q "COERCION_TEST.md"
+}
+
+# Case 8: absent "passed" key in the drift file must still default to true
+# (no drift block), proving the fix did not change the deliberate absent-key
+# default — only a literal false must trip the block.
+@test "drift file with absent passed key defaults to no drift block" {
+  run bash "$BIN" \
+    --gate "$FIX/gate-plain-pass.json" \
+    --drift "$FIX/drift-absent-key.json" \
+    --mode test
+  [ "$status" -eq 0 ]
+  drift_hits="$(printf '%s' "$output" | grep -c "### Doc drift" || true)"
+  [ "${drift_hits:-0}" -eq 0 ]
+  doc_hits="$(printf '%s' "$output" | grep -c "SHOULD_NOT_APPEAR.md" || true)"
+  [ "${doc_hits:-0}" -eq 0 ]
+}

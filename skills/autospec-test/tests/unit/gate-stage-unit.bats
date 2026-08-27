@@ -215,6 +215,42 @@ EOF
     [ "$missing_count" -gt 0 ]
 }
 
+# ── gate-stage-unit.sh: jq alternative-operator coercion guard ───────────────
+# .unit.function_presence_check // true is a "//" alternative, which treats a
+# literal false the same as an absent key. An explicit
+# function_presence_check:false in the contract must disable the check (and
+# so must NOT surface the multiply/farewell missing-test failure), proving
+# FUNCTION_PRESENCE reads the literal false rather than being coerced to true.
+
+@test "gate-stage-unit: explicit function_presence_check:false disables the check" {
+    local contract
+    contract=$(jq -n '{
+        "mode": "strict_isolation",
+        "unit": {
+            "test_cmd": "true",
+            "coverage_collector": "istanbul",
+            "coverage_thresholds": {"lines": 0, "branches": 0, "functions": 0},
+            "function_presence_check": false
+        },
+        "e2e": {"forbidden_url_patterns": ["^https?://example\\.com"]}
+    }')
+
+    # Same fixtures as the function-presence-fail edge above: multiply is not
+    # tested, so if the check ran it would fail the gate.
+    mkdir -p "$TEST_TMPDIR/src" "$TEST_TMPDIR/tests"
+    cp "$JS_FIXTURES/src/calculator.js" "$TEST_TMPDIR/src/"
+    cp "$JS_FIXTURES/tests/calculator.test.js" "$TEST_TMPDIR/tests/"
+
+    local output
+    output=$(printf '%s' "$contract" | bash "$SCRIPTS_DIR/gate-stage-unit.sh" "$TEST_TMPDIR" 2>/dev/null || true)
+    local missing_count
+    missing_count=$(printf '%s' "$output" | jq '.metrics.unit.missing_function_tests | length')
+    [ "$missing_count" -eq 0 ]
+    local passed
+    passed=$(printf '%s' "$output" | jq -r '.passed')
+    [ "$passed" = "true" ]
+}
+
 # ── Stage 1 result JSON schema validation ─────────────────────────────────────
 
 @test "gate-stage-unit: output validates against stage1-result schema (pass case)" {
