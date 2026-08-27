@@ -121,8 +121,8 @@ JSON contract:
 {"lang":"rust","source":"inherited","rationale":"...","deterministic":true,"confidence":0.95}
 ```
 
-- `source` ∈ `explicit | inherited | repo-dominant | chosen`
-- `deterministic` is `false` only when step 4 ties; that is the sole LLM escalation,
+- `source` ∈ `explicit | inherited | repo-dominant | chosen | unknown`
+- `deterministic` is `false` only when step 5 ties; that is the sole LLM escalation,
   a single Tier-B call, never Tier A.
 - Telemetry: one JSON line per invocation to `.autospec/telemetry/classify-language.jsonl`,
   matching the model-fit classifier's convention.
@@ -130,11 +130,11 @@ JSON contract:
 
 ### Implementation status
 
-- Ranks 1–2 (explicit-with-path, inherited) are implemented in
-  `scripts/classify-language.sh` per issue #3107; ranks 3–5 (repo-dominant,
-  chosen, step-4 LLM tie-break) are not implemented yet, so
-  `source` in practice is `explicit | inherited | unknown` and
-  `deterministic` is always `true` until rank 4 lands.
+- All five ranks (explicit-with-path, inherited, explicit-prose,
+  repo-dominant, chosen + step-5 Tier-B tie-break) are implemented in
+  `scripts/classify-language.sh`, so `source` in practice is
+  `explicit | inherited | repo-dominant | chosen | unknown` and
+  `deterministic` is `false` only on a step-5 (chosen) tie.
 - An **existing but empty** body file is a valid input: it classifies as
   `lang:unknown`, `confidence:0.0`, exit `0` (abstention with telemetry).
   Exit `1` is reserved for a missing body file or usage errors.
@@ -162,7 +162,7 @@ a positive assertion that an irreducible boundary lives inside one issue.
 Phase 3.75 emits a boundary block when **either** the sibling set spans ≥2
 distinct `lang:*` **or** any single child carries `lang:mixed`.
 
-### Chosen-language scoring table (step 4 only)
+### Chosen-language scoring table (step 5 only)
 
 | Signal in the request | Favors |
 |---|---|
@@ -284,7 +284,7 @@ the remaining work is tabular, and tables already carry it.
 - [ ] Both stack walkers share one exclusion list defined in exactly one file
 - [ ] Detection confidence is ≤0.5 when the winning marker covers <50% of tracked source lines
 - [ ] `scripts/classify-language.sh <body> --json` emits the documented five-key object
-- [ ] `deterministic:false` occurs only on a step-4 tie and triggers at most one Tier-B call
+- [ ] `deterministic:false` occurs only on a step-5 tie and triggers at most one Tier-B call
 - [ ] An issue whose `Files touched` are all `*.rs` classifies `lang:rust` with `source:inherited`
 - [ ] An issue with no resolvable signal classifies `lang:unknown` with `confidence:0.0`
 - [ ] The pre-merge quality gate runs every language whose marker is present, not only the first
