@@ -1,5 +1,39 @@
 use super::*;
 
+impl accountability::github::ProjectAssignment
+    for crate::commands::managed_project::ManagedProjectStore
+{
+    fn target(&self) -> Result<accountability::github::ProjectTarget, String> {
+        let binding = self.snapshot();
+        Ok(accountability::github::ProjectTarget {
+            owner: binding
+                .owner
+                .clone()
+                .ok_or_else(|| "managed Project binding has no owner".to_string())?,
+            node_id: binding
+                .project_node_id
+                .clone()
+                .ok_or_else(|| "managed Project binding has no node ID".to_string())?,
+            number: binding
+                .project_number
+                .ok_or_else(|| "managed Project binding has no number".to_string())?,
+        })
+    }
+
+    fn enqueue_issue(&mut self, issue_url: &str) -> Result<String, String> {
+        let target = accountability::github::ProjectAssignment::target(self)?;
+        let projection = format!("project:item-add:{}:{issue_url}", target.node_id);
+        self.enqueue_projection(projection.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(projection)
+    }
+
+    fn acknowledge_issue(&mut self, projection: &str) -> Result<(), String> {
+        self.ack_projection(projection)
+            .map_err(|error| error.to_string())
+    }
+}
+
 mod control;
 pub(super) use control::*;
 
@@ -69,6 +103,8 @@ pub(super) fn bind_accountability_epic(
                 CommandFailure::diagnostic(error.to_string())
             })?;
     }
+    let config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
+    let managed_policy = config.project_board.managed_policy().cloned();
     let request = EpicBindingRequest {
         repository,
         explicit_epic: options.epic,
@@ -77,24 +113,61 @@ pub(super) fn bind_accountability_epic(
         } else {
             ResumePolicy::ActiveOnly
         },
-        project_number: accountability_project_number(),
+        project_number: managed_policy
+            .is_none()
+            .then(accountability_project_number)
+            .flatten(),
         adopted_lease_generation: lease.accountability_predecessor_generation(),
     };
     let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
         .map_err(resilience_lease_error)?;
     let mut github = GhCli;
-    let binding_result =
+    let mut managed_store = if let Some(policy) = managed_policy.as_ref() {
+        let repo_root = repository_config_path(&options.repo_dir)
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                CommandFailure::diagnostic("managed Project config has no repository root")
+            })?
+            .to_path_buf();
+        let mut project_store = crate::commands::managed_project::ManagedProjectStore::open(
+            &repo_root.join(".autospec/state"),
+            &policy.product_key,
+        )
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        crate::commands::managed_project::resolve_or_create_project(
+            &mut project_store,
+            &mut github,
+            policy,
+            policy.product_key.as_str(),
+        )
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        Some(project_store)
+    } else {
+        None
+    };
+    let binding_result = if let Some(project) = managed_store.as_mut() {
+        accountability::github::bind_epic_with_project(
+            &mut store,
+            &mut github,
+            request,
+            project,
+            || {
+                resilience::renew_lifecycle(&layout.repo, lease)
+                    .map_err(|_| "lifecycle lease renewal rejected".to_string())
+            },
+        )
+    } else {
         accountability::github::bind_epic(&mut store, &mut github, request, || {
             resilience::renew_lifecycle(&layout.repo, lease)
                 .map_err(|_| "lifecycle lease renewal rejected".to_string())
-        });
+        })
+    };
     let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
     let binding = binding_result.map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
     heartbeat_result?;
     if let Some(warning) = binding.project_warning.as_deref() {
-        eprintln!(
-            "autospec autonomous accountability: optional Project assignment failed: {warning}"
-        );
+        eprintln!("autospec autonomous accountability: Project assignment degraded: {warning}");
     }
     Ok(binding)
 }

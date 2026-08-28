@@ -11,6 +11,7 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LEDGER_SH="$HERE/growth-ledger.sh"
+PROJECT_SYNC_SH="$HERE/project-sync-issue.sh"
 
 while IFS= read -r line; do
   [ -n "$line" ] || continue
@@ -41,6 +42,7 @@ while IFS= read -r line; do
     echo "grow-define: could not parse issue number from: $url (skipped)" >&2
     continue
   fi
+  bash "$PROJECT_SYNC_SH" "$url" "$PWD"
 
   # Telemetry (issue #1774): fire-and-forget feature.described emit after a
   # successful file. Guarded source (absent shim/binary/DSN is a silent

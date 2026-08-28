@@ -294,6 +294,7 @@ while [ "$_i" -lt "$_gap_count" ]; do
     printf 'gap-remediation: WARN failed to file gap "%s" after retry\n' "$_title" >&2
     continue
   fi
+  bash "$(cd "$(dirname "$0")" && pwd)/project-sync-issue.sh" "$_url" "${REPO_ROOT:-$PWD}"
   _filed=$((_filed + 1))
 
 done

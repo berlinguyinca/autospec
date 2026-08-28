@@ -36,6 +36,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
+project_sync_issue() {
+    local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+    bash "$helper" "$1" "$REPO_ROOT"
+}
+
 # Defaults.
 MAX_ITERATIONS=3
 MAX_ISSUES_PER_ROUND=5
@@ -989,6 +994,7 @@ $marker"
             issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
+        project_sync_issue "$issue_url"
         # Extract trailing issue number from the returned URL.
         issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
         case "$issue_num" in

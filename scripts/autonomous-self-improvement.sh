@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # autonomous-self-improvement.sh — deterministic low-hanging-fruit candidate source.
 set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+project_sync_issue() {
+    local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+    bash "$helper" "$1" "$repo_root"
+}
 usage() {
     cat <<'EOF'
 Usage:
@@ -378,7 +383,8 @@ case "$cmd" in
                 printf 'autospec validate\n'
                 printf '```\n'
             } > "$tmp.body"
-            gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify --label origin:self >/dev/null
+            issue_url="$(gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify --label origin:self)"
+            project_sync_issue "$issue_url"
             filed=$((filed + 1))
         done < "$tmp"
         jq -n --argjson filed "$filed" --argjson candidates "${total:-0}" \

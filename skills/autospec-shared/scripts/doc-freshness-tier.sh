@@ -186,7 +186,10 @@ ${sources:-<none>}
   for label in "${_labels[@]}"; do
     [ -n "$label" ] && labels_args+=(--label "$label")
   done
-  gh issue create --title "$title" --body "$body" "${labels_args[@]}"
+  local issue_url
+  issue_url="$(gh issue create --title "$title" --body "$body" "${labels_args[@]}")" || return 1
+  bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-sync-issue.sh" "$issue_url" "$REPO_ROOT"
+  printf '%s\n' "$issue_url"
 }
 
 run_examples_and_llms_for_doc_changes() {
