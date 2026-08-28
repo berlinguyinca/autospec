@@ -606,6 +606,89 @@ fn onboard_ignores_non_repository_npm_dependency_protocols() {
 }
 
 #[test]
+fn onboard_accepts_npm_git_plus_github_repository_forms() {
+    let fixture = Fixture::new("onboard-npm-git-plus");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join("package.json"),
+        r#"{"repository":{"type":"git","url":"git+https://github.com/berlinguyinca/repository-form.git"},"dependencies":{"ssh":"git+ssh://git@github.com/berlinguyinca/dependency-form.git#main","gitlab":"git+https://gitlab.com/berlinguyinca/not-github.git","malformed":"not a repository"}}"#,
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.inaccessible, 0);
+    let repositories = report
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(repositories.contains("berlinguyinca/repository-form"));
+    assert!(repositories.contains("berlinguyinca/dependency-form"));
+    assert_eq!(repositories.len(), 3);
+}
+
+#[test]
+fn onboard_ignores_non_github_npm_repository_fields() {
+    for (name, repository) in [
+        (
+            "gitlab-repository",
+            "git+https://gitlab.com/berlinguyinca/not-github.git",
+        ),
+        ("malformed-repository", "not a repository"),
+    ] {
+        let fixture = Fixture::new(name);
+        let repository_path = fixture.path().join("checkout");
+        initialize_repository(
+            &repository_path,
+            "https://github.com/berlinguyinca/autospec.git",
+        );
+        fs::write(
+            repository_path.join("package.json"),
+            serde_json::json!({ "repository": repository }).to_string(),
+        )
+        .unwrap();
+        let mut policy = policy("berlinguyinca");
+        policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+        let mut store =
+            ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+        let report = onboard_repositories(
+            &mut store,
+            &policy,
+            &OnboardingOptions {
+                repo_dir: repository_path,
+                repositories: Vec::new(),
+                workspaces: Vec::new(),
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.inaccessible, 0, "case {name}");
+        assert_eq!(report.repositories.len(), 1, "case {name}");
+    }
+}
+
+#[test]
 fn onboard_resolves_cargo_paths_and_pnpm_members_with_typed_failures() {
     let fixture = Fixture::new("onboard-local-workspaces");
     let repository_path = fixture.path().join("checkout");

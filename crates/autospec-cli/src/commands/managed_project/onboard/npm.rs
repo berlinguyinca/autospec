@@ -16,7 +16,8 @@ fn package_json(root: &Path) -> Vec<Discovery> {
         return Vec::new();
     };
     let mut discoveries = Vec::new();
-    if let Some(repository) = repository_value(value.get("repository")) {
+    if let Some(repository) = repository_value(value.get("repository")).and_then(github_repository)
+    {
         discoveries.push(Discovery::repository(
             repository,
             "manifest-dependency",
@@ -35,7 +36,7 @@ fn package_json(root: &Path) -> Vec<Discovery> {
             .into_iter()
             .flat_map(|dependencies| dependencies.values())
             .filter_map(Value::as_str)
-            .filter(|dependency| normalize_github_repository(dependency).is_some())
+            .filter_map(github_repository)
         {
             discoveries.push(Discovery::repository(
                 repository,
@@ -63,6 +64,10 @@ fn package_json(root: &Path) -> Vec<Discovery> {
         }
     }
     discoveries
+}
+
+fn github_repository(value: &str) -> Option<&str> {
+    normalize_github_repository(value).map(|_| value)
 }
 
 fn repository_value(value: Option<&Value>) -> Option<&str> {

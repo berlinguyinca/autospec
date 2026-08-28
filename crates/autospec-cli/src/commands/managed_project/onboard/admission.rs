@@ -15,6 +15,8 @@ pub fn normalize_github_repository(value: &str) -> Option<String> {
         .trim_matches(|character: char| "\"'`()[]{}<>,;".contains(character));
     let path = [
         "git@github.com:",
+        "git+ssh://git@github.com/",
+        "git+https://github.com/",
         "ssh://git@github.com/",
         "https://github.com/",
         "http://github.com/",
