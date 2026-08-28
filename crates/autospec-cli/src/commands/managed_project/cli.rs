@@ -77,7 +77,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
         .repository_seeds
         .iter()
         .chain(options.repositories.iter())
-        .cloned()
+        .filter_map(|repository| super::normalize_github_repository(repository))
         .collect::<std::collections::BTreeSet<_>>();
     let selected_issue_discovery = if command == "onboard" {
         load_selected_issue_relationships(

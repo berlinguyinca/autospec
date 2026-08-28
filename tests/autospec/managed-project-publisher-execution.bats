@@ -6,6 +6,10 @@ PROJECT_HELPER="$REPO_ROOT/skills/autospec-shared/scripts/project-sync-issue.sh"
 setup() {
   TMP="$(mktemp -d)"
   mkdir -p "$TMP/bin" "$TMP/repo/.autospec"
+  git -C "$TMP/repo" init -q -b main
+  git -C "$TMP/repo" config user.email autospec-test@example.invalid
+  git -C "$TMP/repo" config user.name autospec-test
+  git -C "$TMP/repo" commit --allow-empty -q -m seed
   export EVENTS="$TMP/events"
   export AUTOSPEC_CALLS="$TMP/autospec.calls"
   cp "$PROJECT_HELPER" "$TMP/bin/project-sync-issue.sh"
@@ -56,6 +60,7 @@ assert_no_sync() {
 set -u
 SCRIPT_DIR="$REPO_ROOT/scripts"
 REPO_ROOT="$TMP/repo"
+cd "$TMP/repo"
 SANDBOX_BRANCH="sandbox/explore-demo"
 RESEARCH_SOURCES="spec-vs-code"
 GITHUB_REPOSITORY="acme/widgets"

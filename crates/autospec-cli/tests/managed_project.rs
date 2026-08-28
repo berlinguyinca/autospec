@@ -869,7 +869,7 @@ fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
     let repository_path = initialize_managed_repository(&fixture, "checkout");
     fs::write(
         repository_path.join(".autospec/autonomous.yml"),
-        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 1\n",
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"https://github.com/BerlinGuyInCA/autospec.git\"]\n  discovery_max_repos: 1\n",
     )
     .unwrap();
     let args = vec![
