@@ -617,13 +617,14 @@ def sync_project(issue_url):
     helper = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_HELPER", "")).strip()
     repo = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_REPO", os.getcwd())).strip()
     if not helper or not os.path.isfile(helper):
-        return
-    subprocess.run(
+        return False
+    result = subprocess.run(
         ["bash", helper, str(issue_url or "").strip(), repo],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
+    return result.returncode == 0
 
 def rust_safety_pass(issue_url):
     issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
@@ -701,8 +702,7 @@ for candidate in candidates:
             text=True,
             check=True,
         )
-        sync_project(created.stdout)
-        if rust_safety_pass(created.stdout):
+        if sync_project(created.stdout) and rust_safety_pass(created.stdout):
             count += 1
     except Exception:
         pass

@@ -223,6 +223,8 @@ SH
 @test "standalone publisher skills install the shared projection helper" {
   skills=(
     autospec-autonomous
+    autospec-classify
+    autospec-define
     autospec-explore
     autospec-listen
     autospec-grow-define
@@ -230,6 +232,7 @@ SH
     autospec-release
     autospec-review
     autospec-run
+    autospec-split
   )
   for skill in "${skills[@]}"; do
     run env HOME="$TMP/home-$skill" sh "$REPO_ROOT/skills/$skill/install.sh" --harness codex --dry-run
@@ -361,7 +364,7 @@ SH
   [ ! -s "$AUTOSPEC_CALLS" ]
 
   : > "$events"
-  run env EVENTS="$events" AUTOSPEC_SYNC_FAIL=1 AUTOSPEC_SCRIPTS_DIR="$TMP/bin" REPO_DIR="$TMP/repo" \
+  run env EVENTS="$events" AUTOSPEC_SYNC_FAIL=pending AUTOSPEC_SCRIPTS_DIR="$TMP/bin" REPO_DIR="$TMP/repo" \
     bash "$REPO_ROOT/scripts/qa-finding-to-issue.sh" --finding "$finding" --dedup-cache "$TMP/fail.cache"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^gh:issue create' "$events")" -eq 1 ]
@@ -371,8 +374,8 @@ SH
 @test "define split and classify require sync after successful non-dry-run mutation" {
   for skill in autospec-define autospec-split autospec-classify; do
     body="$REPO_ROOT/skills/$skill/SKILL.md"
-    grep -Fq 'autospec project sync --repo-dir "$PWD" --issue-url "$ISSUE_URL"' "$body"
+    grep -Fq 'project-sync-issue.sh" "$ISSUE_URL" "$PWD"' "$body"
     grep -q 'dry-run' "$body"
-    grep -q 'WARNING.*Project sync' "$body"
+    grep -q 'journaled-pending' "$body"
   done
 }

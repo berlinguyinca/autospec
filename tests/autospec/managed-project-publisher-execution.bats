@@ -13,7 +13,10 @@ setup() {
 #!/usr/bin/env bash
 printf 'autospec:%s\n' "$*" >> "$EVENTS"
 printf '%s\n' "$*" >> "$AUTOSPEC_CALLS"
-[ -z "${AUTOSPEC_SYNC_FAIL:-}" ] || exit 9
+if [ -n "${AUTOSPEC_SYNC_FAIL:-}" ]; then
+  [ "$AUTOSPEC_SYNC_FAIL" = hard ] || echo 'journaled_projection_pending: retry later' >&2
+  exit 9
+fi
 SH
   cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash

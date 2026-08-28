@@ -136,7 +136,7 @@ if ISSUE_URL="$(gh issue create \
     --label "auto-implement,autospec:v2-flow" \
     --label origin:self \
     --body "$BODY" 2>/dev/null)"; then
-    project_sync_issue "$ISSUE_URL"
+    project_sync_issue "$ISSUE_URL" || exit $?
     echo "$DEDUP_KEY" >> "$DEDUP_CACHE"
     exit 0
 fi

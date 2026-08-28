@@ -477,11 +477,11 @@ pub(super) fn create_issue(
         .ok()
         .filter(|number| *number > 0)
         .ok_or_else(|| "Tier 2 issue creation returned an invalid number".to_string())?;
-    project_sync_issue(repo_dir, repo, number);
+    project_sync_issue(repo_dir, repo, number)?;
     Ok(number)
 }
 
-fn project_sync_issue(repo_dir: &Path, repo: &str, number: u64) {
+fn project_sync_issue(repo_dir: &Path, repo: &str, number: u64) -> Result<(), String> {
     let issue_url = format!("https://github.com/{repo}/issues/{number}");
     let result = Command::new(std::env::var("AUTOSPEC_BIN").unwrap_or_else(|_| "autospec".into()))
         .arg("project")
@@ -491,11 +491,22 @@ fn project_sync_issue(repo_dir: &Path, repo: &str, number: u64) {
         .arg("--issue-url")
         .arg(&issue_url)
         .output();
-    if result.is_err() || result.is_ok_and(|output| !output.status.success()) {
+    let output =
+        result.map_err(|error| format!("could not execute managed Project sync: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("journaled_projection_pending:") {
         eprintln!(
             "WARNING: managed Project sync failed for {issue_url}; durable projection remains retryable"
         );
+        return Ok(());
     }
+    Err(format!(
+        "managed Project sync failed before durable journaling for {issue_url}: {}",
+        diagnostic.trim()
+    ))
 }
 
 pub(super) fn create_issue_arguments(repo: &str, draft: &PublicationDraft) -> Vec<String> {

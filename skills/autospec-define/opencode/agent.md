@@ -487,10 +487,9 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 
 > **Managed Project projection (mandatory):** Immediately after every successful issue
 > creation or issue edit, capture the verified URL as `ISSUE_URL` and run:
-> `autospec project sync --repo-dir "$PWD" --issue-url "$ISSUE_URL"`.
+> `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$ISSUE_URL" "$PWD"`.
 > Never run this command in dry-run mode. If sync fails, print
-> `WARNING: managed Project sync failed for $ISSUE_URL` and continue with the issue that
-> already exists; never create a replacement issue.
+> `WARNING: managed Project sync failed for $ISSUE_URL` only for a verified journaled-pending outcome. A hard pre-journal failure stops decomposition after preserving the already-created issue; never create a replacement issue.
 > Then perform a Tier-A portfolio review: confirm every threat has a control,
 > every control has both a negative test and an issue owner, every required spec
 > section is covered, dependencies are acyclic, every prerequisite names its

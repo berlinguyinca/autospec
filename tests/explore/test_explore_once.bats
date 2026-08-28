@@ -55,6 +55,9 @@ if [ "${1:-}" = "explore" ] && [ "${2:-}" = "verifier-outcome" ]; then
     printf '{"outcome":"NotRun","reason":"missing_AUTOSPEC_EXPLORE_VERIFY_CMD","tier":"%s","cycle":%s,"artifact_path":"%s","sealed":true,"dry":false,"may_mutate_github":false}\n' "$tier" "${cycle:-0}" "$artifact"
     exit 0
 fi
+if [ "${1:-}" = "project" ] && [ "${2:-}" = "sync" ]; then
+    exit 0
+fi
 if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
     exit 41
 fi

@@ -9,7 +9,7 @@ use autospec_core::managed_project::{
 use commands::autonomous::accountability::github::{GithubCommand, GithubFailure, GithubTransport};
 use commands::managed_project::{
     active_dependency_graph, journal_issue_projection, onboard_repositories, reconcile_issue,
-    resolve_or_create_project, retry_pending_projections, run_with_transport,
+    resolve_or_create_project, retry_pending_projections, run_with_transport, tracked_issue_urls,
     verify_managed_marker, ManagedProjectStore, OnboardingOptions,
 };
 use std::collections::VecDeque;
@@ -603,6 +603,7 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
                 repository_path.to_str().unwrap(),
                 "--dry-run",
             ])
+            .env("AUTOSPEC_HOME", &state_root)
             .output()
             .unwrap()
     };
@@ -708,6 +709,7 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
     let repository_path = initialize_managed_repository(&fixture, "checkout");
     let state_root = repository_path.join(".autospec/state");
     let issue_url = "https://github.com/berlinguyinca/autospec/issues/45";
+    let second_issue_url = "https://github.com/berlinguyinca/autospec/issues/46";
     let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
     store
         .record_project(
@@ -719,10 +721,24 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
         )
         .unwrap();
     journal_issue_projection(&mut store, issue_url).unwrap();
+    journal_issue_projection(&mut store, second_issue_url).unwrap();
     store
         .ack_projection(&format!("project:item-add:unresolved:{issue_url}"))
         .unwrap();
+    store
+        .ack_projection(&format!("project:item-add:unresolved:{second_issue_url}"))
+        .unwrap();
+    assert_eq!(
+        tracked_issue_urls(&store),
+        vec![issue_url.to_owned(), second_issue_url.to_owned()]
+    );
     drop(store);
+    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    assert_eq!(
+        tracked_issue_urls(&reopened),
+        vec![issue_url.to_owned(), second_issue_url.to_owned()]
+    );
+    drop(reopened);
     let args = vec![
         "sync".to_owned(),
         "--repo-dir".to_owned(),
@@ -737,14 +753,31 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
         )),
         Ok(item_list(&[])),
         Ok(String::new()),
+        Ok(String::new()),
     ]);
 
     run_with_transport(&args, &mut github).unwrap();
 
+    assert!(
+        github.calls.iter().any(|call| matches!(
+            call,
+            GithubCommand::AddToProject { issue_url: added, .. } if added == issue_url
+        )),
+        "calls: {:?}",
+        github.calls
+    );
     assert!(github.calls.iter().any(|call| matches!(
         call,
-        GithubCommand::AddToProject { issue_url: added, .. } if added == issue_url
+        GithubCommand::AddToProject { issue_url: added, .. } if added == second_issue_url
     )));
+    assert_eq!(
+        github
+            .calls
+            .iter()
+            .filter(|call| matches!(call, GithubCommand::ListProjectItems { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -820,6 +853,50 @@ fn onboard_cli_journals_selected_issue_before_owner_enumeration_failure() {
         reopened.snapshot().pending_projections,
         [format!("project:item-add:unresolved:{issue_url}")]
     );
+}
+
+#[test]
+fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
+    let fixture = Fixture::new("selected-issue-shared-cap");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 1\n",
+    )
+    .unwrap();
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--issue-url".to_owned(),
+        "https://github.com/berlinguyinca/autospec/issues/50".to_owned(),
+        "--issue-url".to_owned(),
+        "https://github.com/berlinguyinca/autospec/issues/51".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([
+        Ok(issue(
+            "https://github.com/berlinguyinca/autospec/issues/50",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/alpha/issues/1",
+        )),
+        Ok(issue(
+            "https://github.com/berlinguyinca/autospec/issues/51",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/beta/issues/1",
+        )),
+    ]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    let repositories = outcome["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 2);
+    assert_eq!(
+        repositories
+            .iter()
+            .filter(|record| record["entry_kind"] == "issue-reference")
+            .count(),
+        1
+    );
+    assert!(outcome["out_of_bound"].as_u64().unwrap() >= 1);
 }
 
 #[test]

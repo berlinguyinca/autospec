@@ -132,7 +132,8 @@ fn sync<T: GithubTransport>(
         let project =
             resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
         for tracked_issue in tracked_issue_urls(store) {
-            super::reconcile_issue(store, github, policy, &tracked_issue)?;
+            let projection = journal_issue_projection(store, &tracked_issue)?;
+            store.restore_projection(&projection)?;
         }
         retry_pending_projections(store, github, policy)?;
         ack_repository_projections(store, policy)?;
@@ -289,6 +290,28 @@ fn load_selected_issue_relationships<T: GithubTransport>(
     report
         .repositories
         .dedup_by(|left, right| left.repository == right.repository);
+    if report.repositories.len() > policy.discovery_max_repos {
+        let excluded = report.repositories.split_off(policy.discovery_max_repos);
+        report.out_of_bound += excluded.len();
+    }
+    let mut admitted = report
+        .repositories
+        .iter()
+        .map(|record| record.repository.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    admitted.extend(issue_urls.iter().filter_map(|issue_url| {
+        issue_url
+            .strip_prefix("https://github.com/")
+            .and_then(|remainder| remainder.split_once("/issues/"))
+            .map(|(repository, _)| repository.to_owned())
+    }));
+    report.edges.retain(|edge| {
+        [&edge.source, &edge.target].into_iter().all(|identity| {
+            super::onboard::field_repository(identity)
+                .and_then(super::normalize_github_repository)
+                .is_none_or(|repository| admitted.contains(&repository))
+        })
+    });
     report.edges.sort_by_key(RelationshipEdge::dedupe_key);
     report.edges.dedup_by_key(|edge| edge.dedupe_key());
     Ok(report)
@@ -317,6 +340,9 @@ fn merge_selected_issue_discovery(
         }
         report.repositories.push(repository);
     }
+    report
+        .repositories
+        .sort_by(|left, right| left.repository.cmp(&right.repository));
     let mut known = report
         .edges
         .iter()

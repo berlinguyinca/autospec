@@ -257,6 +257,33 @@ impl ManagedProjectStore {
         )
     }
 
+    pub fn restore_projection(&mut self, projection_key: &str) -> Result<(), ManagedProjectError> {
+        let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
+        self.refresh_from_journal()?;
+        if self
+            .binding
+            .pending_projections
+            .iter()
+            .any(|pending| pending == projection_key)
+        {
+            return Ok(());
+        }
+        if !self.known_projections.contains(projection_key) {
+            return Err(ManagedProjectError::new(
+                "projection restore has no matching durable enqueue event",
+            ));
+        }
+        self.append_event_locked(
+            format!(
+                "projection:restore:{}:{}",
+                sha256_hex(projection_key.as_bytes()),
+                self.next_sequence
+            ),
+            "projection-restored",
+            Value::String(projection_key.to_owned()),
+        )
+    }
+
     pub fn snapshot(&self) -> &ManagedProjectBinding {
         &self.binding
     }
@@ -348,6 +375,7 @@ impl ManagedProjectStore {
             "repository-recorded" => self.apply_repository_recorded(event)?,
             "relationship-recorded" => self.apply_relationship_recorded(event)?,
             "projection-enqueued" => self.apply_projection_enqueued(event)?,
+            "projection-restored" => self.apply_projection_restored(event)?,
             "projection-acknowledged" => self.apply_projection_acknowledged(event)?,
             _ => {
                 return Err(ManagedProjectError::new(format!(
@@ -456,6 +484,27 @@ impl ManagedProjectStore {
         }
         self.known_projections.insert(projection.to_owned());
         self.binding.pending_projections.push(projection.to_owned());
+        Ok(())
+    }
+
+    fn apply_projection_restored(
+        &mut self,
+        event: &JournalEvent,
+    ) -> Result<(), ManagedProjectError> {
+        let projection = payload_string(event, "projection restore")?;
+        if !self.known_projections.contains(projection) {
+            return Err(ManagedProjectError::new(
+                "projection restore precedes its durable enqueue event",
+            ));
+        }
+        if !self
+            .binding
+            .pending_projections
+            .iter()
+            .any(|pending| pending == projection)
+        {
+            self.binding.pending_projections.push(projection.to_owned());
+        }
         Ok(())
     }
 

@@ -460,9 +460,8 @@ autospec-classify run summary on {repo}
   `needs-autospec-template`, `lang:*`.
 - Never call `gh issue edit` in `--dry-run` mode.
 - Immediately after every successful non-dry-run issue edit, capture the verified issue URL as
-  `ISSUE_URL` and run `autospec project sync --repo-dir "$PWD" --issue-url "$ISSUE_URL"`.
-  If sync fails, print `WARNING: managed Project sync failed for $ISSUE_URL`, keep the edited
-  issue, and never create a replacement issue.
+  `ISSUE_URL` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$ISSUE_URL" "$PWD"`.
+  Continue only for a verified journaled-pending warning. A hard pre-journal failure stops classification after preserving the edited issue; never create a replacement issue.
 - Always idempotent — running twice on the same issue results in no diff after
   the second run (same labels, same `## Model fit` block).
 - `gh` CLI only; no direct GraphQL.
