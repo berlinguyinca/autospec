@@ -617,7 +617,7 @@ def sync_project(issue_url):
     helper = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_HELPER", "")).strip()
     repo = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_REPO", os.getcwd())).strip()
     if not helper or not os.path.isfile(helper):
-        return False
+        raise RuntimeError("managed Project sync helper is unavailable")
     result = subprocess.run(
         ["bash", helper, str(issue_url or "").strip(), repo],
         stdout=subprocess.DEVNULL,
@@ -1084,7 +1084,7 @@ _explore_file_round() {
     if ! bash "$SCRIPT_DIR/gen-explore-round-spec.sh" "$research_json" \
         --round "$iter" --branch "$SANDBOX_BRANCH" --out "$spec_path" 2>/dev/null; then
         echo "code_health:explore_round_spec_render_failed round=$iter" >&2
-        _explore_raw_file_round
+        _explore_raw_file_round || return $?
         return 0
     fi
 
@@ -1115,7 +1115,7 @@ _explore_file_round() {
     if [ "$define_rc" -ne 0 ]; then
         # 5. Fallback — keep the committed spec, raw-file this round, continue.
         echo "code_health:explore_define_unavailable round=$iter rc=$define_rc spec=$spec_path" >&2
-        _explore_raw_file_round
+        _explore_raw_file_round || return $?
         return 0
     fi
 
@@ -1343,7 +1343,11 @@ PYR
     # back to raw `gh issue create` for that round, and continue (never stall).
     issues_filed=0
     filed_issue_nums=""   # space-separated issue numbers filed THIS round (for ledger)
-    _explore_file_round
+    if ! _explore_file_round; then
+        echo "code_health:explore_project_sync_failed iter=$iter" >&2
+        status="project_sync_failed"
+        break
+    fi
 
     # ── Drain callback: invoke /autospec-run. ─────────────────────────────────
     drain_rc=0

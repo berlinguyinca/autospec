@@ -347,6 +347,20 @@ assert d['dry'] is False, f'expected dry=false, got: {d}'
     [[ "$output" == *"hard managed Project sync failure"* ]]
 }
 
+@test "--once propagates a missing Project sync helper" {
+    local proposals='[{"title":"feat: one","evidence":"e","estimated_complexity":"small","confidence":0.9,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+    mkdir -p "$TMP/missing-scripts"
+
+    run env AUTOSPEC_SCRIPTS_DIR="$TMP/missing-scripts" bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once --research-sources spec-vs-code
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"sync helper is unavailable"* ]]
+}
+
 
 @test "--once emits machine-readable candidates with evidence, labels, ROI score, and body" {
     local proposals='[{"title":"fix: verified gap","evidence":"scripts/x.sh:12 missing guard","estimated_complexity":"medium","confidence":0.8,"source":"source-analysis","severity":"correctness","named_consumer":"autospec-run","score":0.42}]'

@@ -80,6 +80,11 @@ DRIVER
   run env AUTOSPEC_SYNC_FAIL=hard AUTOSPEC_SCRIPTS_DIR="$TMP/bin" bash "$TMP/driver.sh"
   [ "$status" -ne 0 ]
 
+  sed '$d' "$TMP/driver.sh" > "$TMP/wrapped-driver.sh"
+  printf '%s\n' '_explore_file_round' >> "$TMP/wrapped-driver.sh"
+  run env AUTOSPEC_SYNC_FAIL=hard AUTOSPEC_SCRIPTS_DIR="$TMP/bin" bash "$TMP/wrapped-driver.sh"
+  [ "$status" -ne 0 ]
+
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run env AUTOSPEC_SCRIPTS_DIR="$TMP/bin" AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD='printf "{\"proposals_total\":0,\"proposals\":[]}"' \
     bash "$REPO_ROOT/scripts/autospec-explore.sh" --once --preview --autonomous --research-sources spec-vs-code

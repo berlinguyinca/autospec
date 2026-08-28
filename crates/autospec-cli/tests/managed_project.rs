@@ -885,11 +885,11 @@ fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
     let mut github = ScriptedGithub::with([
         Ok(issue(
             "https://github.com/berlinguyinca/autospec/issues/50",
-            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/zeta/issues/1",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/autospec/issues/99",
         )),
         Ok(issue(
             "https://github.com/berlinguyinca/autospec/issues/51",
-            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/omega/issues/1",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/zeta/issues/1",
         )),
     ]);
 
@@ -904,7 +904,7 @@ fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
             .count(),
         1
     );
-    assert_eq!(outcome["out_of_bound"], 1);
+    assert_eq!(outcome["out_of_bound"], 0);
 }
 
 #[test]

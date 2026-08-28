@@ -73,8 +73,19 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
     }
     populate_owner_repositories(&policy, &mut options, github)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
+    let explicitly_admitted = policy
+        .repository_seeds
+        .iter()
+        .chain(options.repositories.iter())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let selected_issue_discovery = if command == "onboard" {
-        load_selected_issue_relationships(&policy, &options.issue_urls, github)?
+        load_selected_issue_relationships(
+            &policy,
+            &options.issue_urls,
+            &explicitly_admitted,
+            github,
+        )?
     } else {
         OnboardingReport::default()
     };
@@ -240,6 +251,7 @@ fn onboard<T: GithubTransport>(
 fn load_selected_issue_relationships<T: GithubTransport>(
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_urls: &[String],
+    explicitly_admitted: &std::collections::BTreeSet<String>,
     github: &mut T,
 ) -> Result<OnboardingReport, ManagedProjectError> {
     let mut report = OnboardingReport::default();
@@ -292,7 +304,7 @@ fn load_selected_issue_relationships<T: GithubTransport>(
         .dedup_by(|left, right| left.repository == right.repository);
     report
         .repositories
-        .retain(|record| record.entry_kind != "selected-issue");
+        .retain(|record| !explicitly_admitted.contains(&record.repository));
     if report.repositories.len() > policy.discovery_max_repos {
         let excluded = report.repositories.split_off(policy.discovery_max_repos);
         report.out_of_bound += excluded.len();
