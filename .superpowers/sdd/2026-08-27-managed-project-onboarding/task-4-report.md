@@ -7,6 +7,7 @@ Status: DONE_WITH_CONCERNS
 - `6351305c` — `feat: onboard existing repository relationships`
 - `06c8965a` — `fix: preserve bounded onboarding evidence`
 - `d65f1719` — `fix: validate onboarding before side effects`
+- `4c12501d` — `fix: constrain npm repository metadata to GitHub`
 
 ## Review-fix red evidence
 
@@ -26,13 +27,16 @@ Status: DONE_WITH_CONCERNS
   before production edits.
 - The restored positive name-reference regression passed immediately, confirming that the
   existing proposal-state isolation was correct but previously lacked under-cap coverage.
+- Round 3 positive and negative npm regressions both failed before production edits:
+  `git+https://github.com/...` repository metadata was counted inaccessible, while GitLab
+  `repository` metadata was emitted and also inflated the inaccessible count.
 
 ## Green evidence
 
 - Direct `rustfmt` over the changed Task 4 Rust files with child traversal disabled plus
   `git diff --check` → exit `0`.
 - `cargo test -p autospec-cli --test managed_project onboard_ --no-fail-fast` → exit `0`;
-  `10 passed`, `0 failed`.
+  `12 passed`, `0 failed`.
 - `cargo test -p autospec-cli --test managed_project github_ --no-fail-fast` → exit `0`;
   `21 passed`, `0 failed`.
 - `cargo test -p autospec-cli --test managed_project store_ --no-fail-fast` → exit `0`;
@@ -48,7 +52,8 @@ Status: DONE_WITH_CONCERNS
 - `crates/autospec-cli/src/commands/managed_project/onboard.rs` — bounded typed discovery,
   endpoint-before-edge retention, orchestration, and active dependency graph.
 - `crates/autospec-cli/src/commands/managed_project/onboard/*.rs` — structured Cargo, npm/pnpm,
-  line-format, managed-issue, admission, and stable-report modules.
+  line-format, managed-issue, admission, and stable-report modules, including npm `git+https`
+  and `git+ssh` GitHub canonicalization.
 - `crates/autospec-cli/src/commands/managed_project/cli.rs` — focused
   `project resolve|sync|onboard` parsing and reporting; every policy/CLI seed is validated before
   writable state or GitHub, and dry-run suppresses GitHub plus persistence.
@@ -87,6 +92,9 @@ Status: DONE_WITH_CONCERNS
 - npm dependencies yield repository candidates only when the dependency value canonicalizes as a
   GitHub repository; semver, registry alias, file, and workspace protocols are ignored rather than
   counted inaccessible.
+- npm `repository` strings/object URLs and dependency values share the same canonical GitHub
+  predicate. GitLab and malformed metadata are ignored, while npm `git+https` and `git+ssh`
+  GitHub URLs normalize to `owner/repo`.
 
 ## Concerns
 
