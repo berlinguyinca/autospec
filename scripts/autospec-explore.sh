@@ -584,7 +584,7 @@ except Exception:
     # File surviving candidates as issues (best-effort; never blocks the mode).
     _once_filed=0
     if [ "$_once_new" -gt 0 ] && [ "$PREVIEW" -ne 1 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
-        _once_filed="$(python3 - "$_once_candidates" <<'PY'
+        _once_filed="$(AUTOSPEC_PROJECT_SYNC_HELPER="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh" AUTOSPEC_PROJECT_SYNC_REPO="$REPO_ROOT" python3 - "$_once_candidates" <<'PY'
 import json, os, shutil, subprocess, sys
 try:
     candidates = json.load(open(sys.argv[1]))
@@ -612,6 +612,18 @@ def resolve_autospec_bin():
     return shutil.which("autospec") or ""
 
 AUTOSPEC_BIN = resolve_autospec_bin()
+
+def sync_project(issue_url):
+    helper = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_HELPER", "")).strip()
+    repo = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_REPO", os.getcwd())).strip()
+    if not helper or not os.path.isfile(helper):
+        return
+    subprocess.run(
+        ["bash", helper, str(issue_url or "").strip(), repo],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
 
 def rust_safety_pass(issue_url):
     issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
@@ -689,6 +701,7 @@ for candidate in candidates:
             text=True,
             check=True,
         )
+        sync_project(created.stdout)
         if rust_safety_pass(created.stdout):
             count += 1
     except Exception:

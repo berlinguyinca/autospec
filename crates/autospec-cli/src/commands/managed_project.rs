@@ -30,7 +30,7 @@ pub(crate) use cli::{bound_project_url, managed_state_root};
 pub use github::verify_managed_marker;
 pub use github::{
     journal_issue_projection, normalize_issue_url, reconcile_issue, resolve_or_create_project,
-    retry_pending_projections,
+    retry_pending_projections, tracked_issue_urls,
 };
 pub(crate) use onboard::discover_remote_issue_relationships;
 pub use onboard::{

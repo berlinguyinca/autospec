@@ -214,7 +214,7 @@ When the user utters a phrase from the **Issue triggers** list (see `references/
 5. **On `yes`**, infer the title and run:
    ```bash
    issue_url="$(gh issue create --title "<inferred-title>" --body "<draft-body>" --label needs-classify)"
-   bash "${AUTOSPEC_SCRIPTS_DIR:-$PWD/skills/autospec-shared/scripts}/project-sync-issue.sh" "$issue_url" "$PWD"
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$issue_url" "$PWD"
    ```
    Then post the resulting issue URL back to the chat. Project sync is best-effort but journals the issue before remote reconciliation, so a failed projection remains retryable. The `needs-classify` label keeps the issue out of the auto-implement queue until `/autospec-classify` sizes it.
 6. **On `edit`**, accept free-text revisions from the user, re-render the draft, and re-confirm (loop back to step 4).

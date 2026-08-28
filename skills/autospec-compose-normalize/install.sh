@@ -18,6 +18,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=
 SHARED_SCRIPT_FILES="claim-guard.sh lint-issue.sh worktree-guard.sh"
+SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"
 SKILL_SCRIPT_FILES="workflow-guard.sh"
 
 err() { printf 'error: %s\n' "$*" >&2; }
@@ -84,6 +85,14 @@ fetch_sources() {
             exit 1
         fi
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/lib-scripts/$rel"; then
+            err "failed to download $rel"
+            exit 1
+        fi
+    done
     for rel in $SKILL_SCRIPT_FILES; do
         if ! curl -fsSL "$SKILL_RAW_BASE/scripts/$rel" \
             -o "$TMP_FETCH_DIR/scripts/$rel"; then
@@ -129,6 +138,16 @@ install_shared_scripts() {
     }
     for rel in $SHARED_SCRIPT_FILES; do
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        run chmod +x "$HOME/.autospec/scripts/$rel"
+    done
+    checkout_root=$(CDPATH= cd -- "$SKILL_DIR/../.." 2>/dev/null && pwd || true)
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-shared/scripts" ]; then
+        lib_dir="$checkout_root/skills/autospec-shared/scripts"
+    else
+        lib_dir="$SKILL_DIR/lib-scripts"
+    fi
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$lib_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         run chmod +x "$HOME/.autospec/scripts/$rel"
     done
 }

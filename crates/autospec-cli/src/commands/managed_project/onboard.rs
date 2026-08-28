@@ -173,7 +173,7 @@ pub(crate) fn discover_remote_issue_relationships(
     policy: &ManagedProjectPolicy,
     issue_url: &str,
     body: &str,
-) -> Result<Vec<RelationshipEdge>, ManagedProjectError> {
+) -> Result<OnboardingReport, ManagedProjectError> {
     let remainder = issue_url
         .strip_prefix("https://github.com/")
         .ok_or_else(|| ManagedProjectError::new("selected issue URL is not canonical"))?;
@@ -217,7 +217,18 @@ pub(crate) fn discover_remote_issue_relationships(
             },
         );
     }
-    Ok(state.edges.into_values().collect())
+    let edges = state.edges.into_values().collect::<Vec<_>>();
+    Ok(OnboardingReport {
+        proposed: edges
+            .iter()
+            .filter(|edge| edge.state == RelationshipState::Proposed)
+            .count(),
+        out_of_bound: state.out_of_bound.len(),
+        inaccessible: state.inaccessible.len(),
+        repositories: state.records.into_values().collect(),
+        edges,
+        ..OnboardingReport::default()
+    })
 }
 
 fn baseline(

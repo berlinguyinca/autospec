@@ -203,6 +203,7 @@ before `gh issue create`. Then run
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" "$ISSUE_BODY"
 ISSUE_URL=$(gh issue create --title "feat: migrate Compose isolation $FINGERPRINT" \
   --body-file "$ISSUE_BODY" --label needs-classify)
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$ISSUE_URL" "$PWD"
 ISSUE_NUMBER=${ISSUE_URL##*/}
 ```
 

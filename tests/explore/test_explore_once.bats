@@ -363,7 +363,7 @@ assert 'Adversarial verify' in cand['body'], cand
 "
 }
 
-@test "--once files an interim candidate before exact Rust safety review" {
+@test "--once syncs an interim candidate before exact Rust safety review" {
     local proposals='[{"title":"fix: label body gap","evidence":"lib/y.sh:7 failing path","estimated_complexity":"small","confidence":0.7,"source":"spec-vs-code","severity":"feature","named_consumer":"autospec-run","score":0.7}]'
     local cycle_cmd
     cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
@@ -377,10 +377,13 @@ assert 'Adversarial verify' in cand['body'], cand
     [ "$status" -eq 0 ]
 
     grep -q -- '--label auto-implement' "$TMP/.autospec/gh-calls.log"
+    grep -q 'autospec project sync --repo-dir' "$TMP/.autospec/gh-calls.log"
     grep -q 'autospec queue review-safety --repo x/y --limit 1 --issue 42' "$TMP/.autospec/gh-calls.log"
     create_line="$(grep -n 'gh issue create' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
+    sync_line="$(grep -n 'autospec project sync' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
     review_line="$(grep -n 'autospec queue review-safety' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
-    [ "$create_line" -lt "$review_line" ]
+    [ "$create_line" -lt "$sync_line" ]
+    [ "$sync_line" -lt "$review_line" ]
     grep -q -- '--label ctx:32k' "$TMP/.autospec/gh-calls.log"
     grep -q -- '--label reasoning:medium' "$TMP/.autospec/gh-calls.log"
     grep -q 'lib/y.sh:7 failing path' "$TMP/.autospec/gh-calls.log"

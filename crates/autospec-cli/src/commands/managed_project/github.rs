@@ -2,7 +2,10 @@ use super::{ManagedProjectError, ManagedProjectStore, RemoteProject};
 use crate::commands::autonomous::accountability::github::{
     GithubCommand, GithubFailure, GithubTransport,
 };
-use autospec_core::managed_project::ManagedProjectPolicy;
+use autospec_core::managed_project::{
+    ManagedProjectPolicy, RelationshipEdge, RelationshipEvidence, RelationshipKind,
+    RelationshipState,
+};
 use std::collections::HashSet;
 
 #[path = "github/parse.rs"]
@@ -114,9 +117,39 @@ pub fn journal_issue_projection(
     issue_url: &str,
 ) -> Result<String, ManagedProjectError> {
     let normalized = parse::normalize_issue_url(issue_url)?;
+    store.record_edge(RelationshipEdge {
+        product_key: store.snapshot().product_key.clone(),
+        kind: RelationshipKind::Contains,
+        source: store.snapshot().product_key.as_str().to_owned(),
+        target: normalized.clone(),
+        evidence: RelationshipEvidence {
+            kind: "autospec-issue-membership".to_owned(),
+            location: normalized.clone(),
+            discovered_at: "managed-project-sync".to_owned(),
+            confidence: 100,
+        },
+        state: RelationshipState::Active,
+    })?;
     let projection = format!("project:item-add:unresolved:{normalized}");
     store.enqueue_projection(projection.clone())?;
     Ok(projection)
+}
+
+pub fn tracked_issue_urls(store: &ManagedProjectStore) -> Vec<String> {
+    let mut urls = store
+        .snapshot()
+        .relationships
+        .iter()
+        .filter(|edge| {
+            edge.kind == RelationshipKind::Contains
+                && edge.state == RelationshipState::Active
+                && edge.evidence.kind == "autospec-issue-membership"
+        })
+        .map(|edge| edge.target.clone())
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    urls
 }
 
 pub fn normalize_issue_url(issue_url: &str) -> Result<String, ManagedProjectError> {

@@ -11,7 +11,11 @@ setup() {
 printf '%s\n' "$*" >> "$AUTOSPEC_CALLS"
 [ -z "${EVENTS:-}" ] || printf 'autospec:%s\n' "$*" >> "$EVENTS"
 if [ -n "${AUTOSPEC_SYNC_FAIL:-}" ]; then
-  echo "sync denied" >&2
+  if [ "$AUTOSPEC_SYNC_FAIL" = pending ]; then
+    echo "journaled_projection_pending: sync denied" >&2
+  else
+    echo "sync denied" >&2
+  fi
   exit 9
 fi
 SH
@@ -201,21 +205,26 @@ SH
   grep -Fxq "project sync --repo-dir $TMP/repo --issue-url https://github.com/acme/widgets/issues/42" "$AUTOSPEC_CALLS"
 }
 
-@test "shared issue projection skips dry-run and degrades on sync failure" {
+@test "shared issue projection skips dry-run, degrades only after journaling, and propagates hard failure" {
   run env AUTOSPEC_DRY_RUN=1 bash "$HELPER" "https://github.com/acme/widgets/issues/42" "$TMP/repo"
   [ "$status" -eq 0 ]
   [ ! -e "$AUTOSPEC_CALLS" ]
 
-  run env AUTOSPEC_SYNC_FAIL=1 bash "$HELPER" "https://github.com/acme/widgets/issues/42" "$TMP/repo"
+  run env AUTOSPEC_SYNC_FAIL=pending bash "$HELPER" "https://github.com/acme/widgets/issues/42" "$TMP/repo"
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARNING: managed Project sync failed"* ]]
   [ "$(wc -l < "$AUTOSPEC_CALLS" | tr -d ' ')" -eq 1 ]
+
+  run env AUTOSPEC_SYNC_FAIL=hard bash "$HELPER" "https://github.com/acme/widgets/issues/43" "$TMP/repo"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed before durable journaling"* ]]
 }
 
 @test "standalone publisher skills install the shared projection helper" {
   skills=(
     autospec-autonomous
     autospec-explore
+    autospec-listen
     autospec-grow-define
     autospec-qa
     autospec-release
@@ -241,7 +250,7 @@ SH
     "$REPO_ROOT/skills/autospec-listen/opencode/agent.md" \
     "$REPO_ROOT/skills/autospec-listen/codex/prompt.md"; do
     grep -Fq 'issue_url="$(gh issue create' "$body"
-    grep -Fq 'project-sync-issue.sh" "$issue_url"' "$body"
+    grep -Fq '.autospec/scripts}/project-sync-issue.sh" "$issue_url"' "$body"
   done
 
   for body in \
@@ -250,7 +259,18 @@ SH
     "$REPO_ROOT/skills/autospec-explore/codex/prompt.md"; do
     grep -Fq 'invokes `project-sync-issue.sh` before the exact Rust admission command' "$body"
   done
+  grep -Fq 'sync_project(created.stdout)' "$REPO_ROOT/scripts/autospec-explore.sh"
   grep -Fq 'project_sync_issue "$issue_url"' "$REPO_ROOT/scripts/autospec-explore.sh"
+  grep -Fq -- '--repo-dir "$BOARD_CONFIG_REPO_DIR"' "$REPO_ROOT/scripts/autonomous-promote-open-issues.sh"
+
+  for body in \
+    "$REPO_ROOT/skills/autospec-compose-normalize/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-compose-normalize/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec-compose-normalize/codex/prompt.md"; do
+    grep -Fq 'project-sync-issue.sh" "$ISSUE_URL"' "$body"
+  done
+  grep -Fq 'SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"' \
+    "$REPO_ROOT/skills/autospec-compose-normalize/install.sh"
 }
 
 @test "brute-force ambiguous create adopts and syncs the refreshed issue once" {

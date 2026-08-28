@@ -685,6 +685,11 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
         edge["source"] == "https://github.com/berlinguyinca/autospec/issues/41"
             && edge["target"] == "https://github.com/berlinguyinca/autospec-node/issues/9"
     }));
+    assert!(outcome["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|record| { record["repository"] == "berlinguyinca/autospec-node" }));
     assert_eq!(
         github
             .calls
@@ -698,9 +703,66 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
 }
 
 #[test]
+fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
+    let fixture = Fixture::new("sync-restores-tracked-issue");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let state_root = repository_path.join(".autospec/state");
+    let issue_url = "https://github.com/berlinguyinca/autospec/issues/45";
+    let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    journal_issue_projection(&mut store, issue_url).unwrap();
+    store
+        .ack_projection(&format!("project:item-add:unresolved:{issue_url}"))
+        .unwrap();
+    drop(store);
+    let args = vec![
+        "sync".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+    ];
+    let mut github = ScriptedGithub::with([
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Autospec",
+            &marker("berlinguyinca"),
+        )),
+        Ok(item_list(&[])),
+        Ok(String::new()),
+    ]);
+
+    run_with_transport(&args, &mut github).unwrap();
+
+    assert!(github.calls.iter().any(|call| matches!(
+        call,
+        GithubCommand::AddToProject { issue_url: added, .. } if added == issue_url
+    )));
+}
+
+#[test]
 fn onboard_cli_journals_selected_issue_before_relationship_fetch_failure() {
     let fixture = Fixture::new("onboard-selected-issue-fetch-failure");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let state_root = repository_path.join(".autospec/state");
+    let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    drop(store);
     let issue_url = "https://github.com/berlinguyinca/autospec/issues/43";
     let args = vec![
         "onboard".to_owned(),
@@ -709,8 +771,44 @@ fn onboard_cli_journals_selected_issue_before_relationship_fetch_failure() {
         "--issue-url".to_owned(),
         issue_url.to_owned(),
     ];
+    let mut github = ScriptedGithub::with([
+        Err(GithubFailure::Definitive("missing issue scope".to_owned())),
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Autospec",
+            &marker("berlinguyinca"),
+        )),
+        Ok(item_list(&[])),
+        Ok(String::new()),
+    ]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+    assert_eq!(outcome["inaccessible"], 1);
+    assert_eq!(outcome["reconciled_issues"], 1);
+
+    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    assert!(reopened.snapshot().pending_projections.is_empty());
+}
+
+#[test]
+fn onboard_cli_journals_selected_issue_before_owner_enumeration_failure() {
+    let fixture = Fixture::new("onboard-selected-issue-owner-failure");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let issue_url = "https://github.com/berlinguyinca/autospec/issues/44";
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/*".to_owned(),
+        "--issue-url".to_owned(),
+        issue_url.to_owned(),
+    ];
     let mut github = ScriptedGithub::with([Err(GithubFailure::Definitive(
-        "missing issue scope".to_owned(),
+        "missing repository scope".to_owned(),
     ))]);
 
     assert!(run_with_transport(&args, &mut github).is_err());

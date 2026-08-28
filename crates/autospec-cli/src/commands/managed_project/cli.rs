@@ -1,8 +1,8 @@
 use super::super::autonomous::accountability::github::{GhCli, GithubCommand, GithubTransport};
 use super::{
     journal_issue_projection, normalize_issue_url, onboard_repositories, resolve_or_create_project,
-    retry_pending_projections, ManagedProjectError, ManagedProjectStore, OnboardingOptions,
-    OnboardingReport,
+    retry_pending_projections, tracked_issue_urls, ManagedProjectError, ManagedProjectStore,
+    OnboardingOptions, OnboardingReport,
 };
 use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::managed_project::{
@@ -50,8 +50,6 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
     add_issue_repositories(&mut options)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
     validate_issue_boundaries(&policy, &options.issue_urls)?;
-    populate_owner_repositories(&policy, &mut options, github)?;
-    validate_explicit_seeds(&policy, &options.repositories)?;
     let state_root = managed_state_root(&repo_dir)?;
     let legacy_root = repo_dir.join(".autospec/state");
     let read_only = options.dry_run || command == "active-edges";
@@ -73,10 +71,12 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             journal_issue_projection(&mut store, issue_url)?;
         }
     }
-    let selected_issue_edges = if command == "onboard" {
+    populate_owner_repositories(&policy, &mut options, github)?;
+    validate_explicit_seeds(&policy, &options.repositories)?;
+    let selected_issue_discovery = if command == "onboard" {
         load_selected_issue_relationships(&policy, &options.issue_urls, github)?
     } else {
-        Vec::new()
+        OnboardingReport::default()
     };
 
     match command.as_str() {
@@ -93,7 +93,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             policy,
             &repo_dir,
             options,
-            selected_issue_edges,
+            selected_issue_discovery,
         ),
         "active-edges" => active_edges(&store, options.board_url.as_deref()),
         other => Err(ManagedProjectError::new(format!(
@@ -124,20 +124,31 @@ fn sync<T: GithubTransport>(
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_url: Option<&str>,
 ) -> Result<Value, ManagedProjectError> {
+    let journaled = issue_url.is_some();
     if let Some(issue_url) = issue_url {
         journal_issue_projection(store, issue_url)?;
     }
-    let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
-    if let Some(issue_url) = issue_url {
-        super::reconcile_issue(store, github, policy, issue_url)?;
-    }
-    retry_pending_projections(store, github, policy)?;
-    ack_repository_projections(store, policy)?;
-    Ok(json!({
-        "outcome": "reconciled",
-        "pending_projection": store.snapshot().pending_projections.len(),
-        "project_url": project.url,
-    }))
+    let result = (|| {
+        let project =
+            resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
+        for tracked_issue in tracked_issue_urls(store) {
+            super::reconcile_issue(store, github, policy, &tracked_issue)?;
+        }
+        retry_pending_projections(store, github, policy)?;
+        ack_repository_projections(store, policy)?;
+        Ok(json!({
+            "outcome": "reconciled",
+            "pending_projection": store.snapshot().pending_projections.len(),
+            "project_url": project.url,
+        }))
+    })();
+    result.map_err(|error: ManagedProjectError| {
+        if journaled {
+            ManagedProjectError::new(format!("journaled_projection_pending: {error}"))
+        } else {
+            error
+        }
+    })
 }
 
 fn onboard<T: GithubTransport>(
@@ -146,7 +157,7 @@ fn onboard<T: GithubTransport>(
     policy: autospec_core::managed_project::ManagedProjectPolicy,
     repo_dir: &Path,
     options: ProjectOptions,
-    selected_issue_edges: Vec<RelationshipEdge>,
+    selected_issue_discovery: OnboardingReport,
 ) -> Result<Value, ManagedProjectError> {
     let created_repository = options.repositories.first().cloned();
     let selected_issues = options.issue_urls.clone();
@@ -160,10 +171,10 @@ fn onboard<T: GithubTransport>(
             dry_run: options.dry_run,
         },
     )?;
-    merge_selected_issue_edges(
+    merge_selected_issue_discovery(
         &mut store,
         &mut report,
-        selected_issue_edges,
+        selected_issue_discovery,
         options.dry_run,
     )?;
     if !options.dry_run {
@@ -229,8 +240,8 @@ fn load_selected_issue_relationships<T: GithubTransport>(
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_urls: &[String],
     github: &mut T,
-) -> Result<Vec<RelationshipEdge>, ManagedProjectError> {
-    let mut edges = Vec::new();
+) -> Result<OnboardingReport, ManagedProjectError> {
+    let mut report = OnboardingReport::default();
     for issue_url in issue_urls {
         let remainder = issue_url
             .strip_prefix("https://github.com/")
@@ -245,46 +256,73 @@ fn load_selected_issue_relationships<T: GithubTransport>(
             .get(0..2)
             .map(|parts| parts.join("/"))
             .ok_or_else(|| ManagedProjectError::new("selected issue URL has no repository"))?;
-        let output = github
-            .execute(GithubCommand::ViewIssue { repository, number })
-            .map_err(|error| {
-                ManagedProjectError::new(format!("cannot index selected issue: {error}"))
-            })?;
-        let issue: Value = serde_json::from_str(&output).map_err(|error| {
-            ManagedProjectError::new(format!("invalid selected issue response: {error}"))
-        })?;
-        let returned_url = issue.get("url").and_then(Value::as_str).ok_or_else(|| {
-            ManagedProjectError::new("invalid selected issue response: missing url")
-        })?;
+        let Ok(output) = github.execute(GithubCommand::ViewIssue { repository, number }) else {
+            report.inaccessible += 1;
+            continue;
+        };
+        let Ok(issue) = serde_json::from_str::<Value>(&output) else {
+            report.inaccessible += 1;
+            continue;
+        };
+        let Some(returned_url) = issue.get("url").and_then(Value::as_str) else {
+            report.inaccessible += 1;
+            continue;
+        };
         if normalize_issue_url(returned_url)? != *issue_url {
             return Err(ManagedProjectError::new(
                 "selected issue response does not match the requested issue",
             ));
         }
-        let body = issue.get("body").and_then(Value::as_str).ok_or_else(|| {
-            ManagedProjectError::new("invalid selected issue response: missing body")
-        })?;
-        edges.extend(super::discover_remote_issue_relationships(
-            policy, issue_url, body,
-        )?);
+        let Some(body) = issue.get("body").and_then(Value::as_str) else {
+            report.inaccessible += 1;
+            continue;
+        };
+        let discovered = super::discover_remote_issue_relationships(policy, issue_url, body)?;
+        report.out_of_bound += discovered.out_of_bound;
+        report.inaccessible += discovered.inaccessible;
+        report.repositories.extend(discovered.repositories);
+        report.edges.extend(discovered.edges);
     }
-    edges.sort_by_key(RelationshipEdge::dedupe_key);
-    edges.dedup_by_key(|edge| edge.dedupe_key());
-    Ok(edges)
+    report
+        .repositories
+        .sort_by(|left, right| left.repository.cmp(&right.repository));
+    report
+        .repositories
+        .dedup_by(|left, right| left.repository == right.repository);
+    report.edges.sort_by_key(RelationshipEdge::dedupe_key);
+    report.edges.dedup_by_key(|edge| edge.dedupe_key());
+    Ok(report)
 }
 
-fn merge_selected_issue_edges(
+fn merge_selected_issue_discovery(
     store: &mut ManagedProjectStore,
     report: &mut OnboardingReport,
-    edges: Vec<RelationshipEdge>,
+    discovered: OnboardingReport,
     dry_run: bool,
 ) -> Result<(), ManagedProjectError> {
+    report.out_of_bound += discovered.out_of_bound;
+    report.inaccessible += discovered.inaccessible;
+    let mut known_repositories = report
+        .repositories
+        .iter()
+        .map(|record| record.repository.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for repository in discovered.repositories {
+        if !known_repositories.insert(repository.repository.clone()) {
+            continue;
+        }
+        report.created += 1;
+        if !dry_run {
+            store.record_repository(repository.clone())?;
+        }
+        report.repositories.push(repository);
+    }
     let mut known = report
         .edges
         .iter()
         .map(RelationshipEdge::dedupe_key)
         .collect::<std::collections::BTreeSet<_>>();
-    for edge in edges {
+    for edge in discovered.edges {
         if !known.insert(edge.dedupe_key()) {
             continue;
         }
