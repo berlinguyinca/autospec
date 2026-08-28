@@ -584,6 +584,94 @@ fn onboard_cli_requires_an_allowlist_for_owner_enumeration() {
 }
 
 #[test]
+fn onboard_cli_rejects_owner_responses_above_the_requested_bound() {
+    let fixture = Fixture::new("onboard-owner-oversized");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 2\n",
+    )
+    .unwrap();
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/*".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok(
+        r#"[{"nameWithOwner":"berlinguyinca/one"},{"nameWithOwner":"berlinguyinca/two"},{"nameWithOwner":"berlinguyinca/three"}]"#
+            .to_owned(),
+    )]);
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(error.to_string().contains("exceeds discovery_max_repos 2"));
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
+fn onboard_cli_rejects_spawned_from_with_owner_enumeration() {
+    let fixture = Fixture::new("onboard-owner-spawned-from");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/*".to_owned(),
+        "--spawned-from".to_owned(),
+        "run:managed-project-onboarding".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("--spawned-from cannot be combined with --owner"));
+    assert!(github.calls.is_empty());
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
+fn onboard_cli_accepts_owner_wide_allow_under_the_result_cap() {
+    let fixture = Fixture::new("onboard-owner-wide");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/*".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok(
+        r#"[{"nameWithOwner":"berlinguyinca/one"},{"nameWithOwner":"berlinguyinca/two"},{"nameWithOwner":"other/three"}]"#
+            .to_owned(),
+    )]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    let repositories = outcome["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| repository["repository"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(repositories.contains(&"berlinguyinca/one"));
+    assert!(repositories.contains(&"berlinguyinca/two"));
+    assert!(!repositories.contains(&"other/three"));
+}
+
+#[test]
 fn onboard_scans_only_structured_manifest_and_fleet_fields() {
     let fixture = Fixture::new("onboard-structured-fields");
     let repository_path = fixture.path().join("checkout");

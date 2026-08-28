@@ -225,13 +225,16 @@ autospec project sync --repo-dir "$PWD"
 ```
 
 The Rust command accepts repeatable `--repo` and `--workspace` seeds. Owner onboarding requires
-at least one repeatable `--allow` equality or trailing-`*` prefix. It asks `gh repo list` for at
-most `discovery_max_repos`, applies those command-line patterns before the matching repositories
-become exact scanner seeds, and then enforces the configured `repo_allowlist` again. Discovery may
-follow concrete repository metadata, but it cannot widen either boundary; out-of-bound
-repositories are reported and never indexed.
+at least one repeatable `--allow`: an exact repository, a trailing-`*` repository-name prefix, or
+`OWNER/*` for the bounded owner-wide set. It requests at most `discovery_max_repos` from `gh repo
+list` and also fails closed if the response itself exceeds that cap. Command-line patterns are
+applied before matching repositories become exact scanner seeds, and the configured
+`repo_allowlist` is enforced again. Discovery may follow concrete repository metadata, but it
+cannot widen either boundary; out-of-bound repositories are reported and never indexed.
 Verified repository creation uses `--repo OWNER/NAME --spawned-from IDENTITY` after `gh repo
-view` succeeds, while adopted repositories receive only an active `contains` relationship.
+view` succeeds. `--spawned-from` cannot be combined with owner enumeration because creation
+provenance must identify exactly one repository. Adopted repositories receive only an active
+`contains` relationship.
 
 Reconciliation is additive and idempotent. Deterministic evidence becomes an active relationship;
 ambiguous name-only evidence remains proposed and cannot gate execution. When onboarding has

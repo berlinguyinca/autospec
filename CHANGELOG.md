@@ -16,9 +16,11 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   failures without duplicate issues or Project items.
 - Added `autospec project resolve`, `sync`, and `onboard` for explicit repository seeds, bounded
   `--owner`/`--allow` discovery, and local workspace onboarding. Owner enumeration is capped by
-  `discovery_max_repos`, and matches become exact seeds only after the command allowlist is
-  applied. Discovery cannot widen the configured allowlist; deterministic relationships become
-  active while ambiguous evidence stays proposed and non-blocking.
+  `discovery_max_repos` at both the GitHub request and response boundary; oversized responses fail
+  closed. Exact, trailing-prefix, and bounded `OWNER/*` patterns are accepted, and matches become
+  exact seeds only after the command allowlist is applied. Discovery cannot widen the configured
+  allowlist; deterministic relationships become active while ambiguous evidence stays proposed
+  and non-blocking.
 - Repository bootstrap now registers a verified remote after creation and records explicit
   `spawned-from` provenance. Existing explicit Project URLs remain compatible in external mode,
   and accountability retains its undeleted `~/.autospec/project-map.yml` compatibility fallback

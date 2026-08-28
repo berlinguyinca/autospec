@@ -328,8 +328,8 @@ project_board:
 
 `repository_seeds` is the explicit starting set. `repo_allowlist` is the admission boundary, not
 a discovery hint: dependencies, submodules, workspace metadata, and other concrete evidence can
-suggest candidates but cannot widen it. `discovery_max_repos` bounds scanner expansion. Literal
-and trailing-`*` prefix allowlist entries are supported.
+suggest candidates but cannot widen it. `discovery_max_repos` bounds scanner expansion. Literal,
+trailing-`*` prefix, and bounded `OWNER/*` allowlist entries are supported.
 
 Resolve or synchronize the configured Project from the target repository:
 
@@ -348,13 +348,16 @@ autospec project onboard --repo-dir "$PWD" --owner OWNER --allow 'OWNER/prefix-*
 autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO --dry-run
 ```
 
-Owner onboarding requires at least one repeatable `--allow` equality or trailing-`*` prefix and
-the owner must match the managed policy. The CLI enumerates no more than `discovery_max_repos`
-through the typed, read-only `gh repo list` transport, filters that response through `--allow`, and
-passes only the matches as exact seeds to the existing scanner. The configured `repo_allowlist`
-still applies during scanner admission. Newly created repositories are registered only after `gh
-repo view` verifies the remote; bootstrap supplies `--spawned-from IDENTITY` for that exact
-repository. Adopted repositories receive `contains` membership without creation provenance.
+Owner onboarding requires at least one repeatable `--allow`: an exact repository, a trailing-`*`
+repository-name prefix, or `OWNER/*` for all repositories inside the bounded owner response. The
+owner must match the managed policy. The CLI requests no more than `discovery_max_repos` through
+the typed, read-only `gh repo list` transport and independently rejects an oversized response,
+then filters it through `--allow` and passes only the matches as exact seeds to the existing
+scanner. The configured `repo_allowlist` still applies during scanner admission. Newly created
+repositories are registered only after `gh repo view` verifies the remote; bootstrap supplies
+`--spawned-from IDENTITY` for that exact repository. The CLI rejects `--spawned-from` with
+`--owner`, preserving exact single-repository provenance. Adopted repositories receive `contains`
+membership without creation provenance.
 
 The JSON onboarding report distinguishes `created`, `adopted`, `updated`, `unchanged`,
 `proposed`, `out_of_bound`, `inaccessible`, and `pending_projection`, and includes the resolved

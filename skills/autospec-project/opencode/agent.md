@@ -72,11 +72,14 @@ argument as its own word, never interpolate it into `sh -c`, and never use
 - `onboard --workspace /absolute/path` requires an absolute path and forwards
   it as `autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"`.
 - `onboard --owner owner` requires at least one explicit `--allow` value and
-  forwards the owner plus every equality/trailing-`*` prefix as separate
+  forwards the owner plus every equality, trailing-`*` repository prefix, or
+  bounded `owner/*` pattern as separate
   arguments to `autospec project onboard --repo-dir "$PWD" --owner "owner"
   --allow "pattern" ...`. The owner and configured managed policy owner must
   match. Refuse owner onboarding when the allowlist is absent; owner scope
   alone never authorizes indexing every repository.
+- Never forward `--spawned-from` with `--owner`; creation provenance requires
+  the single exact repository supplied through `--repo`.
 - Forward `--dry-run` as a separate literal flag on either onboarding form.
 - Managed `sync` with no URL runs `autospec project sync --repo-dir "$PWD"`.
   The existing `sync <url>` form below remains the one-pass external board

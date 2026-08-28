@@ -56,6 +56,8 @@ teardown() {
   grep -Fq 'autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"' "$body"
   grep -Fq 'autospec project onboard --repo-dir "$PWD" --owner "owner"' "$body"
   grep -Fq -- '--allow "pattern"' "$body"
+  grep -Fq 'bounded `owner/*` pattern' "$body"
+  grep -Fq 'Never forward `--spawned-from` with `--owner`' "$body"
   grep -Fq 'Forward `--dry-run` as a separate literal flag' "$body"
   grep -Fq 'never use' "$body"
   grep -Fq '`eval`' "$body"

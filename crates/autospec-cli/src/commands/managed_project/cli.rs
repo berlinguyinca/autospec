@@ -332,6 +332,11 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
     if command == "onboard" && options.owner.is_none() && !options.allow.is_empty() {
         return Err(ManagedProjectError::new("--allow requires --owner"));
     }
+    if command == "onboard" && options.owner.is_some() && options.spawned_from.is_some() {
+        return Err(ManagedProjectError::new(
+            "--spawned-from cannot be combined with --owner",
+        ));
+    }
     let invalid = match command {
         "resolve" => {
             !options.repositories.is_empty()
@@ -400,6 +405,12 @@ fn populate_owner_repositories<T: GithubTransport>(
     let repositories = repositories.as_array().ok_or_else(|| {
         ManagedProjectError::new("invalid owner repository response: expected an array")
     })?;
+    if repositories.len() > policy.discovery_max_repos {
+        return Err(ManagedProjectError::new(format!(
+            "owner repository response exceeds discovery_max_repos {}",
+            policy.discovery_max_repos
+        )));
+    }
     for repository in repositories {
         let value = repository
             .get("nameWithOwner")
@@ -424,9 +435,13 @@ fn populate_owner_repositories<T: GithubTransport>(
 
 fn validate_owner_pattern(owner: &str, pattern: &str) -> Result<String, ManagedProjectError> {
     let normalized = pattern.trim().to_ascii_lowercase();
+    let owner_prefix = format!("{}/", owner.trim().to_ascii_lowercase());
+    if normalized == format!("{owner_prefix}*") {
+        return Ok(normalized);
+    }
     let base = normalized.strip_suffix('*').unwrap_or(&normalized);
     if base.contains('*')
-        || !base.starts_with(&format!("{}/", owner.trim().to_ascii_lowercase()))
+        || !base.starts_with(&owner_prefix)
         || super::normalize_github_repository(base).is_none()
     {
         return Err(ManagedProjectError::new(format!(
