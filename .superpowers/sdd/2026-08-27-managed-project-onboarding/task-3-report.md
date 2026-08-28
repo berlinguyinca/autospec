@@ -7,6 +7,7 @@ Status: DONE_WITH_CONCERNS
 - `b99d2479` — `feat: upsert managed GitHub Projects`
 - Review fix — `fix: make managed Project retries fail closed`
 - Review fix round 2 — `fix: keep created Projects provisional until verified`
+- Review fix round 3 — `fix: tolerate mutable Project metadata during promotion`
 
 ## Red evidence
 
@@ -29,6 +30,9 @@ Status: DONE_WITH_CONCERNS
 - Review round 2 first observed the new provisional-safety regression fail because an
   interrupted create exposed `Some("PVT_7")` as the final binding before marker verification.
   That state could authorize a later item-list/add transport call.
+- Review round 3 observed recovery fail with `verified project conflicts with provisional
+  created identity` after the same owner/node/number Project was renamed and returned a changed
+  URL. The comparison incorrectly treated mutable display metadata as immutable identity.
 
 ## Green evidence
 
@@ -54,6 +58,10 @@ Status: DONE_WITH_CONCERNS
   reopened provisional journal exposes no final binding and reconciliation makes zero calls.
 - Review round 2: the focused `github_` and `store_` filters pass with `20` and `21` tests,
   respectively.
+- Review round 3: the rename-during-recovery regression passes and proves the final binding uses
+  the verified read-back title and URL rather than the provisional create response metadata.
+- Review round 3: focused `github_`, `store_`, and `autonomous_accountability_github` runs pass
+  with `21`, `21`, and `33` tests, respectively.
 
 ## Files changed
 

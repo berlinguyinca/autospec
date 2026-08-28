@@ -285,7 +285,7 @@ impl ManagedProjectStore {
                 if self
                     .provisional_project
                     .as_ref()
-                    .is_some_and(|existing| existing != &identity)
+                    .is_some_and(|existing| !existing.same_immutable_identity(&identity))
                 {
                     return Err(ManagedProjectError::new(
                         "journal contains conflicting provisional project identities",
@@ -305,7 +305,7 @@ impl ManagedProjectStore {
                 if self
                     .provisional_project
                     .as_ref()
-                    .is_some_and(|provisional| provisional != &identity)
+                    .is_some_and(|provisional| !provisional.same_immutable_identity(&identity))
                 {
                     return Err(ManagedProjectError::new(
                         "final project binding conflicts with provisional identity",

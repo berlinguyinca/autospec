@@ -73,7 +73,7 @@ impl ManagedProjectStore {
         }
         if self
             .provisional_project()
-            .is_some_and(|existing| existing != &identity)
+            .is_some_and(|existing| !existing.same_immutable_identity(&identity))
         {
             return Err(ManagedProjectError::new(
                 "provisional project identity conflicts with the created project",
@@ -122,7 +122,7 @@ impl ManagedProjectStore {
         }
         if self
             .provisional_project()
-            .is_some_and(|provisional| provisional != &identity)
+            .is_some_and(|provisional| !provisional.same_immutable_identity(&identity))
         {
             return Err(ManagedProjectError::new(
                 "verified project conflicts with provisional created identity",
@@ -147,6 +147,10 @@ impl ProjectIdentity {
         };
         validate_project_identity(&identity)?;
         Ok(identity)
+    }
+
+    pub(super) fn same_immutable_identity(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.node_id == other.node_id && self.number == other.number
     }
 }
 

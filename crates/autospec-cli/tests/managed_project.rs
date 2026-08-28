@@ -279,6 +279,41 @@ fn github_provisional_creation_cannot_authorize_item_mutation() {
 }
 
 #[test]
+fn github_provisional_recovery_accepts_renamed_project_and_persists_verified_metadata() {
+    let fixture = Fixture::new("github-provisional-rename");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut create = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Ok(project(7, "berlinguyinca", "Original title", "human")),
+        Err(GithubFailure::Retryable("view interrupted".to_owned())),
+    ]);
+    assert!(resolve_or_create_project(&mut store, &mut create, &policy, "Original title").is_err());
+    drop(store);
+
+    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let marked = format!("human\n\n{}", marker("berlinguyinca"));
+    let mut renamed: serde_json::Value =
+        serde_json::from_str(&project(7, "berlinguyinca", "Human rename", &marked)).unwrap();
+    renamed["url"] =
+        serde_json::json!("https://github.com/orgs/berlinguyinca/projects/7?view=roadmap");
+    let mut github = ScriptedGithub::with([Ok(renamed.to_string())]);
+
+    resolve_or_create_project(&mut reopened, &mut github, &policy, "Original title").unwrap();
+
+    assert_eq!(
+        reopened.snapshot().project_title.as_deref(),
+        Some("Human rename")
+    );
+    assert_eq!(
+        reopened.snapshot().project_url.as_deref(),
+        Some("https://github.com/orgs/berlinguyinca/projects/7?view=roadmap")
+    );
+    assert!(reopened.snapshot().pending_projections.is_empty());
+    assert_eq!(github.calls.len(), 1);
+}
+
+#[test]
 fn github_ambiguous_marker_edit_resumes_from_verified_bound_project() {
     let fixture = Fixture::new("github-edit-resume");
     let policy = policy("berlinguyinca");
