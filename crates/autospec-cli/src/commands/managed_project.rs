@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{ManagedProjectBinding, ProductKey};
 use serde_json::{json, Value};
@@ -13,13 +14,236 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 
 #[path = "managed_project/github.rs"]
 mod github;
+#[path = "managed_project/onboard.rs"]
+mod onboard;
 #[path = "managed_project/store.rs"]
 mod store;
 
 pub use github::{
     reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
 };
+pub use onboard::{
+    active_dependency_graph, normalize_github_repository, onboard_repositories, OnboardingOptions,
+    OnboardingReport,
+};
 pub use store::ManagedProjectStore;
+
+pub fn run(args: &[String]) -> Result<(), ManagedProjectError> {
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|argument| argument == "--help" || argument == "-h")
+    {
+        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--dry-run]");
+        return Ok(());
+    }
+    let command = args
+        .first()
+        .ok_or_else(|| ManagedProjectError::new("missing project subcommand"))?;
+    let options = parse_project_options(&args[1..])?;
+    let repo_dir = options
+        .repo_dir
+        .as_deref()
+        .ok_or_else(|| ManagedProjectError::new("autospec project requires --repo-dir"))?;
+    let policy = load_managed_policy(repo_dir)?;
+    let state_root = if options.dry_run && command == "onboard" {
+        std::env::temp_dir().join(format!(
+            "autospec-project-dry-run-{}-{}",
+            std::process::id(),
+            TEMP_SERIAL.fetch_add(1, Ordering::Relaxed)
+        ))
+    } else {
+        repo_dir.join(".autospec/state")
+    };
+    let _dry_run_state =
+        (options.dry_run && command == "onboard").then(|| DryRunState(state_root.clone()));
+    let mut store = ManagedProjectStore::open(&state_root, &policy.product_key)?;
+
+    match command.as_str() {
+        "resolve" => {
+            reject_onboard_only_options(&options)?;
+            let mut github = super::autonomous::accountability::github::GhCli;
+            let project = resolve_or_create_project(
+                &mut store,
+                &mut github,
+                &policy,
+                policy.product_key.as_str(),
+            )?;
+            println!(
+                "{}",
+                json!({
+                    "node_id": project.node_id,
+                    "number": project.number,
+                    "owner": project.owner,
+                    "title": project.title,
+                    "url": project.url,
+                })
+            );
+        }
+        "sync" => {
+            if !options.repositories.is_empty() || !options.workspaces.is_empty() || options.dry_run
+            {
+                return Err(ManagedProjectError::new("invalid option for project sync"));
+            }
+            let mut github = super::autonomous::accountability::github::GhCli;
+            let project = resolve_or_create_project(
+                &mut store,
+                &mut github,
+                &policy,
+                policy.product_key.as_str(),
+            )?;
+            if let Some(issue_url) = options.issue_url.as_deref() {
+                reconcile_issue(&mut store, &mut github, &policy, issue_url)?;
+            }
+            retry_pending_projections(&mut store, &mut github, &policy)?;
+            println!(
+                "{}",
+                json!({
+                    "pending_projection": store.snapshot().pending_projections.len(),
+                    "project_url": project.url,
+                })
+            );
+        }
+        "onboard" => {
+            if options.issue_url.is_some() {
+                return Err(ManagedProjectError::new(
+                    "invalid option for project onboard",
+                ));
+            }
+            if !options.dry_run {
+                let mut github = super::autonomous::accountability::github::GhCli;
+                resolve_or_create_project(
+                    &mut store,
+                    &mut github,
+                    &policy,
+                    policy.product_key.as_str(),
+                )?;
+                retry_pending_projections(&mut store, &mut github, &policy)?;
+            }
+            let report = onboard_repositories(
+                &mut store,
+                &policy,
+                &OnboardingOptions {
+                    repo_dir: repo_dir.to_path_buf(),
+                    repositories: options.repositories,
+                    workspaces: options.workspaces,
+                    dry_run: options.dry_run,
+                },
+            )?;
+            println!("{}", onboarding_report_json(&report));
+        }
+        other => {
+            return Err(ManagedProjectError::new(format!(
+                "unknown autospec project subcommand: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+struct DryRunState(std::path::PathBuf);
+
+impl Drop for DryRunState {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[derive(Default)]
+struct ProjectOptions {
+    repo_dir: Option<std::path::PathBuf>,
+    repositories: Vec<String>,
+    workspaces: Vec<std::path::PathBuf>,
+    issue_url: Option<String>,
+    dry_run: bool,
+}
+
+fn parse_project_options(args: &[String]) -> Result<ProjectOptions, ManagedProjectError> {
+    let mut options = ProjectOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        match argument.as_str() {
+            "--repo-dir" | "--repo" | "--workspace" | "--issue-url" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    ManagedProjectError::new(format!("{argument} requires a value"))
+                })?;
+                match argument.as_str() {
+                    "--repo-dir" if options.repo_dir.is_none() => {
+                        options.repo_dir = Some(value.into())
+                    }
+                    "--repo-dir" => {
+                        return Err(ManagedProjectError::new("duplicate --repo-dir"));
+                    }
+                    "--repo" => options.repositories.push(value.clone()),
+                    "--workspace" => options.workspaces.push(value.into()),
+                    "--issue-url" if options.issue_url.is_none() => {
+                        options.issue_url = Some(value.clone())
+                    }
+                    "--issue-url" => {
+                        return Err(ManagedProjectError::new("duplicate --issue-url"));
+                    }
+                    _ => unreachable!(),
+                }
+                index += 2;
+            }
+            "--dry-run" if !options.dry_run => {
+                options.dry_run = true;
+                index += 1;
+            }
+            "--dry-run" => return Err(ManagedProjectError::new("duplicate --dry-run")),
+            _ => {
+                return Err(ManagedProjectError::new(format!(
+                    "unknown autospec project option: {argument}"
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn reject_onboard_only_options(options: &ProjectOptions) -> Result<(), ManagedProjectError> {
+    if !options.repositories.is_empty()
+        || !options.workspaces.is_empty()
+        || options.issue_url.is_some()
+        || options.dry_run
+    {
+        return Err(ManagedProjectError::new(
+            "invalid option for project resolve",
+        ));
+    }
+    Ok(())
+}
+
+fn load_managed_policy(
+    repo_dir: &Path,
+) -> Result<autospec_core::managed_project::ManagedProjectPolicy, ManagedProjectError> {
+    let path = repo_dir.join(".autospec/autonomous.yml");
+    let source = fs::read_to_string(&path).map_err(|error| {
+        ManagedProjectError::new(format!("cannot read {}: {error}", path.display()))
+    })?;
+    let config = AutonomousConfig::parse(&source).map_err(ManagedProjectError::new)?;
+    config
+        .project_board
+        .managed_policy()
+        .cloned()
+        .ok_or_else(|| ManagedProjectError::new("project_board.mode must be managed"))
+}
+
+fn onboarding_report_json(report: &OnboardingReport) -> Value {
+    json!({
+        "created": report.created,
+        "adopted": report.adopted,
+        "updated": report.updated,
+        "unchanged": report.unchanged,
+        "proposed": report.proposed,
+        "out_of_bound": report.out_of_bound,
+        "inaccessible": report.inaccessible,
+        "pending_projection": report.pending_projection,
+        "repositories": report.repositories,
+        "edges": report.edges,
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteProject {

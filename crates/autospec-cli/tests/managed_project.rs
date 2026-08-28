@@ -8,13 +8,14 @@ use autospec_core::managed_project::{
 };
 use commands::autonomous::accountability::github::{GithubCommand, GithubFailure, GithubTransport};
 use commands::managed_project::{
-    reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
-    ManagedProjectStore,
+    active_dependency_graph, onboard_repositories, reconcile_issue, resolve_or_create_project,
+    retry_pending_projections, verify_managed_marker, ManagedProjectStore, OnboardingOptions,
 };
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
@@ -121,6 +122,245 @@ fn marker(owner: &str) -> String {
     format!(
         "<!-- autospec-managed-project:begin -->\nschema: 1\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
     )
+}
+
+fn initialize_repository(path: &Path, remote: &str) {
+    fs::create_dir_all(path).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["remote", "add", "origin", remote])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[test]
+fn onboard_admits_explicit_and_allowlisted_evidence_without_executing_manifests() {
+    let fixture = Fixture::new("onboard-evidence");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "git@github.com:berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join(".gitmodules"),
+        "[submodule \"node\"]\n  path = node\n  url = https://github.com/berlinguyinca/autospec-node.git\n",
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("Cargo.toml"),
+        "[workspace]\nmembers = [\n  \"member\",\n]\n[dependencies]\nallowed = { git = \"ssh://git@github.com/berlinguyinca/autospec-tools.git\" }\noutside = { git = \"https://github.com/other/private.git\" }\n",
+    )
+    .unwrap();
+    let member_path = repository_path.join("member");
+    initialize_repository(
+        &member_path,
+        "https://github.com/berlinguyinca/autospec-member.git",
+    );
+    fs::write(
+        member_path.join("package.json"),
+        r#"{"repository":"https://github.com/berlinguyinca/autospec-member-dep"}"#,
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("package.json"),
+        r#"{"workspaces":["packages/*"],"dependencies":{"web":"github:berlinguyinca/autospec-web"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("go.mod"),
+        "module github.com/berlinguyinca/autospec\nreplace example.invalid/tool => github.com/berlinguyinca/autospec-go v1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("autospec-fleet.yml"),
+        "repositories:\n  - https://github.com/berlinguyinca/autospec-fleet-worker\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repository_path.join(".autospec/issues")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/issues/42.md"),
+        "## Autospec relationships\nSource spec: https://github.com/berlinguyinca/autospec-spec/issues/7\nTracker: berlinguyinca/autospec-tracker#9\nDepends on https://github.com/berlinguyinca/autospec-node/pull/3\n",
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/autospec*".to_owned()];
+    let state = fixture.path().join("state");
+    let mut store = ManagedProjectStore::open(&state, &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path.clone(),
+            repositories: vec!["https://github.com/berlinguyinca/autospec".to_owned()],
+            workspaces: vec![repository_path],
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let repositories = store
+        .snapshot()
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(repositories.first(), Some(&"berlinguyinca/autospec"));
+    for expected in [
+        "berlinguyinca/autospec-node",
+        "berlinguyinca/autospec-tools",
+        "berlinguyinca/autospec-web",
+        "berlinguyinca/autospec-go",
+        "berlinguyinca/autospec-fleet-worker",
+        "berlinguyinca/autospec-spec",
+        "berlinguyinca/autospec-tracker",
+        "berlinguyinca/autospec-member",
+        "berlinguyinca/autospec-member-dep",
+    ] {
+        assert!(repositories.contains(&expected), "missing {expected}");
+    }
+    assert_eq!(report.out_of_bound, 1);
+    assert!(store.snapshot().relationships.iter().all(|edge| {
+        edge.state == RelationshipState::Active
+            && matches!(
+                edge.evidence.kind.as_str(),
+                "submodule"
+                    | "manifest-dependency"
+                    | "fleet"
+                    | "issue-reference"
+                    | "source-spec"
+                    | "tracker"
+            )
+    }));
+
+    let repository_count = store.snapshot().repositories.len();
+    let edge_count = store.snapshot().relationships.len();
+    let repeated = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: fixture.path().join("checkout"),
+            repositories: vec!["berlinguyinca/autospec".to_owned()],
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(store.snapshot().repositories.len(), repository_count);
+    assert_eq!(store.snapshot().relationships.len(), edge_count);
+    assert!(repeated.unchanged > 0);
+}
+
+#[test]
+fn onboard_bounds_queue_and_excludes_proposed_edges_from_active_graph() {
+    let fixture = Fixture::new("onboard-bounds");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join(".gitmodules"),
+        "[submodule \"one\"]\nurl = https://github.com/berlinguyinca/one\n[submodule \"two\"]\nurl = https://github.com/berlinguyinca/two\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repository_path.join(".autospec/issues")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/issues/ambiguous.md"),
+        "## Autospec relationships\nThe autospec-node repository is related.\n",
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    policy.discovery_max_repos = 2;
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(store.snapshot().repositories.len(), 2);
+    assert_eq!(report.proposed, 1);
+    let proposed = store
+        .snapshot()
+        .relationships
+        .iter()
+        .find(|edge| edge.state == RelationshipState::Proposed)
+        .unwrap();
+    assert!(proposed.target.ends_with("/autospec-node"));
+    assert!(active_dependency_graph(store.snapshot())
+        .iter()
+        .all(|edge| edge.state == RelationshipState::Active));
+}
+
+#[test]
+fn onboard_cli_dry_run_emits_stable_sorted_json() {
+    let fixture = Fixture::new("onboard-cli");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/autospec*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 10\n",
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join(".gitmodules"),
+        "[submodule \"z\"]\nurl = https://github.com/berlinguyinca/zeta\n[submodule \"a\"]\nurl = https://github.com/berlinguyinca/alpha\n",
+    )
+    .unwrap();
+
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_autospec"))
+            .args([
+                "project",
+                "onboard",
+                "--repo-dir",
+                repository_path.to_str().unwrap(),
+                "--dry-run",
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    let second = run();
+
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    assert!(!repository_path.join(".autospec/state").exists());
+    let report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(report["adopted"], 1);
+    assert_eq!(report["created"], 0);
+    assert_eq!(
+        report["repositories"][0]["repository"],
+        "berlinguyinca/autospec"
+    );
+    assert!(report["edges"].as_array().unwrap().windows(2).all(|pair| {
+        pair[0]["target"].as_str().unwrap() <= pair[1]["target"].as_str().unwrap()
+    }));
 }
 
 fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {
