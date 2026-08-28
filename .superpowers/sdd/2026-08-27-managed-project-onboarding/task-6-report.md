@@ -151,3 +151,59 @@ Status: DONE_WITH_CONCERNS
   it traversed unrelated autonomous Tier 2 tests and surfaced their existing
   failures. Per the scoped instruction, no full suite was pursued; all Task 6
   focused tests and static checks are green.
+
+## Fix round 2
+
+Status: DONE_WITH_CONCERNS
+
+### Commit
+
+- `e0e44876` — `fix: reserve pending outcomes for transient GitHub failures`
+
+### Corrected behavior
+
+- `GithubFailure::LocalExecution` now distinguishes a missing or broken local
+  `gh` executable from retryable remote transport failure. It is an integrity
+  block for accountability and a hard managed-project error.
+- Read-only GitHub commands no longer classify every non-zero exit as
+  retryable. Authentication, scope, HTTP 400/401/403/404, invalid response, and
+  other non-transient failures are definitive. Recognized network, timeout,
+  429/502/503/504, and rate-limit failures remain retryable; mutating calls
+  retain ambiguous-response protection.
+- Real binary-boundary tests run `autospec project onboard` through `GhCli`
+  with a missing executable, a fake HTTP 403/auth executable, and a transient
+  HTTP 503 executable. The first two exit non-zero with no pending summary; the
+  transient case returns `journaled_projection_pending` with count `2`.
+- The standalone project installer validates `project onboard --help`,
+  `project sync --help`, and the literal `--spawned-from` capability for both
+  an existing candidate and the runtime returned by the established installer.
+  A generic successful `project --help` surface is rejected.
+- The control-plane behavior test now requires the exact typed-pending warning
+  `WARNING: managed Project repository registration journaled; projection
+  remains pending (count=2)` twice—once for each companion repository.
+
+### TDD and verification evidence
+
+- RED: real GhCli tests showed missing executable and HTTP 403/auth read
+  failures exited `0` with the typed pending outcome.
+- RED: installer behavior tests showed an exact Task 6 runtime fixture was
+  rejected while a generic `project --help` fixture was incorrectly accepted.
+- GREEN: `cargo test -p autospec-cli --test managed_project gh_cli_
+  --no-fail-fast` → `3 passed`, `0 failed`.
+- GREEN: `cargo test -p autospec-cli --test managed_project onboard_
+  --no-fail-fast` → `16 passed`, `0 failed`.
+- GREEN: `bats tests/autospec/managed-project-workflows.bats`
+  → `11 passed`, `0 failed`.
+- GREEN: `bats tests/install/project-board-install.bats`
+  → `11 passed`, `0 failed`.
+- GREEN: targeted accountability retryability test, `cargo check -p
+  autospec-cli`, `cargo clippy -p autospec-cli --bin autospec --no-deps`,
+  installer syntax, targeted `rustfmt --check`, and `git diff --check` all
+  completed successfully. Clippy emitted only the previously documented
+  warnings outside Task 6.
+
+### Remaining concern
+
+- Live GitHub API error payloads remain untested; real process boundaries and
+  representative stderr fixtures cover local execution, auth/scope, and
+  transient transport classification without network mutation.
