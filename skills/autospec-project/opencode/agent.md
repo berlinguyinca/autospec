@@ -49,11 +49,42 @@ and exit.
 /autospec-project ship <url>     # resolve -> fleet config -> provision -> launch, end to end
 /autospec-project sync <url>     # one promotion pass, no drain
 /autospec-project status <url>   # board-scoped queue, workers, PRs, blockers
+/autospec-project onboard --repo owner/name
+/autospec-project onboard --workspace /absolute/path
+/autospec-project onboard --owner owner --allow owner/repo --allow owner/prefix-*
+/autospec-project sync
 ```
 
 `<url>` is a GitHub Projects v2 URL: `https://github.com/orgs/<org>/projects/<n>`
 or `https://github.com/users/<user>/projects/<n>`, optionally with a trailing
 `/views/<n>`.
+
+### Managed repository `onboard` and `sync`
+
+These modes use the typed `autospec project` command and the managed policy in
+`.autospec/autonomous.yml`; they do not execute repository content. Treat every
+repository, owner, allowlist, and workspace argument as data: preserve each
+argument as its own word, never interpolate it into `sh -c`, and never use
+`eval`.
+
+- `onboard --repo owner/name` forwards the exact slug as
+  `autospec project onboard --repo-dir "$PWD" --repo "owner/name"`.
+- `onboard --workspace /absolute/path` requires an absolute path and forwards
+  it as `autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"`.
+- `onboard --owner owner` requires at least one explicit `--allow` value. Write
+  the owner and each literal equality/prefix allowlist entry into the managed
+  `project_board` policy before invoking `autospec project onboard --repo-dir
+  "$PWD"`. Refuse owner onboarding when the allowlist is absent; owner scope
+  alone never authorizes indexing every repository.
+- Forward `--dry-run` as a separate literal flag on either onboarding form.
+- Managed `sync` with no URL runs `autospec project sync --repo-dir "$PWD"`.
+  The existing `sync <url>` form below remains the one-pass external board
+  promoter.
+
+Print all stable reconciliation fields returned by the command—`created`,
+`adopted`, `updated`, `unchanged`, `proposed`, `out_of_bound`, `inaccessible`,
+and `pending_projection`—plus `project_url`. Do not summarize away pending or
+out-of-bound results.
 
 ### Bare mode: resolve and print
 

@@ -160,6 +160,26 @@ classification path as the normal pipeline.
 
 <!-- autospec-block:harness-adapter -->
 
+### Managed Project registration after Phase 0 bootstrap
+
+When Phase 0 creates a GitHub repository, register it only after the required
+remote read-back succeeds. Set `REPO` to the exact `owner/name` slug and set
+`SPAWNED_FROM` to the source-spec URL when one already exists, otherwise to the
+current Autospec run identity (or `bootstrap:<owner/name>` when neither exists):
+
+```bash
+gh repo view <owner>/<name> --json url,defaultBranchRef
+REPO="<owner>/<name>"
+SPAWNED_FROM="${SOURCE_SPEC_URL:-${AUTOSPEC_RUN_ID:-bootstrap:$REPO}}"
+if ! "${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM"; then
+  printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+fi
+```
+
+Never run registration when remote verification fails. Registration failure
+does not roll back, delete, or recreate the verified repository; the managed
+Project journal retains the pending projection for a later `project sync`.
+
 ## Physical STL / CAD design guardrails
 
 When the request involves STL, CAD, 3D-printable fixtures, workholding,

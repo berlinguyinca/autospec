@@ -25,6 +25,128 @@ teardown() {
   unset AUTOSPEC_CALLS AUTOSPEC_SYNC_FAIL AUTOSPEC_DRY_RUN
 }
 
+@test "greenfield skill bootstraps verify before registering spawned repositories" {
+  for skill in autospec autospec-define autospec-split; do
+    body="$REPO_ROOT/skills/$skill/SKILL.md"
+    expanded="$TMP/$skill.expanded"
+    bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$body" > "$expanded"
+    create_line="$(grep -nF 'gh repo create <owner>/<name> --<private|public> --source=. --remote=origin --push' "$expanded" | head -1 | cut -d: -f1)"
+    verify_line="$(grep -nF 'gh repo view <owner>/<name> --json url,defaultBranchRef' "$expanded" | head -1 | cut -d: -f1)"
+    register_line="$(grep -nF 'project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM"' "$expanded" | head -1 | cut -d: -f1)"
+    [ -n "$verify_line" ]
+    [ -n "$register_line" ]
+    [ "$verify_line" -lt "$register_line" ]
+    if [ "$skill" != autospec ]; then
+      [ -n "$create_line" ]
+      [ "$create_line" -lt "$verify_line" ]
+    fi
+    grep -q 'WARNING.*repository registration failed.*pending' "$expanded"
+  done
+}
+
+@test "autospec-project exposes bounded onboard and managed sync arguments as data" {
+  body="$REPO_ROOT/skills/autospec-project/SKILL.md"
+  grep -Fq '/autospec-project onboard --repo owner/name' "$body"
+  grep -Fq '/autospec-project onboard --workspace /absolute/path' "$body"
+  grep -Fq '/autospec-project onboard --owner owner --allow owner/repo --allow owner/prefix-*' "$body"
+  grep -Fxq '/autospec-project sync' "$body"
+  grep -Fq 'requires at least one explicit `--allow` value' "$body"
+  grep -Fq 'autospec project onboard --repo-dir "$PWD" --repo "owner/name"' "$body"
+  grep -Fq 'autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"' "$body"
+  grep -Fq 'Forward `--dry-run` as a separate literal flag' "$body"
+  grep -Fq 'never use' "$body"
+  grep -Fq '`eval`' "$body"
+  grep -Fq '`project_url`' "$body"
+}
+
+@test "control plane registers adopted and created repositories without fabricating spawned evidence" {
+  project="$TMP/control-project"
+  remotes="$TMP/remotes"
+  events="$TMP/control.events"
+  mkdir -p "$project/.autospec" "$remotes/acme" "$TMP/control-bin"
+  git init --bare "$remotes/acme/adopted.git" >/dev/null
+  cat > "$TMP/control-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'gh:%s\n' "$*" >> "$EVENTS"
+if [ "$1 $2" = "repo view" ]; then
+  repo="$3"
+  [ -d "$REMOTE_ROOT/${repo}.git" ] || exit 1
+  printf 'file://%s/%s.git\n' "$REMOTE_ROOT" "$repo"
+  exit 0
+fi
+if [ "$1 $2" = "repo create" ]; then
+  repo="$3"
+  mkdir -p "$REMOTE_ROOT/$(dirname "$repo")"
+  git init --bare "$REMOTE_ROOT/${repo}.git" >/dev/null
+  exit 0
+fi
+exit 99
+SH
+  cat > "$TMP/control-bin/autospec" <<'SH'
+#!/usr/bin/env bash
+printf 'autospec:%s\n' "$*" >> "$EVENTS"
+exit "${AUTOSPEC_REGISTER_STATUS:-0}"
+SH
+  chmod +x "$TMP/control-bin/gh" "$TMP/control-bin/autospec"
+
+  run env PATH="$TMP/control-bin:$PATH" EVENTS="$events" REMOTE_ROOT="$remotes" \
+    AUTOSPEC_BIN="$TMP/control-bin/autospec" AUTOSPEC_RUN_ID='run;touch should-not-exist' \
+    AUTOSPEC_CONTROL_PLANE_WORKDIR="$TMP/work" bash -c \
+    'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo created --observatory-repo adopted' \
+    _ "$project" "$REPO_ROOT/scripts/autospec-control-plane.sh"
+  [ "$status" -eq 0 ]
+  grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/adopted" "$events"
+  grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/created --spawned-from run;touch should-not-exist" "$events"
+  ! grep -F 'acme/adopted --spawned-from' "$events"
+  [ ! -e "$project/should-not-exist" ]
+  create_line="$(grep -n '^gh:repo create acme/created' "$events" | cut -d: -f1)"
+  verify_line="$(grep -n '^gh:repo view acme/created --json url,defaultBranchRef' "$events" | tail -1 | cut -d: -f1)"
+  register_line="$(grep -n '^autospec:project onboard .*acme/created' "$events" | cut -d: -f1)"
+  [ "$create_line" -lt "$verify_line" ]
+  [ "$verify_line" -lt "$register_line" ]
+}
+
+@test "control plane keeps a verified repository when registration remains pending" {
+  project="$TMP/failing-project"
+  remotes="$TMP/failing-remotes"
+  events="$TMP/failing.events"
+  mkdir -p "$project/.autospec" "$remotes" "$TMP/failing-bin"
+  cat > "$TMP/failing-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'gh:%s\n' "$*" >> "$EVENTS"
+if [ "$1 $2" = "repo view" ]; then
+  [ -d "$REMOTE_ROOT/$3.git" ] || exit 1
+  printf 'file://%s/%s.git\n' "$REMOTE_ROOT" "$3"
+  exit 0
+fi
+if [ "$1 $2" = "repo create" ]; then
+  mkdir -p "$REMOTE_ROOT/$(dirname "$3")"
+  git init --bare "$REMOTE_ROOT/$3.git" >/dev/null
+  exit 0
+fi
+exit 99
+SH
+  cat > "$TMP/failing-bin/autospec" <<'SH'
+#!/usr/bin/env bash
+printf 'autospec:%s\n' "$*" >> "$EVENTS"
+exit 9
+SH
+  chmod +x "$TMP/failing-bin/gh" "$TMP/failing-bin/autospec"
+
+  run env PATH="$TMP/failing-bin:$PATH" EVENTS="$events" REMOTE_ROOT="$remotes" \
+    AUTOSPEC_BIN="$TMP/failing-bin/autospec" AUTOSPEC_CONTROL_PLANE_WORKDIR="$TMP/failing-work" \
+    bash -c 'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo gov --observatory-repo obs' \
+    _ "$project" "$REPO_ROOT/scripts/autospec-control-plane.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: managed Project repository registration failed; projection remains pending"* ]]
+  [ -d "$remotes/acme/gov.git" ]
+  [ -d "$remotes/acme/obs.git" ]
+  [ "$(grep -c '^gh:repo create acme/gov' "$events")" -eq 1 ]
+  [ "$(grep -c '^gh:repo create acme/obs' "$events")" -eq 1 ]
+}
+
 @test "shared issue projection invokes the managed sync boundary" {
   run bash "$HELPER" "https://github.com/acme/widgets/issues/42" "$TMP/repo"
   [ "$status" -eq 0 ]

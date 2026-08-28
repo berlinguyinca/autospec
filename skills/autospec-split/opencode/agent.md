@@ -154,7 +154,18 @@ If **either** check fails — no git repo, or no GitHub remote — bootstrap a n
    gh repo create <owner>/<name> --<private|public> --source=. --remote=origin --push
    ```
 
-5. **Verify**: `gh repo view <owner>/<name> --json url,defaultBranchRef`. Capture `<owner>/<name>` as `{repo}` — every subsequent phase uses this value.
+5. **Verify and register**: first run `gh repo view <owner>/<name> --json url,defaultBranchRef`.
+   Only after that succeeds, capture the exact slug and record verified creation evidence:
+   ```bash
+   REPO="<owner>/<name>"
+   SPAWNED_FROM="${SOURCE_SPEC_URL:-${AUTOSPEC_RUN_ID:-bootstrap:$REPO}}"
+   if ! "${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM"; then
+     printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+   fi
+   ```
+   Never register when read-back fails. A registration failure does not roll
+   back or recreate the verified repository; reconciliation retries the
+   journaled projection. Capture `<owner>/<name>` as `{repo}` for every later phase.
 
 If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>` remote), capture that as `{repo}` and skip the bootstrap.
 

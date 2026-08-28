@@ -67,7 +67,7 @@ validate_owner_and_repo_names() {
 
 repo_url_for() {
     full_name="$1"
-    gh repo view "$full_name" --json url --jq .url 2>/dev/null || return 1
+    gh repo view "$full_name" --json url,defaultBranchRef --jq .url 2>/dev/null || return 1
 }
 
 create_repo_if_missing() {
@@ -225,6 +225,21 @@ ensure_companion_repo() {
     printf '%s\t%s\t%s\n' "$state" "$repo_url" "$clone_dir"
 }
 
+register_companion_repo() {
+    full_name="$1"
+    state="$2"
+    autospec_bin="${AUTOSPEC_BIN:-autospec}"
+    if [ "$state" = "created" ]; then
+        spawned_from="${AUTOSPEC_SOURCE_SPEC:-${AUTOSPEC_RUN_ID:-control-plane-bootstrap}}"
+        if ! "$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name" \
+          --spawned-from "$spawned_from"; then
+            printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+        fi
+    elif ! "$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name"; then
+        printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+    fi
+}
+
 emit_bootstrap_event() {
     event_type="$1"
     summary="$2"
@@ -293,11 +308,13 @@ bootstrap_confirm() {
     governance_result="$(ensure_companion_repo "$owner" "$governance_repo" governance "$work_root")"
     governance_state="$(printf '%s' "$governance_result" | awk -F '\t' '{print $1}')"
     governance_url="$(printf '%s' "$governance_result" | awk -F '\t' '{print $2}')"
+    register_companion_repo "$owner/$governance_repo" "$governance_state"
     emit_bootstrap_event "GovernanceRepoCreated" "governance repo ${governance_state}: ${governance_repo}" "$owner/$governance_repo"
 
     observatory_result="$(ensure_companion_repo "$owner" "$observatory_repo" observatory "$work_root")"
     observatory_state="$(printf '%s' "$observatory_result" | awk -F '\t' '{print $1}')"
     observatory_url="$(printf '%s' "$observatory_result" | awk -F '\t' '{print $2}')"
+    register_companion_repo "$owner/$observatory_repo" "$observatory_state"
     emit_bootstrap_event "ObservatoryRepoCreated" "observatory repo ${observatory_state}: ${observatory_repo}" "$owner/$observatory_repo"
 
     write_control_plane_config "$owner" "$governance_repo" "$governance_url" "$governance_state" \

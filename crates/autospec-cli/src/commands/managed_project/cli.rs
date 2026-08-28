@@ -4,6 +4,9 @@ use super::{
     ManagedProjectError, ManagedProjectStore, OnboardingOptions, OnboardingReport,
 };
 use autospec_core::autonomous::config::AutonomousConfig;
+use autospec_core::managed_project::{
+    RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             .iter()
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--dry-run]");
+        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--spawned-from IDENTITY] [--dry-run]");
         return Ok(());
     }
     let command = &args[0];
@@ -97,10 +100,15 @@ fn onboard<T: GithubTransport>(
     repo_dir: &Path,
     options: ProjectOptions,
 ) -> Result<(), ManagedProjectError> {
-    if !options.dry_run {
-        resolve_or_create_project(&mut store, github, &policy, policy.product_key.as_str())?;
+    let project_url = if !options.dry_run {
+        let project =
+            resolve_or_create_project(&mut store, github, &policy, policy.product_key.as_str())?;
         retry_pending_projections(&mut store, github, &policy)?;
-    }
+        Some(project.url)
+    } else {
+        store.snapshot().project_url.clone()
+    };
+    let created_repository = options.repositories.first().cloned();
     let report = onboard_repositories(
         &mut store,
         &policy,
@@ -111,7 +119,59 @@ fn onboard<T: GithubTransport>(
             dry_run: options.dry_run,
         },
     )?;
-    println!("{}", report_json(&report));
+    if !options.dry_run {
+        record_repository_relationships(
+            &mut store,
+            &policy,
+            &report,
+            options.spawned_from.as_deref(),
+            created_repository.as_deref(),
+        )?;
+    }
+    println!("{}", report_json(&report, project_url.as_deref()));
+    Ok(())
+}
+
+fn record_repository_relationships(
+    store: &mut ManagedProjectStore,
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    report: &OnboardingReport,
+    spawned_from: Option<&str>,
+    created_repository: Option<&str>,
+) -> Result<(), ManagedProjectError> {
+    for repository in &report.repositories {
+        store.record_edge(RelationshipEdge {
+            product_key: policy.product_key.clone(),
+            kind: RelationshipKind::Contains,
+            source: format!("product:{}", policy.product_key),
+            target: repository.repository.clone(),
+            evidence: RelationshipEvidence {
+                kind: "repository-onboarded".to_owned(),
+                location: repository.entry_kind.clone(),
+                discovered_at: "managed-project-onboard".to_owned(),
+                confidence: 100,
+            },
+            state: RelationshipState::Active,
+        })?;
+    }
+    if let (Some(identity), Some(repository)) = (spawned_from, created_repository) {
+        let repository = super::normalize_github_repository(repository).ok_or_else(|| {
+            ManagedProjectError::new("--spawned-from requires a valid --repo value")
+        })?;
+        store.record_edge(RelationshipEdge {
+            product_key: policy.product_key.clone(),
+            kind: RelationshipKind::SpawnedFrom,
+            source: repository,
+            target: identity.to_owned(),
+            evidence: RelationshipEvidence {
+                kind: "verified-repository-creation".to_owned(),
+                location: identity.to_owned(),
+                discovered_at: "managed-project-onboard".to_owned(),
+                confidence: 100,
+            },
+            state: RelationshipState::Active,
+        })?;
+    }
     Ok(())
 }
 
@@ -135,6 +195,7 @@ struct ProjectOptions {
     repositories: Vec<String>,
     workspaces: Vec<PathBuf>,
     issue_url: Option<String>,
+    spawned_from: Option<String>,
     dry_run: bool,
 }
 
@@ -144,7 +205,7 @@ fn parse_options(args: &[String]) -> Result<ProjectOptions, ManagedProjectError>
     while index < args.len() {
         let argument = &args[index];
         match argument.as_str() {
-            "--repo-dir" | "--repo" | "--workspace" | "--issue-url" => {
+            "--repo-dir" | "--repo" | "--workspace" | "--issue-url" | "--spawned-from" => {
                 let value = args.get(index + 1).ok_or_else(|| {
                     ManagedProjectError::new(format!("{argument} requires a value"))
                 })?;
@@ -178,6 +239,13 @@ fn set_value(
         "--workspace" => options.workspaces.push(value.into()),
         "--issue-url" if options.issue_url.is_none() => options.issue_url = Some(value.to_owned()),
         "--issue-url" => return Err(ManagedProjectError::new("duplicate --issue-url")),
+        "--spawned-from" if options.spawned_from.is_none() && !value.trim().is_empty() => {
+            options.spawned_from = Some(value.to_owned())
+        }
+        "--spawned-from" if value.trim().is_empty() => {
+            return Err(ManagedProjectError::new("--spawned-from must not be empty"))
+        }
+        "--spawned-from" => return Err(ManagedProjectError::new("duplicate --spawned-from")),
         _ => unreachable!(),
     }
     Ok(())
@@ -189,12 +257,19 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
             !options.repositories.is_empty()
                 || !options.workspaces.is_empty()
                 || options.issue_url.is_some()
+                || options.spawned_from.is_some()
                 || options.dry_run
         }
         "sync" => {
-            !options.repositories.is_empty() || !options.workspaces.is_empty() || options.dry_run
+            !options.repositories.is_empty()
+                || !options.workspaces.is_empty()
+                || options.spawned_from.is_some()
+                || options.dry_run
         }
-        "onboard" => options.issue_url.is_some(),
+        "onboard" => {
+            options.issue_url.is_some()
+                || (options.spawned_from.is_some() && options.repositories.len() != 1)
+        }
         _ => false,
     };
     if invalid {
@@ -221,7 +296,7 @@ fn load_managed_policy(
         .ok_or_else(|| ManagedProjectError::new("project_board.mode must be managed"))
 }
 
-fn report_json(report: &OnboardingReport) -> Value {
+fn report_json(report: &OnboardingReport, project_url: Option<&str>) -> Value {
     json!({
         "created": report.created,
         "adopted": report.adopted,
@@ -231,6 +306,7 @@ fn report_json(report: &OnboardingReport) -> Value {
         "out_of_bound": report.out_of_bound,
         "inaccessible": report.inaccessible,
         "pending_projection": report.pending_projection,
+        "project_url": project_url,
         "repositories": report.repositories,
         "edges": report.edges,
     })

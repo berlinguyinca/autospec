@@ -98,3 +98,13 @@ read_var() {
   grep -q 'project-board-control-mirror.sh' "$INSTALL"
   [ -x "$REPO/scripts/project-board-control-mirror.sh" ]
 }
+
+@test "clean installs verify the typed managed-project command before installing workflow skills" {
+  grep -q '^verify_managed_project_command_surface()' "$REPO/install.sh"
+  verify_line="$(grep -n '^verify_managed_project_command_surface$' "$REPO/install.sh" | tail -1 | cut -d: -f1)"
+  loop_line="$(grep -n '^for skill in \$SKILLS_TO_RUN; do$' "$REPO/install.sh" | cut -d: -f1)"
+  [ -n "$verify_line" ]
+  [ -n "$loop_line" ]
+  [ "$verify_line" -lt "$loop_line" ]
+  grep -q '^for dep in autospec git gh jq; do$' "$REPO/skills/autospec-project/install.sh"
+}

@@ -165,7 +165,7 @@ if [ "$need_fetch" -eq 1 ]; then
     fetch_source_files
 fi
 
-for dep in git gh jq; do
+for dep in autospec git gh jq; do
     command -v "$dep" >/dev/null 2>&1 || warn "$dep not found on PATH"
 done
 
