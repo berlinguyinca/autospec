@@ -1259,6 +1259,7 @@ fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
         "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/00042/?view=1",
     ]))]);
     reconcile_issue(&mut store, &mut already_present, &policy, issue_url).unwrap();
+    assert!(store.snapshot().pending_projections.is_empty());
     assert!(already_present
         .calls
         .iter()
@@ -1286,6 +1287,33 @@ fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
         call,
         GithubCommand::CreateIssue { .. } | GithubCommand::AddToProject { .. }
     )));
+}
+
+#[test]
+fn github_reconcile_journals_before_listing_remote_items() {
+    let fixture = Fixture::new("github-reconcile-list-failure");
+    let policy = policy("berlinguyinca");
+    let issue_url = "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/00046/?view=1";
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    let mut github = ScriptedGithub::with([Err(GithubFailure::Retryable(
+        "item list unavailable".to_owned(),
+    ))]);
+
+    assert!(reconcile_issue(&mut store, &mut github, &policy, issue_url).is_err());
+    assert_eq!(store.snapshot().pending_projections.len(), 1);
+    assert_eq!(
+        store.snapshot().pending_projections[0],
+        "project:item-add:PVT_7:https://github.com/berlinguyinca/autospec/issues/46"
+    );
 }
 
 #[test]
@@ -1336,7 +1364,7 @@ fn github_item_reconciliation_ignores_known_nonissues_but_rejects_unknown_items(
             "https://github.com/berlinguyinca/autospec/issues/45",
         )
         .is_err());
-        assert!(store.snapshot().pending_projections.is_empty());
+        assert_eq!(store.snapshot().pending_projections.len(), 1);
         assert!(invalid
             .calls
             .iter()

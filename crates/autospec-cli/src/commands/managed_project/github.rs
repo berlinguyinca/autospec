@@ -88,20 +88,13 @@ pub fn reconcile_issue<T: GithubTransport>(
 ) -> Result<(), ManagedProjectError> {
     let identity = bound_identity(store, policy)?;
     let normalized = parse::normalize_issue_url(issue_url)?;
-    let items = list_project_items(github, &identity.owner, identity.number)?;
     let projection = projection_key(&identity.node_id, &normalized);
+    store.enqueue_projection(projection.clone())?;
+    let items = list_project_items(github, &identity.owner, identity.number)?;
     if items.contains(&normalized) {
-        if store
-            .snapshot()
-            .pending_projections
-            .iter()
-            .any(|pending| pending == &projection)
-        {
-            store.ack_projection(&projection)?;
-        }
+        store.ack_projection(&projection)?;
         return Ok(());
     }
-    store.enqueue_projection(projection.clone())?;
     execute(
         github,
         GithubCommand::AddToProject {

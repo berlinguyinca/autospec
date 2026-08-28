@@ -302,6 +302,7 @@ create_or_recheck_issue() {
     fi
     exact_number="$(exact_issue_number "$OPEN_ISSUES" "$marker")"
     if [ -n "$exact_number" ]; then
+        project_sync_catalog_issue "$OPEN_ISSUES" "$exact_number"
         printf '%s\n' "existing-open-after-create"; return 0
     fi
     if issue_url="$(repo_gh issue create --title "$title" --body "$body" \

@@ -40,6 +40,7 @@ struct ProposalDraft {
 pub(super) fn publish_tier2_with_lease(
     state_root: &Path,
     repo: &str,
+    repo_dir: &Path,
     lease: &ConductorLease,
 ) -> Result<Tier2Progress, String> {
     let existing = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
@@ -50,7 +51,7 @@ pub(super) fn publish_tier2_with_lease(
             with_current_lifecycle_lease(lease, || ensure_label(repo, label))?;
         }
         for draft in drafts {
-            with_current_lifecycle_lease(lease, || create_issue(repo, &draft))?;
+            with_current_lifecycle_lease(lease, || create_issue(repo_dir, repo, &draft))?;
         }
     }
     let confirmed = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
@@ -459,7 +460,11 @@ fn label_metadata(label: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn create_issue(repo: &str, draft: &PublicationDraft) -> Result<u64, String> {
+pub(super) fn create_issue(
+    repo_dir: &Path,
+    repo: &str,
+    draft: &PublicationDraft,
+) -> Result<u64, String> {
     let arguments = create_issue_arguments(repo, draft);
     let output = Command::new("gh")
         .args(&arguments)
@@ -472,21 +477,19 @@ fn create_issue(repo: &str, draft: &PublicationDraft) -> Result<u64, String> {
         .ok()
         .filter(|number| *number > 0)
         .ok_or_else(|| "Tier 2 issue creation returned an invalid number".to_string())?;
-    project_sync_issue(repo, number);
+    project_sync_issue(repo_dir, repo, number);
     Ok(number)
 }
 
-fn project_sync_issue(repo: &str, number: u64) {
+fn project_sync_issue(repo_dir: &Path, repo: &str, number: u64) {
     let issue_url = format!("https://github.com/{repo}/issues/{number}");
     let result = Command::new(std::env::var("AUTOSPEC_BIN").unwrap_or_else(|_| "autospec".into()))
-        .args([
-            "project",
-            "sync",
-            "--repo-dir",
-            ".",
-            "--issue-url",
-            &issue_url,
-        ])
+        .arg("project")
+        .arg("sync")
+        .arg("--repo-dir")
+        .arg(repo_dir)
+        .arg("--issue-url")
+        .arg(&issue_url)
         .output();
     if result.is_err() || result.is_ok_and(|output| !output.status.success()) {
         eprintln!(

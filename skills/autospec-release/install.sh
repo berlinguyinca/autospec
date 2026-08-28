@@ -18,6 +18,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh validate-qa-artifacts.sh"
+SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn: %s\n' "$*" >&2; }
@@ -57,7 +58,29 @@ fetch_source_files() {
     for rel in $SHARED_SCRIPT_FILES; do
         curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel" || { err "failed to download $rel"; exit 1; }
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/lib-scripts/$rel" || { err "failed to download $rel"; exit 1; }
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
+}
+
+resolve_shared_lib_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-shared/scripts" ]; then
+        printf '%s\n' "$checkout_root/skills/autospec-shared/scripts"
+    else
+        printf '%s\n' "$SKILL_DIR/lib-scripts"
+    fi
+}
+
+install_shared_lib_scripts() {
+    src_dir="$(resolve_shared_lib_scripts_dir)"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$src_dir/$rel" "$HOME/.autospec/skills/autospec-shared/scripts/$rel" || return 1
+        run "chmod +x \"$HOME/.autospec/skills/autospec-shared/scripts/$rel\""
+    done
 }
 
 resolve_shared_scripts_dir() {
@@ -129,6 +152,7 @@ done
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+install_shared_lib_scripts
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"

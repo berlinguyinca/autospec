@@ -3217,6 +3217,7 @@ fn scan_foreground(
                     tier2_publisher::publish_tier2_with_lease(
                         &layout.state_dir,
                         &layout.repo,
+                        repo_dir,
                         lease,
                     )?;
                     return Ok((state, false));

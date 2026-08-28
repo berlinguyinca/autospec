@@ -47,7 +47,7 @@ LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 # repo-root scripts/ dir, but are still required at runtime: the Tier 1.5
 # grooming orchestrator (autonomous-promote-open-issues.sh) reads its policy
 # through grooming-config.sh at that path.
-SHARED_LIB_SCRIPT_FILES="grooming-config.sh"
+SHARED_LIB_SCRIPT_FILES="grooming-config.sh project-sync-issue.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn:  %s\n' "$*" >&2; }
