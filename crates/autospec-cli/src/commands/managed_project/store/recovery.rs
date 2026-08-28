@@ -1,6 +1,7 @@
 use super::{ManagedProjectError, JOURNAL_SCHEMA};
 use crate::commands::managed_project::{
     empty_journal_digest, extend_journal_digest, io_error, open_private_file,
+    open_private_file_read_only,
 };
 use autospec_core::managed_project::ProductKey;
 use serde_json::{json, Value};
@@ -85,8 +86,13 @@ pub(super) fn payload_string<'a>(
 pub(super) fn recover_events(
     path: &Path,
     product_key: &ProductKey,
+    repair_truncated_tail: bool,
 ) -> Result<RecoveredJournal, ManagedProjectError> {
-    let mut file = open_private_file(path)?;
+    let mut file = if repair_truncated_tail {
+        open_private_file(path)?
+    } else {
+        open_private_file_read_only(path)?
+    };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(io_error)?;
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -94,10 +100,12 @@ pub(super) fn recover_events(
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |index| index + 1);
-        file.set_len(complete as u64).map_err(io_error)?;
-        file.seek(SeekFrom::Start(complete as u64))
-            .map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
+        if repair_truncated_tail {
+            file.set_len(complete as u64).map_err(io_error)?;
+            file.seek(SeekFrom::Start(complete as u64))
+                .map_err(io_error)?;
+            file.sync_all().map_err(io_error)?;
+        }
         bytes.truncate(complete);
     }
     let mut events = Vec::new();

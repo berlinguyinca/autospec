@@ -110,6 +110,7 @@ struct Retention<'a> {
     queued: &'a mut BTreeSet<String>,
     out_of_bound: &'a mut BTreeSet<String>,
     inaccessible: &'a mut BTreeSet<String>,
+    expansions: &'a mut usize,
 }
 
 pub fn onboard_repositories(
@@ -148,6 +149,7 @@ pub fn onboard_repositories(
     let mut queued = BTreeSet::new();
     let mut out_of_bound = BTreeSet::new();
     let mut inaccessible = BTreeSet::new();
+    let mut expansions = 0;
 
     for seed in policy
         .repository_seeds
@@ -173,15 +175,13 @@ pub fn onboard_repositories(
     for path in workspace_paths {
         match workspace_admission(&path, policy) {
             Admission::Admitted(repository) => {
-                if records.len() < policy.discovery_max_repos || records.contains_key(&repository) {
-                    records
-                        .entry(repository.clone())
-                        .or_insert(RepositoryRecord {
-                            repository: repository.clone(),
-                            entry_kind: "workspace".to_owned(),
-                        });
-                    enqueue(&mut queue, &mut queued, repository, path);
-                }
+                records
+                    .entry(repository.clone())
+                    .or_insert(RepositoryRecord {
+                        repository: repository.clone(),
+                        entry_kind: "workspace".to_owned(),
+                    });
+                enqueue(&mut queue, &mut queued, repository, path);
             }
             Admission::OutOfBound(repository) => {
                 out_of_bound.insert(repository);
@@ -205,6 +205,7 @@ pub fn onboard_repositories(
                     queued: &mut queued,
                     out_of_bound: &mut out_of_bound,
                     inaccessible: &mut inaccessible,
+                    expansions: &mut expansions,
                 },
             );
         }
@@ -286,7 +287,7 @@ fn retain_discovery(
         return;
     }
     if !retention.records.contains_key(&repository) {
-        if retention.records.len() >= policy.discovery_max_repos {
+        if *retention.expansions >= policy.discovery_max_repos {
             return;
         }
         retention.records.insert(
@@ -296,6 +297,7 @@ fn retain_discovery(
                 entry_kind: evidence.clone(),
             },
         );
+        *retention.expansions += 1;
     }
     let edge = relationship(policy, source, &repository, &evidence, &location, state);
     retention.edges.entry(edge.dedupe_key()).or_insert(edge);
@@ -340,7 +342,7 @@ fn admit_record(
 ) {
     if !allowed(&repository, policy) {
         out_of_bound.insert(repository);
-    } else if records.len() < policy.discovery_max_repos || records.contains_key(&repository) {
+    } else {
         records
             .entry(repository.clone())
             .or_insert(RepositoryRecord {

@@ -23,6 +23,7 @@ mod project;
 mod store;
 
 pub use cli::run;
+pub(crate) use cli::run_with_transport;
 pub use github::{
     reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
 };
@@ -340,6 +341,12 @@ pub(super) fn open_private_file(path: &Path) -> Result<File, ManagedProjectError
         .write(true)
         .open(path)
         .map_err(io_error)?;
+    validate_open_file(&file)?;
+    Ok(file)
+}
+
+pub(super) fn open_private_file_read_only(path: &Path) -> Result<File, ManagedProjectError> {
+    let file = private_options().read(true).open(path).map_err(io_error)?;
     validate_open_file(&file)?;
     Ok(file)
 }

@@ -41,22 +41,60 @@ impl ManagedProjectStore {
     ) -> Result<Self, ManagedProjectError> {
         let project_root = root.join("projects").join(product_key.as_str());
         let binding_path = project_root.join(BINDING_FILE);
-        let binding = if binding_path.exists() {
-            read_persisted_binding(&binding_path, product_key)?.binding
+        let events_path = project_root.join(EVENTS_FILE);
+        let persisted = if binding_path.exists() {
+            Some(read_persisted_binding(&binding_path, product_key)?)
         } else {
-            ManagedProjectBinding::new(product_key.clone())
+            None
         };
-        Ok(Self {
+        let empty_binding = ManagedProjectBinding::new(product_key.clone());
+        if !events_path.exists() {
+            if persisted
+                .as_ref()
+                .is_some_and(|persisted| persisted.binding != empty_binding)
+            {
+                return Err(ManagedProjectError::new(
+                    "nonempty managed project binding is missing its durable event journal",
+                ));
+            }
+            return Ok(Self {
+                root: project_root,
+                product_key: product_key.clone(),
+                binding: empty_binding,
+                event_keys: HashSet::new(),
+                known_projections: HashSet::new(),
+                provisional_project: None,
+                next_sequence: 1,
+                journal_digest: empty_journal_digest(),
+                append_fault_after: None,
+            });
+        }
+        let recovered = recover_events(&events_path, product_key, false)?;
+        let mut store = Self {
             root: project_root,
             product_key: product_key.clone(),
-            binding,
+            binding: empty_binding,
             event_keys: HashSet::new(),
             known_projections: HashSet::new(),
             provisional_project: None,
             next_sequence: 1,
             journal_digest: empty_journal_digest(),
             append_fault_after: None,
-        })
+        };
+        for event in &recovered.events {
+            store.apply_event(event)?;
+            store.next_sequence = event
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
+        }
+        store.journal_digest = recovered.final_digest;
+        validate_replay_checkpoint(
+            persisted.as_ref(),
+            &store.binding,
+            &recovered.prefix_digests,
+        )?;
+        Ok(store)
     }
 
     pub fn open(root: &Path, product_key: &ProductKey) -> Result<Self, ManagedProjectError> {
@@ -90,7 +128,7 @@ impl ManagedProjectStore {
             ));
         }
         ensure_private_file(&events_path)?;
-        let recovered = recover_events(&events_path, product_key)?;
+        let recovered = recover_events(&events_path, product_key, true)?;
         let mut store = Self {
             root,
             product_key: product_key.clone(),
@@ -262,7 +300,7 @@ impl ManagedProjectStore {
 
     pub(super) fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
         let persisted = read_persisted_binding(&self.root.join(BINDING_FILE), &self.product_key)?;
-        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key)?;
+        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key, true)?;
         self.binding = ManagedProjectBinding::new(self.product_key.clone());
         self.event_keys.clear();
         self.known_projections.clear();

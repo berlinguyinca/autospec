@@ -1,3 +1,4 @@
+use super::super::autonomous::accountability::github::{GhCli, GithubTransport};
 use super::{
     onboard_repositories, reconcile_issue, resolve_or_create_project, retry_pending_projections,
     ManagedProjectError, ManagedProjectStore, OnboardingOptions, OnboardingReport,
@@ -8,6 +9,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn run(args: &[String]) -> Result<(), ManagedProjectError> {
+    run_with_transport(args, &mut GhCli)
+}
+
+pub(crate) fn run_with_transport<T: GithubTransport>(
+    args: &[String],
+    github: &mut T,
+) -> Result<(), ManagedProjectError> {
     if args.is_empty()
         || args
             .iter()
@@ -24,6 +32,7 @@ pub fn run(args: &[String]) -> Result<(), ManagedProjectError> {
         .clone()
         .ok_or_else(|| ManagedProjectError::new("autospec project requires --repo-dir"))?;
     let policy = load_managed_policy(&repo_dir)?;
+    validate_explicit_seeds(&policy, &options.repositories)?;
     let state_root = repo_dir.join(".autospec/state");
     let mut store = if options.dry_run {
         ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
@@ -32,22 +41,21 @@ pub fn run(args: &[String]) -> Result<(), ManagedProjectError> {
     };
 
     match command.as_str() {
-        "resolve" => resolve(&mut store, &policy),
-        "sync" => sync(&mut store, &policy, options.issue_url.as_deref()),
-        "onboard" => onboard(store, policy, &repo_dir, options),
+        "resolve" => resolve(&mut store, github, &policy),
+        "sync" => sync(&mut store, github, &policy, options.issue_url.as_deref()),
+        "onboard" => onboard(store, github, policy, &repo_dir, options),
         other => Err(ManagedProjectError::new(format!(
             "unknown autospec project subcommand: {other}"
         ))),
     }
 }
 
-fn resolve(
+fn resolve<T: GithubTransport>(
     store: &mut ManagedProjectStore,
+    github: &mut T,
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
 ) -> Result<(), ManagedProjectError> {
-    let mut github = super::super::autonomous::accountability::github::GhCli;
-    let project =
-        resolve_or_create_project(store, &mut github, policy, policy.product_key.as_str())?;
+    let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
     println!(
         "{}",
         json!({
@@ -61,18 +69,17 @@ fn resolve(
     Ok(())
 }
 
-fn sync(
+fn sync<T: GithubTransport>(
     store: &mut ManagedProjectStore,
+    github: &mut T,
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_url: Option<&str>,
 ) -> Result<(), ManagedProjectError> {
-    let mut github = super::super::autonomous::accountability::github::GhCli;
-    let project =
-        resolve_or_create_project(store, &mut github, policy, policy.product_key.as_str())?;
+    let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
     if let Some(issue_url) = issue_url {
-        reconcile_issue(store, &mut github, policy, issue_url)?;
+        reconcile_issue(store, github, policy, issue_url)?;
     }
-    retry_pending_projections(store, &mut github, policy)?;
+    retry_pending_projections(store, github, policy)?;
     println!(
         "{}",
         json!({
@@ -83,21 +90,16 @@ fn sync(
     Ok(())
 }
 
-fn onboard(
+fn onboard<T: GithubTransport>(
     mut store: ManagedProjectStore,
+    github: &mut T,
     policy: autospec_core::managed_project::ManagedProjectPolicy,
     repo_dir: &Path,
     options: ProjectOptions,
 ) -> Result<(), ManagedProjectError> {
     if !options.dry_run {
-        let mut github = super::super::autonomous::accountability::github::GhCli;
-        resolve_or_create_project(
-            &mut store,
-            &mut github,
-            &policy,
-            policy.product_key.as_str(),
-        )?;
-        retry_pending_projections(&mut store, &mut github, &policy)?;
+        resolve_or_create_project(&mut store, github, &policy, policy.product_key.as_str())?;
+        retry_pending_projections(&mut store, github, &policy)?;
     }
     let report = onboard_repositories(
         &mut store,
@@ -110,6 +112,20 @@ fn onboard(
         },
     )?;
     println!("{}", report_json(&report));
+    Ok(())
+}
+
+fn validate_explicit_seeds(
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    repositories: &[String],
+) -> Result<(), ManagedProjectError> {
+    for seed in policy.repository_seeds.iter().chain(repositories) {
+        if super::normalize_github_repository(seed).is_none() {
+            return Err(ManagedProjectError::new(format!(
+                "invalid explicit GitHub repository seed: {seed}"
+            )));
+        }
+    }
     Ok(())
 }
 

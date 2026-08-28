@@ -1,4 +1,4 @@
-use super::{expand_workspace_path, Discovery};
+use super::{expand_workspace_path, normalize_github_repository, Discovery};
 use serde_json::Value;
 use std::path::Path;
 
@@ -35,6 +35,7 @@ fn package_json(root: &Path) -> Vec<Discovery> {
             .into_iter()
             .flat_map(|dependencies| dependencies.values())
             .filter_map(Value::as_str)
+            .filter(|dependency| normalize_github_repository(dependency).is_some())
         {
             discoveries.push(Discovery::repository(
                 repository,

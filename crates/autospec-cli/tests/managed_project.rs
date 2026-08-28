@@ -9,7 +9,8 @@ use autospec_core::managed_project::{
 use commands::autonomous::accountability::github::{GithubCommand, GithubFailure, GithubTransport};
 use commands::managed_project::{
     active_dependency_graph, onboard_repositories, reconcile_issue, resolve_or_create_project,
-    retry_pending_projections, verify_managed_marker, ManagedProjectStore, OnboardingOptions,
+    retry_pending_projections, run_with_transport, verify_managed_marker, ManagedProjectStore,
+    OnboardingOptions,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -279,7 +280,7 @@ fn onboard_bounds_queue_and_excludes_proposed_edges_from_active_graph() {
     .unwrap();
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
-    policy.discovery_max_repos = 2;
+    policy.discovery_max_repos = 1;
     let mut store =
         ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
 
@@ -313,6 +314,110 @@ fn onboard_bounds_queue_and_excludes_proposed_edges_from_active_graph() {
     assert!(active_dependency_graph(store.snapshot())
         .iter()
         .all(|edge| edge.state == RelationshipState::Active));
+}
+
+#[test]
+fn onboard_applies_discovery_cap_only_to_expansion_not_explicit_seeds() {
+    let fixture = Fixture::new("onboard-expansion-cap");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join(".gitmodules"),
+        "[submodule \"one\"]\nurl = https://github.com/berlinguyinca/discovered-one\n[submodule \"two\"]\nurl = https://github.com/berlinguyinca/discovered-two\n",
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repository_seeds = vec![
+        "berlinguyinca/autospec".to_owned(),
+        "berlinguyinca/explicit-one".to_owned(),
+        "berlinguyinca/explicit-two".to_owned(),
+    ];
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    policy.discovery_max_repos = 1;
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let repositories = report
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for explicit in [
+        "berlinguyinca/autospec",
+        "berlinguyinca/explicit-one",
+        "berlinguyinca/explicit-two",
+    ] {
+        assert!(repositories.contains(explicit), "missing {explicit}");
+    }
+    assert_eq!(
+        report
+            .repositories
+            .iter()
+            .filter(|record| record.entry_kind == "submodule")
+            .count(),
+        1
+    );
+    assert_eq!(report.repositories.len(), 4);
+    assert_eq!(report.edges.len(), 1);
+}
+
+#[test]
+fn onboard_retains_under_cap_name_reference_as_proposed_only() {
+    let fixture = Fixture::new("onboard-proposed");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec/issues")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/issues/ambiguous.md"),
+        "## Autospec relationships\nThe autospec-node repository is related.\n",
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    policy.discovery_max_repos = 1;
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.proposed, 1);
+    let proposed = report
+        .edges
+        .iter()
+        .find(|edge| edge.target == "berlinguyinca/autospec-node")
+        .unwrap();
+    assert_eq!(proposed.state, RelationshipState::Proposed);
+    assert!(!active_dependency_graph(store.snapshot())
+        .iter()
+        .any(|edge| edge.dedupe_key() == proposed.dedupe_key()));
 }
 
 #[test]
@@ -456,6 +561,51 @@ fn onboard_scans_only_structured_manifest_and_fleet_fields() {
 }
 
 #[test]
+fn onboard_ignores_non_repository_npm_dependency_protocols() {
+    let fixture = Fixture::new("onboard-npm-protocols");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join("package.json"),
+        r#"{"dependencies":{"semver":"^1.2.3","registry_alias":"npm:real-package@^2","local":"file:../local","workspace":"workspace:*","github":"github:berlinguyinca/real-npm"}}"#,
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.inaccessible, 0);
+    assert!(report
+        .repositories
+        .iter()
+        .any(|record| record.repository == "berlinguyinca/real-npm"));
+    assert_eq!(
+        report
+            .repositories
+            .iter()
+            .filter(|record| record.entry_kind == "manifest-dependency")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn onboard_resolves_cargo_paths_and_pnpm_members_with_typed_failures() {
     let fixture = Fixture::new("onboard-local-workspaces");
     let repository_path = fixture.path().join("checkout");
@@ -541,6 +691,53 @@ fn onboard_rejects_malformed_explicit_repository_seeds() {
 
     assert!(result.is_err());
     assert!(store.snapshot().repositories.is_empty());
+}
+
+#[test]
+fn onboard_cli_validates_every_explicit_seed_before_state_or_github() {
+    for (name, policy_seeds, cli_seeds) in [
+        (
+            "policy-seed",
+            "[\"berlinguyinca/autospec\", \"not a repository\"]",
+            Vec::new(),
+        ),
+        (
+            "cli-seed",
+            "[\"berlinguyinca/autospec\"]",
+            vec![
+                "--repo",
+                "berlinguyinca/allowed",
+                "--repo",
+                "not a repository",
+            ],
+        ),
+    ] {
+        let fixture = Fixture::new(name);
+        let repository_path = fixture.path().join("checkout");
+        initialize_repository(
+            &repository_path,
+            "https://github.com/berlinguyinca/autospec.git",
+        );
+        fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+        fs::write(
+            repository_path.join(".autospec/autonomous.yml"),
+            format!(
+                "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: {policy_seeds}\n  discovery_max_repos: 1\n"
+            ),
+        )
+        .unwrap();
+        let mut args = vec![
+            "onboard".to_owned(),
+            "--repo-dir".to_owned(),
+            repository_path.display().to_string(),
+        ];
+        args.extend(cli_seeds.into_iter().map(str::to_owned));
+        let mut github = ScriptedGithub::default();
+
+        assert!(run_with_transport(&args, &mut github).is_err());
+        assert!(github.calls.is_empty());
+        assert!(!repository_path.join(".autospec/state").exists());
+    }
 }
 
 fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {
@@ -1126,6 +1323,60 @@ fn store_reopens_repository_edge_and_pending_projection_from_journal() {
     assert_eq!(reopened.snapshot().repositories.len(), 1);
     assert_eq!(reopened.snapshot().relationships.len(), 1);
     assert_eq!(reopened.snapshot().pending_projections.len(), 1);
+}
+
+#[test]
+fn store_read_only_replays_newest_valid_events_without_repairing_files() {
+    let fixture = Fixture::new("read-only-replay");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/first", "explicit-seed"))
+        .unwrap();
+    let stale_binding = fs::read(fixture.state_path("binding.json")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/second", "manifest-dependency"))
+        .unwrap();
+    drop(store);
+    fs::write(fixture.state_path("binding.json"), stale_binding).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.state_path("events.jsonl"))
+        .unwrap()
+        .write_all(br#"{"partial""#)
+        .unwrap();
+    let binding_before = fs::read(fixture.state_path("binding.json")).unwrap();
+    let journal_before = fs::read(fixture.state_path("events.jsonl")).unwrap();
+
+    let read_only = ManagedProjectStore::open_read_only(fixture.path(), &key("autospec")).unwrap();
+
+    assert_eq!(read_only.snapshot().repositories.len(), 2);
+    assert_eq!(
+        fs::read(fixture.state_path("binding.json")).unwrap(),
+        binding_before
+    );
+    assert_eq!(
+        fs::read(fixture.state_path("events.jsonl")).unwrap(),
+        journal_before
+    );
+}
+
+#[test]
+fn store_read_only_rejects_nonempty_binding_without_valid_journal() {
+    let fixture = Fixture::new("read-only-missing-journal");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    drop(store);
+    fs::remove_file(fixture.state_path("events.jsonl")).unwrap();
+    let binding_before = fs::read(fixture.state_path("binding.json")).unwrap();
+
+    assert!(ManagedProjectStore::open_read_only(fixture.path(), &key("autospec")).is_err());
+    assert_eq!(
+        fs::read(fixture.state_path("binding.json")).unwrap(),
+        binding_before
+    );
+    assert!(!fixture.state_path("events.jsonl").exists());
 }
 
 #[test]
