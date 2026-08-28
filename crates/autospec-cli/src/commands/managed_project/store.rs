@@ -502,11 +502,6 @@ fn import_legacy_state(
     let Some(legacy_root) = legacy_root.filter(|legacy| *legacy != root) else {
         return Ok(());
     };
-    let legacy_project = legacy_root.join("projects").join(product_key.as_str());
-    if !legacy_project.exists() {
-        return Ok(());
-    }
-    let legacy = ManagedProjectStore::open_read_only(legacy_root, product_key)?;
     ensure_private_directory(root)?;
     let projects = root.join("projects");
     ensure_private_directory(&projects)?;
@@ -518,6 +513,13 @@ fn import_legacy_state(
     if binding_path.exists() || events_path.exists() {
         return Ok(());
     }
+    let legacy_project = legacy_root.join("projects").join(product_key.as_str());
+    if !legacy_project.exists() {
+        return Ok(());
+    }
+    validate_read_only_ancestors(legacy_root, product_key)?;
+    let _legacy_lock = ProductLock::acquire(&legacy_project.join(LOCK_FILE))?;
+    let legacy = ManagedProjectStore::open_read_only(legacy_root, product_key)?;
     let legacy_binding = legacy_project.join(BINDING_FILE);
     let legacy_events = legacy_project.join(EVENTS_FILE);
     let binding = super::read_private_file(&legacy_binding)?;

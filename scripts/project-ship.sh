@@ -145,7 +145,8 @@ if [ "$resolve_rc" -ne 0 ]; then
     exit "$resolve_rc"
 fi
 ready_plan="$(printf '%s' "$plan_json" | bash "$DEPS_BIN" --resolve)" || fail "active dependency readiness failed"
-repos_json="$(printf '%s' "$ready_plan" | jq -c '[.items[]? | select(.state == "open" and .ready == true) | .repo] | unique')"
+blocked_repos_json="$(printf '%s' "$ready_plan" | jq -c '[.items[]? | select(.state == "open" and .ready != true) | .repo] | unique')"
+repos_json="$(printf '%s' "$ready_plan" | jq -c --argjson blocked "$blocked_repos_json" '[.items[]? | select(.state == "open") | .repo] | unique | map(select(. as $repo | $blocked | index($repo) | not))')"
 
 # ── Step 3: filter to the allowlist ─────────────────────────────────────────
 filtered_json="$(jq -c -n --argjson repos "$repos_json" --argjson allow "$allowlist_json" '
@@ -159,6 +160,19 @@ filtered_json="$(jq -c -n --argjson repos "$repos_json" --argjson allow "$allowl
 
 allowed_repos_json="$(printf '%s' "$filtered_json" | jq -c '.allowed')"
 skipped_repos_json="$(printf '%s' "$filtered_json" | jq -c '.skipped')"
+
+while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    allowlisted="$(jq -rn --arg repo "$repo" --argjson allow "$allowlist_json" '
+      def allowed($r): $allow | map((. | rtrimstr("*")) as $p | if endswith("*") then ($r | startswith($p)) else ($r == .) end) | any;
+      allowed($repo)')"
+    if [ "$allowlisted" = "true" ]; then
+        reasons="$(printf '%s' "$ready_plan" | jq -r --arg repo "$repo" '[.items[]? | select(.repo == $repo and .state == "open" and .ready != true) | (.reason // "not-ready")] | unique | join(",")')"
+        printf 'project-ship: repo=%s allowlisted=yes action=skipped reason=blocked-issue details=%s\n' "$repo" "$reasons"
+    else
+        printf 'project-ship: repo=%s allowlisted=no action=skipped reason=not-allowlisted\n' "$repo"
+    fi
+done < <(printf '%s' "$blocked_repos_json" | jq -r '.[]')
 
 while IFS= read -r repo; do
     [ -n "$repo" ] || continue

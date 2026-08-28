@@ -93,7 +93,7 @@ command -v jq >/dev/null 2>&1 || { printf 'project-board-resolve: jq not found\n
 active_edges_json='[]'
 if [ -n "$repo_dir" ]; then
     autospec_bin="${AUTOSPEC_BIN:-autospec}"
-    active_edges_json="$("$autospec_bin" project active-edges --repo-dir "$repo_dir" 2>/dev/null)" || {
+    active_edges_json="$("$autospec_bin" project active-edges --repo-dir "$repo_dir" --board-url "$url" 2>/dev/null)" || {
         printf 'project-board-resolve: managed active-edge read failed\n' >&2
         exit 3
     }

@@ -29,7 +29,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             .iter()
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--issue-url URL]... [--owner OWNER --allow PATTERN]... [--spawned-from IDENTITY] [--dry-run]\n    autospec project active-edges --repo-dir PATH");
+        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--issue-url URL]... [--owner OWNER --allow PATTERN]... [--spawned-from IDENTITY] [--dry-run]\n    autospec project active-edges --repo-dir PATH --board-url URL");
         return Ok(Value::Null);
     }
     let command = &args[0];
@@ -39,11 +39,19 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
         .repo_dir
         .clone()
         .ok_or_else(|| ManagedProjectError::new("autospec project requires --repo-dir"))?;
-    let policy = load_managed_policy(&repo_dir)?;
-    populate_owner_repositories(&policy, &mut options, github)?;
+    let board = load_project_board_config(&repo_dir)?;
+    if command == "active-edges" && board.managed_policy().is_none() {
+        return Ok(json!([]));
+    }
+    let policy = board
+        .managed_policy()
+        .cloned()
+        .ok_or_else(|| ManagedProjectError::new("project_board.mode must be managed"))?;
     add_issue_repositories(&mut options)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
     validate_issue_boundaries(&policy, &options.issue_urls)?;
+    populate_owner_repositories(&policy, &mut options, github)?;
+    validate_explicit_seeds(&policy, &options.repositories)?;
     let state_root = managed_state_root(&repo_dir)?;
     let legacy_root = repo_dir.join(".autospec/state");
     let read_only = options.dry_run || command == "active-edges";
@@ -70,9 +78,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             options.issue_urls.first().map(String::as_str),
         ),
         "onboard" => onboard(store, github, policy, &repo_dir, options),
-        "active-edges" => Ok(serde_json::to_value(super::active_dependency_graph(
-            store.snapshot(),
-        ))?),
+        "active-edges" => active_edges(&store, options.board_url.as_deref()),
         other => Err(ManagedProjectError::new(format!(
             "unknown autospec project subcommand: {other}"
         ))),
@@ -300,6 +306,7 @@ struct ProjectOptions {
     spawned_from: Option<String>,
     owner: Option<String>,
     allow: Vec<String>,
+    board_url: Option<String>,
     dry_run: bool,
 }
 
@@ -310,7 +317,7 @@ fn parse_options(args: &[String]) -> Result<ProjectOptions, ManagedProjectError>
         let argument = &args[index];
         match argument.as_str() {
             "--repo-dir" | "--repo" | "--workspace" | "--issue-url" | "--spawned-from"
-            | "--owner" | "--allow" => {
+            | "--owner" | "--allow" | "--board-url" => {
                 let value = args.get(index + 1).ok_or_else(|| {
                     ManagedProjectError::new(format!("{argument} requires a value"))
                 })?;
@@ -359,6 +366,13 @@ fn set_value(
         "--owner" => return Err(ManagedProjectError::new("duplicate --owner")),
         "--allow" if !value.trim().is_empty() => options.allow.push(value.to_owned()),
         "--allow" => return Err(ManagedProjectError::new("--allow must not be empty")),
+        "--board-url" if options.board_url.is_none() && !value.trim().is_empty() => {
+            options.board_url = Some(value.to_owned())
+        }
+        "--board-url" if value.trim().is_empty() => {
+            return Err(ManagedProjectError::new("--board-url must not be empty"))
+        }
+        "--board-url" => return Err(ManagedProjectError::new("duplicate --board-url")),
         _ => unreachable!(),
     }
     Ok(())
@@ -384,6 +398,7 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
                 || options.spawned_from.is_some()
                 || options.owner.is_some()
                 || !options.allow.is_empty()
+                || options.board_url.is_some()
                 || options.dry_run
         }
         "sync" => {
@@ -392,10 +407,14 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
                 || options.spawned_from.is_some()
                 || options.owner.is_some()
                 || !options.allow.is_empty()
+                || options.board_url.is_some()
                 || options.dry_run
                 || options.issue_urls.len() > 1
         }
-        "onboard" => options.spawned_from.is_some() && options.repositories.len() != 1,
+        "onboard" => {
+            options.board_url.is_some()
+                || (options.spawned_from.is_some() && options.repositories.len() != 1)
+        }
         "active-edges" => {
             !options.repositories.is_empty()
                 || !options.workspaces.is_empty()
@@ -404,6 +423,7 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
                 || options.owner.is_some()
                 || !options.allow.is_empty()
                 || options.dry_run
+                || options.board_url.is_none()
         }
         _ => false,
     };
@@ -504,19 +524,41 @@ fn matches_allow_pattern(repository: &str, pattern: &str) -> bool {
     )
 }
 
-fn load_managed_policy(
+fn load_project_board_config(
     repo_dir: &Path,
-) -> Result<autospec_core::managed_project::ManagedProjectPolicy, ManagedProjectError> {
+) -> Result<autospec_core::autonomous::config::ProjectBoardConfig, ManagedProjectError> {
     let path = repo_dir.join(".autospec/autonomous.yml");
     let source = fs::read_to_string(&path).map_err(|error| {
         ManagedProjectError::new(format!("cannot read {}: {error}", path.display()))
     })?;
-    let config = AutonomousConfig::parse(&source).map_err(ManagedProjectError::new)?;
-    config
-        .project_board
-        .managed_policy()
-        .cloned()
-        .ok_or_else(|| ManagedProjectError::new("project_board.mode must be managed"))
+    Ok(AutonomousConfig::parse(&source)
+        .map_err(ManagedProjectError::new)?
+        .project_board)
+}
+
+fn active_edges(
+    store: &ManagedProjectStore,
+    board_url: Option<&str>,
+) -> Result<Value, ManagedProjectError> {
+    let requested =
+        board_url.ok_or_else(|| ManagedProjectError::new("active-edges requires --board-url"))?;
+    let bound = store
+        .snapshot()
+        .project_url
+        .as_deref()
+        .ok_or_else(|| ManagedProjectError::new("managed project has no bound board"))?;
+    if normalize_board_url(requested) != normalize_board_url(bound) {
+        return Err(ManagedProjectError::new(
+            "requested board does not match the managed project binding",
+        ));
+    }
+    Ok(serde_json::to_value(super::active_dependency_graph(
+        store.snapshot(),
+    ))?)
+}
+
+fn normalize_board_url(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
 fn report_json(

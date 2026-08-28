@@ -48,6 +48,10 @@ SH
     cat > "$TMP/bin/resolve.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'resolve %s\n' "$*" >> "$CALL_LOG"
+if [ -n "${RESOLVE_PLAN_JSON:-}" ]; then
+    printf '%s\n' "$RESOLVE_PLAN_JSON"
+    exit "${RESOLVE_EXIT:-0}"
+fi
 repos="${RESOLVE_REPOS_JSON:-[]}"
 edges="${RESOLVE_ACTIVE_EDGES_JSON:-[]}"
 jq -cn --argjson repos "$repos" --argjson edges "$edges" '
@@ -209,6 +213,21 @@ teardown() {
     [ "$status" -ne 0 ]
     grep -q 'o/b' "$FLEET_SPAWN_LOG"
     run grep -q 'o/a' "$FLEET_SPAWN_LOG"
+    [ "$status" -ne 0 ]
+}
+
+@test "one blocked issue withholds its whole repository even when another issue is ready" {
+    export PB_CONFIG_JSON='{"url":"https://github.com/orgs/o/projects/1","allowlist":["o/a","o/b"]}'
+    export RESOLVE_PLAN_JSON='{"active_edges":[{"kind":"depends-on","state":"active","source":"https://github.com/o/a/issues/1","target":"https://github.com/o/b/issues/2"}],"items":[{"repo":"o/a","number":1,"state":"open","body":"","dependencies":null,"parent_issue":null},{"repo":"o/a","number":3,"state":"open","body":"","dependencies":null,"parent_issue":null},{"repo":"o/b","number":2,"state":"open","body":"","dependencies":null,"parent_issue":null}]}'
+
+    run bash "$SHIP" --url https://github.com/orgs/o/projects/1 --repo-dir "$TMP/repo" \
+        --workspace "$TMP/ws" --fleet-config "$TMP/fleet.yml"
+
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q 'repo=o/a allowlisted=yes action=skipped reason=blocked-issue'
+    echo "$output" | grep -q 'blocked-by o/b#2'
+    grep -q 'o/b.git' "$TMP/fleet.yml"
+    run grep -q 'o/a.git' "$TMP/fleet.yml"
     [ "$status" -ne 0 ]
 }
 

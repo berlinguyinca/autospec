@@ -686,6 +686,68 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
 }
 
 #[test]
+fn active_edges_returns_empty_for_an_external_project_board() {
+    let fixture = Fixture::new("external-active-edges");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: external\n  url: https://github.com/orgs/berlinguyinca/projects/7\n  repo_allowlist: [\"berlinguyinca/*\"]\n",
+    )
+    .unwrap();
+    let args = vec![
+        "active-edges".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--board-url".to_owned(),
+        "https://github.com/orgs/berlinguyinca/projects/7".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(outcome, serde_json::json!([]));
+    assert!(github.calls.is_empty());
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
+fn active_edges_rejects_a_board_other_than_the_managed_binding() {
+    let fixture = Fixture::new("active-edges-board-mismatch");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let mut store =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    drop(store);
+    let args = vec![
+        "active-edges".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--board-url".to_owned(),
+        "https://github.com/orgs/berlinguyinca/projects/8".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(error.to_string().contains("does not match"));
+    assert!(github.calls.is_empty());
+}
+
+#[test]
 fn onboard_cli_rejects_selected_issue_outside_the_admitted_repository_boundary() {
     let fixture = Fixture::new("onboard-selected-issue-boundary");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
@@ -765,6 +827,35 @@ fn onboard_cli_bounds_owner_enumeration_and_filters_before_scanning() {
     assert!(repositories.contains(&"berlinguyinca/kept-one"));
     assert!(!repositories.contains(&"berlinguyinca/rejected"));
     assert!(!repositories.contains(&"other/kept-two"));
+}
+
+#[test]
+fn onboard_cli_rejects_an_invalid_issue_before_owner_enumeration() {
+    let fixture = Fixture::new("onboard-invalid-issue-before-owner");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/*".to_owned(),
+        "--issue-url".to_owned(),
+        "https://github.com/other/out-of-bound/issues/7".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok("[]".to_owned())]);
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("outside the managed repository boundary"),
+        "{error}"
+    );
+    assert!(github.calls.is_empty());
 }
 
 #[test]
@@ -1436,9 +1527,11 @@ fn gh_cli_missing_executable_is_a_hard_nonzero_onboarding_failure() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot execute gh"));
-    let store =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let store = ManagedProjectStore::open(
+        &repository_path.join("test-autospec-home"),
+        &key("autospec"),
+    )
+    .unwrap();
     assert!(store
         .snapshot()
         .pending_projections
@@ -2321,6 +2414,32 @@ fn store_global_open_imports_one_legacy_repo_state_and_reuses_it_across_reposito
         "berlinguyinca/one"
     );
     assert!(global.join("projects/autospec/binding.lock").exists());
+}
+
+#[test]
+fn store_global_open_ignores_corrupt_legacy_after_global_state_exists() {
+    let fixture = Fixture::new("global-precedes-corrupt-legacy");
+    let global = fixture.path().join("global");
+    let legacy = fixture.path().join("repo/.autospec/state");
+    fs::create_dir_all(fixture.path()).unwrap();
+    let mut existing = ManagedProjectStore::open(&global, &key("autospec")).unwrap();
+    existing
+        .record_repository(repository("berlinguyinca/global", "explicit-seed"))
+        .unwrap();
+    drop(existing);
+    let legacy_project = legacy.join("projects/autospec");
+    fs::create_dir_all(&legacy_project).unwrap();
+    fs::write(legacy_project.join("binding.json"), "not-json").unwrap();
+    fs::write(legacy_project.join("events.jsonl"), "not-json\n").unwrap();
+
+    let reopened =
+        ManagedProjectStore::open_global(&global, Some(&legacy), &key("autospec")).unwrap();
+
+    assert_eq!(reopened.snapshot().repositories.len(), 1);
+    assert_eq!(
+        reopened.snapshot().repositories[0].repository,
+        "berlinguyinca/global"
+    );
 }
 
 #[cfg(unix)]

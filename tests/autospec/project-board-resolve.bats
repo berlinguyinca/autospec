@@ -98,7 +98,7 @@ SH
     --repo-dir "$TMP/repo" --emit plan
 
   [ "$status" -eq 0 ]
-  [ "$(cat "$TMP/autospec-call.log")" = "project active-edges --repo-dir $TMP/repo" ]
+  [ "$(cat "$TMP/autospec-call.log")" = "project active-edges --repo-dir $TMP/repo --board-url https://github.com/orgs/InferWeave/projects/2" ]
   echo "$output" | jq -e '.active_edges == [{
     from: "https://github.com/InferWeave/inferweave-workbench/issues/2",
     to: "https://github.com/InferWeave/inferweave-workbench/issues/5",

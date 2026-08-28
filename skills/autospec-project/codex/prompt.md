@@ -45,6 +45,7 @@ and exit.
 /autospec-project sync <url>     # one promotion pass, no drain
 /autospec-project status <url>   # board-scoped queue, workers, PRs, blockers
 /autospec-project onboard --repo owner/name
+/autospec-project onboard --repo owner/name --issue-url URL [--issue-url URL...]
 /autospec-project onboard --workspace /absolute/path
 /autospec-project onboard --owner owner --allow owner/repo --allow owner/prefix-*
 /autospec-project sync
@@ -64,6 +65,8 @@ argument as its own word, never interpolate it into `sh -c`, and never use
 
 - `onboard --repo owner/name` forwards the exact slug as
   `autospec project onboard --repo-dir "$PWD" --repo "owner/name"`.
+- Each repeatable `--issue-url URL` is forwarded as its own exact argument to
+  `autospec project onboard`; validate every URL before any owner enumeration.
 - `onboard --workspace /absolute/path` requires an absolute path and forwards
   it as `autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"`.
 - `onboard --owner owner` requires at least one explicit `--allow` value and
@@ -82,7 +85,8 @@ argument as its own word, never interpolate it into `sh -c`, and never use
 
 Print all stable reconciliation fields returned by the command—`created`,
 `adopted`, `updated`, `unchanged`, `proposed`, `out_of_bound`, `inaccessible`,
-and `pending_projection`—plus `outcome`, `project_url`, and `error`. Treat
+and `pending_projection`—plus `selected_issues`, `reconciled_issues`, `outcome`,
+`project_url`, and `error`. Treat
 `outcome: journaled_projection_pending` as the successful onboarding result
 used after repository state is durable but remote reconciliation is transiently
 degraded. Any non-zero command exit or other outcome is a hard configuration,
