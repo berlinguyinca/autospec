@@ -475,7 +475,13 @@ fn finish_binding<T: GithubTransport>(
     let project_warning = request.project_number.and_then(|project_number| {
         github
             .execute(GithubCommand::AddToProject {
-                repository: request.repository.as_str().to_owned(),
+                owner: request
+                    .repository
+                    .as_str()
+                    .split_once('/')
+                    .expect("validated repository identity has an owner")
+                    .0
+                    .to_owned(),
                 project_number,
                 issue_url: issue.url.clone(),
             })

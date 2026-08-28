@@ -6,15 +6,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{ManagedProjectBinding, ProductKey};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
+#[path = "managed_project/github.rs"]
+mod github;
 #[path = "managed_project/store.rs"]
 mod store;
 
+pub use github::{
+    reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
+};
 pub use store::ManagedProjectStore;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProject {
+    pub node_id: String,
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    pub owner: String,
+    pub readme: String,
+}
 
 #[derive(Debug)]
 pub struct ManagedProjectError(String);
@@ -32,6 +47,91 @@ impl fmt::Display for ManagedProjectError {
 }
 
 impl std::error::Error for ManagedProjectError {}
+
+impl ManagedProjectStore {
+    pub fn record_project(
+        &mut self,
+        owner: &str,
+        node_id: &str,
+        number: u64,
+        url: &str,
+        title: &str,
+    ) -> Result<(), ManagedProjectError> {
+        if [owner, node_id, url, title]
+            .iter()
+            .any(|value| value.trim().is_empty())
+            || number == 0
+        {
+            return Err(ManagedProjectError::new(
+                "managed project identity fields must not be empty",
+            ));
+        }
+        let _lock = ProductLock::acquire(&self.root.join(store::LOCK_FILE))?;
+        self.refresh_from_journal()?;
+        let payload = json!({
+            "owner": owner,
+            "node_id": node_id,
+            "number": number,
+            "url": url,
+            "title": title,
+        });
+        if self.binding.project_node_id.is_some()
+            && project_binding_payload(&self.binding) != Some(payload.clone())
+        {
+            return Err(ManagedProjectError::new(
+                "managed project binding conflicts with the verified remote project",
+            ));
+        }
+        self.append_event_locked(
+            format!("project:bind:{}", self.product_key.as_str()),
+            "project-bound",
+            payload,
+        )
+    }
+}
+
+fn apply_project_binding(
+    binding: &mut ManagedProjectBinding,
+    payload: &Value,
+) -> Result<(), ManagedProjectError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ManagedProjectError::new("project binding payload must be an object"))?;
+    let string = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ManagedProjectError::new(format!("project binding payload has invalid {field}"))
+            })
+    };
+    binding.owner = Some(string("owner")?);
+    binding.project_node_id = Some(string("node_id")?);
+    binding.project_number = Some(
+        object
+            .get("number")
+            .and_then(Value::as_u64)
+            .filter(|number| *number > 0)
+            .ok_or_else(|| {
+                ManagedProjectError::new("project binding payload has invalid number")
+            })?,
+    );
+    binding.project_url = Some(string("url")?);
+    binding.project_title = Some(string("title")?);
+    Ok(())
+}
+
+fn project_binding_payload(binding: &ManagedProjectBinding) -> Option<Value> {
+    Some(json!({
+        "owner": binding.owner.as_deref()?,
+        "node_id": binding.project_node_id.as_deref()?,
+        "number": binding.project_number?,
+        "url": binding.project_url.as_deref()?,
+        "title": binding.project_title.as_deref()?,
+    }))
+}
 
 pub(super) struct JournalCheckpoint {
     pub(super) high_watermark: u64,

@@ -1,11 +1,17 @@
-#[path = "../src/commands/managed_project.rs"]
-mod managed_project;
+#[path = "../src/commands/mod.rs"]
+mod commands;
 
+use autospec_core::managed_project::ManagedProjectPolicy;
 use autospec_core::managed_project::{
     ProductKey, RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
     RepositoryRecord,
 };
-use managed_project::ManagedProjectStore;
+use commands::autonomous::accountability::github::{GithubCommand, GithubFailure, GithubTransport};
+use commands::managed_project::{
+    reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
+    ManagedProjectStore,
+};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -73,6 +79,292 @@ fn edge() -> RelationshipEdge {
 
 fn add_item(issue_url: &str) -> String {
     format!("project:item-add:PV_123:{issue_url}")
+}
+
+#[derive(Default)]
+struct ScriptedGithub {
+    responses: VecDeque<Result<String, GithubFailure>>,
+    calls: Vec<GithubCommand>,
+}
+
+impl ScriptedGithub {
+    fn with(responses: impl IntoIterator<Item = Result<String, GithubFailure>>) -> Self {
+        Self {
+            responses: responses.into_iter().collect(),
+            calls: Vec::new(),
+        }
+    }
+}
+
+impl GithubTransport for ScriptedGithub {
+    fn execute(&mut self, command: GithubCommand) -> Result<String, GithubFailure> {
+        self.calls.push(command);
+        self.responses.pop_front().unwrap_or_else(|| {
+            Err(GithubFailure::Definitive(
+                "unexpected GitHub call".to_owned(),
+            ))
+        })
+    }
+}
+
+fn policy(owner: &str) -> ManagedProjectPolicy {
+    ManagedProjectPolicy {
+        product_key: key("autospec"),
+        owner: owner.to_owned(),
+        repository_seeds: vec![format!("{owner}/autospec")],
+        repo_allowlist: vec![format!("{owner}/autospec")],
+        discovery_max_repos: 25,
+    }
+}
+
+fn marker(owner: &str) -> String {
+    format!(
+        "<!-- autospec-managed-project:begin -->\nschema: 1\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
+    )
+}
+
+fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {
+    serde_json::json!({
+        "id": format!("PVT_{number}"),
+        "number": number,
+        "url": format!("https://github.com/orgs/{owner}/projects/{number}"),
+        "title": title,
+        "owner": { "login": owner },
+        "readme": readme,
+    })
+    .to_string()
+}
+
+fn project_list(projects: serde_json::Value) -> String {
+    serde_json::json!({ "projects": projects }).to_string()
+}
+
+fn item_list(urls: &[&str]) -> String {
+    serde_json::json!({
+        "items": urls.iter().map(|url| serde_json::json!({"content": {"url": url}})).collect::<Vec<_>>()
+    })
+    .to_string()
+}
+
+#[test]
+fn github_marker_parser_requires_one_complete_exact_marker() {
+    assert!(verify_managed_marker(&marker("berlinguyinca"), &policy("berlinguyinca")).unwrap());
+    assert!(!verify_managed_marker("# Human project", &policy("berlinguyinca")).unwrap());
+    assert!(verify_managed_marker(
+        &format!("{}\n{}", marker("berlinguyinca"), marker("berlinguyinca")),
+        &policy("berlinguyinca")
+    )
+    .is_err());
+}
+
+#[test]
+fn github_resolve_creates_marks_verifies_and_persists_when_no_marker_matches() {
+    let fixture = Fixture::new("github-create");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let human_readme = "# Human notes\n\nKeep this text.";
+    let marked_readme = format!("{human_readme}\n\n{}", marker("berlinguyinca"));
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{
+            "number": 3,
+            "title": "Autospec"
+        }]))),
+        Ok(project(3, "berlinguyinca", "Autospec", "# Title only")),
+        Ok(project(7, "berlinguyinca", "Autospec", human_readme)),
+        Ok(project(7, "berlinguyinca", "Autospec", human_readme)),
+        Ok(String::new()),
+        Ok(project(7, "berlinguyinca", "Autospec", &marked_readme)),
+    ]);
+
+    let resolved = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap();
+
+    assert_eq!(resolved.number, 7);
+    assert_eq!(store.snapshot().project_node_id.as_deref(), Some("PVT_7"));
+    assert_eq!(store.snapshot().project_number, Some(7));
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert_eq!(
+        github
+            .calls
+            .iter()
+            .filter(|call| matches!(call, GithubCommand::CreateProject { .. }))
+            .count(),
+        1
+    );
+    let edited = github.calls.iter().find_map(|call| match call {
+        GithubCommand::EditProjectMarker { readme, .. } => Some(readme),
+        _ => None,
+    });
+    assert_eq!(edited.map(String::as_str), Some(marked_readme.as_str()));
+}
+
+#[test]
+fn github_resolve_adopts_one_exact_marker_and_ignores_title_only_matches() {
+    let fixture = Fixture::new("github-adopt");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([
+            {"number": 3, "title": "Autospec"},
+            {"number": 7, "title": "Renamed by a human"}
+        ]))),
+        Ok(project(3, "berlinguyinca", "Autospec", "# No marker")),
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Renamed by a human",
+            &marker("berlinguyinca"),
+        )),
+    ]);
+
+    let resolved = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap();
+
+    assert_eq!(resolved.number, 7);
+    assert_eq!(
+        store.snapshot().project_title.as_deref(),
+        Some("Renamed by a human")
+    );
+    assert!(github.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateProject { .. } | GithubCommand::EditProjectMarker { .. }
+    )));
+}
+
+#[test]
+fn github_resolve_rejects_ambiguous_markers_without_mutation() {
+    let fixture = Fixture::new("github-ambiguous");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(
+            serde_json::json!([{"number": 7}, {"number": 8}]),
+        )),
+        Ok(project(7, "berlinguyinca", "One", &marker("berlinguyinca"))),
+        Ok(project(8, "berlinguyinca", "Two", &marker("berlinguyinca"))),
+    ]);
+
+    assert!(resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec"
+    )
+    .is_err());
+    assert!(store.snapshot().project_node_id.is_none());
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(github.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateProject { .. } | GithubCommand::EditProjectMarker { .. }
+    )));
+}
+
+#[test]
+fn github_resolve_fails_closed_when_project_discovery_may_be_truncated() {
+    let fixture = Fixture::new("github-truncated-projects");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let projects = (1..=500)
+        .map(|number| serde_json::json!({"number": number}))
+        .collect::<Vec<_>>();
+    let mut github = ScriptedGithub::with([Ok(project_list(serde_json::json!(projects)))]);
+
+    let error = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("truncated"));
+    assert_eq!(github.calls.len(), 1);
+    assert!(store.snapshot().pending_projections.is_empty());
+}
+
+#[test]
+fn github_resolve_fails_closed_on_marker_owner_mismatch() {
+    let fixture = Fixture::new("github-owner-mismatch");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Autospec",
+            &marker("someone-else"),
+        )),
+    ]);
+
+    let error = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("owner"));
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProject { .. })));
+}
+
+#[test]
+fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
+    let fixture = Fixture::new("github-reconcile");
+    let policy = policy("berlinguyinca");
+    let issue_url = "https://github.com/berlinguyinca/autospec/issues/42";
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut resolver = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Autospec",
+            &marker("berlinguyinca"),
+        )),
+    ]);
+    resolve_or_create_project(&mut store, &mut resolver, &policy, "Autospec").unwrap();
+
+    let mut already_present = ScriptedGithub::with([Ok(item_list(&[
+        "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/42/",
+    ]))]);
+    reconcile_issue(&mut store, &mut already_present, &policy, issue_url).unwrap();
+    assert!(already_present
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::AddToProject { .. })));
+
+    let mut failing = ScriptedGithub::with([
+        Ok(item_list(&[])),
+        Err(GithubFailure::Retryable("rate limited".to_owned())),
+    ]);
+    assert!(reconcile_issue(
+        &mut store,
+        &mut failing,
+        &policy,
+        "https://github.com/berlinguyinca/autospec/issues/43"
+    )
+    .is_err());
+    assert_eq!(store.snapshot().pending_projections.len(), 1);
+
+    let mut retry = ScriptedGithub::with([Ok(item_list(&[
+        "https://github.com/berlinguyinca/autospec/issues/43",
+    ]))]);
+    retry_pending_projections(&mut store, &mut retry, &policy).unwrap();
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(retry.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateIssue { .. } | GithubCommand::AddToProject { .. }
+    )));
 }
 
 #[test]

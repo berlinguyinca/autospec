@@ -36,11 +36,210 @@ pub enum GithubCommand {
         repository: String,
         number: u64,
     },
+    ListProjects {
+        owner: String,
+    },
+    ViewProject {
+        owner: String,
+        number: u64,
+    },
+    CreateProject {
+        owner: String,
+        title: String,
+    },
+    EditProjectMarker {
+        owner: String,
+        number: u64,
+        readme: String,
+    },
+    ListProjectItems {
+        owner: String,
+        number: u64,
+    },
     AddToProject {
-        repository: String,
+        owner: String,
         project_number: u64,
         issue_url: String,
     },
+}
+
+impl GithubCommand {
+    pub(crate) fn into_parts(self) -> (Vec<String>, Option<String>) {
+        match self {
+            Self::EnsureLabel { repository, name } => (
+                vec![
+                    "label".into(),
+                    "create".into(),
+                    name,
+                    "--repo".into(),
+                    repository,
+                    "--color".into(),
+                    "5319e7".into(),
+                    "--force".into(),
+                ],
+                None,
+            ),
+            Self::ListAccountabilityIssues { repository } => (
+                vec![
+                    "api".into(),
+                    "--paginate".into(),
+                    "--slurp".into(),
+                    format!(
+                        "repos/{repository}/issues?state=all&labels=autospec%3Arun-accountability&per_page=100"
+                    ),
+                ],
+                None,
+            ),
+            Self::ViewIssue { repository, number } => (
+                vec![
+                    "issue".into(),
+                    "view".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repository,
+                    "--json".into(),
+                    "number,url,state,body,labels".into(),
+                ],
+                None,
+            ),
+            Self::CreateIssue {
+                repository,
+                title,
+                body,
+                labels,
+            } => (
+                vec![
+                    "api".into(),
+                    "--method".into(),
+                    "POST".into(),
+                    format!("repos/{repository}/issues"),
+                    "--input".into(),
+                    "-".into(),
+                ],
+                Some(serde_json::json!({"title": title, "body": body, "labels": labels}).to_string()),
+            ),
+            Self::EditIssue {
+                repository,
+                number,
+                body,
+            } => (
+                vec![
+                    "issue".into(),
+                    "edit".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repository,
+                    "--body-file".into(),
+                    "-".into(),
+                ],
+                Some(body),
+            ),
+            Self::ReopenIssue { repository, number } => (
+                vec![
+                    "issue".into(),
+                    "reopen".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repository,
+                ],
+                None,
+            ),
+            Self::CloseIssue { repository, number } => (
+                vec![
+                    "issue".into(),
+                    "close".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repository,
+                ],
+                None,
+            ),
+            Self::ListProjects { owner } => (
+                vec![
+                    "project".into(),
+                    "list".into(),
+                    "--owner".into(),
+                    owner,
+                    "--format".into(),
+                    "json".into(),
+                    "--limit".into(),
+                    "500".into(),
+                ],
+                None,
+            ),
+            Self::ViewProject { owner, number } => (
+                vec![
+                    "project".into(),
+                    "view".into(),
+                    number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--format".into(),
+                    "json".into(),
+                ],
+                None,
+            ),
+            Self::CreateProject { owner, title } => (
+                vec![
+                    "project".into(),
+                    "create".into(),
+                    "--owner".into(),
+                    owner,
+                    "--title".into(),
+                    title,
+                    "--format".into(),
+                    "json".into(),
+                ],
+                None,
+            ),
+            Self::EditProjectMarker {
+                owner,
+                number,
+                readme,
+            } => (
+                vec![
+                    "project".into(),
+                    "edit".into(),
+                    number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--readme".into(),
+                    readme,
+                ],
+                None,
+            ),
+            Self::ListProjectItems { owner, number } => (
+                vec![
+                    "project".into(),
+                    "item-list".into(),
+                    number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--format".into(),
+                    "json".into(),
+                    "--limit".into(),
+                    "500".into(),
+                ],
+                None,
+            ),
+            Self::AddToProject {
+                owner,
+                project_number,
+                issue_url,
+            } => (
+                vec![
+                    "project".into(),
+                    "item-add".into(),
+                    project_number.to_string(),
+                    "--owner".into(),
+                    owner,
+                    "--url".into(),
+                    issue_url,
+                ],
+                None,
+            ),
+        }
+    }
 }
 
 pub trait GithubTransport {
@@ -93,120 +292,13 @@ impl GithubTransport for GhCli {
 fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
     let mutating = !matches!(
         command,
-        GithubCommand::ListAccountabilityIssues { .. } | GithubCommand::ViewIssue { .. }
+        GithubCommand::ListAccountabilityIssues { .. }
+            | GithubCommand::ViewIssue { .. }
+            | GithubCommand::ListProjects { .. }
+            | GithubCommand::ViewProject { .. }
+            | GithubCommand::ListProjectItems { .. }
     );
-    let (args, stdin) = match command {
-        GithubCommand::EnsureLabel { repository, name } => (
-            vec![
-                "label".to_string(),
-                "create".to_string(),
-                name,
-                "--repo".to_string(),
-                repository,
-                "--color".to_string(),
-                "5319e7".to_string(),
-                "--force".to_string(),
-            ],
-            None,
-        ),
-        GithubCommand::ListAccountabilityIssues { repository } => (
-            vec![
-                "api".to_string(),
-                "--paginate".to_string(),
-                "--slurp".to_string(),
-                format!(
-                    "repos/{repository}/issues?state=all&labels=autospec%3Arun-accountability&per_page=100"
-                ),
-            ],
-            None,
-        ),
-        GithubCommand::ViewIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "view".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-                "--json".to_string(),
-                "number,url,state,body,labels".to_string(),
-            ],
-            None,
-        ),
-        GithubCommand::CreateIssue {
-            repository,
-            title,
-            body,
-            labels,
-        } => (
-            vec![
-                "api".to_string(),
-                "--method".to_string(),
-                "POST".to_string(),
-                format!("repos/{repository}/issues"),
-                "--input".to_string(),
-                "-".to_string(),
-            ],
-            Some(
-                serde_json::json!({"title": title, "body": body, "labels": labels})
-                    .to_string(),
-            ),
-        ),
-        GithubCommand::EditIssue {
-            repository,
-            number,
-            body,
-        } => (
-            vec![
-                "issue".to_string(),
-                "edit".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-                "--body-file".to_string(),
-                "-".to_string(),
-            ],
-            Some(body),
-        ),
-        GithubCommand::ReopenIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "reopen".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-            ],
-            None,
-        ),
-        GithubCommand::CloseIssue { repository, number } => (
-            vec![
-                "issue".to_string(),
-                "close".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repository,
-            ],
-            None,
-        ),
-        GithubCommand::AddToProject {
-            repository,
-            project_number,
-            issue_url,
-        } => {
-            let owner = repository.split('/').next().unwrap_or_default().to_owned();
-            (
-                vec![
-                    "project".to_string(),
-                    "item-add".to_string(),
-                    project_number.to_string(),
-                    "--owner".to_string(),
-                    owner,
-                    "--url".to_string(),
-                    issue_url,
-                ],
-                None,
-            )
-        }
-    };
+    let (args, stdin) = command.into_parts();
     let mut process =
         Command::new(std::env::var_os("AUTOSPEC_GH_PROGRAM").unwrap_or_else(|| "gh".into()));
     process

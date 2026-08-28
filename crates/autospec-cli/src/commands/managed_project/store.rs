@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 const JOURNAL_SCHEMA: u64 = 1;
 const BINDING_FILE: &str = "binding.json";
 const EVENTS_FILE: &str = "events.jsonl";
-const LOCK_FILE: &str = "binding.lock";
+pub(super) const LOCK_FILE: &str = "binding.lock";
 
 pub struct ManagedProjectStore {
-    root: PathBuf,
-    product_key: ProductKey,
-    binding: ManagedProjectBinding,
+    pub(super) root: PathBuf,
+    pub(super) product_key: ProductKey,
+    pub(super) binding: ManagedProjectBinding,
     event_keys: HashSet<String>,
     known_projections: HashSet<String>,
     next_sequence: u64,
@@ -194,7 +194,7 @@ impl ManagedProjectStore {
         self.append_event_locked(key, kind, payload)
     }
 
-    fn append_event_locked(
+    pub(super) fn append_event_locked(
         &mut self,
         key: String,
         kind: &'static str,
@@ -226,7 +226,7 @@ impl ManagedProjectStore {
         self.persist_binding()
     }
 
-    fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
+    pub(super) fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
         let persisted = read_persisted_binding(&self.root.join(BINDING_FILE), &self.product_key)?;
         let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key)?;
         self.binding = ManagedProjectBinding::new(self.product_key.clone());
@@ -255,6 +255,9 @@ impl ManagedProjectStore {
             return Ok(());
         }
         match event.kind.as_str() {
+            "project-bound" => {
+                super::apply_project_binding(&mut self.binding, &event.payload)?;
+            }
             "repository-recorded" => {
                 let repository: RepositoryRecord = serde_json::from_value(event.payload.clone())
                     .map_err(|error| {
