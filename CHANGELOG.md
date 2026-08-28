@@ -10,7 +10,7 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 ### Added
 
 #### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
-- Added one marker-verified managed GitHub Project per product, backed by a private repo-local
+- Added one marker-verified managed GitHub Project per product, backed by a private product-global
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
   every generated issue and accountability epic recoverable, and retries transient item-add
   failures without duplicate issues or Project items.
@@ -21,6 +21,9 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   exact seeds only after the command allowlist is applied. Discovery cannot widen the configured
   allowlist; deterministic relationships become active while ambiguous evidence stays proposed
   and non-blocking.
+- Existing open or closed issues can be selected with repeatable onboarding `--issue-url` values.
+  Their normalized unresolved projections are durable before Project resolution and are promoted
+  after marker verification. Active typed issue edges now participate in board/fleet readiness.
 - Repository bootstrap now registers a verified remote after creation and records explicit
   `spawned-from` provenance. Existing explicit Project URLs remain compatible in external mode,
   and accountability retains its undeleted `~/.autospec/project-map.yml` compatibility fallback

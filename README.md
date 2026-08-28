@@ -231,6 +231,9 @@ list` and also fails closed if the response itself exceeds that cap. Command-lin
 applied before matching repositories become exact scanner seeds, and the configured
 `repo_allowlist` is enforced again. Discovery may follow concrete repository metadata, but it
 cannot widen either boundary; out-of-bound repositories are reported and never indexed.
+Repeat `--issue-url` during onboarding to select bounded existing open or closed issues; each URL
+must belong to an admitted owner/allowlist repository. The report includes `selected_issues` and
+`reconciled_issues` counts.
 Verified repository creation uses `--repo OWNER/NAME --spawned-from IDENTITY` after `gh repo
 view` succeeds. `--spawned-from` cannot be combined with owner enumeration because creation
 provenance must identify exactly one repository. Adopted repositories receive only an active
@@ -243,9 +246,12 @@ the command exits successfully with JSON `outcome: journaled_projection_pending`
 `autospec project sync --repo-dir "$PWD"` does not use that success outcome: a remote failure is a
 nonzero error, and an operator must rerun it after the cause clears. A pending Project create with
 no verified remote identity is a hard fail-closed condition, not automatically recoverable; verify
-the remote Project state before retrying. The authoritative local recovery journal is
-`.autospec/state/projects/<product-key>/events.jsonl`, with its checkpoint at
-`.autospec/state/projects/<product-key>/binding.json`.
+the remote Project state before retrying. The authoritative product-global recovery journal is
+`${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/events.jsonl`, with its checkpoint at
+`${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/binding.json`. The per-product lock in
+that directory serializes creation across every repository. On first writable open, an existing
+private repo-local `.autospec/state/projects/<product-key>` journal is validated and copied into
+the absent global binding; the legacy source is retained as a compatibility backup.
 
 Existing `project_board.url` configurations remain compatible in `external` mode. The legacy
 `~/.autospec/project-map.yml` maps labels to GitHub Project numbers for the independent

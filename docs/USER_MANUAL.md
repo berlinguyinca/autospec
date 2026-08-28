@@ -343,6 +343,7 @@ Onboard existing repositories with one or more explicit repository or workspace 
 
 ```bash
 autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO
+autospec project onboard --repo-dir "$PWD" --issue-url https://github.com/OWNER/REPO/issues/42
 autospec project onboard --repo-dir "$PWD" --workspace /absolute/workspace
 autospec project onboard --repo-dir "$PWD" --owner OWNER --allow 'OWNER/prefix-*'
 autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO --dry-run
@@ -361,16 +362,26 @@ membership without creation provenance.
 
 The JSON onboarding report distinguishes `created`, `adopted`, `updated`, `unchanged`,
 `proposed`, `out_of_bound`, `inaccessible`, and `pending_projection`, and includes the resolved
-`project_url`. Deterministic evidence creates active relationships. Ambiguous name-only evidence
-is proposed, does not enter the active dependency graph, and cannot block execution.
+`project_url`. Repeatable `--issue-url` inputs select existing open or closed issues inside the
+admitted owner/allowlist boundary; `selected_issues` and `reconciled_issues` report their outcome.
+Deterministic evidence creates active relationships. Ambiguous name-only evidence is proposed,
+does not enter the active dependency graph, and cannot block execution. Active issue-level
+`depends-on` and `blocks` edges feed board readiness and cross-repository fleet launch selection.
 
-Local state is private and repo-local:
+Local state is private and product-global across repositories:
 
-- `.autospec/state/projects/<product-key>/binding.json` is the current checkpoint.
-- `.autospec/state/projects/<product-key>/events.jsonl` is the authoritative append-only recovery
+- `${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/binding.json` is the current checkpoint.
+- `${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/events.jsonl` is the authoritative append-only recovery
   journal.
 
-Remote writes are journaled before projection. If onboarding has durable repository state and
+The global per-product lock prevents duplicate Project creation from concurrent repositories.
+When the global binding is absent, the first writable command validates and imports a private
+legacy `.autospec/state/projects/<product-key>` journal without deleting the legacy copy.
+
+Issue URLs are normalized and journaled before Project discovery or creation, so authentication,
+scope, marker, or create failures retain a retryable identity-independent outbox entry. After a
+Project is marker-verified, sync promotes that entry to the Project node-specific item projection.
+If onboarding has durable repository state and
 remote reconciliation then fails transiently, its successful JSON report uses
 `outcome: journaled_projection_pending`. `autospec project sync --repo-dir "$PWD"` instead returns
 nonzero on remote failure; rerun it only after addressing the reported cause. A pending Project

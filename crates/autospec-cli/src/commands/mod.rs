@@ -7,7 +7,6 @@ pub mod growth_report;
 pub mod init;
 pub mod issue;
 pub mod lint;
-#[allow(dead_code, unused_imports)]
 pub mod managed_project;
 pub mod parent;
 pub mod plan;

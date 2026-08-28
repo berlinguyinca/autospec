@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{ManagedProjectBinding, ProductKey};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -23,9 +23,13 @@ mod project;
 mod store;
 
 pub use cli::run;
+#[cfg(test)]
 pub(crate) use cli::run_with_transport;
+#[cfg(test)]
+pub use github::verify_managed_marker;
 pub use github::{
-    reconcile_issue, resolve_or_create_project, retry_pending_projections, verify_managed_marker,
+    journal_issue_projection, normalize_issue_url, reconcile_issue, resolve_or_create_project,
+    retry_pending_projections,
 };
 pub use onboard::{
     active_dependency_graph, normalize_github_repository, onboard_repositories, OnboardingOptions,

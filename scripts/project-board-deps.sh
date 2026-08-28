@@ -150,7 +150,7 @@ jq '
         else . + {ready: true, reason: "all blockers satisfied"} end)'
 }
 
-printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
+extracted="$(printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
   # Regex-escape a literal string (used for user-configured marker phrases,
   # never for board-derived data).
   def rxesc:
@@ -288,4 +288,31 @@ printf '%s' "$parsed" | jq --arg markers_csv "$markers_csv" '
             deps_unresolvable: (if $s.unresolvable then true else (.deps_unresolvable // false) end),
             deps_reason: (if $s.unresolvable then $s.reason else (.deps_reason // null) end)
           }
-      end)' | if [ "$resolve" -eq 1 ]; then resolve_stage; else cat; fi
+      end)')"
+
+# Overlay only the typed, active edge projection emitted by the managed
+# project store. DependsOn means source waits for target; Blocks means target
+# waits for source. Invalid or non-issue endpoints are ignored fail-closed by
+# never inventing an issue identity.
+with_active_edges="$(printf '%s' "$extracted" | jq '
+  def issue_ref:
+    if type != "string" then null
+    else try (capture("^https://github\\.com/(?<repo>[^/]+/[^/]+)/(?:issues|pull)/(?<number>[1-9][0-9]*)$")
+      | {repo: .repo, number: (.number | tonumber)}) catch null end;
+  reduce ((.active_edges // [])[] | select(.state == "active")) as $edge (.;
+    ($edge.source | issue_ref) as $source
+    | ($edge.target | issue_ref) as $target
+    | if $source == null or $target == null then .
+      elif $edge.kind == "depends-on" then
+        .items |= map(if .repo == $source.repo and .number == $source.number
+          then .blocked_by = (((.blocked_by // []) + [$target]) | unique_by(.repo, .number)) else . end)
+      elif $edge.kind == "blocks" then
+        .items |= map(if .repo == $target.repo and .number == $target.number
+          then .blocked_by = (((.blocked_by // []) + [$source]) | unique_by(.repo, .number)) else . end)
+      else . end)')"
+
+if [ "$resolve" -eq 1 ]; then
+    printf '%s' "$with_active_edges" | resolve_stage
+else
+    printf '%s' "$with_active_edges"
+fi

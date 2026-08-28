@@ -4,6 +4,8 @@ setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   AUTOSPEC_BIN="${AUTOSPEC_TEST_BIN:-$REPO_ROOT/target/debug/autospec}"
   TMP="$(mktemp -d)"
+  export AUTOSPEC_HOME="$TMP/autospec-home"
+  mkdir -m 700 "$AUTOSPEC_HOME"
   git -C "$TMP" init -q
   git -C "$TMP" remote add origin git@github.com:acme/widgets.git
   mkdir -p "$TMP/.autospec"
@@ -45,4 +47,15 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.out_of_bound')" -eq 1 ]
   ! printf '%s' "$output" | jq -e '.repositories[] | select(.repository == "other/private")' >/dev/null
+}
+
+@test "project onboard accepts repeated bounded issue selections and reports their counts" {
+  run "$AUTOSPEC_BIN" project onboard --repo-dir "$TMP" --dry-run \
+    --issue-url https://github.com/acme/widgets/issues/7 \
+    --issue-url https://github.com/acme/widgets/issues/8
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.selected_issues')" -eq 2 ]
+  [ "$(printf '%s' "$output" | jq -r '.reconciled_issues')" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '[.repositories[] | select(.repository == "acme/widgets")] | length')" -eq 1 ]
 }

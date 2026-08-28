@@ -1,7 +1,8 @@
 use super::super::autonomous::accountability::github::{GhCli, GithubCommand, GithubTransport};
 use super::{
-    onboard_repositories, reconcile_issue, resolve_or_create_project, retry_pending_projections,
-    ManagedProjectError, ManagedProjectStore, OnboardingOptions, OnboardingReport,
+    journal_issue_projection, normalize_issue_url, onboard_repositories, resolve_or_create_project,
+    retry_pending_projections, ManagedProjectError, ManagedProjectStore, OnboardingOptions,
+    OnboardingReport,
 };
 use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::managed_project::{
@@ -28,7 +29,7 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             .iter()
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--owner OWNER --allow PATTERN]... [--spawned-from IDENTITY] [--dry-run]");
+        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--issue-url URL]... [--owner OWNER --allow PATTERN]... [--spawned-from IDENTITY] [--dry-run]\n    autospec project active-edges --repo-dir PATH");
         return Ok(Value::Null);
     }
     let command = &args[0];
@@ -40,18 +41,38 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
         .ok_or_else(|| ManagedProjectError::new("autospec project requires --repo-dir"))?;
     let policy = load_managed_policy(&repo_dir)?;
     populate_owner_repositories(&policy, &mut options, github)?;
+    add_issue_repositories(&mut options)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
-    let state_root = repo_dir.join(".autospec/state");
-    let mut store = if options.dry_run {
-        ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
+    validate_issue_boundaries(&policy, &options.issue_urls)?;
+    let state_root = managed_state_root(&repo_dir)?;
+    let legacy_root = repo_dir.join(".autospec/state");
+    let read_only = options.dry_run || command == "active-edges";
+    let mut store = if read_only {
+        if state_root
+            .join("projects")
+            .join(policy.product_key.as_str())
+            .exists()
+        {
+            ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
+        } else {
+            ManagedProjectStore::open_read_only(&legacy_root, &policy.product_key)?
+        }
     } else {
-        ManagedProjectStore::open(&state_root, &policy.product_key)?
+        ManagedProjectStore::open_global(&state_root, Some(&legacy_root), &policy.product_key)?
     };
 
     match command.as_str() {
         "resolve" => resolve(&mut store, github, &policy),
-        "sync" => sync(&mut store, github, &policy, options.issue_url.as_deref()),
+        "sync" => sync(
+            &mut store,
+            github,
+            &policy,
+            options.issue_urls.first().map(String::as_str),
+        ),
         "onboard" => onboard(store, github, policy, &repo_dir, options),
+        "active-edges" => Ok(serde_json::to_value(super::active_dependency_graph(
+            store.snapshot(),
+        ))?),
         other => Err(ManagedProjectError::new(format!(
             "unknown autospec project subcommand: {other}"
         ))),
@@ -80,9 +101,12 @@ fn sync<T: GithubTransport>(
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_url: Option<&str>,
 ) -> Result<Value, ManagedProjectError> {
+    if let Some(issue_url) = issue_url {
+        journal_issue_projection(store, issue_url)?;
+    }
     let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
     if let Some(issue_url) = issue_url {
-        reconcile_issue(store, github, policy, issue_url)?;
+        super::reconcile_issue(store, github, policy, issue_url)?;
     }
     retry_pending_projections(store, github, policy)?;
     ack_repository_projections(store, policy)?;
@@ -101,6 +125,7 @@ fn onboard<T: GithubTransport>(
     options: ProjectOptions,
 ) -> Result<Value, ManagedProjectError> {
     let created_repository = options.repositories.first().cloned();
+    let selected_issues = options.issue_urls.clone();
     let report = onboard_repositories(
         &mut store,
         &policy,
@@ -120,6 +145,9 @@ fn onboard<T: GithubTransport>(
             created_repository.as_deref(),
         )?;
         enqueue_repository_projections(&mut store, &policy, &report)?;
+        for issue_url in &selected_issues {
+            journal_issue_projection(&mut store, issue_url)?;
+        }
     }
     if options.dry_run {
         return Ok(report_json(
@@ -128,6 +156,8 @@ fn onboard<T: GithubTransport>(
             "dry_run",
             None,
             store.snapshot().pending_projections.len(),
+            selected_issues.len(),
+            0,
         ));
     }
 
@@ -137,20 +167,30 @@ fn onboard<T: GithubTransport>(
             ack_repository_projections(&mut store, &policy)?;
             Ok(project)
         }) {
-        Ok(project) => Ok(report_json(
-            &report,
-            Some(&project.url),
-            "reconciled",
-            None,
-            store.snapshot().pending_projections.len(),
-        )),
-        Err(error) if error.is_journaled_projection_pending() => Ok(report_json(
-            &report,
-            store.snapshot().project_url.as_deref(),
-            "journaled_projection_pending",
-            Some(&error.to_string()),
-            store.snapshot().pending_projections.len(),
-        )),
+        Ok(project) => {
+            let reconciled = reconciled_issue_count(&store, &selected_issues);
+            Ok(report_json(
+                &report,
+                Some(&project.url),
+                "reconciled",
+                None,
+                store.snapshot().pending_projections.len(),
+                selected_issues.len(),
+                reconciled,
+            ))
+        }
+        Err(error) if error.is_journaled_projection_pending() => {
+            let reconciled = reconciled_issue_count(&store, &selected_issues);
+            Ok(report_json(
+                &report,
+                store.snapshot().project_url.as_deref(),
+                "journaled_projection_pending",
+                Some(&error.to_string()),
+                store.snapshot().pending_projections.len(),
+                selected_issues.len(),
+                reconciled,
+            ))
+        }
         Err(error) => Err(error),
     }
 }
@@ -256,7 +296,7 @@ struct ProjectOptions {
     repo_dir: Option<PathBuf>,
     repositories: Vec<String>,
     workspaces: Vec<PathBuf>,
-    issue_url: Option<String>,
+    issue_urls: Vec<String>,
     spawned_from: Option<String>,
     owner: Option<String>,
     allow: Vec<String>,
@@ -302,8 +342,7 @@ fn set_value(
         "--repo-dir" => return Err(ManagedProjectError::new("duplicate --repo-dir")),
         "--repo" => options.repositories.push(value.to_owned()),
         "--workspace" => options.workspaces.push(value.into()),
-        "--issue-url" if options.issue_url.is_none() => options.issue_url = Some(value.to_owned()),
-        "--issue-url" => return Err(ManagedProjectError::new("duplicate --issue-url")),
+        "--issue-url" => options.issue_urls.push(value.to_owned()),
         "--spawned-from" if options.spawned_from.is_none() && !value.trim().is_empty() => {
             options.spawned_from = Some(value.to_owned())
         }
@@ -341,7 +380,7 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
         "resolve" => {
             !options.repositories.is_empty()
                 || !options.workspaces.is_empty()
-                || options.issue_url.is_some()
+                || !options.issue_urls.is_empty()
                 || options.spawned_from.is_some()
                 || options.owner.is_some()
                 || !options.allow.is_empty()
@@ -354,10 +393,17 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
                 || options.owner.is_some()
                 || !options.allow.is_empty()
                 || options.dry_run
+                || options.issue_urls.len() > 1
         }
-        "onboard" => {
-            options.issue_url.is_some()
-                || (options.spawned_from.is_some() && options.repositories.len() != 1)
+        "onboard" => options.spawned_from.is_some() && options.repositories.len() != 1,
+        "active-edges" => {
+            !options.repositories.is_empty()
+                || !options.workspaces.is_empty()
+                || !options.issue_urls.is_empty()
+                || options.spawned_from.is_some()
+                || options.owner.is_some()
+                || !options.allow.is_empty()
+                || options.dry_run
         }
         _ => false,
     };
@@ -479,6 +525,8 @@ fn report_json(
     outcome: &str,
     error: Option<&str>,
     pending_projection: usize,
+    selected_issues: usize,
+    reconciled_issues: usize,
 ) -> Value {
     json!({
         "outcome": outcome,
@@ -490,9 +538,78 @@ fn report_json(
         "out_of_bound": report.out_of_bound,
         "inaccessible": report.inaccessible,
         "pending_projection": pending_projection,
+        "selected_issues": selected_issues,
+        "reconciled_issues": reconciled_issues,
         "project_url": project_url,
         "error": error,
         "repositories": report.repositories,
         "edges": report.edges,
     })
+}
+
+fn add_issue_repositories(options: &mut ProjectOptions) -> Result<(), ManagedProjectError> {
+    for issue_url in &mut options.issue_urls {
+        *issue_url = normalize_issue_url(issue_url)?;
+        let repository = super::normalize_github_repository(issue_url).ok_or_else(|| {
+            ManagedProjectError::new("--issue-url must identify a GitHub issue repository")
+        })?;
+        options.repositories.push(repository);
+    }
+    options.repositories.sort();
+    options.repositories.dedup();
+    Ok(())
+}
+
+fn managed_state_root(_repo_dir: &Path) -> Result<PathBuf, ManagedProjectError> {
+    #[cfg(test)]
+    return Ok(_repo_dir.join(".autospec/state"));
+    #[cfg(not(test))]
+    if let Some(root) = std::env::var_os("AUTOSPEC_HOME") {
+        return Ok(PathBuf::from(root));
+    }
+    #[cfg(not(test))]
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".autospec"))
+        .ok_or_else(|| ManagedProjectError::new("HOME is required when AUTOSPEC_HOME is unset"))
+}
+
+fn validate_issue_boundaries(
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    issue_urls: &[String],
+) -> Result<(), ManagedProjectError> {
+    for issue_url in issue_urls {
+        let repository = super::normalize_github_repository(issue_url).ok_or_else(|| {
+            ManagedProjectError::new("--issue-url must identify a GitHub issue repository")
+        })?;
+        let owner_matches = repository
+            .split_once('/')
+            .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&policy.owner));
+        let allowed = policy.repo_allowlist.iter().any(|pattern| {
+            let pattern = pattern.to_ascii_lowercase();
+            pattern.strip_suffix('*').map_or_else(
+                || repository == pattern,
+                |prefix| repository.starts_with(prefix),
+            )
+        });
+        if !owner_matches || !allowed {
+            return Err(ManagedProjectError::new(format!(
+                "selected issue is outside the managed repository boundary: {issue_url}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reconciled_issue_count(store: &ManagedProjectStore, issue_urls: &[String]) -> usize {
+    issue_urls
+        .iter()
+        .filter(|issue_url| {
+            !store
+                .snapshot()
+                .pending_projections
+                .iter()
+                .any(|projection| projection.ends_with(issue_url.as_str()))
+        })
+        .count()
 }

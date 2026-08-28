@@ -8,7 +8,7 @@ use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
     ManagedProjectBinding, ProductKey, RelationshipEdge, RepositoryRecord,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -35,10 +35,20 @@ pub struct ManagedProjectStore {
 }
 
 impl ManagedProjectStore {
+    pub fn open_global(
+        root: &Path,
+        legacy_root: Option<&Path>,
+        product_key: &ProductKey,
+    ) -> Result<Self, ManagedProjectError> {
+        import_legacy_state(root, legacy_root, product_key)?;
+        Self::open(root, product_key)
+    }
+
     pub fn open_read_only(
         root: &Path,
         product_key: &ProductKey,
     ) -> Result<Self, ManagedProjectError> {
+        validate_read_only_ancestors(root, product_key)?;
         let project_root = root.join("projects").join(product_key.as_str());
         let binding_path = project_root.join(BINDING_FILE);
         let events_path = project_root.join(EVENTS_FILE);
@@ -333,109 +343,12 @@ impl ManagedProjectStore {
             return Ok(());
         }
         match event.kind.as_str() {
-            "project-created" => {
-                let projection = format!("project:create:{}", self.product_key.as_str());
-                if self.binding.project_node_id.is_some() {
-                    return Err(ManagedProjectError::new(
-                        "provisional project identity follows a final binding",
-                    ));
-                }
-                if !self.known_projections.contains(&projection)
-                    || !self
-                        .binding
-                        .pending_projections
-                        .iter()
-                        .any(|pending| pending == &projection)
-                {
-                    return Err(ManagedProjectError::new(
-                        "provisional project identity has no pending create projection",
-                    ));
-                }
-                let identity = super::parse_project_identity(&event.payload)?;
-                if self
-                    .provisional_project
-                    .as_ref()
-                    .is_some_and(|existing| !existing.same_immutable_identity(&identity))
-                {
-                    return Err(ManagedProjectError::new(
-                        "journal contains conflicting provisional project identities",
-                    ));
-                }
-                self.provisional_project = Some(identity);
-            }
-            "project-bound" => {
-                let identity = super::parse_project_identity(&event.payload)?;
-                if self.binding.project_node_id.is_some()
-                    && super::project_binding_payload(&self.binding) != Some(event.payload.clone())
-                {
-                    return Err(ManagedProjectError::new(
-                        "journal contains conflicting final project bindings",
-                    ));
-                }
-                if self
-                    .provisional_project
-                    .as_ref()
-                    .is_some_and(|provisional| !provisional.same_immutable_identity(&identity))
-                {
-                    return Err(ManagedProjectError::new(
-                        "final project binding conflicts with provisional identity",
-                    ));
-                }
-                super::apply_project_binding(&mut self.binding, &event.payload)?;
-                self.provisional_project = None;
-            }
-            "repository-recorded" => {
-                let repository: RepositoryRecord = serde_json::from_value(event.payload.clone())
-                    .map_err(|error| {
-                        ManagedProjectError::new(format!(
-                            "invalid repository journal payload: {error}"
-                        ))
-                    })?;
-                self.binding.repositories.push(repository);
-            }
-            "relationship-recorded" => {
-                let edge: RelationshipEdge = serde_json::from_value(event.payload.clone())
-                    .map_err(|error| {
-                        ManagedProjectError::new(format!(
-                            "invalid relationship journal payload: {error}"
-                        ))
-                    })?;
-                if edge.product_key != self.product_key {
-                    return Err(ManagedProjectError::new(
-                        "journal relationship product key does not match its state directory",
-                    ));
-                }
-                self.binding.relationships.push(edge);
-            }
-            "projection-enqueued" => {
-                let projection = payload_string(event, "projection enqueue")?;
-                if projection != event.key {
-                    return Err(ManagedProjectError::new(
-                        "projection enqueue key does not match its payload",
-                    ));
-                }
-                self.known_projections.insert(projection.to_owned());
-                self.binding.pending_projections.push(projection.to_owned());
-            }
-            "projection-acknowledged" => {
-                let projection = payload_string(event, "projection acknowledgment")?;
-                if !self.known_projections.contains(projection) {
-                    return Err(ManagedProjectError::new(
-                        "projection acknowledgment precedes its durable enqueue event",
-                    ));
-                }
-                let index = self
-                    .binding
-                    .pending_projections
-                    .iter()
-                    .position(|pending| pending == projection)
-                    .ok_or_else(|| {
-                        ManagedProjectError::new(
-                            "projection acknowledgment does not match a pending projection",
-                        )
-                    })?;
-                self.binding.pending_projections.remove(index);
-            }
+            "project-created" => self.apply_project_created(event)?,
+            "project-bound" => self.apply_project_bound(event)?,
+            "repository-recorded" => self.apply_repository_recorded(event)?,
+            "relationship-recorded" => self.apply_relationship_recorded(event)?,
+            "projection-enqueued" => self.apply_projection_enqueued(event)?,
+            "projection-acknowledged" => self.apply_projection_acknowledged(event)?,
             _ => {
                 return Err(ManagedProjectError::new(format!(
                     "unknown managed project journal event kind {}",
@@ -444,6 +357,128 @@ impl ManagedProjectStore {
             }
         }
         self.event_keys.insert(event.key.clone());
+        Ok(())
+    }
+
+    fn apply_project_created(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
+        let projection = format!("project:create:{}", self.product_key.as_str());
+        if self.binding.project_node_id.is_some() {
+            return Err(ManagedProjectError::new(
+                "provisional project identity follows a final binding",
+            ));
+        }
+        if !self.known_projections.contains(&projection)
+            || !self
+                .binding
+                .pending_projections
+                .iter()
+                .any(|pending| pending == &projection)
+        {
+            return Err(ManagedProjectError::new(
+                "provisional project identity has no pending create projection",
+            ));
+        }
+        let identity = super::parse_project_identity(&event.payload)?;
+        if self
+            .provisional_project
+            .as_ref()
+            .is_some_and(|existing| !existing.same_immutable_identity(&identity))
+        {
+            return Err(ManagedProjectError::new(
+                "journal contains conflicting provisional project identities",
+            ));
+        }
+        self.provisional_project = Some(identity);
+        Ok(())
+    }
+
+    fn apply_project_bound(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
+        let identity = super::parse_project_identity(&event.payload)?;
+        if self.binding.project_node_id.is_some()
+            && super::project_binding_payload(&self.binding) != Some(event.payload.clone())
+        {
+            return Err(ManagedProjectError::new(
+                "journal contains conflicting final project bindings",
+            ));
+        }
+        if self
+            .provisional_project
+            .as_ref()
+            .is_some_and(|project| !project.same_immutable_identity(&identity))
+        {
+            return Err(ManagedProjectError::new(
+                "final project binding conflicts with provisional identity",
+            ));
+        }
+        super::apply_project_binding(&mut self.binding, &event.payload)?;
+        self.provisional_project = None;
+        Ok(())
+    }
+
+    fn apply_repository_recorded(
+        &mut self,
+        event: &JournalEvent,
+    ) -> Result<(), ManagedProjectError> {
+        let repository = serde_json::from_value(event.payload.clone()).map_err(|error| {
+            ManagedProjectError::new(format!("invalid repository journal payload: {error}"))
+        })?;
+        self.binding.repositories.push(repository);
+        Ok(())
+    }
+
+    fn apply_relationship_recorded(
+        &mut self,
+        event: &JournalEvent,
+    ) -> Result<(), ManagedProjectError> {
+        let edge: RelationshipEdge =
+            serde_json::from_value(event.payload.clone()).map_err(|error| {
+                ManagedProjectError::new(format!("invalid relationship journal payload: {error}"))
+            })?;
+        if edge.product_key != self.product_key {
+            return Err(ManagedProjectError::new(
+                "journal relationship product key does not match its state directory",
+            ));
+        }
+        self.binding.relationships.push(edge);
+        Ok(())
+    }
+
+    fn apply_projection_enqueued(
+        &mut self,
+        event: &JournalEvent,
+    ) -> Result<(), ManagedProjectError> {
+        let projection = payload_string(event, "projection enqueue")?;
+        if projection != event.key {
+            return Err(ManagedProjectError::new(
+                "projection enqueue key does not match its payload",
+            ));
+        }
+        self.known_projections.insert(projection.to_owned());
+        self.binding.pending_projections.push(projection.to_owned());
+        Ok(())
+    }
+
+    fn apply_projection_acknowledged(
+        &mut self,
+        event: &JournalEvent,
+    ) -> Result<(), ManagedProjectError> {
+        let projection = payload_string(event, "projection acknowledgment")?;
+        if !self.known_projections.contains(projection) {
+            return Err(ManagedProjectError::new(
+                "projection acknowledgment precedes its durable enqueue event",
+            ));
+        }
+        let index = self
+            .binding
+            .pending_projections
+            .iter()
+            .position(|pending| pending == projection)
+            .ok_or_else(|| {
+                ManagedProjectError::new(
+                    "projection acknowledgment does not match a pending projection",
+                )
+            })?;
+        self.binding.pending_projections.remove(index);
         Ok(())
     }
 
@@ -457,6 +492,70 @@ impl ManagedProjectStore {
         )?;
         atomic_write(&self.root.join(BINDING_FILE), &document)
     }
+}
+
+fn import_legacy_state(
+    root: &Path,
+    legacy_root: Option<&Path>,
+    product_key: &ProductKey,
+) -> Result<(), ManagedProjectError> {
+    let Some(legacy_root) = legacy_root.filter(|legacy| *legacy != root) else {
+        return Ok(());
+    };
+    let legacy_project = legacy_root.join("projects").join(product_key.as_str());
+    if !legacy_project.exists() {
+        return Ok(());
+    }
+    let legacy = ManagedProjectStore::open_read_only(legacy_root, product_key)?;
+    ensure_private_directory(root)?;
+    let projects = root.join("projects");
+    ensure_private_directory(&projects)?;
+    let project_root = projects.join(product_key.as_str());
+    ensure_private_directory(&project_root)?;
+    let _lock = ProductLock::acquire(&project_root.join(LOCK_FILE))?;
+    let binding_path = project_root.join(BINDING_FILE);
+    let events_path = project_root.join(EVENTS_FILE);
+    if binding_path.exists() || events_path.exists() {
+        return Ok(());
+    }
+    let legacy_binding = legacy_project.join(BINDING_FILE);
+    let legacy_events = legacy_project.join(EVENTS_FILE);
+    let binding = super::read_private_file(&legacy_binding)?;
+    let events = super::read_private_file(&legacy_events)?;
+    super::atomic_write(&events_path, events.as_bytes())?;
+    super::atomic_write(&binding_path, binding.as_bytes())?;
+    drop(legacy);
+    Ok(())
+}
+
+fn validate_read_only_ancestors(
+    root: &Path,
+    product_key: &ProductKey,
+) -> Result<(), ManagedProjectError> {
+    for directory in [
+        root.to_path_buf(),
+        root.join("projects"),
+        root.join("projects").join(product_key.as_str()),
+    ] {
+        let metadata = match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(super::io_error(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ManagedProjectError::new(
+                "managed project read-only ancestor is not a safe directory",
+            ));
+        }
+        super::validate_owner(&metadata)?;
+        #[cfg(unix)]
+        if std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o077 != 0 {
+            return Err(ManagedProjectError::new(
+                "managed project read-only ancestor permissions must be private",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl From<serde_json::Error> for ManagedProjectError {

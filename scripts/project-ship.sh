@@ -100,6 +100,7 @@ RESOLVE_BIN="${AUTOSPEC_PROJECT_BOARD_RESOLVE_BIN:-${AUTOSPEC_SCRIPTS_DIR:-$SCRI
 BOARD_CONFIG_BIN="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
 FLEET_LIB="${AUTOSPEC_FLEET_LIB_SCRIPT:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/fleet-lib.sh}"
 FLEET_RUN_BIN="${AUTOSPEC_FLEET_RUN_SCRIPT:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/fleet-run.sh}"
+DEPS_BIN="${AUTOSPEC_PROJECT_BOARD_DEPS_BIN:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/project-board-deps.sh}"
 
 if [ ! -f "$FLEET_LIB" ]; then
     _dev_fleet_lib="$SCRIPT_DIR/../skills/autospec-fleet/scripts/fleet-lib.sh"
@@ -113,6 +114,7 @@ fi
 [ -f "$RESOLVE_BIN" ] || fail "project-board-resolve.sh not found at $RESOLVE_BIN"
 [ -f "$FLEET_LIB" ] || fail "fleet-lib.sh not found (checked \$AUTOSPEC_FLEET_LIB_SCRIPT and $FLEET_LIB)"
 [ -f "$FLEET_RUN_BIN" ] || fail "fleet-run.sh not found (checked \$AUTOSPEC_FLEET_RUN_SCRIPT and $FLEET_RUN_BIN)"
+[ -f "$DEPS_BIN" ] || fail "project-board-deps.sh not found at $DEPS_BIN"
 # shellcheck source=/dev/null
 source "$FLEET_LIB"
 
@@ -137,11 +139,13 @@ fi
 # same as bare/sync/status mode) ────────────────────────────────────────────
 repos_json=""
 resolve_rc=0
-repos_json="$("$RESOLVE_BIN" --url "$url" --emit repos)" || resolve_rc=$?
+plan_json="$("$RESOLVE_BIN" --url "$url" --repo-dir "$repo_dir" --emit plan)" || resolve_rc=$?
 if [ "$resolve_rc" -ne 0 ]; then
     printf 'project-ship: board resolve failed (exit %s)\n' "$resolve_rc" >&2
     exit "$resolve_rc"
 fi
+ready_plan="$(printf '%s' "$plan_json" | bash "$DEPS_BIN" --resolve)" || fail "active dependency readiness failed"
+repos_json="$(printf '%s' "$ready_plan" | jq -c '[.items[]? | select(.state == "open" and .ready == true) | .repo] | unique')"
 
 # ── Step 3: filter to the allowlist ─────────────────────────────────────────
 filtered_json="$(jq -c -n --argjson repos "$repos_json" --argjson allow "$allowlist_json" '

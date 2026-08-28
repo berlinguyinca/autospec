@@ -86,10 +86,12 @@ pub fn reconcile_issue<T: GithubTransport>(
     policy: &ManagedProjectPolicy,
     issue_url: &str,
 ) -> Result<(), ManagedProjectError> {
+    let unresolved = journal_issue_projection(store, issue_url)?;
     let identity = bound_identity(store, policy)?;
-    let normalized = parse::normalize_issue_url(issue_url)?;
+    let normalized = unresolved_issue_url(&unresolved)?;
     let projection = projection_key(&identity.node_id, &normalized);
     store.enqueue_projection(projection.clone())?;
+    store.ack_projection(&unresolved)?;
     let items = list_project_items(github, &identity.owner, identity.number)?;
     if items.contains(&normalized) {
         store.ack_projection(&projection)?;
@@ -107,6 +109,20 @@ pub fn reconcile_issue<T: GithubTransport>(
     store.ack_projection(&projection)
 }
 
+pub fn journal_issue_projection(
+    store: &mut ManagedProjectStore,
+    issue_url: &str,
+) -> Result<String, ManagedProjectError> {
+    let normalized = parse::normalize_issue_url(issue_url)?;
+    let projection = format!("project:item-add:unresolved:{normalized}");
+    store.enqueue_projection(projection.clone())?;
+    Ok(projection)
+}
+
+pub fn normalize_issue_url(issue_url: &str) -> Result<String, ManagedProjectError> {
+    parse::normalize_issue_url(issue_url)
+}
+
 pub fn retry_pending_projections<T: GithubTransport>(
     store: &mut ManagedProjectStore,
     github: &mut T,
@@ -114,6 +130,21 @@ pub fn retry_pending_projections<T: GithubTransport>(
 ) -> Result<(), ManagedProjectError> {
     let identity = bound_identity(store, policy)?;
     let prefix = format!("project:item-add:{}:", identity.node_id);
+    let unresolved_prefix = "project:item-add:unresolved:";
+    let unresolved = store
+        .snapshot()
+        .pending_projections
+        .iter()
+        .filter_map(|projection| {
+            projection
+                .strip_prefix(unresolved_prefix)
+                .map(|url| (projection.clone(), url.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    for (unresolved_projection, issue_url) in &unresolved {
+        store.enqueue_projection(projection_key(&identity.node_id, issue_url))?;
+        store.ack_projection(unresolved_projection)?;
+    }
     let pending = store
         .snapshot()
         .pending_projections
@@ -136,7 +167,7 @@ pub fn retry_pending_projections<T: GithubTransport>(
                 GithubCommand::AddToProject {
                     owner: identity.owner.clone(),
                     project_number: identity.number,
-                    issue_url,
+                    issue_url: issue_url.clone(),
                 },
                 "cannot retry managed GitHub Project item addition",
             )?;
@@ -144,6 +175,13 @@ pub fn retry_pending_projections<T: GithubTransport>(
         store.ack_projection(&projection)?;
     }
     Ok(())
+}
+
+fn unresolved_issue_url(projection: &str) -> Result<String, ManagedProjectError> {
+    projection
+        .strip_prefix("project:item-add:unresolved:")
+        .map(str::to_owned)
+        .ok_or_else(|| ManagedProjectError::new("invalid unresolved issue projection key"))
 }
 
 fn create_project<T: GithubTransport>(

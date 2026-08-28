@@ -43,16 +43,22 @@ SH
     export AUTOSPEC_PROJECT_BOARD_CONFIG_BIN="$TMP/bin/board-config.sh"
 
     # ── board resolve stub (stands in for project-board-resolve.sh --emit
-    # repos) — controlled per-test via RESOLVE_REPOS_JSON. Never calls a
+    # plan) — controlled per-test via RESOLVE_REPOS_JSON. Never calls a
     # real `gh`. ─────────────────────────────────────────────────────────────
     cat > "$TMP/bin/resolve.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'resolve %s\n' "$*" >> "$CALL_LOG"
-printf '%s' "${RESOLVE_REPOS_JSON:-[]}"
+repos="${RESOLVE_REPOS_JSON:-[]}"
+edges="${RESOLVE_ACTIVE_EDGES_JSON:-[]}"
+jq -cn --argjson repos "$repos" --argjson edges "$edges" '
+  {active_edges: $edges,
+   items: [$repos | to_entries[] |
+     {repo: .value, number: (.key + 1), state: "open", body: "", dependencies: null, parent_issue: null}]}'
 exit "${RESOLVE_EXIT:-0}"
 SH
     chmod +x "$TMP/bin/resolve.sh"
     export AUTOSPEC_PROJECT_BOARD_RESOLVE_BIN="$TMP/bin/resolve.sh"
+    export AUTOSPEC_PROJECT_BOARD_DEPS_BIN="$REPO_ROOT/scripts/project-board-deps.sh"
 
     # ── git stub: logs every invocation; clone/fetch/status/merge results
     # are steered per-test via env vars, and clone/status can be made to
@@ -184,6 +190,23 @@ teardown() {
     echo "$output" | grep -q 'repo=o/b allowlisted=yes launch=launched'
     # o/a never got a checkout, so it cannot have been launched.
     echo "$output" | grep -q 'repo=o/a allowlisted=yes launch=skipped:checkout-not-found'
+    grep -q 'o/b' "$FLEET_SPAWN_LOG"
+    run grep -q 'o/a' "$FLEET_SPAWN_LOG"
+    [ "$status" -ne 0 ]
+}
+
+@test "active cross-repository issue dependency blocks only the dependent repository fleet launch" {
+    export PB_CONFIG_JSON='{"url":"https://github.com/orgs/o/projects/1","allowlist":["o/a","o/b"]}'
+    export RESOLVE_REPOS_JSON='["o/a","o/b"]'
+    export RESOLVE_ACTIVE_EDGES_JSON='[{"kind":"depends-on","state":"active","source":"https://github.com/o/a/issues/1","target":"https://github.com/o/b/issues/2"}]'
+
+    run bash "$SHIP" --url https://github.com/orgs/o/projects/1 --repo-dir "$TMP/repo" \
+        --workspace "$TMP/ws" --fleet-config "$TMP/fleet.yml"
+
+    [ "$status" -eq 0 ]
+    grep -q 'o/b.git' "$TMP/fleet.yml"
+    run grep -q 'o/a.git' "$TMP/fleet.yml"
+    [ "$status" -ne 0 ]
     grep -q 'o/b' "$FLEET_SPAWN_LOG"
     run grep -q 'o/a' "$FLEET_SPAWN_LOG"
     [ "$status" -ne 0 ]

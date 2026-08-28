@@ -60,6 +60,9 @@ struct ScanTarget {
 enum Discovery {
     Repository {
         value: String,
+        target: String,
+        source_issue: Option<u64>,
+        kind: RelationshipKind,
         evidence: String,
         location: String,
     },
@@ -80,8 +83,30 @@ impl Discovery {
         evidence: impl Into<String>,
         location: impl Into<String>,
     ) -> Self {
+        let value = value.into();
+        Self::Repository {
+            target: value.clone(),
+            value,
+            source_issue: None,
+            kind: RelationshipKind::DependsOn,
+            evidence: evidence.into(),
+            location: location.into(),
+        }
+    }
+
+    fn typed_repository(
+        value: impl Into<String>,
+        target: impl Into<String>,
+        source_issue: Option<u64>,
+        kind: RelationshipKind,
+        evidence: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self::Repository {
             value: value.into(),
+            target: target.into(),
+            source_issue,
+            kind,
             evidence: evidence.into(),
             location: location.into(),
         }
@@ -119,105 +144,17 @@ pub fn onboard_repositories(
     options: &OnboardingOptions,
 ) -> Result<OnboardingReport, ManagedProjectError> {
     validate_policy(policy)?;
-    let existing_repositories = store
-        .snapshot()
-        .repositories
-        .iter()
-        .map(|record| normalize_repository(&record.repository))
-        .collect::<BTreeSet<_>>();
-    let existing_edges = store
-        .snapshot()
-        .relationships
-        .iter()
-        .map(RelationshipEdge::dedupe_key)
-        .collect::<BTreeSet<_>>();
-    let mut records = store
-        .snapshot()
-        .repositories
-        .iter()
-        .cloned()
-        .map(|record| (normalize_repository(&record.repository), record))
-        .collect::<BTreeMap<_, _>>();
-    let mut edges = store
-        .snapshot()
-        .relationships
-        .iter()
-        .cloned()
-        .map(|edge| (edge.dedupe_key(), edge))
-        .collect::<BTreeMap<_, _>>();
-    let mut queue = VecDeque::new();
-    let mut queued = BTreeSet::new();
-    let mut out_of_bound = BTreeSet::new();
-    let mut inaccessible = BTreeSet::new();
-    let mut expansions = 0;
-
-    for seed in policy
-        .repository_seeds
-        .iter()
-        .chain(options.repositories.iter())
-    {
-        let repository = normalize_github_repository(seed).ok_or_else(|| {
-            ManagedProjectError::new(format!("invalid explicit GitHub repository seed: {seed}"))
-        })?;
-        admit_record(
-            repository,
-            "explicit-seed",
-            policy,
-            &mut records,
-            &mut out_of_bound,
-        );
-    }
-
-    let mut workspace_paths = vec![options.repo_dir.clone()];
-    workspace_paths.extend(options.workspaces.iter().cloned());
-    workspace_paths.sort();
-    workspace_paths.dedup();
-    for path in workspace_paths {
-        match workspace_admission(&path, policy) {
-            Admission::Admitted(repository) => {
-                records
-                    .entry(repository.clone())
-                    .or_insert(RepositoryRecord {
-                        repository: repository.clone(),
-                        entry_kind: "workspace".to_owned(),
-                    });
-                enqueue(&mut queue, &mut queued, repository, path);
-            }
-            Admission::OutOfBound(repository) => {
-                out_of_bound.insert(repository);
-            }
-            Admission::Inaccessible(identity) => {
-                inaccessible.insert(identity);
-            }
-        }
-    }
-
-    while let Some(target) = queue.pop_front() {
-        for discovery in scan_repository(&target.path)? {
-            retain_discovery(
-                discovery,
-                &target,
-                policy,
-                &mut Retention {
-                    records: &mut records,
-                    edges: &mut edges,
-                    queue: &mut queue,
-                    queued: &mut queued,
-                    out_of_bound: &mut out_of_bound,
-                    inaccessible: &mut inaccessible,
-                    expansions: &mut expansions,
-                },
-            );
-        }
-    }
-
+    let (existing_repositories, existing_edges, mut discovery) = baseline(store.snapshot());
+    admit_explicit_seeds(&mut discovery, policy, options)?;
+    admit_workspaces(&mut discovery, policy, options);
+    scan_admitted_repositories(&mut discovery, policy)?;
     let mut report = report::build(
-        records,
-        edges,
+        discovery.records,
+        discovery.edges,
         &existing_repositories,
         &existing_edges,
-        out_of_bound.len(),
-        inaccessible.len(),
+        discovery.out_of_bound.len(),
+        discovery.inaccessible.len(),
         store.snapshot().pending_projections.len(),
     );
     if !options.dry_run {
@@ -232,19 +169,156 @@ pub fn onboard_repositories(
     Ok(report)
 }
 
+fn baseline(
+    binding: &ManagedProjectBinding,
+) -> (BTreeSet<String>, BTreeSet<String>, DiscoveryState) {
+    let repositories = binding
+        .repositories
+        .iter()
+        .map(|record| normalize_repository(&record.repository))
+        .collect();
+    let edges = binding
+        .relationships
+        .iter()
+        .map(RelationshipEdge::dedupe_key)
+        .collect();
+    let records = binding
+        .repositories
+        .iter()
+        .cloned()
+        .map(|record| (normalize_repository(&record.repository), record))
+        .collect();
+    let edge_map = binding
+        .relationships
+        .iter()
+        .cloned()
+        .map(|edge| (edge.dedupe_key(), edge))
+        .collect();
+    (repositories, edges, DiscoveryState::new(records, edge_map))
+}
+
+struct DiscoveryState {
+    records: BTreeMap<String, RepositoryRecord>,
+    edges: BTreeMap<String, RelationshipEdge>,
+    queue: VecDeque<ScanTarget>,
+    queued: BTreeSet<String>,
+    out_of_bound: BTreeSet<String>,
+    inaccessible: BTreeSet<String>,
+    expansions: usize,
+}
+
+impl DiscoveryState {
+    fn new(
+        records: BTreeMap<String, RepositoryRecord>,
+        edges: BTreeMap<String, RelationshipEdge>,
+    ) -> Self {
+        Self {
+            records,
+            edges,
+            queue: VecDeque::new(),
+            queued: BTreeSet::new(),
+            out_of_bound: BTreeSet::new(),
+            inaccessible: BTreeSet::new(),
+            expansions: 0,
+        }
+    }
+}
+
+fn admit_explicit_seeds(
+    state: &mut DiscoveryState,
+    policy: &ManagedProjectPolicy,
+    options: &OnboardingOptions,
+) -> Result<(), ManagedProjectError> {
+    for seed in policy.repository_seeds.iter().chain(&options.repositories) {
+        let repository = normalize_github_repository(seed).ok_or_else(|| {
+            ManagedProjectError::new(format!("invalid explicit GitHub repository seed: {seed}"))
+        })?;
+        admit_record(
+            repository,
+            "explicit-seed",
+            policy,
+            &mut state.records,
+            &mut state.out_of_bound,
+        );
+    }
+    Ok(())
+}
+
+fn admit_workspaces(
+    state: &mut DiscoveryState,
+    policy: &ManagedProjectPolicy,
+    options: &OnboardingOptions,
+) {
+    let mut paths = vec![options.repo_dir.clone()];
+    paths.extend(options.workspaces.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        match workspace_admission(&path, policy) {
+            Admission::Admitted(repository) => {
+                state
+                    .records
+                    .entry(repository.clone())
+                    .or_insert(RepositoryRecord {
+                        repository: repository.clone(),
+                        entry_kind: "workspace".to_owned(),
+                    });
+                enqueue(&mut state.queue, &mut state.queued, repository, path);
+            }
+            Admission::OutOfBound(repository) => {
+                state.out_of_bound.insert(repository);
+            }
+            Admission::Inaccessible(identity) => {
+                state.inaccessible.insert(identity);
+            }
+        }
+    }
+}
+
+fn scan_admitted_repositories(
+    state: &mut DiscoveryState,
+    policy: &ManagedProjectPolicy,
+) -> Result<(), ManagedProjectError> {
+    while let Some(target) = state.queue.pop_front() {
+        for discovery in scan_repository(&target.path)? {
+            retain_discovery(
+                discovery,
+                &target,
+                policy,
+                &mut Retention {
+                    records: &mut state.records,
+                    edges: &mut state.edges,
+                    queue: &mut state.queue,
+                    queued: &mut state.queued,
+                    out_of_bound: &mut state.out_of_bound,
+                    inaccessible: &mut state.inaccessible,
+                    expansions: &mut state.expansions,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 fn retain_discovery(
     discovery: Discovery,
     source: &ScanTarget,
     policy: &ManagedProjectPolicy,
     retention: &mut Retention<'_>,
 ) {
-    let (admission, evidence, location, state, path) = match discovery {
+    let (admission, target, source_issue, kind, evidence, location, state, path) = match discovery {
         Discovery::Repository {
             value,
+            target,
+            source_issue,
+            kind,
             evidence,
             location,
         } => (
             repository_admission(&value, policy),
+            target,
+            source_issue,
+            kind,
             evidence,
             location,
             RelationshipState::Active,
@@ -256,6 +330,9 @@ fn retain_discovery(
             location,
         } => (
             workspace_admission(&path, policy),
+            String::new(),
+            None,
+            RelationshipKind::DependsOn,
             evidence,
             location,
             RelationshipState::Active,
@@ -266,6 +343,9 @@ fn retain_discovery(
                 &format!("{}/{}", policy.owner.to_ascii_lowercase(), name),
                 policy,
             ),
+            String::new(),
+            None,
+            RelationshipKind::DependsOn,
             "name-similarity".to_owned(),
             location,
             RelationshipState::Proposed,
@@ -283,7 +363,7 @@ fn retain_discovery(
             return;
         }
     };
-    if repository == source.repository {
+    if repository == source.repository && source_issue.is_none() {
         return;
     }
     if !retention.records.contains_key(&repository) {
@@ -299,7 +379,24 @@ fn retain_discovery(
         );
         *retention.expansions += 1;
     }
-    let edge = relationship(policy, source, &repository, &evidence, &location, state);
+    let target = if target.is_empty() {
+        &repository
+    } else {
+        &target
+    };
+    let source_identity = source_issue.map_or_else(
+        || source.repository.clone(),
+        |number| format!("https://github.com/{}/issues/{number}", source.repository),
+    );
+    let edge = relationship(
+        policy,
+        &source_identity,
+        target,
+        kind,
+        &evidence,
+        &location,
+        state,
+    );
     retention.edges.entry(edge.dedupe_key()).or_insert(edge);
     if let Some(path) = path {
         enqueue(retention.queue, retention.queued, repository, path);
@@ -354,8 +451,9 @@ fn admit_record(
 
 fn relationship(
     policy: &ManagedProjectPolicy,
-    source: &ScanTarget,
+    source: &str,
     target: &str,
+    discovered_kind: RelationshipKind,
     evidence: &str,
     location: &str,
     state: RelationshipState,
@@ -366,12 +464,12 @@ fn relationship(
         "fleet" | "manifest-dependency" if location.contains("workspace") => {
             RelationshipKind::Contains
         }
-        _ => RelationshipKind::DependsOn,
+        _ => discovered_kind,
     };
     RelationshipEdge {
         product_key: policy.product_key.clone(),
         kind,
-        source: source.repository.clone(),
+        source: source.to_owned(),
         target: target.to_owned(),
         evidence: RelationshipEvidence {
             kind: evidence.to_owned(),
