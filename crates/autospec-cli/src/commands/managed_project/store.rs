@@ -1,9 +1,8 @@
 use super::{
     append_synced_line, atomic_write, binding_document, empty_journal_digest,
-    ensure_private_directory, ensure_private_file, extend_journal_digest, io_error,
-    open_private_file, read_persisted_binding, reject_unsafe_file, snapshot_needs_update,
-    validate_replay_checkpoint, JournalCheckpoint, ManagedProjectError, ProductLock,
-    ProjectIdentity,
+    ensure_private_directory, ensure_private_file, extend_journal_digest, read_persisted_binding,
+    reject_unsafe_file, snapshot_needs_update, validate_replay_checkpoint, JournalCheckpoint,
+    ManagedProjectError, ProductLock, ProjectIdentity,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
@@ -11,8 +10,12 @@ use autospec_core::managed_project::{
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+#[path = "store/recovery.rs"]
+mod recovery;
+
+use recovery::{payload_string, recover_events, JournalEvent};
 
 const JOURNAL_SCHEMA: u64 = 1;
 const BINDING_FILE: &str = "binding.json";
@@ -32,6 +35,30 @@ pub struct ManagedProjectStore {
 }
 
 impl ManagedProjectStore {
+    pub fn open_read_only(
+        root: &Path,
+        product_key: &ProductKey,
+    ) -> Result<Self, ManagedProjectError> {
+        let project_root = root.join("projects").join(product_key.as_str());
+        let binding_path = project_root.join(BINDING_FILE);
+        let binding = if binding_path.exists() {
+            read_persisted_binding(&binding_path, product_key)?.binding
+        } else {
+            ManagedProjectBinding::new(product_key.clone())
+        };
+        Ok(Self {
+            root: project_root,
+            product_key: product_key.clone(),
+            binding,
+            event_keys: HashSet::new(),
+            known_projections: HashSet::new(),
+            provisional_project: None,
+            next_sequence: 1,
+            journal_digest: empty_journal_digest(),
+            append_fault_after: None,
+        })
+    }
+
     pub fn open(root: &Path, product_key: &ProductKey) -> Result<Self, ManagedProjectError> {
         ensure_private_directory(root)?;
         let projects = root.join("projects");
@@ -393,161 +420,6 @@ impl From<serde_json::Error> for ManagedProjectError {
     fn from(error: serde_json::Error) -> Self {
         Self::new(error.to_string())
     }
-}
-
-struct JournalEvent {
-    sequence: u64,
-    product_key: ProductKey,
-    key: String,
-    kind: String,
-    payload: Value,
-}
-
-impl JournalEvent {
-    fn to_value(&self) -> Value {
-        json!({
-            "schema": JOURNAL_SCHEMA,
-            "sequence": self.sequence,
-            "product_key": self.product_key,
-            "key": self.key,
-            "kind": self.kind,
-            "payload": self.payload,
-        })
-    }
-
-    fn from_value(value: Value) -> Result<Self, ManagedProjectError> {
-        let object = value
-            .as_object()
-            .ok_or_else(|| ManagedProjectError::new("journal event must be an object"))?;
-        if object.get("schema").and_then(Value::as_u64) != Some(JOURNAL_SCHEMA) {
-            return Err(ManagedProjectError::new(
-                "unsupported managed project journal schema",
-            ));
-        }
-        let sequence = object
-            .get("sequence")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| ManagedProjectError::new("journal event sequence must be unsigned"))?;
-        let product_key = serde_json::from_value(
-            object
-                .get("product_key")
-                .cloned()
-                .ok_or_else(|| ManagedProjectError::new("journal event has no product key"))?,
-        )
-        .map_err(|error| {
-            ManagedProjectError::new(format!("invalid journal event product key: {error}"))
-        })?;
-        let string = |field: &str| {
-            object
-                .get(field)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    ManagedProjectError::new(format!("journal event has invalid {field}"))
-                })
-        };
-        Ok(Self {
-            sequence,
-            product_key,
-            key: string("key")?,
-            kind: string("kind")?,
-            payload: object
-                .get("payload")
-                .cloned()
-                .ok_or_else(|| ManagedProjectError::new("journal event has no payload"))?,
-        })
-    }
-}
-
-fn payload_string<'a>(
-    event: &'a JournalEvent,
-    description: &str,
-) -> Result<&'a str, ManagedProjectError> {
-    event
-        .payload
-        .as_str()
-        .ok_or_else(|| ManagedProjectError::new(format!("{description} payload must be a string")))
-}
-
-fn recover_events(
-    path: &Path,
-    product_key: &ProductKey,
-) -> Result<RecoveredJournal, ManagedProjectError> {
-    let mut file = open_private_file(path)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(io_error)?;
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        let complete = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
-        file.set_len(complete as u64).map_err(io_error)?;
-        file.seek(SeekFrom::Start(complete as u64))
-            .map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        bytes.truncate(complete);
-    }
-    let mut events = Vec::new();
-    let mut prefix_digests = vec![empty_journal_digest()];
-    if bytes.is_empty() {
-        return Ok(RecoveredJournal {
-            events,
-            final_digest: prefix_digests[0].clone(),
-            prefix_digests,
-        });
-    }
-    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        if line.is_empty() {
-            if index + 1 == lines.len() {
-                continue;
-            }
-            return Err(ManagedProjectError::new(
-                "managed project journal contains an empty completed line",
-            ));
-        }
-        let value = serde_json::from_slice(line).map_err(|error| {
-            ManagedProjectError::new(format!("invalid completed journal line: {error}"))
-        })?;
-        let event = JournalEvent::from_value(value)?;
-        let expected = u64::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
-        if event.sequence != expected {
-            return Err(ManagedProjectError::new(
-                "managed project journal sequence is not contiguous",
-            ));
-        }
-        if &event.product_key != product_key {
-            return Err(ManagedProjectError::new(
-                "journal event product key does not match its state directory",
-            ));
-        }
-        let mut complete_line = line.to_vec();
-        complete_line.push(b'\n');
-        let digest = extend_journal_digest(
-            prefix_digests.last().expect("initial digest exists"),
-            &complete_line,
-        );
-        prefix_digests.push(digest);
-        events.push(event);
-    }
-    Ok(RecoveredJournal {
-        final_digest: prefix_digests
-            .last()
-            .expect("initial digest exists")
-            .clone(),
-        events,
-        prefix_digests,
-    })
-}
-
-struct RecoveredJournal {
-    events: Vec<JournalEvent>,
-    prefix_digests: Vec<String>,
-    final_digest: String,
 }
 
 fn normalize_identity(value: &str) -> String {

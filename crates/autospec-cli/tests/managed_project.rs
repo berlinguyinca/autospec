@@ -296,14 +296,20 @@ fn onboard_bounds_queue_and_excludes_proposed_edges_from_active_graph() {
     .unwrap();
 
     assert_eq!(store.snapshot().repositories.len(), 2);
-    assert_eq!(report.proposed, 1);
-    let proposed = store
+    let admitted = store
+        .snapshot()
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(store
         .snapshot()
         .relationships
         .iter()
-        .find(|edge| edge.state == RelationshipState::Proposed)
-        .unwrap();
-    assert!(proposed.target.ends_with("/autospec-node"));
+        .filter(|edge| edge.state == RelationshipState::Active)
+        .all(|edge| admitted.contains(edge.source.as_str())
+            && admitted.contains(edge.target.as_str())));
+    assert_eq!(report.proposed, 0);
     assert!(active_dependency_graph(store.snapshot())
         .iter()
         .all(|edge| edge.state == RelationshipState::Active));
@@ -328,6 +334,21 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
         "[submodule \"z\"]\nurl = https://github.com/berlinguyinca/zeta\n[submodule \"a\"]\nurl = https://github.com/berlinguyinca/alpha\n",
     )
     .unwrap();
+    let state_root = repository_path.join(".autospec/state");
+    let mut persisted = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    persisted
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    persisted
+        .enqueue_projection(
+            "project:item-add:PVT_1:https://github.com/berlinguyinca/autospec/issues/1",
+        )
+        .unwrap();
+    drop(persisted);
+    let binding_path = state_root.join("projects/autospec/binding.json");
+    let journal_path = state_root.join("projects/autospec/events.jsonl");
+    let binding_before = fs::read(&binding_path).unwrap();
+    let journal_before = fs::read(&journal_path).unwrap();
 
     let run = || {
         Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -350,10 +371,13 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert_eq!(first.stdout, second.stdout);
-    assert!(!repository_path.join(".autospec/state").exists());
+    assert_eq!(fs::read(binding_path).unwrap(), binding_before);
+    assert_eq!(fs::read(journal_path).unwrap(), journal_before);
     let report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(report["adopted"], 1);
+    assert_eq!(report["adopted"], 0);
     assert_eq!(report["created"], 0);
+    assert_eq!(report["unchanged"], 1);
+    assert_eq!(report["pending_projection"], 1);
     assert_eq!(
         report["repositories"][0]["repository"],
         "berlinguyinca/autospec"
@@ -361,6 +385,162 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
     assert!(report["edges"].as_array().unwrap().windows(2).all(|pair| {
         pair[0]["target"].as_str().unwrap() <= pair[1]["target"].as_str().unwrap()
     }));
+}
+
+#[test]
+fn onboard_scans_only_structured_manifest_and_fleet_fields() {
+    let fixture = Fixture::new("onboard-structured-fields");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join("Cargo.toml"),
+        "# https://github.com/berlinguyinca/comment-only\n[package]\ndescription = \"https://github.com/berlinguyinca/description-only\"\n[dependencies]\nreal = { git = \"https://github.com/berlinguyinca/real-cargo\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("package.json"),
+        r#"{"scripts":{"postinstall":"echo https://github.com/berlinguyinca/script-only"},"homepage":"https://github.com/berlinguyinca/homepage-only","repository":"https://github.com/berlinguyinca/real-package","dependencies":{"real":"github:berlinguyinca/real-npm"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("autospec-fleet.yml"),
+        "note: https://github.com/berlinguyinca/note-only\nrepositories:\n  - https://github.com/berlinguyinca/real-fleet\n",
+    )
+    .unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let repositories = store
+        .snapshot()
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for expected in [
+        "berlinguyinca/real-cargo",
+        "berlinguyinca/real-package",
+        "berlinguyinca/real-npm",
+        "berlinguyinca/real-fleet",
+    ] {
+        assert!(repositories.contains(expected), "missing {expected}");
+    }
+    for false_positive in [
+        "berlinguyinca/comment-only",
+        "berlinguyinca/description-only",
+        "berlinguyinca/script-only",
+        "berlinguyinca/homepage-only",
+        "berlinguyinca/note-only",
+    ] {
+        assert!(
+            !repositories.contains(false_positive),
+            "retained {false_positive}"
+        );
+    }
+}
+
+#[test]
+fn onboard_resolves_cargo_paths_and_pnpm_members_with_typed_failures() {
+    let fixture = Fixture::new("onboard-local-workspaces");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::write(
+        repository_path.join("Cargo.toml"),
+        "[dependencies]\nlocal = { path = \"../cargo-local\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        repository_path.join("pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+    )
+    .unwrap();
+    initialize_repository(
+        &fixture.path().join("cargo-local"),
+        "https://github.com/berlinguyinca/cargo-local.git",
+    );
+    initialize_repository(
+        &repository_path.join("packages/allowed"),
+        "https://github.com/berlinguyinca/pnpm-allowed.git",
+    );
+    initialize_repository(
+        &repository_path.join("packages/outside"),
+        "https://github.com/other/pnpm-outside.git",
+    );
+    fs::create_dir_all(repository_path.join("packages/inaccessible")).unwrap();
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let report = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: Vec::new(),
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    let repositories = store
+        .snapshot()
+        .repositories
+        .iter()
+        .map(|record| record.repository.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(repositories.contains("berlinguyinca/cargo-local"));
+    assert!(repositories.contains("berlinguyinca/pnpm-allowed"));
+    assert_eq!(report.out_of_bound, 1);
+    assert_eq!(report.inaccessible, 1);
+}
+
+#[test]
+fn onboard_rejects_malformed_explicit_repository_seeds() {
+    let fixture = Fixture::new("onboard-malformed-seed");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    let mut policy = policy("berlinguyinca");
+    policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
+    let mut store =
+        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+
+    let result = onboard_repositories(
+        &mut store,
+        &policy,
+        &OnboardingOptions {
+            repo_dir: repository_path,
+            repositories: vec!["not a repository".to_owned()],
+            workspaces: Vec::new(),
+            dry_run: false,
+        },
+    );
+
+    assert!(result.is_err());
+    assert!(store.snapshot().repositories.is_empty());
 }
 
 fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {

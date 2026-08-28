@@ -3,11 +3,28 @@ use autospec_core::managed_project::{
     ManagedProjectBinding, ManagedProjectPolicy, RelationshipEdge, RelationshipEvidence,
     RelationshipKind, RelationshipState, RepositoryRecord,
 };
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+#[path = "onboard/admission.rs"]
+mod admission;
+
+#[path = "onboard/cargo.rs"]
+mod cargo;
+#[path = "onboard/issues.rs"]
+mod issues;
+#[path = "onboard/line_formats.rs"]
+mod line_formats;
+#[path = "onboard/npm.rs"]
+mod npm;
+#[path = "onboard/report.rs"]
+mod report;
+
+pub(super) use admission::field_repository;
+pub use admission::normalize_github_repository;
+use admission::{
+    allowed, normalize_repository, repository_admission, workspace_admission, Admission,
+};
 
 const DISCOVERED_AT: &str = "deterministic-local-scan";
 
@@ -40,11 +57,59 @@ struct ScanTarget {
 }
 
 #[derive(Clone, Debug)]
-struct Candidate {
-    repository: String,
-    entry_kind: String,
-    edge: Option<RelationshipEdge>,
-    path: Option<PathBuf>,
+enum Discovery {
+    Repository {
+        value: String,
+        evidence: String,
+        location: String,
+    },
+    Workspace {
+        path: PathBuf,
+        evidence: String,
+        location: String,
+    },
+    Proposed {
+        name: String,
+        location: String,
+    },
+}
+
+impl Discovery {
+    fn repository(
+        value: impl Into<String>,
+        evidence: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
+        Self::Repository {
+            value: value.into(),
+            evidence: evidence.into(),
+            location: location.into(),
+        }
+    }
+
+    fn workspace(path: PathBuf, evidence: impl Into<String>, location: impl Into<String>) -> Self {
+        Self::Workspace {
+            path,
+            evidence: evidence.into(),
+            location: location.into(),
+        }
+    }
+
+    fn proposed(name: impl Into<String>, location: impl Into<String>) -> Self {
+        Self::Proposed {
+            name: name.into(),
+            location: location.into(),
+        }
+    }
+}
+
+struct Retention<'a> {
+    records: &'a mut BTreeMap<String, RepositoryRecord>,
+    edges: &'a mut BTreeMap<String, RelationshipEdge>,
+    queue: &'a mut VecDeque<ScanTarget>,
+    queued: &'a mut BTreeSet<String>,
+    out_of_bound: &'a mut BTreeSet<String>,
+    inaccessible: &'a mut BTreeSet<String>,
 }
 
 pub fn onboard_repositories(
@@ -65,11 +130,22 @@ pub fn onboard_repositories(
         .iter()
         .map(RelationshipEdge::dedupe_key)
         .collect::<BTreeSet<_>>();
-    let mut report = OnboardingReport::default();
-    let mut records = BTreeMap::<String, RepositoryRecord>::new();
-    let mut edges = BTreeMap::<String, RelationshipEdge>::new();
-    let mut queued = BTreeSet::new();
+    let mut records = store
+        .snapshot()
+        .repositories
+        .iter()
+        .cloned()
+        .map(|record| (normalize_repository(&record.repository), record))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = store
+        .snapshot()
+        .relationships
+        .iter()
+        .cloned()
+        .map(|edge| (edge.dedupe_key(), edge))
+        .collect::<BTreeMap<_, _>>();
     let mut queue = VecDeque::new();
+    let mut queued = BTreeSet::new();
     let mut out_of_bound = BTreeSet::new();
     let mut inaccessible = BTreeSet::new();
 
@@ -78,8 +154,11 @@ pub fn onboard_repositories(
         .iter()
         .chain(options.repositories.iter())
     {
-        admit_repository(
-            seed,
+        let repository = normalize_github_repository(seed).ok_or_else(|| {
+            ManagedProjectError::new(format!("invalid explicit GitHub repository seed: {seed}"))
+        })?;
+        admit_record(
+            repository,
             "explicit-seed",
             policy,
             &mut records,
@@ -92,100 +171,137 @@ pub fn onboard_repositories(
     workspace_paths.sort();
     workspace_paths.dedup();
     for path in workspace_paths {
-        match workspace_repository(&path) {
-            Ok(repository) if allowed(&repository, policy) => {
-                records
-                    .entry(repository.clone())
-                    .or_insert(RepositoryRecord {
-                        repository: repository.clone(),
-                        entry_kind: "workspace".to_owned(),
-                    });
-                if queued.len() < policy.discovery_max_repos && queued.insert(repository.clone()) {
-                    queue.push_back(ScanTarget { repository, path });
+        match workspace_admission(&path, policy) {
+            Admission::Admitted(repository) => {
+                if records.len() < policy.discovery_max_repos || records.contains_key(&repository) {
+                    records
+                        .entry(repository.clone())
+                        .or_insert(RepositoryRecord {
+                            repository: repository.clone(),
+                            entry_kind: "workspace".to_owned(),
+                        });
+                    enqueue(&mut queue, &mut queued, repository, path);
                 }
             }
-            Ok(repository) => {
+            Admission::OutOfBound(repository) => {
                 out_of_bound.insert(repository);
             }
-            Err(_) => {
-                inaccessible.insert(path.display().to_string());
+            Admission::Inaccessible(identity) => {
+                inaccessible.insert(identity);
             }
         }
     }
 
     while let Some(target) = queue.pop_front() {
-        for candidate in scan_repository(&target, policy)? {
-            if !allowed(&candidate.repository, policy) {
-                out_of_bound.insert(candidate.repository);
-                continue;
-            }
-            let proposed = candidate
-                .edge
-                .as_ref()
-                .is_some_and(|edge| edge.state == RelationshipState::Proposed);
-            if let Some(edge) = candidate.edge {
-                edges.entry(edge.dedupe_key()).or_insert(edge);
-            }
-            if proposed || records.contains_key(&candidate.repository) {
-                continue;
-            }
-            if records.len() >= policy.discovery_max_repos {
-                continue;
-            }
-            records.insert(
-                candidate.repository.clone(),
-                RepositoryRecord {
-                    repository: candidate.repository.clone(),
-                    entry_kind: candidate.entry_kind,
+        for discovery in scan_repository(&target.path)? {
+            retain_discovery(
+                discovery,
+                &target,
+                policy,
+                &mut Retention {
+                    records: &mut records,
+                    edges: &mut edges,
+                    queue: &mut queue,
+                    queued: &mut queued,
+                    out_of_bound: &mut out_of_bound,
+                    inaccessible: &mut inaccessible,
                 },
             );
-            if let Some(path) = candidate.path {
-                if queued.len() < policy.discovery_max_repos
-                    && queued.insert(candidate.repository.clone())
-                {
-                    queue.push_back(ScanTarget {
-                        repository: candidate.repository,
-                        path,
-                    });
-                }
-            }
         }
     }
 
-    report.out_of_bound = out_of_bound.len();
-    report.inaccessible = inaccessible.len();
-    report.repositories = records.into_values().collect();
-    report.edges = edges.into_values().collect();
-    report.proposed = report
-        .edges
-        .iter()
-        .filter(|edge| edge.state == RelationshipState::Proposed)
-        .count();
-
-    for record in &report.repositories {
-        if existing_repositories.contains(&record.repository) {
-            report.unchanged += 1;
-        } else if matches!(record.entry_kind.as_str(), "explicit-seed" | "workspace") {
-            report.adopted += 1;
-        } else {
-            report.created += 1;
-        }
-        if !options.dry_run {
+    let mut report = report::build(
+        records,
+        edges,
+        &existing_repositories,
+        &existing_edges,
+        out_of_bound.len(),
+        inaccessible.len(),
+        store.snapshot().pending_projections.len(),
+    );
+    if !options.dry_run {
+        for record in &report.repositories {
             store.record_repository(record.clone())?;
         }
-    }
-    for edge in &report.edges {
-        if existing_edges.contains(&edge.dedupe_key()) {
-            report.unchanged += 1;
-        } else {
-            report.updated += 1;
-        }
-        if !options.dry_run {
+        for edge in &report.edges {
             store.record_edge(edge.clone())?;
         }
+        report.pending_projection = store.snapshot().pending_projections.len();
     }
-    report.pending_projection = store.snapshot().pending_projections.len();
     Ok(report)
+}
+
+fn retain_discovery(
+    discovery: Discovery,
+    source: &ScanTarget,
+    policy: &ManagedProjectPolicy,
+    retention: &mut Retention<'_>,
+) {
+    let (admission, evidence, location, state, path) = match discovery {
+        Discovery::Repository {
+            value,
+            evidence,
+            location,
+        } => (
+            repository_admission(&value, policy),
+            evidence,
+            location,
+            RelationshipState::Active,
+            None,
+        ),
+        Discovery::Workspace {
+            path,
+            evidence,
+            location,
+        } => (
+            workspace_admission(&path, policy),
+            evidence,
+            location,
+            RelationshipState::Active,
+            Some(path),
+        ),
+        Discovery::Proposed { name, location } => (
+            repository_admission(
+                &format!("{}/{}", policy.owner.to_ascii_lowercase(), name),
+                policy,
+            ),
+            "name-similarity".to_owned(),
+            location,
+            RelationshipState::Proposed,
+            None,
+        ),
+    };
+    let repository = match admission {
+        Admission::Admitted(repository) => repository,
+        Admission::OutOfBound(repository) => {
+            retention.out_of_bound.insert(repository);
+            return;
+        }
+        Admission::Inaccessible(identity) => {
+            retention.inaccessible.insert(identity);
+            return;
+        }
+    };
+    if repository == source.repository {
+        return;
+    }
+    if !retention.records.contains_key(&repository) {
+        if retention.records.len() >= policy.discovery_max_repos {
+            return;
+        }
+        retention.records.insert(
+            repository.clone(),
+            RepositoryRecord {
+                repository: repository.clone(),
+                entry_kind: evidence.clone(),
+            },
+        );
+    }
+    let edge = relationship(policy, source, &repository, &evidence, &location, state);
+    retention.edges.entry(edge.dedupe_key()).or_insert(edge);
+    if let Some(path) = path {
+        enqueue(retention.queue, retention.queued, repository, path);
+    }
 }
 
 pub fn active_dependency_graph(binding: &ManagedProjectBinding) -> Vec<RelationshipEdge> {
@@ -205,55 +321,79 @@ pub fn active_dependency_graph(binding: &ManagedProjectBinding) -> Vec<Relations
     edges
 }
 
-pub fn normalize_github_repository(value: &str) -> Option<String> {
-    let value = value
-        .trim()
-        .trim_matches(|character: char| "\"'`()[]{}<>,;".contains(character));
-    let path = if let Some(path) = value.strip_prefix("git@github.com:") {
-        path
-    } else if let Some(path) = value.strip_prefix("ssh://git@github.com/") {
-        path
-    } else if let Some(path) = value.strip_prefix("https://github.com/") {
-        path
-    } else if let Some(path) = value.strip_prefix("http://github.com/") {
-        path
-    } else if let Some(path) = value.strip_prefix("github:") {
-        path
-    } else if let Some(path) = value.strip_prefix("github.com/") {
-        path
-    } else if value.matches('/').count() == 1 {
-        value
-    } else {
-        return None;
-    };
-    let mut components = path.split('/');
-    let owner = clean_component(components.next()?);
-    let repository = clean_component(components.next()?);
-    if owner.is_empty()
-        || repository.is_empty()
-        || !owner
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-        || !repository.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-    {
-        return None;
+fn scan_repository(path: &Path) -> Result<Vec<Discovery>, ManagedProjectError> {
+    let mut discoveries = cargo::scan(path);
+    discoveries.extend(npm::scan(path));
+    discoveries.extend(line_formats::scan(path));
+    discoveries.extend(issues::scan(path).map_err(|error| {
+        ManagedProjectError::new(format!("cannot scan managed issue metadata: {error}"))
+    })?);
+    Ok(discoveries)
+}
+
+fn admit_record(
+    repository: String,
+    entry_kind: &str,
+    policy: &ManagedProjectPolicy,
+    records: &mut BTreeMap<String, RepositoryRecord>,
+    out_of_bound: &mut BTreeSet<String>,
+) {
+    if !allowed(&repository, policy) {
+        out_of_bound.insert(repository);
+    } else if records.len() < policy.discovery_max_repos || records.contains_key(&repository) {
+        records
+            .entry(repository.clone())
+            .or_insert(RepositoryRecord {
+                repository,
+                entry_kind: entry_kind.to_owned(),
+            });
     }
-    Some(format!("{owner}/{repository}").to_ascii_lowercase())
 }
 
-fn clean_component(value: &str) -> &str {
-    value
-        .split(['#', '?'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches(".git")
-        .trim_matches(|character: char| "\"'`()[]{}<>,;".contains(character))
+fn relationship(
+    policy: &ManagedProjectPolicy,
+    source: &ScanTarget,
+    target: &str,
+    evidence: &str,
+    location: &str,
+    state: RelationshipState,
+) -> RelationshipEdge {
+    let kind = match evidence {
+        "source-spec" => RelationshipKind::Implements,
+        "tracker" => RelationshipKind::Tracks,
+        "fleet" | "manifest-dependency" if location.contains("workspace") => {
+            RelationshipKind::Contains
+        }
+        _ => RelationshipKind::DependsOn,
+    };
+    RelationshipEdge {
+        product_key: policy.product_key.clone(),
+        kind,
+        source: source.repository.clone(),
+        target: target.to_owned(),
+        evidence: RelationshipEvidence {
+            kind: evidence.to_owned(),
+            location: location.to_owned(),
+            discovered_at: DISCOVERED_AT.to_owned(),
+            confidence: if state == RelationshipState::Active {
+                100
+            } else {
+                40
+            },
+        },
+        state,
+    }
 }
 
-fn normalize_repository(value: &str) -> String {
-    normalize_github_repository(value).unwrap_or_else(|| value.trim().to_ascii_lowercase())
+fn enqueue(
+    queue: &mut VecDeque<ScanTarget>,
+    queued: &mut BTreeSet<String>,
+    repository: String,
+    path: PathBuf,
+) {
+    if queued.insert(repository.clone()) {
+        queue.push_back(ScanTarget { repository, path });
+    }
 }
 
 fn validate_policy(policy: &ManagedProjectPolicy) -> Result<(), ManagedProjectError> {
@@ -266,264 +406,6 @@ fn validate_policy(policy: &ManagedProjectPolicy) -> Result<(), ManagedProjectEr
         ));
     }
     Ok(())
-}
-
-fn allowed(repository: &str, policy: &ManagedProjectPolicy) -> bool {
-    let repository = normalize_repository(repository);
-    let Some((owner, _)) = repository.split_once('/') else {
-        return false;
-    };
-    owner.eq_ignore_ascii_case(policy.owner.trim())
-        && policy
-            .repo_allowlist
-            .iter()
-            .any(|pattern| wildcard_match(&repository, &pattern.to_ascii_lowercase()))
-}
-
-fn wildcard_match(value: &str, pattern: &str) -> bool {
-    match pattern.split_once('*') {
-        Some((prefix, suffix)) => value.starts_with(prefix) && value.ends_with(suffix),
-        None => value == pattern,
-    }
-}
-
-fn admit_repository(
-    value: &str,
-    entry_kind: &str,
-    policy: &ManagedProjectPolicy,
-    records: &mut BTreeMap<String, RepositoryRecord>,
-    out_of_bound: &mut BTreeSet<String>,
-) {
-    let Some(repository) = normalize_github_repository(value) else {
-        return;
-    };
-    if allowed(&repository, policy) {
-        records
-            .entry(repository.clone())
-            .or_insert(RepositoryRecord {
-                repository,
-                entry_kind: entry_kind.to_owned(),
-            });
-    } else {
-        out_of_bound.insert(repository);
-    }
-}
-
-fn workspace_repository(path: &Path) -> Result<String, ManagedProjectError> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            path.to_string_lossy().as_ref(),
-            "remote",
-            "get-url",
-            "origin",
-        ])
-        .output()
-        .map_err(|error| {
-            ManagedProjectError::new(format!("cannot inspect workspace remote: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(ManagedProjectError::new("workspace has no verified origin"));
-    }
-    normalize_github_repository(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| ManagedProjectError::new("workspace origin is not a GitHub repository"))
-}
-
-fn scan_repository(
-    target: &ScanTarget,
-    policy: &ManagedProjectPolicy,
-) -> Result<Vec<Candidate>, ManagedProjectError> {
-    let mut candidates = Vec::new();
-    candidates.extend(local_workspace_candidates(target, policy));
-    for (relative, evidence) in [
-        (".gitmodules", "submodule"),
-        ("Cargo.toml", "manifest-dependency"),
-        ("package.json", "manifest-dependency"),
-        ("pnpm-workspace.yaml", "manifest-dependency"),
-        ("go.mod", "manifest-dependency"),
-        ("autospec-fleet.yml", "fleet"),
-        (".autospec/fleet.yml", "fleet"),
-    ] {
-        let path = target.path.join(relative);
-        let Ok(source) = fs::read_to_string(&path) else {
-            continue;
-        };
-        for repository in github_references(&source) {
-            if repository == target.repository {
-                continue;
-            }
-            candidates.push(exact_candidate(
-                policy, target, repository, evidence, relative,
-            ));
-        }
-    }
-    for path in managed_issue_files(&target.path)? {
-        let source = fs::read_to_string(&path).map_err(|error| {
-            ManagedProjectError::new(format!("cannot read {}: {error}", path.display()))
-        })?;
-        let location = path
-            .strip_prefix(&target.path)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        for line in managed_relationship_lines(&source) {
-            let evidence = if line.to_ascii_lowercase().contains("source spec") {
-                "source-spec"
-            } else if line.to_ascii_lowercase().contains("tracker") {
-                "tracker"
-            } else {
-                "issue-reference"
-            };
-            let exact = github_references(line);
-            if exact.is_empty() {
-                for name in repository_name_references(line) {
-                    let repository = format!("{}/{name}", policy.owner.to_ascii_lowercase());
-                    if repository != target.repository && allowed(&repository, policy) {
-                        candidates.push(Candidate {
-                            repository: repository.clone(),
-                            entry_kind: "proposed".to_owned(),
-                            edge: Some(edge(
-                                policy,
-                                &target.repository,
-                                &repository,
-                                RelationshipKind::DependsOn,
-                                "name-similarity",
-                                &location,
-                                (RelationshipState::Proposed, 40),
-                            )),
-                            path: None,
-                        });
-                    }
-                }
-            }
-            for repository in exact {
-                if repository != target.repository {
-                    candidates.push(exact_candidate(
-                        policy, target, repository, evidence, &location,
-                    ));
-                }
-            }
-        }
-    }
-    candidates.sort_by(|left, right| {
-        left.repository
-            .cmp(&right.repository)
-            .then_with(|| left.entry_kind.cmp(&right.entry_kind))
-            .then_with(|| {
-                left.edge
-                    .as_ref()
-                    .map(RelationshipEdge::dedupe_key)
-                    .cmp(&right.edge.as_ref().map(RelationshipEdge::dedupe_key))
-            })
-    });
-    Ok(candidates)
-}
-
-fn exact_candidate(
-    policy: &ManagedProjectPolicy,
-    target: &ScanTarget,
-    repository: String,
-    evidence: &str,
-    location: &str,
-) -> Candidate {
-    let kind = match evidence {
-        "source-spec" => RelationshipKind::Implements,
-        "tracker" => RelationshipKind::Tracks,
-        "fleet" => RelationshipKind::Contains,
-        _ => RelationshipKind::DependsOn,
-    };
-    Candidate {
-        repository: repository.clone(),
-        entry_kind: evidence.to_owned(),
-        edge: Some(edge(
-            policy,
-            &target.repository,
-            &repository,
-            kind,
-            evidence,
-            location,
-            (RelationshipState::Active, 100),
-        )),
-        path: None,
-    }
-}
-
-fn local_workspace_candidates(
-    target: &ScanTarget,
-    policy: &ManagedProjectPolicy,
-) -> Vec<Candidate> {
-    let mut paths = BTreeSet::new();
-    if let Ok(source) = fs::read_to_string(target.path.join("Cargo.toml")) {
-        for member in cargo_workspace_members(&source) {
-            paths.insert(target.path.join(member));
-        }
-    }
-    if let Ok(source) = fs::read_to_string(target.path.join("package.json")) {
-        if let Ok(value) = serde_json::from_str::<Value>(&source) {
-            let workspaces = value
-                .get("workspaces")
-                .and_then(|value| value.as_array())
-                .or_else(|| {
-                    value
-                        .get("workspaces")
-                        .and_then(|value| value.get("packages"))
-                        .and_then(|value| value.as_array())
-                });
-            for workspace in workspaces.into_iter().flatten().filter_map(Value::as_str) {
-                paths.extend(expand_workspace_path(&target.path, workspace));
-            }
-        }
-    }
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let repository = workspace_repository(&path).ok()?;
-            if !allowed(&repository, policy) || repository == target.repository {
-                return None;
-            }
-            Some(Candidate {
-                repository: repository.clone(),
-                entry_kind: "manifest-dependency".to_owned(),
-                edge: Some(edge(
-                    policy,
-                    &target.repository,
-                    &repository,
-                    RelationshipKind::Contains,
-                    "manifest-dependency",
-                    "workspace-member",
-                    (RelationshipState::Active, 100),
-                )),
-                path: Some(path),
-            })
-        })
-        .collect()
-}
-
-fn cargo_workspace_members(source: &str) -> Vec<&str> {
-    let mut members = Vec::new();
-    let mut in_workspace = false;
-    let mut in_members = false;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_workspace = trimmed == "[workspace]";
-            in_members = false;
-            continue;
-        }
-        if !in_workspace {
-            continue;
-        }
-        if trimmed.starts_with("members") {
-            in_members = true;
-        }
-        if in_members {
-            members.extend(quoted_values(trimmed));
-            if trimmed.contains(']') {
-                in_members = false;
-            }
-        }
-    }
-    members
 }
 
 fn quoted_values(line: &str) -> Vec<&str> {
@@ -544,8 +426,7 @@ fn expand_workspace_path(root: &Path, workspace: &str) -> Vec<PathBuf> {
     let Some(prefix) = workspace.strip_suffix("/*") else {
         return vec![root.join(workspace)];
     };
-    let directory = root.join(prefix);
-    let Ok(entries) = fs::read_dir(directory) else {
+    let Ok(entries) = std::fs::read_dir(root.join(prefix)) else {
         return Vec::new();
     };
     let mut paths = entries
@@ -555,66 +436,6 @@ fn expand_workspace_path(root: &Path, workspace: &str) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
-}
-
-fn edge(
-    policy: &ManagedProjectPolicy,
-    source: &str,
-    target: &str,
-    kind: RelationshipKind,
-    evidence_kind: &str,
-    location: &str,
-    classification: (RelationshipState, u8),
-) -> RelationshipEdge {
-    RelationshipEdge {
-        product_key: policy.product_key.clone(),
-        kind,
-        source: source.to_owned(),
-        target: target.to_owned(),
-        evidence: RelationshipEvidence {
-            kind: evidence_kind.to_owned(),
-            location: location.to_owned(),
-            discovered_at: DISCOVERED_AT.to_owned(),
-            confidence: classification.1,
-        },
-        state: classification.0,
-    }
-}
-
-fn github_references(source: &str) -> BTreeSet<String> {
-    source
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric()
-                || matches!(character, '-' | '_' | '.' | '/' | ':' | '@' | '#' | '?'))
-        })
-        .filter(|token| !token.is_empty())
-        .filter_map(normalize_github_repository)
-        .collect()
-}
-
-fn managed_issue_files(root: &Path) -> Result<Vec<PathBuf>, ManagedProjectError> {
-    let directory = root.join(".autospec/issues");
-    let Ok(entries) = fs::read_dir(&directory) else {
-        return Ok(Vec::new());
-    };
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
-}
-
-fn managed_relationship_lines(source: &str) -> impl Iterator<Item = &str> {
-    let mut managed = false;
-    source.lines().filter(move |line| {
-        if line.starts_with("## ") {
-            managed = line.to_ascii_lowercase().contains("autospec");
-            return false;
-        }
-        managed && !line.trim().is_empty()
-    })
 }
 
 fn repository_name_references(line: &str) -> BTreeSet<String> {
