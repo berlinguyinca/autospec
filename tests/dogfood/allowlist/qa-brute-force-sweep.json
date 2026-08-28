@@ -33,13 +33,7 @@
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_permission.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module: every substring match is an assertion on a codex argument vector or a permission string it must contain (\"permissions.autospec-network-executor.filesystem=\", \"danger-full-access\", per-path read/deny entries). Those are the CLI surface under test, not a domain representation. Same situation as the codex_sandbox.rs row above."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_sandbox.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+    "justification": "Test-only module: every substring match is an assertion on a codex argument vector or a permission string it must contain (\"permissions.autospec-network-executor.filesystem=\", \"danger-full-access\", per-path read/deny entries). Those are the CLI surface under test, not a domain representation."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/identity_reviewer.rs",

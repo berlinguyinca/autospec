@@ -64,17 +64,12 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_r
     bridge::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
     let interrupted =
         bridge::run_executor_bridge(&request).expect_err("interrupt entrypoint repair");
-    assert!(interrupted
-        .to_string()
-        .contains("injected executor worktree repair crash"));
+    let crash = interrupted.to_string();
+    assert!(crash.contains("injected executor worktree repair crash"));
     let retry = bridge::run_executor_bridge(&request)
         .expect_err("stop after entrypoint recovery at implementation proof");
-    assert!(
-        retry
-            .to_string()
-            .contains("implementation HEAD is unchanged"),
-        "{retry}"
-    );
+    let msg = retry.to_string();
+    assert!(msg.contains("implementation HEAD is unchanged"), "{retry}");
     assert!(worktree.path.is_dir());
     assert!(!scope_root.join("issue-42.repair-intent.json").exists());
 
@@ -489,12 +484,8 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_faili
 
     assert_eq!(probe_calls, 0, "live recovery must not run a fresh probe");
     let error = outcome.expect_err("fixture must stop after recovered supervision");
-    assert!(
-        !error
-            .to_string()
-            .contains("injected failing Codex sandbox probe"),
-        "{error}"
-    );
+    let msg = error.to_string();
+    assert!(!msg.contains("injected failing Codex sandbox probe"));
     let events = fs::read_to_string(&event_log).expect("read recovery events");
     assert!(events.contains("\"event\":\"child_adopted\""), "{events}");
     for identity in [
