@@ -81,3 +81,73 @@ Status: DONE_WITH_CONCERNS
   non-rollback behavior.
 - Per instruction, no full workspace suite or repository-wide formatter was
   run. Focused Rust, Bats, syntax, install, trio, and golden gates are green.
+
+## Fix round 1
+
+Status: DONE_WITH_CONCERNS
+
+### Commit
+
+- `2af8919d` — `fix: preserve repository onboarding before projection`
+
+### Corrected behavior
+
+- Repository records, additive `contains` relationships, admission-gated
+  `spawned-from` evidence, and idempotent `repository:register` projections are
+  journaled before any GitHub Project resolution or retry.
+- Repository record event keys use the distinct `repository:record` namespace,
+  so a durable record and its projection cannot suppress one another. Repeated
+  onboarding leaves one projection event per admitted repository.
+- Retryable and ambiguous GitHub transport failures return the machine-readable
+  `journaled_projection_pending` outcome with the real pending count and error
+  summary. Definitive transport, remote-response validation, configuration,
+  local storage, and unsupported outcome failures remain non-zero errors.
+- `spawned-from` is written only when the normalized explicit repository is
+  present in the onboarding report. Out-of-bound candidates receive neither
+  that edge nor a repository projection.
+- `autospec project sync` acknowledges preserved repository projections only
+  after managed Project resolution and issue-projection retry succeed.
+- Control-plane bootstrap accepts explicit `--source-spec IDENTITY`; that value
+  takes precedence over `AUTOSPEC_RUN_ID` and the generic bootstrap identity.
+  Values remain individually quoted shell arguments and are never evaluated.
+- Control-plane bootstrap continues only for `reconciled` and
+  `journaled_projection_pending`; it propagates every non-zero or unsupported
+  result without rolling back or recreating the verified repository.
+- The standalone `autospec-project` installer now invokes the established
+  runtime installer when the configured binary lacks `autospec project`, then
+  verifies the returned runtime path. It fails before claiming installation
+  success when that surface remains unavailable.
+
+### TDD and verification evidence
+
+- RED: `cargo test -p autospec-cli --test managed_project onboard_cli_` failed
+  to compile because `run_with_transport` returned no typed value; the new
+  real-journal tests therefore could not observe a pending outcome.
+- RED: focused control-plane Bats showed explicit `--source-spec` was rejected
+  and exit `9` registration failures were swallowed as warning-only success.
+- GREEN: `cargo test -p autospec-cli --test managed_project onboard_ --no-fail-fast`
+  → `16 passed`, `0 failed`, including real `events.jsonl` ordering,
+  idempotency, hard-versus-pending outcomes, admission gating, and later sync.
+- GREEN: `bats tests/autospec/managed-project-workflows.bats`
+  → `11 passed`, `0 failed`.
+- GREEN: `bats tests/install/project-board-install.bats`
+  → `10 passed`, `0 failed`.
+- GREEN: `AUTOSPEC_TEST_BIN="$PWD/target/debug/autospec" bats
+  tests/autospec/managed-project-onboard.bats` → `2 passed`, `0 failed`.
+- GREEN: `cargo check -p autospec-cli` and `cargo clippy -p autospec-cli --bin
+  autospec --no-deps` completed successfully; only pre-existing dead-code and
+  unnecessary-cast warnings outside Task 6 were emitted.
+- GREEN: `bash -n scripts/autospec-control-plane.sh`, `sh -n
+  skills/autospec-project/install.sh`, targeted `rustfmt --check` with child
+  traversal disabled, all four trio `--check` runs, idempotent golden
+  regeneration, and `git diff --check` completed successfully.
+
+### Remaining concerns
+
+- Live GitHub repository/Project mutations remain untested; scripted transport
+  and real local bare repositories cover ordering, durable recovery,
+  provenance, and no-recreate behavior.
+- A redundant broad `managed_project` integration-target run was stopped after
+  it traversed unrelated autonomous Tier 2 tests and surfaced their existing
+  failures. Per the scoped instruction, no full suite was pursued; all Task 6
+  focused tests and static checks are green.
