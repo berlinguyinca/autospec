@@ -37,6 +37,14 @@ pub fn resolve_or_create_project<T: GithubTransport>(
         }
         return resume_bound_project(store, github, policy, number);
     }
+    if let Some(provisional) = store.provisional_project().cloned() {
+        if provisional.owner != policy.owner {
+            return Err(ManagedProjectError::new(
+                "provisional project owner conflicts with policy",
+            ));
+        }
+        return resume_created_project(store, github, policy, &provisional);
+    }
 
     let output = execute(
         github,
@@ -167,8 +175,63 @@ fn create_project<T: GithubTransport>(
         "cannot create managed GitHub Project",
     )?)?;
     validate_returned_owner(&created, &policy.owner)?;
-    persist_project(store, &created)?;
-    resume_bound_project(store, github, policy, created.number)
+    store.record_created_project(&created)?;
+    let provisional = store
+        .provisional_project()
+        .cloned()
+        .ok_or_else(|| ManagedProjectError::new("created project identity was not journaled"))?;
+    resume_created_project(store, github, policy, &provisional)
+}
+
+fn resume_created_project<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+    provisional: &super::ProjectIdentity,
+) -> Result<RemoteProject, ManagedProjectError> {
+    let before_edit = view_project(github, &policy.owner, provisional.number)?;
+    validate_created_identity(&before_edit, provisional)?;
+    let verified = if verify_managed_marker(&before_edit.readme, policy)? {
+        before_edit
+    } else {
+        if !has_pending_create(store, policy) {
+            return Err(ManagedProjectError::new(
+                "provisional Project has no pending create projection",
+            ));
+        }
+        let readme = parse::append_marker(&before_edit.readme, policy)?;
+        execute(
+            github,
+            GithubCommand::EditProjectMarker {
+                owner: policy.owner.clone(),
+                number: provisional.number,
+                readme,
+            },
+            "cannot write managed GitHub Project marker",
+        )?;
+        let verified = view_project(github, &policy.owner, provisional.number)?;
+        validate_created_identity(&verified, provisional)?;
+        validate_project(&verified, policy)?;
+        verified
+    };
+    persist_project(store, &verified)?;
+    ack_create_projection_if_pending(store, policy)?;
+    Ok(verified)
+}
+
+fn validate_created_identity(
+    project: &RemoteProject,
+    provisional: &super::ProjectIdentity,
+) -> Result<(), ManagedProjectError> {
+    if project.owner != provisional.owner
+        || project.node_id != provisional.node_id
+        || project.number != provisional.number
+    {
+        return Err(ManagedProjectError::new(
+            "verified remote project identity conflicts with provisional creation",
+        ));
+    }
+    Ok(())
 }
 
 fn resume_bound_project<T: GithubTransport>(
@@ -308,6 +371,11 @@ fn bound_identity(
     store: &ManagedProjectStore,
     policy: &ManagedProjectPolicy,
 ) -> Result<BoundIdentity, ManagedProjectError> {
+    if has_pending_create(store, policy) {
+        return Err(ManagedProjectError::new(
+            "managed GitHub Project creation is not verified",
+        ));
+    }
     let binding = store.snapshot();
     let owner = binding
         .owner

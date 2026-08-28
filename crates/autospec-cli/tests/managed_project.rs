@@ -216,7 +216,8 @@ fn github_create_failure_persists_identity_and_resumes_marker_edit_without_dupli
     ]);
 
     assert!(resolve_or_create_project(&mut store, &mut first, &policy, "Autospec").is_err());
-    assert_eq!(store.snapshot().project_node_id.as_deref(), Some("PVT_7"));
+    assert_eq!(store.snapshot().project_node_id, None);
+    assert_eq!(store.snapshot().project_number, None);
     assert_eq!(store.snapshot().pending_projections.len(), 1);
     drop(store);
 
@@ -228,6 +229,11 @@ fn github_create_failure_persists_identity_and_resumes_marker_edit_without_dupli
     ]);
     resolve_or_create_project(&mut reopened, &mut retry, &policy, "Autospec").unwrap();
 
+    assert_eq!(
+        reopened.snapshot().project_node_id.as_deref(),
+        Some("PVT_7")
+    );
+    assert_eq!(reopened.snapshot().project_number, Some(7));
     assert!(reopened.snapshot().pending_projections.is_empty());
     assert!(retry.calls.iter().all(|call| !matches!(
         call,
@@ -238,6 +244,38 @@ fn github_create_failure_persists_identity_and_resumes_marker_edit_without_dupli
         _ => None,
     });
     assert_eq!(edited, Some(marked.as_str()));
+}
+
+#[test]
+fn github_provisional_creation_cannot_authorize_item_mutation() {
+    let fixture = Fixture::new("github-provisional-create");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut create = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Ok(project(7, "berlinguyinca", "Autospec", "human")),
+        Err(GithubFailure::Retryable("view interrupted".to_owned())),
+    ]);
+
+    assert!(resolve_or_create_project(&mut store, &mut create, &policy, "Autospec").is_err());
+    assert_eq!(store.snapshot().project_node_id, None);
+    assert_eq!(store.snapshot().project_number, None);
+    let journal = fs::read_to_string(fixture.state_path("events.jsonl")).unwrap();
+    assert!(journal.contains("\"kind\":\"project-created\""));
+    assert!(!journal.contains("\"kind\":\"project-bound\""));
+    drop(store);
+
+    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut reconcile = ScriptedGithub::default();
+    assert!(reconcile_issue(
+        &mut reopened,
+        &mut reconcile,
+        &policy,
+        "https://github.com/berlinguyinca/autospec/issues/47",
+    )
+    .is_err());
+    assert!(reconcile.calls.is_empty());
+    assert_eq!(reopened.snapshot().pending_projections.len(), 1);
 }
 
 #[test]

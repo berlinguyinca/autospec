@@ -6,6 +6,7 @@ Status: DONE_WITH_CONCERNS
 
 - `b99d2479` — `feat: upsert managed GitHub Projects`
 - Review fix — `fix: make managed Project retries fail closed`
+- Review fix round 2 — `fix: keep created Projects provisional until verified`
 
 ## Red evidence
 
@@ -25,6 +26,9 @@ Status: DONE_WITH_CONCERNS
   that created identity was not durable before marker editing, pending creation could repeat,
   malformed README/item shapes were accepted or skipped, human README suffix bytes were
   trimmed, and numeric issue aliases were not canonicalized.
+- Review round 2 first observed the new provisional-safety regression fail because an
+  interrupted create exposed `Some("PVT_7")` as the final binding before marker verification.
+  That state could authorize a later item-list/add transport call.
 
 ## Green evidence
 
@@ -45,6 +49,11 @@ Status: DONE_WITH_CONCERNS
   → exit `0`; `21 passed`, `0 failed`.
 - Review round 1: `cargo test -p autospec-cli --test autonomous_accountability_github --
   --nocapture` → exit `0`; `33 passed`, `0 failed`.
+- Review round 2: `cargo test -p autospec-cli --test managed_project
+  github_provisional_creation_cannot_authorize_item_mutation -- --nocapture` → exit `0`; the
+  reopened provisional journal exposes no final binding and reconciliation makes zero calls.
+- Review round 2: the focused `github_` and `store_` filters pass with `20` and `21` tests,
+  respectively.
 
 ## Files changed
 
@@ -55,9 +64,10 @@ Status: DONE_WITH_CONCERNS
   README, marker, item, and canonical issue-URL parsing while retaining the 500-object
   fail-closed boundary.
 - `crates/autospec-cli/src/commands/managed_project.rs` — exports the lifecycle surface and
-  adds the journaled, conflict-checked Project binding event.
+  adds distinct provisional identity and final binding transitions with conflict checks.
 - `crates/autospec-cli/src/commands/managed_project/store.rs` — replays the new
-  `project-bound` event while preserving the existing serialized writer/checkpoint contract.
+  `project-created` provisional event and promotes it only through the later `project-bound`
+  event while preserving the existing serialized writer/checkpoint contract.
 - `crates/autospec-cli/src/commands/autonomous/accountability/github/transport.rs` — adds
   owner-explicit Project list/view/create/edit/item commands and removes repository-derived
   ownership from `AddToProject`.

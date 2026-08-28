@@ -3,6 +3,7 @@ use super::{
     ensure_private_directory, ensure_private_file, extend_journal_digest, io_error,
     open_private_file, read_persisted_binding, reject_unsafe_file, snapshot_needs_update,
     validate_replay_checkpoint, JournalCheckpoint, ManagedProjectError, ProductLock,
+    ProjectIdentity,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
@@ -24,6 +25,7 @@ pub struct ManagedProjectStore {
     pub(super) binding: ManagedProjectBinding,
     event_keys: HashSet<String>,
     known_projections: HashSet<String>,
+    provisional_project: Option<ProjectIdentity>,
     next_sequence: u64,
     journal_digest: String,
     append_fault_after: Option<usize>,
@@ -68,6 +70,7 @@ impl ManagedProjectStore {
             binding: empty_binding,
             event_keys: HashSet::new(),
             known_projections: HashSet::new(),
+            provisional_project: None,
             next_sequence: 1,
             journal_digest: empty_journal_digest(),
             append_fault_after: None,
@@ -178,6 +181,10 @@ impl ManagedProjectStore {
         &self.binding
     }
 
+    pub(super) fn provisional_project(&self) -> Option<&ProjectIdentity> {
+        self.provisional_project.as_ref()
+    }
+
     #[cfg(test)]
     pub fn fail_next_append_after(&mut self, bytes: usize) {
         self.append_fault_after = Some(bytes);
@@ -232,6 +239,7 @@ impl ManagedProjectStore {
         self.binding = ManagedProjectBinding::new(self.product_key.clone());
         self.event_keys.clear();
         self.known_projections.clear();
+        self.provisional_project = None;
         self.next_sequence = 1;
         for event in recovered.events {
             self.apply_event(&event)?;
@@ -255,8 +263,56 @@ impl ManagedProjectStore {
             return Ok(());
         }
         match event.kind.as_str() {
+            "project-created" => {
+                let projection = format!("project:create:{}", self.product_key.as_str());
+                if self.binding.project_node_id.is_some() {
+                    return Err(ManagedProjectError::new(
+                        "provisional project identity follows a final binding",
+                    ));
+                }
+                if !self.known_projections.contains(&projection)
+                    || !self
+                        .binding
+                        .pending_projections
+                        .iter()
+                        .any(|pending| pending == &projection)
+                {
+                    return Err(ManagedProjectError::new(
+                        "provisional project identity has no pending create projection",
+                    ));
+                }
+                let identity = super::parse_project_identity(&event.payload)?;
+                if self
+                    .provisional_project
+                    .as_ref()
+                    .is_some_and(|existing| existing != &identity)
+                {
+                    return Err(ManagedProjectError::new(
+                        "journal contains conflicting provisional project identities",
+                    ));
+                }
+                self.provisional_project = Some(identity);
+            }
             "project-bound" => {
+                let identity = super::parse_project_identity(&event.payload)?;
+                if self.binding.project_node_id.is_some()
+                    && super::project_binding_payload(&self.binding) != Some(event.payload.clone())
+                {
+                    return Err(ManagedProjectError::new(
+                        "journal contains conflicting final project bindings",
+                    ));
+                }
+                if self
+                    .provisional_project
+                    .as_ref()
+                    .is_some_and(|provisional| provisional != &identity)
+                {
+                    return Err(ManagedProjectError::new(
+                        "final project binding conflicts with provisional identity",
+                    ));
+                }
                 super::apply_project_binding(&mut self.binding, &event.payload)?;
+                self.provisional_project = None;
             }
             "repository-recorded" => {
                 let repository: RepositoryRecord = serde_json::from_value(event.payload.clone())
