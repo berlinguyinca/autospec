@@ -16,50 +16,59 @@ pub(super) fn scan(root: &Path) -> Result<Vec<Discovery>, std::io::Error> {
             .unwrap_or(&path)
             .display()
             .to_string();
-        for line in managed_relationship_lines(&source) {
-            let lower = line.to_ascii_lowercase();
-            let (evidence, kind, value) = if let Some(value) = prefixed_value(line, "Source spec:")
-            {
-                ("source-spec", RelationshipKind::Implements, value)
-            } else if let Some(value) = prefixed_value(line, "Tracker:") {
-                ("tracker", RelationshipKind::Tracks, value)
-            } else if let Some(value) = prefixed_value(line, "Depends on") {
-                ("issue-reference", RelationshipKind::DependsOn, value)
-            } else if let Some(value) = prefixed_value(line, "Blocks") {
-                ("issue-reference", RelationshipKind::Blocks, value)
-            } else {
-                ("name-similarity", RelationshipKind::DependsOn, line)
-            };
-            if evidence != "name-similarity" {
-                let target = canonical_target(value);
-                let repository = target
-                    .as_deref()
-                    .and_then(field_repository)
-                    .or_else(|| field_repository(value))
-                    .map(str::to_owned);
-                if let Some(repository) = repository {
-                    let target = target.unwrap_or_else(|| repository.clone());
-                    discoveries.push(Discovery::typed_repository(
-                        repository,
-                        target,
-                        source_issue,
-                        kind,
-                        evidence,
-                        location.clone(),
-                    ));
-                }
-                continue;
-            }
-            if lower.contains("repository") {
-                discoveries.extend(
-                    repository_name_references(value)
-                        .into_iter()
-                        .map(|name| Discovery::proposed(name, location.clone())),
-                );
-            }
-        }
+        discoveries.extend(scan_source(&source, source_issue, &location));
     }
     Ok(discoveries)
+}
+
+pub(super) fn scan_source(
+    source: &str,
+    source_issue: Option<u64>,
+    location: &str,
+) -> Vec<Discovery> {
+    let mut discoveries = Vec::new();
+    for line in managed_relationship_lines(source) {
+        let lower = line.to_ascii_lowercase();
+        let (evidence, kind, value) = if let Some(value) = prefixed_value(line, "Source spec:") {
+            ("source-spec", RelationshipKind::Implements, value)
+        } else if let Some(value) = prefixed_value(line, "Tracker:") {
+            ("tracker", RelationshipKind::Tracks, value)
+        } else if let Some(value) = prefixed_value(line, "Depends on") {
+            ("issue-reference", RelationshipKind::DependsOn, value)
+        } else if let Some(value) = prefixed_value(line, "Blocks") {
+            ("issue-reference", RelationshipKind::Blocks, value)
+        } else {
+            ("name-similarity", RelationshipKind::DependsOn, line)
+        };
+        if evidence != "name-similarity" {
+            let target = canonical_target(value);
+            let repository = target
+                .as_deref()
+                .and_then(field_repository)
+                .or_else(|| field_repository(value))
+                .map(str::to_owned);
+            if let Some(repository) = repository {
+                let target = target.unwrap_or_else(|| repository.clone());
+                discoveries.push(Discovery::typed_repository(
+                    repository,
+                    target,
+                    source_issue,
+                    kind,
+                    evidence,
+                    location.to_owned(),
+                ));
+            }
+            continue;
+        }
+        if lower.contains("repository") {
+            discoveries.extend(
+                repository_name_references(value)
+                    .into_iter()
+                    .map(|name| Discovery::proposed(name, location.to_owned())),
+            );
+        }
+    }
+    discoveries
 }
 
 fn canonical_target(value: &str) -> Option<String> {

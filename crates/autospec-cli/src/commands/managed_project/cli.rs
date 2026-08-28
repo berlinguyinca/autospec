@@ -52,6 +52,11 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
     validate_issue_boundaries(&policy, &options.issue_urls)?;
     populate_owner_repositories(&policy, &mut options, github)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
+    let selected_issue_edges = if command == "onboard" {
+        load_selected_issue_relationships(&policy, &options.issue_urls, github)?
+    } else {
+        Vec::new()
+    };
     let state_root = managed_state_root(&repo_dir)?;
     let legacy_root = repo_dir.join(".autospec/state");
     let read_only = options.dry_run || command == "active-edges";
@@ -77,7 +82,14 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             &policy,
             options.issue_urls.first().map(String::as_str),
         ),
-        "onboard" => onboard(store, github, policy, &repo_dir, options),
+        "onboard" => onboard(
+            store,
+            github,
+            policy,
+            &repo_dir,
+            options,
+            selected_issue_edges,
+        ),
         "active-edges" => active_edges(&store, options.board_url.as_deref()),
         other => Err(ManagedProjectError::new(format!(
             "unknown autospec project subcommand: {other}"
@@ -129,10 +141,11 @@ fn onboard<T: GithubTransport>(
     policy: autospec_core::managed_project::ManagedProjectPolicy,
     repo_dir: &Path,
     options: ProjectOptions,
+    selected_issue_edges: Vec<RelationshipEdge>,
 ) -> Result<Value, ManagedProjectError> {
     let created_repository = options.repositories.first().cloned();
     let selected_issues = options.issue_urls.clone();
-    let report = onboard_repositories(
+    let mut report = onboard_repositories(
         &mut store,
         &policy,
         &OnboardingOptions {
@@ -141,6 +154,12 @@ fn onboard<T: GithubTransport>(
             workspaces: options.workspaces,
             dry_run: options.dry_run,
         },
+    )?;
+    merge_selected_issue_edges(
+        &mut store,
+        &mut report,
+        selected_issue_edges,
+        options.dry_run,
     )?;
     if !options.dry_run {
         record_repository_relationships(
@@ -199,6 +218,82 @@ fn onboard<T: GithubTransport>(
         }
         Err(error) => Err(error),
     }
+}
+
+fn load_selected_issue_relationships<T: GithubTransport>(
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    issue_urls: &[String],
+    github: &mut T,
+) -> Result<Vec<RelationshipEdge>, ManagedProjectError> {
+    let mut edges = Vec::new();
+    for issue_url in issue_urls {
+        let remainder = issue_url
+            .strip_prefix("https://github.com/")
+            .ok_or_else(|| ManagedProjectError::new("selected issue URL is not canonical"))?;
+        let parts = remainder.split('/').collect::<Vec<_>>();
+        let number = parts
+            .get(3)
+            .and_then(|number| number.parse::<u64>().ok())
+            .filter(|number| *number > 0)
+            .ok_or_else(|| ManagedProjectError::new("selected issue URL has no positive number"))?;
+        let repository = parts
+            .get(0..2)
+            .map(|parts| parts.join("/"))
+            .ok_or_else(|| ManagedProjectError::new("selected issue URL has no repository"))?;
+        let output = github
+            .execute(GithubCommand::ViewIssue { repository, number })
+            .map_err(|error| {
+                ManagedProjectError::new(format!("cannot index selected issue: {error}"))
+            })?;
+        let issue: Value = serde_json::from_str(&output).map_err(|error| {
+            ManagedProjectError::new(format!("invalid selected issue response: {error}"))
+        })?;
+        let returned_url = issue.get("url").and_then(Value::as_str).ok_or_else(|| {
+            ManagedProjectError::new("invalid selected issue response: missing url")
+        })?;
+        if normalize_issue_url(returned_url)? != *issue_url {
+            return Err(ManagedProjectError::new(
+                "selected issue response does not match the requested issue",
+            ));
+        }
+        let body = issue.get("body").and_then(Value::as_str).ok_or_else(|| {
+            ManagedProjectError::new("invalid selected issue response: missing body")
+        })?;
+        edges.extend(super::discover_remote_issue_relationships(
+            policy, issue_url, body,
+        )?);
+    }
+    edges.sort_by_key(RelationshipEdge::dedupe_key);
+    edges.dedup_by_key(|edge| edge.dedupe_key());
+    Ok(edges)
+}
+
+fn merge_selected_issue_edges(
+    store: &mut ManagedProjectStore,
+    report: &mut OnboardingReport,
+    edges: Vec<RelationshipEdge>,
+    dry_run: bool,
+) -> Result<(), ManagedProjectError> {
+    let mut known = report
+        .edges
+        .iter()
+        .map(RelationshipEdge::dedupe_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    for edge in edges {
+        if !known.insert(edge.dedupe_key()) {
+            continue;
+        }
+        report.updated += 1;
+        if edge.state == RelationshipState::Proposed {
+            report.proposed += 1;
+        }
+        if !dry_run {
+            store.record_edge(edge.clone())?;
+        }
+        report.edges.push(edge);
+    }
+    report.edges.sort_by_key(RelationshipEdge::dedupe_key);
+    Ok(())
 }
 
 fn record_repository_relationships(
@@ -602,7 +697,7 @@ fn add_issue_repositories(options: &mut ProjectOptions) -> Result<(), ManagedPro
     Ok(())
 }
 
-fn managed_state_root(_repo_dir: &Path) -> Result<PathBuf, ManagedProjectError> {
+pub(crate) fn managed_state_root(_repo_dir: &Path) -> Result<PathBuf, ManagedProjectError> {
     #[cfg(test)]
     return Ok(_repo_dir.join(".autospec/state"));
     #[cfg(not(test))]
@@ -614,6 +709,24 @@ fn managed_state_root(_repo_dir: &Path) -> Result<PathBuf, ManagedProjectError> 
         .map(PathBuf::from)
         .map(|home| home.join(".autospec"))
         .ok_or_else(|| ManagedProjectError::new("HOME is required when AUTOSPEC_HOME is unset"))
+}
+
+pub(crate) fn bound_project_url(
+    repo_dir: &Path,
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+) -> Result<Option<String>, ManagedProjectError> {
+    let state_root = managed_state_root(repo_dir)?;
+    let legacy_root = repo_dir.join(".autospec/state");
+    let store = if state_root
+        .join("projects")
+        .join(policy.product_key.as_str())
+        .exists()
+    {
+        ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
+    } else {
+        ManagedProjectStore::open_read_only(&legacy_root, &policy.product_key)?
+    };
+    Ok(store.snapshot().project_url.clone())
 }
 
 fn validate_issue_boundaries(

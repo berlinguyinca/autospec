@@ -308,9 +308,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "timeline" => timeline(options).map_err(CommandFailure::diagnostic),
         "cleanup" => cleanup(options).map_err(CommandFailure::diagnostic),
         "main-health" => main_health(options).map_err(CommandFailure::diagnostic),
-        "project-board-config" => {
-            project_board_config(options).map_err(CommandFailure::diagnostic)
-        }
+        "project-board-config" => project_board_config(options).map_err(CommandFailure::diagnostic),
         "drain" => drain::run(options),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
@@ -2026,7 +2024,22 @@ fn effective_main_health_policy_digest(
 /// nothing on stdout instead.
 fn project_board_config(options: Options) -> Result<(), String> {
     let config = load_autonomous_config(&options.repo_dir)?;
-    println!("{}", format_project_board_config(&config.project_board));
+    let mut board = config.project_board;
+    hydrate_managed_project_url(&mut board, std::path::Path::new(&options.repo_dir))?;
+    println!("{}", format_project_board_config(&board));
+    Ok(())
+}
+
+fn hydrate_managed_project_url(
+    board: &mut autospec_core::autonomous::config::ProjectBoardConfig,
+    repo_dir: &std::path::Path,
+) -> Result<(), String> {
+    if board.url.is_none() {
+        if let Some(policy) = board.managed_policy() {
+            board.url = crate::commands::managed_project::bound_project_url(repo_dir, policy)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -2065,10 +2078,7 @@ fn format_project_board_config(
                 .join(",")
         )
     );
-    let dep_fields_json = format!(
-        "\"{}\"",
-        json_escape(&board.dep_field_candidates.join(","))
-    );
+    let dep_fields_json = format!("\"{}\"", json_escape(&board.dep_field_candidates.join(",")));
     let dep_markers_json = format!("\"{}\"", json_escape(&board.dep_markers.join(",")));
     let write_back_json = if board.write_back { "true" } else { "false" };
     format!(
@@ -2610,8 +2620,7 @@ fn run_foreground_with_lease(
                 None,
                 claim::BridgeClaimDisposition::Retryable,
             )?;
-            clear_claim_acquisition_receipt(&state_path)
-                .map_err(CommandFailure::diagnostic)?;
+            clear_claim_acquisition_receipt(&state_path).map_err(CommandFailure::diagnostic)?;
         }
         state = state
             .transition(ConductorEvent::AbandonTerminal)
@@ -8129,6 +8138,9 @@ mod foreground_tests {
 mod project_board_config_tests {
     use super::*;
     use autospec_core::autonomous::config::AutonomousConfig;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PROJECT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
     // format_project_board_config is a pure formatter over an already-parsed
     // ProjectBoardConfig, so these tests exercise it directly against
@@ -8158,6 +8170,54 @@ mod project_board_config_tests {
                 "{{\"url\":\"https://github.com/orgs/acme/projects/1\",\"allowlist\":[\"acme/widgets\",\"acme/gadgets\"],\"control_issue\":null,{DEFAULT_TAIL},\"write_back\":true}}"
             )
         );
+    }
+
+    #[test]
+    fn managed_config_hydrates_the_url_from_the_durable_project_binding() {
+        let serial = NEXT_PROJECT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let repo_dir = std::env::temp_dir().join(format!(
+            "autospec-project-board-config-{}-{serial}",
+            std::process::id()
+        ));
+        let state_root = repo_dir.join(".autospec/state");
+        let policy = board(
+            "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  repo_allowlist: [\"berlinguyinca/*\"]\n",
+        )
+        .managed_policy()
+        .unwrap()
+        .clone();
+        std::fs::create_dir_all(&state_root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut store = crate::commands::managed_project::ManagedProjectStore::open(
+            &state_root,
+            &policy.product_key,
+        )
+        .unwrap();
+        store
+            .record_project(
+                "berlinguyinca",
+                "PVT_7",
+                7,
+                "https://github.com/orgs/berlinguyinca/projects/7",
+                "Autospec",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut managed = board(
+            "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  repo_allowlist: [\"berlinguyinca/*\"]\n",
+        );
+        hydrate_managed_project_url(&mut managed, &repo_dir).unwrap();
+
+        assert_eq!(
+            managed.url.as_deref(),
+            Some("https://github.com/orgs/berlinguyinca/projects/7")
+        );
+        let _ = std::fs::remove_dir_all(repo_dir);
     }
 
     #[test]

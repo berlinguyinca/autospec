@@ -657,6 +657,14 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
         "https://github.com/berlinguyinca/autospec/issues/42".to_owned(),
     ];
     let mut github = ScriptedGithub::with([
+        Ok(issue(
+            "https://github.com/berlinguyinca/autospec/issues/41",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/autospec-node/issues/9",
+        )),
+        Ok(issue(
+            "https://github.com/berlinguyinca/autospec/issues/42",
+            "No managed relationships.",
+        )),
         Ok(project(
             7,
             "berlinguyinca",
@@ -673,6 +681,10 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
     assert_eq!(outcome["selected_issues"], 2);
     assert_eq!(outcome["reconciled_issues"], 2);
     assert_eq!(outcome["pending_projection"], 0);
+    assert!(outcome["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["source"] == "https://github.com/berlinguyinca/autospec/issues/41"
+            && edge["target"] == "https://github.com/berlinguyinca/autospec-node/issues/9"
+    }));
     assert_eq!(
         github
             .calls
@@ -1684,6 +1696,10 @@ fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {
     .to_string()
 }
 
+fn issue(url: &str, body: &str) -> String {
+    serde_json::json!({ "url": url, "body": body }).to_string()
+}
+
 fn project_list(projects: serde_json::Value) -> String {
     serde_json::json!({ "projects": projects }).to_string()
 }
@@ -2204,6 +2220,42 @@ fn issue_projection_is_durable_before_project_identity_exists_and_promotes_after
         GithubCommand::AddToProject { issue_url, .. }
             if issue_url == "https://github.com/berlinguyinca/autospec/issues/46"
     )));
+}
+
+#[test]
+fn project_binding_refreshes_mutable_title_and_url_for_the_same_project_identity() {
+    let fixture = Fixture::new("project-binding-metadata-refresh");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/users/berlinguyinca/projects/7",
+            "Autospec delivery",
+        )
+        .unwrap();
+    drop(store);
+
+    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    assert_eq!(
+        reopened.snapshot().project_url.as_deref(),
+        Some("https://github.com/users/berlinguyinca/projects/7")
+    );
+    assert_eq!(
+        reopened.snapshot().project_title.as_deref(),
+        Some("Autospec delivery")
+    );
 }
 
 #[test]

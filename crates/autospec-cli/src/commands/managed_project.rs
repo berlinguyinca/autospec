@@ -25,12 +25,14 @@ mod store;
 pub use cli::run;
 #[cfg(test)]
 pub(crate) use cli::run_with_transport;
+pub(crate) use cli::{bound_project_url, managed_state_root};
 #[cfg(test)]
 pub use github::verify_managed_marker;
 pub use github::{
     journal_issue_projection, normalize_issue_url, reconcile_issue, resolve_or_create_project,
     retry_pending_projections,
 };
+pub(crate) use onboard::discover_remote_issue_relationships;
 pub use onboard::{
     active_dependency_graph, normalize_github_repository, onboard_repositories, OnboardingOptions,
     OnboardingReport,

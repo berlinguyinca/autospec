@@ -284,6 +284,7 @@ fn resume_bound_project<T: GithubTransport>(
         ));
     }
     if verify_managed_marker(&before_edit.readme, policy)? {
+        persist_project(store, &before_edit)?;
         ack_create_projection_if_pending(store, policy)?;
         return Ok(before_edit);
     }

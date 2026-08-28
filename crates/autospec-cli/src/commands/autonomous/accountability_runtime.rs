@@ -130,8 +130,12 @@ pub(super) fn bind_accountability_epic(
                 CommandFailure::diagnostic("managed Project config has no repository root")
             })?
             .to_path_buf();
-        let mut project_store = crate::commands::managed_project::ManagedProjectStore::open(
-            &repo_root.join(".autospec/state"),
+        let state_root = crate::commands::managed_project::managed_state_root(&repo_root)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        let legacy_root = repo_root.join(".autospec/state");
+        let mut project_store = crate::commands::managed_project::ManagedProjectStore::open_global(
+            &state_root,
+            Some(&legacy_root),
             &policy.product_key,
         )
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;

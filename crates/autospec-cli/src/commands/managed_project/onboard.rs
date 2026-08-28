@@ -169,6 +169,57 @@ pub fn onboard_repositories(
     Ok(report)
 }
 
+pub(crate) fn discover_remote_issue_relationships(
+    policy: &ManagedProjectPolicy,
+    issue_url: &str,
+    body: &str,
+) -> Result<Vec<RelationshipEdge>, ManagedProjectError> {
+    let remainder = issue_url
+        .strip_prefix("https://github.com/")
+        .ok_or_else(|| ManagedProjectError::new("selected issue URL is not canonical"))?;
+    let parts = remainder.split('/').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[2] != "issues" {
+        return Err(ManagedProjectError::new(
+            "selected issue URL is not canonical",
+        ));
+    }
+    let repository = format!("{}/{}", parts[0], parts[1]);
+    let number = parts[3]
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| ManagedProjectError::new("selected issue URL has no positive number"))?;
+    let mut state = DiscoveryState::new(BTreeMap::new(), BTreeMap::new());
+    state.records.insert(
+        repository.clone(),
+        RepositoryRecord {
+            repository: repository.clone(),
+            entry_kind: "selected-issue".to_owned(),
+        },
+    );
+    let source = ScanTarget {
+        repository,
+        path: PathBuf::new(),
+    };
+    for discovery in issues::scan_source(body, Some(number), issue_url) {
+        retain_discovery(
+            discovery,
+            &source,
+            policy,
+            &mut Retention {
+                records: &mut state.records,
+                edges: &mut state.edges,
+                queue: &mut state.queue,
+                queued: &mut state.queued,
+                out_of_bound: &mut state.out_of_bound,
+                inaccessible: &mut state.inaccessible,
+                expansions: &mut state.expansions,
+            },
+        );
+    }
+    Ok(state.edges.into_values().collect())
+}
+
 fn baseline(
     binding: &ManagedProjectBinding,
 ) -> (BTreeSet<String>, BTreeSet<String>, DiscoveryState) {

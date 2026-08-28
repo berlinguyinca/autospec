@@ -394,12 +394,13 @@ impl ManagedProjectStore {
 
     fn apply_project_bound(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
         let identity = super::parse_project_identity(&event.payload)?;
-        if self.binding.project_node_id.is_some()
-            && super::project_binding_payload(&self.binding) != Some(event.payload.clone())
-        {
-            return Err(ManagedProjectError::new(
-                "journal contains conflicting final project bindings",
-            ));
+        if let Some(existing) = super::project_binding_payload(&self.binding) {
+            let existing = super::parse_project_identity(&existing)?;
+            if !existing.same_immutable_identity(&identity) {
+                return Err(ManagedProjectError::new(
+                    "journal contains conflicting final project bindings",
+                ));
+            }
         }
         if self
             .provisional_project

@@ -1,4 +1,5 @@
 use super::{store, ManagedProjectError, ManagedProjectStore, ProductLock};
+use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::ManagedProjectBinding;
 use serde_json::{json, Value};
 
@@ -77,12 +78,13 @@ impl ManagedProjectStore {
             title: title.to_owned(),
         };
         let payload = project_identity_payload(&identity);
-        if self.binding.project_node_id.is_some()
-            && project_binding_payload(&self.binding) != Some(payload.clone())
-        {
-            return Err(ManagedProjectError::new(
-                "managed project binding conflicts with the verified remote project",
-            ));
+        if let Some(existing) = project_binding_payload(&self.binding) {
+            let existing = parse_project_identity(&existing)?;
+            if !existing.same_immutable_identity(&identity) {
+                return Err(ManagedProjectError::new(
+                    "managed project binding conflicts with the verified remote project",
+                ));
+            }
         }
         if self
             .provisional_project()
@@ -93,7 +95,11 @@ impl ManagedProjectStore {
             ));
         }
         self.append_event_locked(
-            format!("project:bind:{}", self.product_key.as_str()),
+            format!(
+                "project:bind:{}:{}",
+                self.product_key.as_str(),
+                sha256_hex(payload.to_string().as_bytes())
+            ),
             "project-bound",
             payload,
         )
