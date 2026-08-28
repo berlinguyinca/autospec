@@ -39,6 +39,10 @@ pub enum GithubCommand {
     ListProjects {
         owner: String,
     },
+    ListOwnerRepositories {
+        owner: String,
+        limit: usize,
+    },
     ViewProject {
         owner: String,
         number: u64,
@@ -164,6 +168,18 @@ impl GithubCommand {
                     "json".into(),
                     "--limit".into(),
                     "500".into(),
+                ],
+                None,
+            ),
+            Self::ListOwnerRepositories { owner, limit } => (
+                vec![
+                    "repo".into(),
+                    "list".into(),
+                    owner,
+                    "--limit".into(),
+                    limit.to_string(),
+                    "--json".into(),
+                    "nameWithOwner".into(),
                 ],
                 None,
             ),
@@ -297,6 +313,7 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
         GithubCommand::ListAccountabilityIssues { .. }
             | GithubCommand::ViewIssue { .. }
             | GithubCommand::ListProjects { .. }
+            | GithubCommand::ListOwnerRepositories { .. }
             | GithubCommand::ViewProject { .. }
             | GithubCommand::ListProjectItems { .. }
     );

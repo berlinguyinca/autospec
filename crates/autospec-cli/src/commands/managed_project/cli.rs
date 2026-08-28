@@ -1,4 +1,4 @@
-use super::super::autonomous::accountability::github::{GhCli, GithubTransport};
+use super::super::autonomous::accountability::github::{GhCli, GithubCommand, GithubTransport};
 use super::{
     onboard_repositories, reconcile_issue, resolve_or_create_project, retry_pending_projections,
     ManagedProjectError, ManagedProjectStore, OnboardingOptions, OnboardingReport,
@@ -28,17 +28,18 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             .iter()
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--spawned-from IDENTITY] [--dry-run]");
+        println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--owner OWNER --allow PATTERN]... [--spawned-from IDENTITY] [--dry-run]");
         return Ok(Value::Null);
     }
     let command = &args[0];
-    let options = parse_options(&args[1..])?;
+    let mut options = parse_options(&args[1..])?;
     validate_options(command, &options)?;
     let repo_dir = options
         .repo_dir
         .clone()
         .ok_or_else(|| ManagedProjectError::new("autospec project requires --repo-dir"))?;
     let policy = load_managed_policy(&repo_dir)?;
+    populate_owner_repositories(&policy, &mut options, github)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
     let state_root = repo_dir.join(".autospec/state");
     let mut store = if options.dry_run {
@@ -257,6 +258,8 @@ struct ProjectOptions {
     workspaces: Vec<PathBuf>,
     issue_url: Option<String>,
     spawned_from: Option<String>,
+    owner: Option<String>,
+    allow: Vec<String>,
     dry_run: bool,
 }
 
@@ -266,7 +269,8 @@ fn parse_options(args: &[String]) -> Result<ProjectOptions, ManagedProjectError>
     while index < args.len() {
         let argument = &args[index];
         match argument.as_str() {
-            "--repo-dir" | "--repo" | "--workspace" | "--issue-url" | "--spawned-from" => {
+            "--repo-dir" | "--repo" | "--workspace" | "--issue-url" | "--spawned-from"
+            | "--owner" | "--allow" => {
                 let value = args.get(index + 1).ok_or_else(|| {
                     ManagedProjectError::new(format!("{argument} requires a value"))
                 })?;
@@ -307,24 +311,43 @@ fn set_value(
             return Err(ManagedProjectError::new("--spawned-from must not be empty"))
         }
         "--spawned-from" => return Err(ManagedProjectError::new("duplicate --spawned-from")),
+        "--owner" if options.owner.is_none() && !value.trim().is_empty() => {
+            options.owner = Some(value.to_owned())
+        }
+        "--owner" if value.trim().is_empty() => {
+            return Err(ManagedProjectError::new("--owner must not be empty"))
+        }
+        "--owner" => return Err(ManagedProjectError::new("duplicate --owner")),
+        "--allow" if !value.trim().is_empty() => options.allow.push(value.to_owned()),
+        "--allow" => return Err(ManagedProjectError::new("--allow must not be empty")),
         _ => unreachable!(),
     }
     Ok(())
 }
 
 fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), ManagedProjectError> {
+    if command == "onboard" && options.owner.is_some() && options.allow.is_empty() {
+        return Err(ManagedProjectError::new("--owner requires --allow"));
+    }
+    if command == "onboard" && options.owner.is_none() && !options.allow.is_empty() {
+        return Err(ManagedProjectError::new("--allow requires --owner"));
+    }
     let invalid = match command {
         "resolve" => {
             !options.repositories.is_empty()
                 || !options.workspaces.is_empty()
                 || options.issue_url.is_some()
                 || options.spawned_from.is_some()
+                || options.owner.is_some()
+                || !options.allow.is_empty()
                 || options.dry_run
         }
         "sync" => {
             !options.repositories.is_empty()
                 || !options.workspaces.is_empty()
                 || options.spawned_from.is_some()
+                || options.owner.is_some()
+                || !options.allow.is_empty()
                 || options.dry_run
         }
         "onboard" => {
@@ -340,6 +363,84 @@ fn validate_options(command: &str, options: &ProjectOptions) -> Result<(), Manag
     } else {
         Ok(())
     }
+}
+
+fn populate_owner_repositories<T: GithubTransport>(
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    options: &mut ProjectOptions,
+    github: &mut T,
+) -> Result<(), ManagedProjectError> {
+    let Some(owner) = options.owner.as_deref() else {
+        return Ok(());
+    };
+    if options.allow.is_empty() {
+        return Err(ManagedProjectError::new("--owner requires --allow"));
+    }
+    if !owner.eq_ignore_ascii_case(&policy.owner) {
+        return Err(ManagedProjectError::new(
+            "--owner must match the managed project owner",
+        ));
+    }
+    let allow = options
+        .allow
+        .iter()
+        .map(|pattern| validate_owner_pattern(owner, pattern))
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = github
+        .execute(GithubCommand::ListOwnerRepositories {
+            owner: owner.to_owned(),
+            limit: policy.discovery_max_repos,
+        })
+        .map_err(|error| {
+            ManagedProjectError::new(format!("cannot enumerate owner repositories: {error}"))
+        })?;
+    let repositories: Value = serde_json::from_str(&output).map_err(|error| {
+        ManagedProjectError::new(format!("invalid owner repository response: {error}"))
+    })?;
+    let repositories = repositories.as_array().ok_or_else(|| {
+        ManagedProjectError::new("invalid owner repository response: expected an array")
+    })?;
+    for repository in repositories {
+        let value = repository
+            .get("nameWithOwner")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ManagedProjectError::new("invalid owner repository response: missing nameWithOwner")
+            })?;
+        let repository = super::normalize_github_repository(value).ok_or_else(|| {
+            ManagedProjectError::new("invalid owner repository response: malformed repository")
+        })?;
+        if allow
+            .iter()
+            .any(|pattern| matches_allow_pattern(&repository, pattern))
+        {
+            options.repositories.push(repository);
+        }
+    }
+    options.repositories.sort();
+    options.repositories.dedup();
+    Ok(())
+}
+
+fn validate_owner_pattern(owner: &str, pattern: &str) -> Result<String, ManagedProjectError> {
+    let normalized = pattern.trim().to_ascii_lowercase();
+    let base = normalized.strip_suffix('*').unwrap_or(&normalized);
+    if base.contains('*')
+        || !base.starts_with(&format!("{}/", owner.trim().to_ascii_lowercase()))
+        || super::normalize_github_repository(base).is_none()
+    {
+        return Err(ManagedProjectError::new(format!(
+            "invalid --allow repository pattern: {pattern}"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn matches_allow_pattern(repository: &str, pattern: &str) -> bool {
+    pattern.strip_suffix('*').map_or_else(
+        || repository == pattern,
+        |prefix| repository.starts_with(prefix),
+    )
 }
 
 fn load_managed_policy(

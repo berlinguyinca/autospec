@@ -27,6 +27,22 @@ fn github_project_transport_commands_have_explicit_owner_contracts() {
             None,
         ),
         (
+            GithubCommand::ListOwnerRepositories {
+                owner: "berlinguyinca".into(),
+                limit: 25,
+            },
+            vec![
+                "repo",
+                "list",
+                "berlinguyinca",
+                "--limit",
+                "25",
+                "--json",
+                "nameWithOwner",
+            ],
+            None,
+        ),
+        (
             GithubCommand::CreateProject {
                 owner: "berlinguyinca".into(),
                 title: "Autospec".into(),

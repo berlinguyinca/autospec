@@ -14,13 +14,15 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
   every generated issue and accountability epic recoverable, and retries transient item-add
   failures without duplicate issues or Project items.
-- Added `autospec project resolve`, `sync`, and `onboard` for explicit repository seeds,
-  allowlisted-owner discovery, and local workspace onboarding. Discovery cannot widen the
-  configured allowlist; deterministic relationships become active while ambiguous evidence stays
-  proposed and non-blocking.
+- Added `autospec project resolve`, `sync`, and `onboard` for explicit repository seeds, bounded
+  `--owner`/`--allow` discovery, and local workspace onboarding. Owner enumeration is capped by
+  `discovery_max_repos`, and matches become exact seeds only after the command allowlist is
+  applied. Discovery cannot widen the configured allowlist; deterministic relationships become
+  active while ambiguous evidence stays proposed and non-blocking.
 - Repository bootstrap now registers a verified remote after creation and records explicit
   `spawned-from` provenance. Existing explicit Project URLs remain compatible in external mode,
-  and `~/.autospec/project-map.yml` remains an undeleted fallback during migration.
+  and accountability retains its undeleted `~/.autospec/project-map.yml` compatibility fallback
+  when no managed policy exists. Classifier `--apply-boards` label routing remains independent.
 
 ### Fixed
 

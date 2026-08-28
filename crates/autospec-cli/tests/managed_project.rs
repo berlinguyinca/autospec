@@ -525,6 +525,65 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
 }
 
 #[test]
+fn onboard_cli_bounds_owner_enumeration_and_filters_before_scanning() {
+    let fixture = Fixture::new("onboard-owner");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+        "--allow".to_owned(),
+        "berlinguyinca/kept-*".to_owned(),
+        "--dry-run".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok(
+        r#"[{"nameWithOwner":"berlinguyinca/kept-one"},{"nameWithOwner":"berlinguyinca/rejected"},{"nameWithOwner":"other/kept-two"}]"#
+            .to_owned(),
+    )]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(
+        github.calls,
+        vec![GithubCommand::ListOwnerRepositories {
+            owner: "berlinguyinca".to_owned(),
+            limit: 25,
+        }]
+    );
+    let repositories = outcome["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| repository["repository"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(repositories.contains(&"berlinguyinca/kept-one"));
+    assert!(!repositories.contains(&"berlinguyinca/rejected"));
+    assert!(!repositories.contains(&"other/kept-two"));
+}
+
+#[test]
+fn onboard_cli_requires_an_allowlist_for_owner_enumeration() {
+    let fixture = Fixture::new("onboard-owner-no-allow");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--owner".to_owned(),
+        "berlinguyinca".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(error.to_string().contains("--owner requires --allow"));
+    assert!(github.calls.is_empty());
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
 fn onboard_scans_only_structured_manifest_and_fleet_fields() {
     let fixture = Fixture::new("onboard-structured-fields");
     let repository_path = fixture.path().join("checkout");
@@ -1112,6 +1171,40 @@ fn gh_cli_read_auth_403_is_a_hard_nonzero_onboarding_failure() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("HTTP 403"));
+}
+
+#[cfg(unix)]
+#[test]
+fn gh_cli_owner_enumeration_auth_failure_is_hard_before_onboarding_state() {
+    let fixture = Fixture::new("gh-cli-owner-auth-403");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let gh_program = fixture.path().join("gh-owner-auth-403");
+    fs::write(
+        &gh_program,
+        "#!/bin/sh\nprintf '%s\\n' 'authentication required (HTTP 401)' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh_program, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args([
+            "project",
+            "onboard",
+            "--repo-dir",
+            repository_path.to_str().unwrap(),
+            "--owner",
+            "berlinguyinca",
+            "--allow",
+            "berlinguyinca/autospec-*",
+        ])
+        .env("AUTOSPEC_GH_PROGRAM", gh_program)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HTTP 401"));
+    assert!(!repository_path.join(".autospec/state").exists());
 }
 
 #[cfg(unix)]

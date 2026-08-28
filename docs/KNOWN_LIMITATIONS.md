@@ -75,6 +75,12 @@
   explicit repositories, an allowlisted owner, or workspace paths, follows supported concrete
   metadata, and never expands beyond `repo_allowlist` or `discovery_max_repos`. Out-of-bound and
   inaccessible candidates are reported rather than indexed.
+- Owner onboarding enumerates at most `discovery_max_repos` through `gh repo list`; repositories
+  outside that bounded response are not considered even if they would match `--allow`. Missing
+  allow patterns and enumeration authentication failures are hard errors.
+- `journaled_projection_pending` is an onboarding JSON outcome after local repository state is
+  durable. Managed sync reports remote failures with a nonzero exit. A pending create without a
+  verified remote Project identity cannot be adopted automatically and fails closed.
 - Relationship inference is conservative. Deterministic repository metadata can create active
   dependency/blocking edges; ambiguous name-only relationships remain proposed and cannot affect
   execution until stronger evidence is recorded.

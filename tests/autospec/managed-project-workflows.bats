@@ -54,6 +54,8 @@ teardown() {
   grep -Fq 'requires at least one explicit `--allow` value' "$body"
   grep -Fq 'autospec project onboard --repo-dir "$PWD" --repo "owner/name"' "$body"
   grep -Fq 'autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"' "$body"
+  grep -Fq 'autospec project onboard --repo-dir "$PWD" --owner "owner"' "$body"
+  grep -Fq -- '--allow "pattern"' "$body"
   grep -Fq 'Forward `--dry-run` as a separate literal flag' "$body"
   grep -Fq 'never use' "$body"
   grep -Fq '`eval`' "$body"

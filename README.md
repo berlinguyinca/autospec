@@ -220,28 +220,38 @@ Then resolve the marked Project or onboard existing repositories:
 autospec project resolve --repo-dir "$PWD"
 autospec project onboard --repo-dir "$PWD" --repo berlinguyinca/autospec
 autospec project onboard --repo-dir "$PWD" --workspace /absolute/path
+autospec project onboard --repo-dir "$PWD" --owner berlinguyinca --allow 'berlinguyinca/autospec-*'
 autospec project sync --repo-dir "$PWD"
 ```
 
-The Rust command accepts repeatable `--repo` and `--workspace` seeds. The
-`/autospec-project onboard --owner berlinguyinca --allow berlinguyinca/autospec --allow
-berlinguyinca/autospec-*` skill writes the corresponding managed
-policy before invoking it. Discovery may follow concrete repository metadata, but every result
-must still match `repo_allowlist`; out-of-bound repositories are reported and never indexed.
+The Rust command accepts repeatable `--repo` and `--workspace` seeds. Owner onboarding requires
+at least one repeatable `--allow` equality or trailing-`*` prefix. It asks `gh repo list` for at
+most `discovery_max_repos`, applies those command-line patterns before the matching repositories
+become exact scanner seeds, and then enforces the configured `repo_allowlist` again. Discovery may
+follow concrete repository metadata, but it cannot widen either boundary; out-of-bound
+repositories are reported and never indexed.
 Verified repository creation uses `--repo OWNER/NAME --spawned-from IDENTITY` after `gh repo
 view` succeeds, while adopted repositories receive only an active `contains` relationship.
 
 Reconciliation is additive and idempotent. Deterministic evidence becomes an active relationship;
-ambiguous name-only evidence remains proposed and cannot gate execution. Failed transient GitHub
-projection is retained as one retryable pending entry and acknowledged by a later `project sync`
-without creating a replacement issue or duplicate Project item. The authoritative local recovery
-journal is `.autospec/state/projects/<product-key>/events.jsonl`, with its checkpoint at
+ambiguous name-only evidence remains proposed and cannot gate execution. When onboarding has
+already journaled repository state but its remote reconciliation encounters a transient failure,
+the command exits successfully with JSON `outcome: journaled_projection_pending`. Managed
+`autospec project sync --repo-dir "$PWD"` does not use that success outcome: a remote failure is a
+nonzero error, and an operator must rerun it after the cause clears. A pending Project create with
+no verified remote identity is a hard fail-closed condition, not automatically recoverable; verify
+the remote Project state before retrying. The authoritative local recovery journal is
+`.autospec/state/projects/<product-key>/events.jsonl`, with its checkpoint at
 `.autospec/state/projects/<product-key>/binding.json`.
 
-Existing `project_board.url` configurations remain compatible in `external` mode. To migrate from
-`~/.autospec/project-map.yml`, add the managed policy above, run `project resolve` and the bounded
-`project onboard` command, then run `project sync`. Autospec continues to read the legacy mapping
-only when no managed policy is configured and does not delete or rewrite that file.
+Existing `project_board.url` configurations remain compatible in `external` mode. The legacy
+`~/.autospec/project-map.yml` maps labels to GitHub Project numbers for the independent
+`/autospec-classify --apply-boards` workflow; it is not a repository-to-Project managed routing
+map. Accountability alone may use its mapped Project number as a compatibility fallback when no
+managed policy exists. To migrate accountability, add the managed policy above, run `autospec
+project resolve --repo-dir "$PWD"`, the bounded `autospec project onboard --repo-dir "$PWD" ...`
+command, and `autospec project sync --repo-dir "$PWD"`. Autospec does not delete or rewrite the
+legacy file, and `--apply-boards` continues to consume it independently.
 
 ## Install
 
