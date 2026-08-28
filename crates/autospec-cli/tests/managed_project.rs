@@ -141,7 +141,7 @@ fn project_list(projects: serde_json::Value) -> String {
 
 fn item_list(urls: &[&str]) -> String {
     serde_json::json!({
-        "items": urls.iter().map(|url| serde_json::json!({"content": {"url": url}})).collect::<Vec<_>>()
+        "items": urls.iter().map(|url| serde_json::json!({"content": {"type": "Issue", "url": url}})).collect::<Vec<_>>()
     })
     .to_string()
 }
@@ -161,7 +161,7 @@ fn github_marker_parser_requires_one_complete_exact_marker() {
 fn github_resolve_creates_marks_verifies_and_persists_when_no_marker_matches() {
     let fixture = Fixture::new("github-create");
     let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
-    let human_readme = "# Human notes\n\nKeep this text.";
+    let human_readme = "# Human notes\n\nKeep this text.\n \n\t";
     let marked_readme = format!("{human_readme}\n\n{}", marker("berlinguyinca"));
     let mut github = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([{
@@ -200,6 +200,154 @@ fn github_resolve_creates_marks_verifies_and_persists_when_no_marker_matches() {
         _ => None,
     });
     assert_eq!(edited.map(String::as_str), Some(marked_readme.as_str()));
+}
+
+#[test]
+fn github_create_failure_persists_identity_and_resumes_marker_edit_without_duplicate_create() {
+    let fixture = Fixture::new("github-create-resume");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let human_readme = "human bytes\n \n";
+    let marked = format!("{human_readme}\n\n{}", marker("berlinguyinca"));
+    let mut first = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Ok(project(7, "berlinguyinca", "Autospec", human_readme)),
+        Err(GithubFailure::Retryable("view interrupted".to_owned())),
+    ]);
+
+    assert!(resolve_or_create_project(&mut store, &mut first, &policy, "Autospec").is_err());
+    assert_eq!(store.snapshot().project_node_id.as_deref(), Some("PVT_7"));
+    assert_eq!(store.snapshot().pending_projections.len(), 1);
+    drop(store);
+
+    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut retry = ScriptedGithub::with([
+        Ok(project(7, "berlinguyinca", "Autospec", human_readme)),
+        Ok(String::new()),
+        Ok(project(7, "berlinguyinca", "Autospec", &marked)),
+    ]);
+    resolve_or_create_project(&mut reopened, &mut retry, &policy, "Autospec").unwrap();
+
+    assert!(reopened.snapshot().pending_projections.is_empty());
+    assert!(retry.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::ListProjects { .. } | GithubCommand::CreateProject { .. }
+    )));
+    let edited = retry.calls.iter().find_map(|call| match call {
+        GithubCommand::EditProjectMarker { readme, .. } => Some(readme.as_str()),
+        _ => None,
+    });
+    assert_eq!(edited, Some(marked.as_str()));
+}
+
+#[test]
+fn github_ambiguous_marker_edit_resumes_from_verified_bound_project() {
+    let fixture = Fixture::new("github-edit-resume");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let unmarked = project(7, "berlinguyinca", "Autospec", "human");
+    let marked = project(
+        7,
+        "berlinguyinca",
+        "Autospec",
+        &format!("human\n\n{}", marker("berlinguyinca")),
+    );
+    let mut first = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Ok(unmarked.clone()),
+        Ok(unmarked),
+        Err(GithubFailure::Retryable("edit response lost".to_owned())),
+    ]);
+    assert!(resolve_or_create_project(&mut store, &mut first, &policy, "Autospec").is_err());
+    assert_eq!(store.snapshot().pending_projections.len(), 1);
+
+    let mut retry = ScriptedGithub::with([Ok(marked)]);
+    resolve_or_create_project(&mut store, &mut retry, &policy, "Autospec").unwrap();
+
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert_eq!(retry.calls.len(), 1);
+    assert!(matches!(retry.calls[0], GithubCommand::ViewProject { .. }));
+}
+
+#[test]
+fn github_pending_create_without_identity_never_creates_a_second_project() {
+    let fixture = Fixture::new("github-create-ambiguous");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store.enqueue_projection("project:create:autospec").unwrap();
+    let mut github = ScriptedGithub::with([Ok(project_list(serde_json::json!([])))]);
+
+    let error = resolve_or_create_project(&mut store, &mut github, &policy, "Autospec")
+        .expect_err("an unbound pending create is ambiguous");
+
+    assert!(error.to_string().contains("pending project creation"));
+    assert_eq!(store.snapshot().pending_projections.len(), 1);
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProject { .. })));
+}
+
+#[test]
+fn github_verified_adoption_acknowledges_a_pending_create_projection() {
+    let fixture = Fixture::new("github-create-adopt");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store.enqueue_projection("project:create:autospec").unwrap();
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(
+            7,
+            "berlinguyinca",
+            "Autospec",
+            &marker("berlinguyinca"),
+        )),
+    ]);
+
+    resolve_or_create_project(&mut store, &mut github, &policy, "Autospec").unwrap();
+
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProject { .. })));
+}
+
+#[test]
+fn github_project_readme_must_be_a_string_before_any_mutation() {
+    for (name, readme) in [
+        ("missing", None),
+        ("null", Some(serde_json::Value::Null)),
+        ("number", Some(serde_json::json!(7))),
+    ] {
+        let fixture = Fixture::new(&format!("github-readme-{name}"));
+        let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&project(7, "berlinguyinca", "Autospec", "human")).unwrap();
+        match readme {
+            Some(readme) => value["readme"] = readme,
+            None => {
+                value.as_object_mut().unwrap().remove("readme");
+            }
+        }
+        let mut github = ScriptedGithub::with([
+            Ok(project_list(serde_json::json!([{"number": 7}]))),
+            Ok(value.to_string()),
+        ]);
+
+        assert!(resolve_or_create_project(
+            &mut store,
+            &mut github,
+            &policy("berlinguyinca"),
+            "Autospec"
+        )
+        .is_err());
+        assert!(store.snapshot().pending_projections.is_empty());
+        assert!(github.calls.iter().all(|call| !matches!(
+            call,
+            GithubCommand::CreateProject { .. } | GithubCommand::EditProjectMarker { .. }
+        )));
+    }
 }
 
 #[test]
@@ -335,7 +483,7 @@ fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
     resolve_or_create_project(&mut store, &mut resolver, &policy, "Autospec").unwrap();
 
     let mut already_present = ScriptedGithub::with([Ok(item_list(&[
-        "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/42/",
+        "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/00042/?view=1",
     ]))]);
     reconcile_issue(&mut store, &mut already_present, &policy, issue_url).unwrap();
     assert!(already_present
@@ -365,6 +513,105 @@ fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
         call,
         GithubCommand::CreateIssue { .. } | GithubCommand::AddToProject { .. }
     )));
+}
+
+#[test]
+fn github_item_reconciliation_ignores_known_nonissues_but_rejects_unknown_items() {
+    let fixture = Fixture::new("github-item-shapes");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    let pull_request_items = serde_json::json!({
+        "items": [{"content": {"type": "PullRequest", "url": "https://github.com/berlinguyinca/autospec/pull/9"}}]
+    })
+    .to_string();
+    let mut known = ScriptedGithub::with([Ok(pull_request_items), Ok(String::new())]);
+    reconcile_issue(
+        &mut store,
+        &mut known,
+        &policy,
+        "https://github.com/berlinguyinca/autospec/issues/44",
+    )
+    .unwrap();
+    assert!(known
+        .calls
+        .iter()
+        .any(|call| matches!(call, GithubCommand::AddToProject { .. })));
+
+    for invalid_item in [
+        serde_json::json!({
+            "content": {"type": "Mystery", "url": "https://github.com/berlinguyinca/autospec/issues/45"}
+        }),
+        serde_json::json!({
+            "content": {"url": "https://github.com/berlinguyinca/autospec/issues/45"}
+        }),
+    ] {
+        let invalid_items = serde_json::json!({"items": [invalid_item]}).to_string();
+        let mut invalid = ScriptedGithub::with([Ok(invalid_items)]);
+        assert!(reconcile_issue(
+            &mut store,
+            &mut invalid,
+            &policy,
+            "https://github.com/berlinguyinca/autospec/issues/45",
+        )
+        .is_err());
+        assert!(store.snapshot().pending_projections.is_empty());
+        assert!(invalid
+            .calls
+            .iter()
+            .all(|call| !matches!(call, GithubCommand::AddToProject { .. })));
+    }
+}
+
+#[test]
+fn github_issue_urls_require_nonempty_identity_and_positive_canonical_number() {
+    let fixture = Fixture::new("github-canonical-url");
+    let policy = policy("berlinguyinca");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+
+    for invalid in [
+        "https://github.com///issues/1",
+        "https://github.com/owner//issues/1",
+        "https://github.com/owner/repo/issues/0",
+    ] {
+        let mut github = ScriptedGithub::default();
+        assert!(reconcile_issue(&mut store, &mut github, &policy, invalid).is_err());
+        assert!(github.calls.is_empty());
+    }
+
+    let mut github = ScriptedGithub::with([Ok(item_list(&[])), Ok(String::new())]);
+    reconcile_issue(
+        &mut store,
+        &mut github,
+        &policy,
+        "HTTPS://GITHUB.COM/BerlinGuyInCA/AutoSpec/issues/00046/?tab=1",
+    )
+    .unwrap();
+    let added = github.calls.iter().find_map(|call| match call {
+        GithubCommand::AddToProject { issue_url, .. } => Some(issue_url.as_str()),
+        _ => None,
+    });
+    assert_eq!(
+        added,
+        Some("https://github.com/berlinguyinca/autospec/issues/46")
+    );
 }
 
 #[test]

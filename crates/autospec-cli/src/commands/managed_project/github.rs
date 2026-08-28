@@ -3,27 +3,18 @@ use crate::commands::autonomous::accountability::github::{
     GithubCommand, GithubFailure, GithubTransport,
 };
 use autospec_core::managed_project::ManagedProjectPolicy;
-use serde_json::Value;
 use std::collections::HashSet;
 
-const MARKER_BEGIN: &str = "<!-- autospec-managed-project:begin -->";
-const MARKER_END: &str = "<!-- autospec-managed-project:end -->";
+#[path = "github/parse.rs"]
+mod parse;
+
 const PROJECT_FETCH_LIMIT: usize = 500;
 
 pub fn verify_managed_marker(
     readme: &str,
     policy: &ManagedProjectPolicy,
 ) -> Result<bool, ManagedProjectError> {
-    let Some(marker) = parse_marker(readme)? else {
-        return Ok(false);
-    };
-    if marker.product_key == policy.product_key.as_str() && marker.owner != policy.owner {
-        return Err(ManagedProjectError::new(format!(
-            "managed GitHub Project marker owner {} conflicts with approved owner {}",
-            marker.owner, policy.owner
-        )));
-    }
-    Ok(marker.product_key == policy.product_key.as_str() && marker.owner == policy.owner)
+    parse::verify_managed_marker(readme, policy)
 }
 
 pub fn resolve_or_create_project<T: GithubTransport>(
@@ -44,14 +35,7 @@ pub fn resolve_or_create_project<T: GithubTransport>(
                 "managed project binding owner conflicts with policy",
             ));
         }
-        let project = view_project(github, &policy.owner, number)?;
-        validate_project(&project, policy)?;
-        if store.snapshot().project_node_id.as_deref() != Some(project.node_id.as_str()) {
-            return Err(ManagedProjectError::new(
-                "verified remote project node ID conflicts with local binding",
-            ));
-        }
-        return Ok(project);
+        return resume_bound_project(store, github, policy, number);
     }
 
     let output = execute(
@@ -61,7 +45,7 @@ pub fn resolve_or_create_project<T: GithubTransport>(
         },
         "cannot list GitHub Projects",
     )?;
-    let numbers = parse_project_numbers(&output)?;
+    let numbers = parse::parse_project_numbers(&output)?;
     let mut matches = Vec::new();
     for number in numbers {
         let project = view_project(github, &policy.owner, number)?;
@@ -74,12 +58,16 @@ pub fn resolve_or_create_project<T: GithubTransport>(
         1 => {
             let project = matches.pop().expect("one verified match");
             persist_project(store, &project)?;
+            ack_create_projection_if_pending(store, policy)?;
             Ok(project)
         }
         count if count > 1 => Err(ManagedProjectError::new(format!(
             "multiple GitHub Projects have the managed marker for {}",
             policy.product_key.as_str()
         ))),
+        _ if has_pending_create(store, policy) => Err(ManagedProjectError::new(
+            "pending project creation has no verified project identity",
+        )),
         _ => create_project(store, github, policy, title),
     }
 }
@@ -91,7 +79,7 @@ pub fn reconcile_issue<T: GithubTransport>(
     issue_url: &str,
 ) -> Result<(), ManagedProjectError> {
     let identity = bound_identity(store, policy)?;
-    let normalized = normalize_issue_url(issue_url)?;
+    let normalized = parse::normalize_issue_url(issue_url)?;
     let items = list_project_items(github, &identity.owner, identity.number)?;
     let projection = projection_key(&identity.node_id, &normalized);
     if items.contains(&normalized) {
@@ -140,7 +128,7 @@ pub fn retry_pending_projections<T: GithubTransport>(
     }
     let items = list_project_items(github, &identity.owner, identity.number)?;
     for (projection, issue_url) in pending {
-        let issue_url = normalize_issue_url(&issue_url)?;
+        let issue_url = parse::normalize_issue_url(&issue_url)?;
         if !items.contains(&issue_url) {
             execute(
                 github,
@@ -168,9 +156,9 @@ fn create_project<T: GithubTransport>(
             "managed GitHub Project title must not be empty",
         ));
     }
-    let projection = format!("project:create:{}", policy.product_key.as_str());
+    let projection = create_projection(policy);
     store.enqueue_projection(projection.clone())?;
-    let created = parse_project(&execute(
+    let created = parse::parse_project(&execute(
         github,
         GithubCommand::CreateProject {
             owner: policy.owner.clone(),
@@ -179,31 +167,55 @@ fn create_project<T: GithubTransport>(
         "cannot create managed GitHub Project",
     )?)?;
     validate_returned_owner(&created, &policy.owner)?;
-    let before_edit = view_project(github, &policy.owner, created.number)?;
-    if before_edit.node_id != created.node_id {
+    persist_project(store, &created)?;
+    resume_bound_project(store, github, policy, created.number)
+}
+
+fn resume_bound_project<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+    number: u64,
+) -> Result<RemoteProject, ManagedProjectError> {
+    let expected_node_id = store
+        .snapshot()
+        .project_node_id
+        .clone()
+        .ok_or_else(|| ManagedProjectError::new("managed project binding has no node ID"))?;
+    let before_edit = view_project(github, &policy.owner, number)?;
+    validate_returned_owner(&before_edit, &policy.owner)?;
+    if before_edit.node_id != expected_node_id || before_edit.number != number {
         return Err(ManagedProjectError::new(
-            "created GitHub Project changed identity before marker update",
+            "verified remote project identity conflicts with local binding",
         ));
     }
-    let readme = append_marker(&before_edit.readme, policy)?;
+    if verify_managed_marker(&before_edit.readme, policy)? {
+        ack_create_projection_if_pending(store, policy)?;
+        return Ok(before_edit);
+    }
+    if !has_pending_create(store, policy) {
+        return Err(ManagedProjectError::new(
+            "GitHub Project does not contain the expected managed marker",
+        ));
+    }
+    let readme = parse::append_marker(&before_edit.readme, policy)?;
     execute(
         github,
         GithubCommand::EditProjectMarker {
             owner: policy.owner.clone(),
-            number: created.number,
+            number,
             readme,
         },
         "cannot write managed GitHub Project marker",
     )?;
-    let verified = view_project(github, &policy.owner, created.number)?;
-    if verified.node_id != created.node_id || verified.number != created.number {
+    let verified = view_project(github, &policy.owner, number)?;
+    if verified.node_id != expected_node_id || verified.number != number {
         return Err(ManagedProjectError::new(
             "GitHub returned a different Project after marker update",
         ));
     }
     validate_project(&verified, policy)?;
-    persist_project(store, &verified)?;
-    store.ack_projection(&projection)?;
+    ack_create_projection_if_pending(store, policy)?;
     Ok(verified)
 }
 
@@ -251,7 +263,7 @@ fn view_project<T: GithubTransport>(
     owner: &str,
     number: u64,
 ) -> Result<RemoteProject, ManagedProjectError> {
-    parse_project(&execute(
+    parse::parse_project(&execute(
         github,
         GithubCommand::ViewProject {
             owner: owner.to_owned(),
@@ -274,143 +286,7 @@ fn list_project_items<T: GithubTransport>(
         },
         "cannot list managed GitHub Project items",
     )?;
-    let value: Value = serde_json::from_str(&output).map_err(json_error)?;
-    let items = value
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ManagedProjectError::new("GitHub Project item list has no items array"))?;
-    if items.len() >= PROJECT_FETCH_LIMIT {
-        return Err(ManagedProjectError::new(
-            "GitHub Project item list may be truncated at the transport limit",
-        ));
-    }
-    items
-        .iter()
-        .filter_map(|item| {
-            item.pointer("/content/url")
-                .or_else(|| item.get("contentUrl"))
-                .or_else(|| item.get("url"))
-                .and_then(Value::as_str)
-        })
-        .map(normalize_issue_url)
-        .collect()
-}
-
-fn parse_project_numbers(output: &str) -> Result<Vec<u64>, ManagedProjectError> {
-    let value: Value = serde_json::from_str(output).map_err(json_error)?;
-    let projects = value
-        .get("projects")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ManagedProjectError::new("GitHub Project list has no projects array"))?;
-    if projects.len() >= PROJECT_FETCH_LIMIT {
-        return Err(ManagedProjectError::new(
-            "GitHub Project discovery may be truncated at the transport limit",
-        ));
-    }
-    projects
-        .iter()
-        .map(|project| {
-            project
-                .get("number")
-                .and_then(Value::as_u64)
-                .filter(|number| *number > 0)
-                .ok_or_else(|| ManagedProjectError::new("GitHub Project has invalid number"))
-        })
-        .collect()
-}
-
-fn parse_project(output: &str) -> Result<RemoteProject, ManagedProjectError> {
-    let value: Value = serde_json::from_str(output).map_err(json_error)?;
-    let string = |field: &str| {
-        value
-            .get(field)
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| ManagedProjectError::new(format!("GitHub Project has invalid {field}")))
-    };
-    let owner = value
-        .pointer("/owner/login")
-        .or_else(|| value.get("owner"))
-        .and_then(Value::as_str)
-        .filter(|owner| !owner.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| ManagedProjectError::new("GitHub Project has invalid owner"))?;
-    Ok(RemoteProject {
-        node_id: string("id")?,
-        number: value
-            .get("number")
-            .and_then(Value::as_u64)
-            .filter(|number| *number > 0)
-            .ok_or_else(|| ManagedProjectError::new("GitHub Project has invalid number"))?,
-        url: string("url")?,
-        title: string("title")?,
-        owner,
-        readme: value
-            .get("readme")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-    })
-}
-
-fn append_marker(
-    readme: &str,
-    policy: &ManagedProjectPolicy,
-) -> Result<String, ManagedProjectError> {
-    if parse_marker(readme)?.is_some() {
-        return Err(ManagedProjectError::new(
-            "new GitHub Project already contains a managed marker",
-        ));
-    }
-    let marker = format!(
-        "{MARKER_BEGIN}\nschema: 1\nproduct-key: {}\nowner: {}\n{MARKER_END}",
-        policy.product_key.as_str(),
-        policy.owner
-    );
-    if readme.is_empty() {
-        Ok(marker)
-    } else {
-        Ok(format!("{}\n\n{marker}", readme.trim_end()))
-    }
-}
-
-struct Marker<'a> {
-    product_key: &'a str,
-    owner: &'a str,
-}
-
-fn parse_marker(readme: &str) -> Result<Option<Marker<'_>>, ManagedProjectError> {
-    let starts = readme.match_indices(MARKER_BEGIN).collect::<Vec<_>>();
-    let ends = readme.match_indices(MARKER_END).collect::<Vec<_>>();
-    if starts.is_empty() && ends.is_empty() {
-        return Ok(None);
-    }
-    if starts.len() != 1 || ends.len() != 1 || starts[0].0 >= ends[0].0 {
-        return Err(ManagedProjectError::new(
-            "GitHub Project managed marker must contain exactly one complete block",
-        ));
-    }
-    let payload_start = starts[0].0 + MARKER_BEGIN.len();
-    let payload = readme[payload_start..ends[0].0].trim_matches(['\r', '\n']);
-    let lines = payload.lines().collect::<Vec<_>>();
-    if lines.len() != 3 || lines[0] != "schema: 1" {
-        return Err(ManagedProjectError::new(
-            "GitHub Project managed marker has unsupported schema or shape",
-        ));
-    }
-    let product_key = lines[1].strip_prefix("product-key: ").ok_or_else(|| {
-        ManagedProjectError::new("GitHub Project managed marker has invalid product key")
-    })?;
-    let owner = lines[2].strip_prefix("owner: ").ok_or_else(|| {
-        ManagedProjectError::new("GitHub Project managed marker has invalid owner")
-    })?;
-    if product_key.is_empty() || owner.is_empty() {
-        return Err(ManagedProjectError::new(
-            "GitHub Project managed marker identity must not be empty",
-        ));
-    }
-    Ok(Some(Marker { product_key, owner }))
+    parse::parse_project_items(&output)
 }
 
 fn validate_policy(policy: &ManagedProjectPolicy) -> Result<(), ManagedProjectError> {
@@ -458,24 +334,28 @@ fn projection_key(node_id: &str, issue_url: &str) -> String {
     format!("project:item-add:{node_id}:{issue_url}")
 }
 
-fn normalize_issue_url(url: &str) -> Result<String, ManagedProjectError> {
-    let normalized = url
-        .trim()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_ascii_lowercase();
-    let path = normalized
-        .strip_prefix("https://github.com/")
-        .ok_or_else(|| ManagedProjectError::new("issue URL must use https://github.com"))?;
-    let parts = path.split('/').collect::<Vec<_>>();
-    if parts.len() != 4 || parts[2] != "issues" || parts[3].parse::<u64>().is_err() {
-        return Err(ManagedProjectError::new(
-            "issue URL must identify one GitHub issue",
-        ));
+fn create_projection(policy: &ManagedProjectPolicy) -> String {
+    format!("project:create:{}", policy.product_key.as_str())
+}
+
+fn has_pending_create(store: &ManagedProjectStore, policy: &ManagedProjectPolicy) -> bool {
+    let projection = create_projection(policy);
+    store
+        .snapshot()
+        .pending_projections
+        .iter()
+        .any(|pending| pending == &projection)
+}
+
+fn ack_create_projection_if_pending(
+    store: &mut ManagedProjectStore,
+    policy: &ManagedProjectPolicy,
+) -> Result<(), ManagedProjectError> {
+    let projection = create_projection(policy);
+    if has_pending_create(store, policy) {
+        store.ack_projection(&projection)?;
     }
-    Ok(normalized)
+    Ok(())
 }
 
 fn execute<T: GithubTransport>(
@@ -490,8 +370,4 @@ fn execute<T: GithubTransport>(
 
 fn transport_error(context: &str, error: GithubFailure) -> ManagedProjectError {
     ManagedProjectError::new(format!("{context}: {error}"))
-}
-
-fn json_error(error: serde_json::Error) -> ManagedProjectError {
-    ManagedProjectError::new(format!("invalid GitHub Project response: {error}"))
 }
