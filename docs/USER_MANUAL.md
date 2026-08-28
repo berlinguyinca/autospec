@@ -309,9 +309,86 @@ actually answered, and `--require-accelerator` to turn an unusable accelerator i
 hard stop instead of a recorded fact. See
 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md#capability-evidence-levels).
 
-### Project map (`~/.autospec/project-map.yml`)
+### Managed GitHub Project (`.autospec/autonomous.yml`)
 
-Maps repo slugs to local paths. See `examples/project-map.yml`.
+A product or initiative has one managed GitHub Project across all of its repositories and runs.
+Autospec resolves, creates, or reuses that Project by the immutable `product-key` and `owner`
+marker in its readme; a matching title alone is never enough.
+
+```yaml
+project_board:
+  mode: managed
+  product_key: autospec
+  owner: berlinguyinca
+  repository_seeds: ["berlinguyinca/autospec"]
+  repo_allowlist: ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
+  discovery_max_repos: 25
+  write_back: true
+```
+
+`repository_seeds` is the explicit starting set. `repo_allowlist` is the admission boundary, not
+a discovery hint: dependencies, submodules, workspace metadata, and other concrete evidence can
+suggest candidates but cannot widen it. `discovery_max_repos` bounds scanner expansion. Literal
+and trailing-`*` prefix allowlist entries are supported.
+
+Resolve or synchronize the configured Project from the target repository:
+
+```bash
+autospec project resolve --repo-dir "$PWD"
+autospec project sync --repo-dir "$PWD"
+autospec project sync --repo-dir "$PWD" --issue-url https://github.com/OWNER/REPO/issues/42
+```
+
+Onboard existing repositories with one or more explicit repository or workspace seeds:
+
+```bash
+autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO
+autospec project onboard --repo-dir "$PWD" --workspace /absolute/workspace
+autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO --dry-run
+```
+
+At the skill surface, `/autospec-project onboard --owner OWNER --allow OWNER/REPO --allow
+OWNER/prefix-*` updates the managed policy before invoking the bounded command. Newly created
+repositories are registered only after `gh repo view` verifies the remote; bootstrap supplies
+`--spawned-from IDENTITY` for that exact repository. Adopted repositories receive `contains`
+membership without creation provenance.
+
+The JSON onboarding report distinguishes `created`, `adopted`, `updated`, `unchanged`,
+`proposed`, `out_of_bound`, `inaccessible`, and `pending_projection`, and includes the resolved
+`project_url`. Deterministic evidence creates active relationships. Ambiguous name-only evidence
+is proposed, does not enter the active dependency graph, and cannot block execution.
+
+Local state is private and repo-local:
+
+- `.autospec/state/projects/<product-key>/binding.json` is the current checkpoint.
+- `.autospec/state/projects/<product-key>/events.jsonl` is the authoritative append-only recovery
+  journal.
+
+Remote writes are journaled before projection. A transient Project/item-add failure returns
+`journaled_projection_pending`; rerun `autospec project sync --repo-dir "$PWD"` to retry and
+acknowledge the one retained projection. Reconciliation is additive, preserves human-managed
+Project content outside Autospec markers, and does not delete Project items, repositories,
+fields, or relationships.
+
+### External Projects and legacy project map
+
+An existing explicit URL remains externally managed. A URL-only configuration defaults to
+`external`; Autospec may ingest and write back according to the existing settings but does not
+claim or replace its identity:
+
+```yaml
+project_board:
+  mode: external
+  url: https://github.com/orgs/OWNER/projects/7
+  repo_allowlist: ["OWNER/REPO"]
+```
+
+`~/.autospec/project-map.yml` continues to map repository slugs to local paths and remains a
+compatibility fallback when no managed policy is configured. To migrate, add a managed policy,
+run `autospec project resolve`, onboard the explicit repositories/allowlisted owner/workspace,
+and run `autospec project sync`. Migration does not delete or rewrite `project-map.yml`; keep it
+until every consumer has moved to the managed binding. See `examples/project-map.yml` for its
+legacy format.
 
 ### Issue labels
 

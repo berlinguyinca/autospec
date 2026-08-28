@@ -185,6 +185,64 @@ When the generated issues are ready:
 /autospec-run
 ```
 
+## Managed GitHub Projects
+
+Autospec can own one durable GitHub Project per product or initiative. The Project is shared
+across that product's repositories and autonomous runs; it is not recreated for each repository
+or conductor generation. Autospec verifies identity with this marker in the Project readme and
+never adopts a Project by title alone:
+
+```text
+<!-- autospec-managed-project:begin -->
+schema: 1
+product-key: autospec
+owner: berlinguyinca
+<!-- autospec-managed-project:end -->
+```
+
+Configure the target repository's `.autospec/autonomous.yml` with an explicit seed and admission
+boundary:
+
+```yaml
+project_board:
+  mode: managed
+  product_key: autospec
+  owner: berlinguyinca
+  repository_seeds: ["berlinguyinca/autospec"]
+  repo_allowlist: ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
+  discovery_max_repos: 25
+  write_back: true
+```
+
+Then resolve the marked Project or onboard existing repositories:
+
+```bash
+autospec project resolve --repo-dir "$PWD"
+autospec project onboard --repo-dir "$PWD" --repo berlinguyinca/autospec
+autospec project onboard --repo-dir "$PWD" --workspace /absolute/path
+autospec project sync --repo-dir "$PWD"
+```
+
+The Rust command accepts repeatable `--repo` and `--workspace` seeds. The
+`/autospec-project onboard --owner berlinguyinca --allow berlinguyinca/autospec --allow
+berlinguyinca/autospec-*` skill writes the corresponding managed
+policy before invoking it. Discovery may follow concrete repository metadata, but every result
+must still match `repo_allowlist`; out-of-bound repositories are reported and never indexed.
+Verified repository creation uses `--repo OWNER/NAME --spawned-from IDENTITY` after `gh repo
+view` succeeds, while adopted repositories receive only an active `contains` relationship.
+
+Reconciliation is additive and idempotent. Deterministic evidence becomes an active relationship;
+ambiguous name-only evidence remains proposed and cannot gate execution. Failed transient GitHub
+projection is retained as one retryable pending entry and acknowledged by a later `project sync`
+without creating a replacement issue or duplicate Project item. The authoritative local recovery
+journal is `.autospec/state/projects/<product-key>/events.jsonl`, with its checkpoint at
+`.autospec/state/projects/<product-key>/binding.json`.
+
+Existing `project_board.url` configurations remain compatible in `external` mode. To migrate from
+`~/.autospec/project-map.yml`, add the managed policy above, run `project resolve` and the bounded
+`project onboard` command, then run `project sync`. Autospec continues to read the legacy mapping
+only when no managed policy is configured and does not delete or rewrite that file.
+
 ## Install
 
 For day-to-day use, install the latest `main` version on macOS/Linux:

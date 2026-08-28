@@ -7,6 +7,21 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ## [Unreleased]
 
+### Added
+
+#### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
+- Added one marker-verified managed GitHub Project per product, backed by a private repo-local
+  binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
+  every generated issue and accountability epic recoverable, and retries transient item-add
+  failures without duplicate issues or Project items.
+- Added `autospec project resolve`, `sync`, and `onboard` for explicit repository seeds,
+  allowlisted-owner discovery, and local workspace onboarding. Discovery cannot widen the
+  configured allowlist; deterministic relationships become active while ambiguous evidence stays
+  proposed and non-blocking.
+- Repository bootstrap now registers a verified remote after creation and records explicit
+  `spawned-from` provenance. Existing explicit Project URLs remain compatible in external mode,
+  and `~/.autospec/project-map.yml` remains an undeleted fallback during migration.
+
 ### Fixed
 
 #### Generated metadata was charged to the authored word budget (2026-08-23)

@@ -66,6 +66,20 @@
   conductor arms a subreaper, so an orphaned holder can stay unreaped for the life of the run;
   `process_is_terminated` reads the process state from procfs and returns `Ok(false)` on every
   other host, so macOS, FreeBSD, and Windows still wait for the holder's PID entry to disappear.
+- Managed GitHub Project resolution, creation, marker verification, item reconciliation, and
+  onboarding require a working authenticated `gh` CLI with Project read/write scope. Transient
+  network, rate-limit, and ambiguous mutation failures remain retryable in the repo-local journal;
+  missing executables, authentication/scope failures, malformed responses, and identity conflicts
+  fail closed.
+- Existing-repository discovery is intentionally incomplete and bounded. It starts only from
+  explicit repositories, an allowlisted owner, or workspace paths, follows supported concrete
+  metadata, and never expands beyond `repo_allowlist` or `discovery_max_repos`. Out-of-bound and
+  inaccessible candidates are reported rather than indexed.
+- Relationship inference is conservative. Deterministic repository metadata can create active
+  dependency/blocking edges; ambiguous name-only relationships remain proposed and cannot affect
+  execution until stronger evidence is recorded.
+- Ordinary managed reconciliation is additive. It preserves human-managed Project content and has
+  no deletion/pruning path for stale items, repositories, fields, or relationships.
 
 ## Requires human guidance
 
