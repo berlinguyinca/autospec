@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,17 +33,32 @@ static TEMP_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn append_synced_line(
     path: &Path,
-    value: &serde_json::Value,
+    line: &[u8],
+    fail_after: Option<usize>,
 ) -> Result<(), ManagedProjectError> {
     reject_unsafe_file(path)?;
-    let mut file = private_options()
-        .append(true)
-        .create(true)
-        .open(path)
-        .map_err(io_error)?;
-    validate_open_file(&file)?;
-    serde_json::to_writer(&mut file, value).map_err(ManagedProjectError::from)?;
-    file.write_all(b"\n").map_err(io_error)?;
+    let mut file = open_private_file(path)?;
+    let original_length = file.metadata().map_err(io_error)?.len();
+    file.seek(SeekFrom::End(0)).map_err(io_error)?;
+    let write_result = if let Some(limit) = fail_after {
+        let partial = limit.min(line.len().saturating_sub(1));
+        file.write_all(&line[..partial])
+            .and_then(|_| Err(std::io::Error::other("injected partial journal append")))
+    } else {
+        file.write_all(line)
+    };
+    if let Err(error) = write_result {
+        if let Err(rollback) = file
+            .set_len(original_length)
+            .and_then(|_| file.seek(SeekFrom::Start(original_length)).map(|_| ()))
+            .and_then(|_| file.sync_all())
+        {
+            return Err(ManagedProjectError::new(format!(
+                "journal append failed ({error}) and rollback failed ({rollback})"
+            )));
+        }
+        return Err(io_error(error));
+    }
     file.sync_all().map_err(io_error)
 }
 
@@ -163,6 +178,25 @@ pub(super) fn open_private_file(path: &Path) -> Result<File, ManagedProjectError
         .map_err(io_error)?;
     validate_open_file(&file)?;
     Ok(file)
+}
+
+pub(super) struct ProductLock(File);
+
+impl ProductLock {
+    pub(super) fn acquire(path: &Path) -> Result<Self, ManagedProjectError> {
+        ensure_private_file(path)?;
+        let file = open_private_file(path)?;
+        file.lock().map_err(|error| {
+            ManagedProjectError::new(format!("cannot lock managed project state: {error}"))
+        })?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ProductLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn validate_open_file(file: &File) -> Result<(), ManagedProjectError> {

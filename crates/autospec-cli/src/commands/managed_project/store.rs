@@ -1,6 +1,6 @@
 use super::{
     append_synced_line, atomic_write, ensure_private_directory, ensure_private_file, io_error,
-    open_private_file, read_private_file, reject_unsafe_file, ManagedProjectError,
+    open_private_file, read_private_file, reject_unsafe_file, ManagedProjectError, ProductLock,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 const JOURNAL_SCHEMA: u64 = 1;
 const BINDING_FILE: &str = "binding.json";
 const EVENTS_FILE: &str = "events.jsonl";
+const LOCK_FILE: &str = "binding.lock";
 
 pub struct ManagedProjectStore {
     root: PathBuf,
@@ -22,6 +23,7 @@ pub struct ManagedProjectStore {
     event_keys: HashSet<String>,
     known_projections: HashSet<String>,
     next_sequence: u64,
+    append_fault_after: Option<usize>,
 }
 
 impl ManagedProjectStore {
@@ -31,6 +33,7 @@ impl ManagedProjectStore {
         ensure_private_directory(&projects)?;
         let root = projects.join(product_key.as_str());
         ensure_private_directory(&root)?;
+        let _lock = ProductLock::acquire(&root.join(LOCK_FILE))?;
 
         let binding_path = root.join(BINDING_FILE);
         let events_path = root.join(EVENTS_FILE);
@@ -48,15 +51,27 @@ impl ManagedProjectStore {
             None
         };
 
+        let journal_exists = events_path.exists();
+        let empty_binding = ManagedProjectBinding::new(product_key.clone());
+        if !journal_exists
+            && persisted
+                .as_ref()
+                .is_some_and(|binding| binding != &empty_binding)
+        {
+            return Err(ManagedProjectError::new(
+                "nonempty managed project binding is missing its durable event journal",
+            ));
+        }
         ensure_private_file(&events_path)?;
         let events = recover_events(&events_path, product_key)?;
         let mut store = Self {
             root,
             product_key: product_key.clone(),
-            binding: ManagedProjectBinding::new(product_key.clone()),
+            binding: empty_binding,
             event_keys: HashSet::new(),
             known_projections: HashSet::new(),
             next_sequence: 1,
+            append_fault_after: None,
         };
         for event in events {
             store.apply_event(&event)?;
@@ -127,6 +142,8 @@ impl ManagedProjectStore {
     }
 
     pub fn ack_projection(&mut self, projection_key: &str) -> Result<(), ManagedProjectError> {
+        let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
+        self.refresh_from_journal()?;
         if !self.known_projections.contains(projection_key) {
             return Err(ManagedProjectError::new(
                 "projection acknowledgment has no matching durable enqueue event",
@@ -140,7 +157,7 @@ impl ManagedProjectStore {
         {
             return Ok(());
         }
-        self.append_event(
+        self.append_event_locked(
             format!("projection:ack:{projection_key}"),
             "projection-acknowledged",
             Value::String(projection_key.to_owned()),
@@ -151,14 +168,30 @@ impl ManagedProjectStore {
         &self.binding
     }
 
+    #[cfg(test)]
+    pub fn fail_next_append_after(&mut self, bytes: usize) {
+        self.append_fault_after = Some(bytes);
+    }
+
     fn append_event(
         &mut self,
         key: String,
         kind: &'static str,
         payload: Value,
     ) -> Result<(), ManagedProjectError> {
+        let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
+        self.refresh_from_journal()?;
+        self.append_event_locked(key, kind, payload)
+    }
+
+    fn append_event_locked(
+        &mut self,
+        key: String,
+        kind: &'static str,
+        payload: Value,
+    ) -> Result<(), ManagedProjectError> {
         if self.event_keys.contains(&key) {
-            return Ok(());
+            return self.persist_binding();
         }
         let event = JournalEvent {
             sequence: self.next_sequence,
@@ -167,13 +200,35 @@ impl ManagedProjectStore {
             kind: kind.to_owned(),
             payload,
         };
-        append_synced_line(&self.root.join(EVENTS_FILE), &event.to_value())?;
+        let mut line = serde_json::to_vec(&event.to_value()).map_err(ManagedProjectError::from)?;
+        line.push(b'\n');
+        append_synced_line(
+            &self.root.join(EVENTS_FILE),
+            &line,
+            self.append_fault_after.take(),
+        )?;
         self.apply_event(&event)?;
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
             .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
         self.persist_binding()
+    }
+
+    fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
+        let events = recover_events(&self.root.join(EVENTS_FILE), &self.product_key)?;
+        self.binding = ManagedProjectBinding::new(self.product_key.clone());
+        self.event_keys.clear();
+        self.known_projections.clear();
+        self.next_sequence = 1;
+        for event in events {
+            self.apply_event(&event)?;
+            self.next_sequence = event
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
+        }
+        Ok(())
     }
 
     fn apply_event(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
@@ -375,11 +430,19 @@ fn recover_events(
         bytes.truncate(complete);
     }
     let mut events = Vec::new();
-    for (index, line) in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .enumerate()
-    {
+    if bytes.is_empty() {
+        return Ok(events);
+    }
+    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            if index + 1 == lines.len() {
+                continue;
+            }
+            return Err(ManagedProjectError::new(
+                "managed project journal contains an empty completed line",
+            ));
+        }
         let value = serde_json::from_slice(line).map_err(|error| {
             ManagedProjectError::new(format!("invalid completed journal line: {error}"))
         })?;

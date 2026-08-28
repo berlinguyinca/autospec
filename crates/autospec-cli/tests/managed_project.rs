@@ -124,6 +124,56 @@ fn store_duplicate_event_keys_are_no_ops() {
 }
 
 #[test]
+fn store_two_writers_refresh_under_lock_without_losing_events() {
+    let fixture = Fixture::new("two-writers");
+    let mut first = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut second = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+
+    first
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    second
+        .record_repository(repository("berlinguyinca/autospec-node", "explicit-seed"))
+        .unwrap();
+    drop((first, second));
+
+    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    assert_eq!(reopened.snapshot().repositories.len(), 2);
+    assert_eq!(
+        fs::read_to_string(fixture.state_path("events.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn store_partial_append_failure_rolls_back_before_same_instance_retry() {
+    let fixture = Fixture::new("append-rollback");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    let journal_path = fixture.state_path("events.jsonl");
+    let length_before = fs::metadata(&journal_path).unwrap().len();
+    store.fail_next_append_after(17);
+
+    assert!(store
+        .record_repository(repository("berlinguyinca/autospec-node", "explicit-seed"))
+        .is_err());
+    assert_eq!(fs::metadata(&journal_path).unwrap().len(), length_before);
+    store
+        .record_repository(repository("berlinguyinca/autospec-node", "explicit-seed"))
+        .unwrap();
+    drop(store);
+
+    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    assert_eq!(reopened.snapshot().repositories.len(), 2);
+    assert_eq!(fs::read_to_string(journal_path).unwrap().lines().count(), 2);
+}
+
+#[test]
 fn store_ack_projection_is_retryable_but_unknown_keys_fail_closed() {
     let fixture = Fixture::new("ack");
     let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
@@ -163,6 +213,24 @@ fn store_discards_only_a_truncated_jsonl_tail_and_rebuilds_the_snapshot() {
 }
 
 #[test]
+fn store_rejects_empty_interior_journal_lines() {
+    let fixture = Fixture::new("empty-journal-line");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    drop(store);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.state_path("events.jsonl"))
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+}
+
+#[test]
 fn store_rebuilds_a_stale_snapshot_from_the_journal() {
     let fixture = Fixture::new("stale-snapshot");
     let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
@@ -180,6 +248,23 @@ fn store_rebuilds_a_stale_snapshot_from_the_journal() {
 
     let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 1);
+}
+
+#[test]
+fn store_missing_journal_fails_closed_without_overwriting_a_nonempty_binding() {
+    let fixture = Fixture::new("missing-journal");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    drop(store);
+    let binding_path = fixture.state_path("binding.json");
+    let binding_before = fs::read(&binding_path).unwrap();
+    fs::remove_file(fixture.state_path("events.jsonl")).unwrap();
+
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert_eq!(fs::read(binding_path).unwrap(), binding_before);
+    assert!(!fixture.state_path("events.jsonl").exists());
 }
 
 #[test]
@@ -218,7 +303,7 @@ fn store_uses_private_state_and_rejects_public_binding_files() {
         fs::metadata(&project_dir).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    for name in ["binding.json", "events.jsonl"] {
+    for name in ["binding.json", "events.jsonl", "binding.lock"] {
         assert_eq!(
             fs::metadata(fixture.state_path(name))
                 .unwrap()
@@ -234,6 +319,21 @@ fn store_uses_private_state_and_rejects_public_binding_files() {
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn store_rejects_a_public_product_lock_file() {
+    let fixture = Fixture::new("public-lock");
+    let store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    drop(store);
+    fs::set_permissions(
+        fixture.state_path("binding.lock"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
     assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
 }
 
