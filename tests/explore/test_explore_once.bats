@@ -56,6 +56,10 @@ if [ "${1:-}" = "explore" ] && [ "${2:-}" = "verifier-outcome" ]; then
     exit 0
 fi
 if [ "${1:-}" = "project" ] && [ "${2:-}" = "sync" ]; then
+    if [ "${AUTOSPEC_SYNC_FAIL:-}" = "hard" ]; then
+        echo 'pre-journal failure' >&2
+        exit 9
+    fi
     exit 0
 fi
 if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
@@ -328,6 +332,19 @@ assert d['new_candidates'] == 2, f'expected 2 new_candidates, got: {d}'
 assert d['filed'] == 2, f'expected filed=2, got: {d}'
 assert d['dry'] is False, f'expected dry=false, got: {d}'
 "
+}
+
+@test "--once propagates a hard pre-journal Project sync failure" {
+    local proposals='[{"title":"feat: one","evidence":"e","estimated_complexity":"small","confidence":0.9,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run env AUTOSPEC_SYNC_FAIL=hard bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once --research-sources spec-vs-code
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"hard managed Project sync failure"* ]]
 }
 
 

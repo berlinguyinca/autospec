@@ -31,6 +31,6 @@ body=$(printf '%s\n' '## Category' '' "$category" '' '## Summary' '' "$summary" 
 if [ "$dry" = 1 ]; then printf 'TITLE: %s\nREPO: %s\n\n%s\n' "$title" "$repo" "$body"; printf '%s|%s\n' "$now" "$key" >> "$cache"; exit 0; fi
 if ! command -v gh >/dev/null 2>&1; then echo 'autospec-self-issue: gh unavailable; refusing to prompt' >&2; exit 2; fi
 url=$(gh issue create --repo "$repo" --title "$title" --body "$body" --label auto-implement --label origin:self 2>/dev/null) || { echo 'autospec-self-issue: gh issue create failed' >&2; exit 2; }
-bash "$(cd "$(dirname "$0")" && pwd)/project-sync-issue.sh" "$url" "$PWD"
+bash "$(cd "$(dirname "$0")" && pwd)/project-sync-issue.sh" "$url" "$PWD" || exit 1
 printf '%s|%s\n' "$now" "$key" >> "$cache"
 printf '%s\n' "$url"

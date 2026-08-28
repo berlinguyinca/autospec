@@ -175,7 +175,7 @@ pub fn retry_pending_projections<T: GithubTransport>(
         })
         .collect::<Vec<_>>();
     for (unresolved_projection, issue_url) in &unresolved {
-        store.enqueue_projection(projection_key(&identity.node_id, issue_url))?;
+        store.ensure_projection_pending(&projection_key(&identity.node_id, issue_url))?;
         store.ack_projection(unresolved_projection)?;
     }
     let pending = store

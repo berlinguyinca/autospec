@@ -584,7 +584,7 @@ except Exception:
     # File surviving candidates as issues (best-effort; never blocks the mode).
     _once_filed=0
     if [ "$_once_new" -gt 0 ] && [ "$PREVIEW" -ne 1 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
-        _once_filed="$(AUTOSPEC_PROJECT_SYNC_HELPER="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh" AUTOSPEC_PROJECT_SYNC_REPO="$REPO_ROOT" python3 - "$_once_candidates" <<'PY'
+        if ! _once_filed="$(AUTOSPEC_PROJECT_SYNC_HELPER="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh" AUTOSPEC_PROJECT_SYNC_REPO="$REPO_ROOT" python3 - "$_once_candidates" <<'PY'
 import json, os, shutil, subprocess, sys
 try:
     candidates = json.load(open(sys.argv[1]))
@@ -621,10 +621,11 @@ def sync_project(issue_url):
     result = subprocess.run(
         ["bash", helper, str(issue_url or "").strip(), repo],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
         check=False,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        raise RuntimeError("managed Project sync failed before durable journaling")
+    return True
 
 def rust_safety_pass(issue_url):
     issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
@@ -702,13 +703,16 @@ for candidate in candidates:
             text=True,
             check=True,
         )
-        if sync_project(created.stdout) and rust_safety_pass(created.stdout):
-            count += 1
-    except Exception:
-        pass
+    except subprocess.CalledProcessError:
+        continue
+    if sync_project(created.stdout) and rust_safety_pass(created.stdout):
+        count += 1
 print(count)
 PY
-)" || _once_filed=0
+)"; then
+            echo "ERROR: --once stopped after a hard managed Project sync failure" >&2
+            exit 1
+        fi
     fi
 
     # Compose the reason string. A fail-closed pass is NOT a dry well — report it
@@ -1007,7 +1011,7 @@ $marker"
             issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
-        project_sync_issue "$issue_url"
+        project_sync_issue "$issue_url" || return 1
         # Extract trailing issue number from the returned URL.
         issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
         case "$issue_num" in

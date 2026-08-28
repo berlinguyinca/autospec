@@ -722,12 +722,18 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
         .unwrap();
     journal_issue_projection(&mut store, issue_url).unwrap();
     journal_issue_projection(&mut store, second_issue_url).unwrap();
+    let first_bound = format!("project:item-add:PVT_7:{issue_url}");
+    let second_bound = format!("project:item-add:PVT_7:{second_issue_url}");
+    store.enqueue_projection(first_bound.clone()).unwrap();
+    store.enqueue_projection(second_bound.clone()).unwrap();
     store
         .ack_projection(&format!("project:item-add:unresolved:{issue_url}"))
         .unwrap();
     store
         .ack_projection(&format!("project:item-add:unresolved:{second_issue_url}"))
         .unwrap();
+    store.ack_projection(&first_bound).unwrap();
+    store.ack_projection(&second_bound).unwrap();
     assert_eq!(
         tracked_issue_urls(&store),
         vec![issue_url.to_owned(), second_issue_url.to_owned()]
@@ -778,6 +784,8 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
             .count(),
         1
     );
+    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    assert!(reopened.snapshot().pending_projections.is_empty());
 }
 
 #[test]
@@ -877,11 +885,11 @@ fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
     let mut github = ScriptedGithub::with([
         Ok(issue(
             "https://github.com/berlinguyinca/autospec/issues/50",
-            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/alpha/issues/1",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/zeta/issues/1",
         )),
         Ok(issue(
             "https://github.com/berlinguyinca/autospec/issues/51",
-            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/beta/issues/1",
+            "## AutoSpec relationships\nDepends on: https://github.com/berlinguyinca/omega/issues/1",
         )),
     ]);
 
@@ -896,7 +904,7 @@ fn selected_issue_discovery_shares_one_repository_cap_across_all_issues() {
             .count(),
         1
     );
-    assert!(outcome["out_of_bound"].as_u64().unwrap() >= 1);
+    assert_eq!(outcome["out_of_bound"], 1);
 }
 
 #[test]

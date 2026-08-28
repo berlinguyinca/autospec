@@ -133,7 +133,7 @@ fn sync<T: GithubTransport>(
             resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
         for tracked_issue in tracked_issue_urls(store) {
             let projection = journal_issue_projection(store, &tracked_issue)?;
-            store.restore_projection(&projection)?;
+            store.ensure_projection_pending(&projection)?;
         }
         retry_pending_projections(store, github, policy)?;
         ack_repository_projections(store, policy)?;
@@ -290,6 +290,9 @@ fn load_selected_issue_relationships<T: GithubTransport>(
     report
         .repositories
         .dedup_by(|left, right| left.repository == right.repository);
+    report
+        .repositories
+        .retain(|record| record.entry_kind != "selected-issue");
     if report.repositories.len() > policy.discovery_max_repos {
         let excluded = report.repositories.split_off(policy.discovery_max_repos);
         report.out_of_bound += excluded.len();

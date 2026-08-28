@@ -77,6 +77,9 @@ DRIVER
   [ "$status" -eq 0 ]
   assert_create_then_sync_once
 
+  run env AUTOSPEC_SYNC_FAIL=hard AUTOSPEC_SCRIPTS_DIR="$TMP/bin" bash "$TMP/driver.sh"
+  [ "$status" -ne 0 ]
+
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run env AUTOSPEC_SCRIPTS_DIR="$TMP/bin" AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD='printf "{\"proposals_total\":0,\"proposals\":[]}"' \
     bash "$REPO_ROOT/scripts/autospec-explore.sh" --once --preview --autonomous --research-sources spec-vs-code
@@ -122,6 +125,10 @@ DRIVER
   run env AUTOSPEC_SYNC_FAIL=1 bash "$script" --finding "$finding" --repo acme/widgets --cache "$TMP/live.cache"
   [ "$status" -eq 0 ]
   assert_create_then_sync_once
+
+  run env AUTOSPEC_SYNC_FAIL=hard bash "$script" --finding "$finding" --repo acme/widgets --cache "$TMP/hard.cache"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TMP/hard.cache" ]
 
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run bash "$script" --finding "$finding" --repo acme/widgets --cache "$TMP/dry.cache" --dry-run

@@ -251,13 +251,20 @@ impl ManagedProjectStore {
             return Ok(());
         }
         self.append_event_locked(
-            format!("projection:ack:{projection_key}"),
+            format!(
+                "projection:ack:{}:{}",
+                sha256_hex(projection_key.as_bytes()),
+                self.next_sequence
+            ),
             "projection-acknowledged",
             Value::String(projection_key.to_owned()),
         )
     }
 
-    pub fn restore_projection(&mut self, projection_key: &str) -> Result<(), ManagedProjectError> {
+    pub fn ensure_projection_pending(
+        &mut self,
+        projection_key: &str,
+    ) -> Result<(), ManagedProjectError> {
         let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
         self.refresh_from_journal()?;
         if self
@@ -269,9 +276,11 @@ impl ManagedProjectStore {
             return Ok(());
         }
         if !self.known_projections.contains(projection_key) {
-            return Err(ManagedProjectError::new(
-                "projection restore has no matching durable enqueue event",
-            ));
+            return self.append_event_locked(
+                projection_key.to_owned(),
+                "projection-enqueued",
+                Value::String(projection_key.to_owned()),
+            );
         }
         self.append_event_locked(
             format!(
