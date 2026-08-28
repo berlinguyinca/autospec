@@ -698,6 +698,33 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
 }
 
 #[test]
+fn onboard_cli_journals_selected_issue_before_relationship_fetch_failure() {
+    let fixture = Fixture::new("onboard-selected-issue-fetch-failure");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let issue_url = "https://github.com/berlinguyinca/autospec/issues/43";
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--issue-url".to_owned(),
+        issue_url.to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Err(GithubFailure::Definitive(
+        "missing issue scope".to_owned(),
+    ))]);
+
+    assert!(run_with_transport(&args, &mut github).is_err());
+
+    let reopened =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    assert_eq!(
+        reopened.snapshot().pending_projections,
+        [format!("project:item-add:unresolved:{issue_url}")]
+    );
+}
+
+#[test]
 fn active_edges_returns_empty_for_an_external_project_board() {
     let fixture = Fixture::new("external-active-edges");
     let repository_path = fixture.path().join("checkout");
@@ -1907,10 +1934,22 @@ fn github_ambiguous_marker_edit_resumes_from_verified_bound_project() {
     assert!(resolve_or_create_project(&mut store, &mut first, &policy, "Autospec").is_err());
     assert_eq!(store.snapshot().pending_projections.len(), 1);
 
-    let mut retry = ScriptedGithub::with([Ok(marked)]);
+    let mut refreshed: serde_json::Value = serde_json::from_str(&marked).unwrap();
+    refreshed["title"] = serde_json::json!("Autospec delivery");
+    refreshed["url"] =
+        serde_json::json!("https://github.com/orgs/berlinguyinca/projects/7?view=delivery");
+    let mut retry = ScriptedGithub::with([Ok(refreshed.to_string())]);
     resolve_or_create_project(&mut store, &mut retry, &policy, "Autospec").unwrap();
 
     assert!(store.snapshot().pending_projections.is_empty());
+    assert_eq!(
+        store.snapshot().project_title.as_deref(),
+        Some("Autospec delivery")
+    );
+    assert_eq!(
+        store.snapshot().project_url.as_deref(),
+        Some("https://github.com/orgs/berlinguyinca/projects/7?view=delivery")
+    );
     assert_eq!(retry.calls.len(), 1);
     assert!(matches!(retry.calls[0], GithubCommand::ViewProject { .. }));
 }

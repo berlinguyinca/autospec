@@ -277,7 +277,7 @@ Behavioural contract:
 4. Files each surviving proposal as an interim candidate via `gh issue create --label auto-implement --label origin:self`,
    first running the idempotent, best-effort `gh label create origin:self --color 8250df --force`
    guard so the label always exists (label-create failure never aborts filing). After `gh issue create`
-   returns issue `<N>`, invokes the exact Rust admission command:
+   returns the issue URL, invokes `project-sync-issue.sh` before the exact Rust admission command:
    ```bash
    "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
    ```

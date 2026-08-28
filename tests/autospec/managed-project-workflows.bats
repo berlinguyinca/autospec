@@ -235,6 +235,24 @@ SH
   done
 }
 
+@test "listener and explore issue producers require managed Project sync" {
+  for body in \
+    "$REPO_ROOT/skills/autospec-listen/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-listen/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec-listen/codex/prompt.md"; do
+    grep -Fq 'issue_url="$(gh issue create' "$body"
+    grep -Fq 'project-sync-issue.sh" "$issue_url"' "$body"
+  done
+
+  for body in \
+    "$REPO_ROOT/skills/autospec-explore/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-explore/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec-explore/codex/prompt.md"; do
+    grep -Fq 'invokes `project-sync-issue.sh` before the exact Rust admission command' "$body"
+  done
+  grep -Fq 'project_sync_issue "$issue_url"' "$REPO_ROOT/scripts/autospec-explore.sh"
+}
+
 @test "brute-force ambiguous create adopts and syncs the refreshed issue once" {
   repo="$TMP/qa-repo"
   mkdir -p "$repo/src"

@@ -310,6 +310,7 @@ fn resume_bound_project<T: GithubTransport>(
         ));
     }
     validate_project(&verified, policy)?;
+    persist_project(store, &verified)?;
     ack_create_projection_if_pending(store, policy)?;
     Ok(verified)
 }

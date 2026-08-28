@@ -438,7 +438,8 @@ pub(super) fn parse(source: &str) -> Result<ProjectBoardConfig, String> {
         return Ok(config);
     }
 
-    config.write_back = write_back_explicit.unwrap_or_else(|| config.url.is_some());
+    config.write_back = write_back_explicit
+        .unwrap_or_else(|| config.url.is_some() || config.mode == ProjectMode::Managed);
 
     if config.mode == ProjectMode::Managed {
         let product_key = product_key.ok_or_else(|| {
@@ -763,6 +764,16 @@ project_board:
             ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
         );
         assert_eq!(policy.discovery_max_repos, 25);
+    }
+
+    #[test]
+    fn managed_project_defaults_write_back_on_but_preserves_explicit_false() {
+        let base = "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n";
+        let defaulted = AutonomousConfig::parse(base).unwrap();
+        assert!(defaulted.project_board.write_back);
+
+        let disabled = AutonomousConfig::parse(&format!("{base}  write_back: false\n")).unwrap();
+        assert!(!disabled.project_board.write_back);
     }
 
     #[test]

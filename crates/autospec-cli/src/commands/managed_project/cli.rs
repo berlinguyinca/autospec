@@ -52,11 +52,6 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
     validate_issue_boundaries(&policy, &options.issue_urls)?;
     populate_owner_repositories(&policy, &mut options, github)?;
     validate_explicit_seeds(&policy, &options.repositories)?;
-    let selected_issue_edges = if command == "onboard" {
-        load_selected_issue_relationships(&policy, &options.issue_urls, github)?
-    } else {
-        Vec::new()
-    };
     let state_root = managed_state_root(&repo_dir)?;
     let legacy_root = repo_dir.join(".autospec/state");
     let read_only = options.dry_run || command == "active-edges";
@@ -72,6 +67,16 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
         }
     } else {
         ManagedProjectStore::open_global(&state_root, Some(&legacy_root), &policy.product_key)?
+    };
+    if command == "onboard" && !read_only {
+        for issue_url in &options.issue_urls {
+            journal_issue_projection(&mut store, issue_url)?;
+        }
+    }
+    let selected_issue_edges = if command == "onboard" {
+        load_selected_issue_relationships(&policy, &options.issue_urls, github)?
+    } else {
+        Vec::new()
     };
 
     match command.as_str() {
