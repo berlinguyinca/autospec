@@ -6,6 +6,12 @@ setup() {
     SCRIPT="$REPO_ROOT/scripts/autonomous-self-improvement.sh"
     TMP="$(mktemp -d -t self-improve.XXXXXX)"
     mkdir -p "$TMP/repo/crates/autospec-cli/src/commands" "$TMP/repo/docs/reports" "$TMP/bin"
+    cat > "$TMP/bin/autospec" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$TMP/bin/autospec"
+    export PATH="$TMP/bin:$PATH"
 }
 
 teardown() {
