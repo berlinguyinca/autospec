@@ -4,6 +4,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::waterfall::sha256_hex;
+use autospec_core::managed_project::{ManagedProjectBinding, ProductKey};
+use serde_json::Value;
+
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
@@ -28,6 +32,146 @@ impl fmt::Display for ManagedProjectError {
 }
 
 impl std::error::Error for ManagedProjectError {}
+
+pub(super) struct JournalCheckpoint {
+    pub(super) high_watermark: u64,
+    pub(super) digest: String,
+}
+
+pub(super) struct PersistedBinding {
+    pub(super) binding: ManagedProjectBinding,
+    pub(super) checkpoint: Option<JournalCheckpoint>,
+}
+
+pub(super) fn read_persisted_binding(
+    path: &Path,
+    product_key: &ProductKey,
+) -> Result<PersistedBinding, ManagedProjectError> {
+    let value: Value = serde_json::from_str(&read_private_file(path)?).map_err(|error| {
+        ManagedProjectError::new(format!("invalid managed project binding: {error}"))
+    })?;
+    let binding: ManagedProjectBinding =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            ManagedProjectError::new(format!("invalid managed project binding: {error}"))
+        })?;
+    validate_binding_identity(&binding, product_key)?;
+    let high_watermark = value.get("journal_high_watermark").and_then(Value::as_u64);
+    let digest = value.get("journal_digest").and_then(Value::as_str);
+    let checkpoint = match (high_watermark, digest) {
+        (None, None) => None,
+        (Some(high_watermark), Some(digest))
+            if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Some(JournalCheckpoint {
+                high_watermark,
+                digest: digest.to_owned(),
+            })
+        }
+        _ => {
+            return Err(ManagedProjectError::new(
+                "managed project binding has invalid journal checkpoint metadata",
+            ))
+        }
+    };
+    Ok(PersistedBinding {
+        binding,
+        checkpoint,
+    })
+}
+
+pub(super) fn binding_document(
+    binding: &ManagedProjectBinding,
+    checkpoint: &JournalCheckpoint,
+) -> Result<Vec<u8>, ManagedProjectError> {
+    let mut value = serde_json::to_value(binding).map_err(ManagedProjectError::from)?;
+    let object = value
+        .as_object_mut()
+        .expect("managed project binding serializes as an object");
+    object.insert(
+        "journal_high_watermark".to_owned(),
+        Value::from(checkpoint.high_watermark),
+    );
+    object.insert(
+        "journal_digest".to_owned(),
+        Value::from(checkpoint.digest.clone()),
+    );
+    let mut document = serde_json::to_vec_pretty(&value).map_err(ManagedProjectError::from)?;
+    document.push(b'\n');
+    Ok(document)
+}
+
+pub(super) fn validate_replay_checkpoint(
+    persisted: Option<&PersistedBinding>,
+    replayed: &ManagedProjectBinding,
+    prefix_digests: &[String],
+) -> Result<(), ManagedProjectError> {
+    let Some(persisted) = persisted else {
+        return Ok(());
+    };
+    let Some(checkpoint) = &persisted.checkpoint else {
+        return if persisted.binding == *replayed {
+            Ok(())
+        } else {
+            Err(ManagedProjectError::new(
+                "managed project binding without a checkpoint disagrees with its journal",
+            ))
+        };
+    };
+    let index = usize::try_from(checkpoint.high_watermark)
+        .map_err(|_| ManagedProjectError::new("journal checkpoint high-watermark is too large"))?;
+    let digest = prefix_digests.get(index).ok_or_else(|| {
+        ManagedProjectError::new("managed project journal is behind the binding high-watermark")
+    })?;
+    if digest != &checkpoint.digest {
+        return Err(ManagedProjectError::new(
+            "managed project journal does not match the binding checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn snapshot_needs_update(
+    persisted: Option<&PersistedBinding>,
+    replayed: &ManagedProjectBinding,
+    high_watermark: u64,
+    digest: &str,
+) -> bool {
+    persisted.is_none_or(|persisted| {
+        persisted.binding != *replayed
+            || persisted.checkpoint.as_ref().is_none_or(|checkpoint| {
+                checkpoint.high_watermark != high_watermark || checkpoint.digest != digest
+            })
+    })
+}
+
+pub(super) fn empty_journal_digest() -> String {
+    sha256_hex(b"managed-project-journal-v1")
+}
+
+pub(super) fn extend_journal_digest(prior: &str, line: &[u8]) -> String {
+    let mut input = Vec::with_capacity(prior.len() + 1 + line.len());
+    input.extend_from_slice(prior.as_bytes());
+    input.push(0);
+    input.extend_from_slice(line);
+    sha256_hex(&input)
+}
+
+fn validate_binding_identity(
+    binding: &ManagedProjectBinding,
+    product_key: &ProductKey,
+) -> Result<(), ManagedProjectError> {
+    if binding.schema_version != ManagedProjectBinding::SCHEMA_VERSION {
+        return Err(ManagedProjectError::new(
+            "unsupported managed project binding schema",
+        ));
+    }
+    if &binding.product_key != product_key {
+        return Err(ManagedProjectError::new(
+            "managed project binding product key does not match its state directory",
+        ));
+    }
+    Ok(())
+}
 
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(1);
 

@@ -1,6 +1,8 @@
 use super::{
-    append_synced_line, atomic_write, ensure_private_directory, ensure_private_file, io_error,
-    open_private_file, read_private_file, reject_unsafe_file, ManagedProjectError, ProductLock,
+    append_synced_line, atomic_write, binding_document, empty_journal_digest,
+    ensure_private_directory, ensure_private_file, extend_journal_digest, io_error,
+    open_private_file, read_persisted_binding, reject_unsafe_file, snapshot_needs_update,
+    validate_replay_checkpoint, JournalCheckpoint, ManagedProjectError, ProductLock,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
@@ -23,6 +25,7 @@ pub struct ManagedProjectStore {
     event_keys: HashSet<String>,
     known_projections: HashSet<String>,
     next_sequence: u64,
+    journal_digest: String,
     append_fault_after: Option<usize>,
 }
 
@@ -41,12 +44,7 @@ impl ManagedProjectStore {
         reject_unsafe_file(&events_path)?;
 
         let persisted = if binding_path.exists() {
-            let binding: ManagedProjectBinding =
-                serde_json::from_str(&read_private_file(&binding_path)?).map_err(|error| {
-                    ManagedProjectError::new(format!("invalid managed project binding: {error}"))
-                })?;
-            validate_binding_identity(&binding, product_key)?;
-            Some(binding)
+            Some(read_persisted_binding(&binding_path, product_key)?)
         } else {
             None
         };
@@ -56,14 +54,14 @@ impl ManagedProjectStore {
         if !journal_exists
             && persisted
                 .as_ref()
-                .is_some_and(|binding| binding != &empty_binding)
+                .is_some_and(|persisted| persisted.binding != empty_binding)
         {
             return Err(ManagedProjectError::new(
                 "nonempty managed project binding is missing its durable event journal",
             ));
         }
         ensure_private_file(&events_path)?;
-        let events = recover_events(&events_path, product_key)?;
+        let recovered = recover_events(&events_path, product_key)?;
         let mut store = Self {
             root,
             product_key: product_key.clone(),
@@ -71,16 +69,28 @@ impl ManagedProjectStore {
             event_keys: HashSet::new(),
             known_projections: HashSet::new(),
             next_sequence: 1,
+            journal_digest: empty_journal_digest(),
             append_fault_after: None,
         };
-        for event in events {
+        for event in recovered.events {
             store.apply_event(&event)?;
             store.next_sequence = event
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
         }
-        if persisted.as_ref() != Some(&store.binding) {
+        store.journal_digest = recovered.final_digest;
+        validate_replay_checkpoint(
+            persisted.as_ref(),
+            &store.binding,
+            &recovered.prefix_digests,
+        )?;
+        if snapshot_needs_update(
+            persisted.as_ref(),
+            &store.binding,
+            store.next_sequence - 1,
+            &store.journal_digest,
+        ) {
             store.persist_binding()?;
         }
         Ok(store)
@@ -207,6 +217,7 @@ impl ManagedProjectStore {
             &line,
             self.append_fault_after.take(),
         )?;
+        self.journal_digest = extend_journal_digest(&self.journal_digest, &line);
         self.apply_event(&event)?;
         self.next_sequence = self
             .next_sequence
@@ -216,18 +227,21 @@ impl ManagedProjectStore {
     }
 
     fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
-        let events = recover_events(&self.root.join(EVENTS_FILE), &self.product_key)?;
+        let persisted = read_persisted_binding(&self.root.join(BINDING_FILE), &self.product_key)?;
+        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key)?;
         self.binding = ManagedProjectBinding::new(self.product_key.clone());
         self.event_keys.clear();
         self.known_projections.clear();
         self.next_sequence = 1;
-        for event in events {
+        for event in recovered.events {
             self.apply_event(&event)?;
             self.next_sequence = event
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| ManagedProjectError::new("managed project sequence overflow"))?;
         }
+        self.journal_digest = recovered.final_digest;
+        validate_replay_checkpoint(Some(&persisted), &self.binding, &recovered.prefix_digests)?;
         Ok(())
     }
 
@@ -305,10 +319,13 @@ impl ManagedProjectStore {
     }
 
     fn persist_binding(&self) -> Result<(), ManagedProjectError> {
-        let mut document = serde_json::to_vec_pretty(&self.binding).map_err(|error| {
-            ManagedProjectError::new(format!("cannot serialize managed project binding: {error}"))
-        })?;
-        document.push(b'\n');
+        let document = binding_document(
+            &self.binding,
+            &JournalCheckpoint {
+                high_watermark: self.next_sequence - 1,
+                digest: self.journal_digest.clone(),
+            },
+        )?;
         atomic_write(&self.root.join(BINDING_FILE), &document)
     }
 }
@@ -394,27 +411,10 @@ fn payload_string<'a>(
         .ok_or_else(|| ManagedProjectError::new(format!("{description} payload must be a string")))
 }
 
-fn validate_binding_identity(
-    binding: &ManagedProjectBinding,
-    product_key: &ProductKey,
-) -> Result<(), ManagedProjectError> {
-    if binding.schema_version != ManagedProjectBinding::SCHEMA_VERSION {
-        return Err(ManagedProjectError::new(
-            "unsupported managed project binding schema",
-        ));
-    }
-    if &binding.product_key != product_key {
-        return Err(ManagedProjectError::new(
-            "managed project binding product key does not match its state directory",
-        ));
-    }
-    Ok(())
-}
-
 fn recover_events(
     path: &Path,
     product_key: &ProductKey,
-) -> Result<Vec<JournalEvent>, ManagedProjectError> {
+) -> Result<RecoveredJournal, ManagedProjectError> {
     let mut file = open_private_file(path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(io_error)?;
@@ -430,8 +430,13 @@ fn recover_events(
         bytes.truncate(complete);
     }
     let mut events = Vec::new();
+    let mut prefix_digests = vec![empty_journal_digest()];
     if bytes.is_empty() {
-        return Ok(events);
+        return Ok(RecoveredJournal {
+            events,
+            final_digest: prefix_digests[0].clone(),
+            prefix_digests,
+        });
     }
     let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
@@ -461,9 +466,29 @@ fn recover_events(
                 "journal event product key does not match its state directory",
             ));
         }
+        let mut complete_line = line.to_vec();
+        complete_line.push(b'\n');
+        let digest = extend_journal_digest(
+            prefix_digests.last().expect("initial digest exists"),
+            &complete_line,
+        );
+        prefix_digests.push(digest);
         events.push(event);
     }
-    Ok(events)
+    Ok(RecoveredJournal {
+        final_digest: prefix_digests
+            .last()
+            .expect("initial digest exists")
+            .clone(),
+        events,
+        prefix_digests,
+    })
+}
+
+struct RecoveredJournal {
+    events: Vec<JournalEvent>,
+    prefix_digests: Vec<String>,
+    final_digest: String,
 }
 
 fn normalize_identity(value: &str) -> String {

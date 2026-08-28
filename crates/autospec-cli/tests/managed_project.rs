@@ -268,6 +268,53 @@ fn store_missing_journal_fails_closed_without_overwriting_a_nonempty_binding() {
 }
 
 #[test]
+fn store_zero_length_journal_fails_closed_without_modifying_state() {
+    let fixture = Fixture::new("empty-journal");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    drop(store);
+    let binding_path = fixture.state_path("binding.json");
+    let journal_path = fixture.state_path("events.jsonl");
+    let binding_before = fs::read(&binding_path).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&journal_path)
+        .unwrap();
+
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert_eq!(fs::read(binding_path).unwrap(), binding_before);
+    assert!(fs::read(journal_path).unwrap().is_empty());
+}
+
+#[test]
+fn store_valid_journal_prefix_behind_snapshot_fails_closed_without_modifying_state() {
+    let fixture = Fixture::new("journal-prefix");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
+        .unwrap();
+    store
+        .record_repository(repository("berlinguyinca/autospec-node", "explicit-seed"))
+        .unwrap();
+    drop(store);
+    let binding_path = fixture.state_path("binding.json");
+    let journal_path = fixture.state_path("events.jsonl");
+    let binding_before = fs::read(&binding_path).unwrap();
+    let journal = fs::read_to_string(&journal_path).unwrap();
+    let first_line = format!("{}\n", journal.lines().next().unwrap());
+    fs::write(&journal_path, first_line.as_bytes()).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert_eq!(fs::read(binding_path).unwrap(), binding_before);
+    assert_eq!(fs::read(journal_path).unwrap(), first_line.as_bytes());
+}
+
+#[test]
 fn store_rejects_mismatched_binding_and_edge_product_keys() {
     let fixture = Fixture::new("mismatched-key");
     let store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
