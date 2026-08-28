@@ -36,6 +36,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
+project_sync_issue() {
+    local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+    bash "$helper" "$1" "$REPO_ROOT"
+}
+
 # Defaults.
 MAX_ITERATIONS=3
 MAX_ISSUES_PER_ROUND=5
@@ -579,7 +584,7 @@ except Exception:
     # File surviving candidates as issues (best-effort; never blocks the mode).
     _once_filed=0
     if [ "$_once_new" -gt 0 ] && [ "$PREVIEW" -ne 1 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
-        _once_filed="$(python3 - "$_once_candidates" <<'PY'
+        if ! _once_filed="$(AUTOSPEC_PROJECT_SYNC_HELPER="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh" AUTOSPEC_PROJECT_SYNC_REPO="$REPO_ROOT" python3 - "$_once_candidates" <<'PY'
 import json, os, shutil, subprocess, sys
 try:
     candidates = json.load(open(sys.argv[1]))
@@ -607,6 +612,20 @@ def resolve_autospec_bin():
     return shutil.which("autospec") or ""
 
 AUTOSPEC_BIN = resolve_autospec_bin()
+
+def sync_project(issue_url):
+    helper = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_HELPER", "")).strip()
+    repo = str(os.environ.get("AUTOSPEC_PROJECT_SYNC_REPO", os.getcwd())).strip()
+    if not helper or not os.path.isfile(helper):
+        raise RuntimeError("managed Project sync helper is unavailable")
+    result = subprocess.run(
+        ["bash", helper, str(issue_url or "").strip(), repo],
+        stdout=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("managed Project sync failed before durable journaling")
+    return True
 
 def rust_safety_pass(issue_url):
     issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
@@ -684,13 +703,16 @@ for candidate in candidates:
             text=True,
             check=True,
         )
-        if rust_safety_pass(created.stdout):
-            count += 1
-    except Exception:
-        pass
+    except subprocess.CalledProcessError:
+        continue
+    if sync_project(created.stdout) and rust_safety_pass(created.stdout):
+        count += 1
 print(count)
 PY
-)" || _once_filed=0
+)"; then
+            echo "ERROR: --once stopped after a hard managed Project sync failure" >&2
+            exit 1
+        fi
     fi
 
     # Compose the reason string. A fail-closed pass is NOT a dry well — report it
@@ -989,6 +1011,7 @@ $marker"
             issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
+        project_sync_issue "$issue_url" || return 1
         # Extract trailing issue number from the returned URL.
         issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
         case "$issue_num" in
@@ -1061,7 +1084,7 @@ _explore_file_round() {
     if ! bash "$SCRIPT_DIR/gen-explore-round-spec.sh" "$research_json" \
         --round "$iter" --branch "$SANDBOX_BRANCH" --out "$spec_path" 2>/dev/null; then
         echo "code_health:explore_round_spec_render_failed round=$iter" >&2
-        _explore_raw_file_round
+        _explore_raw_file_round || return $?
         return 0
     fi
 
@@ -1092,7 +1115,7 @@ _explore_file_round() {
     if [ "$define_rc" -ne 0 ]; then
         # 5. Fallback — keep the committed spec, raw-file this round, continue.
         echo "code_health:explore_define_unavailable round=$iter rc=$define_rc spec=$spec_path" >&2
-        _explore_raw_file_round
+        _explore_raw_file_round || return $?
         return 0
     fi
 
@@ -1320,7 +1343,11 @@ PYR
     # back to raw `gh issue create` for that round, and continue (never stall).
     issues_filed=0
     filed_issue_nums=""   # space-separated issue numbers filed THIS round (for ledger)
-    _explore_file_round
+    if ! _explore_file_round; then
+        echo "code_health:explore_project_sync_failed iter=$iter" >&2
+        status="project_sync_failed"
+        break
+    fi
 
     # ── Drain callback: invoke /autospec-run. ─────────────────────────────────
     drain_rc=0

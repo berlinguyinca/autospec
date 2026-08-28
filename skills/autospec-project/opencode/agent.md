@@ -49,11 +49,56 @@ and exit.
 /autospec-project ship <url>     # resolve -> fleet config -> provision -> launch, end to end
 /autospec-project sync <url>     # one promotion pass, no drain
 /autospec-project status <url>   # board-scoped queue, workers, PRs, blockers
+/autospec-project onboard --repo owner/name
+/autospec-project onboard --repo owner/name --issue-url URL [--issue-url URL...]
+/autospec-project onboard --workspace /absolute/path
+/autospec-project onboard --owner owner --allow owner/repo --allow owner/prefix-*
+/autospec-project sync
 ```
 
 `<url>` is a GitHub Projects v2 URL: `https://github.com/orgs/<org>/projects/<n>`
 or `https://github.com/users/<user>/projects/<n>`, optionally with a trailing
 `/views/<n>`.
+
+### Managed repository `onboard` and `sync`
+
+These modes use the typed `autospec project` command and the managed policy in
+`.autospec/autonomous.yml`; they do not execute repository content. Treat every
+repository, owner, allowlist, and workspace argument as data: preserve each
+argument as its own word, never interpolate it into `sh -c`, and never use
+`eval`.
+
+- `onboard --repo owner/name` forwards the exact slug as
+  `autospec project onboard --repo-dir "$PWD" --repo "owner/name"`.
+- Each repeatable `--issue-url URL` is forwarded as its own exact argument to
+  `autospec project onboard`; validate every URL before any owner enumeration.
+- `onboard --workspace /absolute/path` requires an absolute path and forwards
+  it as `autospec project onboard --repo-dir "$PWD" --workspace "/absolute/path"`.
+- `onboard --owner owner` requires at least one explicit `--allow` value and
+  forwards the owner plus every equality, trailing-`*` repository prefix, or
+  bounded `owner/*` pattern as separate
+  arguments to `autospec project onboard --repo-dir "$PWD" --owner "owner"
+  --allow "pattern" ...`. The owner and configured managed policy owner must
+  match. Refuse owner onboarding when the allowlist is absent; owner scope
+  alone never authorizes indexing every repository.
+- Never forward `--spawned-from` with `--owner`; creation provenance requires
+  the single exact repository supplied through `--repo`.
+- Forward `--dry-run` as a separate literal flag on either onboarding form.
+- Managed `sync` with no URL runs `autospec project sync --repo-dir "$PWD"`.
+  The existing `sync <url>` form below remains the one-pass external board
+  promoter.
+
+Print all stable reconciliation fields returned by the command—`created`,
+`adopted`, `updated`, `unchanged`, `proposed`, `out_of_bound`, `inaccessible`,
+and `pending_projection`—plus `selected_issues`, `reconciled_issues`, `outcome`,
+`project_url`, and `error`. Treat
+`outcome: journaled_projection_pending` as the successful onboarding result
+used after repository state is durable but remote reconciliation is transiently
+degraded. Any non-zero command exit or other outcome is a hard configuration,
+validation, storage, or runtime failure and must be propagated. Managed `sync`
+also propagates remote failures as nonzero. Do not summarize away pending or
+out-of-bound results, and do not promise automatic recovery: a pending Project
+create without verified remote identity fails closed on later reconciliation.
 
 ### Bare mode: resolve and print
 

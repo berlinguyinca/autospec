@@ -7,6 +7,7 @@ pub mod growth_report;
 pub mod init;
 pub mod issue;
 pub mod lint;
+pub mod managed_project;
 pub mod parent;
 pub mod plan;
 pub mod queue;

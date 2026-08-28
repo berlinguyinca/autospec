@@ -154,7 +154,26 @@ If **either** check fails — no git repo, or no GitHub remote — bootstrap a n
    gh repo create <owner>/<name> --<private|public> --source=. --remote=origin --push
    ```
 
-5. **Verify**: `gh repo view <owner>/<name> --json url,defaultBranchRef`. Capture `<owner>/<name>` as `{repo}` — every subsequent phase uses this value.
+5. **Verify and register**: first run `gh repo view <owner>/<name> --json url,defaultBranchRef`.
+   Only after that succeeds, capture the exact slug and record verified creation evidence:
+   ```bash
+   REPO="<owner>/<name>"
+   SPAWNED_FROM="${SOURCE_SPEC_URL:-${AUTOSPEC_RUN_ID:-bootstrap:$REPO}}"
+   REGISTRATION_JSON=$("${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM") || {
+     printf '%s\n' 'ERROR: managed Project repository registration failed before durable admission' >&2
+     exit 1
+   }
+   case "$(printf '%s' "$REGISTRATION_JSON" | jq -r '.outcome // empty')" in
+     reconciled) ;;
+     journaled_projection_pending)
+       printf '%s\n' 'WARNING: managed Project repository projection is durably journaled and pending' >&2 ;;
+     *) printf '%s\n' 'ERROR: managed Project repository registration returned no supported typed outcome' >&2; exit 1 ;;
+   esac
+   ```
+   Never register when read-back fails. A typed pending outcome does not roll
+   back or recreate the verified repository; reconciliation retries the
+   journaled projection. Propagate every hard registration failure. Capture
+   `<owner>/<name>` as `{repo}` for every later phase.
 
 If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>` remote), capture that as `{repo}` and skip the bootstrap.
 
@@ -243,6 +262,12 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
 >
 > **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to `gh issue create` as normal.
+
+> **Managed Project projection (mandatory):** Immediately after every successful issue
+> creation or issue edit, capture the verified URL as `ISSUE_URL` and run:
+> `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$ISSUE_URL" "$PWD"`.
+> Never run this command in dry-run mode. If sync fails, print
+> `WARNING: managed Project sync failed for $ISSUE_URL` only for a verified journaled-pending outcome. A hard pre-journal failure stops decomposition after preserving the already-created issue; never create a replacement issue.
 >
 > | Finding | Directive appended to next prompt |
 > |---|---|

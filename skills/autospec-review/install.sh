@@ -42,7 +42,7 @@ SKILL_REFERENCE_FILES="csv-schema.md gap-taxonomy.md reviewer-prompt.md subagent
 # that live under skills/autospec-shared/scripts/ (not repo-root scripts/). They
 # MUST ship into ~/.autospec/scripts so a standalone install of autospec-review
 # can run /autospec-review in a target repo without this checkout present.
-SHARED_LIB_SCRIPT_FILES="emit-gaps.sh inject-relevant-memory.sh"
+SHARED_LIB_SCRIPT_FILES="emit-gaps.sh inject-relevant-memory.sh project-sync-issue.sh"
 
 # ---------- helpers --------------------------------------------------------
 

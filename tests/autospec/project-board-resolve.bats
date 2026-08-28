@@ -84,6 +84,29 @@ SH
   echo "$output" | jq -e '.fields.autospec_state.options | has("Ready") and has("Done")'
 }
 
+@test "plan includes managed active edges from the selected product state" {
+  stub_gh "$FIX/p2-fields.json" "$FIX/p2-items.json"
+  cat > "$TMP/bin/autospec" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$TMP/autospec-call.log"
+printf '[{"from":"https://github.com/InferWeave/inferweave-workbench/issues/2","to":"https://github.com/InferWeave/inferweave-workbench/issues/5","kind":"depends-on","state":"active"}]'
+SH
+  chmod +x "$TMP/bin/autospec"
+
+  AUTOSPEC_BIN="$TMP/bin/autospec" run bash "$SCRIPT" \
+    --url https://github.com/orgs/InferWeave/projects/2 \
+    --repo-dir "$TMP/repo" --emit plan
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMP/autospec-call.log")" = "project active-edges --repo-dir $TMP/repo --board-url https://github.com/orgs/InferWeave/projects/2" ]
+  echo "$output" | jq -e '.active_edges == [{
+    from: "https://github.com/InferWeave/inferweave-workbench/issues/2",
+    to: "https://github.com/InferWeave/inferweave-workbench/issues/5",
+    kind: "depends-on",
+    state: "active"
+  }]'
+}
+
 @test "plan lists every distinct repo on a multi-repo board" {
   stub_gh "$FIX/p1-fields.json" "$FIX/p1-items.json"
   run bash "$SCRIPT" --url https://github.com/orgs/InferWeave/projects/1 --emit repos
@@ -271,7 +294,7 @@ SH
   [ -n "$option_id" ] && [ "$option_id" != "null" ]
 
   WRITEBACK="${BATS_TEST_DIRNAME}/../../scripts/project-board-writeback.sh"
-  run bash "$WRITEBACK" --plan "$TMP/plan.json" --item "$item_id" --state Ready
+  AUTOSPEC_PROJECT_BOARD_WRITE_BACK=1 run bash "$WRITEBACK" --plan "$TMP/plan.json" --item "$item_id" --state Ready
   [ "$status" -eq 0 ]
 
   edit_call="$(grep 'item-edit' "$TMP/gh-calls.log")"

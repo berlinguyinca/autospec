@@ -44,6 +44,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+SHARED_LIB_SCRIPT_FILES="project-sync-issue.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -107,6 +108,10 @@ fetch_source_files() {
             exit 1
         fi
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" -o "$TMP_FETCH_DIR/lib-scripts/$rel" || exit 1
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
 }
 
@@ -132,6 +137,13 @@ install_shared_scripts() {
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
+    done
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    lib_dir="$SKILL_DIR/lib-scripts"
+    [ -z "$checkout_root" ] || [ ! -d "$checkout_root/skills/autospec-shared/scripts" ] || lib_dir="$checkout_root/skills/autospec-shared/scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$lib_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        run "chmod +x \"$HOME/.autospec/scripts/$rel\""
     done
 }
 

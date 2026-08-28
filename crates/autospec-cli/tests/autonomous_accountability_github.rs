@@ -3,8 +3,8 @@
 mod accountability;
 
 use accountability::github::{
-    bind_epic, bind_epic_at, EpicBindingRequest, GithubCommand, GithubFailure, GithubTransport,
-    ResumePolicy,
+    bind_epic, bind_epic_at, bind_epic_with_project, EpicBindingRequest, GithubCommand,
+    GithubFailure, GithubTransport, ProjectAssignment, ProjectTarget, ResumePolicy,
 };
 use accountability::{
     AccountabilityEvent, AccountabilityStore, EventKind, Evidence, LaunchDescriptor,

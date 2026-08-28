@@ -23,6 +23,27 @@ item() { printf '{"items":[{"repo":"o/r","number":9,"body":%s,"dependencies":%s,
   echo "$output" | jq -e '.items[0].blocked_by == [{"repo":"InferWeave/inferweave-protocol","number":42}]'
 }
 
+@test "managed active DependsOn and Blocks edges preserve direction in readiness" {
+  cat > "$TMP/in.json" <<'JSON'
+{"active_edges":[
+  {"kind":"depends-on","state":"active","source":"https://github.com/o/a/issues/1","target":"https://github.com/o/b/issues/2"},
+  {"kind":"blocks","state":"active","source":"https://github.com/o/c/issues/3","target":"https://github.com/o/d/issues/4"}
+],"items":[
+  {"repo":"o/a","number":1,"state":"open"},
+  {"repo":"o/b","number":2,"state":"open"},
+  {"repo":"o/c","number":3,"state":"open"},
+  {"repo":"o/d","number":4,"state":"open"}
+]}
+JSON
+  run bash "$SCRIPT" --resolve < "$TMP/in.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    (.items[] | select(.repo == "o/a") | .blocked_by == [{"repo":"o/b","number":2}] and .ready == false) and
+    (.items[] | select(.repo == "o/d") | .blocked_by == [{"repo":"o/c","number":3}] and .ready == false) and
+    (.items[] | select(.repo == "o/b") | .ready == true) and
+    (.items[] | select(.repo == "o/c") | .ready == true)'
+}
+
 @test "parses multiple blocked-by references on one line" {
   item '"## Dependencies\n\n- Blocked by: #1, #2, #3.\n"' > "$TMP/in.json"
   run bash "$SCRIPT" < "$TMP/in.json"

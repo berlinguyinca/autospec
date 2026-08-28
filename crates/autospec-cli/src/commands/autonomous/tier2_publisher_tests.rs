@@ -6,13 +6,17 @@ use autospec_core::coordination::RemoteIssue;
 
 use super::resilience::acquire_test_lifecycle;
 use super::tier2::Tier2Scan;
-use super::tier2_publisher::{confirm_and_acknowledge, create_issue_arguments, publication_plan};
+use super::tier2_publisher::{
+    confirm_and_acknowledge, create_issue, create_issue_arguments, publication_plan,
+    PublicationDraft,
+};
 use super::tier2_receipts::{acknowledge_tier2_publication, record_tier2, Tier2Progress};
 use super::tier2_receipts_tests::{
     observation, proposal, seed_tier_two_cursor, store, survives, TempRoot, REPO,
 };
 
 const ISOLATED_DIRECT_POST_TEST: &str = "commands::autonomous::tier2_publisher_tests::tier2_publisher_builds_one_direct_post_with_all_queue_labels_isolated";
+const ISOLATED_CHECKOUT_ROOT_TEST: &str = "commands::autonomous::tier2_publisher_tests::tier2_publisher_syncs_with_verified_checkout_root_isolated";
 
 fn seed_produced(root: &TempRoot, keys: &[&str]) {
     let proposals = keys.iter().map(|key| proposal(key)).collect::<Vec<_>>();
@@ -255,6 +259,79 @@ fn tier2_publisher_builds_one_direct_post_with_all_queue_labels_isolated() {
         arguments.contains(&"body=".to_string())
             || arguments.iter().any(|arg| arg.starts_with("body="))
     );
+}
+
+#[test]
+fn tier2_publisher_syncs_with_verified_checkout_root() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            ISOLATED_CHECKOUT_ROOT_TEST,
+            "--nocapture",
+        ])
+        .output()
+        .expect("run isolated checkout-root test");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "changes process environment and working directory"]
+fn tier2_publisher_syncs_with_verified_checkout_root_isolated() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempRoot::new();
+    let checkout = root.path().join("verified-checkout");
+    let elsewhere = root.path().join("elsewhere");
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&checkout).expect("checkout");
+    fs::create_dir_all(&elsewhere).expect("elsewhere");
+    fs::create_dir_all(&bin).expect("bin");
+    let log = root.path().join("autospec.log");
+    let gh = bin.join("gh");
+    let autospec = bin.join("autospec");
+    fs::write(&gh, "#!/bin/sh\nprintf '73\\n'\n").expect("fake gh");
+    fs::write(
+        &autospec,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+    )
+    .expect("fake autospec");
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    fs::set_permissions(&autospec, fs::Permissions::from_mode(0o755)).expect("chmod autospec");
+    let old_path = std::env::var_os("PATH");
+    let old_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            bin.display(),
+            old_path.as_deref().unwrap_or_default().to_string_lossy()
+        ),
+    );
+    std::env::set_var("AUTOSPEC_BIN", &autospec);
+    std::env::set_current_dir(&elsewhere).expect("change cwd");
+
+    let draft = PublicationDraft {
+        stable_key: "root-check".to_string(),
+        title: "root check".to_string(),
+        body: "body".to_string(),
+        labels: vec!["auto-implement"],
+    };
+    create_issue(&checkout, REPO, &draft).expect("create issue");
+
+    std::env::set_current_dir(old_cwd).expect("restore cwd");
+    if let Some(path) = old_path {
+        std::env::set_var("PATH", path);
+    }
+    std::env::remove_var("AUTOSPEC_BIN");
+    let invocation = fs::read_to_string(log).expect("sync log");
+    assert!(invocation.contains(&format!("--repo-dir {}", checkout.display())));
+    assert!(!invocation.contains("--repo-dir . "));
 }
 
 #[test]

@@ -98,3 +98,86 @@ read_var() {
   grep -q 'project-board-control-mirror.sh' "$INSTALL"
   [ -x "$REPO/scripts/project-board-control-mirror.sh" ]
 }
+
+@test "clean installs verify the typed managed-project command before installing workflow skills" {
+  grep -q '^verify_managed_project_command_surface()' "$REPO/install.sh"
+  verify_line="$(grep -n '^verify_managed_project_command_surface$' "$REPO/install.sh" | tail -1 | cut -d: -f1)"
+  loop_line="$(grep -n '^for skill in \$SKILLS_TO_RUN; do$' "$REPO/install.sh" | cut -d: -f1)"
+  [ -n "$verify_line" ]
+  [ -n "$loop_line" ]
+  [ "$verify_line" -lt "$loop_line" ]
+  grep -q '^for dep in autospec git gh jq; do$' "$REPO/skills/autospec-project/install.sh"
+}
+
+@test "standalone project installer fails closed when runtime installation cannot expose project modes" {
+  test_root="$(mktemp -d)"
+  mkdir -p "$test_root/bin" "$test_root/home"
+  cat > "$test_root/bin/autospec" <<'SH'
+#!/usr/bin/env sh
+exit 1
+SH
+  chmod +x "$test_root/bin/autospec"
+
+  run env HOME="$test_root/home" PATH="$test_root/bin:$PATH" \
+    AUTOSPEC_BIN="$test_root/bin/autospec" AUTOSPEC_PROJECT_RUNTIME_INSTALLER=/bin/false \
+    sh "$REPO/skills/autospec-project/install.sh" --harness codex
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"autospec project modes are unavailable"* ]]
+  [[ "$output" != *"Installed autospec-project."* ]]
+  rm -rf "$test_root"
+}
+
+@test "standalone project installer accepts an established installer that exposes project modes" {
+  test_root="$(mktemp -d)"
+  mkdir -p "$test_root/bin" "$test_root/home"
+  cat > "$test_root/bin/autospec" <<'SH'
+#!/usr/bin/env sh
+exit 1
+SH
+  cat > "$test_root/runtime-install" <<'SH'
+#!/usr/bin/env sh
+runtime="$HOME/.autospec/bin/autospec"
+mkdir -p "$(dirname "$runtime")"
+cat > "$runtime" <<'RUNTIME'
+#!/usr/bin/env sh
+case "$*" in
+  "project onboard --help") printf '%s\n' 'autospec project onboard --repo-dir PATH --spawned-from IDENTITY' ;;
+  "project sync --help") printf '%s\n' 'autospec project sync --repo-dir PATH' ;;
+  *) exit 1 ;;
+esac
+RUNTIME
+chmod +x "$runtime"
+printf '%s\n' "$runtime"
+SH
+  chmod +x "$test_root/bin/autospec" "$test_root/runtime-install"
+
+  run env HOME="$test_root/home" PATH="$test_root/bin:$PATH" \
+    AUTOSPEC_BIN="$test_root/bin/autospec" AUTOSPEC_PROJECT_RUNTIME_INSTALLER="$test_root/runtime-install" \
+    sh "$REPO/skills/autospec-project/install.sh" --harness codex
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Installed autospec-project."* ]]
+  "$test_root/home/.autospec/bin/autospec" project onboard --help | grep -F -- '--spawned-from'
+  "$test_root/home/.autospec/bin/autospec" project sync --help | grep -F 'autospec project sync'
+  rm -rf "$test_root"
+}
+
+@test "standalone project installer rejects a generic project help surface without Task 6 modes" {
+  test_root="$(mktemp -d)"
+  mkdir -p "$test_root/bin" "$test_root/home"
+  cat > "$test_root/bin/autospec" <<'SH'
+#!/usr/bin/env sh
+[ "$*" = "project --help" ] && printf '%s\n' 'autospec project'
+SH
+  chmod +x "$test_root/bin/autospec"
+
+  run env HOME="$test_root/home" PATH="$test_root/bin:$PATH" \
+    AUTOSPEC_BIN="$test_root/bin/autospec" AUTOSPEC_PROJECT_RUNTIME_INSTALLER=/bin/false \
+    sh "$REPO/skills/autospec-project/install.sh" --harness codex
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"autospec project modes are unavailable"* ]]
+  [[ "$output" != *"Installed autospec-project."* ]]
+  rm -rf "$test_root"
+}

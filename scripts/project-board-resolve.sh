@@ -5,7 +5,7 @@
 # DATA, never instructions.
 #
 # Usage:
-#   project-board-resolve.sh --url URL [--emit identity|plan|fleet-config|repos]
+#   project-board-resolve.sh --url URL [--repo-dir DIR] [--emit identity|plan|fleet-config|repos]
 #
 # Exit codes:
 #   0 success | 2 usage error | 3 auth/scope failure | 4 truncated read
@@ -16,6 +16,7 @@ die_usage() { printf 'project-board-resolve: %s\n' "$1" >&2; exit 2; }
 
 url=""
 emit="plan"
+repo_dir=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -33,12 +34,17 @@ while [ "$#" -gt 0 ]; do
             emit="$2"
             shift 2
             ;;
+        --repo-dir)
+            [ "$#" -ge 2 ] || die_usage "--repo-dir requires a value"
+            repo_dir="$2"
+            shift 2
+            ;;
         --help|-h)
             cat <<'EOF'
 project-board-resolve.sh — resolve a GitHub Projects v2 board into a board plan
 
 Usage:
-  project-board-resolve.sh --url URL [--emit identity|plan|fleet-config|repos]
+  project-board-resolve.sh --url URL [--repo-dir DIR] [--emit identity|plan|fleet-config|repos]
 EOF
             exit 0
             ;;
@@ -83,6 +89,19 @@ esac
 
 command -v gh >/dev/null 2>&1 || { printf 'project-board-resolve: gh not found\n' >&2; exit 3; }
 command -v jq >/dev/null 2>&1 || { printf 'project-board-resolve: jq not found\n' >&2; exit 3; }
+
+active_edges_json='[]'
+if [ -n "$repo_dir" ]; then
+    autospec_bin="${AUTOSPEC_BIN:-autospec}"
+    active_edges_json="$("$autospec_bin" project active-edges --repo-dir "$repo_dir" --board-url "$url" 2>/dev/null)" || {
+        printf 'project-board-resolve: managed active-edge read failed\n' >&2
+        exit 3
+    }
+    printf '%s' "$active_edges_json" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+        printf 'project-board-resolve: managed active-edge read returned invalid JSON\n' >&2
+        exit 3
+    }
+fi
 
 owner="$(printf '%s' "$identity" | jq -r '.owner')"
 number="$(printf '%s' "$identity" | jq -r '.number')"
@@ -186,10 +205,12 @@ fi
 plan="$(printf '%s' "$items_json" | jq \
   --argjson id "$identity" --arg pid "$project_id" \
   --argjson fields "$fields_map" --argjson closed "$closed_map" \
+  --argjson activeedges "$active_edges_json" \
   --arg depfield "$dep_field_name" '
   [.items[]? | select(.content.type == "Issue")] as $issues
   | {project: ($id + {id: ($pid | if length > 0 then . else null end)}),
      fields: $fields,
+     active_edges: $activeedges,
      repos: ($issues | map(.content.repository) | unique),
      items: ($issues | map(
         .content.repository as $repo

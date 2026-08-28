@@ -185,6 +185,83 @@ When the generated issues are ready:
 /autospec-run
 ```
 
+## Managed GitHub Projects
+
+Autospec can own one durable GitHub Project per product or initiative. The Project is shared
+across that product's repositories and autonomous runs; it is not recreated for each repository
+or conductor generation. Autospec verifies identity with this marker in the Project readme and
+never adopts a Project by title alone:
+
+```text
+<!-- autospec-managed-project:begin -->
+schema: 1
+product-key: autospec
+owner: berlinguyinca
+<!-- autospec-managed-project:end -->
+```
+
+Configure the target repository's `.autospec/autonomous.yml` with an explicit seed and admission
+boundary:
+
+```yaml
+project_board:
+  mode: managed
+  product_key: autospec
+  owner: berlinguyinca
+  repository_seeds: ["berlinguyinca/autospec"]
+  repo_allowlist: ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
+  discovery_max_repos: 25
+  write_back: true
+```
+
+Then resolve the marked Project or onboard existing repositories:
+
+```bash
+autospec project resolve --repo-dir "$PWD"
+autospec project onboard --repo-dir "$PWD" --repo berlinguyinca/autospec
+autospec project onboard --repo-dir "$PWD" --workspace /absolute/path
+autospec project onboard --repo-dir "$PWD" --owner berlinguyinca --allow 'berlinguyinca/autospec-*'
+autospec project sync --repo-dir "$PWD"
+```
+
+The Rust command accepts repeatable `--repo` and `--workspace` seeds. Owner onboarding requires
+at least one repeatable `--allow`: an exact repository, a trailing-`*` repository-name prefix, or
+`OWNER/*` for the bounded owner-wide set. It requests at most `discovery_max_repos` from `gh repo
+list` and also fails closed if the response itself exceeds that cap. Command-line patterns are
+applied before matching repositories become exact scanner seeds, and the configured
+`repo_allowlist` is enforced again. Discovery may follow concrete repository metadata, but it
+cannot widen either boundary; out-of-bound repositories are reported and never indexed.
+Repeat `--issue-url` during onboarding to select bounded existing open or closed issues; each URL
+must belong to an admitted owner/allowlist repository. The report includes `selected_issues` and
+`reconciled_issues` counts.
+Verified repository creation uses `--repo OWNER/NAME --spawned-from IDENTITY` after `gh repo
+view` succeeds. `--spawned-from` cannot be combined with owner enumeration because creation
+provenance must identify exactly one repository. Adopted repositories receive only an active
+`contains` relationship.
+
+Reconciliation is additive and idempotent. Deterministic evidence becomes an active relationship;
+ambiguous name-only evidence remains proposed and cannot gate execution. When onboarding has
+already journaled repository state but its remote reconciliation encounters a transient failure,
+the command exits successfully with JSON `outcome: journaled_projection_pending`. Managed
+`autospec project sync --repo-dir "$PWD"` does not use that success outcome: a remote failure is a
+nonzero error, and an operator must rerun it after the cause clears. A pending Project create with
+no verified remote identity is a hard fail-closed condition, not automatically recoverable; verify
+the remote Project state before retrying. The authoritative product-global recovery journal is
+`${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/events.jsonl`, with its checkpoint at
+`${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/binding.json`. The per-product lock in
+that directory serializes creation across every repository. On first writable open, an existing
+private repo-local `.autospec/state/projects/<product-key>` journal is validated and copied into
+the absent global binding; the legacy source is retained as a compatibility backup.
+
+Existing `project_board.url` configurations remain compatible in `external` mode. The legacy
+`~/.autospec/project-map.yml` maps labels to GitHub Project numbers for the independent
+`/autospec-classify --apply-boards` workflow; it is not a repository-to-Project managed routing
+map. Accountability alone may use its mapped Project number as a compatibility fallback when no
+managed policy exists. To migrate accountability, add the managed policy above, run `autospec
+project resolve --repo-dir "$PWD"`, the bounded `autospec project onboard --repo-dir "$PWD" ...`
+command, and `autospec project sync --repo-dir "$PWD"`. Autospec does not delete or rewrite the
+legacy file, and `--apply-boards` continues to consume it independently.
+
 ## Install
 
 For day-to-day use, install the latest `main` version on macOS/Linux:

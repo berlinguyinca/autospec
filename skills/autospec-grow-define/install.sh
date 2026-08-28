@@ -49,7 +49,7 @@ SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.
 # MUST ship into ~/.autospec/scripts so a standalone install of
 # autospec-grow-define can run the skill in a target repo without this checkout
 # present.
-SHARED_LIB_SCRIPT_FILES="inject-relevant-memory.sh validate-growth-config.sh validate-growth-candidate.sh growth-measure.sh growth-source-weights.sh growth-candidate-dedup.sh growth-candidate-verify.sh growth-candidate-rank.sh growth-ledger.sh grow-define-pipeline.sh grow-define-file-issues.sh"
+SHARED_LIB_SCRIPT_FILES="inject-relevant-memory.sh validate-growth-config.sh validate-growth-candidate.sh growth-measure.sh growth-source-weights.sh growth-candidate-dedup.sh growth-candidate-verify.sh growth-candidate-rank.sh growth-ledger.sh grow-define-pipeline.sh grow-define-file-issues.sh project-sync-issue.sh"
 
 # ---------- helpers --------------------------------------------------------
 

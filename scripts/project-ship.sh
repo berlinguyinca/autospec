@@ -100,6 +100,7 @@ RESOLVE_BIN="${AUTOSPEC_PROJECT_BOARD_RESOLVE_BIN:-${AUTOSPEC_SCRIPTS_DIR:-$SCRI
 BOARD_CONFIG_BIN="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
 FLEET_LIB="${AUTOSPEC_FLEET_LIB_SCRIPT:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/fleet-lib.sh}"
 FLEET_RUN_BIN="${AUTOSPEC_FLEET_RUN_SCRIPT:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/fleet-run.sh}"
+DEPS_BIN="${AUTOSPEC_PROJECT_BOARD_DEPS_BIN:-${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/project-board-deps.sh}"
 
 if [ ! -f "$FLEET_LIB" ]; then
     _dev_fleet_lib="$SCRIPT_DIR/../skills/autospec-fleet/scripts/fleet-lib.sh"
@@ -113,6 +114,7 @@ fi
 [ -f "$RESOLVE_BIN" ] || fail "project-board-resolve.sh not found at $RESOLVE_BIN"
 [ -f "$FLEET_LIB" ] || fail "fleet-lib.sh not found (checked \$AUTOSPEC_FLEET_LIB_SCRIPT and $FLEET_LIB)"
 [ -f "$FLEET_RUN_BIN" ] || fail "fleet-run.sh not found (checked \$AUTOSPEC_FLEET_RUN_SCRIPT and $FLEET_RUN_BIN)"
+[ -f "$DEPS_BIN" ] || fail "project-board-deps.sh not found at $DEPS_BIN"
 # shellcheck source=/dev/null
 source "$FLEET_LIB"
 
@@ -137,11 +139,14 @@ fi
 # same as bare/sync/status mode) ────────────────────────────────────────────
 repos_json=""
 resolve_rc=0
-repos_json="$("$RESOLVE_BIN" --url "$url" --emit repos)" || resolve_rc=$?
+plan_json="$("$RESOLVE_BIN" --url "$url" --repo-dir "$repo_dir" --emit plan)" || resolve_rc=$?
 if [ "$resolve_rc" -ne 0 ]; then
     printf 'project-ship: board resolve failed (exit %s)\n' "$resolve_rc" >&2
     exit "$resolve_rc"
 fi
+ready_plan="$(printf '%s' "$plan_json" | bash "$DEPS_BIN" --resolve)" || fail "active dependency readiness failed"
+blocked_repos_json="$(printf '%s' "$ready_plan" | jq -c '[.items[]? | select(.state == "open" and .ready != true) | .repo] | unique')"
+repos_json="$(printf '%s' "$ready_plan" | jq -c --argjson blocked "$blocked_repos_json" '[.items[]? | select(.state == "open") | .repo] | unique | map(select(. as $repo | $blocked | index($repo) | not))')"
 
 # ── Step 3: filter to the allowlist ─────────────────────────────────────────
 filtered_json="$(jq -c -n --argjson repos "$repos_json" --argjson allow "$allowlist_json" '
@@ -155,6 +160,19 @@ filtered_json="$(jq -c -n --argjson repos "$repos_json" --argjson allow "$allowl
 
 allowed_repos_json="$(printf '%s' "$filtered_json" | jq -c '.allowed')"
 skipped_repos_json="$(printf '%s' "$filtered_json" | jq -c '.skipped')"
+
+while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    allowlisted="$(jq -rn --arg repo "$repo" --argjson allow "$allowlist_json" '
+      def allowed($r): $allow | map((. | rtrimstr("*")) as $p | if endswith("*") then ($r | startswith($p)) else ($r == .) end) | any;
+      allowed($repo)')"
+    if [ "$allowlisted" = "true" ]; then
+        reasons="$(printf '%s' "$ready_plan" | jq -r --arg repo "$repo" '[.items[]? | select(.repo == $repo and .state == "open" and .ready != true) | (.reason // "not-ready")] | unique | join(",")')"
+        printf 'project-ship: repo=%s allowlisted=yes action=skipped reason=blocked-issue details=%s\n' "$repo" "$reasons"
+    else
+        printf 'project-ship: repo=%s allowlisted=no action=skipped reason=not-allowlisted\n' "$repo"
+    fi
+done < <(printf '%s' "$blocked_repos_json" | jq -r '.[]')
 
 while IFS= read -r repo; do
     [ -n "$repo" ] || continue

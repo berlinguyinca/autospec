@@ -8,6 +8,11 @@
 # --search` before filing each draft with `gh issue create`.
 
 set -eu
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+project_sync_issue() {
+  helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+  bash "$helper" "$1" "$PWD"
+}
 
 INPUT=""
 LEDGER="docs/memory/autospec-gap-ledger.md"
@@ -194,7 +199,8 @@ file_draft() {
   [ -n "$area_label" ] && _gh_label_create "$area_label" --color 5319e7 --force >/dev/null 2>&1 || true
   priority_label="$(printf '%s' "$draft" | jq -r '.priority')"
   _gh_label_create "$priority_label" --color e11d21 --force >/dev/null 2>&1 || true
-  _gh_issue_create --title "$title" --body "$body" --label "$labels" >/dev/null
+  issue_url="$(_gh_issue_create --title "$title" --body "$body" --label "$labels")"
+  project_sync_issue "$issue_url"
 }
 
 ensure_ledger

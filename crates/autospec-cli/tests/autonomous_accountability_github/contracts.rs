@@ -8,6 +8,119 @@ use std::os::unix::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn github_project_transport_commands_have_explicit_owner_contracts() {
+    let cases = [
+        (
+            GithubCommand::ListProjects {
+                owner: "berlinguyinca".into(),
+            },
+            vec![
+                "project",
+                "list",
+                "--owner",
+                "berlinguyinca",
+                "--format",
+                "json",
+                "--limit",
+                "500",
+            ],
+            None,
+        ),
+        (
+            GithubCommand::ListOwnerRepositories {
+                owner: "berlinguyinca".into(),
+                limit: 25,
+            },
+            vec![
+                "repo",
+                "list",
+                "berlinguyinca",
+                "--limit",
+                "25",
+                "--json",
+                "nameWithOwner",
+            ],
+            None,
+        ),
+        (
+            GithubCommand::CreateProject {
+                owner: "berlinguyinca".into(),
+                title: "Autospec".into(),
+            },
+            vec![
+                "project",
+                "create",
+                "--owner",
+                "berlinguyinca",
+                "--title",
+                "Autospec",
+                "--format",
+                "json",
+            ],
+            None,
+        ),
+        (
+            GithubCommand::ListProjectItems {
+                owner: "berlinguyinca".into(),
+                number: 7,
+            },
+            vec![
+                "project",
+                "item-list",
+                "7",
+                "--owner",
+                "berlinguyinca",
+                "--format",
+                "json",
+                "--limit",
+                "500",
+            ],
+            None,
+        ),
+        (
+            GithubCommand::EditProjectMarker {
+                owner: "berlinguyinca".into(),
+                number: 7,
+                readme: "managed marker".into(),
+            },
+            vec![
+                "project",
+                "edit",
+                "7",
+                "--owner",
+                "berlinguyinca",
+                "--readme",
+                "managed marker",
+            ],
+            None,
+        ),
+        (
+            GithubCommand::AddToProject {
+                owner: "berlinguyinca".into(),
+                project_number: 7,
+                issue_url: "https://github.com/berlinguyinca/autospec/issues/42".into(),
+            },
+            vec![
+                "project",
+                "item-add",
+                "7",
+                "--owner",
+                "berlinguyinca",
+                "--url",
+                "https://github.com/berlinguyinca/autospec/issues/42",
+            ],
+            None,
+        ),
+    ];
+
+    for (command, expected_args, expected_stdin) in cases {
+        let (args, stdin) = command.into_parts();
+        assert_eq!(args, expected_args);
+        assert_eq!(stdin.as_deref(), expected_stdin);
+    }
+}
+
+#[test]
 fn recovery_events_replay_into_the_active_existing_epic_projection() {
     let fixture = Fixture::new("recovery-projection");
     let mut store = store(&fixture);
@@ -74,16 +187,27 @@ fn recovery_events_replay_into_the_active_existing_epic_projection() {
     }
 
     let projection = store.render().unwrap();
-    assert!(projection.markdown.contains("Heartbeat publication deferred"));
+    assert!(projection
+        .markdown
+        .contains("Heartbeat publication deferred"));
     assert!(projection.markdown.contains("Startup claim recovered"));
     assert!(projection.markdown.contains("**What:**"));
     assert!(projection.markdown.contains("**Why:**"));
     assert!(projection.markdown.contains("**Evidence:**"));
-    assert!(projection.markdown.contains("deferred_42_1 --> recovered_42_2"));
-    assert!(projection.markdown.contains("deferred_42_3 --> recovered_42_4"));
+    assert!(projection
+        .markdown
+        .contains("deferred_42_1 --> recovered_42_2"));
+    assert!(projection
+        .markdown
+        .contains("deferred_42_3 --> recovered_42_4"));
     assert!(!projection.markdown.contains("deferred_42_5 -->"));
-    assert!(!projection.markdown.contains("recovered_42_2 --> deferred_42_1"));
-    assert_eq!(store.recovery_projection().0, accountability::RecoveryState::Active);
+    assert!(!projection
+        .markdown
+        .contains("recovered_42_2 --> deferred_42_1"));
+    assert_eq!(
+        store.recovery_projection().0,
+        accountability::RecoveryState::Active
+    );
 
     drop(store);
     let reopened = AccountabilityStore::open(fixture.path()).unwrap();
@@ -141,10 +265,7 @@ fn autonomous_resume_dry_run_is_strictly_read_only() {
     fixture.record_immediate_stop();
     fixture.install_closed_epic();
     let mut conductor = fixture.install_running_conductor();
-    assert_authoritative_conductor_metadata(
-        &fixture.scope().join("conductor.pid"),
-        conductor.id(),
-    );
+    assert_authoritative_conductor_metadata(&fixture.scope().join("conductor.pid"), conductor.id());
     let stop_before = fs::read_to_string(fixture.stop_flag()).expect("read stop flag");
     let files_before = snapshot_tree(&fixture.root);
 
@@ -448,11 +569,11 @@ fn native_process_identity(pid: u32) -> Option<NativeProcessIdentity> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, fields) = stat.rsplit_once(") ")?;
     let fields = fields.split_whitespace().collect::<Vec<_>>();
-    let pgid = u32::try_from(nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(
-        i32::try_from(pid).ok()?,
-    )))
-    .ok()?
-    .as_raw())
+    let pgid = u32::try_from(
+        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?)))
+            .ok()?
+            .as_raw(),
+    )
     .ok()?;
     Some(NativeProcessIdentity {
         pgid,

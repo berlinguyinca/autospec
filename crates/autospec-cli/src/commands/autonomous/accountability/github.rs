@@ -32,6 +32,19 @@ pub struct EpicBindingRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectTarget {
+    pub owner: String,
+    pub node_id: String,
+    pub number: u64,
+}
+
+pub trait ProjectAssignment {
+    fn target(&self) -> Result<ProjectTarget, String>;
+    fn enqueue_issue(&mut self, issue_url: &str) -> Result<String, String>;
+    fn acknowledge_issue(&mut self, projection: &str) -> Result<(), String>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpicBinding {
     pub number: u64,
     pub url: String,
@@ -73,11 +86,33 @@ where
     T: GithubTransport,
     R: FnMut() -> Result<(), String>,
 {
-    bind_epic_at(
+    bind_epic_at_inner(
         store,
         github,
         request,
         AccountabilityStore::projection_clock_now()?,
+        None,
+        renew_lease,
+    )
+}
+
+pub fn bind_epic_with_project<T, R>(
+    store: &mut AccountabilityStore,
+    github: &mut T,
+    request: EpicBindingRequest,
+    project: &mut dyn ProjectAssignment,
+    renew_lease: R,
+) -> Result<EpicBinding, AccountabilityError>
+where
+    T: GithubTransport,
+    R: FnMut() -> Result<(), String>,
+{
+    bind_epic_at_inner(
+        store,
+        github,
+        request,
+        AccountabilityStore::projection_clock_now()?,
+        Some(project),
         renew_lease,
     )
 }
@@ -87,6 +122,21 @@ pub fn bind_epic_at<T, R>(
     github: &mut T,
     request: EpicBindingRequest,
     now: u64,
+    renew_lease: R,
+) -> Result<EpicBinding, AccountabilityError>
+where
+    T: GithubTransport,
+    R: FnMut() -> Result<(), String>,
+{
+    bind_epic_at_inner(store, github, request, now, None, renew_lease)
+}
+
+fn bind_epic_at_inner<T, R>(
+    store: &mut AccountabilityStore,
+    github: &mut T,
+    request: EpicBindingRequest,
+    now: u64,
+    project: Option<&mut dyn ProjectAssignment>,
     mut renew_lease: R,
 ) -> Result<EpicBinding, AccountabilityError>
 where
@@ -97,9 +147,9 @@ where
         return local_binding(store);
     }
     let result = if let Some(number) = request.explicit_epic {
-        bind_explicit(store, github, request, number, &mut renew_lease)
+        bind_explicit(store, github, request, number, project, &mut renew_lease)
     } else {
-        bind_generated(store, github, request, &mut renew_lease)
+        bind_generated(store, github, request, project, &mut renew_lease)
     };
     result.map_err(|error| {
         let error = error.into_projection(ProjectionDisposition::IntegrityBlock);
@@ -134,6 +184,7 @@ fn bind_generated<T, R>(
     store: &mut AccountabilityStore,
     github: &mut T,
     request: EpicBindingRequest,
+    project: Option<&mut dyn ProjectAssignment>,
     renew_lease: &mut R,
 ) -> Result<EpicBinding, AccountabilityError>
 where
@@ -198,7 +249,7 @@ where
                 ));
             }
         }
-        return finish_binding(store, github, request, issue);
+        return finish_binding(store, github, request, issue, project);
     }
 
     let issue = if let Some(issue) = matches.pop() {
@@ -239,7 +290,7 @@ where
                         &serde_json::from_str(&output).map_err(json_error)?,
                     )?);
                 }
-                Err(error @ GithubFailure::Definitive(_)) => {
+                Err(error @ (GithubFailure::LocalExecution(_) | GithubFailure::Definitive(_))) => {
                     return Err(github_projection_error(
                         "cannot create accountability epic",
                         error,
@@ -302,7 +353,7 @@ where
         &marker,
         renew_lease,
     )?;
-    finish_binding(store, github, request, issue)
+    finish_binding(store, github, request, issue, project)
 }
 
 fn bind_explicit<T, R>(
@@ -310,6 +361,7 @@ fn bind_explicit<T, R>(
     github: &mut T,
     request: EpicBindingRequest,
     number: u64,
+    project: Option<&mut dyn ProjectAssignment>,
     renew_lease: &mut R,
 ) -> Result<EpicBinding, AccountabilityError>
 where
@@ -390,7 +442,7 @@ where
         &marker,
         renew_lease,
     )?;
-    finish_binding(store, github, request, issue)
+    finish_binding(store, github, request, issue, project)
 }
 
 fn project_and_ack<T, R>(
@@ -471,17 +523,45 @@ fn finish_binding<T: GithubTransport>(
     github: &mut T,
     request: EpicBindingRequest,
     issue: RemoteIssue,
+    project: Option<&mut dyn ProjectAssignment>,
 ) -> Result<EpicBinding, AccountabilityError> {
-    let project_warning = request.project_number.and_then(|project_number| {
-        github
-            .execute(GithubCommand::AddToProject {
-                repository: request.repository.as_str().to_owned(),
-                project_number,
-                issue_url: issue.url.clone(),
-            })
-            .err()
-            .map(|error| error.to_string())
-    });
+    let project_warning = if let Some(project) = project {
+        let target = project.target().map_err(|error| {
+            AccountabilityError::new(format!("managed Project binding is invalid: {error}"))
+        })?;
+        let projection = project.enqueue_issue(&issue.url).map_err(|error| {
+            AccountabilityError::new(format!(
+                "cannot journal managed Project assignment: {error}"
+            ))
+        })?;
+        match github.execute(GithubCommand::AddToProject {
+            owner: target.owner,
+            project_number: target.number,
+            issue_url: issue.url.clone(),
+        }) {
+            Ok(_) => project.acknowledge_issue(&projection).err().map(|error| {
+                format!("Project assignment succeeded but acknowledgment failed: {error}")
+            }),
+            Err(error) => Some(error.to_string()),
+        }
+    } else {
+        request.project_number.and_then(|project_number| {
+            github
+                .execute(GithubCommand::AddToProject {
+                    owner: request
+                        .repository
+                        .as_str()
+                        .split_once('/')
+                        .expect("validated repository identity has an owner")
+                        .0
+                        .to_owned(),
+                    project_number,
+                    issue_url: issue.url.clone(),
+                })
+                .err()
+                .map(|error| error.to_string())
+        })
+    };
     Ok(EpicBinding {
         number: issue.number,
         url: issue.url,

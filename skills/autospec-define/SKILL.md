@@ -175,7 +175,26 @@ If **either** check fails — no git repo, or no GitHub remote — bootstrap a n
    gh repo create <owner>/<name> --<private|public> --source=. --remote=origin --push
    ```
 
-6. **Verify**: `gh repo view <owner>/<name> --json url,defaultBranchRef`. Capture `<owner>/<name>` as `{repo}` — every subsequent phase uses this value.
+6. **Verify and register**: first run `gh repo view <owner>/<name> --json url,defaultBranchRef`.
+   Only after that succeeds, capture the exact slug and record verified creation evidence:
+   ```bash
+   REPO="<owner>/<name>"
+   SPAWNED_FROM="${SOURCE_SPEC_URL:-${AUTOSPEC_RUN_ID:-bootstrap:$REPO}}"
+   REGISTRATION_JSON=$("${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM") || {
+     printf '%s\n' 'ERROR: managed Project repository registration failed before durable admission' >&2
+     exit 1
+   }
+   case "$(printf '%s' "$REGISTRATION_JSON" | jq -r '.outcome // empty')" in
+     reconciled) ;;
+     journaled_projection_pending)
+       printf '%s\n' 'WARNING: managed Project repository projection is durably journaled and pending' >&2 ;;
+     *) printf '%s\n' 'ERROR: managed Project repository registration returned no supported typed outcome' >&2; exit 1 ;;
+   esac
+   ```
+   Never register when read-back fails. A typed pending outcome does not roll
+   back or recreate the verified repository; reconciliation retries the
+   journaled projection. Propagate every hard registration failure. Capture
+   `<owner>/<name>` as `{repo}` for every later phase.
 
 If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>` remote), capture that as `{repo}` and skip the bootstrap.
 
@@ -466,6 +485,12 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > issue mapping after decomposition, and run
 > `python3 "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/validate-security-artifact.py" <artifact>`.
 > Validation must pass before creating labels or calling `gh issue create`.
+
+> **Managed Project projection (mandatory):** Immediately after every successful issue
+> creation or issue edit, capture the verified URL as `ISSUE_URL` and run:
+> `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-sync-issue.sh" "$ISSUE_URL" "$PWD"`.
+> Never run this command in dry-run mode. If sync fails, print
+> `WARNING: managed Project sync failed for $ISSUE_URL` only for a verified journaled-pending outcome. A hard pre-journal failure stops decomposition after preserving the already-created issue; never create a replacement issue.
 > Then perform a Tier-A portfolio review: confirm every threat has a control,
 > every control has both a negative test and an issue owner, every required spec
 > section is covered, dependencies are acyclic, every prerequisite names its

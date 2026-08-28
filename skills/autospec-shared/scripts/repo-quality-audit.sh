@@ -1570,6 +1570,9 @@ if [ "$issue_policy_permits" -eq 1 ] && [ "$issue_catalog_ok" -eq 1 ]; then
         json_append "$ISSUES_ND" --arg title "$existing_title" --arg url "$existing_url" --arg key "$key" \
           '{title:$title,url:$url,dedupe_key:$key,existing:true}'
       fi
+      if [ -n "$existing_url" ]; then
+        bash "$(cd "$(dirname "$0")" && pwd)/project-sync-issue.sh" "$existing_url" "$REPO"
+      fi
       created_issue_keys="${created_issue_keys}${key}
 "
       continue
@@ -1577,6 +1580,7 @@ if [ "$issue_policy_permits" -eq 1 ] && [ "$issue_catalog_ok" -eq 1 ]; then
     body="$(printf '%s' "$finding" | jq -r '"## Goal\n" + .body + "\n\n## Acceptance criteria\n- [ ] Address `" + .dedupe_key + "` in `" + .file + "`.\n\n---\n- probe: " + .probe + "\n- classification: " + .classification + "\n- severity: " + .severity + "\n- dedupe_key: " + .dedupe_key + "\n\n<!-- autospec-quality-audit-dedupe:v2:" + .dedupe_key + " -->"')"
     url="$(cd "$REPO" && gh issue create --title "$title" --body "$body" --label "quality-audit" --label "auto-implement" --label "autospec:v2-flow" --label "origin:self" 2>/dev/null || true)"
     if [ -n "$url" ]; then
+      bash "$(cd "$(dirname "$0")" && pwd)/project-sync-issue.sh" "$url" "$REPO"
       json_append "$ISSUES_ND" --arg title "$title" --arg url "$url" --arg key "$key" \
         '{title:$title,url:$url,dedupe_key:$key}'
       created_issue_keys="${created_issue_keys}${key}

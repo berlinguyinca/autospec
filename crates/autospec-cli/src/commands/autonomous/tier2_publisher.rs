@@ -40,6 +40,7 @@ struct ProposalDraft {
 pub(super) fn publish_tier2_with_lease(
     state_root: &Path,
     repo: &str,
+    repo_dir: &Path,
     lease: &ConductorLease,
 ) -> Result<Tier2Progress, String> {
     let existing = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
@@ -50,7 +51,7 @@ pub(super) fn publish_tier2_with_lease(
             with_current_lifecycle_lease(lease, || ensure_label(repo, label))?;
         }
         for draft in drafts {
-            with_current_lifecycle_lease(lease, || create_issue(repo, &draft))?;
+            with_current_lifecycle_lease(lease, || create_issue(repo_dir, repo, &draft))?;
         }
     }
     let confirmed = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
@@ -459,19 +460,53 @@ fn label_metadata(label: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn create_issue(repo: &str, draft: &PublicationDraft) -> Result<u64, String> {
+pub(super) fn create_issue(
+    repo_dir: &Path,
+    repo: &str,
+    draft: &PublicationDraft,
+) -> Result<u64, String> {
     let arguments = create_issue_arguments(repo, draft);
     let output = Command::new("gh")
         .args(&arguments)
         .output()
         .map_err(|error| format!("could not execute gh: {error}"))?;
     require_success(&output, "create Tier 2 issue")?;
-    String::from_utf8_lossy(&output.stdout)
+    let number = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse::<u64>()
         .ok()
         .filter(|number| *number > 0)
-        .ok_or_else(|| "Tier 2 issue creation returned an invalid number".to_string())
+        .ok_or_else(|| "Tier 2 issue creation returned an invalid number".to_string())?;
+    project_sync_issue(repo_dir, repo, number)?;
+    Ok(number)
+}
+
+fn project_sync_issue(repo_dir: &Path, repo: &str, number: u64) -> Result<(), String> {
+    let issue_url = format!("https://github.com/{repo}/issues/{number}");
+    let result = Command::new(std::env::var("AUTOSPEC_BIN").unwrap_or_else(|_| "autospec".into()))
+        .arg("project")
+        .arg("sync")
+        .arg("--repo-dir")
+        .arg(repo_dir)
+        .arg("--issue-url")
+        .arg(&issue_url)
+        .output();
+    let output =
+        result.map_err(|error| format!("could not execute managed Project sync: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("journaled_projection_pending:") {
+        eprintln!(
+            "WARNING: managed Project sync failed for {issue_url}; durable projection remains retryable"
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "managed Project sync failed before durable journaling for {issue_url}: {}",
+        diagnostic.trim()
+    ))
 }
 
 pub(super) fn create_issue_arguments(repo: &str, draft: &PublicationDraft) -> Vec<String> {

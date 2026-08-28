@@ -1,5 +1,126 @@
 use super::*;
 
+#[derive(Default)]
+struct StubProjectAssignment {
+    target: Option<ProjectTarget>,
+    pending: Vec<String>,
+    acknowledged: Vec<String>,
+}
+
+impl ProjectAssignment for StubProjectAssignment {
+    fn target(&self) -> Result<ProjectTarget, String> {
+        self.target
+            .clone()
+            .ok_or_else(|| "managed Project binding is unavailable".to_string())
+    }
+
+    fn enqueue_issue(&mut self, issue_url: &str) -> Result<String, String> {
+        let key = format!(
+            "project:item-add:{}:{issue_url}",
+            self.target().unwrap().node_id
+        );
+        self.pending.push(key.clone());
+        Ok(key)
+    }
+
+    fn acknowledge_issue(&mut self, projection: &str) -> Result<(), String> {
+        self.pending.retain(|pending| pending != projection);
+        self.acknowledged.push(projection.to_string());
+        Ok(())
+    }
+}
+
+#[test]
+fn managed_project_assignment_uses_bound_owner_and_retains_failed_projection() {
+    let fixture = Fixture::new("managed-project-warning");
+    let mut store = store(&fixture);
+    let marker = format!(
+        "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+        run().run_id()
+    );
+    let remote = issue(188, "OPEN", &marker);
+    let mut github = StubGithub::with([
+        Ok(pages(std::slice::from_ref(&remote))),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+        Err(GithubFailure::Definitive(
+            "missing project scope".to_string(),
+        )),
+    ]);
+    let mut project = StubProjectAssignment {
+        target: Some(ProjectTarget {
+            owner: "product-owner".to_string(),
+            node_id: "PVT_managed".to_string(),
+            number: 17,
+        }),
+        ..StubProjectAssignment::default()
+    };
+
+    let mut binding_request = request();
+    binding_request.project_number = Some(9);
+    let binding = bind_epic_with_project(
+        &mut store,
+        &mut github,
+        binding_request,
+        &mut project,
+        || Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(binding.number, 188);
+    assert_eq!(
+        binding.project_warning.as_deref(),
+        Some("missing project scope")
+    );
+    assert_eq!(project.pending.len(), 1, "failed assignment stays durable");
+    assert!(project.acknowledged.is_empty());
+    assert!(github.calls.iter().any(|call| matches!(
+        call,
+        GithubCommand::AddToProject { owner, project_number: 17, .. }
+            if owner == "product-owner"
+    )));
+    assert!(
+        !github.calls.iter().any(|call| matches!(
+            call,
+            GithubCommand::AddToProject {
+                project_number: 9,
+                ..
+            }
+        )),
+        "the managed binding must win over the legacy numeric map"
+    );
+}
+
+#[test]
+fn managed_project_assignment_acknowledges_successful_projection() {
+    let fixture = Fixture::new("managed-project-ack");
+    let mut store = store(&fixture);
+    let marker = format!(
+        "<!-- autospec:run-epic repo=acme/widgets run_id={} -->",
+        run().run_id()
+    );
+    let remote = issue(189, "OPEN", &marker);
+    let mut github = StubGithub::with([
+        Ok(pages(std::slice::from_ref(&remote))),
+        Ok(String::new()),
+        Ok("__return_last_edit__".to_string()),
+        Ok(String::new()),
+    ]);
+    let mut project = StubProjectAssignment {
+        target: Some(ProjectTarget {
+            owner: "product-owner".to_string(),
+            node_id: "PVT_managed".to_string(),
+            number: 17,
+        }),
+        ..StubProjectAssignment::default()
+    };
+
+    bind_epic_with_project(&mut store, &mut github, request(), &mut project, || Ok(())).unwrap();
+
+    assert!(project.pending.is_empty());
+    assert_eq!(project.acknowledged.len(), 1);
+}
+
 #[test]
 fn zero_matches_binds_the_create_response_without_waiting_for_list_visibility() {
     let fixture = Fixture::new("create");

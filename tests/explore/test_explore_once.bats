@@ -55,6 +55,13 @@ if [ "${1:-}" = "explore" ] && [ "${2:-}" = "verifier-outcome" ]; then
     printf '{"outcome":"NotRun","reason":"missing_AUTOSPEC_EXPLORE_VERIFY_CMD","tier":"%s","cycle":%s,"artifact_path":"%s","sealed":true,"dry":false,"may_mutate_github":false}\n' "$tier" "${cycle:-0}" "$artifact"
     exit 0
 fi
+if [ "${1:-}" = "project" ] && [ "${2:-}" = "sync" ]; then
+    if [ "${AUTOSPEC_SYNC_FAIL:-}" = "hard" ]; then
+        echo 'pre-journal failure' >&2
+        exit 9
+    fi
+    exit 0
+fi
 if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
     exit 41
 fi
@@ -327,6 +334,33 @@ assert d['dry'] is False, f'expected dry=false, got: {d}'
 "
 }
 
+@test "--once propagates a hard pre-journal Project sync failure" {
+    local proposals='[{"title":"feat: one","evidence":"e","estimated_complexity":"small","confidence":0.9,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run env AUTOSPEC_SYNC_FAIL=hard bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once --research-sources spec-vs-code
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"hard managed Project sync failure"* ]]
+}
+
+@test "--once propagates a missing Project sync helper" {
+    local proposals='[{"title":"feat: one","evidence":"e","estimated_complexity":"small","confidence":0.9,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+    mkdir -p "$TMP/missing-scripts"
+
+    run env AUTOSPEC_SCRIPTS_DIR="$TMP/missing-scripts" bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once --research-sources spec-vs-code
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"sync helper is unavailable"* ]]
+}
+
 
 @test "--once emits machine-readable candidates with evidence, labels, ROI score, and body" {
     local proposals='[{"title":"fix: verified gap","evidence":"scripts/x.sh:12 missing guard","estimated_complexity":"medium","confidence":0.8,"source":"source-analysis","severity":"correctness","named_consumer":"autospec-run","score":0.42}]'
@@ -363,7 +397,7 @@ assert 'Adversarial verify' in cand['body'], cand
 "
 }
 
-@test "--once files an interim candidate before exact Rust safety review" {
+@test "--once syncs an interim candidate before exact Rust safety review" {
     local proposals='[{"title":"fix: label body gap","evidence":"lib/y.sh:7 failing path","estimated_complexity":"small","confidence":0.7,"source":"spec-vs-code","severity":"feature","named_consumer":"autospec-run","score":0.7}]'
     local cycle_cmd
     cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
@@ -377,10 +411,13 @@ assert 'Adversarial verify' in cand['body'], cand
     [ "$status" -eq 0 ]
 
     grep -q -- '--label auto-implement' "$TMP/.autospec/gh-calls.log"
+    grep -q 'autospec project sync --repo-dir' "$TMP/.autospec/gh-calls.log"
     grep -q 'autospec queue review-safety --repo x/y --limit 1 --issue 42' "$TMP/.autospec/gh-calls.log"
     create_line="$(grep -n 'gh issue create' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
+    sync_line="$(grep -n 'autospec project sync' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
     review_line="$(grep -n 'autospec queue review-safety' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
-    [ "$create_line" -lt "$review_line" ]
+    [ "$create_line" -lt "$sync_line" ]
+    [ "$sync_line" -lt "$review_line" ]
     grep -q -- '--label ctx:32k' "$TMP/.autospec/gh-calls.log"
     grep -q -- '--label reasoning:medium' "$TMP/.autospec/gh-calls.log"
     grep -q 'lib/y.sh:7 failing path' "$TMP/.autospec/gh-calls.log"

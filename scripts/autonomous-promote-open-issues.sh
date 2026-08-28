@@ -323,7 +323,7 @@ board_plan() {
 
     # Fail-closed: any resolver failure (bad URL, auth, truncated read) yields
     # an empty board, never a partial/garbage promotion.
-    if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --emit plan 2>/dev/null)" \
+    if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --repo-dir "$BOARD_CONFIG_REPO_DIR" --emit plan 2>/dev/null)" \
         && printf '%s' "$_plan" \
              | bash "$BOARD_NORMALIZE" ${AUTOSPEC_PROJECT_BOARD_LABEL_MAP:+--label-map "$AUTOSPEC_PROJECT_BOARD_LABEL_MAP"} \
              | bash "$BOARD_DEPS" --resolve > "$_tmp" 2>/dev/null; then

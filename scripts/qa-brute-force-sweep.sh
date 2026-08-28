@@ -34,6 +34,17 @@ set -eu
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
 VERDICT_FILE="${VERDICT_FILE:-$REPO_DIR/.autospec/qa-verdict.json}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+project_sync_issue() {
+    local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+    bash "$helper" "$1" "$REPO_DIR"
+}
+
+project_sync_catalog_issue() {
+    local catalog="$1" number="$2" issue_url
+    issue_url="$(jq -r --argjson number "$number" '.[] | select(.number == $number) | .url // empty' "$catalog" | head -n 1)"
+    [ -n "$issue_url" ] && project_sync_issue "$issue_url"
+}
 
 mkdir -p "$(dirname "$VERDICT_FILE")"
 
@@ -212,6 +223,7 @@ resume_pending() {
     if ! repo_gh issue edit "$number" --body-file "$cleaned" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
+    project_sync_catalog_issue "$catalog" "$number"
     printf '%s\n' "pending-recovered"
 }
 
@@ -249,6 +261,7 @@ handle_recurrence() {
     if ! repo_gh issue edit "$issue_number" --body-file "$clean_body" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
+    project_sync_catalog_issue "$CLOSED_ISSUES" "$issue_number"
     printf '%s\n' "reopened"
 }
 
@@ -272,14 +285,16 @@ handle_open_recurrence() {
     if ! repo_gh issue edit "$issue_number" --body-file "$clean_body" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
+    project_sync_catalog_issue "$OPEN_ISSUES" "$issue_number"
     printf '%s\n' "updated-open"
 }
 
 create_or_recheck_issue() {
-    local title="$1" body="$2" marker="$3" exact_number
+    local title="$1" body="$2" marker="$3" exact_number issue_url
     ensure_origin_self_label
-    if repo_gh issue create --title "$title" --body "$body" \
-        --label "auto-implement,autospec:v2-flow" --label origin:self >/dev/null 2>&1; then
+    if issue_url="$(repo_gh issue create --title "$title" --body "$body" \
+        --label "auto-implement,autospec:v2-flow" --label origin:self 2>/dev/null)"; then
+        project_sync_issue "$issue_url"
         printf '%s\n' "created"; return 0
     fi
     if ! refresh_open_catalog; then
@@ -287,10 +302,12 @@ create_or_recheck_issue() {
     fi
     exact_number="$(exact_issue_number "$OPEN_ISSUES" "$marker")"
     if [ -n "$exact_number" ]; then
+        project_sync_catalog_issue "$OPEN_ISSUES" "$exact_number"
         printf '%s\n' "existing-open-after-create"; return 0
     fi
-    if repo_gh issue create --title "$title" --body "$body" \
-        --label "auto-implement,autospec:v2-flow" --label origin:self >/dev/null 2>&1; then
+    if issue_url="$(repo_gh issue create --title "$title" --body "$body" \
+        --label "auto-implement,autospec:v2-flow" --label origin:self 2>/dev/null)"; then
+        project_sync_issue "$issue_url"
         printf '%s\n' "created"
     else
         printf '%s\n' "not-filed-create-failed"

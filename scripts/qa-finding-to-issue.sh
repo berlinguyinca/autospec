@@ -15,6 +15,11 @@
 #   2 — error (malformed JSON / gh call failure / missing args)
 
 set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+project_sync_issue() {
+    local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
+    bash "$helper" "$1" "${REPO_DIR:-$PWD}"
+}
 
 FINDING=""
 DRY_RUN=0
@@ -126,11 +131,12 @@ ensure_origin_self_label() {
 
 ensure_origin_self_label
 
-if gh issue create \
+if ISSUE_URL="$(gh issue create \
     --title "$TITLE" \
     --label "auto-implement,autospec:v2-flow" \
     --label origin:self \
-    --body "$BODY" >/dev/null 2>&1; then
+    --body "$BODY" 2>/dev/null)"; then
+    project_sync_issue "$ISSUE_URL" || exit $?
     echo "$DEDUP_KEY" >> "$DEDUP_CACHE"
     exit 0
 fi

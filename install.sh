@@ -186,6 +186,24 @@ install_autospec_runtime_binary() {
     info "install_autospec_runtime_binary: installed $runtime_target"
 }
 
+verify_managed_project_command_surface() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] verify_managed_project_command_surface: $HOME/.autospec/bin/autospec project --help"
+        return 0
+    fi
+
+    autospec_runtime="$HOME/.autospec/bin/autospec"
+    if [ ! -x "$autospec_runtime" ]; then
+        err "verify_managed_project_command_surface: runtime binary is missing: $autospec_runtime"
+        return 1
+    fi
+    if ! "$autospec_runtime" project --help >/dev/null; then
+        err "verify_managed_project_command_surface: installed runtime lacks autospec project"
+        return 1
+    fi
+    info "verify_managed_project_command_surface: autospec project is available"
+}
+
 write_agent_env_wrapper() {
     target="$1"
     {
@@ -1716,6 +1734,7 @@ ensure_autospec_bin_path
 ensure_required_system_tools
 install_autonomous_operator_commands
 install_autospec_runtime_binary
+verify_managed_project_command_surface
 install_agent_env_commands
 install_agent_env_aliases
 install_scanner_shims

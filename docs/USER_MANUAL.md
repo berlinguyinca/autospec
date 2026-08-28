@@ -309,9 +309,109 @@ actually answered, and `--require-accelerator` to turn an unusable accelerator i
 hard stop instead of a recorded fact. See
 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md#capability-evidence-levels).
 
-### Project map (`~/.autospec/project-map.yml`)
+### Managed GitHub Project (`.autospec/autonomous.yml`)
 
-Maps repo slugs to local paths. See `examples/project-map.yml`.
+A product or initiative has one managed GitHub Project across all of its repositories and runs.
+Autospec resolves, creates, or reuses that Project by the immutable `product-key` and `owner`
+marker in its readme; a matching title alone is never enough.
+
+```yaml
+project_board:
+  mode: managed
+  product_key: autospec
+  owner: berlinguyinca
+  repository_seeds: ["berlinguyinca/autospec"]
+  repo_allowlist: ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
+  discovery_max_repos: 25
+  write_back: true
+```
+
+`repository_seeds` is the explicit starting set. `repo_allowlist` is the admission boundary, not
+a discovery hint: dependencies, submodules, workspace metadata, and other concrete evidence can
+suggest candidates but cannot widen it. `discovery_max_repos` bounds scanner expansion. Literal,
+trailing-`*` prefix, and bounded `OWNER/*` allowlist entries are supported.
+
+Resolve or synchronize the configured Project from the target repository:
+
+```bash
+autospec project resolve --repo-dir "$PWD"
+autospec project sync --repo-dir "$PWD"
+autospec project sync --repo-dir "$PWD" --issue-url https://github.com/OWNER/REPO/issues/42
+```
+
+Onboard existing repositories with one or more explicit repository or workspace seeds:
+
+```bash
+autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO
+autospec project onboard --repo-dir "$PWD" --issue-url https://github.com/OWNER/REPO/issues/42
+autospec project onboard --repo-dir "$PWD" --workspace /absolute/workspace
+autospec project onboard --repo-dir "$PWD" --owner OWNER --allow 'OWNER/prefix-*'
+autospec project onboard --repo-dir "$PWD" --repo OWNER/REPO --dry-run
+```
+
+Owner onboarding requires at least one repeatable `--allow`: an exact repository, a trailing-`*`
+repository-name prefix, or `OWNER/*` for all repositories inside the bounded owner response. The
+owner must match the managed policy. The CLI requests no more than `discovery_max_repos` through
+the typed, read-only `gh repo list` transport and independently rejects an oversized response,
+then filters it through `--allow` and passes only the matches as exact seeds to the existing
+scanner. The configured `repo_allowlist` still applies during scanner admission. Newly created
+repositories are registered only after `gh repo view` verifies the remote; bootstrap supplies
+`--spawned-from IDENTITY` for that exact repository. The CLI rejects `--spawned-from` with
+`--owner`, preserving exact single-repository provenance. Adopted repositories receive `contains`
+membership without creation provenance.
+
+The JSON onboarding report distinguishes `created`, `adopted`, `updated`, `unchanged`,
+`proposed`, `out_of_bound`, `inaccessible`, and `pending_projection`, and includes the resolved
+`project_url`. Repeatable `--issue-url` inputs select existing open or closed issues inside the
+admitted owner/allowlist boundary; `selected_issues` and `reconciled_issues` report their outcome.
+Deterministic evidence creates active relationships. Ambiguous name-only evidence is proposed,
+does not enter the active dependency graph, and cannot block execution. Active issue-level
+`depends-on` and `blocks` edges feed board readiness and cross-repository fleet launch selection.
+
+Local state is private and product-global across repositories:
+
+- `${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/binding.json` is the current checkpoint.
+- `${AUTOSPEC_HOME:-$HOME/.autospec}/projects/<product-key>/events.jsonl` is the authoritative append-only recovery
+  journal.
+
+The global per-product lock prevents duplicate Project creation from concurrent repositories.
+When the global binding is absent, the first writable command validates and imports a private
+legacy `.autospec/state/projects/<product-key>` journal without deleting the legacy copy.
+
+Issue URLs are normalized and journaled before Project discovery or creation, so authentication,
+scope, marker, or create failures retain a retryable identity-independent outbox entry. After a
+Project is marker-verified, sync promotes that entry to the Project node-specific item projection.
+If onboarding has durable repository state and
+remote reconciliation then fails transiently, its successful JSON report uses
+`outcome: journaled_projection_pending`. `autospec project sync --repo-dir "$PWD"` instead returns
+nonzero on remote failure; rerun it only after addressing the reported cause. A pending Project
+create without a verified node ID, number, URL, and owner fails closed on later reconciliation;
+the journal alone cannot safely identify which remote Project to adopt, so recovery is not
+automatic. Reconciliation is additive, preserves human-managed Project content outside Autospec
+markers, and does not delete Project items, repositories, fields, or relationships.
+
+### External Projects and legacy project map
+
+An existing explicit URL remains externally managed. A URL-only configuration defaults to
+`external`; Autospec may ingest and write back according to the existing settings but does not
+claim or replace its identity:
+
+```yaml
+project_board:
+  mode: external
+  url: https://github.com/orgs/OWNER/projects/7
+  repo_allowlist: ["OWNER/REPO"]
+```
+
+`~/.autospec/project-map.yml` maps classification labels to GitHub Project numbers for the
+independent `/autospec-classify --apply-boards` workflow; it does not map repositories to managed
+products. Accountability may use a mapped Project number as a legacy fallback only when no
+managed policy exists. To migrate that accountability fallback, add a managed policy, run
+`autospec project resolve --repo-dir "$PWD"`, onboard explicit repositories, a bounded
+`--owner`/`--allow` set, or a workspace with `autospec project onboard --repo-dir "$PWD" ...`, and
+run `autospec project sync --repo-dir "$PWD"`. Migration does not delete or rewrite
+`project-map.yml`, and `--apply-boards` remains independent. See `examples/project-map.yml` for
+the label-routing schema.
 
 ### Issue labels
 
