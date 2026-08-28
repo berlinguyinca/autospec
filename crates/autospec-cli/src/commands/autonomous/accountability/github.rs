@@ -290,7 +290,7 @@ where
                         &serde_json::from_str(&output).map_err(json_error)?,
                     )?);
                 }
-                Err(error @ GithubFailure::Definitive(_)) => {
+                Err(error @ (GithubFailure::LocalExecution(_) | GithubFailure::Definitive(_))) => {
                     return Err(github_projection_error(
                         "cannot create accountability epic",
                         error,

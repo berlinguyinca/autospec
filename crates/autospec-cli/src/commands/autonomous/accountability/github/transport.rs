@@ -248,6 +248,7 @@ pub trait GithubTransport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GithubFailure {
+    LocalExecution(String),
     Retryable(String),
     RetryAfter { message: String, delay: Duration },
     Ambiguous(String),
@@ -273,9 +274,10 @@ impl GithubFailure {
 impl fmt::Display for GithubFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Retryable(message) | Self::Ambiguous(message) | Self::Definitive(message) => {
-                formatter.write_str(message)
-            }
+            Self::LocalExecution(message)
+            | Self::Retryable(message)
+            | Self::Ambiguous(message)
+            | Self::Definitive(message) => formatter.write_str(message),
             Self::RetryAfter { message, .. } => formatter.write_str(message),
         }
     }
@@ -310,7 +312,7 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
     }
     let mut child = process
         .spawn()
-        .map_err(|error| GithubFailure::Retryable(format!("cannot execute gh: {error}")))?;
+        .map_err(|error| GithubFailure::LocalExecution(format!("cannot execute gh: {error}")))?;
     if let Some(input) = stdin {
         child
             .stdin
@@ -327,14 +329,18 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
         if let Some(delay) = parse_retry_after(&message) {
             return Err(GithubFailure::RetryAfter { message, delay });
         }
-        return Err(if mutating {
-            if definitive_gh_failure(&message) {
-                GithubFailure::Definitive(message)
-            } else {
+        return Err(if definitive_gh_failure(&message) {
+            GithubFailure::Definitive(message)
+        } else if transient_gh_failure(&message) {
+            if mutating {
                 GithubFailure::Ambiguous(message)
+            } else {
+                GithubFailure::Retryable(message)
             }
+        } else if mutating {
+            GithubFailure::Ambiguous(message)
         } else {
-            GithubFailure::Retryable(message)
+            GithubFailure::Definitive(message)
         });
     }
     String::from_utf8(output.stdout)
@@ -361,6 +367,27 @@ fn definitive_gh_failure(message: &str) -> bool {
         "http 403",
         "http 404",
         "unprocessable entity",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn transient_gh_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "connection refused",
+        "connection reset",
+        "could not resolve host",
+        "failed to connect",
+        "network is unreachable",
+        "rate limit",
+        "temporary failure",
+        "timed out",
+        "timeout",
+        "http 429",
+        "http 502",
+        "http 503",
+        "http 504",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

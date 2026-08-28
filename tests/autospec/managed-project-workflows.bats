@@ -141,7 +141,8 @@ SH
     bash -c 'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo gov --observatory-repo obs' \
     _ "$project" "$REPO_ROOT/scripts/autospec-control-plane.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WARNING: managed Project repository registration failed; projection remains pending"* ]]
+  warning='WARNING: managed Project repository registration journaled; projection remains pending (count=2)'
+  [ "$(printf '%s\n' "$output" | grep -Fxc "$warning")" -eq 2 ]
   [ -d "$remotes/acme/gov.git" ]
   [ -d "$remotes/acme/obs.git" ]
   [ "$(grep -c '^gh:repo create acme/gov' "$events")" -eq 1 ]

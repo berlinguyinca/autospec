@@ -435,6 +435,8 @@ fn transport_error(context: &str, error: GithubFailure) -> ManagedProjectError {
         GithubFailure::Retryable(_)
         | GithubFailure::RetryAfter { .. }
         | GithubFailure::Ambiguous(_) => ManagedProjectError::journaled_projection_pending(message),
-        GithubFailure::Definitive(_) => ManagedProjectError::new(message),
+        GithubFailure::LocalExecution(_) | GithubFailure::Definitive(_) => {
+            ManagedProjectError::new(message)
+        }
     }
 }

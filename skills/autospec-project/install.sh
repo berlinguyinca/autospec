@@ -101,7 +101,11 @@ resolve_fleet_scripts_dir() {
 }
 
 managed_project_command_available() {
-    "$1" project --help >/dev/null 2>&1
+    onboard_help="$("$1" project onboard --help 2>/dev/null)" || return 1
+    sync_help="$("$1" project sync --help 2>/dev/null)" || return 1
+    printf '%s\n' "$onboard_help" | grep -F 'autospec project onboard' >/dev/null || return 1
+    printf '%s\n' "$onboard_help" | grep -F -- '--spawned-from' >/dev/null || return 1
+    printf '%s\n' "$sync_help" | grep -F 'autospec project sync' >/dev/null || return 1
 }
 
 ensure_managed_project_runtime() {

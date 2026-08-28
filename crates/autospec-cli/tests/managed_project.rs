@@ -141,6 +141,38 @@ fn initialize_repository(path: &Path, remote: &str) {
         .success());
 }
 
+fn initialize_managed_repository(fixture: &Fixture, name: &str) -> PathBuf {
+    let repository_path = fixture.path().join(name);
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
+    )
+    .unwrap();
+    repository_path
+}
+
+fn run_real_onboard(repository_path: &Path, gh_program: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args([
+            "project",
+            "onboard",
+            "--repo-dir",
+            repository_path.to_str().unwrap(),
+            "--repo",
+            "berlinguyinca/created",
+            "--spawned-from",
+            "spec:managed-project-onboarding",
+        ])
+        .env("AUTOSPEC_GH_PROGRAM", gh_program)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn onboard_admits_explicit_and_allowlisted_evidence_without_executing_manifests() {
     let fixture = Fixture::new("onboard-evidence");
@@ -1041,6 +1073,66 @@ fn onboard_cli_propagates_hard_remote_validation_failure_after_journaling() {
         .snapshot()
         .pending_projections
         .contains(&"repository:register:autospec:berlinguyinca/created".to_owned()));
+}
+
+#[test]
+fn gh_cli_missing_executable_is_a_hard_nonzero_onboarding_failure() {
+    let fixture = Fixture::new("gh-cli-missing");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+
+    let output = run_real_onboard(&repository_path, &fixture.path().join("missing-gh"));
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot execute gh"));
+    let store =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    assert!(store
+        .snapshot()
+        .pending_projections
+        .contains(&"repository:register:autospec:berlinguyinca/created".to_owned()));
+}
+
+#[cfg(unix)]
+#[test]
+fn gh_cli_read_auth_403_is_a_hard_nonzero_onboarding_failure() {
+    let fixture = Fixture::new("gh-cli-auth-403");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let gh_program = fixture.path().join("gh-auth-403");
+    fs::write(
+        &gh_program,
+        "#!/bin/sh\nprintf '%s\\n' 'GraphQL: Resource not accessible by integration (HTTP 403)' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh_program, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_real_onboard(&repository_path, &gh_program);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HTTP 403"));
+}
+
+#[cfg(unix)]
+#[test]
+fn gh_cli_transient_read_failure_keeps_the_typed_pending_outcome() {
+    let fixture = Fixture::new("gh-cli-transient");
+    let repository_path = initialize_managed_repository(&fixture, "checkout");
+    let gh_program = fixture.path().join("gh-transient");
+    fs::write(
+        &gh_program,
+        "#!/bin/sh\nprintf '%s\\n' 'failed to connect: HTTP 503 service unavailable' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh_program, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_real_onboard(&repository_path, &gh_program);
+
+    assert!(output.status.success());
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["outcome"], "journaled_projection_pending");
+    assert_eq!(summary["pending_projection"], 2);
 }
 
 #[test]
