@@ -100,6 +100,47 @@ resolve_fleet_scripts_dir() {
     fi
 }
 
+managed_project_command_available() {
+    "$1" project --help >/dev/null 2>&1
+}
+
+ensure_managed_project_runtime() {
+    autospec_candidate="${AUTOSPEC_BIN:-}"
+    if [ -z "$autospec_candidate" ]; then
+        autospec_candidate="$(command -v autospec 2>/dev/null || true)"
+    fi
+    if [ -n "$autospec_candidate" ] && managed_project_command_available "$autospec_candidate"; then
+        return 0
+    fi
+
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    runtime_installer="${AUTOSPEC_PROJECT_RUNTIME_INSTALLER:-}"
+    if [ -z "$runtime_installer" ] && [ -n "$checkout_root" ]; then
+        runtime_installer="$checkout_root/scripts/autospec-runtime-install.sh"
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        [ -n "$runtime_installer" ] && [ -f "$runtime_installer" ] || {
+            err "autospec project modes are unavailable and no runtime installer was found"
+            return 1
+        }
+        info "  [dry-run] $runtime_installer --repo-dir $checkout_root"
+        return 0
+    fi
+    [ -n "$runtime_installer" ] && [ -x "$runtime_installer" ] || {
+        err "autospec project modes are unavailable and no executable runtime installer was found"
+        return 1
+    }
+    runtime_path="$("$runtime_installer" --repo-dir "$checkout_root")" || {
+        err "autospec project modes are unavailable because runtime installation failed"
+        return 1
+    }
+    runtime_path="$(printf '%s\n' "$runtime_path" | tail -n 1)"
+    if [ -z "$runtime_path" ] || ! managed_project_command_available "$runtime_path"; then
+        err "autospec project modes are unavailable after runtime installation"
+        return 1
+    fi
+}
+
 install_one() {
     src="$1"
     dest="$2"
@@ -168,6 +209,8 @@ fi
 for dep in autospec git gh jq; do
     command -v "$dep" >/dev/null 2>&1 || warn "$dep not found on PATH"
 done
+
+ensure_managed_project_runtime
 
 info ""
 info "Shared autospec helper scripts:"

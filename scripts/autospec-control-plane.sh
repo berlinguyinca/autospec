@@ -8,7 +8,7 @@ usage() {
 Usage:
   scripts/autospec-control-plane.sh --help
   scripts/autospec-control-plane.sh bootstrap --dry-run [--owner OWNER] [--governance-repo NAME] [--observatory-repo NAME]
-  scripts/autospec-control-plane.sh bootstrap --confirm --owner OWNER --governance-repo NAME --observatory-repo NAME
+  scripts/autospec-control-plane.sh bootstrap --confirm --owner OWNER --governance-repo NAME --observatory-repo NAME [--source-spec IDENTITY]
 
 Commands:
   bootstrap --dry-run    Print governance and observatory scaffolds without GitHub writes.
@@ -18,6 +18,7 @@ Defaults:
   --owner OWNER             berlinguyinca (dry-run only; --confirm requires explicit value)
   --governance-repo NAME    autospec-governance (dry-run only; --confirm requires explicit value)
   --observatory-repo NAME   autospec-observatory (dry-run only; --confirm requires explicit value)
+  --source-spec IDENTITY    Provenance for repositories created by this bootstrap; takes precedence over AUTOSPEC_RUN_ID
 
 Environment:
   AUTOSPEC_OBSERVATORY_URL         Enables bootstrap event emission via scripts/autospec-observatory-events.sh
@@ -228,16 +229,46 @@ ensure_companion_repo() {
 register_companion_repo() {
     full_name="$1"
     state="$2"
+    source_spec="$3"
     autospec_bin="${AUTOSPEC_BIN:-autospec}"
     if [ "$state" = "created" ]; then
-        spawned_from="${AUTOSPEC_SOURCE_SPEC:-${AUTOSPEC_RUN_ID:-control-plane-bootstrap}}"
-        if ! "$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name" \
-          --spawned-from "$spawned_from"; then
-            printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+        if [ -n "$source_spec" ]; then
+            spawned_from="$source_spec"
+        else
+            spawned_from="${AUTOSPEC_RUN_ID:-control-plane-bootstrap}"
         fi
-    elif ! "$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name"; then
-        printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
+        if registration_output=$("$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name" \
+          --spawned-from "$spawned_from"); then
+            registration_status=0
+        else
+            registration_status=$?
+        fi
+    else
+        if registration_output=$("$autospec_bin" project onboard --repo-dir "$PWD" --repo "$full_name"); then
+            registration_status=0
+        else
+            registration_status=$?
+        fi
     fi
+    if [ "$registration_status" -ne 0 ]; then
+        return "$registration_status"
+    fi
+    registration_outcome=$(printf '%s' "$registration_output" | jq -er '.outcome // empty') || {
+        printf '%s\n' 'autospec-control-plane: managed Project registration returned no typed outcome' >&2
+        return 2
+    }
+    case "$registration_outcome" in
+        reconciled) return 0 ;;
+        journaled_projection_pending)
+            pending_count=$(printf '%s' "$registration_output" | jq -r '.pending_projection // 0')
+            printf 'WARNING: managed Project repository registration journaled; projection remains pending (count=%s)\n' "$pending_count" >&2
+            return 0
+            ;;
+        *)
+            printf 'autospec-control-plane: unsupported managed Project registration outcome: %s\n' "$registration_outcome" >&2
+            return 2
+            ;;
+    esac
 }
 
 emit_bootstrap_event() {
@@ -291,6 +322,7 @@ bootstrap_confirm() {
     owner="$1"
     governance_repo="$2"
     observatory_repo="$3"
+    source_spec="$4"
 
     require_command gh
     require_command git
@@ -308,13 +340,13 @@ bootstrap_confirm() {
     governance_result="$(ensure_companion_repo "$owner" "$governance_repo" governance "$work_root")"
     governance_state="$(printf '%s' "$governance_result" | awk -F '\t' '{print $1}')"
     governance_url="$(printf '%s' "$governance_result" | awk -F '\t' '{print $2}')"
-    register_companion_repo "$owner/$governance_repo" "$governance_state"
+    register_companion_repo "$owner/$governance_repo" "$governance_state" "$source_spec"
     emit_bootstrap_event "GovernanceRepoCreated" "governance repo ${governance_state}: ${governance_repo}" "$owner/$governance_repo"
 
     observatory_result="$(ensure_companion_repo "$owner" "$observatory_repo" observatory "$work_root")"
     observatory_state="$(printf '%s' "$observatory_result" | awk -F '\t' '{print $1}')"
     observatory_url="$(printf '%s' "$observatory_result" | awk -F '\t' '{print $2}')"
-    register_companion_repo "$owner/$observatory_repo" "$observatory_state"
+    register_companion_repo "$owner/$observatory_repo" "$observatory_state" "$source_spec"
     emit_bootstrap_event "ObservatoryRepoCreated" "observatory repo ${observatory_state}: ${observatory_repo}" "$owner/$observatory_repo"
 
     write_control_plane_config "$owner" "$governance_repo" "$governance_url" "$governance_state" \
@@ -335,6 +367,7 @@ bootstrap() {
     owner="berlinguyinca"
     governance_repo="autospec-governance"
     observatory_repo="autospec-observatory"
+    source_spec=""
     owner_explicit=0
     governance_explicit=0
     observatory_explicit=0
@@ -367,6 +400,12 @@ bootstrap() {
                 observatory_explicit=1
                 shift 2
                 ;;
+            --source-spec)
+                [ "$#" -ge 2 ] || fail "--source-spec requires a value"
+                [ -n "$2" ] || fail "--source-spec requires a non-empty value"
+                source_spec="$2"
+                shift 2
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -384,7 +423,7 @@ bootstrap() {
         [ -n "$owner" ] && [ -n "$governance_repo" ] && [ -n "$observatory_repo" ] \
             || fail "--confirm requires non-empty owner and repo names"
         validate_owner_and_repo_names "$owner" "$governance_repo" "$observatory_repo"
-        bootstrap_confirm "$owner" "$governance_repo" "$observatory_repo"
+        bootstrap_confirm "$owner" "$governance_repo" "$observatory_repo" "$source_spec"
         return 0
     fi
 

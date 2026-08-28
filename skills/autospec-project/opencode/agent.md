@@ -83,8 +83,13 @@ argument as its own word, never interpolate it into `sh -c`, and never use
 
 Print all stable reconciliation fields returned by the command—`created`,
 `adopted`, `updated`, `unchanged`, `proposed`, `out_of_bound`, `inaccessible`,
-and `pending_projection`—plus `project_url`. Do not summarize away pending or
-out-of-bound results.
+and `pending_projection`—plus `outcome`, `project_url`, and `error`. Treat
+`outcome: journaled_projection_pending` as a durable, retryable remote
+reconciliation result. Any non-zero command exit or other outcome is a hard
+configuration, validation, storage, or runtime failure and must be propagated.
+Do not summarize away pending or out-of-bound results. A later managed `sync`
+retries and acknowledges durable repository projections after Project
+resolution succeeds.
 
 ### Bare mode: resolve and print
 

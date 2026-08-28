@@ -174,10 +174,15 @@ impl ManagedProjectStore {
                 "repository identity and entry kind must not be empty",
             ));
         }
-        let key = format!(
-            "repository:register:{}:{identity}",
-            self.product_key.as_str()
-        );
+        if self
+            .binding
+            .repositories
+            .iter()
+            .any(|record| normalize_identity(&record.repository) == identity)
+        {
+            return Ok(());
+        }
+        let key = format!("repository:record:{}:{identity}", self.product_key.as_str());
         self.append_event(
             key,
             "repository-recorded",

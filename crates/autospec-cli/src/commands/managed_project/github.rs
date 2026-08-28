@@ -430,5 +430,11 @@ fn execute<T: GithubTransport>(
 }
 
 fn transport_error(context: &str, error: GithubFailure) -> ManagedProjectError {
-    ManagedProjectError::new(format!("{context}: {error}"))
+    let message = format!("{context}: {error}");
+    match error {
+        GithubFailure::Retryable(_)
+        | GithubFailure::RetryAfter { .. }
+        | GithubFailure::Ambiguous(_) => ManagedProjectError::journaled_projection_pending(message),
+        GithubFailure::Definitive(_) => ManagedProjectError::new(message),
+    }
 }

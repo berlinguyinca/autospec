@@ -12,20 +12,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn run(args: &[String]) -> Result<(), ManagedProjectError> {
-    run_with_transport(args, &mut GhCli)
+    let outcome = run_with_transport(args, &mut GhCli)?;
+    if !outcome.is_null() {
+        println!("{outcome}");
+    }
+    Ok(())
 }
 
 pub(crate) fn run_with_transport<T: GithubTransport>(
     args: &[String],
     github: &mut T,
-) -> Result<(), ManagedProjectError> {
+) -> Result<Value, ManagedProjectError> {
     if args.is_empty()
         || args
             .iter()
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         println!("autospec project\n\nUSAGE:\n    autospec project resolve --repo-dir PATH\n    autospec project sync --repo-dir PATH [--issue-url URL]\n    autospec project onboard --repo-dir PATH [--repo OWNER/NAME]... [--workspace PATH] [--spawned-from IDENTITY] [--dry-run]");
-        return Ok(());
+        return Ok(Value::Null);
     }
     let command = &args[0];
     let options = parse_options(&args[1..])?;
@@ -57,19 +61,16 @@ fn resolve<T: GithubTransport>(
     store: &mut ManagedProjectStore,
     github: &mut T,
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
-) -> Result<(), ManagedProjectError> {
+) -> Result<Value, ManagedProjectError> {
     let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
-    println!(
-        "{}",
-        json!({
-            "node_id": project.node_id,
-            "number": project.number,
-            "owner": project.owner,
-            "title": project.title,
-            "url": project.url,
-        })
-    );
-    Ok(())
+    Ok(json!({
+        "outcome": "reconciled",
+        "node_id": project.node_id,
+        "number": project.number,
+        "owner": project.owner,
+        "title": project.title,
+        "url": project.url,
+    }))
 }
 
 fn sync<T: GithubTransport>(
@@ -77,20 +78,18 @@ fn sync<T: GithubTransport>(
     github: &mut T,
     policy: &autospec_core::managed_project::ManagedProjectPolicy,
     issue_url: Option<&str>,
-) -> Result<(), ManagedProjectError> {
+) -> Result<Value, ManagedProjectError> {
     let project = resolve_or_create_project(store, github, policy, policy.product_key.as_str())?;
     if let Some(issue_url) = issue_url {
         reconcile_issue(store, github, policy, issue_url)?;
     }
     retry_pending_projections(store, github, policy)?;
-    println!(
-        "{}",
-        json!({
-            "pending_projection": store.snapshot().pending_projections.len(),
-            "project_url": project.url,
-        })
-    );
-    Ok(())
+    ack_repository_projections(store, policy)?;
+    Ok(json!({
+        "outcome": "reconciled",
+        "pending_projection": store.snapshot().pending_projections.len(),
+        "project_url": project.url,
+    }))
 }
 
 fn onboard<T: GithubTransport>(
@@ -99,15 +98,7 @@ fn onboard<T: GithubTransport>(
     policy: autospec_core::managed_project::ManagedProjectPolicy,
     repo_dir: &Path,
     options: ProjectOptions,
-) -> Result<(), ManagedProjectError> {
-    let project_url = if !options.dry_run {
-        let project =
-            resolve_or_create_project(&mut store, github, &policy, policy.product_key.as_str())?;
-        retry_pending_projections(&mut store, github, &policy)?;
-        Some(project.url)
-    } else {
-        store.snapshot().project_url.clone()
-    };
+) -> Result<Value, ManagedProjectError> {
     let created_repository = options.repositories.first().cloned();
     let report = onboard_repositories(
         &mut store,
@@ -127,9 +118,40 @@ fn onboard<T: GithubTransport>(
             options.spawned_from.as_deref(),
             created_repository.as_deref(),
         )?;
+        enqueue_repository_projections(&mut store, &policy, &report)?;
     }
-    println!("{}", report_json(&report, project_url.as_deref()));
-    Ok(())
+    if options.dry_run {
+        return Ok(report_json(
+            &report,
+            store.snapshot().project_url.as_deref(),
+            "dry_run",
+            None,
+            store.snapshot().pending_projections.len(),
+        ));
+    }
+
+    match resolve_or_create_project(&mut store, github, &policy, policy.product_key.as_str())
+        .and_then(|project| {
+            retry_pending_projections(&mut store, github, &policy)?;
+            ack_repository_projections(&mut store, &policy)?;
+            Ok(project)
+        }) {
+        Ok(project) => Ok(report_json(
+            &report,
+            Some(&project.url),
+            "reconciled",
+            None,
+            store.snapshot().pending_projections.len(),
+        )),
+        Err(error) if error.is_journaled_projection_pending() => Ok(report_json(
+            &report,
+            store.snapshot().project_url.as_deref(),
+            "journaled_projection_pending",
+            Some(&error.to_string()),
+            store.snapshot().pending_projections.len(),
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 fn record_repository_relationships(
@@ -158,6 +180,13 @@ fn record_repository_relationships(
         let repository = super::normalize_github_repository(repository).ok_or_else(|| {
             ManagedProjectError::new("--spawned-from requires a valid --repo value")
         })?;
+        if !report
+            .repositories
+            .iter()
+            .any(|record| record.repository == repository)
+        {
+            return Ok(());
+        }
         store.record_edge(RelationshipEdge {
             product_key: policy.product_key.clone(),
             kind: RelationshipKind::SpawnedFrom,
@@ -171,6 +200,38 @@ fn record_repository_relationships(
             },
             state: RelationshipState::Active,
         })?;
+    }
+    Ok(())
+}
+
+fn enqueue_repository_projections(
+    store: &mut ManagedProjectStore,
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+    report: &OnboardingReport,
+) -> Result<(), ManagedProjectError> {
+    for repository in &report.repositories {
+        store.enqueue_projection(format!(
+            "repository:register:{}:{}",
+            policy.product_key, repository.repository
+        ))?;
+    }
+    Ok(())
+}
+
+fn ack_repository_projections(
+    store: &mut ManagedProjectStore,
+    policy: &autospec_core::managed_project::ManagedProjectPolicy,
+) -> Result<(), ManagedProjectError> {
+    let prefix = format!("repository:register:{}:", policy.product_key);
+    let pending = store
+        .snapshot()
+        .pending_projections
+        .iter()
+        .filter(|projection| projection.starts_with(&prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    for projection in pending {
+        store.ack_projection(&projection)?;
     }
     Ok(())
 }
@@ -296,8 +357,15 @@ fn load_managed_policy(
         .ok_or_else(|| ManagedProjectError::new("project_board.mode must be managed"))
 }
 
-fn report_json(report: &OnboardingReport, project_url: Option<&str>) -> Value {
+fn report_json(
+    report: &OnboardingReport,
+    project_url: Option<&str>,
+    outcome: &str,
+    error: Option<&str>,
+    pending_projection: usize,
+) -> Value {
     json!({
+        "outcome": outcome,
         "created": report.created,
         "adopted": report.adopted,
         "updated": report.updated,
@@ -305,8 +373,9 @@ fn report_json(report: &OnboardingReport, project_url: Option<&str>) -> Value {
         "proposed": report.proposed,
         "out_of_bound": report.out_of_bound,
         "inaccessible": report.inaccessible,
-        "pending_projection": report.pending_projection,
+        "pending_projection": pending_projection,
         "project_url": project_url,
+        "error": error,
         "repositories": report.repositories,
         "edges": report.edges,
     })

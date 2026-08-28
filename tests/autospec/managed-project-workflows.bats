@@ -40,7 +40,8 @@ teardown() {
       [ -n "$create_line" ]
       [ "$create_line" -lt "$verify_line" ]
     fi
-    grep -q 'WARNING.*repository registration failed.*pending' "$expanded"
+    grep -q 'journaled_projection_pending' "$expanded"
+    grep -q 'ERROR.*registration failed before durable admission' "$expanded"
   done
 }
 
@@ -86,18 +87,18 @@ SH
   cat > "$TMP/control-bin/autospec" <<'SH'
 #!/usr/bin/env bash
 printf 'autospec:%s\n' "$*" >> "$EVENTS"
-exit "${AUTOSPEC_REGISTER_STATUS:-0}"
+printf '{"outcome":"reconciled","pending_projection":0}\n'
 SH
   chmod +x "$TMP/control-bin/gh" "$TMP/control-bin/autospec"
 
   run env PATH="$TMP/control-bin:$PATH" EVENTS="$events" REMOTE_ROOT="$remotes" \
-    AUTOSPEC_BIN="$TMP/control-bin/autospec" AUTOSPEC_RUN_ID='run;touch should-not-exist' \
+    AUTOSPEC_BIN="$TMP/control-bin/autospec" AUTOSPEC_RUN_ID='run:lower-precedence' \
     AUTOSPEC_CONTROL_PLANE_WORKDIR="$TMP/work" bash -c \
-    'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo created --observatory-repo adopted' \
+    'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo created --observatory-repo adopted --source-spec "spec;touch should-not-exist"' \
     _ "$project" "$REPO_ROOT/scripts/autospec-control-plane.sh"
   [ "$status" -eq 0 ]
   grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/adopted" "$events"
-  grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/created --spawned-from run;touch should-not-exist" "$events"
+  grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/created --spawned-from spec;touch should-not-exist" "$events"
   ! grep -F 'acme/adopted --spawned-from' "$events"
   [ ! -e "$project/should-not-exist" ]
   create_line="$(grep -n '^gh:repo create acme/created' "$events" | cut -d: -f1)"
@@ -131,7 +132,7 @@ SH
   cat > "$TMP/failing-bin/autospec" <<'SH'
 #!/usr/bin/env bash
 printf 'autospec:%s\n' "$*" >> "$EVENTS"
-exit 9
+printf '{"outcome":"journaled_projection_pending","pending_projection":2,"error":"project lookup unavailable"}\n'
 SH
   chmod +x "$TMP/failing-bin/gh" "$TMP/failing-bin/autospec"
 
@@ -145,6 +146,47 @@ SH
   [ -d "$remotes/acme/obs.git" ]
   [ "$(grep -c '^gh:repo create acme/gov' "$events")" -eq 1 ]
   [ "$(grep -c '^gh:repo create acme/obs' "$events")" -eq 1 ]
+}
+
+@test "control plane propagates hard registration failures instead of treating them as pending" {
+  project="$TMP/hard-failure-project"
+  remotes="$TMP/hard-failure-remotes"
+  events="$TMP/hard-failure.events"
+  mkdir -p "$project/.autospec" "$remotes" "$TMP/hard-failure-bin"
+  cat > "$TMP/hard-failure-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'gh:%s\n' "$*" >> "$EVENTS"
+if [ "$1 $2" = "repo view" ]; then
+  [ -d "$REMOTE_ROOT/$3.git" ] || exit 1
+  printf 'file://%s/%s.git\n' "$REMOTE_ROOT" "$3"
+  exit 0
+fi
+if [ "$1 $2" = "repo create" ]; then
+  mkdir -p "$REMOTE_ROOT/$(dirname "$3")"
+  git init --bare "$REMOTE_ROOT/$3.git" >/dev/null
+  exit 0
+fi
+exit 99
+SH
+  cat > "$TMP/hard-failure-bin/autospec" <<'SH'
+#!/usr/bin/env bash
+printf 'autospec:%s\n' "$*" >> "$EVENTS"
+printf 'invalid managed project configuration\n' >&2
+exit 9
+SH
+  chmod +x "$TMP/hard-failure-bin/gh" "$TMP/hard-failure-bin/autospec"
+
+  run env PATH="$TMP/hard-failure-bin:$PATH" EVENTS="$events" REMOTE_ROOT="$remotes" \
+    AUTOSPEC_BIN="$TMP/hard-failure-bin/autospec" AUTOSPEC_CONTROL_PLANE_WORKDIR="$TMP/hard-failure-work" \
+    bash -c 'cd "$1" && bash "$2" bootstrap --confirm --owner acme --governance-repo gov --observatory-repo obs' \
+    _ "$project" "$REPO_ROOT/scripts/autospec-control-plane.sh"
+
+  [ "$status" -eq 9 ]
+  [[ "$output" == *"invalid managed project configuration"* ]]
+  [ -d "$remotes/acme/gov.git" ]
+  [ ! -d "$remotes/acme/obs.git" ]
+  [ "$(grep -c '^gh:repo create acme/gov' "$events")" -eq 1 ]
 }
 
 @test "shared issue projection invokes the managed sync boundary" {

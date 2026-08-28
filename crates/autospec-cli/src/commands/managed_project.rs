@@ -37,18 +37,41 @@ pub(super) use project::{
 };
 pub use store::ManagedProjectStore;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedProjectErrorKind {
+    Hard,
+    JournaledProjectionPending,
+}
+
 #[derive(Debug)]
-pub struct ManagedProjectError(String);
+pub struct ManagedProjectError {
+    message: String,
+    kind: ManagedProjectErrorKind,
+}
 
 impl ManagedProjectError {
     pub(super) fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            kind: ManagedProjectErrorKind::Hard,
+        }
+    }
+
+    pub(super) fn journaled_projection_pending(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ManagedProjectErrorKind::JournaledProjectionPending,
+        }
+    }
+
+    pub(super) fn is_journaled_projection_pending(&self) -> bool {
+        self.kind == ManagedProjectErrorKind::JournaledProjectionPending
     }
 }
 
 impl fmt::Display for ManagedProjectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 

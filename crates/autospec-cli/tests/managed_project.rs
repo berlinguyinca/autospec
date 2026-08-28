@@ -901,6 +901,207 @@ fn onboard_cli_records_contains_and_only_explicit_creation_records_spawned_from(
     }
 }
 
+#[test]
+fn onboard_cli_journals_repository_projection_before_remote_reconciliation_failure() {
+    let fixture = Fixture::new("onboard-pending-projection");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
+    )
+    .unwrap();
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--repo".to_owned(),
+        "https://github.com/berlinguyinca/created.git".to_owned(),
+        "--spawned-from".to_owned(),
+        "spec:managed-project-onboarding".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([
+        Err(GithubFailure::Retryable(
+            "project lookup unavailable".to_owned(),
+        )),
+        Err(GithubFailure::Retryable(
+            "project lookup still unavailable".to_owned(),
+        )),
+    ]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+    let repeated = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(outcome["outcome"], "journaled_projection_pending");
+    assert_eq!(outcome["pending_projection"], 2);
+    assert_eq!(repeated["outcome"], "journaled_projection_pending");
+    assert_eq!(repeated["pending_projection"], 2);
+    assert_eq!(
+        outcome["repositories"][1]["repository"],
+        "berlinguyinca/created"
+    );
+    assert_eq!(github.calls.len(), 2);
+
+    let state_root = repository_path.join(".autospec/state");
+    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let snapshot = reopened.snapshot();
+    assert!(snapshot
+        .repositories
+        .iter()
+        .any(|record| record.repository == "berlinguyinca/created"));
+    assert!(snapshot.relationships.iter().any(|edge| {
+        edge.kind == RelationshipKind::Contains
+            && edge.source == "product:autospec"
+            && edge.target == "berlinguyinca/created"
+    }));
+    assert!(snapshot.relationships.iter().any(|edge| {
+        edge.kind == RelationshipKind::SpawnedFrom
+            && edge.source == "berlinguyinca/created"
+            && edge.target == "spec:managed-project-onboarding"
+    }));
+    assert!(snapshot
+        .pending_projections
+        .contains(&"repository:register:autospec:berlinguyinca/autospec".to_owned()));
+    assert!(snapshot
+        .pending_projections
+        .contains(&"repository:register:autospec:berlinguyinca/created".to_owned()));
+
+    let journal = fs::read_to_string(state_root.join("projects/autospec/events.jsonl")).unwrap();
+    let repository_event = journal.find("repository-recorded").unwrap();
+    let relationship_event = journal.find("relationship-recorded").unwrap();
+    let projection_event = journal.find("projection-enqueued").unwrap();
+    assert_eq!(journal.matches("projection-enqueued").count(), 2);
+    assert!(repository_event < relationship_event);
+    assert!(relationship_event < projection_event);
+
+    drop(reopened);
+    let mut bound = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    bound
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    drop(bound);
+    let sync_args = vec![
+        "sync".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+    ];
+    let mut sync_github = ScriptedGithub::with([Ok(project(
+        7,
+        "berlinguyinca",
+        "Autospec",
+        &marker("berlinguyinca"),
+    ))]);
+    let synced = run_with_transport(&sync_args, &mut sync_github).unwrap();
+    assert_eq!(synced["outcome"], "reconciled");
+    assert_eq!(synced["pending_projection"], 0);
+    let synced_store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    assert!(synced_store.snapshot().pending_projections.is_empty());
+}
+
+#[test]
+fn onboard_cli_propagates_hard_remote_validation_failure_after_journaling() {
+    let fixture = Fixture::new("onboard-hard-remote-validation");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
+    )
+    .unwrap();
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--repo".to_owned(),
+        "berlinguyinca/created".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok("not project json".to_owned())]);
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(!error.to_string().is_empty());
+    let reopened =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    assert!(reopened
+        .snapshot()
+        .pending_projections
+        .contains(&"repository:register:autospec:berlinguyinca/created".to_owned()));
+}
+
+#[test]
+fn onboard_cli_does_not_project_or_link_an_out_of_bound_spawned_repository() {
+    let fixture = Fixture::new("onboard-out-of-bound-spawned");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/autospec\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
+    )
+    .unwrap();
+    let mut store =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Autospec",
+        )
+        .unwrap();
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--repo".to_owned(),
+        "other/created".to_owned(),
+        "--spawned-from".to_owned(),
+        "spec:managed-project-onboarding".to_owned(),
+    ];
+    let mut github = ScriptedGithub::with([Ok(project(
+        7,
+        "berlinguyinca",
+        "Autospec",
+        &marker("berlinguyinca"),
+    ))]);
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(outcome["outcome"], "reconciled");
+    assert_eq!(outcome["out_of_bound"], 1);
+    let reopened =
+        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
+            .unwrap();
+    assert!(!reopened.snapshot().relationships.iter().any(|edge| {
+        edge.kind == RelationshipKind::SpawnedFrom && edge.source == "other/created"
+    }));
+    assert!(!reopened
+        .snapshot()
+        .pending_projections
+        .iter()
+        .any(|projection| projection.ends_with(":other/created")));
+}
+
 fn project(number: u64, owner: &str, title: &str, readme: &str) -> String {
     serde_json::json!({
         "id": format!("PVT_{number}"),

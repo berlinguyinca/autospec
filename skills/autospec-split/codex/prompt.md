@@ -155,13 +155,21 @@ If **either** check fails — no git repo, or no GitHub remote — bootstrap a n
    ```bash
    REPO="<owner>/<name>"
    SPAWNED_FROM="${SOURCE_SPEC_URL:-${AUTOSPEC_RUN_ID:-bootstrap:$REPO}}"
-   if ! "${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM"; then
-     printf '%s\n' 'WARNING: managed Project repository registration failed; projection remains pending' >&2
-   fi
+   REGISTRATION_JSON=$("${AUTOSPEC_BIN:-autospec}" project onboard --repo-dir "$PWD" --repo "$REPO" --spawned-from "$SPAWNED_FROM") || {
+     printf '%s\n' 'ERROR: managed Project repository registration failed before durable admission' >&2
+     exit 1
+   }
+   case "$(printf '%s' "$REGISTRATION_JSON" | jq -r '.outcome // empty')" in
+     reconciled) ;;
+     journaled_projection_pending)
+       printf '%s\n' 'WARNING: managed Project repository projection is durably journaled and pending' >&2 ;;
+     *) printf '%s\n' 'ERROR: managed Project repository registration returned no supported typed outcome' >&2; exit 1 ;;
+   esac
    ```
-   Never register when read-back fails. A registration failure does not roll
+   Never register when read-back fails. A typed pending outcome does not roll
    back or recreate the verified repository; reconciliation retries the
-   journaled projection. Capture `<owner>/<name>` as `{repo}` for every later phase.
+   journaled projection. Propagate every hard registration failure. Capture
+   `<owner>/<name>` as `{repo}` for every later phase.
 
 If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>` remote), capture that as `{repo}` and skip the bootstrap.
 
