@@ -147,16 +147,28 @@ pub struct RelationshipEdge {
 
 impl RelationshipEdge {
     pub fn dedupe_key(&self) -> String {
-        [
-            self.product_key.as_str().to_string(),
-            self.kind.as_str().to_string(),
-            normalize_identity(&self.source),
-            normalize_identity(&self.target),
-            self.evidence.kind.trim().to_ascii_lowercase(),
-            self.evidence.location.trim().to_string(),
-        ]
-        .join("|")
+        let source = normalize_identity(&self.source);
+        let target = normalize_identity(&self.target);
+        let evidence_kind = self.evidence.kind.trim().to_ascii_lowercase();
+        let evidence_location = self.evidence.location.trim();
+        let mut key = "relationship-dedupe-v1".to_string();
+        append_dedupe_component(&mut key, "product_key", self.product_key.as_str());
+        append_dedupe_component(&mut key, "kind", self.kind.as_str());
+        append_dedupe_component(&mut key, "source", &source);
+        append_dedupe_component(&mut key, "target", &target);
+        append_dedupe_component(&mut key, "evidence_kind", &evidence_kind);
+        append_dedupe_component(&mut key, "evidence_location", evidence_location);
+        key
     }
+}
+
+fn append_dedupe_component(key: &mut String, field: &str, value: &str) {
+    key.push('|');
+    key.push_str(field);
+    key.push(':');
+    key.push_str(&value.len().to_string());
+    key.push(':');
+    key.push_str(value);
 }
 
 fn normalize_identity(value: &str) -> String {
@@ -236,7 +248,29 @@ mod tests {
 
         assert_eq!(
             edge.dedupe_key(),
-            "autospec|depends-on|https://github.com/berlinguyinca/autospec|https://github.com/berlinguyinca/autospec-node|manifest-dependency|Cargo.toml#workspace.dependencies"
+            "relationship-dedupe-v1|product_key:8:autospec|kind:10:depends-on|source:41:https://github.com/berlinguyinca/autospec|target:46:https://github.com/berlinguyinca/autospec-node|evidence_kind:19:manifest-dependency|evidence_location:33:Cargo.toml#workspace.dependencies"
+        );
+    }
+
+    #[test]
+    fn managed_project_relationship_dedupe_key_is_unambiguous_with_delimiters() {
+        let edge = |source: &str, target: &str| RelationshipEdge {
+            product_key: ProductKey::new("autospec").unwrap(),
+            kind: RelationshipKind::DependsOn,
+            source: source.to_string(),
+            target: target.to_string(),
+            evidence: RelationshipEvidence {
+                kind: "manifest-dependency".to_string(),
+                location: "Cargo.toml".to_string(),
+                discovered_at: "2026-08-27T00:00:00Z".to_string(),
+                confidence: 100,
+            },
+            state: RelationshipState::Active,
+        };
+
+        assert_ne!(
+            edge("source|segment", "target").dedupe_key(),
+            edge("source", "segment|target").dedupe_key()
         );
     }
 }

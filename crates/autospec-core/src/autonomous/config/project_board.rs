@@ -758,6 +758,10 @@ project_board:
         assert_eq!(policy.product_key.as_str(), "autospec");
         assert_eq!(policy.owner, "berlinguyinca");
         assert_eq!(policy.repository_seeds, ["berlinguyinca/autospec"]);
+        assert_eq!(
+            policy.repo_allowlist,
+            ["berlinguyinca/autospec", "berlinguyinca/autospec-*"]
+        );
         assert_eq!(policy.discovery_max_repos, 25);
     }
 
