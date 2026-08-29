@@ -197,7 +197,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_pending_sidecar_cleanup_s
         &fixture,
         &state_path,
         &mut state,
-        "while :; do /usr/bin/sleep 1; done",
+        "while :; do /bin/sleep 1; done",
     );
     let supervisor = state.supervisor.clone().expect("durable supervisor");
     let harness = state.process.clone().expect("durable harness");
@@ -290,7 +290,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_clean
         &fixture,
         &state_path,
         &mut state,
-        "while :; do /usr/bin/sleep 1; done",
+        "while :; do /bin/sleep 1; done",
     );
     let supervisor = state.supervisor.clone().expect("durable supervisor");
     let harness = state.process.clone().expect("durable harness");
@@ -300,7 +300,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_clean
     bridge::write_invocation_atomic(&state_path, &state)
         .expect("persist partial Interrupted state");
     let aliases = fixture.root.join("codex-aliases.tsv");
-    fs::write(&aliases, "codex\t/bin/true\t\tCodex CLI\n").expect("write Codex alias");
+    fs::write(&aliases, "codex\t/usr/bin/true\t\tCodex CLI\n").expect("write Codex alias");
     let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
     let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
@@ -452,7 +452,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_faili
     launcher.wait().expect("reap fixture launcher");
 
     let aliases = fixture.root.join("aliases.tsv");
-    fs::write(&aliases, "codex\t/bin/false\t\tCodex CLI\n").expect("write alias table");
+    fs::write(&aliases, "codex\t/usr/bin/false\t\tCodex CLI\n").expect("write alias table");
     let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
     let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);

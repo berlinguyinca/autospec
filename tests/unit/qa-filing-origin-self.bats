@@ -6,6 +6,7 @@ QA_SWEEP="$REPO_ROOT/scripts/qa-brute-force-sweep.sh"
 
 setup() {
   TMP="$(mktemp -d)"
+  export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -40,7 +41,7 @@ SH
 
 teardown() {
   rm -rf "$TMP"
-  unset GH_LOG GH_CREATE_COUNT GH_LABEL_FAIL GH_CREATE_FAIL_ONCE REPO_DIR VERDICT_FILE
+  unset GH_LOG GH_CREATE_COUNT GH_LABEL_FAIL GH_CREATE_FAIL_ONCE REPO_DIR VERDICT_FILE AUTOSPEC_BIN
 }
 
 create_lines() {

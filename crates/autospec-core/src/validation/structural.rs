@@ -750,7 +750,11 @@ impl StructuralValidator {
         if expected != priority_sort_excerpt(&strip_frontmatter(&read(&opencode)?)) {
             return Err("priority sort lockstep (opencode)".to_string());
         }
-        if expected != priority_sort_excerpt(&super::structural_text::strip_first_blank_line(&read(&codex)?)) {
+        if expected
+            != priority_sort_excerpt(&super::structural_text::strip_first_blank_line(&read(
+                &codex,
+            )?))
+        {
             return Err("priority sort lockstep (codex)".to_string());
         }
         Ok(())
@@ -2215,8 +2219,7 @@ impl StructuralValidator {
         // Asserts the block is harness-safe, then yields whichever text actually
         // carries the executable body (the extracted script, or the block itself
         // on legacy trees).
-        let canonical =
-            startup_preflight_contract::resolve_contract_source(root, &template_body)?;
+        let canonical = startup_preflight_contract::resolve_contract_source(root, &template_body)?;
         startup_preflight_contract::validate_reliability(&canonical)?;
 
         let trio_dirs = skill_directories(root)?
@@ -2436,13 +2439,19 @@ fn guardian_block(document: &str) -> String {
     for line in document.lines() {
         if line.contains("<!-- guardian-block:begin -->") {
             depth += 1;
-            if depth == 1 { continue; }
+            if depth == 1 {
+                continue;
+            }
         }
         if line.contains("<!-- guardian-block:end -->") {
-            if depth == 1 { break; }
+            if depth == 1 {
+                break;
+            }
             depth -= 1;
         }
-        if depth >= 1 { lines.push(line); }
+        if depth >= 1 {
+            lines.push(line);
+        }
     }
     lines.join("\n")
 }

@@ -8,9 +8,11 @@ FAKE_HOME="$TMP_DIR/home"
 ORIGINAL_HOME="$HOME"
 ORIGINAL_PATH="$PATH"
 ORIGINAL_UID="$(id -u)"
+ORIGINAL_PYTHON="$(command -v python3)"
 failures=0
 
 cleanup() {
+    chmod -R u+w "$TMP_DIR" 2>/dev/null || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -158,7 +160,7 @@ cat > "$ISOLATED_BIN/codex" <<'SHIM'
 exit 0
 SHIM
 chmod +x "$ISOLATED_BIN/codex"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/python3"
+printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$ORIGINAL_PYTHON" > "$ISOLATED_BIN/python3"
 chmod +x "$ISOLATED_BIN/python3"
 
 # Autonomous execution fails closed unless all executor scanners are installed
@@ -288,7 +290,7 @@ cat > "$ISOLATED_BIN/winget" <<SHIM
 #!/usr/bin/env bash
 case "\$*" in
     *Python.Python.3.12*)
-        printf '#!/usr/bin/env bash\n[ "\$(command -v find)" != "$WINDOWS_BIN/find" ] || touch "$WINDOWS_FIND_MARKER"\nexit 0\n' > "$WINDOWS_BIN/python"
+        printf '#!/usr/bin/env bash\n[ "\$(command -v find)" != "$WINDOWS_BIN/find" ] || touch "$WINDOWS_FIND_MARKER"\nexec %q "\$@"\n' "$ORIGINAL_PYTHON" > "$WINDOWS_BIN/python"
         chmod +x "$WINDOWS_BIN/python"
         ;;
 esac
@@ -336,7 +338,7 @@ fi
 rm -f "$ISOLATED_BIN/winget" "$ISOLATED_BIN/powershell.exe" "$ISOLATED_BIN/cygpath"
 rm -f "$ISOLATED_BIN/codex"
 
-printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/python3"
+printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$ORIGINAL_PYTHON" > "$ISOLATED_BIN/python3"
 chmod +x "$ISOLATED_BIN/python3"
 EVAL_MARKER="$TMP_DIR/eval-marker"
 MALICIOUS_TOOL="\$(touch\${IFS}$EVAL_MARKER)"

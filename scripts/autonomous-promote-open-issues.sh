@@ -82,7 +82,7 @@ BOARD_WRITEBACK="${AUTOSPEC_BOARD_WRITEBACK_SCRIPT:-$SCRIPT_DIR/project-board-wr
 BOARD_CONFIG_BIN="${AUTOSPEC_PROJECT_BOARD_CONFIG_BIN:-${AUTOSPEC_BIN:-autospec}}"
 BOARD_CONFIG_REPO_DIR="${AUTOSPEC_REPO_DIR:-.}"
 
-# Never `eval` this output — it is parsed field-by-field with jq. Any
+# Never `eval` this output — it is parsed field-by-field with jq. A
 # failure (binary missing, subcommand missing on a stale install, malformed
 # config that fails the url/repo_allowlist gate, no config file at all)
 # degrades silently to "no board configured": board_plan() already treats
@@ -316,12 +316,12 @@ board_plan() {
     # with $$ and $RANDOM gives every worker its own source path, so no mv
     # can ever race another worker's. The mv (and the two fallback writes,
     # which used to write "$_cache" directly and non-atomically) are all
-    # guarded with `|| true` as defense-in-depth: any leftover failure (e.g.
+    # guarded with `|| true` as defense-in-depth: a leftover failure (e.g.
     # the cache dir vanishing mid-run) degrades to an empty/stale board
     # rather than crashing this script.
     _tmp="$_cache.$$.${RANDOM:-0}.tmp"
 
-    # Fail-closed: any resolver failure (bad URL, auth, truncated read) yields
+    # Fail-closed: each resolver failure (bad URL, auth, truncated read) yields
     # an empty board, never a partial/garbage promotion.
     if _plan="$(bash "$BOARD_RESOLVE" --url "$_url" --repo-dir "$BOARD_CONFIG_REPO_DIR" --emit plan 2>/dev/null)" \
         && printf '%s' "$_plan" \
@@ -355,7 +355,7 @@ board_stage() {
         | if ($pats | length) == 0 then false
           else $pats | map(
               (. | rtrimstr("*")) as $p
-              | if endswith("*") then ($r | startswith($p)) else ($r == .) end) | any
+              | if endswith("*") then ($r | startswith($p)) else ($r == .) end) | index(true) != null
           end;
       # Priority rank for stable promotion ordering. A missing/unrecognized
       # priority label ranks LAST (4) — never highest — so an unprioritized
@@ -370,7 +370,7 @@ board_stage() {
       # overstated what the code would actually promote.
       def blocked_from_promotion:
         ((.labels // []) | map(select(type == "string"))) as $ls
-        | ($ls | any(. == "autospec:needs-human" or . == "in-progress-by-bot"));
+        | ($ls | map(. == "autospec:needs-human" or . == "in-progress-by-bot") | index(true) != null);
       # I6: project-board-deps.sh --resolve computes a graph-wide .cycles —
       # a fixpoint over every item NOT already deps-satisfied, so it lumps
       # genuine cycle members with anything transitively downstream of one

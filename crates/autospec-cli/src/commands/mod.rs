@@ -19,6 +19,9 @@ pub mod showcase;
 pub mod status;
 pub mod validate;
 
+#[cfg(test)]
+pub(crate) static PROCESS_ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandFailureKind {
     Diagnostic,

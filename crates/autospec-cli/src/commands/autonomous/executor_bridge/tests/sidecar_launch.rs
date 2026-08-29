@@ -42,10 +42,7 @@ fn autonomous_executor_bridge_sidecar_only_writer_is_cleaned_before_fresh_launch
     let fresh = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir
@@ -133,10 +130,7 @@ fn autonomous_executor_bridge_sidecar_cleanup_survives_pgid_transition() {
     let fresh = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir
@@ -179,7 +173,7 @@ fn autonomous_executor_bridge_sidecar_cleanup_survives_unlinked_executable() {
     let state_path = fixture.root.join("state/invocation.json");
     let event_log = fixture.root.join("log/executor.jsonl");
     let executable = fixture.root.join("temporary-sleep");
-    fs::copy("/usr/bin/sleep", &executable).expect("copy temporary executable");
+    fs::copy("/bin/sleep", &executable).expect("copy temporary executable");
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
         .expect("temporary executable mode");
     let args = vec!["30".to_string()];
@@ -202,10 +196,7 @@ fn autonomous_executor_bridge_sidecar_cleanup_survives_unlinked_executable() {
     let fresh = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir

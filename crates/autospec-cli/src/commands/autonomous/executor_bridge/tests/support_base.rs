@@ -14,12 +14,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(in super::super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+pub(in super::super) use crate::commands::PROCESS_ENVIRONMENT as TEST_ENVIRONMENT;
 
 /// Restore every injected-fault switch to the value it was declared with.
 ///

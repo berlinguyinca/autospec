@@ -165,28 +165,51 @@ impl LaunchDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventKind {
     RunStarted,
-    WorkSelected { issue: Option<u64> },
-    ClaimStarted { issue: u64 },
-    IssueClaimed { issue: u64 },
-    HeartbeatPublicationDeferred { issue: u64, claim_id: String },
+    WorkSelected {
+        issue: Option<u64>,
+    },
+    ClaimStarted {
+        issue: u64,
+    },
+    IssueClaimed {
+        issue: u64,
+    },
+    HeartbeatPublicationDeferred {
+        issue: u64,
+        claim_id: String,
+    },
     StartupClaimRecovered {
         issue: u64,
         previous_claim_id: String,
         next_claim_id: String,
     },
-    ImplementationStarted { issue: u64 },
-    PullRequestOpened { pull_request: u64 },
-    ReviewStarted { pull_request: u64 },
+    ImplementationStarted {
+        issue: u64,
+    },
+    PullRequestOpened {
+        pull_request: u64,
+    },
+    ReviewStarted {
+        pull_request: u64,
+    },
     Verified,
-    PullRequestVerified { pull_request: u64 },
-    Merged { pull_request: u64 },
+    PullRequestVerified {
+        pull_request: u64,
+    },
+    Merged {
+        pull_request: u64,
+    },
     Blocked,
     Failed,
-    Quarantined { issue: u64 },
+    Quarantined {
+        issue: u64,
+    },
     Parked,
     Stopped,
     Completed,
-    ResumedFromEpic { epic: u64 },
+    ResumedFromEpic {
+        epic: u64,
+    },
 }
 
 impl EventKind {

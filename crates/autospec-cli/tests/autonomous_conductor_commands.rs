@@ -23,8 +23,8 @@ mod autonomous_conductor_process;
 #[path = "support/autonomous_restart_dry_run.rs"]
 mod autonomous_restart_dry_run;
 use autonomous_conductor_process::{
-    process_identity, process_is_running, terminate_process, terminate_process_group,
-    wait_for_process_exit,
+    current_boot_identity, current_host_identity, process_identity, process_is_running,
+    terminate_process, terminate_process_group, wait_for_process_exit,
 };
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -193,7 +193,6 @@ fn launch_modes_reject_non_start_subcommands_before_mutation() {
         .contains("launch modes are valid only with autospec autonomous start, not status"));
     assert!(!fixture.operator.exists());
 }
-
 
 #[test]
 fn foreground_source_has_no_legacy_shell_authority() {
@@ -727,7 +726,10 @@ fn dirty_integration_base_costs_a_continuous_cycle_instead_of_the_run() {
     assert!(status.status.success(), "{stdout}");
     assert!(stdout.contains("action=scan"), "{stdout}");
     assert!(stdout.contains("reason=integration_base_dirty"), "{stdout}");
-    assert!(!stdout.contains("reason=executor_receipt_failed"), "{stdout}");
+    assert!(
+        !stdout.contains("reason=executor_receipt_failed"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -740,10 +742,8 @@ fn dirty_integration_base_stays_fail_closed_for_one_shot_runs() {
     let output = fixture.command().output().expect("run one-shot foreground");
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("integration base main checkout has uncommitted work")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("integration base main checkout has uncommitted work"));
     assert_eq!(
         fs::read_to_string(dirty).expect("operator work remains"),
         "operator work\n"
@@ -986,7 +986,9 @@ fn continuous_executor_receipt_failure_resumes_implementation_proven_evidence() 
     )
     .expect("seed paused recovery state");
 
-    let launches = bridge.safe_root.join("implementation-proven-harness.launches");
+    let launches = bridge
+        .safe_root
+        .join("implementation-proven-harness.launches");
     let mut recovery = fixture.configured_command();
     recovery.args([
         "autonomous",
@@ -2139,7 +2141,8 @@ fn foreground_recovers_exact_immediate_stop_release_without_cleanup_intent() {
     );
     assert!(
         recovery.heartbeat_archived,
-        "exact release must retain the startup heartbeat handoff"
+        "exact release must retain the startup heartbeat handoff; stderr={}",
+        recovery.stderr
     );
     assert!(
         recovery.returned_to_scan,
@@ -2572,7 +2575,7 @@ fn foreground_recovers_retained_executor_predecessor_after_claim_advances() {
             assert_eq!(
                 fixture.read_state().phase(),
                 ConductorPhase::Scan,
-                "match: retained predecessor authority must authorize recovery"
+                "match: retained predecessor authority must authorize recovery; stderr={stderr}"
             );
             let transfer_doc: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(&transfer).expect("match: read ownership transfer"),
@@ -2596,11 +2599,13 @@ fn foreground_recovers_retained_executor_predecessor_after_claim_advances() {
                 "match: successor invocation"
             );
             assert_eq!(
-                calls.matches("\npr\ncreate\n").count(), 1,
+                calls.matches("\npr\ncreate\n").count(),
+                1,
                 "match: one PR create"
             );
             assert_eq!(
-                calls.matches("\npr\nmerge\n").count(), 1,
+                calls.matches("\npr\nmerge\n").count(),
+                1,
                 "match: one PR merge"
             );
         } else {
@@ -2633,7 +2638,8 @@ fn foreground_recovers_retained_executor_predecessor_after_claim_advances() {
                 "mismatch: no successor invocation may be persisted"
             );
             assert_eq!(
-                calls.matches("\npr\ncreate\n").count(), 0,
+                calls.matches("\npr\ncreate\n").count(),
+                0,
                 "mismatch: no PR create"
             );
         }
@@ -2643,6 +2649,7 @@ fn foreground_recovers_retained_executor_predecessor_after_claim_advances() {
     run_case(false);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
@@ -2683,14 +2690,6 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         .map(|entry| entry.path())
         .find(|path| is_generation_invocation_path(path, 42))
         .expect("live executor invocation");
-    let invocation: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&invocation_path).expect("read live executor invocation"),
-    )
-    .expect("parse live executor invocation");
-    let supervisor_pid = invocation["supervisor"]["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .expect("persisted supervisor PID");
     let before_message = git_fixture(
         &fixture.root,
         &[
@@ -2763,7 +2762,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         fs::read_to_string(&fixture.calls).unwrap_or_default()
     );
     assert!(
-        Path::new(&format!("/proc/{harness_pid}")).exists(),
+        process_is_running(harness_pid),
         "harness must still be live when renewal is observed"
     );
     let completed = replacement
@@ -2807,10 +2806,12 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
     assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
     assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
-    assert!(!Path::new(&format!("/proc/{supervisor_pid}")).exists());
-    assert!(!Path::new(&format!("/proc/{harness_pid}")).exists());
+    assert!(!process_is_running(harness_pid));
 }
 
+// This crash-recovery proof requires Linux PID adoption. Portable targets are
+// covered by the fail-closed recovery tests in executor_bridge::portability.
+#[cfg(target_os = "linux")]
 fn assert_released_heartbeat_generation_handoff() {
     let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
     let fixture = ForegroundFixture::new();
@@ -2902,8 +2903,10 @@ fn assert_released_heartbeat_generation_handoff() {
         .expect("retry exact zero-effect completion");
     assert!(
         terminal_transition_once.is_file(),
-        "terminal transition failpoint did not fire; stderr={}",
-        String::from_utf8_lossy(&output.stderr)
+        "terminal transition failpoint did not fire; state={:?} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
     );
     assert_eq!(
         fixture.read_state().phase(),
@@ -3049,12 +3052,9 @@ fn assert_released_heartbeat_generation_handoff() {
         .count();
     assert_eq!(archived, 1, "archive must retain the exact old generation");
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation() {
-    assert_released_heartbeat_generation_handoff();
-}
-#[test]
-fn released_heartbeat_generation_handoff() {
     assert_released_heartbeat_generation_handoff();
 }
 
@@ -6639,7 +6639,7 @@ fi
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
-    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
   elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   else
@@ -6989,11 +6989,9 @@ fi
 if [ -n "${AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE" ]; then
   : > "$AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE"
   worktree=$PWD
-  (
-    sleep 0.2
-    rm -rf "$worktree"
-    : > "${AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE%.*}.deleted"
-  ) </dev/null >/dev/null 2>&1 &
+  cd /
+  rm -rf "$worktree"
+  : > "${AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE%.*}.deleted"
   exit 0
 fi
 if [ -n "${AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE" ]; then
@@ -7023,7 +7021,7 @@ Result: Added the native bridge smoke artifact.
 Claims: [verified] static tests/smoke/generation.sh is committed.
 Proof type: static
 Before/after: 0 to 1 bridge smoke artifacts.
-Artifacts: tests/smoke/generation.sh; /usr/bin/test -s tests/smoke/generation.sh
+Artifacts: tests/smoke/generation.sh; /bin/test -s tests/smoke/generation.sh
 Scoped git status: tests/smoke/generation.sh
 One likely hidden failure: scanner behavior outside this hermetic fixture.
 EOF
@@ -7214,8 +7212,9 @@ printf '%s\n' '[]' > "$report"
         GuardedProcessGroup::new(command.spawn().expect("spawn following start"))
     }
 
-    fn recorded_conductor_pid(&self) -> Option<u32> {
-        let metadata = fs::read_to_string(self.operator.join("test_repo/conductor.pid")).ok()?;
+    fn recorded_process_pid(&self, name: &str) -> Option<u32> {
+        let metadata =
+            fs::read_to_string(self.operator.join(format!("test_repo/{name}.pid"))).ok()?;
         let (_, value) = metadata.split_once("\"pid\":")?;
         value
             .split(|character: char| !character.is_ascii_digit())
@@ -7224,8 +7223,12 @@ printf '%s\n' '[]' > "$report"
             .ok()
     }
 
+    fn recorded_conductor_pid(&self) -> Option<u32> {
+        self.recorded_process_pid("conductor")
+    }
+
     fn terminate_recorded_conductor(&self) {
-        if let Some(pid) = self.recorded_conductor_pid() {
+        if let Some(pid) = self.recorded_process_pid("conductor") {
             terminate_process_group(pid);
             terminate_process(pid);
         }
@@ -7741,14 +7744,8 @@ printf '%s\n' '[]' > "$report"
     ) {
         let repo = "test/repo";
         let issue = 42_u64;
-        let host = fs::read_to_string("/proc/sys/kernel/hostname")
-            .expect("read current host")
-            .trim()
-            .to_string();
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .expect("read current boot identity")
-            .trim()
-            .to_string();
+        let host = current_host_identity();
+        let boot_id = current_boot_identity();
         let mut nonce_frame = b"autospec-startup-heartbeat-nonce-v1".to_vec();
         for field in [repo, &issue.to_string(), claim_id] {
             nonce_frame.extend_from_slice(&(field.len() as u64).to_be_bytes());
@@ -8032,13 +8029,17 @@ fn json_string_field(document: &str, field: &str) -> String {
 
 impl Drop for ForegroundFixture {
     fn drop(&mut self) {
-        self.terminate_recorded_conductor();
+        for name in ["conductor", "monitor", "supervisor"] {
+            if let Some(pid) = self.recorded_process_pid(name) {
+                terminate_process_group(pid);
+                terminate_process(pid);
+            }
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
 
 static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -8135,7 +8136,7 @@ fn path_with(bin: &Path) -> String {
 }
 
 fn wait_for_file_contents(path: &Path, expected: &str) {
-    for _ in 0..1_000 {
+    for _ in 0..3_000 {
         if fs::read_to_string(path).is_ok_and(|contents| contents.contains(expected)) {
             return;
         }

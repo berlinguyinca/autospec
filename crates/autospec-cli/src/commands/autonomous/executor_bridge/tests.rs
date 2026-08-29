@@ -39,7 +39,6 @@ mod dispatcher_temporary;
 #[cfg(unix)]
 mod draft_release;
 mod explore_pin_staleness;
-mod structural_repository_failure;
 mod full_suite;
 mod generation_input;
 #[cfg(target_os = "linux")]
@@ -83,6 +82,7 @@ mod scope_root;
 mod sidecar_launch;
 #[cfg(target_os = "linux")]
 mod snapshot_identity;
+mod structural_repository_failure;
 mod structured_review;
 mod structured_review_receipt;
 mod support_base;

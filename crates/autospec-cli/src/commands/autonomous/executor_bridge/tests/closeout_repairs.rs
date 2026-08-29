@@ -142,6 +142,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
     } else {
         state.identity.worktree.join(common_dir)
     };
+    fs::create_dir_all(common_dir.join("info")).expect("create common Git info directory");
     fs::write(common_dir.join("info/exclude"), ".autospec/\n")
         .expect("ignore private executor artifacts");
     assert!(
@@ -357,6 +358,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
     } else {
         state.identity.worktree.join(common_dir)
     };
+    fs::create_dir_all(common_dir.join("info")).expect("create common Git info directory");
     fs::write(common_dir.join("info/exclude"), ".autospec/\n")
         .expect("ignore private executor artifacts");
 

@@ -683,7 +683,7 @@ THREE NEW Important, nothing Critical:
     two commits later and made it do so. The shipped skill now asserts the opposite of shipped
     behavior — the exact defect I4 was filed for, inverted.
   NEW-3 `legacy_validation_surfaces_are_absent_from_tracked_files` fails at HEAD because MY plan
-    docs (provenance c7a7d416) contain literal `bash scripts/validate.sh`. Red CI here, green on
+    docs (provenance c7a7d416) named the retired validation shell entrypoint. Red CI here, green on
     main. My own text is the merge blocker.
 
 Ruling: run one more small fix dispatch despite the "no second fix wave" rule. — Why: that rule
@@ -692,7 +692,7 @@ Ruling: run one more small fix dispatch despite the "no second fix wave" rule. �
   green on main, plus a skill that documents the inverse of its behavior, is not a defensible
   hand-off. — Cost if wrong: one more review cycle before merge.
 Final blockers: ALL THREE DONE.
-  e2febee4 NEW-3 — dead `scripts/validate.sh` references replaced with `autospec validate`;
+  e2febee4 NEW-3 — dead validation-shell references replaced with `autospec validate`;
     `legacy_validation_surfaces_are_absent_from_tracked_files` now PASSES (merge blocker cleared).
   fb2f907d NEW-2 — skill prose corrected to say the conductor DOES consume project_board: via the
     bridge, with mirrors + goldens re-derived in the same commit.

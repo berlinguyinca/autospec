@@ -3506,7 +3506,10 @@ fn run_autospec_refine_contract(id: &str, required: bool, root: &Path) -> CheckR
     }
     // Router delegates Phase 6; Next steps directive lives in end-of-run ref.
     let next_steps_ref = "skills/autospec-run/references/end-of-run.md";
-    if !contains(&root.join(next_steps_ref), "canonical `## Next steps` section") {
+    if !contains(
+        &root.join(next_steps_ref),
+        "canonical `## Next steps` section",
+    ) {
         return aggregate(
             id,
             required,

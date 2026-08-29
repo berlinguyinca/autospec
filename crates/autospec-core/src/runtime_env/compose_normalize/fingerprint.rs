@@ -141,6 +141,12 @@ pub(super) fn validate_missing_destination(
 }
 
 fn validate_destination_parent(repo: &Path, parent: &Path) -> Result<(), RuntimeEnvError> {
+    let canonical_repo = std::fs::canonicalize(repo).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not canonicalize repository {}: {error}",
+            repo.display()
+        ))
+    })?;
     match std::fs::symlink_metadata(parent) {
         Ok(metadata) if metadata.file_type().is_dir() => {
             let canonical = std::fs::canonicalize(parent).map_err(|error| {
@@ -149,7 +155,22 @@ fn validate_destination_parent(repo: &Path, parent: &Path) -> Result<(), Runtime
                     parent.display()
                 ))
             })?;
-            if canonical != parent || !canonical.starts_with(repo) {
+            let fixed_platform_alias = cfg!(target_os = "macos")
+                && [
+                    (Path::new("/var"), Path::new("/private/var")),
+                    (Path::new("/tmp"), Path::new("/private/tmp")),
+                    (Path::new("/etc"), Path::new("/private/etc")),
+                ]
+                .iter()
+                .any(|(alias, target)| {
+                    parent
+                        .strip_prefix(alias)
+                        .ok()
+                        .is_some_and(|suffix| target.join(suffix) == canonical)
+                });
+            if (canonical != parent && !fixed_platform_alias)
+                || !canonical.starts_with(&canonical_repo)
+            {
                 return Err(RuntimeEnvError::new(format!(
                     "normalization destination parent is unsafe: {}",
                     parent.display()
@@ -166,7 +187,7 @@ fn validate_destination_parent(repo: &Path, parent: &Path) -> Result<(), Runtime
             let ancestor = parent.parent().ok_or_else(|| {
                 RuntimeEnvError::new("normalization destination parent has no ancestor")
             })?;
-            if std::fs::canonicalize(ancestor).ok().as_deref() != Some(repo) {
+            if std::fs::canonicalize(ancestor).ok().as_deref() != Some(&canonical_repo) {
                 return Err(RuntimeEnvError::new(format!(
                     "normalization destination parent is outside repository: {}",
                     parent.display()

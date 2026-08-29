@@ -244,16 +244,11 @@ fn trusted_git_inventory_accepts_an_absent_default_hooks_directory() {
 fn trusted_git_inventory_rejects_post_hook() {
     let (_fixture, state, _snapshot, _closeout) =
         implementation_proof_fixture("rust-commit-post-hook");
-    let common_dir = PathBuf::from(git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--git-common-dir"],
-    ));
-    let common_dir = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        state.identity.worktree.join(common_dir)
-    };
-    let hook = common_dir.join("hooks/post-index-change");
+    let hooks_dir = bridge::trusted_worktree_git(&state)
+        .expect("resolve trusted hooks directory")
+        .hooks_dir;
+    fs::create_dir_all(&hooks_dir).expect("create trusted hooks directory");
+    let hook = hooks_dir.join("post-index-change");
     fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write post hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
         .expect("make post hook executable");
@@ -318,6 +313,50 @@ fn contained_hook_rejects_linter_symlink_into_worktree() {
 )]
 #[test]
 fn rust_commit_runs_trusted_validation_hook_inside_containment() {
+    #[cfg(target_os = "macos")]
+    let developer_tools_valid = Command::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|path| Path::new(path.trim()).join("usr/bin/xcrun").is_file());
+    #[cfg(target_os = "macos")]
+    if !developer_tools_valid
+        || !Command::new("/usr/bin/xcrun")
+            .args(["--find", "sandbox-exec"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+        || !Command::new("/usr/bin/xcrun")
+            .args(["--find", "git"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+        || !Command::new("/usr/bin/git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        || !Command::new("/usr/bin/sandbox-exec")
+            .env_clear()
+            .env("HOME", "/tmp")
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .env("LANG", "C.UTF-8")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-p",
+                "(version 1) (allow default)",
+                "/usr/bin/git",
+                "--version",
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping live containment proof: macOS developer tools are unavailable");
+        return;
+    }
     let (_fixture, state, _snapshot, _closeout) =
         implementation_proof_fixture("rust-commit-contained-hook");
     let external = ExternalHookFixture::new("contained-hook");
@@ -391,6 +430,7 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
         0o600,
         "the trusted validation hook did not execute"
     );
+    println!("AUTOSPEC_CONTAINMENT_PROOF_COMPLETE");
 }
 
 #[cfg(unix)]

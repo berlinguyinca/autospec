@@ -105,7 +105,7 @@ fn autonomous_executor_bridge_explicit_override_precedes_runtime_marker() {
     assert_eq!(resolved.kind, HarnessKind::Claude);
     assert_eq!(
         resolved.executable,
-        fs::canonicalize("/bin/true").expect("canonical /bin/true")
+        fs::canonicalize("/usr/bin/true").expect("canonical /usr/bin/true")
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -125,7 +125,7 @@ fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_i
         &fixture.root,
         &format!(
             "codex\t{}\tautospec-codex\tCodex fixture\n",
-            fs::canonicalize("/bin/true")
+            fs::canonicalize("/usr/bin/true")
                 .expect("canonical reviewer")
                 .display()
         ),
@@ -193,7 +193,7 @@ fn automatic_reviewer_identity_change_preserves_superseded_normalizer() {
         &fixture.root,
         &format!(
             "codex\t{}\tautospec-codex\tCodex fixture\n",
-            fs::canonicalize("/bin/true")
+            fs::canonicalize("/usr/bin/true")
                 .expect("canonical reviewer")
                 .display()
         ),
@@ -250,7 +250,7 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
     .expect("Codex auth fixture");
     fs::write(
         codex_home.join("config.toml"),
-        "[mcp_servers.hostile]\ncommand = \"/bin/false\"\n",
+        "[mcp_servers.hostile]\ncommand = \"/usr/bin/false\"\n",
     )
     .expect("hostile Codex config");
     fs::write(
@@ -278,13 +278,13 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
          \tshift\n\
          done\n\
          /usr/bin/grep -q reviewer-auth-remains-readable \"$CODEX_HOME/auth.json\"\n\
-         /usr/bin/test -s \"$CODEX_HOME/config.toml\"\n\
-         /usr/bin/test -s \"$CODEX_HOME/rules/hostile.rules\"\n\
+         /bin/test -s \"$CODEX_HOME/config.toml\"\n\
+         /bin/test -s \"$CODEX_HOME/rules/hostile.rules\"\n\
          if [ \"$ignore_config\" -ne 1 ] || [ \"$ignore_rules\" -ne 1 ]; then\n\
          \tprintf '%s\\n' loaded > \"$CODEX_HOME/host-policy-loaded\"\n\
          \texit 72\n\
          fi\n\
-         /usr/bin/test -n \"$result\"\n\
+         /bin/test -n \"$result\"\n\
          printf '%s\\n' '{}' > \"$result\"\n",
             review
         ),
@@ -341,7 +341,7 @@ fn autonomous_executor_bridge_normalizes_claude_and_opencode_stdout_verdicts() {
             &fixture.root,
             &format!(
                 "{kind}\t{}\tautospec-{kind}\t{kind} fixture\n",
-                fs::canonicalize("/bin/true")
+                fs::canonicalize("/usr/bin/true")
                     .expect("canonical reviewer")
                     .display()
             ),
@@ -354,7 +354,7 @@ fn autonomous_executor_bridge_normalizes_claude_and_opencode_stdout_verdicts() {
         if kind == "opencode" {
             env.insert(
                 "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
-                fs::canonicalize("/bin/true")
+                fs::canonicalize("/usr/bin/true")
                     .expect("canonical adapter")
                     .into_os_string(),
             );
@@ -458,9 +458,9 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
          set -eu\n\
          head -c 2097152 /dev/zero > \"$3\"\n\
          exec 3>>\"$1\"\n\
-         '{}' -f /bin/sh -c 'trap \"\" HUP INT TERM; sid=$(/usr/bin/ps -o sid= -p \"$$\"); printf \"%s %s\\n\" \"$$\" \"$sid\" > \"$1\"; while :; do /usr/bin/sleep 1; done' descendant \"$2\" &\n\
-         while [ ! -s \"$2\" ]; do /usr/bin/sleep 0.01; done\n\
-         /usr/bin/sleep 0.1\n\
+         '{}' -f /bin/sh -c 'trap \"\" HUP INT TERM; sid=$(/usr/bin/ps -o sid= -p \"$$\"); printf \"%s %s\\n\" \"$$\" \"$sid\" > \"$1\"; while :; do /bin/sleep 1; done' descendant \"$2\" &\n\
+         while [ ! -s \"$2\" ]; do /bin/sleep 0.01; done\n\
+         /bin/sleep 0.1\n\
          printf '%s\\n' '{}' > \"$1\"\n",
             setsid.display(),
             super::support_review::valid_review_json("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -486,7 +486,7 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
         false,
     )
     .expect("automatic reviewer normalizer");
-    let mut unrelated = Command::new("/usr/bin/sleep")
+    let mut unrelated = Command::new("/bin/sleep")
         .arg("30")
         .process_group(0)
         .spawn()

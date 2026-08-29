@@ -15,6 +15,9 @@ pub(super) fn seed_preserved_issue_branch(fixture: &ForegroundFixture, branch: &
     fs::write(fixture.repo_dir.join("WIP.md"), "preserved issue work\n")
         .expect("seed preserved issue work");
     git_fixture(&fixture.repo_dir, &["add", "WIP.md"]);
-    git_fixture(&fixture.repo_dir, &["commit", "-m", "seed preserved issue work"]);
+    git_fixture(
+        &fixture.repo_dir,
+        &["commit", "-m", "seed preserved issue work"],
+    );
     git_fixture(&fixture.repo_dir, &["checkout", "main"]);
 }

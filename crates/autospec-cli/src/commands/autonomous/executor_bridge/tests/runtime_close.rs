@@ -129,7 +129,7 @@ fn autonomous_executor_bridge_reattaches_after_error_and_derives_cleanup_intent(
     drop(reattached);
     fs::write(
         autospec.join("runtime.yml"),
-        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: /bin/false\n    down: /bin/false\n",
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: /usr/bin/false\n    down: /usr/bin/false\n",
     )
     .expect("replace live manifest after persisted runtime binding");
 

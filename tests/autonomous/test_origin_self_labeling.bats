@@ -21,11 +21,13 @@ setup() {
     STUB_DIR="$TMP/bin"
     mkdir -p "$STUB_DIR" "$TMP/repo/crates/autospec-cli/src/commands" "$TMP/repo/docs/reports"
     export PATH="$STUB_DIR:$PATH"
+    export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
     export GH_LOG="$TMP/gh.log"
 }
 
 teardown() {
     rm -rf "$TMP"
+    unset AUTOSPEC_BIN
 }
 
 seed_repo_gaps() {

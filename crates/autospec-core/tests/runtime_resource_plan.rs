@@ -20,6 +20,7 @@ impl TempRepo {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create temporary repository");
+        let root = std::fs::canonicalize(root).expect("canonicalize temporary repository");
         for (relative, content) in files {
             let path = root.join(relative);
             std::fs::create_dir_all(path.parent().expect("fixture file has parent"))

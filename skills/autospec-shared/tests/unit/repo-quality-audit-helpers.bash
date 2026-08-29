@@ -6,11 +6,13 @@ RUN_SKILL="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)/autospec-run
 # tail must follow it, or they force the extraction to be undone.
 RUN_END_OF_RUN="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)/autospec-run/references/end-of-run.md"
 SUMMARY_HELPER="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/autospec-write-run-summary.sh"
+PROJECT_SYNC_STUB="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/tests/fixtures/autospec-project-sync-stub.sh"
 
 setup_repo_quality_audit_fixture() {
     TEST_TMP="$(mktemp -d)"
     REPO="$TEST_TMP/repo"
     mkdir -p "$REPO/src" "$REPO/tests" "$REPO/.autospec"
+    export AUTOSPEC_BIN="$PROJECT_SYNC_STUB"
     cat > "$REPO/package.json" <<'EOF'
 {
   "engines": { "node": ">=20" },
@@ -44,4 +46,5 @@ EOF
 
 teardown_repo_quality_audit_fixture() {
     rm -rf "$TEST_TMP"
+    unset AUTOSPEC_BIN
 }

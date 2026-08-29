@@ -347,12 +347,10 @@ fn bounded_child_stops_oversized_output_while_the_child_is_live() {
 #[test]
 fn bounded_child_output_is_private() {
     let invocation = HarnessInvocation {
-        program: "/usr/bin/stat".into(),
+        program: "/usr/bin/python3".into(),
         args: vec![
-            "-L".to_string(),
             "-c".to_string(),
-            "%a".to_string(),
-            "/proc/self/fd/1".to_string(),
+            "import os; print(oct(os.fstat(1).st_mode & 0o777)[2:])".to_string(),
         ],
         current_dir: "/tmp".into(),
     };
@@ -367,7 +365,7 @@ fn bounded_child_output_is_private() {
 #[test]
 fn bounded_child_preserves_a_nonzero_status() {
     let invocation = HarnessInvocation {
-        program: "/bin/false".into(),
+        program: "/usr/bin/false".into(),
         args: Vec::new(),
         current_dir: "/tmp".into(),
     };

@@ -1300,8 +1300,7 @@ fn runner_checks_phase4_policy_gates_with_direct_bats_commands() {
             owner: CheckOwner::ExternalBatch(owner),
         }]);
 
-        let report =
-            ValidationRunner::run(&catalog, &validation_fixture(fixture));
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
 
         assert_eq!(report.results[0].exit_code, Some(0), "{id}");
         assert!(

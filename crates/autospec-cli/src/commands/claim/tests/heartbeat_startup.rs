@@ -4,7 +4,7 @@
 
 #[cfg(target_os = "linux")]
 use super::support::inject_heartbeat_boundary;
-use super::support::{startup_heartbeat_fixture, lock_heartbeat_env};
+use super::support::{lock_heartbeat_env, startup_heartbeat_fixture};
 use crate::commands::claim;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;

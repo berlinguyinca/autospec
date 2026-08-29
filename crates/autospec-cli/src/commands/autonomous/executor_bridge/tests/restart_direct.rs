@@ -288,7 +288,7 @@ fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
     write_executable(
         &executable,
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /usr/bin/sleep 30\n",
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 30\n",
             marker.display()
         ),
     );

@@ -11,8 +11,8 @@ use super::support::{lock_heartbeat_env, STARTUP_HEARTBEAT_ENV};
 /// This reads the sources instead, which is order-independent.
 #[test]
 fn every_boundary_user_goes_through_the_poison_tolerant_helper() {
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/commands/claim/tests");
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/claim/tests");
     let mut offenders = Vec::new();
     for entry in std::fs::read_dir(&directory).expect("read claim tests directory") {
         let path = entry.expect("claim tests entry").path();

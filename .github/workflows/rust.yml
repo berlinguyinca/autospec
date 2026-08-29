@@ -126,6 +126,7 @@ jobs:
         run: |
           run_exact() {
             behavior_test="$1"
+            proof_marker="${2:-}"
             set +e
             behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
             behavior_status=$?
@@ -135,6 +136,9 @@ jobs:
               return "$behavior_status"
             fi
             test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+            if [ -n "$proof_marker" ]; then
+              test "$(printf '%s\n' "$behavior_output" | grep -F -c "$proof_marker")" -eq 1
+            fi
           }
           cargo test -p autospec-core --lib
           run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
@@ -199,6 +203,7 @@ jobs:
         run: |
           run_exact() {
             behavior_test="$1"
+            proof_marker="${2:-}"
             set +e
             behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
             behavior_status=$?
@@ -208,6 +213,9 @@ jobs:
               return "$behavior_status"
             fi
             test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+            if [ -n "$proof_marker" ]; then
+              test "$(printf '%s\n' "$behavior_output" | grep -F -c "$proof_marker")" -eq 1
+            fi
           }
           run_exact 'commands::claim::heartbeat_portable::tests::publication_is_idempotent_but_rejects_another_generation'
           run_exact 'commands::autonomous::executor_bridge::process_owner::tests::wait_preserves_zero_exit'
@@ -216,7 +224,7 @@ jobs:
           run_exact 'commands::autonomous::executor_bridge::platform_identity::tests::process_observation_only_reports_dead_for_an_absent_pid'
           run_exact 'commands::autonomous::executor_bridge::portability::autonomous_runtime_support_tests::supported_run_foreground_dry_run_is_an_exact_artifact_free_preview'
           run_exact 'commands::autonomous::executor_bridge::portability::supported_host_tests::supported_host_retires_predecessor_runs_noop_and_publishes_terminal_receipt'
-          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment'
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment' 'AUTOSPEC_CONTAINMENT_PROOF_COMPLETE'
           run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation'
 
       - name: Test contained hooks through the Node launcher path
@@ -244,6 +252,7 @@ jobs:
 
           run_exact() {
             behavior_test="$1"
+            proof_marker="${2:-}"
             set +e
             behavior_output="$(cargo test -p autospec-cli --bin autospec "$behavior_test" -- --exact --nocapture 2>&1)"
             behavior_status=$?
@@ -253,8 +262,11 @@ jobs:
               return "$behavior_status"
             fi
             test "$(printf '%s\n' "$behavior_output" | grep -F -c "test $behavior_test ... ok")" -eq 1
+            if [ -n "$proof_marker" ]; then
+              test "$(printf '%s\n' "$behavior_output" | grep -F -c "$proof_marker")" -eq 1
+            fi
           }
-          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment'
+          run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_runs_trusted_validation_hook_inside_containment' 'AUTOSPEC_CONTAINMENT_PROOF_COMPLETE'
           run_exact 'commands::autonomous::executor_bridge::tests::commit_rust::rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation'
 
       - name: Build release autospec CLI

@@ -99,9 +99,7 @@ mod requeue {
     };
     use super::super::super::{ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
-    use crate::commands::claim::tests::support::{
-        startup_heartbeat_fixture, lock_heartbeat_env,
-    };
+    use crate::commands::claim::tests::support::{lock_heartbeat_env, startup_heartbeat_fixture};
     use crate::commands::claim::utc_now_iso;
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;

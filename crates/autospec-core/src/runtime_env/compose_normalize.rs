@@ -315,6 +315,7 @@ mod transaction_tests {
             ));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
+            let root = std::fs::canonicalize(root).unwrap();
             let files = (0..count).map(|index| planned_file(&root, index)).collect();
             Self { root, files }
         }

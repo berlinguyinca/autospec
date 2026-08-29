@@ -5,6 +5,7 @@ S="$REPO_ROOT/skills/autospec-shared/scripts"
 
 setup() {
   TMP="$(mktemp -d)"; export GROWTH_LEDGER="$TMP/ledger.jsonl"
+  export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -16,7 +17,7 @@ SH
   export PATH="$TMP/bin:$PATH"
   echo '{"product":{"name":"Acme"},"site":{"repo_path":"."},"grow":{"max_issues_per_cycle":5}}' > "$TMP/cfg.json"
 }
-teardown() { rm -rf "$TMP"; unset GROWTH_LEDGER GH_LOG GH_COUNTER; }
+teardown() { rm -rf "$TMP"; unset GROWTH_LEDGER GH_LOG GH_COUNTER AUTOSPEC_BIN; }
 
 @test "end-to-end: candidates -> pipeline -> file issues, deterministic" {
   # simulated lens outputs (what G1 subagents would produce)

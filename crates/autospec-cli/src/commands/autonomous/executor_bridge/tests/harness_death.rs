@@ -286,7 +286,7 @@ fn autonomous_executor_bridge_restart_cleans_immediate_exec_harness_after_superv
     let fixture = GitFixture::new("direct-dead-supervisor-immediate-exec");
     let marker = fixture.root.join("command.pid");
     let command = format!(
-        "/bin/sh -c 'if [ ! -e \"{}\" ]; then printf %s \"$$\" > \"{}\"; exec /usr/bin/sleep 30; fi'",
+        "/bin/sh -c 'if [ ! -e \"{}\" ]; then printf %s \"$$\" > \"{}\"; exec /bin/sleep 30; fi'",
         marker.display(),
         marker.display()
     );

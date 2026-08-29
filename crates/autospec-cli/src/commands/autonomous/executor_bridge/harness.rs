@@ -458,7 +458,13 @@ pub(super) fn safe_executable(
 }
 
 pub(super) fn temporary_path(path: &Path, env: &BTreeMap<String, OsString>) -> bool {
-    const TEMPORARY_ROOTS: [&str; 4] = ["/tmp", "/private/tmp", "/var/tmp", "/var/folders"];
+    const TEMPORARY_ROOTS: [&str; 5] = [
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+    ];
 
     TEMPORARY_ROOTS.iter().any(|root| path.starts_with(root))
         || env

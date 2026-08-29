@@ -6,6 +6,7 @@ LG="$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh"
 
 setup() {
   TMP="$(mktemp -d)"; export GROWTH_LEDGER="$TMP/ledger.jsonl"
+  export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
   # gh mock: echoes a fake issue URL; records args; can be forced to fail
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/gh" <<'SH'
@@ -20,7 +21,7 @@ SH
   export PATH="$TMP/bin:$PATH"
   echo '{"product":{"name":"Acme"},"site":{"repo_path":"."}}' > "$TMP/cfg.json"
 }
-teardown() { rm -rf "$TMP"; unset GROWTH_LEDGER GH_LOG GH_COUNTER GH_FAIL; }
+teardown() { rm -rf "$TMP"; unset GROWTH_LEDGER GH_LOG GH_COUNTER GH_FAIL AUTOSPEC_BIN; }
 
 ranked() {
   : > "$TMP/r.jsonl"

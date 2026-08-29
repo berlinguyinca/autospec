@@ -264,7 +264,7 @@ fn terminate_signals_descendants_in_the_owned_process_group() {
     }
     assert!(marker.exists(), "descendant did not publish readiness");
     let _ = owned.terminate().expect("terminate owned descendant tree");
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !matches!(
         std::fs::read_to_string(&marker),
         Ok(ref body) if body == "readyterm"

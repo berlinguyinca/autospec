@@ -285,8 +285,7 @@ impl SessionGuard {
         for session in processes
             .iter()
             .filter(|process| {
-                owned_processes.contains(&process.pid)
-                    && owned_processes.contains(&process.session)
+                owned_processes.contains(&process.pid) && owned_processes.contains(&process.session)
             })
             .map(|process| process.session)
         {

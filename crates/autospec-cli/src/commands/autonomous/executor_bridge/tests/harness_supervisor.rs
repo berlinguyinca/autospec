@@ -144,7 +144,7 @@ fn autonomous_executor_bridge_cleanup_capture_tracks_same_instance_after_pgid_ch
 fn autonomous_executor_bridge_absent_anchors_do_not_prove_orphan_cleanup() {
     // Break caught: two dead persisted anchors being treated as proof that an unrelated
     // closed-stdio orphan from the old tree cannot still be alive.
-    let mut anchor = Command::new("/usr/bin/sleep")
+    let mut anchor = Command::new("/bin/sleep")
         .arg("30")
         .spawn()
         .expect("spawn anchor fixture");
@@ -154,7 +154,7 @@ fn autonomous_executor_bridge_absent_anchors_do_not_prove_orphan_cleanup() {
         .expect("live anchor fixture");
     anchor.kill().expect("kill anchor fixture");
     anchor.wait().expect("reap anchor fixture");
-    let mut orphan = Command::new("/usr/bin/sleep")
+    let mut orphan = Command::new("/bin/sleep")
         .arg("30")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

@@ -267,7 +267,7 @@ For each candidate issue:
     apply_lang_step() {
       # apply_lang_step <body-file> <labels-csv>
       # Splices the canonical `## Language fit` block (from
-      # scripts/classify-language.sh) into <body-file>.lang and prints
+      # ${AUTOSPEC_SCRIPTS_DIR}/classify-language.sh) into <body-file>.lang and prints
       # exactly two lines on stdout: the bare language value, then the
       # label fragment (--add-label lang:<v> [--remove-label lang:<old>]
       # | LABEL_NOOP).

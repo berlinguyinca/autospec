@@ -48,6 +48,9 @@ EOF
 cat > bin/autospec <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/safety.log"
+if [ "\${1:-}" = "project" ] && [ "\${2:-}" = "sync" ]; then
+  exit 0
+fi
 if [ "\${1:-}" != "queue" ] || [ "\${2:-}" != "review-safety" ]; then
   exit 41
 fi
@@ -67,6 +70,7 @@ _run_filing() {
     cat > "$TMP/driver.sh" <<DRIVER
 set -u
 SCRIPT_DIR="$REPO_ROOT/scripts"
+REPO_ROOT="$TMP"
 SANDBOX_BRANCH="sandbox/explore-demo"
 RESEARCH_SOURCES="codebase-signals"
 iter=1
@@ -78,6 +82,7 @@ filed_issue_nums=""
 _ledger_append() { :; }
 _ledger_normalize_title() { printf '%s' "\$1"; }
 LEDGER_BIN=""
+$(awk '/^project_sync_issue\(\)/,/^}/' "$ORCH")
 $(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
 _explore_file_round
 DRIVER
@@ -136,6 +141,7 @@ _run_filing_with_counter() {
     cat > "$TMP/driver_counter.sh" <<DRIVER
 set -u
 SCRIPT_DIR="$REPO_ROOT/scripts"
+REPO_ROOT="$TMP"
 SANDBOX_BRANCH="sandbox/explore-demo"
 RESEARCH_SOURCES="codebase-signals"
 iter=1
@@ -147,6 +153,7 @@ filed_issue_nums=""
 _ledger_append() { :; }
 _ledger_normalize_title() { printf '%s' "\$1"; }
 LEDGER_BIN=""
+$(awk '/^project_sync_issue\(\)/,/^}/' "$ORCH")
 $(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
 _explore_file_round
 printf 'issues_filed=%s\n' "\$issues_filed"

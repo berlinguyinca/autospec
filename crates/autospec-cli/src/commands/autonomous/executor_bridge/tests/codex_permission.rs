@@ -109,6 +109,7 @@ fn autonomous_executor_bridge_builds_exact_codex_arguments() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_profile() {
     let root = test_root("codex-sandbox-profile");
@@ -247,7 +248,7 @@ fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_
         .arg("-P")
         .arg(bridge::CODEX_NETWORK_PERMISSION_PROFILE)
         .args(&profile_args)
-        .args(["--", "/bin/true"])
+        .args(["--", "/usr/bin/true"])
         .output()
         .expect("run Codex permission-profile sandbox from its real installation");
     match previous_codex_home {

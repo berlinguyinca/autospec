@@ -499,6 +499,7 @@ impl RuntimeFixture {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create fixture directory");
+        let root = std::fs::canonicalize(root).expect("canonicalize fixture directory");
         let state_root = root.join("state");
         Self { root, state_root }
     }
@@ -2440,6 +2441,14 @@ fn current_compose_supports_complete_config() -> bool {
 }
 
 #[cfg(unix)]
+fn current_docker_executable() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("docker"))
+        .find(|candidate| candidate.is_file())
+        .expect("Docker executable is available")
+}
+
+#[cfg(unix)]
 fn runtime_fixture_source(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/runtime-resources/compose")
@@ -2469,7 +2478,7 @@ fn assert_real_compose_fixture(name: &str, expected: Option<(&str, &str, &str)>)
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("REAL_DOCKER", "/usr/bin/docker")
+        .env("REAL_DOCKER", current_docker_executable())
         .args(["runtime", "env", "up", "--repo"])
         .arg(&fixture.root)
         .output()

@@ -15,10 +15,10 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 
 // Every test that mutates AUTOSPEC_HEARTBEAT_DIR shares this process-wide boundary.
-pub(super) static STARTUP_HEARTBEAT_ENV: Mutex<()> = Mutex::new(());
+pub(super) use crate::commands::PROCESS_ENVIRONMENT as STARTUP_HEARTBEAT_ENV;
 
 /// Take the process-wide environment boundary, tolerating poison.
 ///

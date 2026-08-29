@@ -358,14 +358,11 @@ fn autonomous_executor_bridge_live_sidecar_beats_stale_completed_retirement() {
         .expect("private old launch");
     bridge::retire_direct_launch(&paths, &old_attempt_id).expect("retire old attempt");
 
-    let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+    let invocation = shell_invocation(&fixture.repo, "exec /bin/sleep 30");
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir

@@ -4,8 +4,7 @@
 
 use super::super::{supervise_harness, BridgePhase, MutationSnapshot, SupervisionOutcome};
 use super::support_base::{
-    git, git_stdout, test_environment, write_executable, zero_effect_classifier_fixture,
-    GitFixture,
+    git, git_stdout, test_environment, write_executable, zero_effect_classifier_fixture, GitFixture,
 };
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, shell_invocation, supervision_config,
@@ -142,7 +141,10 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     );
     let merged_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
     assert_eq!(
-        git_stdout(&state.identity.worktree, &["show", "-s", "--format=%P", "HEAD"]),
+        git_stdout(
+            &state.identity.worktree,
+            &["show", "-s", "--format=%P", "HEAD"]
+        ),
         format!("{transfer_head} {advanced_base}")
     );
 
@@ -154,12 +156,9 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     bridge::write_invocation_atomic(&state_path, &state).expect("persist successor invocation");
     let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
 
-    let no_intent = bridge::RemoteMutationSnapshot::capture_and_persist(
-        &state_path,
-        &mut state,
-        &adapter,
-    )
-    .expect_err("same-parent merge without durable intent must fail closed");
+    let no_intent =
+        bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+            .expect_err("same-parent merge without durable intent must fail closed");
     assert!(no_intent.contains("intent"), "{no_intent}");
 
     let scope_root = state.identity.worktree.parent().expect("scope root");
@@ -174,16 +173,19 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     )
     .expect("persist exact base-drift intent");
 
-    fs::write(state.identity.worktree.join("tampered.txt"), "unowned tree\n")
-        .expect("write unowned merge tree");
-    git(&state.identity.worktree, &["add", "tampered.txt"]);
-    git(&state.identity.worktree, &["commit", "--amend", "--no-edit"]);
-    let unowned = bridge::RemoteMutationSnapshot::capture_and_persist(
-        &state_path,
-        &mut state,
-        &adapter,
+    fs::write(
+        state.identity.worktree.join("tampered.txt"),
+        "unowned tree\n",
     )
-    .expect_err("same-parent merge with an arbitrary tree must fail closed");
+    .expect("write unowned merge tree");
+    git(&state.identity.worktree, &["add", "tampered.txt"]);
+    git(
+        &state.identity.worktree,
+        &["commit", "--amend", "--no-edit"],
+    );
+    let unowned =
+        bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+            .expect_err("same-parent merge with an arbitrary tree must fail closed");
     assert!(unowned.contains("tree"), "{unowned}");
     git(&state.identity.worktree, &["reset", "--hard", &merged_head]);
 
@@ -193,10 +195,9 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     let loaded = bridge::RemoteMutationSnapshot::load(&state_path, &state)
         .expect("exact adopted base merge snapshot replays");
     assert_eq!(loaded, captured);
-    let snapshot: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(snapshot_path).expect("read successor snapshot"),
-    )
-    .expect("parse successor snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(snapshot_path).expect("read successor snapshot"))
+            .expect("parse successor snapshot");
     assert_eq!(snapshot["identity"]["local_head"], merged_head);
 }
 

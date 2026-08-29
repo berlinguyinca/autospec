@@ -151,7 +151,7 @@ mutates `.autospec/autonomous.yml` — allowlist changes are an operator edit.
 `ship <url>` runs the full chain — resolve the board, filter to the
 allowlist, write the fleet config, provision every allowlisted checkout,
 launch a conductor for each — via one script,
-`scripts/project-ship.sh --url <url>`. This is the one subcommand backed by
+`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-ship.sh --url <url>`. This is the one subcommand backed by
 a dedicated helper script rather than inline prose steps: the chain has a
 hard security boundary (the allowlist gate) and a per-repo failure-isolation
 contract that need to be enforced identically on every invocation, not
@@ -290,7 +290,7 @@ failure while preserving parent context.
 `project-board-deps.sh`, `autonomous-promote-open-issues.sh`). `status`
 composes those same scripts with `autospec-fleet`'s existing
 `fleet-status.sh`. `ship` is fully backed end to end by
-`scripts/project-ship.sh`, which chains `project-board-resolve.sh`, the
+`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/project-ship.sh`, which chains `project-board-resolve.sh`, the
 `repo_allowlist` gate, `fleet-lib.sh`'s checkout provisioning (clone /
 fetch+ff-only-update, the same helper `fleet-init.sh` uses), and
 `fleet-run.sh`'s real per-repo `autospec-autonomous` conductor launch — all

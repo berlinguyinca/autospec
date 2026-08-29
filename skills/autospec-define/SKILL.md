@@ -154,7 +154,7 @@ git remote get-url origin 2>/dev/null   # must contain github.com
 
 If **either** check fails — no git repo, or no GitHub remote — bootstrap a new repo:
 
-1. **Resolve the language.** Write the feature description to a temp file and call `scripts/classify-language.sh <temp-file> --json`. Parse the JSON: `lang`, `source`, `rationale`, `deterministic`, `confidence`. If `lang` is not `unknown` and `deterministic` is `true`, the language is unambiguous — pre-fill it in the bootstrap question below. If `lang` is `unknown` or `deterministic` is `false`, ask the operator which language to use. If `classify-language.sh` is missing or exits non-zero, fail closed: do not bootstrap; tell the user the classifier is unavailable and stop.
+1. **Resolve the language.** Write the feature description to a temp file and call `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-language.sh <temp-file> --json`. Parse the JSON: `lang`, `source`, `rationale`, `deterministic`, `confidence`. If `lang` is not `unknown` and `deterministic` is `true`, the language is unambiguous — pre-fill it in the bootstrap question below. If `lang` is `unknown` or `deterministic` is `false`, ask the operator which language to use. If `classify-language.sh` is missing or exits non-zero, fail closed: do not bootstrap; tell the user the classifier is unavailable and stop.
 
 2. **Suggest a name.** Slugify the feature description: lowercase, hyphens, drop stop-words, prefix with the resolved language if present (e.g. `go` → `go-tui-x`; `python` → `py-ml-y`). Offer 1–2 candidates.
 

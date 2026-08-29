@@ -25,6 +25,7 @@ impl MavenFixture {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".autospec")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         std::fs::write(
             root.join(".autospec/runtime.yml"),
             "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",

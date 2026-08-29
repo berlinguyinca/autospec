@@ -125,9 +125,8 @@ fn repeating_the_same_blocked_issue_seals_the_backlog_and_stays_alive() {
 
 #[test]
 fn a_different_blocked_issue_resets_the_backlog_governor() {
-    let (state, _) =
-        blocked_cycle_continuation(blocked_foreground_state(51, "candidate_blocked"))
-            .expect("first blocked cycle");
+    let (state, _) = blocked_cycle_continuation(blocked_foreground_state(51, "candidate_blocked"))
+        .expect("first blocked cycle");
     assert_eq!(state.blocked_backlog_cycles(), 1);
 
     let mut next = blocked_foreground_state(52, "candidate_blocked");

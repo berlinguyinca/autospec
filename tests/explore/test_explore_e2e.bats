@@ -22,6 +22,7 @@ setup() {
     git fetch -q origin main
 
     export AUTOSPEC_REPO_ROOT="$TMP"
+    export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
     export HOME="$TMP/home"
     mkdir -p "$HOME/.autospec"
     # Force harness detect to a known kind without needing real binaries.

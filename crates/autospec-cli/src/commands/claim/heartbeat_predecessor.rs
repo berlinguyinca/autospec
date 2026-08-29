@@ -16,7 +16,7 @@ pub(super) fn completed_handoff(repo: &fs::File, identity: ClaimMutationIdentity
     ) == HeartbeatReceiptDecision::Completed
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn retire(
     repo: &str,
     issue: u64,
@@ -55,7 +55,7 @@ pub(super) fn retire(
     retire_released_startup_heartbeat_with_hook(identity, true, &mut |_, _| Ok(()))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn retire(
     repo: &str,
     issue: u64,
@@ -87,7 +87,7 @@ pub(super) fn retire(
 /// so liveness is not a precondition. Without this, `claim release` left the
 /// session binding on disk forever and the same session could never claim
 /// another issue: the create-once binding still named the finished issue.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(), CommandFailure> {
     // Probe before opening for write. The write path creates the repository
     // directory when it is absent, and a freshly created directory inherits the
@@ -99,7 +99,7 @@ pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(),
     retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(), CommandFailure> {
     heartbeat_portable::retire_released(identity)
 }
