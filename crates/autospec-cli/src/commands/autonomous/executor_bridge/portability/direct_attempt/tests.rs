@@ -98,6 +98,9 @@ fn portable_harness(fixture: &DirectFixture, script: &str) -> ValidatedInvocatio
 
 #[test]
 fn portable_supervision_failures_cleanup_before_retiring_owner_journal() {
+    let _environment = crate::commands::PROCESS_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     // Break caught: any post-spawn `?` returning while the harness or its descendants remain
     // live, or removing ownership without durable cleanup evidence.
     let _serial = PORTABLE_LIFECYCLE_TEST

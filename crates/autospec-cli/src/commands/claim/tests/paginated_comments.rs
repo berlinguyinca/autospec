@@ -6,7 +6,7 @@ use super::super::{claim_settle_millis, publish_session_binding, SessionBindingI
 #[cfg(target_os = "linux")]
 use super::support::{
     anchored_startup_heartbeat_fixture, expected_startup_heartbeat, expired_heartbeat_snapshot,
-    mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture, lock_heartbeat_env,
+    lock_heartbeat_env, mutate_retained, startup_heartbeat_document, startup_heartbeat_fixture,
 };
 use super::support::{claim_record, lifecycle_evidence};
 use crate::commands::claim;

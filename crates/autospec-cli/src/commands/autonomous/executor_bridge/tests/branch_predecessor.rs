@@ -38,7 +38,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper() {
             .expect("capture recovery fixture snapshot");
     let worktree = state.identity.worktree.clone();
     let command = format!(
-        "printf ready > '{}'; while [ ! -f '{}' ]; do /usr/bin/sleep 0.05; done",
+        "printf ready > '{}'; while [ ! -f '{}' ]; do /bin/sleep 0.05; done",
         ready.display(),
         release.display()
     );
@@ -382,8 +382,11 @@ fn autonomous_executor_bridge_transfers_released_implementation_complete_predece
         Some(("old-claim", "old-invocation")),
     )
     .expect("provision predecessor worktree");
-    fs::write(worktree.path.join("implementation.txt"), "preserved implementation\n")
-        .expect("write predecessor implementation");
+    fs::write(
+        worktree.path.join("implementation.txt"),
+        "preserved implementation\n",
+    )
+    .expect("write predecessor implementation");
     git(&worktree.path, &["add", "implementation.txt"]);
     git(
         &worktree.path,
@@ -430,7 +433,10 @@ fn autonomous_executor_bridge_transfers_released_implementation_complete_predece
         Some(("new-claim", "new-invocation")),
     )
     .expect("adopt preserved implementation");
-    assert_eq!(git_stdout(&adopted.path, &["rev-parse", "HEAD"]), preserved_head);
+    assert_eq!(
+        git_stdout(&adopted.path, &["rev-parse", "HEAD"]),
+        preserved_head
+    );
 }
 
 #[test]

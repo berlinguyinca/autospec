@@ -4,7 +4,7 @@
 
 use super::super::{advance_claim_ref_in, create_claim_ref_commit, ClaimRefAdvance};
 use super::support::{
-    assert_bridge_transition_projection, claim_record, git, ClaimRefFixture, lock_heartbeat_env,
+    assert_bridge_transition_projection, claim_record, git, lock_heartbeat_env, ClaimRefFixture,
 };
 use crate::commands::claim;
 use autospec_core::claim::{ExecutorResultEvidence, RemoteComment};

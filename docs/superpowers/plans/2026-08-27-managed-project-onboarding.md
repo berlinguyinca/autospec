@@ -689,7 +689,7 @@ for skill in autospec autospec-define autospec-split autospec-classify autospec-
 done
 bash scripts/gen-skill-goldens.sh autospec autospec-define autospec-split autospec-classify autospec-project
 bash -n install.sh skills/autospec/install.sh skills/autospec-define/install.sh skills/autospec-split/install.sh skills/autospec-classify/install.sh skills/autospec-project/install.sh
-bash scripts/validate.sh
+autospec validate
 ```
 
 If regenerating goldens changes tracked files, inspect and include them; a second invocation

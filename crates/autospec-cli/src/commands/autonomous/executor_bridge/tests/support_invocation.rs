@@ -216,10 +216,7 @@ pub(super) fn detach_harness_for_adoption(
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir
@@ -286,8 +283,7 @@ impl NonDescendantDirectFixture {
             .expect("private artifact root");
         let paths = bridge::direct_attempt_paths(&artifact_root, 0);
         let args = vec!["30".to_string()];
-        let expected_executable =
-            fs::canonicalize("/usr/bin/sleep").expect("canonical sleep fixture");
+        let expected_executable = fs::canonicalize("/bin/sleep").expect("canonical sleep fixture");
         let spawn_identity = || {
             let child = Command::new(&expected_executable)
                 .arg("30")

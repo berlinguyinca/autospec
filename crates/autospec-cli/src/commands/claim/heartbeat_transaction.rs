@@ -78,7 +78,7 @@ pub(super) fn inspect_heartbeat_target(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn heartbeat_publication_error(error: HeartbeatPublicationFailure) -> CommandFailure {
     match error {
         HeartbeatPublicationFailure::PreCommit(error)
@@ -86,7 +86,7 @@ pub(super) fn heartbeat_publication_error(error: HeartbeatPublicationFailure) ->
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn publish_startup_heartbeat_transaction_with_hook(
     root: &Path,
     repo: &str,

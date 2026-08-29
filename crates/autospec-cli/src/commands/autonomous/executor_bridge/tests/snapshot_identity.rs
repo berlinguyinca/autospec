@@ -472,16 +472,20 @@ fn autonomous_executor_bridge_pre_exec_window_allows_only_same_birth_launcher_im
 
     let mut observed = expected.clone();
     observed.executable = launched_program.to_path_buf();
-    assert!(expected
-        .matches_live_harness_or_preexec_window(&observed, launched_program, &launched_args));
+    assert!(expected.matches_live_harness_or_preexec_window(
+        &observed,
+        launched_program,
+        &launched_args
+    ));
 
     observed.executable = PathBuf::from("/usr/bin/bash");
-    observed.argv_digest = bridge::argv_digest(&[
-        launched_program.display().to_string(),
-        "--task".to_string(),
-    ]);
-    assert!(expected
-        .matches_live_harness_or_preexec_window(&observed, launched_program, &launched_args));
+    observed.argv_digest =
+        bridge::argv_digest(&[launched_program.display().to_string(), "--task".to_string()]);
+    assert!(expected.matches_live_harness_or_preexec_window(
+        &observed,
+        launched_program,
+        &launched_args
+    ));
 
     for mutate in [
         |identity: &mut ProcessIdentity| identity.pid += 1,
@@ -495,10 +499,11 @@ fn autonomous_executor_bridge_pre_exec_window_allows_only_same_birth_launcher_im
     ] {
         let mut changed = expected.clone();
         mutate(&mut changed);
-        assert!(
-            !expected
-                .matches_live_harness_or_preexec_window(&changed, launched_program, &launched_args)
-        );
+        assert!(!expected.matches_live_harness_or_preexec_window(
+            &changed,
+            launched_program,
+            &launched_args
+        ));
     }
 }
 
@@ -512,13 +517,10 @@ fn autonomous_executor_bridge_supervision_adopts_adapter_exec_replacement() {
     let state_path = fixture.root.join("state/invocation.json");
     let event_log = fixture.root.join("log/executor.jsonl");
     let adapter = fixture.root.join("containment-adapter");
-    write_executable(
-        &adapter,
-        "#!/bin/sh\nsleep 0.3\nexec /usr/bin/sleep 0.2\n",
-    );
+    write_executable(&adapter, "#!/bin/sh\nsleep 0.3\nexec /bin/sleep 0.2\n");
     let invocation = HarnessInvocation {
         program: fs::canonicalize(&adapter).expect("canonical adapter"),
-        supervised_executable: fs::canonicalize("/usr/bin/sleep").expect("canonical sleep"),
+        supervised_executable: fs::canonicalize("/bin/sleep").expect("canonical sleep"),
         args: Vec::new(),
         current_dir: fixture.repo.clone(),
         requires_mutation_snapshots: false,

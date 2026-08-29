@@ -148,7 +148,8 @@ pub(super) enum LifecycleLeaseError {
     Policy(ResilienceAdmission),
 }
 
-#[allow(dead_code)] // Acquisition/adoption/release are intentionally not public command actions.
+#[allow(dead_code)]
+// Acquisition/adoption/release are intentionally not public command actions.
 // The lease transaction; see the module header there.
 #[path = "resilience/lease_transaction.rs"]
 mod lease_transaction;
@@ -158,7 +159,6 @@ use lease_transaction::LeaseTransaction;
 #[path = "resilience/liveness.rs"]
 mod liveness;
 use liveness::{pid_is_dead, same_known_host};
-
 
 impl ResilienceStore {
     fn from_env(repo: &str) -> Result<Self, String> {
@@ -751,12 +751,12 @@ pub(super) fn with_current_lifecycle_lease<T>(
     #[cfg(not(test))]
     let transaction = LeaseTransaction::try_open(&lease.lock_path);
     let _transaction = transaction.map_err(|error| match error {
-            StoreError::Held => "resilience lease transaction is held".to_string(),
-            StoreError::Diagnostic(reason) => reason,
-            StoreError::TokenMismatch => "resilience lease token mismatch".to_string(),
-            StoreError::Reject(reject) => reject.reason().to_string(),
-            StoreError::Policy(_) => "resilience lease policy rejected the transaction".to_string(),
-        })?;
+        StoreError::Held => "resilience lease transaction is held".to_string(),
+        StoreError::Diagnostic(reason) => reason,
+        StoreError::TokenMismatch => "resilience lease token mismatch".to_string(),
+        StoreError::Reject(reject) => reject.reason().to_string(),
+        StoreError::Policy(_) => "resilience lease policy rejected the transaction".to_string(),
+    })?;
     let raw = fs::read_to_string(&lease.state_path)
         .map_err(|error| format!("cannot read resilience lease state: {error}"))?;
     let state = ResilienceState::parse(&raw)

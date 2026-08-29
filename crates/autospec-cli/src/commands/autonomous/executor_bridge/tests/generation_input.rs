@@ -371,14 +371,11 @@ fn autonomous_executor_bridge_input_rebind_cleans_nested_live_command() {
     bridge::ensure_private_directory(&qa_root).expect("nested QA root");
     let paths = bridge::direct_attempt_paths(&qa_root, 0);
     let attempt_id = bridge::reserve_direct_attempt_id(&paths).expect("nested attempt id");
-    let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+    let invocation = shell_invocation(&fixture.repo, "exec /bin/sleep 30");
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
-            supervised_executable: invocation
-                .program
-                .canonicalize()
-                .expect("canonical shell"),
+            supervised_executable: invocation.program.canonicalize().expect("canonical shell"),
             args: invocation.args,
             current_dir: invocation
                 .current_dir

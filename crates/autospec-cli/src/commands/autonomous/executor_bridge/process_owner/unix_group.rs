@@ -57,6 +57,28 @@ impl UnixOwnedChild {
         );
         let observed = match getpgid(Some(pgid)) {
             Ok(observed) => observed,
+            Err(Errno::ESRCH) => match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Ok(Self {
+                        child: ChildLifecycle::Reaped(status),
+                        pid: child.id(),
+                        pgid,
+                        group_cleaned: true,
+                    });
+                }
+                Ok(None) => {
+                    let cleanup = child.kill().and_then(|()| child.wait());
+                    return Err(format!(
+                        "spawned process group disappeared while its leader remained live; cleanup={cleanup:?}"
+                    ));
+                }
+                Err(wait_error) => {
+                    let cleanup = child.kill().and_then(|()| child.wait());
+                    return Err(format!(
+                        "observe exited process after group disappearance: {wait_error}; cleanup={cleanup:?}"
+                    ));
+                }
+            },
             Err(error) => {
                 let cleanup = child.kill().and_then(|()| child.wait());
                 return Err(format!(
@@ -457,6 +479,9 @@ mod tests {
 
     #[test]
     fn completed_empty_groups_never_signal_after_owner_is_consumed() {
+        let _environment = crate::commands::PROCESS_ENVIRONMENT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         for _ in 0..64 {
             let mut command = Command::new("/usr/bin/true");
             let mut child = UnixOwnedChild::spawn(&mut command).expect("spawn empty group");

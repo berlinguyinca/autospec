@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/claim_process_fixture.rs"]
 mod claim_process_fixture;
-use claim_process_fixture::{bind_to_current_process, current_process_start};
+use claim_process_fixture::{
+    bind_to_current_process, current_boot_identity, current_host_identity, current_process_start,
+};
 
 static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1221,15 +1223,14 @@ impl LegacyRecoveryFixture {
             .expect("private heartbeat root");
         std::fs::set_permissions(&heartbeat_repo, std::fs::Permissions::from_mode(0o700))
             .expect("private heartbeat repository");
-        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
-        let boot =
-            std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+        let host = current_host_identity();
+        let boot = current_boot_identity();
         std::fs::write(
             heartbeat_repo.join("42.json"),
             format!(
                 "{{\"issue\":\"42\",\"branch\":\"\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
-                host.trim(),
-                boot.trim()
+                host,
+                boot
             ),
         )
         .expect("expired heartbeat");
@@ -1668,14 +1669,14 @@ fn claim_stale_heartbeat_recovery() {
         .expect("private heartbeat root");
     std::fs::set_permissions(&heartbeat_repo, std::fs::Permissions::from_mode(0o700))
         .expect("private heartbeat repository");
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+    let host = current_host_identity();
+    let boot = current_boot_identity();
     let process_start = current_process_start();
     let heartbeat = heartbeat_repo.join("42.json");
     let expired_document = format!(
         "{{\"issue\":\"42\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
-        host.trim(),
-        boot.trim()
+        host,
+        boot
     );
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
@@ -2391,11 +2392,18 @@ fn startup_heartbeat_claim_lifecycle() {
     let sessions = heartbeats_a.join("o7_testorg_r8_testrepo/sessions");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::set_permissions(&heartbeats_a, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        heartbeats_a.join("o7_testorg_r8_testrepo"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
     let pending = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-a","state":"claimed","branch":"feat/a","pr":"","step":"heartbeat-pending:73657373696f6e2d61","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-a"}"#).unwrap();
     transition_claim_ref(&repo, &pending);
     let binding = sessions.join("73657373696f6e2d636f6e666c696374.json");
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let host = current_host_identity();
+    let boot = current_boot_identity();
     let process_start = current_process_start();
     std::fs::write(&binding, format!("{{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":10800,\"pid\":{},\"nonce\":\"27ba109f66aa73f03cb40a405356da986874fb0ef2a279127821fdc4dc319b0c\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}}\n", std::process::id(), host.trim(), boot.trim())).unwrap();
     std::fs::set_permissions(&binding, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2436,7 +2444,12 @@ fn startup_heartbeat_claim_lifecycle() {
         String::from_utf8_lossy(&lifecycle.stdout),
         String::from_utf8_lossy(&lifecycle.stderr)
     );
-    assert!(heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(
+        heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&lifecycle.stdout),
+        String::from_utf8_lossy(&lifecycle.stderr)
+    );
     assert!(!heartbeats_b.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(!heartbeats_b
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d61.json")
@@ -2874,18 +2887,36 @@ fn claim_state_upsert_rejects_a_progress_step_as_a_claim_state() {
     // A terminal state is a different mistake and earns a different remedy.
     let terminal = autospec()
         .args([
-            "claim", "state", "upsert", "--issue", "42", "--repo", "testorg/testrepo",
-            "--worker-id", "worker-a", "--branch", "feat/test", "--claim-id", "claim-a",
-            "--state", "merged",
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--state",
+            "merged",
         ])
         .current_dir(&repo)
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
         .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
         .output()
         .expect("autospec claim state upsert starts");
     assert!(!terminal.status.success());
     let terminal_stderr = String::from_utf8_lossy(&terminal.stderr);
-    assert!(terminal_stderr.contains("claim release"), "{terminal_stderr}");
+    assert!(
+        terminal_stderr.contains("claim release"),
+        "{terminal_stderr}"
+    );
     assert_eq!(claim_ref_oid(&repo, 42), original_oid);
 }
 
@@ -3075,12 +3106,27 @@ fn an_upsert_without_a_step_keeps_the_predecessor_step() {
 
     let output = autospec()
         .args([
-            "claim", "state", "upsert", "--issue", "42", "--repo", "testorg/testrepo",
-            "--worker-id", "worker-a", "--claim-id", "claim-a", "--branch", "feat/test",
-            "--state", "claimed",
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--claim-id",
+            "claim-a",
+            "--branch",
+            "feat/test",
+            "--state",
+            "claimed",
         ])
         .current_dir(&repo)
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
         .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
         .output()
         .expect("autospec claim state upsert starts");
@@ -3146,9 +3192,10 @@ fn no_shell_caller_upserts_anything_but_a_claimed_state() {
                 continue;
             }
             inspected += 1;
-            let state = statement.split("--state ").nth(1).map(|rest| {
-                rest.split_whitespace().next().unwrap_or_default()
-            });
+            let state = statement
+                .split("--state ")
+                .nth(1)
+                .map(|rest| rest.split_whitespace().next().unwrap_or_default());
             let Some(state) = state else {
                 panic!("{}: upsert invocation has no --state", path.display());
             };

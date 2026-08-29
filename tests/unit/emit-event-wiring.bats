@@ -16,6 +16,7 @@ SHIM="$REPO_ROOT/skills/autospec-shared/scripts/emit-event.sh"
 
 setup() {
   TMP="$(mktemp -d)"
+  export AUTOSPEC_BIN="$REPO_ROOT/tests/fixtures/autospec-project-sync-stub.sh"
   mkdir -p "$TMP/bin" "$TMP/home"
   # stub autospec-db binary: logs argv verbatim, one line per invocation
   cat > "$TMP/bin/autospec-db" <<'SH'
@@ -34,7 +35,7 @@ SH
 
 teardown() {
   rm -rf "$TMP"
-  unset AUTOSPEC_DB_DSN BIN_LOG AUTOSPEC_DB_DISABLE
+  unset AUTOSPEC_DB_DSN BIN_LOG AUTOSPEC_DB_DISABLE AUTOSPEC_BIN
   unset AUTOSPEC_CLAIM_GIT_REMOTE AUTOSPEC_CLAIM_GIT_STATE_DIR
   unset AUTOSPEC_TELEMETRY_ENABLED AUTOSPEC_DB_HOST_LABEL
   unset AUTOSPEC_DB_SPOOL_MAX_BYTES AUTOSPEC_INSTALL_DB_MODULE

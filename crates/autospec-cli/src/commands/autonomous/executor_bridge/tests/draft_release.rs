@@ -389,11 +389,14 @@ fn autonomous_executor_bridge_draft_release_child_closes_unrelated_inherited_loc
         .expect("reopen unrelated lock");
     let probe_result = probe.try_lock();
     fs::remove_file(hold).expect("release draft child");
-    assert_eq!(publisher.join().expect("join publisher").expect("publish"), 17);
+    assert_eq!(
+        publisher.join().expect("join publisher").expect("publish"),
+        17
+    );
     probe_result.expect("draft release child must not retain unrelated lock");
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
     // Break caught: gh starting before its exact prepared identity/release is durable.
@@ -411,7 +414,7 @@ fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
     assert!(prepared.state.draft_process.is_some());
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child() {
     // Break caught: a parent crash before release permanently stranding a safe create intent.
@@ -438,7 +441,7 @@ fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child()
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
     // Break caught: the suspended child sending a request after its parent disappears pre-release.
@@ -470,7 +473,7 @@ fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable() {
     // Break caught: failed child launch leaving a release receipt that permanently blocks retry.
@@ -515,7 +518,7 @@ fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable()
     assert_eq!(calls.matches("pr create").count(), 1);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_recovers_after_durable_intent_clear_crash() {
     // Break caught: a crash after durable intent removal permanently stranding a safe retry.

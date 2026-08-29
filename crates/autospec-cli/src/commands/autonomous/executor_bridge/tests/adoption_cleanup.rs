@@ -382,7 +382,7 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
     };
     let mut exited_keys = Vec::new();
     for _ in 0..32 {
-        let mut child = Command::new("/usr/bin/sleep")
+        let mut child = Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .expect("spawn exited descendant fixture");
@@ -396,7 +396,7 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
         processes.descendants.insert(key.clone(), owned);
         exited_keys.push(key);
     }
-    let mut zombie_child = Command::new("/usr/bin/sleep")
+    let mut zombie_child = Command::new("/bin/sleep")
         .arg("30")
         .spawn()
         .expect("spawn unreaped descendant fixture");
@@ -455,7 +455,7 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
     }
     assert!(!nonchild.is_live().expect("observe non-child fixture"));
     processes.descendants.insert(nonchild_key.clone(), nonchild);
-    let mut live_child = Command::new("/usr/bin/sleep")
+    let mut live_child = Command::new("/bin/sleep")
         .arg("30")
         .spawn()
         .expect("spawn live descendant fixture");
@@ -505,7 +505,10 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
     processes
         .capture_descendants_while_leader_live()
         .expect("reconcile reparented non-child tombstone");
-    assert_eq!(processes.exited_descendants.contains_key(&nonchild_key), !nonchild_disappeared);
+    assert_eq!(
+        processes.exited_descendants.contains_key(&nonchild_key),
+        !nonchild_disappeared
+    );
     processes
         .descendants
         .get(&live_key)

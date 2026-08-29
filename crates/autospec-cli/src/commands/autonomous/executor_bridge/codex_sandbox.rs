@@ -227,7 +227,7 @@ pub(super) fn preflight_codex_sandbox(codex: &Path) -> Result<CodexSandboxPolicy
         .arg("-P")
         .arg(CODEX_NETWORK_PERMISSION_PROFILE)
         .args(profile_args)
-        .args(["--", "/bin/true"])
+        .args(["--", "/usr/bin/true"])
         .output()
         .map_err(|error| {
             format!("executor_codex_sandbox_unavailable: cannot run Codex sandbox probe: {error}")

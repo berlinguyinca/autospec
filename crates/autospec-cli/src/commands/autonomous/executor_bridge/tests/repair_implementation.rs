@@ -144,7 +144,7 @@ fn autonomous_executor_bridge_opencode_requires_and_uses_safe_adapter() {
 
     env.insert(
         "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
-        OsString::from("/bin/true"),
+        OsString::from("/usr/bin/true"),
     );
     let contained = HarnessConfig::load(&root, &env)
         .expect("load contained harness config")
@@ -160,7 +160,7 @@ fn autonomous_executor_bridge_opencode_requires_and_uses_safe_adapter() {
 
     assert_eq!(
         invocation.program,
-        fs::canonicalize("/bin/true").expect("canonical adapter")
+        fs::canonicalize("/usr/bin/true").expect("canonical adapter")
     );
     assert_eq!(
         invocation.args,
@@ -189,7 +189,7 @@ fn autonomous_executor_bridge_opencode_honors_tier_model_and_variant() {
     );
     env.insert(
         "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
-        OsString::from("/bin/true"),
+        OsString::from("/usr/bin/true"),
     );
     env.insert(
         "AUTOSPEC_OPENCODE_MODEL".to_string(),
@@ -235,7 +235,7 @@ fn autonomous_executor_bridge_opencode_honors_tier_model_and_variant() {
     );
     default_env.insert(
         "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
-        OsString::from("/bin/true"),
+        OsString::from("/usr/bin/true"),
     );
     let defaulted = HarnessConfig::load(&root, &default_env)
         .expect("load harness config")

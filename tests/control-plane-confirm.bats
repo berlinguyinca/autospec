@@ -35,6 +35,13 @@ printf 'unexpected gh invocation: %s\n' "$*" >&2
 exit 99
 GH
   chmod +x "$TEST_TMP/bin/gh"
+  cat > "$TEST_TMP/bin/autospec" <<'AUTOSPEC'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = "project" ] && [ "${2:-}" = "onboard" ] || exit 99
+printf '%s\n' '{"outcome":"reconciled","pending_projection":0}'
+AUTOSPEC
+  chmod +x "$TEST_TMP/bin/autospec"
   export GH_LOG GH_REMOTE_ROOT
   export PATH="$TEST_TMP/bin:$PATH"
   export GIT_AUTHOR_NAME="Autospec Test"

@@ -59,7 +59,9 @@ fn state_candidate_lists_default_when_absent() {
         vec!["AutoSpec state".to_string(), "Delivery status".to_string()]
     );
     assert_eq!(
-        cfg.project_board.state_option_candidates.get("Implementation"),
+        cfg.project_board
+            .state_option_candidates
+            .get("Implementation"),
         Some(&vec![
             "Implementation".to_string(),
             "In progress".to_string()
@@ -180,7 +182,10 @@ fn dep_field_candidates_rejects_explicit_empty_list() {
 fn dep_markers_parses_from_yaml() {
     let cfg = AutonomousConfig::parse("project_board:\n  dep_markers: [\"Waiting on\"]\n")
         .expect("parse");
-    assert_eq!(cfg.project_board.dep_markers, vec!["Waiting on".to_string()]);
+    assert_eq!(
+        cfg.project_board.dep_markers,
+        vec!["Waiting on".to_string()]
+    );
 }
 
 #[test]
@@ -192,8 +197,8 @@ fn dep_markers_rejects_explicit_empty_list() {
 
 #[test]
 fn spend_scope_parses_from_yaml() {
-    let cfg =
-        AutonomousConfig::parse("project_board:\n  spend_scope: board-inferweave-2\n").expect("parse");
+    let cfg = AutonomousConfig::parse("project_board:\n  spend_scope: board-inferweave-2\n")
+        .expect("parse");
     assert_eq!(
         cfg.project_board.spend_scope.as_deref(),
         Some("board-inferweave-2")
@@ -216,9 +221,12 @@ fn spend_scope_rejects_embedded_slash() {
 
 #[test]
 fn spend_scope_rejects_dot_and_dotdot() {
-    for value in ["project_board:\n  spend_scope: \".\"\n", "project_board:\n  spend_scope: \"..\"\n"] {
-        let err = AutonomousConfig::parse(value)
-            .expect_err("'.' and '..' spend_scope must be rejected");
+    for value in [
+        "project_board:\n  spend_scope: \".\"\n",
+        "project_board:\n  spend_scope: \"..\"\n",
+    ] {
+        let err =
+            AutonomousConfig::parse(value).expect_err("'.' and '..' spend_scope must be rejected");
         assert!(err.contains("spend_scope"), "unexpected error: {err}");
     }
 }
@@ -252,5 +260,8 @@ fn spend_scope_accepts_max_length_value() {
     let max_value = "a".repeat(200);
     let source = format!("project_board:\n  spend_scope: {max_value}\n");
     let cfg = AutonomousConfig::parse(&source).expect("200-char spend_scope must be accepted");
-    assert_eq!(cfg.project_board.spend_scope.as_deref(), Some(max_value.as_str()));
+    assert_eq!(
+        cfg.project_board.spend_scope.as_deref(),
+        Some(max_value.as_str())
+    );
 }

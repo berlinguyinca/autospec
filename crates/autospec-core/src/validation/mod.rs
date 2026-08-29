@@ -5,9 +5,9 @@ pub mod external;
 pub mod options;
 pub mod output_macros;
 pub mod plan;
+pub mod reference_pointer;
 pub mod results;
 pub mod runner;
-pub mod reference_pointer;
 pub mod structural;
 pub mod structural_text;
 

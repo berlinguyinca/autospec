@@ -1386,7 +1386,16 @@ fn released_predecessor_heartbeat_evidence_exists(
     };
     let issue_name = format!("{}.json", identity.issue);
     match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
-        Ok(_) => return Ok(true),
+        Ok(snapshot) => {
+            let Some(evidence) = parse_startup_heartbeat(&snapshot.document) else {
+                return Ok(false);
+            };
+            return Ok(evidence.repo == identity.repo
+                && evidence.issue == identity.issue.to_string()
+                && evidence.worker_id == identity.worker_id
+                && evidence.branch == identity.branch
+                && evidence.claim_id == identity.claim_id);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(CommandFailure::diagnostic(format!(
@@ -1394,49 +1403,18 @@ fn released_predecessor_heartbeat_evidence_exists(
             )))
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    return Ok(false);
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let Some(quarantine) = open_optional_heartbeat_directory(&repo, Path::new("quarantine"))?
-        else {
-            return Ok(false);
-        };
-        let Some(handoff) = open_optional_heartbeat_directory(
-            &quarantine,
-            Path::new("startup-heartbeat-handoffs"),
-        )?
-        else {
-            return Ok(false);
-        };
-        let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
-        for entry in fs::read_dir(directory).map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "predecessor heartbeat handoff scan failed: {error}"
-            ))
-        })? {
-            let name = entry
-                .map_err(|error| {
-                    CommandFailure::diagnostic(format!(
-                        "predecessor heartbeat handoff entry failed: {error}"
-                    ))
-                })?
-                .file_name()
-                .into_string()
-                .map_err(|_| {
-                    CommandFailure::diagnostic("predecessor heartbeat handoff is unsafe")
-                })?;
-            let pending = format!("pending-{}-", identity.issue);
-            let completed = format!("completed-{}-", identity.issue);
-            if (name.starts_with(&pending) || name.starts_with(&completed))
-                && (name.ends_with(".receipt") || name.ends_with(".json"))
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
+    Ok(heartbeat_receipt_retry_decision(
+        &repo,
+        StartupHeartbeatExpectation {
+            repo: identity.repo,
+            issue: identity.issue,
+            worker_id: identity.worker_id,
+            branch: identity.branch,
+            pull_request: "",
+            claim_id: identity.claim_id,
+            step: "claimed",
+        },
+    ) != HeartbeatReceiptDecision::Absent)
 }
 
 #[cfg(unix)]
@@ -2768,7 +2746,7 @@ pub(crate) fn recover_released_bridge_claim(
     Ok(exact)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn with_released_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     operation: impl FnOnce() -> Result<T, CommandFailure>,
@@ -2793,7 +2771,7 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn with_released_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     operation: impl FnOnce() -> Result<T, CommandFailure>,
@@ -2805,7 +2783,7 @@ pub(crate) fn with_released_bridge_predecessor_authority<T>(
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 #[allow(dead_code)]
 fn with_retained_bridge_predecessor_authority<T>(
     _identity: ClaimMutationIdentity<'_>,
@@ -4443,7 +4421,7 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     return publish_startup_heartbeat_transaction_with_hook(
         &_root,
         repo,
@@ -4452,7 +4430,7 @@ fn write_startup_heartbeat(
         _body.as_bytes(),
         &mut |_, _| Ok(()),
     );
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     heartbeat_portable::publish(&_root, repo, issue, session_id, _body.as_bytes())
 }
 
@@ -4766,13 +4744,13 @@ fn retire_released_startup_heartbeat_with_hook(
         boundary,
     )
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn retire_released_startup_heartbeat(
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
     retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn retire_released_startup_heartbeat(
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
@@ -5729,6 +5707,39 @@ fn heartbeat_receipt_retry_decision_with_hook(
 }
 
 #[cfg(target_os = "linux")]
+fn read_open_heartbeat_directory(directory: &fs::File) -> Result<fs::ReadDir, CommandFailure> {
+    use std::os::fd::AsRawFd;
+    fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+        .map_err(|error| CommandFailure::diagnostic(format!("retained scan: {error}")))
+}
+
+#[cfg(target_os = "macos")]
+fn read_open_heartbeat_directory(directory: &fs::File) -> Result<fs::ReadDir, CommandFailure> {
+    use std::ffi::CStr;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut path = [0_i8; nix::libc::MAXPATHLEN as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path into the live MAXPATHLEN buffer.
+    if unsafe {
+        nix::libc::fcntl(
+            directory.as_raw_fd(),
+            nix::libc::F_GETPATH,
+            path.as_mut_ptr(),
+        )
+    } == -1
+    {
+        return Err(CommandFailure::diagnostic(format!(
+            "retained scan path: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let path = unsafe { CStr::from_ptr(path.as_ptr()) };
+    fs::read_dir(Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())))
+        .map_err(|error| CommandFailure::diagnostic(format!("retained scan: {error}")))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn classify_retained_prior_generation(
     trusted_repo: &fs::File,
     repo_name: &str,
@@ -5738,7 +5749,6 @@ fn classify_retained_prior_generation(
 ) -> Result<StartupHeartbeatClassification, CommandFailure> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::fstatat;
-    use std::os::fd::AsRawFd;
 
     let quarantine = match fstatat(trusted_repo, "quarantine", AtFlags::AT_SYMLINK_NOFOLLOW) {
         Err(nix::errno::Errno::ENOENT) => return Ok(StartupHeartbeatClassification::Absent),
@@ -5755,9 +5765,7 @@ fn classify_retained_prior_generation(
         Ok(_) => {}
     }
     let handoff = open_receipt_anchors_with_hook(trusted_repo, |_| {})?;
-    let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
-    let entries = fs::read_dir(directory)
-        .map_err(|error| CommandFailure::diagnostic(format!("retained scan: {error}")))?;
+    let entries = read_open_heartbeat_directory(&handoff)?;
     let pending_prefix = format!("pending-{issue}-");
     let completed_prefix = format!("completed-{issue}-");
     let mut relevant = 0usize;
@@ -5827,7 +5835,7 @@ fn classify_retained_prior_generation(
         None => StartupHeartbeatClassification::Absent,
     })
 }
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn classify_retained_prior_generation(
     _trusted_repo: &fs::File,
     _repo_name: &str,
@@ -6426,7 +6434,7 @@ fn held_heartbeat_at(
     Ok(Some(file))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn with_retained_bridge_predecessor_authority<T>(
     identity: ClaimMutationIdentity<'_>,
     observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,

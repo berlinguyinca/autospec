@@ -3532,6 +3532,7 @@ fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
     let repo_dir = temp.join("repo");
     make_git_repo(&repo_dir, None);
     let scope = operator_dir.join("berlinguyinca_autospec");
+    let _cleanup = ScopedPidCleanup(scope.clone());
     let path = hermetic_autonomous_path(&temp);
 
     let start = autospec()
@@ -4298,7 +4299,7 @@ fn fake_bin(
 #[test]
 fn generated_executable_replacement_preserves_active_inode() {
     let fixture = temp_dir("autospec-generated-executable-replacement");
-    let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+    let sleep = ["/bin/sleep", "/bin/sleep"]
         .into_iter()
         .find(|path| std::path::Path::new(path).is_file())
         .expect("sleep executable");
@@ -4594,6 +4595,14 @@ fn cleanup_pids(scope: &std::path::Path) {
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+}
+
+struct ScopedPidCleanup(std::path::PathBuf);
+
+impl Drop for ScopedPidCleanup {
+    fn drop(&mut self) {
+        cleanup_pids(&self.0);
     }
 }
 

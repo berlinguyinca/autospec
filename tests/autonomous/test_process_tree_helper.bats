@@ -8,6 +8,7 @@ setup() {
     TMP="$(mktemp -d -t process-tree.XXXXXX)"
     PID_LEDGER="$TMP/pids"
     : > "$PID_LEDGER"
+    if [ "$(uname -s)" = Linux ]; then
     cat > "$TMP/family.sh" <<'EOF'
 #!/usr/bin/env bash
 sleep 60 & echo $! > "$CHILD_PID_FILE"
@@ -16,6 +17,7 @@ setsid bash -c 'echo $$ > "$NESTED_PID_FILE"; exec sleep 60' </dev/null >/dev/nu
 wait
 EOF
     chmod +x "$TMP/family.sh"
+    fi
 }
 
 teardown() {
@@ -31,6 +33,7 @@ teardown() {
 # Spawns leader + same-group child + same-group orphan + nested-setsid grandchild.
 # Sets LEADER_PID, CHILD_PID, ORPHAN_PID, NESTED_PID and records all in the ledger.
 spawn_family() {
+    [ "$(uname -s)" = Linux ] || skip "real process-group fixture requires Linux setsid semantics"
     export CHILD_PID_FILE="$TMP/child.pid" ORPHAN_PID_FILE="$TMP/orphan.pid" NESTED_PID_FILE="$TMP/nested.pid"
     setsid "$TMP/family.sh" </dev/null >/dev/null 2>&1 &
     LEADER_PID=$!

@@ -29,6 +29,9 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
+  if [ "${1:-}" = "project" ] && [ "${2:-}" = "sync" ]; then
+    exit 0
+  fi
   exit 41
 fi
 printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
@@ -67,6 +70,7 @@ JSON
     cat > "$TMP/driver.sh" <<DRIVER
 set -u
 SCRIPT_DIR="$REPO_ROOT/scripts"
+REPO_ROOT="$TMP"
 SANDBOX_BRANCH="sandbox/explore-demo"
 RESEARCH_SOURCES="spec-vs-code"
 iter=1
@@ -78,6 +82,7 @@ filed_issue_nums=""
 _ledger_append() { :; }
 _ledger_normalize_title() { printf '%s' "\$1"; }
 LEDGER_BIN=""
+$(awk '/^project_sync_issue\(\)/,/^}/' "$EXPLORE")
 $(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$EXPLORE")
 _explore_raw_file_round
 DRIVER

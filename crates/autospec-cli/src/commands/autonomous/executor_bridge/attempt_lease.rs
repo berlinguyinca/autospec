@@ -36,7 +36,9 @@ impl Drop for EvidenceAttemptLease {
     }
 }
 
-pub(super) fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLease, String> {
+pub(super) fn acquire_evidence_attempt_lease(
+    lane_root: &Path,
+) -> Result<EvidenceAttemptLease, String> {
     let path = lane_root.join("attempt.lock");
     reject_symlink_path(&path)?;
     let mut options = OpenOptions::new();

@@ -60,6 +60,8 @@ pub(super) fn draft_pr_adapter_fixture(
              grep -q '\"draft_process\":{' \"$BRIDGE_STATE\"\n\
              test -s \"$AUTOSPEC_DRAFT_RELEASE_RECEIPT\"\n\
            fi\n\
+           if [ -n \"${AUTOSPEC_TEST_DRAFT_RELEASE_HOLD_STARTED:-}\" ]; then touch \"$AUTOSPEC_TEST_DRAFT_RELEASE_HOLD_STARTED\"; fi\n\
+           while [ -n \"${AUTOSPEC_TEST_DRAFT_RELEASE_HOLD:-}\" ] && [ -e \"$AUTOSPEC_TEST_DRAFT_RELEASE_HOLD\" ]; do sleep 0.01; done\n\
            if [ -n \"${GH_CREATE_DELAY:-}\" ]; then\n\
              if ! mkdir \"$GH_INFLIGHT\" 2>/dev/null; then exit 65; fi\n\
              touch \"$GH_CREATE_STARTED\"\n\

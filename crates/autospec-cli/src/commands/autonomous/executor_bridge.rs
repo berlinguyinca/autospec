@@ -940,12 +940,11 @@ pub(crate) fn exact_invocation_exists(
         }
     }
     validate_private_state_file(&state_path).map_err(InvocationProbeError::State)?;
-    let state = PersistedInvocation::from_json(
-        &fs::read_to_string(&state_path).map_err(|error| {
+    let state =
+        PersistedInvocation::from_json(&fs::read_to_string(&state_path).map_err(|error| {
             InvocationProbeError::State(format!("read executor invocation: {error}"))
-        })?,
-    )
-    .map_err(InvocationProbeError::State)?;
+        })?)
+        .map_err(InvocationProbeError::State)?;
     if !invocation_matches_lease(&state, lease) {
         return Err(InvocationProbeError::IdentityMismatch);
     }
@@ -9561,12 +9560,6 @@ fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), 
             Err("existing implementation lint repair artifact differs".to_string())
         };
     }
-    #[cfg(not(target_os = "linux"))]
-    return Err(
-        "implementation repair artifact no-replace publication requires Linux renameat2"
-            .to_string(),
-    );
-    #[cfg(target_os = "linux")]
     {
         let temporary = path.with_file_name(format!(
             ".{}.{}.{}.tmp",
@@ -9577,7 +9570,9 @@ fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), 
             INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
         let mut options = OpenOptions::new();
-        options.create_new(true).write(true).mode(0o600);
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
         let mut file = options
             .open(&temporary)
             .map_err(|error| format!("create implementation repair artifact: {error}"))?;
@@ -9588,7 +9583,8 @@ fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), 
                 .map_err(|error| format!("sync implementation repair artifact: {error}"))?;
             let directory = File::open(parent)
                 .map_err(|error| format!("open implementation repair artifact parent: {error}"))?;
-            match renameat2(
+            #[cfg(target_os = "linux")]
+            let publication_result = match renameat2(
                 &directory,
                 temporary.file_name().expect("temporary file has a name"),
                 &directory,
@@ -9613,7 +9609,33 @@ fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), 
                 Err(error) => Err(format!(
                     "publish implementation repair artifact without replacement: {error}"
                 )),
-            }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let publication_result = match fs::hard_link(&temporary, path) {
+                Ok(()) => {
+                    fs::remove_file(&temporary).map_err(|error| {
+                        format!("remove implementation repair artifact temporary link: {error}")
+                    })?;
+                    directory.sync_all().map_err(|error| {
+                        format!("sync implementation repair artifact parent: {error}")
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_implementation_repair_artifact(path)?;
+                    if fs::read(path).map_err(|error| {
+                        format!("read existing implementation repair artifact: {error}")
+                    })? == body
+                    {
+                        Ok(())
+                    } else {
+                        Err("existing implementation lint repair artifact differs".to_string())
+                    }
+                }
+                Err(error) => Err(format!(
+                    "publish implementation repair artifact without replacement: {error}"
+                )),
+            };
+            publication_result
         })();
         let _ = fs::remove_file(&temporary);
         result?;
@@ -11528,7 +11550,7 @@ where
         return Err("executor remote refs changed during authoritative draft creation".into());
     }
     let number = candidates[0].number;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     if state.draft_process.is_some() {
         verify_portable_draft_cleanup(state_path, state)?;
         state.draft_process = None;
@@ -12904,7 +12926,9 @@ fn adopted_transfer_authorizes_prelaunch_head(
         &["show", "-s", "--format=%T", local_head],
     )?;
     if observed_tree != expected_tree {
-        return Err("executor adopted base merge tree does not match its durable intent".to_string());
+        return Err(
+            "executor adopted base merge tree does not match its durable intent".to_string(),
+        );
     }
     Ok(true)
 }
@@ -12970,7 +12994,9 @@ fn exact_adopted_base_drift_intent(
             continue;
         }
         if matched.replace(intent).is_some() {
-            return Err("multiple executor base-drift intents match the adopted transfer".to_string());
+            return Err(
+                "multiple executor base-drift intents match the adopted transfer".to_string(),
+            );
         }
     }
     let Some(intent) = matched else {
@@ -13087,11 +13113,8 @@ where
         )?;
         if !matches!(
             state.phase,
-            BridgePhase::Pending
-                | BridgePhase::Interrupted
-                | BridgePhase::ImplementationComplete
-        )
-            || state.identity.repository != repository
+            BridgePhase::Pending | BridgePhase::Interrupted | BridgePhase::ImplementationComplete
+        ) || state.identity.repository != repository
             || state.identity.repository_path != repository_path
             || state.identity.issue != issue
             || state.identity.branch != branch
@@ -16377,10 +16400,14 @@ fn validate_invocation(
     if program != invocation.program {
         return Err("executor program must already be canonical before spawn".to_string());
     }
-    let supervised_executable = fs::canonicalize(&invocation.supervised_executable)
-        .map_err(|error| format!("canonicalize executor supervised executable before spawn: {error}"))?;
+    let supervised_executable =
+        fs::canonicalize(&invocation.supervised_executable).map_err(|error| {
+            format!("canonicalize executor supervised executable before spawn: {error}")
+        })?;
     if supervised_executable != invocation.supervised_executable {
-        return Err("executor supervised executable must already be canonical before spawn".to_string());
+        return Err(
+            "executor supervised executable must already be canonical before spawn".to_string(),
+        );
     }
     let current_dir = fs::canonicalize(&invocation.current_dir).map_err(|error| {
         format!("canonicalize executor current directory before spawn: {error}")
@@ -20205,7 +20232,31 @@ fn observe_process_identity_once(
     pid: u32,
     _expected_argv_digest: &str,
 ) -> Result<Option<ProcessIdentity>, String> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let birth_before = match observe_process_birth(pid)? {
+            Some(birth) => birth,
+            None => return Ok(None),
+        };
+        let executable = macos_process_executable(pid)?;
+        let arguments = macos_process_arguments(pid)?;
+        let birth_after = match observe_process_birth(pid)? {
+            Some(birth) => birth,
+            None => return Ok(None),
+        };
+        if birth_before != birth_after {
+            return Ok(None);
+        }
+        Ok(Some(ProcessIdentity {
+            pid,
+            process_group: birth_before.process_group,
+            executable,
+            argv_digest: argv_digest(&arguments),
+            boot_id: birth_before.boot_id,
+            start_identity: birth_before.start_identity,
+        }))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (pid, _expected_argv_digest);
         Err("executor process identity observation requires Linux /proc".to_string())
@@ -20262,11 +20313,129 @@ fn observe_process_identity_once(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_process_executable(pid: u32) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;
+    let mut buffer = vec![0_u8; nix::libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: proc_pidpath receives a live writable buffer with its exact capacity.
+    let length =
+        unsafe { nix::libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return Err(format!(
+            "observe executor executable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    buffer.truncate(length as usize);
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buffer)))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_arguments(pid: u32) -> Result<Vec<String>, String> {
+    let pid = i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?;
+    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_PROCARGS2, pid];
+    let mut length = 0_usize;
+    // SAFETY: the first sysctl call writes only the required output size.
+    if unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length < std::mem::size_of::<i32>()
+    {
+        return Err(format!(
+            "size executor argv: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut buffer = vec![0_u8; length];
+    // SAFETY: the second sysctl call writes at most the advertised buffer length.
+    if unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(format!(
+            "observe executor argv: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    buffer.truncate(length);
+    let argc = i32::from_ne_bytes(buffer[..4].try_into().expect("argc width"));
+    if argc <= 0 {
+        return Err("executor argv is empty".to_string());
+    }
+    let mut offset = 4;
+    while offset < buffer.len() && buffer[offset] != 0 {
+        offset += 1;
+    }
+    while offset < buffer.len() && buffer[offset] == 0 {
+        offset += 1;
+    }
+    let mut arguments = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        let start = offset;
+        while offset < buffer.len() && buffer[offset] != 0 {
+            offset += 1;
+        }
+        if start == offset {
+            return Err("executor argv record is truncated".to_string());
+        }
+        arguments.push(
+            String::from_utf8(buffer[start..offset].to_vec())
+                .map_err(|error| format!("executor argv is not UTF-8: {error}"))?,
+        );
+        while offset < buffer.len() && buffer[offset] == 0 {
+            offset += 1;
+        }
+    }
+    Ok(arguments.into_iter().skip(1).collect())
+}
+
 fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        if i32::try_from(pid).is_err() {
+            return Ok(None);
+        }
+        let Some((boot_id, start_identity)) = platform_identity::process_birth_identity(pid)?
+        else {
+            return Ok(None);
+        };
+        let Ok(native_pid) = i32::try_from(pid) else {
+            return Ok(None);
+        };
+        let native_pid = nix::unistd::Pid::from_raw(native_pid);
+        let process_group = match nix::unistd::getpgid(Some(native_pid)) {
+            Ok(group) => u32::try_from(group.as_raw())
+                .map_err(|_| "executor process group is out of range".to_string())?,
+            Err(nix::errno::Errno::ESRCH) => return Ok(None),
+            Err(error) => return Err(format!("observe executor process group: {error}")),
+        };
+        Ok(Some(ProcessBirth {
+            pid,
+            process_group,
+            boot_id,
+            start_identity,
+        }))
+    }
+    #[cfg(not(unix))]
     {
         let _ = pid;
-        Err("executor process birth observation requires Linux /proc".to_string())
+        Err("executor process birth observation is unavailable on this platform".to_string())
     }
     #[cfg(target_os = "linux")]
     {
@@ -22354,10 +22523,13 @@ fn reject_symlink_path(path: &Path) -> Result<(), String> {
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 #[cfg(target_os = "macos")]
-                if current == Path::new("/tmp")
-                    && fs::canonicalize(&current)
-                        .is_ok_and(|target| target == Path::new("/private/tmp"))
-                {
+                if matches!(
+                    (current.as_path(), fs::canonicalize(&current).ok().as_deref()),
+                    (path, Some(target))
+                        if (path == Path::new("/tmp") && target == Path::new("/private/tmp"))
+                            || (path == Path::new("/var") && target == Path::new("/private/var"))
+                            || (path == Path::new("/etc") && target == Path::new("/private/etc"))
+                ) {
                     continue;
                 }
                 return Err(format!(

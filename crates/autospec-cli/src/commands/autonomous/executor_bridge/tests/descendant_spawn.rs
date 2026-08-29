@@ -18,10 +18,11 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 #[test]
-fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() { // linter:allow-SECURITY test fn name ends in _exec( — Rust test function, not a builtin call
+fn autonomous_executor_bridge_releases_fork_serialization_after_exact_exec() {
+    // linter:allow-SECURITY test fn name ends in _exec( — Rust test function, not a builtin call
     let _environment = test_environment();
     let fixture = GitFixture::new("fork-lock-release-after-exec");
-    let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+    let invocation = shell_invocation(&fixture.repo, "exec /bin/sleep 30");
     let validated = bridge::validate_invocation(
         &HarnessInvocation {
             program: invocation.program.canonicalize().expect("canonical shell"),
@@ -528,7 +529,10 @@ fn executor_supervision_descendant_capture_reserves_descriptor_headroom() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(observed >= 12, "descendant tree never materialized: {observed}");
+    assert!(
+        observed >= 12,
+        "descendant tree never materialized: {observed}"
+    );
 
     let mut set =
         bridge::OwnedProcessSet::from_forked_child(leader.id()).expect("capture tree leader");

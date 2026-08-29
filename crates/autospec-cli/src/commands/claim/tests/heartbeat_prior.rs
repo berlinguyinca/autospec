@@ -10,7 +10,7 @@ use autospec_core::claim::RunStateRecord;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn released_predecessor_retires_only_its_exact_heartbeat_without_signalling() {
     let _guard = lock_heartbeat_env();

@@ -463,7 +463,7 @@ fn autonomous_executor_bridge_merged_reconciliation_waits_for_exact_live_process
     let (_fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("merged-reconciliation-live-process");
     let args = vec!["30".to_string()];
-    let executable = fs::canonicalize("/usr/bin/sleep").expect("sleep executable");
+    let executable = fs::canonicalize("/bin/sleep").expect("sleep executable");
     let mut child = Command::new(&executable)
         .arg("30")
         .process_group(0)

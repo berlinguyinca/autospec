@@ -96,6 +96,11 @@ where
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let stderr_path = state_path.with_extension("draft.stderr");
     let stdout_path = state_path.with_extension("draft.stdout");
+    let mut child_environment = adapter.environment.clone();
+    child_environment.insert(
+        "AUTOSPEC_DRAFT_RELEASE_RECEIPT".into(),
+        draft_release_receipt_path(state_path).into_os_string(),
+    );
     let spawn = process_owner::OwnedChildTree::spawn_prepared(
         process_owner::PreparedLaunchSpec::inherited(
             executable.clone(),
@@ -103,7 +108,7 @@ where
                 .chain(args.iter().map(OsString::from))
                 .collect(),
             Some(state.identity.worktree.clone()),
-            adapter.environment.clone().into_iter().collect(),
+            child_environment.into_iter().collect(),
             Some(File::open(null).map_err(|error| format!("open draft null input: {error}"))?),
             Some(open_private_file(&stdout_path, true)?),
             Some(open_private_file(&stderr_path, true)?),

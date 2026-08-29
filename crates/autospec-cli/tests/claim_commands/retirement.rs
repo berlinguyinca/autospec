@@ -157,7 +157,10 @@ fn claim_release_retires_the_local_heartbeat_and_session_binding() {
     let issue_heartbeat = heartbeats.join("o7_testorg_r8_testrepo/42.json");
     let session_binding =
         heartbeats.join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json");
-    assert!(issue_heartbeat.exists(), "acquire publishes the issue heartbeat");
+    assert!(
+        issue_heartbeat.exists(),
+        "acquire publishes the issue heartbeat"
+    );
     assert!(
         session_binding.exists(),
         "acquire publishes the session binding"

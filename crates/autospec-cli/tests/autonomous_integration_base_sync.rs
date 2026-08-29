@@ -18,7 +18,10 @@ fn autonomous_integration_base_sync() {
         &["clone", remote.to_str().unwrap(), advance.to_str().unwrap()],
     );
     git_fixture(&advance, &["config", "user.name", "Autospec Test"]);
-    git_fixture(&advance, &["config", "user.email", "autospec@example.invalid"]);
+    git_fixture(
+        &advance,
+        &["config", "user.email", "autospec@example.invalid"],
+    );
     fs::write(advance.join("README.md"), "advanced integration base\n")
         .expect("write advanced base content");
     git_fixture(&advance, &["add", "README.md"]);
@@ -75,14 +78,20 @@ fn autonomous_integration_base_sync_conflict_precedes_selection() {
         &["clone", remote.to_str().unwrap(), diverge.to_str().unwrap()],
     );
     git_fixture(&diverge, &["config", "user.name", "Autospec Test"]);
-    git_fixture(&diverge, &["config", "user.email", "autospec@example.invalid"]);
+    git_fixture(
+        &diverge,
+        &["config", "user.email", "autospec@example.invalid"],
+    );
     fs::write(diverge.join("README.md"), "remote divergence\n")
         .expect("write remote divergence content");
     git_fixture(&diverge, &["add", "README.md"]);
     git_fixture(&diverge, &["commit", "-m", "remote divergence"]);
     git_fixture(&diverge, &["push", "origin", "HEAD:main"]);
     let remote_oid = git_fixture(&remote, &["rev-parse", "refs/heads/main"]);
-    assert_ne!(local_oid, remote_oid, "the fixture must diverge the integration bases");
+    assert_ne!(
+        local_oid, remote_oid,
+        "the fixture must diverge the integration bases"
+    );
 
     let output = fixture
         .command()
@@ -181,7 +190,7 @@ fi
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
-    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
   elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   else

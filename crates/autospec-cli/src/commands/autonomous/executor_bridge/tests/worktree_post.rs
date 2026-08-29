@@ -371,6 +371,7 @@ fn autonomous_executor_bridge_atomic_write_preserves_destination_links() {
 
 #[test]
 fn autonomous_executor_bridge_recovery_rejects_replaced_foreign_repository() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("replaced-recovery");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
