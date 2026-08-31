@@ -7,9 +7,10 @@ mod text;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use implementation::{
-    directive_for, lint_implementation, lint_issue_implementation_contract,
-    ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
-    ImplementationLintResult, ImplementationLintRule, ImplementationLintSeverity, RepositoryIndex,
+    declared_implementation_scope, directive_for, lint_implementation,
+    lint_issue_implementation_contract, ImplementationLintContext, ImplementationLintFinding,
+    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
+    ImplementationLintSeverity, RepositoryIndex,
 };
 pub use pr_size::{
     evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,
@@ -40,6 +41,7 @@ pub enum IssueQualityRule {
     MissingSectionImplOutline,
     MissingSectionTests,
     DepsMalformed,
+    FilesTouchedMalformed,
     TooManyFiles,
     BodyTooLong,
     OutlineTooLong,
@@ -63,6 +65,7 @@ impl IssueQualityRule {
             Self::MissingSectionImplOutline => "MISSING_SECTION_IMPL_OUTLINE",
             Self::MissingSectionTests => "MISSING_SECTION_TESTS",
             Self::DepsMalformed => "DEPS_MALFORMED",
+            Self::FilesTouchedMalformed => "FILES_TOUCHED_MALFORMED",
             Self::TooManyFiles => "TOO_MANY_FILES",
             Self::BodyTooLong => "BODY_TOO_LONG",
             Self::OutlineTooLong => "OUTLINE_TOO_LONG",
@@ -378,11 +381,19 @@ fn check_files_touched(document: &IssueDocument<'_>, findings: &mut Vec<IssueLin
 
     let mut units = BTreeSet::new();
     for line in files.into_iter().filter(|line| !line.trim().is_empty()) {
-        let Some(path) = normalize_file_token(line) else {
-            continue;
-        };
-        if let Some(unit) = normalize_logical_unit(&path) {
-            units.insert(unit);
+        match parse_declared_path(line) {
+            Ok(path) => {
+                if let Some(unit) = normalize_logical_unit(path.as_str()) {
+                    units.insert(unit);
+                }
+            }
+            Err(()) => findings.push(IssueLintFinding::new(
+                IssueQualityRule::FilesTouchedMalformed,
+                format!(
+                    "Files touched entry must be one safe repo-relative file or trailing-slash directory: {}",
+                    line.trim()
+                ),
+            )),
         }
     }
 
@@ -643,14 +654,68 @@ fn is_dependency_line(line: &str) -> bool {
     !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn normalize_file_token(line: &str) -> Option<String> {
-    let line = line.trim();
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DeclaredPath {
+    path: String,
+    directory: bool,
+}
+
+impl DeclaredPath {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn authorizes(&self, changed_path: &str) -> bool {
+        if self.directory {
+            changed_path
+                .strip_prefix(&self.path)
+                .is_some_and(|suffix| !suffix.is_empty())
+        } else {
+            changed_path == self.path
+        }
+    }
+}
+
+pub(crate) fn parse_declared_path(line: &str) -> Result<DeclaredPath, ()> {
+    let line = line.trim_start();
     let line = line
         .strip_prefix('-')
         .filter(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
         .map_or(line, str::trim_start);
-    let path = line.trim().replace('`', "");
-    (!path.is_empty() && path.bytes().all(is_path_character)).then_some(path)
+    let line = line.trim_end();
+    let path = match (line.strip_prefix('`'), line.strip_suffix('`')) {
+        (Some(without_open), Some(_)) => without_open.strip_suffix('`').ok_or(())?,
+        (None, None) => line,
+        _ => return Err(()),
+    };
+    parse_repo_relative_path(path)
+}
+
+pub(crate) fn parse_repo_relative_path(path: &str) -> Result<DeclaredPath, ()> {
+    if path.is_empty()
+        || path == "."
+        || path == "/"
+        || path.starts_with('/')
+        || path.ends_with("//")
+        || !path.bytes().all(is_path_character)
+    {
+        return Err(());
+    }
+
+    let directory = path.ends_with('/');
+    let segments = path.trim_end_matches('/').split('/').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || matches!(*segment, "." | ".."))
+    {
+        return Err(());
+    }
+
+    Ok(DeclaredPath {
+        path: path.to_string(),
+        directory,
+    })
 }
 
 pub(crate) fn normalize_logical_unit(path: &str) -> Option<String> {

@@ -44,7 +44,7 @@ Skip Part 1 entirely if `AUTOSPEC_NO_GUARDIAN=1` (log
 
 | RULE_ID | Detector | Tier | Threshold / regex |
 |---|---|---|---|
-| `OUT_OF_SCOPE` | det | path-list compare | files touched ∉ issue body `## Implementation outline` paths |
+| `OUT_OF_SCOPE` | det | exact/prefix path compare | files touched ∉ exact files or trailing-slash directories declared in `## Implementation outline` ∪ `## Files touched` |
 | `MISSING_TEST` | det | path-prefix scan | required test type from issue body `## Tests required` not present in diff under `tests/{unit,integration,smoke,e2e}/` |
 | `COMPLEXITY` | det | line/regex scan | function >50 LOC, file >500 LOC, nesting >4 |
 | `SECURITY` | det | regex match | `eval\(`, `exec\(`, `--no-verify`, `git reset --hard`, `rm -rf /`, AWS-key shape `AKIA[0-9A-Z]{16}`, GitHub-token shape `gh[pousr]_[A-Za-z0-9]{36,}`, private-key markers `-----BEGIN [A-Z ]*PRIVATE KEY-----`, or `localStorage` / `sessionStorage` / `document.cookie` use involving token, API key, credential, auth, authorization, bearer, or group state |
@@ -65,7 +65,7 @@ so the implementer knows the fix on retry:
 
 | RULE_ID | Directive |
 |---|---|
-| `OUT_OF_SCOPE` | "Restrict diff to files listed in issue's ## Implementation outline. Revert other changes or amend the issue body." |
+| `OUT_OF_SCOPE` | "Restrict the diff to exact files or descendants of trailing-slash directories declared in `## Implementation outline` or `## Files touched`. Revert undeclared files; incomplete scope must be corrected by the issue author." |
 | `MISSING_TEST` | "Add a test under tests/<TIER>/ for the listed required test type before re-pushing." |
 | `COMPLEXITY` | "Split functions >50 LOC, files >500 LOC, nesting >4. No copy-paste branches." |
 | `SECURITY` | "Remove the flagged pattern. NEVER hardcode secrets, NEVER use --no-verify or git reset --hard, validate input at boundaries, and do not persist token/API-key/auth/group authorization state in browser storage without an explicit scoped security decision." |

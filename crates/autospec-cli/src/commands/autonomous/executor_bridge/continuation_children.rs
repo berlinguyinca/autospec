@@ -10,12 +10,12 @@
 //
 // Everything here is written to survive a restart mid-publication. A child carries a marker
 // naming the repository, issue, base, head, receipt digest and ordinal, so republishing finds
-// the existing issue instead of creating a second one; every body is validated against the
-// issue-quality contract before any of them is filed, so a rejected body cannot leave a
-// half-published chain; and each issue is re-read after creation to prove GitHub stored what
-// was sent. The authoritative child order lives in a comment on the parent written by a
-// trusted actor, and recover_bound_continuation refuses to proceed when the binding persisted
-// in the invocation disagrees with it.
+// the existing issue instead of creating a second one; every body carries the original
+// validated implementation scope and is checked against the issue-quality contract before any
+// of them is filed, so a rejected body cannot leave a half-published chain; and each issue is
+// re-read after creation to prove GitHub stored what was sent. The authoritative child order
+// lives in a comment on the parent written by a trusted actor, and recover_bound_continuation
+// refuses to proceed when the binding persisted in the invocation disagrees with it.
 //
 // require_continuation_checkpoint is the single entry point for both halves and lives here,
 // with the half that decides whether to publish. It returns an invariant failure for an
@@ -105,6 +105,7 @@ fn continuation_child_document(
     ordinal: usize,
     criterion: &str,
     dependency: Option<u64>,
+    scope: &[String],
 ) -> Result<(String, String, String), String> {
     let criterion = criterion.trim();
     if criterion.len() > 120 || criterion.lines().count() != 1 {
@@ -130,9 +131,17 @@ fn continuation_child_document(
         ));
     }
     let issue = receipt.issue;
-    body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
+    let files_touched = scope
+        .iter()
+        .map(|path| format!("- `{path}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Files touched\n\n{files_touched}\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
     if !autospec_core::lint::lint_issue_body(&body).is_empty() {
         return Err("continuation issue body failed the issue-quality contract".to_string());
+    }
+    if autospec_core::lint::declared_implementation_scope(&body).is_empty() {
+        return Err("continuation issue body has no usable implementation scope".to_string());
     }
     let mut title = format!("Continuation {ordinal}: {criterion}");
     while title.len() > 120 {
@@ -146,9 +155,10 @@ fn publish_continuation_child(
     ordinal: usize,
     criterion: &str,
     dependency: Option<u64>,
+    scope: &[String],
 ) -> Result<u64, String> {
     let (marker, title, body) =
-        continuation_child_document(receipt, umbrella, ordinal, criterion, dependency)?;
+        continuation_child_document(receipt, umbrella, ordinal, criterion, dependency, scope)?;
     let mut matches = continuation_gh(
         &[
             "issue".into(),
@@ -218,6 +228,7 @@ fn publish_continuation_child(
 pub(super) fn publish_continuation_children(
     state_path: &Path,
     receipt: &ContinuationReceipt,
+    scope: &[String],
 ) -> Result<(u64, u64), String> {
     let parent = continuation_parent(&receipt.repository, receipt.issue)?;
     let (umbrella, mut children, start, mut previous) = match parent {
@@ -243,11 +254,24 @@ pub(super) fn publish_continuation_children(
     }
     for (offset, criterion) in criteria.iter().enumerate() {
         let dependency = (parent.is_some() || offset > 0).then_some(receipt.issue);
-        continuation_child_document(receipt, umbrella, start + offset, criterion, dependency)?;
+        continuation_child_document(
+            receipt,
+            umbrella,
+            start + offset,
+            criterion,
+            dependency,
+            scope,
+        )?;
     }
     for (offset, criterion) in criteria.iter().enumerate() {
-        let child =
-            publish_continuation_child(receipt, umbrella, start + offset, criterion, previous)?;
+        let child = publish_continuation_child(
+            receipt,
+            umbrella,
+            start + offset,
+            criterion,
+            previous,
+            scope,
+        )?;
         children.push(child);
         previous = Some(child);
     }
@@ -343,9 +367,15 @@ pub(super) fn require_continuation_checkpoint(
     };
     emit_continuation_events(state_path, event_log, state, &checkpoint)?;
     if publish_children {
+        let scope = autospec_core::lint::declared_implementation_scope(issue_body);
+        if scope.is_empty() {
+            return Err(BridgeRunFailure::invariant(
+                "executor continuation cannot publish auto-implement children without usable scope",
+            ));
+        }
         let binding = match recover_bound_continuation(state)? {
             Some(binding) => binding,
-            None => publish_continuation_children(state_path, &checkpoint.receipt)?,
+            None => publish_continuation_children(state_path, &checkpoint.receipt, &scope)?,
         };
         let mut bound = state.clone();
         bind_continuation_part(state_path, &mut bound, binding)?;

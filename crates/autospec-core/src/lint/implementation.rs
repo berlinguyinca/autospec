@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::diff::{DiffFile, UnifiedDiff};
 use super::pr_size::{evaluate_patch_size, PatchSizeDimension, PatchSizeLimits};
+use super::{parse_declared_path, parse_repo_relative_path, DeclaredPath};
 
 const RULE_EMIT_CAP: usize = 10;
 const DEFAULT_AGGREGATE_HARD_CAP: usize = 200;
@@ -286,7 +287,7 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
             "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff."
         }
         ImplementationLintRule::OutOfScope => {
-            "Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files."
+            "Restrict the diff to exact files or descendants of trailing-slash directories declared in ## Implementation outline or ## Files touched; revert undeclared files, and require the issue author to correct incomplete scope."
         }
         ImplementationLintRule::MissingTest => {
             "Add a test under tests/<tier>/ or a project-native scripts/test-* regression artifact before re-pushing."
@@ -650,9 +651,14 @@ fn detect_out_of_scope(
     let Some(issue_body) = issue_body else {
         return;
     };
-    let outline = section(issue_body, &["Implementation outline"])
-        .or_else(|| section(issue_body, &["Implementation scope"]));
-    let allowed = outline.map(path_tokens).unwrap_or_default();
+    let allowed = implementation_scope(issue_body);
+    // `## Files touched` is a first-class issue-contract heading, and the
+    // decomposer frequently writes the outline as prose bullets naming
+    // behaviours rather than paths. Reading only the outline therefore flagged
+    // issues on the very files they declare, and the documented workaround was
+    // for the implementer to amend the issue body — i.e. to rewrite the scope
+    // it is being measured against. Take the union instead: scope stays
+    // fail-closed when *neither* section names a path.
     if allowed.is_empty() && !fail_closed_on_missing_outline {
         return;
     }
@@ -660,16 +666,12 @@ fn detect_out_of_scope(
         if collector.stopped() {
             return;
         }
-        let base = file.path.rsplit('/').next().unwrap_or(&file.path);
-        if !allowed
-            .iter()
-            .any(|allowed| file.path.contains(allowed) || allowed.contains(base))
-        {
+        if !allowed.iter().any(|allowed| allowed.authorizes(&file.path)) {
             collector.emit(
                 ImplementationLintRule::OutOfScope,
                 &file.path,
                 None,
-                "file not listed in ## Implementation outline",
+                "file not declared exactly, or under a trailing-slash directory, in ## Implementation outline or ## Files touched",
             );
         }
     }
@@ -1439,14 +1441,58 @@ fn section<'a>(body: &'a str, names: &[&str]) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-fn path_tokens(source: &str) -> Vec<String> {
+fn declared_paths(source: &str) -> Vec<DeclaredPath> {
     source
-        .split_whitespace()
-        .filter_map(|token| {
-            let token =
-                token.trim_matches(|c: char| matches!(c, '`' | '(' | ')' | ',' | ';' | ':'));
-            (token.contains('/') || token.contains('.')).then_some(token.to_string())
-        })
+        .lines()
+        .filter_map(|line| parse_declared_path(line).ok())
+        .collect()
+}
+
+fn outline_declared_paths(source: &str) -> Vec<DeclaredPath> {
+    let mut declared = Vec::new();
+    for line in source.lines() {
+        if let Ok(path) = parse_declared_path(line) {
+            declared.push(path);
+            continue;
+        }
+        let mut remaining = line;
+        while let Some(open) = remaining.find('`') {
+            let after_open = &remaining[open + 1..];
+            let Some(close) = after_open.find('`') else {
+                break;
+            };
+            if let Ok(path) = parse_repo_relative_path(&after_open[..close]) {
+                declared.push(path);
+            }
+            remaining = &after_open[close + 1..];
+        }
+    }
+    declared
+}
+
+fn implementation_scope(body: &str) -> BTreeSet<DeclaredPath> {
+    let mut scope = section(body, &["Implementation outline"])
+        .or_else(|| section(body, &["Implementation scope"]))
+        .map(outline_declared_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    scope.extend(
+        section(body, &["Files touched"])
+            .map(declared_paths)
+            .unwrap_or_default(),
+    );
+    scope
+}
+
+/// Return the validated implementation-scope union in deterministic order.
+///
+/// Outline prose may declare paths only inside backticks. `Files touched`
+/// remains strict: every non-blank line must be one standalone declaration.
+pub fn declared_implementation_scope(body: &str) -> Vec<String> {
+    implementation_scope(body)
+        .into_iter()
+        .map(|path| path.path)
         .collect()
 }
 
@@ -2195,6 +2241,215 @@ mod tests {
             .findings
             .iter()
             .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_accepts_safe_path_embedded_in_outline_prose() {
+        let body =
+            "## Implementation outline\n\n- Update `src/changed.rs` while preserving behavior.\n";
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/changed.rs", 1)],
+            },
+            body,
+        );
+
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_basename_collision() {
+        let body = "## Files touched\n\n- `src/allowed.rs`\n";
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("vendor/src/allowed.rs", 1)],
+            },
+            body,
+        );
+
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == ImplementationLintRule::OutOfScope
+                && finding.path == "vendor/src/allowed.rs"
+        }));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_malformed_scope_entries() {
+        for entry in [
+            "To be determined.",
+            "/",
+            ".",
+            "../src/changed.rs",
+            "/src/changed.rs",
+            "src/changed.rs//",
+            "src/changed.rs vendor/other.rs",
+        ] {
+            let body = format!("## Files touched\n\n- {entry}\n");
+            let result = lint_issue_implementation_contract(
+                &UnifiedDiff {
+                    files: vec![file("src/changed.rs", 1)],
+                },
+                &body,
+            );
+
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule == ImplementationLintRule::OutOfScope),
+                "malformed declaration {entry:?} must authorize nothing: {:?}",
+                result.findings
+            );
+        }
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_whitespace_only_bullet() {
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("-", 1)],
+            },
+            "## Files touched\n\n- \n",
+        );
+
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == ImplementationLintRule::OutOfScope && finding.path == "-"
+        }));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_applies_explicit_directory_scope() {
+        let body = "## Files touched\n\n- `src/generated/`\n";
+        let accepted = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/generated/output.rs", 1)],
+            },
+            body,
+        );
+        let rejected = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/generated-old/output.rs", 1)],
+            },
+            body,
+        );
+
+        assert!(accepted
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+        assert!(rejected
+            .findings
+            .iter()
+            .any(|finding| finding.rule == ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_implementation_activates_scope_from_files_touched() {
+        let body = "## Implementation outline\n\n- Update the classifier.\n\n\
+                    ## Files touched\n\n- `src/declared.rs`\n";
+        let repository = EmptyRepository;
+
+        let accepted = lint_implementation(
+            &UnifiedDiff {
+                files: vec![file("src/declared.rs", 1)],
+            },
+            ImplementationLintContext {
+                issue_body: Some(body),
+                repository: &repository,
+                options: ImplementationLintOptions::default(),
+            },
+        );
+        let rejected = lint_implementation(
+            &UnifiedDiff {
+                files: vec![file("src/undeclared.rs", 1)],
+            },
+            ImplementationLintContext {
+                issue_body: Some(body),
+                repository: &repository,
+                options: ImplementationLintOptions::default(),
+            },
+        );
+
+        assert!(accepted
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+        assert!(rejected
+            .findings
+            .iter()
+            .any(|finding| finding.rule == ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_accepts_files_touched_path_with_prose_outline() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        // The decomposer routinely writes prose bullets in the outline while
+        // still declaring the concrete paths under the mandatory
+        // `## Files touched` heading; both sections define the scope.
+        let body = "## Implementation outline\n\n\
+                    - Update the shared classifier before delivery\n\n\
+                    ## Files touched\n\n\
+                    - `src/changed.rs`\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|finding| finding.rule != ImplementationLintRule::OutOfScope),
+            "a path declared under ## Files touched must be in scope even when \
+             the outline names no path: {:?}",
+            result.findings
+        );
+        assert_eq!(result.blocking_count, 0);
+        assert_eq!(result.exit_code(), 0);
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_changed_path_when_neither_section_names_a_path() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        // Neither bullet is a valid standalone repo-relative declaration, so
+        // the strict parser yields nothing and the fail-closed branch — not the
+        // per-file comparison loop — is the one under test.
+        let body = "## Implementation outline\n\n\
+                    - Update the shared classifier before delivery\n\n\
+                    ## Files touched\n\n\
+                    - To be determined\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+        let out_of_scope = result
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == ImplementationLintRule::OutOfScope)
+            .collect::<Vec<_>>();
+
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(out_of_scope[0].path, "src/changed.rs");
+        assert_eq!(out_of_scope[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(result.blocking_count, 1);
+        assert_eq!(result.exit_code(), 1);
     }
 
     #[test]
