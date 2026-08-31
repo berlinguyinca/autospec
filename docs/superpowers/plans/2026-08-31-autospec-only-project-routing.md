@@ -14,7 +14,7 @@
 
 - No new dependencies.
 - Autospec internal implementer/reviewer workers remain supported.
-- Direct serverless implementation is reachable only after a definitive typed Autospec-unavailable result.
+- Autospec unavailability blocks every mutating implementation action; no direct serverless implementation fallback exists.
 - Exactly one verified primary Project binding precedes issue admission.
 - Multi-harness skill bodies remain lock-step identical apart from frontmatter.
 - Tests are written and observed failing before production changes.
@@ -63,7 +63,7 @@
 - Modify: `crates/autospec-cli/src/commands/managed_project/store.rs`
 - Modify: `crates/autospec-cli/src/commands/managed_project/github.rs`
 - Modify: `crates/autospec-cli/src/commands/managed_project/github/parse.rs`
-- Modify: `crates/autospec-cli/src/commands/managed_project/github/transport.rs`
+- Modify: `crates/autospec-cli/src/commands/autonomous/accountability/github/transport.rs`
 - Test: `crates/autospec-cli/tests/managed_project.rs`
 
 **Interfaces:**
@@ -72,9 +72,9 @@
 
 - [ ] **Step 1: Add failing tests for existing spec lineage, new spec-sized work, bounded onboarded work, bounded untracked work, and ambiguous candidates.**
 - [ ] **Step 2: Run each test and confirm failure at the missing policy/binding API.**
-- [ ] **Step 3: Implement the total precedence table, `portfolio:`/`product:` namespaces, `repo:<owner>__<repo>` fallback key, and external-mode-as-secondary rule from typed facts.**
+- [ ] **Step 3: Implement the total precedence table, Windows-safe `portfolio.`/`product.` store namespaces, `repo.<owner>__<repo>` fallback ProductKey, and external-mode-as-secondary rule from typed facts.**
 - [ ] **Step 4: Reuse `ManagedProjectStore`, extend the existing marker parser, add built-in/custom field discovery, and reuse GraphQL transport, journal, and lock primitives.**
-- [ ] **Step 5: Prove ambiguity and permission uncertainty block before issue creation; run focused Rust tests and commit.**
+- [ ] **Step 5: Prove ambiguity and permission uncertainty block before issue creation, and test safe-key round trips, namespace collisions, migration, and Windows paths; run focused Rust tests and commit.**
 
 ### Task 3: Mandatory portfolio transaction for spec-sized work
 
