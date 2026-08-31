@@ -258,6 +258,16 @@ MD
     done
 }
 
+@test "files-touched: whitespace-only bullet is rejected" {
+    write_good_body "$TMP/b.md"
+    sed 's#^- scripts/lint-issue.sh$#- #' "$TMP/b.md" > "$TMP/b2.md"
+
+    run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
+
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -Fq "FILES_TOUCHED_MALFORMED: Files touched entry must be one safe repo-relative file or trailing-slash directory: -"
+}
+
 @test "files-touched: explicit repo-relative directory is accepted" {
     write_good_body "$TMP/b.md"
     sed 's#^- scripts/lint-issue.sh$#- scripts/#' "$TMP/b.md" > "$TMP/b2.md"

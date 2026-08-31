@@ -2307,6 +2307,20 @@ mod tests {
     }
 
     #[test]
+    fn lint_issue_implementation_contract_rejects_whitespace_only_bullet() {
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("-", 1)],
+            },
+            "## Files touched\n\n- \n",
+        );
+
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == ImplementationLintRule::OutOfScope && finding.path == "-"
+        }));
+    }
+
+    #[test]
     fn lint_issue_implementation_contract_applies_explicit_directory_scope() {
         let body = "## Files touched\n\n- `src/generated/`\n";
         let accepted = lint_issue_implementation_contract(

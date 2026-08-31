@@ -677,11 +677,12 @@ impl DeclaredPath {
 }
 
 pub(crate) fn parse_declared_path(line: &str) -> Result<DeclaredPath, ()> {
-    let line = line.trim();
+    let line = line.trim_start();
     let line = line
         .strip_prefix('-')
         .filter(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
         .map_or(line, str::trim_start);
+    let line = line.trim_end();
     let path = match (line.strip_prefix('`'), line.strip_suffix('`')) {
         (Some(without_open), Some(_)) => without_open.strip_suffix('`').ok_or(())?,
         (None, None) => line,

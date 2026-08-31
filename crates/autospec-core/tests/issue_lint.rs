@@ -482,6 +482,28 @@ fn issue_lint_rejects_malformed_files_touched_entries() {
 }
 
 #[test]
+fn issue_lint_rejects_whitespace_only_files_touched_bullet() {
+    let body = replace_once(
+        valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        ),
+        "- crates/autospec-core/src/lint/mod.rs",
+        "- ",
+    );
+
+    assert_eq!(
+        findings(&body),
+        vec![(
+            "FILES_TOUCHED_MALFORMED".to_string(),
+            "Files touched entry must be one safe repo-relative file or trailing-slash directory: -"
+                .to_string(),
+        )]
+    );
+}
+
+#[test]
 fn issue_lint_accepts_an_explicit_repo_relative_directory() {
     let body = replace_once(
         valid_issue_body(
