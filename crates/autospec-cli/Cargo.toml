@@ -15,4 +15,4 @@ serde_json = "=1.0.150" # why: compare durable heartbeat identities before accep
 yaml-edit = "=0.2.3" # why: reject malformed explicit safety-policy YAML instead of defaulting open
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "user"] } # why: safe openat2, euid, PID, and descriptor-relative state operations
+nix = { version = "0.31.3", default-features = false, features = ["dir", "fs", "process", "signal", "user"] } # why: safe descriptor enumeration/openat, euid, PID, and process operations

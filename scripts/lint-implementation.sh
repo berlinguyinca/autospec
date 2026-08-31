@@ -46,7 +46,8 @@ Flags:
 
 RULE_IDs enforced (deterministic detectors):
 
-  OUT_OF_SCOPE      Files touched are not listed in issue's ## Implementation outline.
+  OUT_OF_SCOPE      Files touched are not exact files or descendants of trailing-slash
+                    directories declared in ## Implementation outline or ## Files touched.
   PR_SIZE           Patch exceeds 400 changed lines, 8 files, 3 logical units,
                     or contains binary diff evidence.
   MISSING_TEST      Required test type from ## Tests required absent in diff.
@@ -1587,7 +1588,7 @@ rule_directive() {
     local rule_id="$1"
     case "$rule_id" in
         PR_SIZE)        printf 'Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff.' ;;
-        OUT_OF_SCOPE)    printf 'Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files.' ;;
+        OUT_OF_SCOPE)    printf 'Restrict the diff to exact files or descendants of trailing-slash directories declared in ## Implementation outline or ## Files touched; revert undeclared files, and require the issue author to correct incomplete scope.' ;;
         MISSING_TEST)    printf 'Add a test under tests/<tier>/ for the missing required test type before re-pushing.' ;;
         COMPLEXITY)      printf 'Split functions >50 LOC, files >500 LOC, or nesting >4 — no copy-paste branches.' ;;
         SECURITY)        printf 'Remove the flagged pattern: never hardcode secrets, never bypass git hooks or use destructive resets, validate all inputs.' ;;

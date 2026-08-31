@@ -133,6 +133,43 @@ pub(super) struct PrivateDirectory {
     pub(super) file: fs::File,
 }
 
+#[cfg(unix)]
+pub(super) fn private_directory_entry_names(
+    directory: &PrivateDirectory,
+) -> Result<Vec<String>, CommandFailure> {
+    use std::os::unix::ffi::OsStrExt;
+    let owned: std::os::fd::OwnedFd = directory
+        .file
+        .try_clone()
+        .map_err(|error| CommandFailure::diagnostic(format!("clone heartbeat directory: {error}")))?
+        .into();
+    let mut entries = nix::dir::Dir::from_fd(owned).map_err(|error| {
+        CommandFailure::diagnostic(format!("enumerate heartbeat directory: {error}"))
+    })?;
+    entries
+        .iter()
+        .map(|entry| {
+            let entry = entry.map_err(|error| {
+                CommandFailure::diagnostic(format!("enumerate heartbeat directory: {error}"))
+            })?;
+            let bytes = entry.file_name().to_bytes();
+            let name = std::ffi::OsStr::from_bytes(bytes).to_str().ok_or_else(|| {
+                CommandFailure::diagnostic("heartbeat directory entry is not UTF-8")
+            })?;
+            Ok(name.to_string())
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+pub(super) fn private_directory_entry_names(
+    directory: &PrivateDirectory,
+) -> Result<Vec<String>, CommandFailure> {
+    windows_directory_entry_names(&directory.file).map_err(|error| {
+        CommandFailure::diagnostic(format!("enumerate heartbeat directory: {error}"))
+    })
+}
+
 pub(super) fn open_existing_private_directory(
     path: &Path,
 ) -> Result<Option<PrivateDirectory>, CommandFailure> {

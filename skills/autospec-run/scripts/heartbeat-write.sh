@@ -21,6 +21,7 @@
 #   AUTOSPEC_REPO            repo override (owner/repo format)
 
 set -eu
+umask 077
 
 # Honor both env-var names so writers and the watchdog never point at different
 # dirs (a mismatch silently hid every heartbeat from the watchdog).

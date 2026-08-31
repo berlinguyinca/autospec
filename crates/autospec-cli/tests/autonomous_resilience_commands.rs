@@ -1147,14 +1147,8 @@ exit 1
         .stderr(Stdio::null())
         .spawn()
         .expect("start first foreground command");
-    for _ in 0..80 {
-        if entered.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
     assert!(
-        entered.exists(),
+        wait_for_path(&entered, Duration::from_secs(10)),
         "first foreground command must hold the lease"
     );
 

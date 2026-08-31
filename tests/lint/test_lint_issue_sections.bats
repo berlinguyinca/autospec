@@ -238,6 +238,45 @@ MD
     ! echo "$output" | grep -q "TOO_MANY_FILES"
 }
 
+@test "files-touched: malformed declarations are rejected" {
+    for entry in \
+        'To be determined.' \
+        '/' \
+        '.' \
+        '../scripts/a.sh' \
+        '/scripts/a.sh' \
+        'scripts/a.sh//' \
+        'scripts/a.sh scripts/b.sh'
+    do
+        write_good_body "$TMP/b.md"
+        sed "s#^- scripts/lint-issue.sh\$#- ${entry}#" "$TMP/b.md" > "$TMP/b2.md"
+
+        run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
+
+        [ "$status" -eq 1 ]
+        echo "$output" | grep -Fq "FILES_TOUCHED_MALFORMED: Files touched entry must be one safe repo-relative file or trailing-slash directory: - ${entry}"
+    done
+}
+
+@test "files-touched: whitespace-only bullet is rejected" {
+    write_good_body "$TMP/b.md"
+    sed 's#^- scripts/lint-issue.sh$#- #' "$TMP/b.md" > "$TMP/b2.md"
+
+    run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
+
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -Fq "FILES_TOUCHED_MALFORMED: Files touched entry must be one safe repo-relative file or trailing-slash directory: -"
+}
+
+@test "files-touched: explicit repo-relative directory is accepted" {
+    write_good_body "$TMP/b.md"
+    sed 's#^- scripts/lint-issue.sh$#- scripts/#' "$TMP/b.md" > "$TMP/b2.md"
+
+    run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
+
+    [ "$status" -eq 0 ]
+}
+
 # ── TOO_MANY_FILES: trio atomic-unit exemption (trio-derivation Phase 2 D) ─────
 
 @test "files-touched: a trio's 3 members + derived goldens are ONE unit (no TOO_MANY_FILES)" {

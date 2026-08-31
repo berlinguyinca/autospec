@@ -19,6 +19,7 @@ use directory::*;
 use file::*;
 pub(super) use publication::publish;
 pub(super) use retirement::retire_released;
+pub(super) use retirement::retire_session_bindings_at;
 #[cfg(any(test, windows))]
 use windows::*;
 

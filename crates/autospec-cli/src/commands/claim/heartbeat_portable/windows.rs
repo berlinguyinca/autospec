@@ -214,7 +214,118 @@ unsafe extern "system" {
         length: u32,
         file_information_class: u32,
     ) -> i32;
+    fn NtQueryDirectoryFile(
+        file_handle: std::os::windows::io::RawHandle,
+        event: std::os::windows::io::RawHandle,
+        apc_routine: *mut std::ffi::c_void,
+        apc_context: *mut std::ffi::c_void,
+        io_status_block: *mut WindowsIoStatusBlock,
+        file_information: *mut std::ffi::c_void,
+        length: u32,
+        file_information_class: u32,
+        return_single_entry: u8,
+        file_name: *mut WindowsUnicodeString,
+        restart_scan: u8,
+    ) -> i32;
     fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileNamesInformation {
+    next_entry_offset: u32,
+    file_index: u32,
+    file_name_length: u32,
+    file_name: [u16; 1],
+}
+
+#[cfg(windows)]
+pub(super) fn windows_directory_entry_names(file: &fs::File) -> std::io::Result<Vec<String>> {
+    use std::os::windows::io::AsRawHandle;
+    const FILE_NAMES_INFORMATION: u32 = 12;
+    const STATUS_NO_MORE_FILES: i32 = 0x8000_0006_u32 as i32;
+    let mut names = Vec::new();
+    let mut restart = 1_u8;
+    loop {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut status_block = WindowsIoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        // SAFETY: the handle and output buffers remain live for the synchronous query.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut status_block,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                FILE_NAMES_INFORMATION,
+                0,
+                std::ptr::null_mut(),
+                restart,
+            )
+        };
+        restart = 0;
+        if status == STATUS_NO_MORE_FILES {
+            break;
+        }
+        if status < 0 {
+            // SAFETY: conversion is a pure mapping from the returned NTSTATUS.
+            return Err(std::io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(status) } as i32,
+            ));
+        }
+        let used = status_block.information;
+        if used > buffer.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "directory query returned an oversized buffer length",
+            ));
+        }
+        let mut offset = 0_usize;
+        loop {
+            if used.saturating_sub(offset) < std::mem::size_of::<WindowsFileNamesInformation>() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "directory query returned a truncated entry",
+                ));
+            }
+            let info = unsafe {
+                &*buffer
+                    .as_ptr()
+                    .add(offset)
+                    .cast::<WindowsFileNamesInformation>()
+            };
+            if info.file_name_length % 2 != 0
+                || info.file_name_length as usize > used.saturating_sub(offset + 12)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "directory query returned an invalid name length",
+                ));
+            }
+            let length = info.file_name_length as usize / std::mem::size_of::<u16>();
+            let name = unsafe { std::slice::from_raw_parts(info.file_name.as_ptr(), length) };
+            names
+                .push(String::from_utf16(name).map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                })?);
+            if info.next_entry_offset == 0 {
+                break;
+            }
+            if info.next_entry_offset as usize > used.saturating_sub(offset) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "directory query returned an invalid next-entry offset",
+                ));
+            }
+            offset += info.next_entry_offset as usize;
+        }
+    }
+    Ok(names)
 }
 
 #[cfg(windows)]
