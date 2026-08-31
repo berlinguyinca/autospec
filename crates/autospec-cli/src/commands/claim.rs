@@ -729,7 +729,10 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         "--remove-label".to_string(),
         "in-progress-by-bot".to_string(),
     ];
-    if options.state != "merged" {
+    // `merged` is done and `needs-human` is waiting on a person -- neither goes
+    // back on the queue. Re-adding `auto-implement` to a fence-quarantined issue
+    // is what made it re-implement and re-quarantine forever (#3357).
+    if !matches!(options.state.as_str(), "merged" | "needs-human") {
         arguments.push("--add-label".to_string());
         arguments.push("auto-implement".to_string());
     }
@@ -1392,12 +1395,7 @@ fn released_predecessor_heartbeat_evidence_exists(
                     "released predecessor heartbeat is present but malformed",
                 )
             })?;
-            let exact = evidence.repo == identity.repo
-                && evidence.issue == identity.issue.to_string()
-                && evidence.worker_id == identity.worker_id
-                && evidence.branch == identity.branch
-                && evidence.claim_id == identity.claim_id;
-            if !exact {
+            if !exact_heartbeat_claim_identity(&evidence, identity) {
                 return Err(CommandFailure::diagnostic(
                     "released predecessor heartbeat belongs to another claim generation",
                 ));
@@ -4000,9 +3998,12 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
                         "--state accepts exactly one state",
                     ));
                 }
-                if !matches!(value.as_str(), "released" | "failed" | "merged") {
+                if !matches!(
+                    value.as_str(),
+                    "released" | "failed" | "merged" | "needs-human"
+                ) {
                     return Err(CommandFailure::diagnostic(
-                        "--state must be released, failed, or merged",
+                        "--state must be released, failed, merged, or needs-human",
                     ));
                 }
                 state_seen = true;
@@ -4684,11 +4685,7 @@ fn retire_released_startup_heartbeat_with_hook(
     let issue_name = format!("{}.json", identity.issue);
     let issue = terminal_heartbeat_snapshot(&repo, issue_name.as_ref(), identity)?;
     let evidence = &issue.evidence;
-    let exact = evidence.repo == identity.repo
-        && evidence.issue == identity.issue.to_string()
-        && evidence.worker_id == identity.worker_id
-        && evidence.branch == identity.branch
-        && evidence.claim_id == identity.claim_id
+    let exact = exact_heartbeat_claim_identity(evidence, identity)
         && evidence.step == "claimed"
         && evidence.pr.is_empty()
         && evidence.ttl_seconds > 0
@@ -4751,6 +4748,55 @@ fn retire_released_startup_heartbeat_with_hook(
         "issue",
         boundary,
     )
+}
+/// Retire a session binding whose issue heartbeat is already gone.
+///
+/// [`retire_released_startup_heartbeat_with_hook`] reaches the session file
+/// through the issue heartbeat's own `session_id`, so it cannot act once that
+/// heartbeat has been collected -- and the watchdog collects stale issue
+/// heartbeats without touching session bindings. The binding is create-once, so
+/// the one it leaves behind stops that session from ever claiming another issue
+/// (#3356): every later acquire refuses with `heartbeat_write_failed`, and the
+/// caller's evidence probe skipped retirement silently, with no diagnostic.
+///
+/// Only a binding whose own evidence names this exact claim is retired; a
+/// concurrent session's binding is left alone.
+fn shell_session_binding_matches(
+    document: &[u8],
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    let mut fields = JsonParser::new(
+        std::str::from_utf8(document)
+            .map_err(|_| CommandFailure::diagnostic("session binding evidence is not UTF-8"))?,
+    )
+    .parse()
+    .map_err(|error| CommandFailure::diagnostic(format!("invalid session binding: {error}")))?
+    .into_object("session binding")
+    .map_err(CommandFailure::diagnostic)?;
+    let mut string = |name| {
+        fields
+            .remove(name)
+            .ok_or_else(|| CommandFailure::diagnostic(format!("session binding has no {name}")))?
+            .into_string(name)
+            .map_err(CommandFailure::diagnostic)
+    };
+    let repo = string("repo")?;
+    let issue = string("issue")?;
+    let worker_id = string("worker_id")?;
+    let branch = string("branch")?;
+    let claim_id = string("claim_id")?;
+    Ok(exact_claim_identity(
+        &repo, &issue, &worker_id, &branch, &claim_id, identity,
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn retire_orphaned_session_bindings(
+    identity: ClaimMutationIdentity<'_>,
+    _boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    let root_path = heartbeat_root()?;
+    heartbeat_portable::retire_session_bindings_at(&root_path, identity)
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn retire_released_startup_heartbeat(
@@ -5303,6 +5349,35 @@ struct StartupHeartbeatEvidence {
     boot_id: String,
     process_start: String,
     session_id: Option<String>,
+}
+
+fn exact_heartbeat_claim_identity(
+    evidence: &StartupHeartbeatEvidence,
+    identity: ClaimMutationIdentity<'_>,
+) -> bool {
+    exact_claim_identity(
+        &evidence.repo,
+        &evidence.issue,
+        &evidence.worker_id,
+        &evidence.branch,
+        &evidence.claim_id,
+        identity,
+    )
+}
+
+fn exact_claim_identity(
+    repo: &str,
+    issue: &str,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    identity: ClaimMutationIdentity<'_>,
+) -> bool {
+    repo == identity.repo
+        && issue == identity.issue.to_string()
+        && worker_id == identity.worker_id
+        && branch == identity.branch
+        && claim_id == identity.claim_id
 }
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
