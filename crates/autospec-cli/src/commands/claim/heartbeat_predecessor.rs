@@ -99,9 +99,10 @@ pub(super) fn retire_terminal(identity: ClaimMutationIdentity<'_>) -> Result<(),
         // watchdog collected it and left the create-once session binding
         // behind, which wedges the session for good (#3356). Only the second
         // case has anything to retire, and it names itself.
-        return retire_orphaned_session_binding(identity, &mut |_, _| Ok(()));
+        return retire_orphaned_session_bindings(identity, &mut |_, _| Ok(()));
     }
-    retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
+    retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))?;
+    retire_orphaned_session_bindings(identity, &mut |_, _| Ok(()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

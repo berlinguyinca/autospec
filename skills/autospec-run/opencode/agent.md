@@ -1557,7 +1557,7 @@ do not fall back to an inline label-swap path.
 >    else
 >      _gm_rc=$?
 >      if [ "$_gm_rc" -eq 1 ]; then
->        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state needs-human --branch "<BRANCH>" --pr "<PR>" || true
+>        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --state needs-human --branch "<BRANCH>" --pr "<PR>" || true
 >        echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
 >      else
 >        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
@@ -1566,7 +1566,7 @@ do not fall back to an inline label-swap path.
 >      exit 0
 >    fi
 >    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
->      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
+>      --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" \
 >      --state merged --branch "<BRANCH>" --pr "<PR>" || true
 >    _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
 >    export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"

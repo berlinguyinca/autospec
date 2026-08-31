@@ -1395,12 +1395,7 @@ fn released_predecessor_heartbeat_evidence_exists(
                     "released predecessor heartbeat is present but malformed",
                 )
             })?;
-            let exact = evidence.repo == identity.repo
-                && evidence.issue == identity.issue.to_string()
-                && evidence.worker_id == identity.worker_id
-                && evidence.branch == identity.branch
-                && evidence.claim_id == identity.claim_id;
-            if !exact {
+            if !exact_heartbeat_claim_identity(&evidence, identity) {
                 return Err(CommandFailure::diagnostic(
                     "released predecessor heartbeat belongs to another claim generation",
                 ));
@@ -4690,11 +4685,7 @@ fn retire_released_startup_heartbeat_with_hook(
     let issue_name = format!("{}.json", identity.issue);
     let issue = terminal_heartbeat_snapshot(&repo, issue_name.as_ref(), identity)?;
     let evidence = &issue.evidence;
-    let exact = evidence.repo == identity.repo
-        && evidence.issue == identity.issue.to_string()
-        && evidence.worker_id == identity.worker_id
-        && evidence.branch == identity.branch
-        && evidence.claim_id == identity.claim_id
+    let exact = exact_heartbeat_claim_identity(evidence, identity)
         && evidence.step == "claimed"
         && evidence.pr.is_empty()
         && evidence.ttl_seconds > 0
@@ -4771,7 +4762,97 @@ fn retire_released_startup_heartbeat_with_hook(
 /// Only a binding whose own evidence names this exact claim is retired; a
 /// concurrent session's binding is left alone.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn retire_orphaned_session_binding(
+fn shell_session_binding_matches(
+    document: &[u8],
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    let mut fields = JsonParser::new(
+        std::str::from_utf8(document)
+            .map_err(|_| CommandFailure::diagnostic("session binding evidence is not UTF-8"))?,
+    )
+    .parse()
+    .map_err(|error| CommandFailure::diagnostic(format!("invalid session binding: {error}")))?
+    .into_object("session binding")
+    .map_err(CommandFailure::diagnostic)?;
+    let mut string = |name| {
+        fields
+            .remove(name)
+            .ok_or_else(|| CommandFailure::diagnostic(format!("session binding has no {name}")))?
+            .into_string(name)
+            .map_err(CommandFailure::diagnostic)
+    };
+    let repo = string("repo")?;
+    let issue = string("issue")?;
+    let worker_id = string("worker_id")?;
+    let branch = string("branch")?;
+    let claim_id = string("claim_id")?;
+    Ok(exact_claim_identity(
+        &repo, &issue, &worker_id, &branch, &claim_id, identity,
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn retire_exact_shell_session_binding(
+    sessions: &fs::File,
+    name: &std::ffi::OsStr,
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fstat, Mode, SFlag};
+    use nix::unistd::{fsync, unlinkat, UnlinkatFlags};
+
+    let snapshot = read_regular_file_at_no_follow(sessions, name).map_err(|error| {
+        CommandFailure::diagnostic(format!("session binding read failed: {error}"))
+    })?;
+    if !shell_session_binding_matches(&snapshot.document, identity)? {
+        return Ok(false);
+    }
+    let descriptor = openat(
+        sessions,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|error| CommandFailure::diagnostic(format!("session binding open failed: {error}")))?;
+    let file = fs::File::from(descriptor);
+    let stat = fstat(&file).map_err(|error| {
+        CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
+    })?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_nlink != 1
+    {
+        return Err(CommandFailure::diagnostic("session binding is unsafe"));
+    }
+    let observed = file
+        .try_clone()
+        .and_then(read_regular_file)
+        .map_err(|error| CommandFailure::diagnostic(format!("session binding read: {error}")))?;
+    revalidate_heartbeat_snapshot(&observed, &snapshot)?;
+    if !shell_session_binding_matches(&observed.document, identity)?
+        || heartbeat_final_binding(
+            &file,
+            sessions,
+            name.to_string_lossy().as_ref(),
+            (observed.identity.device, observed.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic(
+            "session binding identity changed",
+        ));
+    }
+    unlinkat(sessions, name, UnlinkatFlags::NoRemoveDir).map_err(|error| {
+        CommandFailure::diagnostic(format!("session binding retirement failed: {error}"))
+    })?;
+    fsync(sessions).map_err(|error| {
+        CommandFailure::diagnostic(format!("session binding retirement sync failed: {error}"))
+    })?;
+    Ok(true)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn retire_orphaned_session_bindings(
     identity: ClaimMutationIdentity<'_>,
     boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
@@ -4792,47 +4873,48 @@ fn retire_orphaned_session_binding(
         Ok(root) => fs::File::from(root),
     };
     private_heartbeat_directory_identity(&root, "terminal root")?;
-    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
-    let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_name))? else {
-        return Ok(());
-    };
-    let Some(sessions) = open_optional_heartbeat_directory(&repo, Path::new("sessions"))? else {
-        return Ok(());
-    };
-    let sessions_path = root_path.join(&repo_name).join("sessions");
-    let entries = fs::read_dir(&sessions_path).map_err(|error| {
-        CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
-        })?;
-        let name = entry.file_name();
-        if Path::new(&name).extension() != Some("json".as_ref()) {
-            continue;
-        }
-        // A binding this claim does not own -- another session's, or a legacy
-        // record this reader cannot vouch for -- is not ours to remove.
-        let Ok(snapshot) = terminal_heartbeat_snapshot(&sessions, name.as_ref(), identity) else {
+    let repo_names = [
+        super::autonomous::drain::repository_progress_key(identity.repo),
+        identity.repo.replace('/', "__"),
+    ];
+    for repo_name in repo_names {
+        let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_name))? else {
             continue;
         };
-        let evidence = &snapshot.evidence;
-        if evidence.repo != identity.repo
-            || evidence.issue != identity.issue.to_string()
-            || evidence.worker_id != identity.worker_id
-            || evidence.branch != identity.branch
-            || evidence.claim_id != identity.claim_id
-        {
+        let Some(sessions) = open_optional_heartbeat_directory(&repo, Path::new("sessions"))?
+        else {
             continue;
+        };
+        let sessions_path = root_path.join(&repo_name).join("sessions");
+        let entries = fs::read_dir(&sessions_path).map_err(|error| {
+            CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                CommandFailure::diagnostic(format!("session binding inspection failed: {error}"))
+            })?;
+            let name = entry.file_name();
+            if Path::new(&name).extension() != Some("json".as_ref()) {
+                continue;
+            }
+            if repo_name == identity.repo.replace('/', "__") {
+                retire_exact_shell_session_binding(&sessions, name.as_ref(), identity)?;
+                continue;
+            }
+            // Inspection errors are not absence: release reports retirement as
+            // deferred rather than silently leaving a possibly matching binding.
+            let snapshot = terminal_heartbeat_snapshot(&sessions, name.as_ref(), identity)?;
+            if exact_heartbeat_claim_identity(&snapshot.evidence, identity) {
+                handoff_terminal_heartbeat(
+                    &sessions_path,
+                    &sessions,
+                    name.as_ref(),
+                    &snapshot,
+                    "session",
+                    boundary,
+                )?;
+            }
         }
-        handoff_terminal_heartbeat(
-            &sessions_path,
-            &sessions,
-            name.as_ref(),
-            &snapshot,
-            "session",
-            boundary,
-        )?;
     }
     Ok(())
 }
@@ -5387,6 +5469,35 @@ struct StartupHeartbeatEvidence {
     boot_id: String,
     process_start: String,
     session_id: Option<String>,
+}
+
+fn exact_heartbeat_claim_identity(
+    evidence: &StartupHeartbeatEvidence,
+    identity: ClaimMutationIdentity<'_>,
+) -> bool {
+    exact_claim_identity(
+        &evidence.repo,
+        &evidence.issue,
+        &evidence.worker_id,
+        &evidence.branch,
+        &evidence.claim_id,
+        identity,
+    )
+}
+
+fn exact_claim_identity(
+    repo: &str,
+    issue: &str,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    identity: ClaimMutationIdentity<'_>,
+) -> bool {
+    repo == identity.repo
+        && issue == identity.issue.to_string()
+        && worker_id == identity.worker_id
+        && branch == identity.branch
+        && claim_id == identity.claim_id
 }
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]

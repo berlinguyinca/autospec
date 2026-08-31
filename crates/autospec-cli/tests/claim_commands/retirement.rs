@@ -391,9 +391,11 @@ fn one_session_can_acquire_release_and_then_acquire_a_different_issue() {
     let issue_heartbeat = repo_heartbeats.join("42.json");
     // hex("session-reuse-1"); pinned literally so a change to the session key
     // convention fails here rather than silently skipping the assertion.
-    let session_binding =
-        repo_heartbeats.join("sessions/73657373696f6e2d72657573652d31.json");
-    assert!(issue_heartbeat.exists(), "acquire publishes the issue heartbeat");
+    let session_binding = repo_heartbeats.join("sessions/73657373696f6e2d72657573652d31.json");
+    assert!(
+        issue_heartbeat.exists(),
+        "acquire publishes the issue heartbeat"
+    );
     assert!(
         session_binding.exists(),
         "acquire publishes the session binding"
@@ -404,6 +406,66 @@ fn one_session_can_acquire_release_and_then_acquire_a_different_issue() {
         .expect("heartbeat records a claim id")
         .1;
     let claim_id = claim_id.split_once('"').expect("claim id terminator").0;
+
+    let heartbeat_writer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../skills/autospec-run/scripts/heartbeat-write.sh");
+    let first_shell_heartbeat = Command::new("bash")
+        .arg(&heartbeat_writer)
+        .args([
+            "--issue",
+            "42",
+            "--step",
+            "implementing",
+            "--branch",
+            "feat/test-42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--claim-id",
+            claim_id,
+            "--session-id",
+            session,
+        ])
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .output()
+        .expect("real shell heartbeat writer starts for the first claim");
+    assert!(
+        first_shell_heartbeat.status.success(),
+        "first shell heartbeat failed: {}",
+        String::from_utf8_lossy(&first_shell_heartbeat.stderr)
+    );
+    let foreign_shell_heartbeat = Command::new("bash")
+        .arg(&heartbeat_writer)
+        .args([
+            "--issue",
+            "99",
+            "--step",
+            "implementing",
+            "--branch",
+            "feat/foreign",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-foreign",
+            "--claim-id",
+            "claim-foreign",
+            "--session-id",
+            "session-foreign",
+        ])
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .output()
+        .expect("real shell heartbeat writer starts for the foreign claim");
+    assert!(
+        foreign_shell_heartbeat.status.success(),
+        "foreign shell heartbeat failed: {}",
+        String::from_utf8_lossy(&foreign_shell_heartbeat.stderr)
+    );
+    // hex("session-foreign"); a foreign claim in the same namespace must not
+    // be retired while releasing claim A.
+    let foreign_session_binding =
+        heartbeats.join("testorg__testrepo/sessions/73657373696f6e2d666f726569676e.json");
+    assert!(foreign_session_binding.exists());
 
     // Model the production state #3356 was reported from: the watchdog collects
     // stale issue heartbeats and does not touch session bindings, so the
@@ -462,6 +524,10 @@ fn one_session_can_acquire_release_and_then_acquire_a_different_issue() {
         !session_binding.exists(),
         "release must retire the session binding: {release_stderr}"
     );
+    assert!(
+        foreign_session_binding.exists(),
+        "release must preserve a foreign session binding"
+    );
 
     let second = acquire("43", "feat/test-43");
     let second_stdout = String::from_utf8_lossy(&second.stdout);
@@ -469,6 +535,39 @@ fn one_session_can_acquire_release_and_then_acquire_a_different_issue() {
         second.status.success() && second_stdout.contains("\"claimed\":true"),
         "the same session could not claim a second issue after releasing the first: {second_stdout} {}",
         String::from_utf8_lossy(&second.stderr)
+    );
+    let second_claim_id = second_stdout
+        .split_once("\"claim_id\":\"")
+        .expect("second acquire records a claim id")
+        .1
+        .split_once('"')
+        .expect("second claim id terminator")
+        .0;
+    let second_shell_heartbeat = Command::new("bash")
+        .arg(&heartbeat_writer)
+        .args([
+            "--issue",
+            "43",
+            "--step",
+            "implementing",
+            "--branch",
+            "feat/test-43",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--claim-id",
+            second_claim_id,
+            "--session-id",
+            session,
+        ])
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .output()
+        .expect("real shell heartbeat writer starts for the second claim");
+    assert!(
+        second_shell_heartbeat.status.success(),
+        "release left the canonical shell session binding stale: {}",
+        String::from_utf8_lossy(&second_shell_heartbeat.stderr)
     );
 }
 
@@ -478,8 +577,8 @@ fn one_session_can_acquire_release_and_then_acquire_a_different_issue() {
 /// this one reads the states the trio actually emits out of `SKILL.md`.
 #[test]
 fn every_release_state_the_run_trio_emits_is_accepted_by_the_parser() {
-    let skill = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../skills/autospec-run/SKILL.md");
+    let skill =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/autospec-run/SKILL.md");
     let text = std::fs::read_to_string(&skill).expect("autospec-run SKILL.md");
     // Shell continuations split one emitted command across lines; rejoin them so
     // a `--state` that trails a backslash is still attributed to its command.
@@ -550,6 +649,76 @@ fn every_release_state_the_run_trio_emits_is_accepted_by_the_parser() {
             "the trio emits `--state {state}`, which the parser rejects: {stderr}"
         );
     }
+}
+
+#[test]
+fn generated_quarantine_release_command_supplies_the_exact_claim_identity() {
+    let skill =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/autospec-run/SKILL.md");
+    let text = std::fs::read_to_string(&skill).expect("autospec-run SKILL.md");
+    let command = text
+        .lines()
+        .find(|line| line.contains("claim release") && line.contains("--state needs-human"))
+        .expect("generated quarantine release command");
+    let command = command
+        .trim_start_matches(|character: char| character == '>' || character.is_whitespace())
+        .replace("<ISSUE>", "42")
+        .replace("{repo}", "testorg/testrepo")
+        .replace("<BRANCH>", "feat/test")
+        .replace("<PR>", "99");
+
+    let fixture = temp_dir("autospec-generated-quarantine-release");
+    let bin = fixture.join("bin");
+    let comments = fixture.join("comments.json");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-14T00:00:00Z",
+            "2026-07-14T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:100,updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then exit 0; fi\nexit 17\n",
+    );
+
+    let output = Command::new("bash")
+        .args(["-c", &command])
+        .env("AUTOSPEC_CLAIM_BIN", env!("CARGO_BIN_EXE_autospec"))
+        .env("CLAIM_WORKER_ID", "worker-a")
+        .env("CLAIM_ID", "claim-a")
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .expect("generated quarantine release command starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"released\":true"),
+        "generated quarantine release did not release its claim: {stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// #3357, past the parser: a `needs-human` release has to reach the end of the
@@ -630,7 +799,10 @@ fn a_needs_human_release_completes_and_does_not_requeue_the_issue() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout.contains("\"released\":true"), "stdout: {stdout}");
-    assert!(stdout.contains("\"state\":\"needs-human\""), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"state\":\"needs-human\""),
+        "stdout: {stdout}"
+    );
     let calls = std::fs::read_to_string(&log).expect("gh call log");
     assert!(
         calls.contains("--remove-label\nin-progress-by-bot"),

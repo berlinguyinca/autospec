@@ -140,11 +140,7 @@ pub(super) fn exact_retirement_identity(
     evidence: &StartupHeartbeatEvidence,
     identity: ClaimMutationIdentity<'_>,
 ) -> bool {
-    evidence.repo == identity.repo
-        && evidence.issue == identity.issue.to_string()
-        && evidence.worker_id == identity.worker_id
-        && evidence.branch == identity.branch
-        && evidence.claim_id == identity.claim_id
+    super::super::exact_heartbeat_claim_identity(evidence, identity)
 }
 
 pub(super) struct DetachedHeartbeat {
