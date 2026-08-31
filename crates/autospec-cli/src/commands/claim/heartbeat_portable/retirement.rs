@@ -38,12 +38,48 @@ pub(super) fn retire_released_at_with_boundary_hooks(
     let Some(root) = open_existing_private_directory(root)? else {
         return Ok(());
     };
-    let repo_name = repository_progress_key(identity.repo);
-    let Some(repo) = open_existing_private_child(&root, &repo_name)? else {
+    let collision_safe = repository_progress_key(identity.repo);
+    if let Some(repo) = open_existing_private_child(&root, &collision_safe)? {
+        after_repo_open(&repo.path)?;
+        let _lock = RepositoryLock::acquire(&repo)?;
+        retire_session_candidates(&repo, identity, after_sessions_open)?;
+        retire_exact_issue(&repo, identity, after_issue_detach)?;
+    }
+    let canonical = identity.repo.replace('/', "__");
+    if canonical != collision_safe {
+        if let Some(repo) = open_existing_private_child(&root, &canonical)? {
+            after_repo_open(&repo.path)?;
+            let _lock = RepositoryLock::acquire(&repo)?;
+            retire_session_candidates(&repo, identity, after_sessions_open)?;
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::commands::claim) fn retire_session_bindings_at(
+    root_path: &Path,
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<(), CommandFailure> {
+    let Some(root) = open_existing_private_directory(root_path)? else {
         return Ok(());
     };
-    after_repo_open(&repo.path)?;
-    let _lock = RepositoryLock::acquire(&repo)?;
+    let collision_safe = repository_progress_key(identity.repo);
+    let canonical = identity.repo.replace('/', "__");
+    for repo_name in [collision_safe.as_str(), canonical.as_str()] {
+        let Some(repo) = open_existing_private_child(&root, repo_name)? else {
+            continue;
+        };
+        let _lock = RepositoryLock::acquire(&repo)?;
+        retire_session_candidates(&repo, identity, &mut |_| Ok(()))?;
+    }
+    Ok(())
+}
+
+fn retire_exact_issue(
+    repo: &PrivateDirectory,
+    identity: ClaimMutationIdentity<'_>,
+    after_issue_detach: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
     let issue_name = format!("{}.json", identity.issue);
     let issue_stage_name = retirement_stage_name(&issue_name, identity);
     let issue_stage = match open_detached_heartbeat(&repo, &issue_stage_name)? {
@@ -57,8 +93,8 @@ pub(super) fn retire_released_at_with_boundary_hooks(
         restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
         return Err(error);
     }
-    let evidence = match detached_retirement_evidence(&repo, &issue_stage, identity) {
-        Ok(Some(evidence)) => evidence,
+    match detached_retirement_evidence(&repo, &issue_stage, identity) {
+        Ok(Some(_)) => {}
         Ok(None) => {
             restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
             return Ok(());
@@ -67,60 +103,56 @@ pub(super) fn retire_released_at_with_boundary_hooks(
             restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
             return Err(error);
         }
-    };
-    if let Some(session_id) = evidence.session_id.as_deref() {
-        match retire_matching_session(&repo, session_id, identity, after_sessions_open) {
-            Ok(true) => {}
-            Ok(false) => {
-                restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
-                return Ok(());
-            }
-            Err(error) => {
-                restore_detached_heartbeat(&repo, &issue_stage, &issue_name)?;
-                return Err(error);
-            }
-        }
     }
     remove_detached_heartbeat(&repo, &issue_stage)?;
     sync_private_directory(&repo)
 }
 
-pub(super) fn retire_matching_session(
+fn retire_session_candidates(
     repo: &PrivateDirectory,
-    session_id: &str,
     identity: ClaimMutationIdentity<'_>,
     after_sessions_open: &mut impl FnMut(&Path) -> Result<(), CommandFailure>,
-) -> Result<bool, CommandFailure> {
+) -> Result<(), CommandFailure> {
     let Some(sessions) = open_existing_private_child(repo, "sessions")? else {
-        return Ok(true);
+        return Ok(());
     };
     after_sessions_open(&sessions.path)?;
-    let session_name = format!("{}.json", heartbeat_session_key(session_id));
-    let session_stage_name = retirement_stage_name(&session_name, identity);
-    let session_stage = match open_detached_heartbeat(&sessions, &session_stage_name)? {
-        Some(stage) => stage,
-        None => match detach_heartbeat(&sessions, &session_name, &session_stage_name)? {
-            Some(stage) => stage,
-            None => return Ok(true),
-        },
-    };
-    match detached_retirement_evidence(&sessions, &session_stage, identity) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            restore_detached_heartbeat(&sessions, &session_stage, &session_name)?;
-            return Ok(false);
+    for name in private_directory_entry_names(&sessions)? {
+        if Path::new(&name).extension() != Some("json".as_ref()) {
+            continue;
         }
-        Err(error) => {
-            restore_detached_heartbeat(&sessions, &session_stage, &session_name)?;
+        let stage_name = retirement_stage_name(&name, identity);
+        let detached = match open_detached_heartbeat(&sessions, &stage_name)? {
+            Some(stage) => stage,
+            None => match detach_heartbeat(&sessions, &name, &stage_name)? {
+                Some(stage) => stage,
+                None => continue,
+            },
+        };
+        let document = match read_detached_private_file(&sessions, &detached) {
+            Ok(document) => document,
+            Err(error) => {
+                restore_detached_heartbeat(&sessions, &detached, &name)?;
+                return Err(CommandFailure::diagnostic(format!(
+                    "read released session binding: {error}"
+                )));
+            }
+        };
+        let exact = parse_startup_heartbeat(&document)
+            .as_ref()
+            .is_some_and(|evidence| exact_retirement_identity(evidence, identity))
+            || super::super::shell_session_binding_matches(&document, identity)?;
+        if !exact {
+            restore_detached_heartbeat(&sessions, &detached, &name)?;
+            continue;
+        }
+        if let Err(error) = remove_detached_heartbeat(&sessions, &detached) {
+            restore_detached_heartbeat(&sessions, &detached, &name)?;
             return Err(error);
         }
+        sync_private_directory(&sessions)?;
     }
-    if let Err(error) = remove_detached_heartbeat(&sessions, &session_stage) {
-        restore_detached_heartbeat(&sessions, &session_stage, &session_name)?;
-        return Err(error);
-    }
-    sync_private_directory(&sessions)?;
-    Ok(true)
+    Ok(())
 }
 
 pub(super) fn detached_retirement_evidence(

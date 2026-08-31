@@ -1,6 +1,89 @@
 use super::*;
 
 #[cfg(unix)]
+fn write_private(path: &Path, document: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, document).expect("heartbeat document");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .expect("heartbeat permissions");
+}
+
+#[cfg(unix)]
+#[test]
+fn portable_retirement_scans_canonical_sessions_without_an_issue_heartbeat() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("retirement-canonical-orphan");
+    let repo = fixture.root.join("owner__repo");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("canonical sessions");
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binding = sessions.join("73657373696f6e2d61.json");
+    write_private(
+        &binding,
+        br#"{"issue":"42","branch":"feat/worker","step":"implementing","ts":1,"pr":"","repo":"owner/repo","host":"host-a","worker_id":"worker-a","claim_id":"claim-a","session_id":"session-a"}"#,
+    );
+
+    retire_released_at(
+        &fixture.root,
+        ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        },
+    )
+    .expect("canonical orphan retirement");
+
+    assert!(!binding.exists(), "canonical session binding remained");
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_session_scan_stays_bound_to_the_open_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("retirement-canonical-directory-swap");
+    let repo = fixture.root.join("owner__repo");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("canonical sessions");
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binding_name = "73657373696f6e2d61.json";
+    let document = br#"{"issue":"42","branch":"feat/worker","step":"implementing","ts":1,"pr":"","repo":"owner/repo","host":"host-a","worker_id":"worker-a","claim_id":"claim-a","session_id":"session-a"}"#;
+    write_private(&sessions.join(binding_name), document);
+    let replacement = repo.join("replacement-sessions");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_private(&replacement.join(binding_name), document);
+    let original = repo.join("original-sessions");
+
+    retire_released_at_with_boundary_hooks(
+        &fixture.root,
+        ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        },
+        &mut |_| Ok(()),
+        &mut |_| Ok(()),
+        &mut |_| {
+            std::fs::rename(&sessions, &original).unwrap();
+            std::fs::rename(&replacement, &sessions).unwrap();
+            Ok(())
+        },
+    )
+    .expect("descriptor-bound canonical retirement");
+
+    assert!(!original.join(binding_name).exists());
+    assert!(sessions.join(binding_name).exists());
+}
+
+#[cfg(unix)]
 #[test]
 fn retirement_rejects_an_intermediate_repository_symlink() {
     use std::os::unix::fs::{symlink, PermissionsExt};
