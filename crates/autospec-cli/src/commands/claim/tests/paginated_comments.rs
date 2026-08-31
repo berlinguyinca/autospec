@@ -416,7 +416,7 @@ fn concurrent_session_binding_publishers_cannot_overwrite_the_winner() {
 }
 
 #[test]
-fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
+fn lifecycle_claim_evidence_state_matrix_reuses_only_valid_available_generations() {
     let requested = ClaimEvidence::Observed(ClaimContext::active(
         RepositoryScope::try_from("owner/repo").expect("repository scope"),
         IssueNumber::new(42).expect("issue"),
@@ -424,7 +424,7 @@ fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
         ClaimBranch::try_from("feat/requested").expect("requested branch"),
         LeaseFreshness::Fresh,
     ));
-    for state in ["released", "retryable"] {
+    for state in ["released", "retryable", "available"] {
         assert_eq!(
             lifecycle_evidence(&claim_record("worker-old", "claim-old", state))
                 .expect("reusable claim evidence"),
