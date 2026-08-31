@@ -121,6 +121,10 @@ fn retire_session_candidates(
         if Path::new(&name).extension() != Some("json".as_ref()) {
             continue;
         }
+        let live_document = read_live_private_file(&sessions, &name)?;
+        if !session_binding_matches(&live_document, identity)? {
+            continue;
+        }
         let stage_name = retirement_stage_name(&name, identity);
         let detached = match open_detached_heartbeat(&sessions, &stage_name)? {
             Some(stage) => stage,
@@ -129,7 +133,7 @@ fn retire_session_candidates(
                 None => continue,
             },
         };
-        let document = match read_detached_private_file(&sessions, &detached) {
+        let detached_document = match read_detached_private_file(&sessions, &detached) {
             Ok(document) => document,
             Err(error) => {
                 restore_detached_heartbeat(&sessions, &detached, &name)?;
@@ -138,13 +142,13 @@ fn retire_session_candidates(
                 )));
             }
         };
-        let exact = parse_startup_heartbeat(&document)
-            .as_ref()
-            .is_some_and(|evidence| exact_retirement_identity(evidence, identity))
-            || super::super::shell_session_binding_matches(&document, identity)?;
-        if !exact {
+        if detached_document != live_document
+            || !session_binding_matches(&detached_document, identity)?
+        {
             restore_detached_heartbeat(&sessions, &detached, &name)?;
-            continue;
+            return Err(CommandFailure::diagnostic(
+                "session binding changed before retirement",
+            ));
         }
         if let Err(error) = remove_detached_heartbeat(&sessions, &detached) {
             restore_detached_heartbeat(&sessions, &detached, &name)?;
@@ -153,6 +157,38 @@ fn retire_session_candidates(
         sync_private_directory(&sessions)?;
     }
     Ok(())
+}
+
+fn read_live_private_file(
+    directory: &PrivateDirectory,
+    name: &str,
+) -> Result<Vec<u8>, CommandFailure> {
+    let mut file = open_private_file_relative(directory, name).map_err(|error| {
+        CommandFailure::diagnostic(format!("read live session binding: {error}"))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        CommandFailure::diagnostic(format!("inspect live session binding: {error}"))
+    })?;
+    if !metadata.file_type().is_file() || !private_file_metadata(&metadata) {
+        return Err(CommandFailure::diagnostic(
+            "live session binding is not a private regular file",
+        ));
+    }
+    let mut document = Vec::new();
+    file.read_to_end(&mut document).map_err(|error| {
+        CommandFailure::diagnostic(format!("read live session binding: {error}"))
+    })?;
+    Ok(document)
+}
+
+fn session_binding_matches(
+    document: &[u8],
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    if let Some(evidence) = parse_startup_heartbeat(document) {
+        return Ok(exact_retirement_identity(&evidence, identity));
+    }
+    super::super::shell_session_binding_matches(document, identity)
 }
 
 pub(super) fn detached_retirement_evidence(

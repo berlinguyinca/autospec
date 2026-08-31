@@ -85,6 +85,85 @@ fn canonical_session_scan_stays_bound_to_the_open_directory() {
 
 #[cfg(unix)]
 #[test]
+fn malformed_foreign_binding_remains_at_its_live_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("retirement-malformed-foreign");
+    let repo = fixture.root.join("owner__repo");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binding = sessions.join("foreign.json");
+    write_private(&binding, br#"{"repo":"other/repo""#);
+
+    let result = retire_released_at(
+        &fixture.root,
+        ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        },
+    );
+
+    assert!(result.is_err());
+    assert!(binding.exists(), "malformed foreign binding was stranded");
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_foreign_reader_never_observes_a_missing_live_binding() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fixture = Fixture::new("retirement-concurrent-foreign-reader");
+    let repo = fixture.root.join("owner__repo");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binding = sessions.join("foreign.json");
+    let mut document = br#"{"issue":"99","branch":"feat/foreign","step":"implementing","ts":1,"pr":"","repo":"owner/repo","host":"host-a","worker_id":"worker-b","claim_id":"claim-b","session_id":"session-b","padding":""#.to_vec();
+    document.extend(std::iter::repeat_n(b'x', 4 * 1024 * 1024));
+    document.extend_from_slice(br#""}"#);
+    write_private(&binding, &document);
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let missing = std::sync::Arc::new(AtomicBool::new(false));
+    let reader_path = binding.clone();
+    let reader_stop = stop.clone();
+    let reader_missing = missing.clone();
+    let reader = std::thread::spawn(move || {
+        while !reader_stop.load(Ordering::Acquire) {
+            if !reader_path.exists() {
+                reader_missing.store(true, Ordering::Release);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+    });
+
+    retire_released_at(
+        &fixture.root,
+        ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        },
+    )
+    .expect("foreign binding classification");
+    stop.store(true, Ordering::Release);
+    reader.join().unwrap();
+
+    assert!(!missing.load(Ordering::Acquire));
+    assert!(binding.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn retirement_rejects_an_intermediate_repository_symlink() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
