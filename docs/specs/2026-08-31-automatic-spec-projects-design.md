@@ -38,7 +38,9 @@ When Autospec is available, the entry point submits intent to Autospec and never
 
 The serverless layer owns intent submission, typed status streaming, cancellation forwarding, and presentation only. Autospec owns decomposition, Project selection, issue admission, distributed claims, worktrees, runtime isolation, implementer/reviewer dispatch, validation, merging, recovery, and reconciliation. Serverless must not recreate those responsibilities or interpret prose output as execution state.
 
-The existing direct serverless subagent path remains available only as an explicit degraded fallback when Autospec is not installed or its compatibility probe definitively returns unavailable. The fallback result is labeled `degraded`, records the unavailable reason, and never claims Autospec guarantees. Transient probe errors, ambiguous installation state, or a live/interrupted Autospec run fail closed into Autospec recovery guidance rather than falling back.
+This repository does not contain the deployment-owned serverless request handler. It owns a versioned handoff protocol and conformance suite, not the external call-site edit. Protocol `autospec.implementation-handoff.v1` carries repository identity, normalized intent, optional issue/spec identity, and caller correlation ID; its response carries availability, typed unavailable reason, route, run identity, primary Project binding, status stream identity, and cancellation token. The external consumer must publish a conformance receipt tied to its deployed revision proving its sole implementation-dispatch function consumes this protocol and no direct implementation-agent branch remains. A repository-local blocked-prerequisite tracker records that rollout without guessing the external repository or deployment owner. The feature cannot report complete until the receipt verifies.
+
+There is no mutating serverless fallback. Definitive Autospec unavailability returns `blocked` with a typed reason and installation/recovery guidance. Transient probe errors, ambiguous installation state, or a live/interrupted Autospec run likewise fail closed into Autospec recovery. Read-only chat remains available, but implementation, branch creation, pushes, PRs, and merges never run outside Autospec.
 
 ## Scope-aware primary Project selection
 
@@ -52,6 +54,8 @@ Every implementation belongs to one primary managed Project. Selection is determ
 | bounded work in a repository with no managed Project | create the repository/product Project, then add the work |
 
 An explicit Project identity supplied by a trusted Autospec artifact wins only when its marker, owner, and repository/product/spec identity verify. Scope classification is typed and auditable; serverless does not choose a board from request wording. An ambiguous match, multiple valid primary candidates, inaccessible Project, or missing write capability blocks admission and returns a resumable diagnostic.
+
+Selection consumes `PrimaryProjectFacts`, not prose: canonical repository, optional immutable spec identity, optional verified portfolio binding, optional onboarded `ProductKey`, managed-project mode, target repositories, planned issue count, cross-repository edges, and requested owner. Precedence is existing verified spec portfolio; new spec portfolio when a spec exists, issue count exceeds one, or cross-repository scope exists; existing managed product for bounded work; otherwise create a repository product with stable `ProductKey = repo:<owner>__<repo>`. Store namespaces prefix `portfolio:` or `product:` so portfolio digests and product keys cannot collide. Existing `external` Project mode never satisfies the primary binding because Autospec cannot own its marker, fields, journal, or reconciliation; it remains an optional secondary projection while Autospec creates/adopts the managed primary.
 
 The primary Project decision does not prohibit secondary projections. `project-map.yml` and other configured boards may receive the issue after the primary binding is acknowledged, but they never replace or suppress it. A work item may appear on multiple GitHub Projects while retaining exactly one Autospec primary binding.
 
@@ -99,10 +103,10 @@ portfolio_id = sha256(canonical_source_repo || source_spec_path || source_spec_b
 
 The frozen plan has stable logical keys such as `source-tracker`, `repo:<owner/repo>:tracker`, `issue:<slug>`, and `audit:phase-5.5`. Before remote mutation Autospec writes a recovery capsule containing the complete ordered item-key set, repository-local parent sets, cross-repository logical edges, `plan_digest`, and a random 128-bit `create_nonce`. The bounded capsule is stored both locally and inside the managed Project README after binding; plans too large for the README are rejected and must be decomposed into separate specs.
 
-The Project README contains exactly one immutable marker:
+The Project README contains exactly one existing managed-Project marker block. Extend its versioned payload with `kind: product | spec_portfolio`, portfolio identity, source-spec identity, and recovery capsule rather than adding a second parser grammar. Existing product blocks migrate in place by preserving their product key/owner and defaulting `kind: product`; spec portfolios use `kind: spec_portfolio`. Mixed legacy/new blocks, duplicate managed blocks, or kind/identity mismatch fail closed. The spec-portfolio payload carries the immutable identity equivalent of:
 
 ```text
-<!-- autospec:spec-project schema=1 portfolio_id=ID source=OWNER/REPO:path@OID -->
+kind=spec_portfolio schema=2 portfolio_id=ID source=OWNER/REPO:path@OID
 ```
 
 Creation searches the selected owner's open and closed Projects with pagination. Zero exact markers permits creation, one adopts, and multiple fail closed. The create-time title includes a bounded nonce suffix `[autospec:<create_nonce>]`, so a lost create response is discoverable before the README marker exists. After creation, Autospec records the returned node identity locally, writes the marker and recovery capsule, then re-queries and verifies both before filing issues. An ambiguous timeout enters `create_unknown`; retries search by exact nonce title, bind at most one result, and never blindly create again.
@@ -115,7 +119,7 @@ Every issue is created with an immutable hidden marker in its initial body:
 
 On a lost issue-create response, reconciliation enters `create_unknown` and paginates the target repository for the exact marker. It never retries an ambiguous create automatically: one match binds, multiple fail closed, and zero remains blocked until GitHub exposes the item or returns definitive evidence that the create failed. Subsequent body edits preserve the marker.
 
-Two hosts may not mutate one portfolio concurrently. Reuse the managed-Project product lock locally and add a repository-hosted optimistic lease at `refs/heads/autospec-state/portfolio/<portfolio_id>` in the source repository. Lease acquisition is a compare-and-swap fast-forward update over the observed ref tip; only one contender can advance from a generation. The lease records `portfolio_id`, `plan_digest`, random holder ID, lease generation, expiry, and last checkpoint but no secrets. A live lease blocks; an expired lease may be advanced only after reconciling Project and issue markers. The holder must renew when less than one-third of the lease duration remains and re-read/revalidate holder ID, generation, and expiry immediately before every remote mutation; a stale generation is fenced and may perform read-only reconciliation only. The coordination ref is retained as an audit chain and never force-updated.
+Two hosts may not mutate one portfolio concurrently. Reuse the managed-Project product lock locally and add a repository-hosted optimistic lease at `refs/heads/autospec-state/portfolio/<portfolio_id>` in the source repository. Lease acquisition is a compare-and-swap fast-forward update over the observed ref tip; only one contender can advance from a generation. The lease records `portfolio_id`, `plan_digest`, random holder ID, lease generation, expiry, and last checkpoint but no secrets. A live lease blocks; an expired lease may be advanced only after reconciling Project and issue markers. The holder must renew when less than one-third of the lease duration remains and re-read/revalidate holder ID, generation, and expiry immediately before every remote mutation; a stale generation is fenced and may perform read-only reconciliation only. The coordination ref is retained as an audit chain and never force-updated. Preflight separately verifies source-repository ref read, create, and fast-forward update authority, including branch/ruleset denial; dry-run reports each capability as `verified`, `unavailable`, or `unknown` and never infers ref authority from issue or Project permission.
 
 The default Project owner is deterministically the source repository owner. Cross-repository target owners and the credential that first runs the command do not change it. Add `--project-owner <login>` to all decomposition entry points for an explicit organization or user owner. The resolved owner is frozen in the plan and coordination record; Autospec never falls back to a different owner after planning.
 
@@ -131,14 +135,14 @@ Writes are local-first, atomic, and idempotent. Each operation moves through `in
 
 Create a Projects v2 board titled `<spec title> — Autospec delivery`. The README includes the source spec link, portfolio ID, included repositories, current counts, blockers, and a bounded Mermaid dependency graph. Preserve human-authored text outside Autospec markers.
 
-Autospec extends the existing managed-Project field resolver and stores every managed field and option node ID in the binding. Autospec-created fields carry an ownership record in the recovery capsule. Duplicate names, an incompatible type, a missing managed option, or a human-owned same-name field are blocking; Autospec never deletes, renames, or silently repurposes operator fields.
+Autospec adds a typed field/view resolver to the merged managed-Project transport and stores every managed custom-field and option node ID in the binding. Autospec-created custom fields carry an ownership record in the recovery capsule. Duplicate custom names, an incompatible custom type, a missing managed option, or a human-owned same-name custom field are blocking; Autospec never deletes, renames, or silently repurposes operator fields. GitHub built-in fields are discovered and verified by system data type and are never treated as Autospec-owned custom fields.
 
 Autospec creates or verifies these fields by stable field name and data type:
 
 | Field | Type | Values or source |
 |---|---|---|
 | `Autospec delivery` | single select | Planned, Ready, Running, PR Open, Review, Verifying, Blocked, Failed, Unknown, Done |
-| `Repository` | text | canonical `owner/repo` |
+| `Repository` | built-in `REPOSITORY` | repository identity supplied by the Project item; verified, never created |
 | `Work kind` | single select | Umbrella, Implementation, Audit, Prerequisite |
 | `Source spec` | text | canonical spec path |
 | `Depends on` | text | comma-separated canonical issue URLs |
@@ -235,7 +239,7 @@ All issue-definition commands print the Project URL before issue URLs and includ
 
 ## Permissions and error handling
 
-Preflight verifies `gh auth status`, Projects v2 read/write scope, owner kind, owner-level Project access, private cross-owner issue visibility/item-add access, and issue creation in every target repository. The diagnostic names the missing scope or owner permission and exits before creating anything. Write capability is established from token scopes plus non-mutating owner/repository permission metadata where GitHub exposes it; uncertain field/view mutation capability is `unknown` until provisioning and therefore must have a resumable failure path.
+Preflight verifies `gh auth status`, Projects v2 read/write scope, owner kind, owner-level Project access, private cross-owner issue visibility/item-add access, issue creation in every target repository, and source-repository coordination-ref read/create/fast-forward authority. It detects branch/ruleset denial before mutation where metadata permits and otherwise reports ref mutation as `unknown` with a resumable provisioning probe. The diagnostic names the missing scope or owner permission and exits before creating anything. Write capability is established from token scopes plus non-mutating owner/repository permission metadata where GitHub exposes it; uncertain field/view or ref mutation capability is `unknown` until provisioning and therefore must have a resumable failure path.
 
 An explicit or inferred owner never falls back. A definitive policy denial produces a blocking diagnostic recommending an explicit `--project-owner`; transient errors, rate limits, ambiguous responses, and partial provisioning likewise never trigger creation under a second owner.
 
@@ -251,11 +255,16 @@ The Rust CLI owns portfolio identity, frozen-plan schemas, distributed lease, Gi
 
 The top-level request router owns only Autospec capability detection and typed handoff. When detection succeeds, no serverless code path may call a general implementation agent directly. All implementation-agent dispatch occurs behind Autospec's claim and orchestration boundaries. The router consumes machine-readable Autospec run identity and status; it must not scrape terminal prose or synthesize claims, branches, PR state, or Project state.
 
+This repository implements and versions the handoff producer/CLI plus a consumer conformance harness. The deployment-owned serverless consumer edit is a required blocking companion rollout outside this repository. Autospec records its conformance receipt as an external prerequisite in the portfolio; repository-local implementation may merge, but the feature remains Blocked until that receipt matches the deployed consumer revision.
+
 Expected implementation areas include:
 
 - a portfolio specialization of `crates/autospec-cli/src/commands/managed_project/` plus a `portfolio` CLI surface;
 - extensions to the existing Projects v2 `GithubTransport`, typed models, store, field resolver, and projection journal;
+- extensions to `managed_project/github.rs`, `managed_project/github/parse.rs`, and `managed_project/github/transport.rs` for the schema-compatible marker variant, built-in/custom field discovery, views, and lease transport;
 - Phase 3 and lifecycle integration in the lock-step `autospec`, `autospec-define`, and `autospec-split` skill trios;
+- pre-claim/admission integration in `autospec-run` and existing-spec integration in `autospec-explore` so neither route can bypass primary Project binding;
+- a versioned `autospec.implementation-handoff.v1` producer and conformance command for the deployment-owned serverless consumer;
 - validation for mandatory Project provisioning across every decomposition path;
 - focused Rust and Bats fixtures for retries, cross-repository graphs, and lock-step generation.
 
@@ -276,8 +285,11 @@ TDD must cover:
 9. Deterministic failpoints cover lost Project/issue create responses, two-host lease races, pagination, mid-field failure, item-add ambiguity, rate-limit replay, journal-tail recovery, and credential revocation.
 10. Real GitHub integration smoke tests are opt-in, declare fixture owners/repositories, create uniquely named disposable artifacts, and always reconcile then clean them up; default CI remains hermetic with recorded GraphQL protocol fixtures rather than mocked domain state.
 11. Permission tests cover missing `project` scope, explicit-owner denial, inferred-owner denial without fallback, private cross-owner visibility, inaccessible target repositories, rate limits, and mid-run credential revocation.
-12. Router tests prove an installed compatible Autospec always receives implementation intent, direct serverless implementation dispatch is unreachable in that state, interrupted runs route to recovery, and unavailable Autospec is the only degraded fallback.
+12. Router tests prove an installed compatible Autospec always receives implementation intent, direct serverless implementation dispatch is unreachable, interrupted runs route to recovery, and unavailable Autospec blocks every mutating implementation action with a typed reason.
 13. Scope-routing tests cover existing spec lineage, new spec-sized work, bounded onboarded-product work, bounded untracked-repository work, ambiguous candidates, and primary-plus-secondary Project projection.
+14. Lease preflight tests cover ref read/create/fast-forward permission, branch/ruleset denial, dry-run tri-state results, two-host races, and mid-run credential revocation.
+15. Marker tests cover legacy product migration, spec-portfolio adoption inside the existing block, duplicate/mixed markers, kind mismatch, and recovery without a second parser grammar.
+16. External-consumer conformance tests reject a receipt when installed-Autospec requests can still reach direct implementation dispatch, status/cancellation is untyped, or the deployed revision does not match the receipt.
 
 Required verification is `cargo test --workspace --no-fail-fast`, focused Bats suites, `autospec validate`, `cargo clippy --workspace --all-targets`, `bash -n` and ShellCheck for changed shell, skill trio/golden validation, `git diff --check`, and a no-mock cross-repository Projects v2 smoke run.
 
@@ -297,7 +309,8 @@ Required verification is `cargo test --workspace --no-fail-fast`, focused Bats s
 - When Autospec is installed and compatible, every implementation request has a typed Autospec run identity and no direct serverless implementation subagent is launched.
 - Autospec's internal implementer and reviewer workers remain supervised by the existing claim, worktree, validation, and reconciliation lifecycle.
 - Bounded work adopts or creates a managed product/repository Project; spec-sized work adopts or creates a per-spec portfolio; ambiguity blocks rather than guessing.
-- Direct serverless implementation is used only for a definitive Autospec-unavailable result and is visibly reported as degraded.
+- Autospec unavailability blocks mutating implementation; no serverless fallback may create a branch, push, open or merge a PR, or claim Autospec guarantees.
+- Repository-local completion remains Blocked until the deployment-owned serverless consumer publishes a matching `autospec.implementation-handoff.v1` conformance receipt proving direct dispatch is unreachable.
 
 ## Scope boundaries
 
