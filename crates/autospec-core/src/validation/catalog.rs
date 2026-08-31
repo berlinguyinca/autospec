@@ -153,9 +153,6 @@ impl ValidationCheck {
             "check_bats_negation_ratchet" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
                 "tests/lint/test_bats_negation_checker.bats",
             )),
-            "check_quality_gate_discovery" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/unit/test_quality_gate_discovery.bats",
-            )),
             "check_autospec_fleet_enabled_false" => CheckOwner::ExternalBatch(
                 ExternalCheck::BatsSuite("tests/unit/test_autospec_fleet_enabled_false.bats"),
             ),

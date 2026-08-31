@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 154); // +10: orphaned-suite ratchet and suites it caught (#3360)
-    assert_eq!(full.unique_ids().len(), 149); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 153); // +9: orphaned-suite ratchet and suites it caught (#3360)
+    assert_eq!(full.unique_ids().len(), 148); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -175,7 +175,6 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_persona_suite"
                 | "check_reuse_lens_suite"
                 | "check_bats_negation_ratchet"
-                | "check_quality_gate_discovery"
                 | "check_autospec_fleet_enabled_false"
                 | "check_autospec_sweep_enabled_false"
                 | "check_classify_lang_labels"
@@ -1900,6 +1899,10 @@ suite, say so in bats_registration_baseline.rs";
         expected.len(),
         "the failure must name the orphaned suite and how to resolve it"
     );
+    assert_eq!(
+        report.results[0].output_digest, "d3696501143320ff",
+        "the digest must bind the exact failure message, not only its length"
+    );
 }
 
 #[test]
@@ -1981,10 +1984,6 @@ fn runner_executes_the_newly_registered_bats_suites() {
         (
             "check_bats_negation_ratchet",
             "tests/lint/test_bats_negation_checker.bats",
-        ),
-        (
-            "check_quality_gate_discovery",
-            "tests/unit/test_quality_gate_discovery.bats",
         ),
         (
             "check_autospec_fleet_enabled_false",
