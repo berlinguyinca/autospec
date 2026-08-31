@@ -424,7 +424,7 @@ fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
         ClaimBranch::try_from("feat/requested").expect("requested branch"),
         LeaseFreshness::Fresh,
     ));
-    for state in ["released", "retryable"] {
+    for state in ["released", "retryable", "available"] {
         assert_eq!(
             lifecycle_evidence(&claim_record("worker-old", "claim-old", state))
                 .expect("reusable claim evidence"),

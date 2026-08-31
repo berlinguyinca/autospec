@@ -1001,7 +1001,10 @@ fn lifecycle_claim_evidence_from_record(
             LeaseFreshness::Fresh,
         )));
     }
-    if matches!(record.state.as_str(), "released" | "retryable") {
+    if matches!(
+        record.state.as_str(),
+        "released" | "retryable" | "available"
+    ) {
         return Ok(ClaimEvidence::Observed(ClaimContext::active(
             scope,
             issue,
