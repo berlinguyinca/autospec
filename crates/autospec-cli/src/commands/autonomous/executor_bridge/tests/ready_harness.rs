@@ -2,7 +2,7 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::support_base::{git_stdout, test_root, write_executable, GitFixture};
+use super::support_base::{git, git_stdout, test_root, write_executable, GitFixture};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, supervision_state,
 };
@@ -15,6 +15,171 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
+
+#[cfg(unix)]
+#[test]
+fn premerge_repair_updates_same_draft_with_descendant() {
+    // Break caught: repaired H1 was compared to the prelaunch empty PR inventory,
+    // so Rust rejected or duplicated the already-created draft at H0.
+    let mut prepared = prepared_draft_transaction("same-pr-premerge-repair");
+    assert_eq!(prepared.publish().expect("publish H0 draft"), 17);
+    let h0 = prepared.proof.head_oid.clone();
+    let lane = bridge::PremergeLaneIdentity::new(
+        prepared.state.identity.repository.clone(),
+        prepared.state.identity.issue,
+        prepared.state.identity.worker_id.clone(),
+        prepared.state.identity.claim_id.clone(),
+        prepared.state.identity.branch.clone(),
+        h0.clone(),
+    )
+    .expect("failed H0 lane");
+    let failure_root = prepared
+        .state
+        .identity
+        .worktree
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest())
+        .join("attempts/test/qa/smoke");
+    let failure_plan = bridge::DirectCommandPlan {
+        commands: vec![bridge::DirectCommand::success(vec![
+            "/usr/bin/false".to_string()
+        ])],
+    };
+    let failure = bridge::execute_premerge_qa_plan(
+        &prepared.state.identity.worktree,
+        &failure_plan,
+        &failure_root,
+        None,
+        Duration::from_secs(5),
+    )
+    .expect_err("H0 QA failure");
+    let observation = failure
+        .premerge_command_failure()
+        .expect("typed H0 failure")
+        .clone();
+    bridge::prepare_premerge_command_repair(
+        &prepared.state_path,
+        &mut prepared.state,
+        &prepared.proof,
+        &observation,
+    )
+    .expect("prepare H0 repair");
+
+    let protected = bridge::MutationSnapshot::capture(
+        &prepared.state.identity.repository_path,
+        &prepared.state.identity.branch,
+    )
+    .expect("protected snapshot");
+    fs::write(
+        prepared.state.identity.worktree.join("implementation.txt"),
+        "repaired implementation\n",
+    )
+    .expect("repair implementation");
+    fs::write(
+        prepared
+            .state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md"),
+        &prepared.proof.closeout_body,
+    )
+    .expect("replace repair closeout");
+    git(
+        &prepared.state.identity.worktree,
+        &["add", "implementation.txt"],
+    );
+    git(
+        &prepared.state.identity.worktree,
+        &["commit", "-m", "fix: repair premerge command"],
+    );
+    prepared.state.phase = bridge::BridgePhase::ImplementationComplete;
+    bridge::write_invocation_atomic(&prepared.state_path, &prepared.state)
+        .expect("persist repaired completion");
+    let closeout = prepared
+        .state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    let h1_proof = bridge::prove_implementation(
+        &prepared.state_path,
+        &mut prepared.state,
+        &protected,
+        &closeout,
+    )
+    .expect("prove repaired H1");
+    assert_ne!(h1_proof.head_oid, h0);
+    let body = bridge::canonical_pull_request_body(&prepared.state, &h1_proof.closeout_body)
+        .expect("canonical repaired PR body");
+    let updated = prepared.fixture.root.join("updated-pull-request.json");
+    fs::write(
+        &updated,
+        format!(
+            "[{{\"number\":17,\"body\":{},\"headRefName\":\"{}\",\"headRefOid\":\"{}\",\"isDraft\":true,\"baseRefName\":\"main\"}}]",
+            serde_json::to_string(&body).expect("encode repaired body"),
+            prepared.state.identity.branch,
+            h1_proof.head_oid,
+        ),
+    )
+    .expect("updated PR fixture");
+    prepared
+        .adapter
+        .environment
+        .insert("GH_UPDATED_PR".into(), updated.into_os_string());
+
+    assert_eq!(
+        bridge::push_and_create_draft(
+            &prepared.state_path,
+            &mut prepared.state,
+            &h1_proof,
+            "Implement issue",
+            super::support_launch::DRAFT_ISSUE_BODY,
+            &prepared.adapter,
+        )
+        .expect("resume same-PR update after descendant push"),
+        17,
+    );
+    assert_eq!(prepared.state.phase, bridge::BridgePhase::DraftCreated);
+    assert_eq!(prepared.state.pr, Some(17));
+    assert_eq!(
+        prepared.state.head_oid.as_deref(),
+        Some(h1_proof.head_oid.as_str())
+    );
+    let ancestor = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &h0, &h1_proof.head_oid])
+        .current_dir(&prepared.state.identity.worktree)
+        .status()
+        .expect("verify repaired ancestry");
+    assert!(ancestor.success());
+    assert_eq!(
+        git_stdout(
+            &prepared.state.identity.worktree,
+            &[
+                "ls-remote",
+                "origin",
+                &format!("refs/heads/{}", prepared.state.identity.branch),
+            ]
+        )
+        .split_whitespace()
+        .next(),
+        Some(h1_proof.head_oid.as_str())
+    );
+    let calls =
+        fs::read_to_string(adapter_path(&prepared.adapter, "GH_CALLS")).expect("GH call log");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.starts_with("pr create "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.starts_with("pr edit 17 "))
+            .count(),
+        1
+    );
+}
 
 #[test]
 fn autonomous_executor_bridge_primary_smoke_is_additional_to_full_suite() {
