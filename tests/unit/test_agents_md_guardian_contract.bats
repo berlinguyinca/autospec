@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
+
 # tests/unit/test_agents_md_guardian_contract.bats — grep assertions verifying
 # that AGENTS.md contains the ## Implementation-quality contract section, all
 # 10 RULE_IDs, the directive map, the opt-out grammar regex, and the
@@ -75,7 +77,8 @@ setup() {
     for contract in "$AGENTS_MD" "$GUARDIAN_DESIGN"; do
         grep -q 'exact files or descendants of trailing-slash directories' "$contract"
         grep -q '## Files touched' "$contract"
-        ! grep -q 'Revert other changes or amend the issue body' "$contract"
+        run ! grep -q 'Revert other changes or amend the issue body' "$contract"
+        [ "$status" -ne 0 ]
     done
 }
 
