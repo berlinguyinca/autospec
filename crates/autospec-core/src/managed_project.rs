@@ -307,15 +307,89 @@ impl From<PortfolioId> for String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub struct SpecPortfolioIdentity {
+    portfolio_id: PortfolioId,
+    source: SourceSpecIdentity,
+}
+
+impl SpecPortfolioIdentity {
+    pub fn new(source: SourceSpecIdentity) -> Self {
+        Self {
+            portfolio_id: source.portfolio_id(),
+            source,
+        }
+    }
+
+    pub fn portfolio_id(&self) -> &PortfolioId {
+        &self.portfolio_id
+    }
+
+    pub fn source(&self) -> &SourceSpecIdentity {
+        &self.source
+    }
+
+    fn from_parts(portfolio_id: PortfolioId, source: SourceSpecIdentity) -> Result<Self, String> {
+        if source.portfolio_id() != portfolio_id {
+            return Err("spec portfolio id does not match its source identity".to_string());
+        }
+        Ok(Self {
+            portfolio_id,
+            source,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpecPortfolioIdentityWire {
+    portfolio_id: PortfolioId,
+    source: SourceSpecIdentity,
+}
+
+impl<'de> Deserialize<'de> for SpecPortfolioIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SpecPortfolioIdentityWire::deserialize(deserializer)?;
+        Self::from_parts(wire.portfolio_id, wire.source).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ManagedProjectIdentity {
+    Product { product_key: ProductKey },
+    SpecPortfolio(SpecPortfolioIdentity),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ManagedProjectIdentityRef<'a> {
     Product {
-        product_key: ProductKey,
+        product_key: &'a ProductKey,
     },
     SpecPortfolio {
-        portfolio_id: PortfolioId,
-        source: SourceSpecIdentity,
+        portfolio_id: &'a PortfolioId,
+        source: &'a SourceSpecIdentity,
     },
+}
+
+impl Serialize for ManagedProjectIdentity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Product { product_key } => {
+                ManagedProjectIdentityRef::Product { product_key }.serialize(serializer)
+            }
+            Self::SpecPortfolio(identity) => ManagedProjectIdentityRef::SpecPortfolio {
+                portfolio_id: identity.portfolio_id(),
+                source: identity.source(),
+            }
+            .serialize(serializer),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -342,13 +416,9 @@ impl<'de> Deserialize<'de> for ManagedProjectIdentity {
             ManagedProjectIdentityWire::SpecPortfolio {
                 portfolio_id,
                 source,
-            } if source.portfolio_id() == portfolio_id => Ok(Self::SpecPortfolio {
-                portfolio_id,
-                source,
-            }),
-            ManagedProjectIdentityWire::SpecPortfolio { .. } => Err(serde::de::Error::custom(
-                "spec portfolio id does not match its source identity",
-            )),
+            } => SpecPortfolioIdentity::from_parts(portfolio_id, source)
+                .map(Self::SpecPortfolio)
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -357,18 +427,16 @@ impl ManagedProjectIdentity {
     pub fn namespace(&self) -> ManagedProjectNamespace {
         match self {
             Self::Product { product_key } => ManagedProjectNamespace::Product(product_key.clone()),
-            Self::SpecPortfolio { portfolio_id, .. } => {
-                ManagedProjectNamespace::Portfolio(portfolio_id.clone())
+            Self::SpecPortfolio(identity) => {
+                ManagedProjectNamespace::Portfolio(identity.portfolio_id().clone())
             }
         }
     }
 
-    fn compatibility_product_key(&self) -> ProductKey {
+    fn compatibility_product_key(&self) -> Option<ProductKey> {
         match self {
-            Self::Product { product_key } => product_key.clone(),
-            Self::SpecPortfolio { portfolio_id, .. } => {
-                ProductKey::new(portfolio_id.as_str()).expect("portfolio digest is a product key")
-            }
+            Self::Product { product_key } => Some(product_key.clone()),
+            Self::SpecPortfolio(_) => None,
         }
     }
 }
@@ -586,7 +654,7 @@ fn normalize_identity(value: &str) -> String {
 pub struct ManagedProjectBinding {
     pub schema_version: u32,
     identity: ManagedProjectIdentity,
-    compatibility: ManagedProjectProductCompatibility,
+    compatibility: Option<ManagedProjectProductCompatibility>,
     pub owner: Option<String>,
     pub project_node_id: Option<String>,
     pub project_number: Option<u64>,
@@ -608,7 +676,11 @@ impl Deref for ManagedProjectBinding {
     type Target = ManagedProjectProductCompatibility;
 
     fn deref(&self) -> &Self::Target {
-        &self.compatibility
+        // Directive: remove this product-only bridge after managed-project store callers
+        // consume ManagedProjectIdentity directly. Portfolio bindings intentionally fail closed.
+        self.compatibility
+            .as_ref()
+            .expect("spec portfolio bindings do not expose product compatibility")
     }
 }
 
@@ -621,18 +693,9 @@ impl ManagedProjectBinding {
     }
 
     pub fn new_identity(identity: ManagedProjectIdentity) -> Result<Self, String> {
-        if let ManagedProjectIdentity::SpecPortfolio {
-            portfolio_id,
-            source,
-        } = &identity
-        {
-            if source.portfolio_id() != *portfolio_id {
-                return Err("spec portfolio id does not match its source identity".to_string());
-            }
-        }
-        let compatibility = ManagedProjectProductCompatibility {
-            product_key: identity.compatibility_product_key(),
-        };
+        let compatibility = identity
+            .compatibility_product_key()
+            .map(|product_key| ManagedProjectProductCompatibility { product_key });
         Ok(Self {
             schema_version: Self::SCHEMA_VERSION,
             identity,
