@@ -416,7 +416,7 @@ fn concurrent_session_binding_publishers_cannot_overwrite_the_winner() {
 }
 
 #[test]
-fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
+fn lifecycle_claim_evidence_state_matrix_reuses_only_valid_available_generations() {
     let requested = ClaimEvidence::Observed(ClaimContext::active(
         RepositoryScope::try_from("owner/repo").expect("repository scope"),
         IssueNumber::new(42).expect("issue"),
