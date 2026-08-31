@@ -1,8 +1,8 @@
-# Automatic GitHub Projects for Spec Decomposition
+# Automatic GitHub Projects and Autospec-Only Implementation Routing
 
 ## Goal
 
-Every Autospec issue-decomposition run must create or adopt exactly one GitHub Project that shows the complete cross-repository delivery state of the source spec before any child issue is filed.
+Every implementation request must run through Autospec when Autospec is installed and must create or adopt exactly one primary GitHub Project, selected deterministically from the request's scope, before implementation work is admitted.
 
 ## Team personality
 
@@ -20,9 +20,44 @@ Phase 3 currently creates a repository-local umbrella and children, then Phase 3
 
 The desired invariant is stronger: a decomposition is not complete until one spec Project exists, every generated tracker and child is present, dependencies and repository identity are visible, and status reflects authoritative issue/PR lifecycle facts.
 
+A second split control plane currently remains possible outside Autospec: a serverless request handler can dispatch a general implementation subagent directly. That path bypasses Autospec's typed issue admission, claims, worktree isolation, runtime environment, review/QA loop, recovery, merge authority, and Project reconciliation. When Autospec is installed, direct top-level implementation dispatch is therefore an invalid execution path. Autospec may still dispatch its own supervised research, implementation, review, and verification workers inside the workflow; the invariant removes competing orchestration, not Autospec's internal agents.
+
+## Top-level implementation gateway
+
+The request entry point performs a side-effect-free capability probe before choosing any implementation path. Autospec is available only when both the `autospec` CLI and the installed Autospec workflow surface required for the request are resolvable. A partially installed or incompatible Autospec reports a typed unavailable reason; it is not treated as a usable installation.
+
+When Autospec is available, the entry point submits intent to Autospec and never invokes a serverless implementation subagent directly:
+
+| Request state | Required Autospec entry point |
+|---|---|
+| classified implementation issues already exist | `autospec-run` |
+| a new implementation request has no issue/spec artifacts | end-to-end `autospec` |
+| a tracked design spec exists but has no issues | `autospec-split`, followed by `autospec-run` |
+| an interrupted typed run exists | Autospec resume/session recovery |
+| read-only explanation or planning only | no implementation dispatch |
+
+The serverless layer owns intent submission, typed status streaming, cancellation forwarding, and presentation only. Autospec owns decomposition, Project selection, issue admission, distributed claims, worktrees, runtime isolation, implementer/reviewer dispatch, validation, merging, recovery, and reconciliation. Serverless must not recreate those responsibilities or interpret prose output as execution state.
+
+The existing direct serverless subagent path remains available only as an explicit degraded fallback when Autospec is not installed or its compatibility probe definitively returns unavailable. The fallback result is labeled `degraded`, records the unavailable reason, and never claims Autospec guarantees. Transient probe errors, ambiguous installation state, or a live/interrupted Autospec run fail closed into Autospec recovery guidance rather than falling back.
+
+## Scope-aware primary Project selection
+
+Every implementation belongs to one primary managed Project. Selection is deterministic and frozen before issue creation:
+
+| Scope | Primary Project behavior |
+|---|---|
+| request belongs to an existing immutable spec lineage | adopt that spec portfolio |
+| new multi-issue, cross-repository, or spec-sized request | create one per-spec portfolio before filing issues |
+| bounded work in an onboarded managed product | add it to that product's existing managed Project |
+| bounded work in a repository with no managed Project | create the repository/product Project, then add the work |
+
+An explicit Project identity supplied by a trusted Autospec artifact wins only when its marker, owner, and repository/product/spec identity verify. Scope classification is typed and auditable; serverless does not choose a board from request wording. An ambiguous match, multiple valid primary candidates, inaccessible Project, or missing write capability blocks admission and returns a resumable diagnostic.
+
+The primary Project decision does not prohibit secondary projections. `project-map.yml` and other configured boards may receive the issue after the primary binding is acknowledged, but they never replace or suppress it. A work item may appear on multiple GitHub Projects while retaining exactly one Autospec primary binding.
+
 ## Architecture
 
-Add a required **spec portfolio** transaction around Phase 3 in the canonical decomposition surfaces: `autospec`, `autospec-define`, `autospec-split`, and the internal existing-spec path used by `autospec-explore`. Other issue-filing helpers do not create spec portfolios unless they explicitly invoke that transaction.
+Add a required **primary Project** transaction around the canonical implementation and decomposition surfaces. `autospec`, `autospec-define`, `autospec-split`, and the internal existing-spec path used by `autospec-explore` use a spec portfolio for spec-sized work. Bounded implementation entry points resolve or create the managed product/repository Project. Other issue-filing helpers do not become implementation gateways unless they explicitly invoke the typed transaction.
 
 1. Run a pure planning pass that performs no GitHub mutation. It emits schema `autospec.portfolio-plan.v1` with stable logical `item_key` values, target repositories, repository-local parentage, cross-repository edges, and the Phase 5.5 audit item.
 2. Canonicalize, lint, and freeze the plan. `plan_digest = sha256(canonical_plan)`; any subsequent shape change requires a new plan revision before mutation resumes.
@@ -143,7 +178,7 @@ Phase 3 may report success only when every planned key is bound exactly once, ev
 
 Cross-repository edges are authoritative queue prerequisites, not display-only links. The typed portfolio graph is consulted before claim and during monitor sweeps. A child becomes Ready only when every hard predecessor is terminal-success according to its repository's issue/PR state; unavailable or contradictory predecessor state fails closed as Blocked. Repository-local issue bodies retain `Depends on issue #N`; cross-repository dependencies use `Depends on <canonical-issue-url>`, and the parser, queue admission, and monitor must accept both forms. This expands queue gating but does not change merge authority after a child is admitted.
 
-The automatic spec Project composes with, rather than replaces, the existing product-level managed Project. Provisioning order is: required spec portfolio, existing `project-sync-issue.sh` product Project, then optional `project-map.yml` boards. The first is blocking before issue filing; the latter two retain their existing journaled-pending and optional semantics. All three reuse `GithubTransport`, URL normalization, marker verification, field resolution, journal, and lock primitives from `managed_project`.
+The automatic spec Project composes with, rather than replaces, the existing product-level managed Project. For spec-sized work, provisioning order is: required spec portfolio, existing `project-sync-issue.sh` product Project, then optional `project-map.yml` boards. For bounded work, the product/repository Project is primary and optional boards follow it. The primary binding is always blocking before issue filing; secondary projections retain their existing journaled-pending and optional semantics. All projections reuse `GithubTransport`, URL normalization, marker verification, field resolution, journal, and lock primitives from `managed_project`.
 
 ## Status reconciliation and completion
 
@@ -214,6 +249,8 @@ No token, GraphQL payload, absolute local path, prompt, or raw command output en
 
 The Rust CLI owns portfolio identity, frozen-plan schemas, distributed lease, GitHub GraphQL transport, idempotency, status derivation, and reconciliation. Skill prompts own when the typed commands run and how decomposition populates the plan. `--project-owner` is passed unchanged from each skill entry point into the typed provision command. Shell may invoke the Rust interface but must not implement Projects v2 lifecycle logic itself.
 
+The top-level request router owns only Autospec capability detection and typed handoff. When detection succeeds, no serverless code path may call a general implementation agent directly. All implementation-agent dispatch occurs behind Autospec's claim and orchestration boundaries. The router consumes machine-readable Autospec run identity and status; it must not scrape terminal prose or synthesize claims, branches, PR state, or Project state.
+
 Expected implementation areas include:
 
 - a portfolio specialization of `crates/autospec-cli/src/commands/managed_project/` plus a `portfolio` CLI surface;
@@ -239,6 +276,8 @@ TDD must cover:
 9. Deterministic failpoints cover lost Project/issue create responses, two-host lease races, pagination, mid-field failure, item-add ambiguity, rate-limit replay, journal-tail recovery, and credential revocation.
 10. Real GitHub integration smoke tests are opt-in, declare fixture owners/repositories, create uniquely named disposable artifacts, and always reconcile then clean them up; default CI remains hermetic with recorded GraphQL protocol fixtures rather than mocked domain state.
 11. Permission tests cover missing `project` scope, explicit-owner denial, inferred-owner denial without fallback, private cross-owner visibility, inaccessible target repositories, rate limits, and mid-run credential revocation.
+12. Router tests prove an installed compatible Autospec always receives implementation intent, direct serverless implementation dispatch is unreachable in that state, interrupted runs route to recovery, and unavailable Autospec is the only degraded fallback.
+13. Scope-routing tests cover existing spec lineage, new spec-sized work, bounded onboarded-product work, bounded untracked-repository work, ambiguous candidates, and primary-plus-secondary Project projection.
 
 Required verification is `cargo test --workspace --no-fail-fast`, focused Bats suites, `autospec validate`, `cargo clippy --workspace --all-targets`, `bash -n` and ShellCheck for changed shell, skill trio/golden validation, `git diff --check`, and a no-mock cross-repository Projects v2 smoke run.
 
@@ -255,7 +294,11 @@ Required verification is `cargo test --workspace --no-fail-fast`, focused Bats s
 - `project-map.yml` may add secondary boards but cannot suppress the mandatory per-spec Project.
 - Cross-repository dependency edges survive in the typed portfolio manifest even when GitHub lacks a native relationship.
 - Existing specs, issue safety admission, parent reconciliation, auto-merge authority, and autonomous accountability remain compatible; queue admission additionally enforces typed cross-repository prerequisites.
+- When Autospec is installed and compatible, every implementation request has a typed Autospec run identity and no direct serverless implementation subagent is launched.
+- Autospec's internal implementer and reviewer workers remain supervised by the existing claim, worktree, validation, and reconciliation lifecycle.
+- Bounded work adopts or creates a managed product/repository Project; spec-sized work adopts or creates a per-spec portfolio; ambiguity blocks rather than guessing.
+- Direct serverless implementation is used only for a definitive Autospec-unavailable result and is visibly reported as degraded.
 
 ## Scope boundaries
 
-This feature does not replace GitHub Projects, make Project fields authoritative for execution, migrate unrelated existing issues, delete or archive completed Projects, infer arbitrary cross-repository scope from repository search alone, or create one permanent global board for all Autospec work. The typed portfolio graph, not the visual board fields, is authoritative only for prerequisites among issues Autospec generated from the same spec. The feature creates one durable delivery portfolio per immutable source-spec version and keeps it synchronized with that work.
+This feature does not replace GitHub Projects, make Project fields authoritative for execution, migrate unrelated existing issues, delete or archive completed Projects, infer arbitrary cross-repository scope from repository search alone, or create one permanent global board for all Autospec work. It does not remove Autospec's internal subagents; it removes direct top-level implementation dispatch that bypasses Autospec when Autospec is available. The typed portfolio graph, not the visual board fields, is authoritative only for prerequisites among issues Autospec generated from the same spec. The feature creates one durable delivery portfolio per immutable source-spec version, uses a managed product/repository Project for bounded work, and keeps the selected primary Project synchronized with that work.
