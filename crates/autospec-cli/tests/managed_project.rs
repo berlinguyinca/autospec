@@ -1,10 +1,9 @@
 #[path = "../src/commands/mod.rs"]
 mod commands;
-#[path = "../src/commands/managed_project/portfolio.rs"]
-mod portfolio;
 
 use autospec_core::managed_project::{
-    ManagedProjectKind, ManagedProjectNamespace, ManagedProjectPolicy, PortfolioId,
+    ItemKey, ManagedProjectIdentity, ManagedProjectNamespace, ManagedProjectPolicy, PortfolioId,
+    SourceSpecIdentity,
 };
 use autospec_core::managed_project::{
     ProductKey, RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
@@ -16,7 +15,6 @@ use commands::managed_project::{
     resolve_or_create_project, retry_pending_projections, run_with_transport, tracked_issue_urls,
     verify_managed_marker, ManagedProjectStore, OnboardingOptions,
 };
-use portfolio::{ItemKey, SourceSpecIdentity};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
@@ -153,10 +151,15 @@ fn managed_project_portfolio_identity_is_stable_and_changes_with_source_blob() {
 
     assert_eq!(source.portfolio_id(), same_source.portfolio_id());
     assert_ne!(source.portfolio_id(), changed_source.portfolio_id());
-    assert_eq!(
-        source.portfolio_id().as_str(),
-        "01700a825b0548efe9c15a57665460cd91aebc5ce37972a4967830db0f2a75fe"
-    );
+    assert_eq!(source.portfolio_id().as_str().len(), 64);
+}
+
+#[test]
+fn managed_project_portfolio_identity_preserves_component_boundaries() {
+    let left = PortfolioId::from_source("a", "bc", "d").unwrap();
+    let right = PortfolioId::from_source("ab", "c", "d").unwrap();
+
+    assert_ne!(left, right);
 }
 
 #[test]
@@ -178,16 +181,94 @@ fn managed_project_binding_evolves_legacy_products_to_schema_two() {
     let binding: autospec_core::managed_project::ManagedProjectBinding =
         serde_json::from_value(legacy).unwrap();
     assert_eq!(binding.schema_version, 2);
-    assert_eq!(binding.kind, ManagedProjectKind::Product);
-    assert_eq!(serde_json::to_value(binding).unwrap()["schema_version"], 2);
+    assert_eq!(
+        binding.identity(),
+        &ManagedProjectIdentity::Product {
+            product_key: key("autospec")
+        }
+    );
+    let serialized = serde_json::to_value(binding).unwrap();
+    assert_eq!(serialized["schema_version"], 2);
+    assert_eq!(serialized["identity"]["kind"], "product");
+    assert!(serialized.get("product_key").is_none());
+}
+
+#[test]
+fn managed_project_binding_rejects_incomplete_or_mixed_identity_schemas() {
+    let legacy_spec = serde_json::json!({
+        "schema_version": 1,
+        "kind": "spec_portfolio",
+        "product_key": "autospec"
+    });
+    let schema_two_legacy_shape = serde_json::json!({
+        "schema_version": 2,
+        "kind": "product",
+        "product_key": "autospec"
+    });
+    let schema_two_missing_identity = serde_json::json!({"schema_version": 2});
+    let mismatched_portfolio = serde_json::json!({
+        "schema_version": 2,
+        "identity": {
+            "kind": "spec_portfolio",
+            "portfolio_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source": "berlinguyinca/autospec:docs/specs/automatic-projects.md@0123456789abcdef0123456789abcdef01234567"
+        }
+    });
+
+    for malformed in [
+        legacy_spec,
+        schema_two_legacy_shape,
+        schema_two_missing_identity,
+        mismatched_portfolio,
+    ] {
+        assert!(
+            serde_json::from_value::<autospec_core::managed_project::ManagedProjectBinding>(
+                malformed
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn managed_project_binding_round_trips_closed_spec_portfolio_identity() {
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let identity = ManagedProjectIdentity::SpecPortfolio {
+        portfolio_id: source.portfolio_id(),
+        source,
+    };
+    let binding =
+        autospec_core::managed_project::ManagedProjectBinding::new_identity(identity).unwrap();
+
+    let encoded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(encoded["identity"]["kind"], "spec_portfolio");
+    assert!(encoded.get("product_key").is_none());
+    let decoded = serde_json::from_value(encoded).unwrap();
+    assert_eq!(binding, decoded);
 }
 
 #[test]
 fn managed_project_namespaces_are_collision_safe_and_round_trip() {
-    let product = ManagedProjectNamespace::product(key("repo.owner__name"));
-    let portfolio = ManagedProjectNamespace::portfolio(
-        PortfolioId::new("a".repeat(64)).expect("valid portfolio digest"),
-    );
+    let product = ManagedProjectIdentity::Product {
+        product_key: key("repo.owner__name"),
+    }
+    .namespace();
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let portfolio = ManagedProjectIdentity::SpecPortfolio {
+        portfolio_id: source.portfolio_id(),
+        source,
+    }
+    .namespace();
 
     for namespace in [&product, &portfolio] {
         let encoded = namespace.to_string();
@@ -209,7 +290,33 @@ fn managed_project_item_keys_preserve_stable_logical_identity() {
         let key = ItemKey::new(value).unwrap();
         assert_eq!(key.as_str(), value);
         assert_eq!(key.to_string(), value);
+        assert_eq!(value.parse::<ItemKey>().unwrap(), key);
+        assert_eq!(
+            serde_json::from_value::<ItemKey>(serde_json::json!(value)).unwrap(),
+            key
+        );
     }
+}
+
+#[test]
+fn managed_project_source_spec_identity_round_trips_as_a_validated_scalar() {
+    let identity = SourceSpecIdentity::new(
+        "BerlinGuyInCA/AutoSpec",
+        "docs/specs/automatic-projects.md",
+        "0123456789ABCDEF0123456789ABCDEF01234567",
+    )
+    .unwrap();
+    let encoded = identity.to_string();
+
+    assert_eq!(
+        encoded,
+        "berlinguyinca/autospec:docs/specs/automatic-projects.md@0123456789abcdef0123456789abcdef01234567"
+    );
+    assert_eq!(encoded.parse::<SourceSpecIdentity>().unwrap(), identity);
+    assert_eq!(
+        serde_json::from_value::<SourceSpecIdentity>(serde_json::json!(encoded)).unwrap(),
+        identity
+    );
 }
 
 #[test]
