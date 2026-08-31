@@ -75,7 +75,8 @@ setup() {
     for contract in "$AGENTS_MD" "$GUARDIAN_DESIGN"; do
         grep -q 'exact files or descendants of trailing-slash directories' "$contract"
         grep -q '## Files touched' "$contract"
-        ! grep -q 'Revert other changes or amend the issue body' "$contract"
+        run ! grep -q 'Revert other changes or amend the issue body' "$contract"
+        [ "$status" -ne 0 ]
     done
 }
 
