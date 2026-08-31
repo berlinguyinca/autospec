@@ -1,7 +1,11 @@
 #[path = "../src/commands/mod.rs"]
 mod commands;
+#[path = "../src/commands/managed_project/portfolio.rs"]
+mod portfolio;
 
-use autospec_core::managed_project::ManagedProjectPolicy;
+use autospec_core::managed_project::{
+    ManagedProjectKind, ManagedProjectNamespace, ManagedProjectPolicy, PortfolioId,
+};
 use autospec_core::managed_project::{
     ProductKey, RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
     RepositoryRecord,
@@ -12,6 +16,7 @@ use commands::managed_project::{
     resolve_or_create_project, retry_pending_projections, run_with_transport, tracked_issue_urls,
     verify_managed_marker, ManagedProjectStore, OnboardingOptions,
 };
+use portfolio::{ItemKey, SourceSpecIdentity};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
@@ -123,6 +128,106 @@ fn marker(owner: &str) -> String {
     format!(
         "<!-- autospec-managed-project:begin -->\nschema: 1\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
     )
+}
+
+#[test]
+fn managed_project_portfolio_identity_is_stable_and_changes_with_source_blob() {
+    let source = SourceSpecIdentity::new(
+        "BerlinGuyInCA/AutoSpec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let same_source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let changed_source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "1123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+
+    assert_eq!(source.portfolio_id(), same_source.portfolio_id());
+    assert_ne!(source.portfolio_id(), changed_source.portfolio_id());
+    assert_eq!(
+        source.portfolio_id().as_str(),
+        "01700a825b0548efe9c15a57665460cd91aebc5ce37972a4967830db0f2a75fe"
+    );
+}
+
+#[test]
+fn managed_project_binding_evolves_legacy_products_to_schema_two() {
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "product_key": "autospec",
+        "owner": "berlinguyinca",
+        "project_node_id": null,
+        "project_number": null,
+        "project_url": null,
+        "project_title": null,
+        "repositories": [],
+        "last_reconciled_at": null,
+        "pending_projections": [],
+        "relationships": []
+    });
+
+    let binding: autospec_core::managed_project::ManagedProjectBinding =
+        serde_json::from_value(legacy).unwrap();
+    assert_eq!(binding.schema_version, 2);
+    assert_eq!(binding.kind, ManagedProjectKind::Product);
+    assert_eq!(serde_json::to_value(binding).unwrap()["schema_version"], 2);
+}
+
+#[test]
+fn managed_project_namespaces_are_collision_safe_and_round_trip() {
+    let product = ManagedProjectNamespace::product(key("repo.owner__name"));
+    let portfolio = ManagedProjectNamespace::portfolio(
+        PortfolioId::new("a".repeat(64)).expect("valid portfolio digest"),
+    );
+
+    for namespace in [&product, &portfolio] {
+        let encoded = namespace.to_string();
+        let decoded: ManagedProjectNamespace = encoded.parse().unwrap();
+        assert_eq!(&decoded, namespace);
+        assert_eq!(decoded.to_string(), encoded);
+    }
+    assert_ne!(product.to_string(), portfolio.to_string());
+}
+
+#[test]
+fn managed_project_item_keys_preserve_stable_logical_identity() {
+    for value in [
+        "source-tracker",
+        "repo:berlinguyinca/autospec:tracker",
+        "issue:portfolio-identity",
+        "audit:phase-5.5",
+    ] {
+        let key = ItemKey::new(value).unwrap();
+        assert_eq!(key.as_str(), value);
+        assert_eq!(key.to_string(), value);
+    }
+}
+
+#[test]
+fn managed_project_identity_types_reject_unsafe_keys() {
+    for unsafe_namespace in [
+        "product.../autospec",
+        "portfolio.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\",
+        "C:portfolio.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(unsafe_namespace.parse::<ManagedProjectNamespace>().is_err());
+    }
+    for unsafe_item_key in [
+        "../source-tracker",
+        "repo:owner\\repo:tracker",
+        "issue:nul\0key",
+    ] {
+        assert!(ItemKey::new(unsafe_item_key).is_err());
+    }
 }
 
 fn initialize_repository(path: &Path, remote: &str) {

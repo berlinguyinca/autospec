@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize};
+use crate::autonomous::waterfall::sha256_hex;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, str::FromStr};
 
-pub const BINDING_SCHEMA_VERSION: u32 = 1;
+pub const BINDING_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -9,6 +10,14 @@ pub enum ProjectMode {
     Managed,
     #[default]
     External,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedProjectKind {
+    #[default]
+    Product,
+    SpecPortfolio,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,6 +87,130 @@ impl TryFrom<String> for ProductKey {
 impl From<ProductKey> for String {
     fn from(value: ProductKey) -> Self {
         value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PortfolioId(String);
+
+impl PortfolioId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err("portfolio id must be a lowercase SHA-256 digest".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn from_source(
+        canonical_source_repo: &str,
+        source_spec_path: &str,
+        source_spec_blob_oid: &str,
+    ) -> Result<Self, String> {
+        if canonical_source_repo.is_empty()
+            || source_spec_path.is_empty()
+            || source_spec_blob_oid.is_empty()
+        {
+            return Err("portfolio source identity components must not be empty".to_string());
+        }
+        let identity = format!("{canonical_source_repo}{source_spec_path}{source_spec_blob_oid}");
+        Self::new(sha256_hex(identity.as_bytes()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PortfolioId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PortfolioId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for PortfolioId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<PortfolioId> for String {
+    fn from(value: PortfolioId) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ManagedProjectNamespace {
+    Product(ProductKey),
+    Portfolio(PortfolioId),
+}
+
+impl ManagedProjectNamespace {
+    pub fn product(product_key: ProductKey) -> Self {
+        Self::Product(product_key)
+    }
+
+    pub fn portfolio(portfolio_id: PortfolioId) -> Self {
+        Self::Portfolio(portfolio_id)
+    }
+}
+
+impl fmt::Display for ManagedProjectNamespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Product(product_key) => write!(formatter, "product.{product_key}"),
+            Self::Portfolio(portfolio_id) => write!(formatter, "portfolio.{portfolio_id}"),
+        }
+    }
+}
+
+impl FromStr for ManagedProjectNamespace {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(product_key) = value.strip_prefix("product.") {
+            return ProductKey::new(product_key).map(Self::Product);
+        }
+        if let Some(portfolio_id) = value.strip_prefix("portfolio.") {
+            return PortfolioId::new(portfolio_id).map(Self::Portfolio);
+        }
+        Err("managed project namespace must start with 'product.' or 'portfolio.'".to_string())
+    }
+}
+
+impl Serialize for ManagedProjectNamespace {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ManagedProjectNamespace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -177,7 +310,10 @@ fn normalize_identity(value: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedProjectBinding {
+    #[serde(deserialize_with = "deserialize_binding_schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
+    pub kind: ManagedProjectKind,
     pub product_key: ProductKey,
     pub owner: Option<String>,
     pub project_node_id: Option<String>,
@@ -196,6 +332,7 @@ impl ManagedProjectBinding {
     pub fn new(product_key: ProductKey) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
+            kind: ManagedProjectKind::Product,
             product_key,
             owner: None,
             project_node_id: None,
@@ -207,6 +344,16 @@ impl ManagedProjectBinding {
             pending_projections: Vec::new(),
             relationships: Vec::new(),
         }
+    }
+}
+
+fn deserialize_binding_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match u32::deserialize(deserializer)? {
+        1 => Ok(BINDING_SCHEMA_VERSION),
+        version => Ok(version),
     }
 }
 
@@ -225,9 +372,9 @@ mod tests {
     }
 
     #[test]
-    fn managed_project_binding_uses_schema_version_one() {
-        assert_eq!(BINDING_SCHEMA_VERSION, 1);
-        assert_eq!(ManagedProjectBinding::SCHEMA_VERSION, 1);
+    fn managed_project_binding_uses_schema_version_two() {
+        assert_eq!(BINDING_SCHEMA_VERSION, 2);
+        assert_eq!(ManagedProjectBinding::SCHEMA_VERSION, 2);
     }
 
     #[test]
