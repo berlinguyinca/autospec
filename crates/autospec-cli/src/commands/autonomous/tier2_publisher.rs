@@ -598,7 +598,7 @@ mod implementation_contract_tests {
         let corrected = malformed.replace(
             &format!("- Update `{target_path}` for the status panel behavior."),
             &format!(
-                "- Update `{target_path}` for the status panel behavior.\n- Verify `{regression_path}`."
+                "- Update `{target_path}` for the status panel behavior.\n- `{regression_path}`"
             ),
         );
         admit_expected_implementation_contract(&corrected, target_path, regression_path)
@@ -607,8 +607,10 @@ mod implementation_contract_tests {
         // Declaring the regression path under `## Files touched` alone is also
         // sufficient — the case #3359 was filed for, and the one `render_draft`
         // relies on when the outline is prose.
-        let declared_in_files_touched =
-            malformed.replace(&format!("- `{target_path}`\n"), &format!("- `{target_path}`\n- `{regression_path}`\n"));
+        let declared_in_files_touched = malformed.replace(
+            &format!("- `{target_path}`\n"),
+            &format!("- `{target_path}`\n- `{regression_path}`\n"),
+        );
         assert!(
             declared_in_files_touched.contains(&format!("## Files touched\n\n- `{target_path}`\n- `{regression_path}`")),
             "fixture must declare the regression path under ## Files touched only: {declared_in_files_touched}"
@@ -622,7 +624,7 @@ mod implementation_contract_tests {
     }
 
     #[test]
-    fn render_draft_rejects_contract_failure_before_publication_draft() {
+    fn render_draft_accepts_an_extensionless_repo_relative_target() {
         let receipt = TierReceipt::new(
             "owner/repo",
             1,
@@ -643,15 +645,15 @@ mod implementation_contract_tests {
             target_path: "status-panel".to_string(),
         };
 
-        let error = render_draft(
+        let draft = render_draft(
             proposal,
             "<!-- marker -->".to_string(),
             &receipt,
             &(std::path::PathBuf::from("tests"), "rs".to_string()),
             "cargo test",
         )
-        .expect_err("an out-of-scope target must not produce a PublicationDraft");
+        .expect("an extensionless root file is a valid repo-relative declaration");
 
-        assert!(error.contains("OUT_OF_SCOPE"), "{error}");
+        assert!(draft.body.contains("## Files touched\n\n- `status-panel`"));
     }
 }

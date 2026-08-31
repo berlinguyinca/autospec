@@ -268,7 +268,7 @@ fn lint_implementation_contract_blocks_unlisted_paths_and_missing_regression_evi
     assert!(output.stderr.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "OUT_OF_SCOPE:scripts/unlisted.mjs:-: file not listed in ## Implementation outline or ## Files touched\n\
+        "OUT_OF_SCOPE:scripts/unlisted.mjs:-: file not declared exactly, or under a trailing-slash directory, in ## Implementation outline or ## Files touched\n\
 MISSING_TEST:tests/integration/:-: required test tier 'integration' not present in diff\n"
     );
 }
@@ -339,7 +339,7 @@ fn lint_implementation_contract_blocks_missing_or_pathless_outlines() {
         assert!(output.stderr.is_empty(), "body fixture {index}");
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "OUT_OF_SCOPE:scripts/test-autonomous-status-panel.mjs:-: file not listed in ## Implementation outline or ## Files touched\n",
+            "OUT_OF_SCOPE:scripts/test-autonomous-status-panel.mjs:-: file not declared exactly, or under a trailing-slash directory, in ## Implementation outline or ## Files touched\n",
             "body fixture {index}"
         );
     }

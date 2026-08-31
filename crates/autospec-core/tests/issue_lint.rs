@@ -448,6 +448,54 @@ fn issue_lint_allows_three_logical_file_units() {
 }
 
 #[test]
+fn issue_lint_rejects_malformed_files_touched_entries() {
+    for entry in [
+        "To be determined.",
+        "/",
+        ".",
+        "../src/changed.rs",
+        "/src/changed.rs",
+        "src/changed.rs vendor/other.rs",
+    ] {
+        let body = replace_once(
+            valid_issue_body(
+                "Add `lint_issue_body` parity fixtures.",
+                "- [ ] `cargo test issue_lint` passes.",
+                "cargo test issue_lint",
+            ),
+            "- crates/autospec-core/src/lint/mod.rs",
+            &format!("- {entry}"),
+        );
+
+        assert_eq!(
+            findings(&body),
+            vec![(
+                "FILES_TOUCHED_MALFORMED".to_string(),
+                format!(
+                    "Files touched entry must be one safe repo-relative file or trailing-slash directory: - {entry}"
+                ),
+            )],
+            "entry {entry:?} must fail issue quality"
+        );
+    }
+}
+
+#[test]
+fn issue_lint_accepts_an_explicit_repo_relative_directory() {
+    let body = replace_once(
+        valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        ),
+        "- crates/autospec-core/src/lint/mod.rs",
+        "- crates/autospec-core/src/lint/",
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
 fn issue_lint_reports_body_too_long_with_the_shell_message() {
     let body = format!(
         "{}\n## Notes\n{}",

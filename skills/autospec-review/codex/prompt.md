@@ -23,7 +23,7 @@ normal pipeline.
 
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
-| Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: `gpt-5.1-codex` + `reasoning_effort=high` | Fall back UP on unavailability |
+| Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: runtime/repository frontier model + `reasoning_effort=high` | Fall back UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
@@ -45,7 +45,7 @@ Detect your harness by checking available tools before any phase:
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
    - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
 
-**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the needed context with a bounded handoff; for Codex native subagents, use a fresh configurable independent agent and the runtime/repository frontier model instead of moving the work into the main/authoring session. When a role-specialized reviewer has a fixed unavailable model binding, the configurable fallback must receive the identical prompt, evidence, validation steps, and output schema. Record `requested_model`, `actual_model`, `fallback_reason`, and reviewed head SHA in an orchestrator-owned sidecar artifact so the reviewer verdict remains byte-exact. Never use a weaker model or self-review. If no equal-or-stronger independent reviewer can run, fail closed for merge/release decisions. Never ask the user.
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
@@ -291,6 +291,8 @@ For each rendered regression spec, dispatch one Tier-A reviewer
 subagent.
 
 **Model tier:** Tier A (spec work).
+
+If the configured reviewer cannot run for a qualifying model-availability reason, apply the run-start fallback rule: use a fresh configurable Tier-A reviewer with the same prompt and JSON contract. This is an availability retry only; never replace or erase substantive reviewer findings.
 
 **Prompt:** load `references/reviewer-prompt.md` verbatim and append
 the input yaml block.

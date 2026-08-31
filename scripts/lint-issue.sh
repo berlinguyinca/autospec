@@ -13,7 +13,8 @@
 #                | SMOKE_MULTI_LINE | SMOKE_PLACEHOLDER | SMOKE_NOT_FENCED
 #                | MISSING_SECTION_FILES_TO_READ | MISSING_SECTION_IMPL_OUTLINE
 #                | MISSING_SECTION_TESTS | DEPS_MALFORMED
-#                | TOO_MANY_FILES | BODY_TOO_LONG | OUTLINE_TOO_LONG
+#                | FILES_TOUCHED_MALFORMED | TOO_MANY_FILES
+#                | BODY_TOO_LONG | OUTLINE_TOO_LONG
 #
 # Implementer-load-bearing section + sizing rules (autospec trackers #420/#421):
 # the per-issue implementer reads "Files to read first", "Implementation outline",
@@ -47,6 +48,8 @@ Rules enforced (§3 quality contract):
   MISSING_SECTION_DEPENDENCIES    Body has no '## Dependencies' heading.
   DEPS_MALFORMED        A '## Dependencies' section exists but a content line is neither
                         'Depends on issue #N' nor exactly 'none'.
+  FILES_TOUCHED_MALFORMED A non-blank '## Files touched' entry is not exactly one
+                        safe repo-relative file or trailing-slash directory.
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
   BODY_TOO_LONG         Authored body exceeds 400 words (the five ui-feature
     sections and marker-bounded generated classification/shared-contract/quality
@@ -473,11 +476,31 @@ check_files_touched() {
     local raw
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        # Strip a leading bullet marker and surrounding backticks/whitespace.
+        # Strip one optional bullet and one optional wrapping backtick pair.
         raw="$(printf '%s' "$line" \
-            | sed -E 's/^[[:space:]]*-[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g')"
-        # Only consider lines that still look like a path/token.
-        printf '%s' "$raw" | grep -qE '^[A-Za-z0-9_./-]+$' || continue
+            | sed -E 's/^[[:space:]]*-[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+        case "$raw" in
+            \`*\`) raw="${raw#\`}"; raw="${raw%\`}" ;;
+            *\`*)
+                add_finding "FILES_TOUCHED_MALFORMED" "Files touched entry must be one safe repo-relative file or trailing-slash directory: $(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                continue
+                ;;
+        esac
+        local path_body="${raw%/}" segment invalid=0
+        case "$raw" in
+            ''|'.'|'/'|/*|*//* ) invalid=1 ;;
+        esac
+        printf '%s' "$raw" | grep -qE '^[A-Za-z0-9_./-]+$' || invalid=1
+        local old_ifs="$IFS"
+        IFS='/'
+        for segment in $path_body; do
+            case "$segment" in ''|'.'|'..') invalid=1 ;; esac
+        done
+        IFS="$old_ifs"
+        if [ "$invalid" -eq 1 ]; then
+            add_finding "FILES_TOUCHED_MALFORMED" "Files touched entry must be one safe repo-relative file or trailing-slash directory: $(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+            continue
+        fi
         # Exclusion: derived skill-golden hashes never count.
         case "$raw" in
             tests/fixtures/skill-goldens/*.sha256) continue ;;
@@ -496,7 +519,7 @@ check_files_touched() {
 $content
 EOF
     local path_count
-    path_count="$(printf '%s' "$units" | sed '/^[[:space:]]*$/d' | sort -u | grep -c '.')"
+    path_count="$(printf '%s' "$units" | sed '/^[[:space:]]*$/d' | sort -u | awk 'NF { count++ } END { print count + 0 }')"
     if [ "$path_count" -gt 3 ]; then
         add_finding "TOO_MANY_FILES" "Files touched lists ${path_count} logical units (max 3; trio members + derived goldens count as one); split the issue to stay small-LLM-sized"
     fi
