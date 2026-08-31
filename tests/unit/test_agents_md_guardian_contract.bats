@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
+
 # tests/unit/test_agents_md_guardian_contract.bats — grep assertions verifying
 # that AGENTS.md contains the ## Implementation-quality contract section, all
 # 10 RULE_IDs, the directive map, the opt-out grammar regex, and the
