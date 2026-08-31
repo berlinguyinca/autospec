@@ -3,10 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::catalog::ValidationCatalog;
 use super::command::{
     bats_command, enter_fast_validation_mode, security_artifact_commands, ToolCommand,
 };
 use super::results::{output_digest, CheckResult};
+
+mod bats_registration_baseline;
+
+use bats_registration_baseline::BATS_REGISTRATION_BASELINE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalCheck {
@@ -29,6 +34,7 @@ pub enum ExternalCheck {
     RunSummaryContract,
     DbModuleInstall,
     BatsDirectory(&'static str),
+    BatsSuiteRegistration,
     AutospecUpgradeContract,
     ClaimGuardContract,
     ClaimCasGuard,
@@ -103,6 +109,80 @@ pub enum ExternalCheck {
 }
 
 impl ExternalCheck {
+    pub(crate) fn registered_bats_suites(&self) -> &[&'static str] {
+        match self {
+            Self::BatsSuite(path) => std::slice::from_ref(path),
+            Self::DeriveTrioConsistency => {
+                &["tests/unit/test_autospec_compose_normalize_skill.bats"]
+            }
+            Self::DbModuleInstall => &["tests/unit/install-db-module.bats"],
+            Self::ClaimCasGuard => &[
+                "tests/unit/test_autospec_claim_id_tiebreak.bats",
+                "tests/unit/test_autospec_stale_lease_reclaim.bats",
+            ],
+            Self::GrowthShared => &[
+                "tests/unit/growth-config-validate.bats",
+                "tests/unit/growth-ethics-blocklist.bats",
+                "tests/unit/growth-ethics-precheck.bats",
+                "tests/unit/growth-ledger.bats",
+                "tests/unit/growth-source-weights.bats",
+                "tests/unit/growth-measure.bats",
+                "tests/unit/growth-measure-due.bats",
+            ],
+            Self::GrowthCandidatePipeline => &[
+                "tests/unit/growth-candidate-validate.bats",
+                "tests/unit/growth-candidate-dedup.bats",
+                "tests/unit/growth-candidate-rank.bats",
+                "tests/unit/growth-candidate-verify.bats",
+                "tests/unit/growth-candidate-pipeline-integration.bats",
+            ],
+            Self::GrowRunPipeline => &[
+                "tests/unit/validate-outbound-draft.bats",
+                "tests/unit/growth-content-quality-precheck.bats",
+                "tests/unit/growth-outbound-queue.bats",
+                "tests/unit/growth-adapters.bats",
+                "tests/unit/growth-attribute.bats",
+                "tests/unit/growth-measure.bats",
+            ],
+            Self::DbTelemetry => &[
+                "tests/unit/emit-event-wiring.bats",
+                "tests/unit/autospec-db-doctor.bats",
+                "tests/unit/emit-event.bats",
+            ],
+            Self::Phase4FinalQualityGate => &[
+                "tests/unit/test_final_quality_gate.bats",
+                "tests/unit/test_quality_gate_discovery.bats",
+            ],
+            Self::GrowDefineContract => &[
+                "tests/unit/grow-define-pipeline.bats",
+                "tests/unit/grow-define-file-issues.bats",
+                "tests/unit/filing-origin-self-explore-growth.bats",
+                "tests/unit/qa-filing-origin-self.bats",
+            ],
+            Self::ConstitutionValidation => &[
+                "tests/unit/test_constitution_validation.bats",
+                "tests/unit/test_baseline_composition.bats",
+                "tests/unit/test_repository_intelligence.bats",
+                "tests/unit/test_issue_planning.bats",
+                "tests/unit/test_github_publishing.bats",
+                "tests/unit/test_worker_v1.bats",
+                "tests/unit/test_verifier_v0.bats",
+                "tests/unit/test_autonomy_pipeline.bats",
+                "tests/unit/test_local_autonomy_control.bats",
+                "tests/unit/test_digital_twin.bats",
+                "tests/unit/test_constitution_rules.bats",
+                "tests/unit/test_policy_sources_v2.bats",
+            ],
+            Self::LintIssueHelpers => &["tests/unit/test_lint_issue_safety.bats"],
+            Self::RunGroomPreflightContract => &["tests/unit/test_run_groom_preflight.bats"],
+            Self::SecurityArtifactProfile => &[
+                "tests/unit/test_security_profile_skill_contract.bats",
+                "tests/unit/test_autospec_run_security_prerequisites.bats",
+            ],
+            _ => &[],
+        }
+    }
+
     pub(crate) fn run_with_fast(
         &self,
         id: &str,
@@ -139,6 +219,7 @@ impl ExternalCheck {
             Self::RunSummaryContract => run_run_summary_contract(id, required, root),
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
+            Self::BatsSuiteRegistration => run_bats_suite_registration(id, required, root),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
             Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
             Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
@@ -658,6 +739,122 @@ fn run_bats_directory_allow_empty_if_available(
     suites.sort();
     let commands = suites.into_iter().map(|suite| bats_command(suite.as_str()));
     run_commands(id, required, root, commands)
+}
+
+/// Test directories whose suites must each be invoked by some validate check.
+///
+/// Deliberately not `tests/**`: `tests/fixtures/**` holds `.bats` files that are
+/// input DATA for other suites, so they are unreferenced by design and would be
+/// permanent false positives.
+const SUITE_SCAN_DIRECTORIES: &[&str] = &["tests/unit", "tests/lint"];
+
+/// The repository marker used to distinguish autospec itself from target repos.
+const VALIDATION_SOURCE_DIRECTORY: &str = "crates/autospec-core/src/validation";
+
+/// The frozen inventory of suites intentionally not owned by a validation check.
+const BASELINE_SOURCE_FILE: &str = "bats_registration_baseline.rs";
+
+/// Fails when a Bats suite under [`SUITE_SCAN_DIRECTORIES`] is invoked by nothing.
+///
+/// Registrations are derived from typed catalog owners, so adding a file to
+/// `tests/unit` or `tests/lint` is otherwise a silent no-op: the suite passes
+/// when run by hand and no validate check ever runs it. Measured on 25855847,
+/// 97 of 144 suites were in that state.
+fn run_bats_suite_registration(id: &str, required: bool, root: &Path) -> CheckResult {
+    let source_directory = root.join(VALIDATION_SOURCE_DIRECTORY);
+    match fs::metadata(&source_directory) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return failure(
+                id,
+                required,
+                &format!(
+                    "{}: validation source inventory is not a directory",
+                    relative_path(root, &source_directory)
+                ),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Not the autospec repository; there is no registry to cross-reference.
+            return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        }
+        Err(error) => {
+            return failure(
+                id,
+                required,
+                &format!(
+                    "{}: cannot read validation source inventory: {error}",
+                    relative_path(root, &source_directory)
+                ),
+            );
+        }
+    }
+
+    let catalog = ValidationCatalog::standard();
+    let registered_suites = catalog.registered_bats_suites();
+    let registered_directories = catalog.registered_bats_directories();
+
+    let mut unregistered = Vec::new();
+    for directory in SUITE_SCAN_DIRECTORIES {
+        // A whole-directory registration covers every suite inside it.
+        if registered_directories.contains(directory) {
+            continue;
+        }
+        let suites = match collect_bats_suites(root, directory) {
+            Ok(suites) => suites,
+            Err(error) => return failure(id, required, &error),
+        };
+        for suite in suites {
+            if registered_suites.contains(suite.as_str()) {
+                continue;
+            }
+            if BATS_REGISTRATION_BASELINE.contains(&suite.as_str()) {
+                continue;
+            }
+            unregistered.push(suite);
+        }
+    }
+
+    if unregistered.is_empty() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    failure(
+        id,
+        required,
+        &format!(
+            "{}: bats suite invoked by no validate check; register it in {VALIDATION_SOURCE_DIRECTORY} \
+             or, if it is genuinely not a suite, say so in {BASELINE_SOURCE_FILE}",
+            unregistered.join(", ")
+        ),
+    )
+}
+
+fn collect_bats_suites(root: &Path, directory: &str) -> Result<Vec<String>, String> {
+    let inventory_path = root.join(directory);
+    let entries = fs::read_dir(&inventory_path)
+        .map_err(|error| format!("{directory}: cannot read bats suite inventory: {error}"))?;
+    let mut suites = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("{directory}: cannot read bats suite inventory entry: {error}")
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "{}: cannot read bats suite inventory entry type: {error}",
+                relative_path(root, &path)
+            )
+        })?;
+        if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "bats")
+        {
+            suites.push(relative_path(root, &path));
+        }
+    }
+    suites.sort();
+    Ok(suites)
 }
 
 fn run_bash_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {

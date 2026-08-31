@@ -36,8 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 144); // +1: check_reference_pointer_integrity (#3158)
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 139); // a call no gate repeats
+    assert_eq!(calls.len(), 153); // +9: orphaned-suite ratchet and suites it caught (#3360)
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 148); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +66,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 155);
+    assert_eq!(frozen_catalog_ids().len(), 164);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 155);
+    assert_eq!(ids.len(), 164);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -599,6 +599,10 @@ fn catalog_assigns_release_and_qa_verdict_contracts_to_rust_owners() {
 #[test]
 fn catalog_assigns_release_support_gates_to_typed_external_batches() {
     let catalog = ValidationCatalog::standard();
+    assert!(
+        !catalog.ids().contains(&"check_quality_gate_discovery"),
+        "the phase4 final-quality batch already owns test_quality_gate_discovery.bats"
+    );
     let (id, owner) = (
         "check_release_verdict_script",
         ExternalCheck::ReleaseVerdictScript,
@@ -623,6 +627,18 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         "check_brute_force_rule_ids must have a direct Rust owner"
     );
 
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_bats_suite_registration")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::BatsSuiteRegistration
+        )),
+        "check_bats_suite_registration must own the orphaned-suite ratchet"
+    );
+
     for (id, suite) in [
         (
             "check_lint_heredoc_handling",
@@ -633,6 +649,39 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
             "tests/lint/test_reuse_triage.bats",
         ),
         ("check_ship_completeness", "tests/ship-completeness.bats"),
+        // Registered by #3360: the ratchet suite shipped invoked by nothing.
+        (
+            "check_bats_negation_ratchet",
+            "tests/lint/test_bats_negation_checker.bats",
+        ),
+        (
+            "check_autospec_fleet_enabled_false",
+            "tests/unit/test_autospec_fleet_enabled_false.bats",
+        ),
+        (
+            "check_autospec_sweep_enabled_false",
+            "tests/unit/test_autospec_sweep_enabled_false.bats",
+        ),
+        (
+            "check_classify_lang_labels",
+            "tests/unit/test_classify_lang_labels.bats",
+        ),
+        (
+            "check_classify_language",
+            "tests/unit/test_classify_language.bats",
+        ),
+        (
+            "check_define_phase0_language",
+            "tests/unit/test_define_phase0_language.bats",
+        ),
+        (
+            "check_language_axis_integration",
+            "tests/unit/test_language_axis_integration.bats",
+        ),
+        (
+            "check_language_table",
+            "tests/unit/test_language_table.bats",
+        ),
     ] {
         assert_eq!(
             catalog

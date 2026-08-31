@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+
+bats_require_minimum_version 1.5.0
 # skills/autospec-test/tests/unit/gate-stage-2-5-live-server.bats
 #
 # Coverage for gate-stage-2-5.sh's live-server orchestration: metrics G
@@ -302,7 +304,8 @@ YAML
     # With the poll faked out, the gate proceeds to invoke run-window.mjs
     # against a server that was never actually ready — it does NOT surface
     # the honest "never answered" failure this suite otherwise proves.
-    ! printf '%s' "$output" | grep -q 'never answered'
+    run ! grep -q 'never answered' <<<"$output"
+    [ "$status" -ne 0 ]
 
     for leaked_pid in $(pgrep -f "node src/server.mjs" 2>/dev/null || true); do
         kill -9 "$leaked_pid" 2>/dev/null || true
@@ -438,7 +441,8 @@ YAML
     # `contractPassed = violations.length === 0` trivially reports true.
     perl -0pi -e 's/\n      \/\/ A contract that extracted nothing.*?\n      if \(tuples\.length === 0\) \{.*?\n        continue;\n      \}\n/\n/s' \
         "$STUB_SCRIPTS/contract-symmetry/run-symmetry.mjs"
-    ! grep -q 'tuples.length === 0' "$STUB_SCRIPTS/contract-symmetry/run-symmetry.mjs"
+    run ! grep -q 'tuples.length === 0' "$STUB_SCRIPTS/contract-symmetry/run-symmetry.mjs"
+    [ "$status" -ne 0 ]
 
     TARGET_DIR="$TEST_TMPDIR/target"
     mkdir -p "$TARGET_DIR/.autospec" "$TARGET_DIR/src"

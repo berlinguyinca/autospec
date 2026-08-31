@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 HELPER="$REPO_ROOT/skills/autospec-shared/scripts/project-sync-issue.sh"
 
@@ -107,7 +109,8 @@ SH
   [ "$status" -eq 0 ]
   grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/adopted" "$events"
   grep -Fxq "autospec:project onboard --repo-dir $project --repo acme/created --spawned-from spec;touch should-not-exist" "$events"
-  ! grep -F 'acme/adopted --spawned-from' "$events"
+  run ! grep -F 'acme/adopted --spawned-from' "$events"
+  [ "$status" -ne 0 ]
   [ ! -e "$project/should-not-exist" ]
   create_line="$(grep -n '^gh:repo create acme/created' "$events" | cut -d: -f1)"
   verify_line="$(grep -n '^gh:repo view acme/created --json url,defaultBranchRef' "$events" | tail -1 | cut -d: -f1)"
@@ -360,7 +363,8 @@ SH
   run env EVENTS="$events" AUTOSPEC_SCRIPTS_DIR="$TMP/bin" REPO_DIR="$TMP/repo" \
     bash "$REPO_ROOT/scripts/qa-finding-to-issue.sh" --finding "$finding" --dry-run --dedup-cache "$TMP/dry.cache"
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$events"
+  run ! grep -q '^gh:issue create' "$events"
+  [ "$status" -ne 0 ]
   [ ! -s "$AUTOSPEC_CALLS" ]
 
   : > "$events"
