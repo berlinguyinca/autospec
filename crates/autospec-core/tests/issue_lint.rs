@@ -455,6 +455,7 @@ fn issue_lint_rejects_malformed_files_touched_entries() {
         ".",
         "../src/changed.rs",
         "/src/changed.rs",
+        "src/changed.rs//",
         "src/changed.rs vendor/other.rs",
     ] {
         let body = replace_once(

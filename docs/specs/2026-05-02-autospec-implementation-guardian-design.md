@@ -14,8 +14,11 @@ classes of failure that produce *AI slop*:
 
 - **Hallucinated symbols** (functions, fields, files, env vars that
   don't exist).
-- **Scope creep** (touching files outside the issue's
-  `## Implementation outline`).
+- **Scope creep** (touching files outside exact files or trailing-slash
+  directories declared by the issue's `## Implementation outline` and
+  `## Files touched` union). The outline may embed safe paths in prose when
+  individually backtick-wrapped; every non-blank `Files touched` line remains
+  one strict standalone path declaration.
 - **Code duplication** (re-implementing helpers that already exist).
 - **Documentation drift** (changing public surface without touching
   README / SKILL.md / AGENTS.md).
@@ -106,7 +109,7 @@ tests/
 
 | RULE_ID | Detector | Tier | Threshold / regex |
 |---|---|---|---|
-| `OUT_OF_SCOPE` | det | path-list compare | files touched ∉ issue body `## Implementation outline` paths |
+| `OUT_OF_SCOPE` | det | exact/prefix path compare | files touched ∉ exact files or trailing-slash directories declared in `## Implementation outline` ∪ `## Files touched` |
 | `MISSING_TEST` | det | path-prefix scan | required test type from issue body `## Tests required` not present in diff under `tests/{unit,integration,smoke,e2e}/` |
 | `COMPLEXITY` | det | line/regex scan | function >50 LOC, file >500 LOC, nesting >4 |
 | `SECURITY` | det | regex match | `eval\(`, `exec\(`, `--no-verify`, `git reset --hard`, `rm -rf /`, AWS-key shape `AKIA[0-9A-Z]{16}`, GitHub-token shape `gh[pousr]_[A-Za-z0-9]{36,}`, private-key markers `-----BEGIN [A-Z ]*PRIVATE KEY-----` |
@@ -125,7 +128,7 @@ AGENTS.md (so all harnesses share one table).
 
 | RULE_ID | Directive |
 |---|---|
-| `OUT_OF_SCOPE` | "Restrict diff to files listed in issue's ## Implementation outline. Revert other changes or amend the issue body." |
+| `OUT_OF_SCOPE` | "Restrict the diff to exact files or descendants of trailing-slash directories declared in `## Implementation outline` or `## Files touched`. Revert undeclared files; incomplete scope must be corrected by the issue author." |
 | `MISSING_TEST` | "Add a test under tests/<TIER>/ for the listed required test type before re-pushing." |
 | `COMPLEXITY` | "Split functions >50 LOC, files >500 LOC, nesting >4. No copy-paste branches." |
 | `SECURITY` | "Remove the flagged pattern. NEVER hardcode secrets, NEVER use --no-verify or git reset --hard, validate input at boundaries." |
@@ -206,7 +209,7 @@ through the LGTM dispatch with:
 > You are the implementation guardian for PR #<PR> on {repo}, derived from issue #<ISSUE>.
 >
 > 1. Read AGENTS.md `## Implementation-quality contract` for the RULE_ID table and directive map.
-> 2. Read issue #<ISSUE> body — note `## Implementation scope`, `## Implementation outline`, `## Tests required`, and any `Guardian: skip-*` lines.
+> 2. Read issue #<ISSUE> body — note `## Implementation scope`, `## Implementation outline`, `## Files touched`, `## Tests required`, and any `Guardian: skip-*` lines.
 > 3. Read deterministic findings already in /tmp/guardian-<PR>.md.
 > 4. Run `gh pr diff <PR>` and `gh pr view <PR> --json files,title,body`.
 > 5. Apply the LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Append findings to /tmp/guardian-<PR>.md as `RULE_ID:<path>:<line>: <one-line description>`. Honor `Guardian: skip-*` opt-outs by emitting `INFO:` instead of blocking.

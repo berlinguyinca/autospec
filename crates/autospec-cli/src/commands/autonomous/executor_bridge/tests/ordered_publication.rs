@@ -81,8 +81,18 @@ esac
         head_oid: head,
         closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"Run `scripts/continuation-second.sh` and verify café café café café café café café café café café café\",\"Run `scripts/continuation-third.sh` once\"]\n".into(),
     };
-    bridge::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
-        .expect("proactive continuation");
+    let issue_body = "## Implementation outline\n\n- Update `slice.txt` within the current slice.\n\n\
+                      ## Files touched\n\n- `scripts/continuation-second.sh`\n- `scripts/continuation-third.sh`\n";
+    let continuation_scope = autospec_core::lint::declared_implementation_scope(issue_body);
+    bridge::require_continuation_checkpoint(
+        &state_path,
+        &event_log,
+        &state,
+        &proof,
+        issue_body,
+        true,
+    )
+    .expect("proactive continuation");
     let bound =
         bridge::PersistedInvocation::from_json(&fs::read_to_string(&state_path).unwrap()).unwrap();
     assert_eq!((bound.umbrella, bound.current_child), (Some(42), Some(101)));
@@ -99,9 +109,29 @@ esac
     assert!(bodies[0].contains("ordinal=1"));
     assert!(bodies[1].contains("Depends on issue #101"));
     assert!(bodies[2].contains("Depends on issue #102"));
+    for body in &bodies {
+        assert!(body.contains("## Files touched"));
+        assert_eq!(
+            autospec_core::lint::declared_implementation_scope(body),
+            continuation_scope
+        );
+        assert!(autospec_core::lint::lint_issue_body(body).is_empty());
+    }
+    let publication_calls = fs::read_to_string(store.join("calls")).expect("publication calls");
+    assert_eq!(
+        publication_calls.matches("--label auto-implement").count(),
+        2
+    );
     fs::write(store.join("calls"), "").expect("clear calls");
-    bridge::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
-        .expect("publication restart");
+    bridge::require_continuation_checkpoint(
+        &state_path,
+        &event_log,
+        &state,
+        &proof,
+        issue_body,
+        true,
+    )
+    .expect("publication restart");
     assert!(!fs::read_to_string(store.join("calls"))
         .expect("restart calls")
         .contains("issue create"));
@@ -151,7 +181,7 @@ esac
         &event_log,
         &rebound,
         &next_proof,
-        "",
+        issue_body,
         true,
     )
     .expect("bound exact-head recovery");
@@ -163,7 +193,9 @@ esac
     adverse.unmet = vec!["Improve quality should feel nice".into()];
     adverse.content_digest = adverse.digest();
     fs::write(store.join("calls"), "").expect("clear calls");
-    assert!(bridge::publish_continuation_children(&state_path, &adverse).is_err());
+    assert!(
+        bridge::publish_continuation_children(&state_path, &adverse, &continuation_scope).is_err()
+    );
     assert!(!fs::read_to_string(store.join("calls"))
         .unwrap()
         .contains("issue create"));
@@ -180,7 +212,13 @@ esac
     let mut existing = bridge::load_continuation_receipt(&state_path, &state).expect("receipt");
     existing.issue = 43;
     existing.content_digest = existing.digest();
-    bridge::publish_continuation_children(&state_path, &existing).expect("parent extension");
+    fs::write(store.join("calls"), "").expect("clear calls");
+    assert!(bridge::publish_continuation_children(&state_path, &existing, &[]).is_err());
+    assert!(!fs::read_to_string(store.join("calls"))
+        .unwrap()
+        .contains("issue create"));
+    bridge::publish_continuation_children(&state_path, &existing, &continuation_scope)
+        .expect("parent extension");
     let first = fs::read_to_string(store.join("issues/104.body")).unwrap();
     assert!(first.contains("Depends on issue #43"));
     assert!(fs::read_to_string(store.join("issues/105.body"))
@@ -210,7 +248,7 @@ esac
             &event_log,
             &state,
             &hard_proof,
-            "",
+            issue_body,
             true,
         )
     };

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::diff::{DiffFile, UnifiedDiff};
 use super::pr_size::{evaluate_patch_size, PatchSizeDimension, PatchSizeLimits};
-use super::{parse_declared_path, DeclaredPath};
+use super::{parse_declared_path, parse_repo_relative_path, DeclaredPath};
 
 const RULE_EMIT_CAP: usize = 10;
 const DEFAULT_AGGREGATE_HARD_CAP: usize = 200;
@@ -651,9 +651,7 @@ fn detect_out_of_scope(
     let Some(issue_body) = issue_body else {
         return;
     };
-    let outline = section(issue_body, &["Implementation outline"])
-        .or_else(|| section(issue_body, &["Implementation scope"]));
-    let mut allowed = outline.map(declared_paths).unwrap_or_default();
+    let allowed = implementation_scope(issue_body);
     // `## Files touched` is a first-class issue-contract heading, and the
     // decomposer frequently writes the outline as prose bullets naming
     // behaviours rather than paths. Reading only the outline therefore flagged
@@ -661,11 +659,6 @@ fn detect_out_of_scope(
     // for the implementer to amend the issue body — i.e. to rewrite the scope
     // it is being measured against. Take the union instead: scope stays
     // fail-closed when *neither* section names a path.
-    allowed.extend(
-        section(issue_body, &["Files touched"])
-            .map(declared_paths)
-            .unwrap_or_default(),
-    );
     if allowed.is_empty() && !fail_closed_on_missing_outline {
         return;
     }
@@ -1455,6 +1448,54 @@ fn declared_paths(source: &str) -> Vec<DeclaredPath> {
         .collect()
 }
 
+fn outline_declared_paths(source: &str) -> Vec<DeclaredPath> {
+    let mut declared = Vec::new();
+    for line in source.lines() {
+        if let Ok(path) = parse_declared_path(line) {
+            declared.push(path);
+            continue;
+        }
+        let mut remaining = line;
+        while let Some(open) = remaining.find('`') {
+            let after_open = &remaining[open + 1..];
+            let Some(close) = after_open.find('`') else {
+                break;
+            };
+            if let Ok(path) = parse_repo_relative_path(&after_open[..close]) {
+                declared.push(path);
+            }
+            remaining = &after_open[close + 1..];
+        }
+    }
+    declared
+}
+
+fn implementation_scope(body: &str) -> BTreeSet<DeclaredPath> {
+    let mut scope = section(body, &["Implementation outline"])
+        .or_else(|| section(body, &["Implementation scope"]))
+        .map(outline_declared_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    scope.extend(
+        section(body, &["Files touched"])
+            .map(declared_paths)
+            .unwrap_or_default(),
+    );
+    scope
+}
+
+/// Return the validated implementation-scope union in deterministic order.
+///
+/// Outline prose may declare paths only inside backticks. `Files touched`
+/// remains strict: every non-blank line must be one standalone declaration.
+pub fn declared_implementation_scope(body: &str) -> Vec<String> {
+    implementation_scope(body)
+        .into_iter()
+        .map(|path| path.path)
+        .collect()
+}
+
 fn parse_guardian_skips(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter_map(|line| {
@@ -2203,6 +2244,23 @@ mod tests {
     }
 
     #[test]
+    fn lint_issue_implementation_contract_accepts_safe_path_embedded_in_outline_prose() {
+        let body =
+            "## Implementation outline\n\n- Update `src/changed.rs` while preserving behavior.\n";
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/changed.rs", 1)],
+            },
+            body,
+        );
+
+        assert!(result
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
     fn lint_issue_implementation_contract_rejects_basename_collision() {
         let body = "## Files touched\n\n- `src/allowed.rs`\n";
         let result = lint_issue_implementation_contract(
@@ -2226,6 +2284,7 @@ mod tests {
             ".",
             "../src/changed.rs",
             "/src/changed.rs",
+            "src/changed.rs//",
             "src/changed.rs vendor/other.rs",
         ] {
             let body = format!("## Files touched\n\n- {entry}\n");

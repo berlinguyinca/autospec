@@ -7,9 +7,10 @@ mod text;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use implementation::{
-    directive_for, lint_implementation, lint_issue_implementation_contract,
-    ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
-    ImplementationLintResult, ImplementationLintRule, ImplementationLintSeverity, RepositoryIndex,
+    declared_implementation_scope, directive_for, lint_implementation,
+    lint_issue_implementation_contract, ImplementationLintContext, ImplementationLintFinding,
+    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
+    ImplementationLintSeverity, RepositoryIndex,
 };
 pub use pr_size::{
     evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,
@@ -686,10 +687,15 @@ pub(crate) fn parse_declared_path(line: &str) -> Result<DeclaredPath, ()> {
         (None, None) => line,
         _ => return Err(()),
     };
+    parse_repo_relative_path(path)
+}
+
+pub(crate) fn parse_repo_relative_path(path: &str) -> Result<DeclaredPath, ()> {
     if path.is_empty()
         || path == "."
         || path == "/"
         || path.starts_with('/')
+        || path.ends_with("//")
         || !path.bytes().all(is_path_character)
     {
         return Err(());

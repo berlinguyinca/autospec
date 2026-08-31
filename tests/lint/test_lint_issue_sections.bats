@@ -245,6 +245,7 @@ MD
         '.' \
         '../scripts/a.sh' \
         '/scripts/a.sh' \
+        'scripts/a.sh//' \
         'scripts/a.sh scripts/b.sh'
     do
         write_good_body "$TMP/b.md"

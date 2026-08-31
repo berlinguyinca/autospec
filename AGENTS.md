@@ -281,7 +281,9 @@ Every non-blank line in `## Files touched` declares exactly one safe repo-relati
 path, optionally wrapped in backticks and preceded by `- `. Absolute paths, `.`,
 `..` segments, root `/`, prose, and multiple paths on one line are invalid. A file
 declaration authorizes only that exact path; a directory authorizes descendants only
-when declared with a trailing `/`.
+when declared with a trailing `/`. `## Implementation outline` may also contribute
+safe paths embedded in prose when each path is individually wrapped in backticks;
+this does not relax the standalone-entry grammar for `## Files touched`.
 
 ## Subagent vs inline decision matrix
 

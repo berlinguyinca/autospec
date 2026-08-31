@@ -7,6 +7,7 @@
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     AGENTS_MD="$REPO_ROOT/AGENTS.md"
+    GUARDIAN_DESIGN="$REPO_ROOT/docs/specs/2026-05-02-autospec-implementation-guardian-design.md"
 }
 
 # ── Section heading ────────────────────────────────────────────────────────────
@@ -70,8 +71,12 @@ setup() {
     grep -q 'Corrective directive map\|corrective directive' "$AGENTS_MD"
 }
 
-@test "AGENTS.md directive map has Restrict diff phrase for OUT_OF_SCOPE" {
-    grep -q 'Restrict diff to files listed' "$AGENTS_MD"
+@test "OUT_OF_SCOPE guidance names the strict outline and Files-touched union" {
+    for contract in "$AGENTS_MD" "$GUARDIAN_DESIGN"; do
+        grep -q 'exact files or descendants of trailing-slash directories' "$contract"
+        grep -q '## Files touched' "$contract"
+        ! grep -q 'Revert other changes or amend the issue body' "$contract"
+    done
 }
 
 @test "AGENTS.md directive map has Add a test phrase for MISSING_TEST" {
