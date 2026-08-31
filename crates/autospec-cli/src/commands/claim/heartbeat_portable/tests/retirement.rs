@@ -134,7 +134,15 @@ fn concurrent_foreign_reader_never_observes_a_missing_live_binding() {
     let reader_path = binding.clone();
     let reader_stop = stop.clone();
     let reader_missing = missing.clone();
+    let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
     let reader = std::thread::spawn(move || {
+        assert!(
+            reader_path.exists(),
+            "foreign binding missing before release"
+        );
+        observed_tx
+            .send(())
+            .expect("signal initial foreign binding observation");
         while !reader_stop.load(Ordering::Acquire) {
             if !reader_path.exists() {
                 reader_missing.store(true, Ordering::Release);
@@ -143,8 +151,11 @@ fn concurrent_foreign_reader_never_observes_a_missing_live_binding() {
             std::hint::spin_loop();
         }
     });
+    observed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("reader did not observe the live foreign binding before release");
 
-    retire_released_at(
+    let retirement = retire_released_at(
         &fixture.root,
         ClaimMutationIdentity {
             repo: "owner/repo",
@@ -153,10 +164,10 @@ fn concurrent_foreign_reader_never_observes_a_missing_live_binding() {
             branch: "feat/worker",
             claim_id: "claim-a",
         },
-    )
-    .expect("foreign binding classification");
+    );
     stop.store(true, Ordering::Release);
     reader.join().unwrap();
+    retirement.expect("foreign binding classification");
 
     assert!(!missing.load(Ordering::Acquire));
     assert!(binding.exists());
