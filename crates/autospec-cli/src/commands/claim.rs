@@ -7362,7 +7362,6 @@ use refusals::{
     unavailable_predecessor_claim, unavailable_safety_claim,
 };
 mod heartbeat_liveness;
-#[cfg(any(not(target_os = "linux"), test))]
 mod heartbeat_portable;
 mod heartbeat_predecessor;
 pub(crate) mod lease;
