@@ -156,6 +156,27 @@ impl ValidationCheck {
             "check_quality_gate_discovery" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
                 "tests/unit/test_quality_gate_discovery.bats",
             )),
+            "check_autospec_fleet_enabled_false" => CheckOwner::ExternalBatch(
+                ExternalCheck::BatsSuite("tests/unit/test_autospec_fleet_enabled_false.bats"),
+            ),
+            "check_autospec_sweep_enabled_false" => CheckOwner::ExternalBatch(
+                ExternalCheck::BatsSuite("tests/unit/test_autospec_sweep_enabled_false.bats"),
+            ),
+            "check_classify_lang_labels" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/unit/test_classify_lang_labels.bats",
+            )),
+            "check_classify_language" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/unit/test_classify_language.bats",
+            )),
+            "check_define_phase0_language" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/unit/test_define_phase0_language.bats",
+            )),
+            "check_language_axis_integration" => CheckOwner::ExternalBatch(
+                ExternalCheck::BatsSuite("tests/unit/test_language_axis_integration.bats"),
+            ),
+            "check_language_table" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/unit/test_language_table.bats",
+            )),
             "check_ship_completeness" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuite("tests/ship-completeness.bats"))
             }
@@ -569,6 +590,27 @@ impl ValidationCatalog {
     pub fn checks(&self) -> &[ValidationCheck] {
         &self.checks
     }
+
+    pub(crate) fn registered_bats_suites(&self) -> BTreeSet<&'static str> {
+        let mut suites = BTreeSet::new();
+        for check in &self.checks {
+            if let CheckOwner::ExternalBatch(owner) = &check.owner {
+                suites.extend(owner.registered_bats_suites().iter().copied());
+            }
+        }
+        suites
+    }
+
+    pub(crate) fn registered_bats_directories(&self) -> BTreeSet<&'static str> {
+        self.checks
+            .iter()
+            .filter_map(|check| match &check.owner {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory(path)) => Some(*path),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn ids(&self) -> Vec<&'static str> {
         self.checks.iter().map(|check| check.id).collect()
     }

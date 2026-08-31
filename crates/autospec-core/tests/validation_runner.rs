@@ -154,13 +154,13 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 147); // +3: orphaned-suite ratchet and the two suites it caught (#3360)
-    assert_eq!(full.unique_ids().len(), 142); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 154); // +10: orphaned-suite ratchet and suites it caught (#3360)
+    assert_eq!(full.unique_ids().len(), 149); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
     assert!(!fast.ids().contains(&"check_python_suites"));
-    // The orphan ratchet itself is filesystem-only, so it stays in --fast; the two
+    // The orphan ratchet itself is filesystem-only, so it stays in --fast; the
     // suites it caught are BatsSuite owners and drop out.
     assert!(fast.ids().contains(&"check_bats_suite_registration"));
     assert_eq!(fast.ids().len(), 137);
@@ -176,6 +176,13 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_reuse_lens_suite"
                 | "check_bats_negation_ratchet"
                 | "check_quality_gate_discovery"
+                | "check_autospec_fleet_enabled_false"
+                | "check_autospec_sweep_enabled_false"
+                | "check_classify_lang_labels"
+                | "check_classify_language"
+                | "check_define_phase0_language"
+                | "check_language_axis_integration"
+                | "check_language_table"
         )
     }));
 }
@@ -1874,7 +1881,7 @@ fn repository_root() -> PathBuf {
 
 #[test]
 fn runner_fails_a_bats_suite_that_no_validate_check_invokes() {
-    let root = bats_registration_root("orphaned", &["registered.bats", "orphan.bats"]);
+    let root = bats_registration_root("orphaned", &["orphan.bats"], "");
 
     let report = run_bats_registration(&root);
 
@@ -1896,15 +1903,57 @@ suite, say so in bats_registration_baseline.rs";
 }
 
 #[test]
-fn runner_accepts_bats_suites_that_a_validate_check_references() {
-    let root = bats_registration_root("registered-only", &["registered.bats"]);
+fn runner_ignores_comments_and_unrelated_strings_that_name_a_bats_suite() {
+    let root = bats_registration_root(
+        "source-spoof",
+        &["orphan.bats"],
+        "// not a registration: \"tests/unit/orphan.bats\"\n\
+         const UNRELATED: &str = \"tests/unit/orphan.bats\";\n",
+    );
+
+    let report = run_bats_registration(&root);
+
+    assert_eq!(
+        report.results[0].exit_code,
+        Some(1),
+        "only a typed catalog owner may register a suite"
+    );
+}
+
+#[test]
+fn runner_accepts_bats_suites_with_typed_catalog_owners() {
+    let root = bats_registration_root(
+        "registered-only",
+        &["test_quality_gate_discovery.bats"],
+        "ExternalCheck::BatsSuite(\"tests/unit/test_quality_gate_discovery.bats\")\n",
+    );
 
     let report = run_bats_registration(&root);
 
     assert_eq!(
         report.results[0].exit_code,
         Some(0),
-        "a suite whose path appears in the validation sources is registered"
+        "a suite with a typed owner in the validation catalog is registered"
+    );
+}
+
+#[test]
+fn runner_fails_closed_when_a_suite_inventory_directory_cannot_be_read() {
+    let root = bats_registration_root("unreadable-inventory", &[], "");
+    fs::remove_dir(root.join("tests/lint")).expect("empty lint inventory directory removed");
+    fs::write(root.join("tests/lint"), "not a directory\n")
+        .expect("unreadable inventory path fixture");
+
+    let report = run_bats_registration(&root);
+
+    assert_eq!(
+        report.results[0].exit_code,
+        Some(1),
+        "required suite inventory I/O errors must fail validation"
+    );
+    assert!(
+        report.results[0].stderr_bytes > "tests/lint".len(),
+        "the failure evidence must identify the unreadable inventory path"
     );
 }
 
@@ -1927,7 +1976,7 @@ fn every_unbaselined_bats_suite_in_this_repository_is_registered() {
 /// suites it now owns. Registry-red while standalone-green is the defect #3360
 /// describes, mirrored.
 #[test]
-fn runner_executes_the_two_newly_registered_bats_suites() {
+fn runner_executes_the_newly_registered_bats_suites() {
     for (id, suite) in [
         (
             "check_bats_negation_ratchet",
@@ -1936,6 +1985,34 @@ fn runner_executes_the_two_newly_registered_bats_suites() {
         (
             "check_quality_gate_discovery",
             "tests/unit/test_quality_gate_discovery.bats",
+        ),
+        (
+            "check_autospec_fleet_enabled_false",
+            "tests/unit/test_autospec_fleet_enabled_false.bats",
+        ),
+        (
+            "check_autospec_sweep_enabled_false",
+            "tests/unit/test_autospec_sweep_enabled_false.bats",
+        ),
+        (
+            "check_classify_lang_labels",
+            "tests/unit/test_classify_lang_labels.bats",
+        ),
+        (
+            "check_classify_language",
+            "tests/unit/test_classify_language.bats",
+        ),
+        (
+            "check_define_phase0_language",
+            "tests/unit/test_define_phase0_language.bats",
+        ),
+        (
+            "check_language_axis_integration",
+            "tests/unit/test_language_axis_integration.bats",
+        ),
+        (
+            "check_language_table",
+            "tests/unit/test_language_table.bats",
         ),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
@@ -1969,9 +2046,9 @@ fn run_bats_registration(root: &std::path::Path) -> ValidationExecutionReport {
     ValidationRunner::run(&catalog, root)
 }
 
-/// Builds a throwaway repository whose validation sources register exactly
-/// `tests/unit/registered.bats`, plus whichever suite files are asked for.
-fn bats_registration_root(name: &str, suites: &[&str]) -> PathBuf {
+/// Builds a throwaway autospec repository marker plus whichever suite files and
+/// irrelevant validation source text a test needs.
+fn bats_registration_root(name: &str, suites: &[&str], validation_source: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "autospec-bats-registration-{name}-{}",
         std::process::id()
@@ -1979,13 +2056,10 @@ fn bats_registration_root(name: &str, suites: &[&str]) -> PathBuf {
     let _ = fs::remove_dir_all(&root);
     let sources = root.join("crates/autospec-core/src/validation");
     fs::create_dir_all(&sources).expect("validation source directory");
-    fs::write(
-        sources.join("catalog.rs"),
-        "ExternalCheck::BatsSuite(\"tests/unit/registered.bats\")\n",
-    )
-    .expect("registry source");
+    fs::write(sources.join("catalog.rs"), validation_source).expect("validation source fixture");
     let unit = root.join("tests/unit");
     fs::create_dir_all(&unit).expect("unit suite directory");
+    fs::create_dir_all(root.join("tests/lint")).expect("lint suite directory");
     for suite in suites {
         fs::write(unit.join(suite), "@test \"placeholder\" { true; }\n").expect("suite file");
     }

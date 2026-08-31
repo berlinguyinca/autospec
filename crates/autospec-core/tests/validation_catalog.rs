@@ -36,8 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 147); // +3: orphaned-suite ratchet and the two suites it caught (#3360)
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 142); // a call no gate repeats
+    assert_eq!(calls.len(), 154); // +10: orphaned-suite ratchet and suites it caught (#3360)
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 149); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +66,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 158);
+    assert_eq!(frozen_catalog_ids().len(), 165);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 158);
+    assert_eq!(ids.len(), 165);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -629,7 +629,9 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
             .iter()
             .find(|check| check.id == "check_bats_suite_registration")
             .map(|check| &check.owner),
-        Some(&CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::BatsSuiteRegistration
+        )),
         "check_bats_suite_registration must own the orphaned-suite ratchet"
     );
 
@@ -651,6 +653,34 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         (
             "check_quality_gate_discovery",
             "tests/unit/test_quality_gate_discovery.bats",
+        ),
+        (
+            "check_autospec_fleet_enabled_false",
+            "tests/unit/test_autospec_fleet_enabled_false.bats",
+        ),
+        (
+            "check_autospec_sweep_enabled_false",
+            "tests/unit/test_autospec_sweep_enabled_false.bats",
+        ),
+        (
+            "check_classify_lang_labels",
+            "tests/unit/test_classify_lang_labels.bats",
+        ),
+        (
+            "check_classify_language",
+            "tests/unit/test_classify_language.bats",
+        ),
+        (
+            "check_define_phase0_language",
+            "tests/unit/test_define_phase0_language.bats",
+        ),
+        (
+            "check_language_axis_integration",
+            "tests/unit/test_language_axis_integration.bats",
+        ),
+        (
+            "check_language_table",
+            "tests/unit/test_language_table.bats",
         ),
     ] {
         assert_eq!(

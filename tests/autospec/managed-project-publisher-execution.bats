@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 PROJECT_HELPER="$REPO_ROOT/skills/autospec-shared/scripts/project-sync-issue.sh"
 
@@ -94,7 +96,8 @@ DRIVER
   run env AUTOSPEC_SCRIPTS_DIR="$TMP/bin" AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD='printf "{\"proposals_total\":0,\"proposals\":[]}"' \
     bash "$REPO_ROOT/scripts/autospec-explore.sh" --once --preview --autonomous --research-sources spec-vs-code
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -110,7 +113,8 @@ DRIVER
   run env AUTOSPEC_SCRIPTS_DIR="$TMP/bin" bash "$REPO_ROOT/scripts/autonomous-self-improvement.sh" \
     apply --repo-root "$TMP/repo" --repo acme/widgets --apply --limit 1
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -125,7 +129,8 @@ DRIVER
   run env AUTOSPEC_SCRIPTS_DIR="$TMP/bin" bash "$REPO_ROOT/scripts/autospec-gap-miner.sh" \
     --input "$TMP/gaps.log" --ledger "$TMP/dry-ledger.md" --repo acme/widgets --dry-run
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -143,7 +148,8 @@ DRIVER
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run bash "$script" --finding "$finding" --repo acme/widgets --cache "$TMP/dry.cache" --dry-run
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -165,7 +171,8 @@ SH
   run env AUTOSPEC_CHECK_DRIFT_SH="$TMP/check-doc-drift.sh" bash "$script" \
     --working-tree --repo-root "$TMP/repo" --dry-run
   [ "$status" -eq 1 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -180,7 +187,8 @@ SH
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run env AUTOSPEC_STATE_DIR="$TMP/state-dry" AUTOSPEC_GAP_REPO=acme/widgets bash "$script" --gaps "$fixture"
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }
 
@@ -214,6 +222,7 @@ SH
   : > "$EVENTS"; : > "$AUTOSPEC_CALLS"
   run bash "$script" --repo "$TMP/audit-repo" --json "$TMP/read-only.json" --markdown "$TMP/read-only.md"
   [ "$status" -eq 0 ]
-  ! grep -q '^gh:issue create' "$EVENTS"
+  run ! grep -q '^gh:issue create' "$EVENTS"
+  [ "$status" -ne 0 ]
   assert_no_sync
 }

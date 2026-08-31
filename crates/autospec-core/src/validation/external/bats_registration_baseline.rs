@@ -13,10 +13,9 @@
 //! this list by wiring a suite into the catalog is the intended direction of
 //! travel; growing it is not, and requires deleting a line here by hand.
 //!
-//! This lives in its own module for a load-bearing reason: the check decides
-//! "registered" by searching the text of the validation sources for the suite
-//! path, so a baseline stored alongside that code would make every baselined
-//! path look registered. The scanner skips this file by name.
+//! Registration is derived from typed validation catalog owners. This module is
+//! separate so the legacy baseline remains an explicit, reviewable exception
+//! inventory rather than being mixed into executable ownership definitions.
 
 pub(super) const BATS_REGISTRATION_BASELINE: &[&str] = &[
     "tests/lint/lint-ui.bats",
