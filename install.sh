@@ -191,6 +191,10 @@ verify_managed_project_command_surface() {
         info "[dry-run] verify_managed_project_command_surface: $HOME/.autospec/bin/autospec project --help"
         return 0
     fi
+    if [ "${AUTOSPEC_SKIP_RUNTIME_BINARY:-0}" = "1" ]; then
+        info "verify_managed_project_command_surface: skipped by AUTOSPEC_SKIP_RUNTIME_BINARY=1"
+        return 0
+    fi
 
     autospec_runtime="$HOME/.autospec/bin/autospec"
     if [ ! -x "$autospec_runtime" ]; then
