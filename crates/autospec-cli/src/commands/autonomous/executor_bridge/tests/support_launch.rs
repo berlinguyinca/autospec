@@ -53,6 +53,7 @@ pub(super) fn draft_pr_adapter_fixture(
          if [ \"$1 $2\" = \"pr list\" ]; then cat \"$GH_PR_STATE\"; exit 0; fi\n\
          if [ \"$1 $2\" = \"pr view\" ]; then cat \"$GH_CLOSED_PR\"; exit 0; fi\n\
          if [ \"$1 $2\" = \"pr ready\" ]; then cp \"$GH_READY_PR\" \"$GH_PR_STATE\"; exit 0; fi\n\
+         if [ \"$1 $2\" = \"pr edit\" ]; then cp \"$GH_UPDATED_PR\" \"$GH_PR_STATE\"; exit 0; fi\n\
          if [ \"$1 $2\" = \"pr close\" ]; then printf '%s\\n' '[]' > \"$GH_PR_STATE\"; exit 0; fi\n\
          if [ \"$1 $2\" = \"pr create\" ]; then\n\
            grep -q '\"phase\":\"draft_creating\"' \"$BRIDGE_STATE\"\n\

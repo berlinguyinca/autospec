@@ -316,6 +316,8 @@ pub(crate) enum BridgeFailureKind {
 pub(crate) struct BridgeRunFailure {
     pub(crate) kind: BridgeFailureKind,
     detail: String,
+    premerge_command_failure: Option<ObservedDirectCommand>,
+    premerge_repair_exhausted: bool,
 }
 
 impl BridgeRunFailure {
@@ -323,6 +325,8 @@ impl BridgeRunFailure {
         Self {
             kind: BridgeFailureKind::Transient,
             detail: detail.into(),
+            premerge_command_failure: None,
+            premerge_repair_exhausted: false,
         }
     }
 
@@ -330,6 +334,8 @@ impl BridgeRunFailure {
         Self {
             kind: BridgeFailureKind::InvariantNeedsHuman,
             detail: detail.into(),
+            premerge_command_failure: None,
+            premerge_repair_exhausted: false,
         }
     }
 
@@ -337,7 +343,34 @@ impl BridgeRunFailure {
         Self {
             kind: BridgeFailureKind::OwnershipLost,
             detail: detail.into(),
+            premerge_command_failure: None,
+            premerge_repair_exhausted: false,
         }
+    }
+
+    fn repairable_premerge_command(
+        detail: impl Into<String>,
+        observation: ObservedDirectCommand,
+    ) -> Self {
+        Self {
+            kind: BridgeFailureKind::InvariantNeedsHuman,
+            detail: detail.into(),
+            premerge_command_failure: Some(observation),
+            premerge_repair_exhausted: false,
+        }
+    }
+
+    fn exhausted_premerge_repair(detail: impl Into<String>) -> Self {
+        Self {
+            kind: BridgeFailureKind::InvariantNeedsHuman,
+            detail: detail.into(),
+            premerge_command_failure: None,
+            premerge_repair_exhausted: true,
+        }
+    }
+
+    fn premerge_command_failure(&self) -> Option<&ObservedDirectCommand> {
+        self.premerge_command_failure.as_ref()
     }
 }
 
@@ -1499,16 +1532,27 @@ fn run_executor_bridge_with_codex_probe_observed(
         )?;
     }
     let review_pull_request = observe_pull_request_and_review(&state, observe)?;
-    let Some(premerge_receipt) = ensure_premerge_and_review(
+    let premerge_receipt = match ensure_premerge_and_review(
         request,
         &environment,
         &remote,
         &mut state,
         &proof,
         runtime.as_ref().map(RuntimeSessionAdapter::direct),
-    )?
-    else {
-        return Ok(pending_bridge_receipt(request)?);
+    ) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => return Ok(pending_bridge_receipt(request)?),
+        Err(error) if error.premerge_repair_exhausted => {
+            return finalize_bridge_failure_with_exhaustion(
+                request,
+                &mut state,
+                runtime.take(),
+                &remote,
+                "executor_premerge_command_repair_exhausted",
+                true,
+            )
+        }
+        Err(error) => return Err(error),
     };
     observe_verified(review_pull_request, observe)?;
     if state.phase == BridgePhase::ReviewPassed {
@@ -1843,7 +1887,7 @@ fn ensure_premerge_and_review(
                 )?
                 .lane_digest(),
             );
-        let evidence = produce_deterministic_premerge_evidence(DeterministicEvidenceRequest {
+        let evidence = match produce_deterministic_premerge_evidence(DeterministicEvidenceRequest {
             state,
             proof,
             review_requirements,
@@ -1855,7 +1899,73 @@ fn ensure_premerge_and_review(
             runtime,
             model_output: None,
             stall_timeout: Duration::from_secs(300),
-        })?;
+        }) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let Some(observation) = error.premerge_command_failure().cloned() else {
+                    return Err(error);
+                };
+                #[cfg(not(test))]
+                let ownership = refresh_bridge_claim(state, ClaimRenewalPhase::Review)?;
+                #[cfg(test)]
+                let ownership = BridgeClaimOwnership::Refreshed { ttl_seconds: 60 };
+                if ownership == BridgeClaimOwnership::Lost {
+                    if let Some(runtime) = runtime {
+                        runtime.close_verified()?;
+                    }
+                    return Err(BridgeRunFailure::ownership_lost(
+                        "executor premerge repair lost exact claim ownership",
+                    ));
+                }
+                let base = state
+                    .identity
+                    .base_ref
+                    .strip_prefix("origin/")
+                    .ok_or_else(|| "executor premerge repair base must name origin".to_string())?;
+                let expected_body = canonical_pull_request_body(state, &proof.closeout_body)?;
+                let remote_snapshot = RemoteMutationSnapshot::capture(state, remote)?;
+                if exact_draft_candidates(
+                    &remote_snapshot.pull_requests,
+                    &expected_body,
+                    &state.identity.branch,
+                    &proof.head_oid,
+                    base,
+                )
+                .len()
+                    != 1
+                {
+                    if let Some(runtime) = runtime {
+                        runtime.close_verified()?;
+                    }
+                    return Err(BridgeRunFailure::invariant(
+                        "executor premerge repair could not revalidate the exact draft PR at H0",
+                    ));
+                }
+                let prepared = prepare_premerge_command_repair(
+                    &request.state_path,
+                    state,
+                    proof,
+                    &observation,
+                );
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(prepare_error) => {
+                        if let Some(runtime) = runtime {
+                            runtime.close_verified()?;
+                        }
+                        return Err(BridgeRunFailure::invariant(prepare_error));
+                    }
+                };
+                return match prepared {
+                    PremergeCommandRepairOutcome::RetryPrepared => Ok(None),
+                    PremergeCommandRepairOutcome::Exhausted => {
+                        Err(BridgeRunFailure::exhausted_premerge_repair(
+                            "executor premerge command repair exhausted",
+                        ))
+                    }
+                };
+            }
+        };
         let receipt = match &evidence.decision {
             PremergeDecision::Pass {
                 evidence_digest, ..
@@ -4392,6 +4502,98 @@ pub(super) fn validate_persisted_observed_manifest(
     Ok(())
 }
 
+fn produce_repairable_integration_smoke_evidence(
+    request: &DeterministicEvidenceRequest<'_>,
+    primary_plan: &DirectCommandPlan,
+    primary_observations: &[ObservedDirectCommand],
+    attempt_root: &Path,
+) -> Result<IntegrationSmokeEvidenceOutcome, BridgeRunFailure> {
+    let Some(plan) =
+        parse_required_integration_smoke(request.issue_body, &request.review_requirements)?
+    else {
+        return Ok(IntegrationSmokeEvidenceOutcome::default());
+    };
+    if &plan == primary_plan {
+        let binding = bind_integration_smoke_evidence(
+            &request.review_requirements,
+            attempt_root,
+            primary_observations,
+        )?;
+        return Ok(IntegrationSmokeEvidenceOutcome {
+            binding: Some(binding),
+            ..IntegrationSmokeEvidenceOutcome::default()
+        });
+    }
+    let observations = execute_premerge_qa_plan(
+        &request.state.identity.worktree,
+        &plan,
+        &attempt_root.join("qa/integration"),
+        request.runtime,
+        request.stall_timeout,
+    )?;
+    let binding =
+        bind_integration_smoke_evidence(&request.review_requirements, attempt_root, &observations)?;
+    Ok(IntegrationSmokeEvidenceOutcome {
+        canonical_plan: Some(plan),
+        observations,
+        binding: Some(binding),
+    })
+}
+
+fn revalidate_full_suite_for_premerge(
+    request: FullSuiteRevalidationRequest<'_>,
+) -> Result<Vec<ObservedDirectCommand>, BridgeRunFailure> {
+    verify_full_suite_base(
+        request.worktree,
+        request.expected_base_ref,
+        request.expected_base_oid,
+    )?;
+    let before = git_stdout(
+        request.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if before != request.expected_commit {
+        return Err(format!(
+            "executor full-suite revalidation commit mismatch: expected {}, observed {before}",
+            request.expected_commit
+        )
+        .into());
+    }
+    let resolved = resolve_full_suite(
+        request.worktree,
+        request.issue_body,
+        request.spec_documents,
+        request.env,
+    )?;
+    let observations = execute_premerge_qa_plan(
+        request.worktree,
+        &resolved.plan,
+        request.artifact_root,
+        request.runtime,
+        request.stall_timeout,
+    )?;
+    for observation in &observations {
+        validate_observed_command(request.worktree, observation)?;
+    }
+    let after = git_stdout(
+        request.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if after != request.expected_commit {
+        return Err(
+            "executor full-suite revalidation commit drifted during execution"
+                .to_string()
+                .into(),
+        );
+    }
+    verify_full_suite_base(
+        request.worktree,
+        request.expected_base_ref,
+        request.expected_base_oid,
+    )?;
+    Ok(observations)
+}
+
 pub(crate) fn produce_deterministic_premerge_evidence(
     request: DeterministicEvidenceRequest<'_>,
 ) -> Result<DeterministicEvidenceOutcome, BridgeRunFailure> {
@@ -4459,15 +4661,19 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
         )?;
         let smoke = parse_primary_smoke(request.issue_body)?;
-        let mut observations = execute_direct_plan(
+        let mut observations = execute_premerge_qa_plan(
             &request.state.identity.worktree,
             &smoke,
             &attempt_root.join("qa/smoke"),
             request.runtime,
             request.stall_timeout,
         )?;
-        let integration =
-            produce_integration_smoke_evidence(&request, &smoke, &observations, &attempt_root)?;
+        let integration = produce_repairable_integration_smoke_evidence(
+            &request,
+            &smoke,
+            &observations,
+            &attempt_root,
+        )?;
         observations.extend(integration.observations);
         verify_exact_evidence_lane(
             request.state,
@@ -4476,7 +4682,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
         )?;
         let full_artifact_root = attempt_root.join("qa/full");
-        let mut full = revalidate_full_suite(FullSuiteRevalidationRequest {
+        let mut full = revalidate_full_suite_for_premerge(FullSuiteRevalidationRequest {
             worktree: &request.state.identity.worktree,
             issue_body: request.issue_body,
             spec_documents: request.spec_documents,
@@ -4561,10 +4767,19 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         )?;
         Ok((qa, security, bundle))
     })();
-    let cleanup = request
-        .runtime
-        .map(DirectRuntimeAdapter::close_verified)
-        .unwrap_or(Ok(()));
+    let repairable_command = production
+        .as_ref()
+        .err()
+        .and_then(BridgeRunFailure::premerge_command_failure)
+        .is_some();
+    let cleanup = if repairable_command {
+        Ok(())
+    } else {
+        request
+            .runtime
+            .map(DirectRuntimeAdapter::close_verified)
+            .unwrap_or(Ok(()))
+    };
     match (production, cleanup) {
         (Ok((qa, security, mut bundle)), Ok(())) => {
             bundle.mark_cleanup_verified()?;
@@ -6731,6 +6946,58 @@ fn interrupted_direct_terminal() -> AttemptTerminal {
 #[cfg(target_os = "linux")]
 fn validate_platform_direct_quarantine(paths: &DirectAttemptPaths) -> Result<(), String> {
     direct_ownership_disproven_markers(paths).map(|_| ())
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    windows
+))]
+fn execute_premerge_qa_plan(
+    worktree: &Path,
+    plan: &DirectCommandPlan,
+    artifact_root: &Path,
+    runtime: Option<&DirectRuntimeAdapter>,
+    stall_timeout: Duration,
+) -> Result<Vec<ObservedDirectCommand>, BridgeRunFailure> {
+    let mut diagnostic_plan = plan.clone();
+    for command in &mut diagnostic_plan.commands {
+        command.accepted_exit_codes = (0..=255).collect();
+    }
+    let observations = execute_direct_plan(
+        worktree,
+        &diagnostic_plan,
+        artifact_root,
+        runtime,
+        stall_timeout,
+    )?;
+    if observations.len() != plan.commands.len() {
+        return Err(BridgeRunFailure::invariant(
+            "executor premerge QA observation count differs from its exact plan",
+        ));
+    }
+    for (declared, observation) in plan.commands.iter().zip(&observations) {
+        if declared.accepts(&observation.terminal) {
+            continue;
+        }
+        return match observation.terminal {
+            AttemptTerminal::Exited(code) if code != 0 => {
+                Err(BridgeRunFailure::repairable_premerge_command(
+                    format!(
+                        "executor premerge QA command {}",
+                        observation.terminal.failure_message()
+                    ),
+                    observation.clone(),
+                ))
+            }
+            _ => Err(BridgeRunFailure::invariant(format!(
+                "executor premerge QA command {}",
+                observation.terminal.failure_message()
+            ))),
+        };
+    }
+    Ok(observations)
 }
 
 #[cfg(any(
@@ -9488,11 +9755,176 @@ fn executor_commit_subject(issue: u64, issue_title: &str) -> String {
     }
 }
 
-const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
+const EXECUTOR_INTERNAL_PATHSPECS: [&str; 4] = [
     ":(exclude).autospec/executor-closeout.md",
+    ":(exclude).autospec/evidence",
     ":(exclude).autospec/local-git",
     ":(exclude).autospec/original-git-pointer",
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PremergeCommandRepairOutcome {
+    RetryPrepared,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PremergeCommandFailure {
+    claim_id: String,
+    invocation_id: String,
+    branch: String,
+    pull_request: u64,
+    attempt: u32,
+    failed_head: String,
+    record_path: String,
+    record_digest: String,
+    stdout_digest: String,
+    stderr_digest: String,
+    exit_code: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ImplementationRepairCause {
+    Lint(Vec<ImplementationLintRule>),
+    PremergeCommand(PremergeCommandFailure),
+}
+
+pub(crate) fn premerge_command_repair_artifact_path(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<PathBuf, String> {
+    let root = state_path
+        .parent()
+        .ok_or_else(|| "executor state path requires a parent".to_string())?
+        .join("premerge-command-repair");
+    ensure_private_directory(&root)?;
+    let scope = &sha256_hex(state.identity.invocation_id.as_bytes())[..16];
+    Ok(root.join(format!("{scope}.attempt-{attempt}.json")))
+}
+
+fn premerge_command_repair_artifact_body(failure: &PremergeCommandFailure) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "claim_id": failure.claim_id,
+        "invocation_id": failure.invocation_id,
+        "branch": failure.branch,
+        "pull_request": failure.pull_request,
+        "attempt": failure.attempt,
+        "failed_head": failure.failed_head,
+        "record_path": failure.record_path,
+        "record_digest": failure.record_digest,
+        "stdout_digest": failure.stdout_digest,
+        "stderr_digest": failure.stderr_digest,
+        "exit_code": failure.exit_code,
+    })
+    .to_string()
+}
+
+pub(crate) fn prepare_premerge_command_repair(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    proof: &ImplementationProof,
+    observation: &ObservedDirectCommand,
+) -> Result<PremergeCommandRepairOutcome, String> {
+    if state.phase != BridgePhase::DraftCreated {
+        return Err("premerge command repair requires DraftCreated state".to_string());
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "premerge command repair requires an exact draft PR".to_string())?;
+    if state.head_oid.as_deref() != Some(proof.head_oid.as_str())
+        || observation.commit_oid != proof.head_oid
+    {
+        return Err("premerge command repair head identity changed".to_string());
+    }
+    let exit_code = match observation.terminal {
+        AttemptTerminal::Exited(code) if code != 0 => code,
+        _ => return Err("premerge command failure is not repairable".to_string()),
+    };
+    verify_proven_local_identity(state, proof)?;
+    let lane = PremergeLaneIdentity::new(
+        state.identity.repository.clone(),
+        state.identity.issue,
+        state.identity.worker_id.clone(),
+        state.identity.claim_id.clone(),
+        state.identity.branch.clone(),
+        proof.head_oid.clone(),
+    )?;
+    let evidence_root = state
+        .identity
+        .worktree
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest());
+    if !observation.record_path.starts_with(&evidence_root) {
+        return Err("premerge command repair record differs from the current QA lane".to_string());
+    }
+    verify_clean_evidence_worktree(state, &evidence_root)?;
+    validate_observed_command(&state.identity.worktree, observation)?;
+    let attempt = state.implementation_repair_attempt + 1;
+    if attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
+        return Err(format!(
+            "executor premerge command repair exhausted after {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS} attempts"
+        ));
+    }
+    let record_path = observation
+        .record_path
+        .strip_prefix(&state.identity.worktree)
+        .map_err(|_| "premerge command repair record escapes the exact worktree".to_string())?;
+    if record_path.as_os_str().is_empty()
+        || record_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("premerge command repair record path is not canonical".to_string());
+    }
+    let failure = PremergeCommandFailure {
+        claim_id: state.identity.claim_id.clone(),
+        invocation_id: state.identity.invocation_id.clone(),
+        branch: state.identity.branch.clone(),
+        pull_request,
+        attempt,
+        failed_head: proof.head_oid.clone(),
+        record_path: record_path.display().to_string(),
+        record_digest: observation.record_digest.clone(),
+        stdout_digest: observation.stdout_digest.clone(),
+        stderr_digest: observation.stderr_digest.clone(),
+        exit_code,
+    };
+    let body = premerge_command_repair_artifact_body(&failure);
+    write_implementation_repair_artifact(
+        &premerge_command_repair_artifact_path(state_path, state, attempt)?,
+        body.as_bytes(),
+    )?;
+    if attempt == MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
+        ensure_failure_cleanup_intent(
+            state_path,
+            state,
+            true,
+            true,
+            "executor_premerge_command_repair_exhausted",
+        )?;
+        return Ok(PremergeCommandRepairOutcome::Exhausted);
+    }
+    let closeout = state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    prepare_private_closeout_sink(&state.identity.worktree, &closeout)?;
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&closeout)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("clear premerge repair Closeout report: {error}"))?;
+    state.phase = BridgePhase::Interrupted;
+    state.implementation_repair_attempt = attempt;
+    state.closeout_path = None;
+    state.closeout_digest = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(PremergeCommandRepairOutcome::RetryPrepared)
+}
 
 fn implementation_repair_artifact_path(
     state_path: &Path,
@@ -9702,6 +10134,110 @@ fn read_implementation_repair_rules(
     Ok(rules)
 }
 
+fn read_premerge_command_failure(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<PremergeCommandFailure, String> {
+    let path = premerge_command_repair_artifact_path(state_path, state, attempt)?;
+    validate_implementation_repair_artifact(&path)?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("read premerge command repair artifact: {error}"))?;
+    if raw.len() > 16 * 1024 {
+        return Err("premerge command repair artifact exceeds 16384 bytes".to_string());
+    }
+    let object = strict_object(
+        serde_json::from_str(&raw)
+            .map_err(|error| format!("parse premerge command repair artifact: {error}"))?,
+        &[
+            "schema",
+            "claim_id",
+            "invocation_id",
+            "branch",
+            "pull_request",
+            "attempt",
+            "failed_head",
+            "record_path",
+            "record_digest",
+            "stdout_digest",
+            "stderr_digest",
+            "exit_code",
+        ],
+        "premerge command repair artifact",
+    )?;
+    let failure = PremergeCommandFailure {
+        claim_id: text(&object, "claim_id")?,
+        invocation_id: text(&object, "invocation_id")?,
+        branch: text(&object, "branch")?,
+        pull_request: number(&object, "pull_request")?,
+        attempt: checked_u32(&object, "attempt")?,
+        failed_head: text(&object, "failed_head")?,
+        record_path: text(&object, "record_path")?,
+        record_digest: text(&object, "record_digest")?,
+        stdout_digest: text(&object, "stdout_digest")?,
+        stderr_digest: text(&object, "stderr_digest")?,
+        exit_code: i32::try_from(number(&object, "exit_code")?)
+            .map_err(|_| "premerge command repair exit code is invalid".to_string())?,
+    };
+    let record_path = Path::new(&failure.record_path);
+    if number(&object, "schema")? != 1
+        || failure.claim_id != state.identity.claim_id
+        || failure.invocation_id != state.identity.invocation_id
+        || failure.branch != state.identity.branch
+        || Some(failure.pull_request) != state.pr
+        || failure.attempt != attempt
+        || !canonical_git_oid(&failure.failed_head)
+        || failure.exit_code == 0
+        || record_path.is_absolute()
+        || record_path.as_os_str().is_empty()
+        || record_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || [
+            &failure.record_digest,
+            &failure.stdout_digest,
+            &failure.stderr_digest,
+        ]
+        .into_iter()
+        .any(|digest| !canonical_sha256(digest))
+    {
+        return Err("premerge command repair artifact binding mismatch".to_string());
+    }
+    if raw != premerge_command_repair_artifact_body(&failure) {
+        return Err("premerge command repair artifact is not canonical".to_string());
+    }
+    Ok(failure)
+}
+
+fn read_implementation_repair_cause(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<ImplementationRepairCause, String> {
+    let lint_path = implementation_repair_artifact_path(state_path, state, attempt)?;
+    let premerge_path = premerge_command_repair_artifact_path(state_path, state, attempt)?;
+    let lint_exists = lint_path
+        .try_exists()
+        .map_err(|error| format!("inspect implementation repair artifact: {error}"))?;
+    let premerge_exists = premerge_path
+        .try_exists()
+        .map_err(|error| format!("inspect premerge command repair artifact: {error}"))?;
+    match (lint_exists, premerge_exists) {
+        (true, false) => Ok(ImplementationRepairCause::Lint(
+            read_implementation_repair_rules(state_path, state, attempt)?,
+        )),
+        (false, true) => Ok(ImplementationRepairCause::PremergeCommand(
+            read_premerge_command_failure(state_path, state, attempt)?,
+        )),
+        (false, false) => Err(format!(
+            "implementation repair attempt {attempt} has no sealed cause"
+        )),
+        (true, true) => Err(format!(
+            "implementation repair attempt {attempt} has ambiguous sealed causes"
+        )),
+    }
+}
+
 fn implementation_repair_prompt(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -9711,18 +10247,43 @@ fn implementation_repair_prompt(
     }
     let mut seen = BTreeSet::new();
     let mut directives = Vec::new();
+    let mut current = None;
     for attempt in 1..=state.implementation_repair_attempt {
-        for rule in read_implementation_repair_rules(state_path, state, attempt)? {
-            if seen.insert(rule.id()) {
-                directives.push(format!("Fix {}: {}", rule.id(), directive_for(rule)));
+        match read_implementation_repair_cause(state_path, state, attempt)? {
+            ImplementationRepairCause::Lint(rules) => {
+                for rule in rules {
+                    if seen.insert(rule.id()) {
+                        directives.push(format!("Fix {}: {}", rule.id(), directive_for(rule)));
+                    }
+                }
+                current = Some("Implementation lint repair");
+            }
+            ImplementationRepairCause::PremergeCommand(failure) => {
+                directives.push(format!(
+                    "Repair deterministic premerge command exit {exit_code} from attempt {attempt}.\n\
+                     Failed HEAD: {failed_head}\n\
+                     Evidence record: {record_path}\n\
+                     Record SHA-256: {record_digest}\n\
+                     stdout SHA-256: {stdout_digest}\n\
+                     stderr SHA-256: {stderr_digest}",
+                    exit_code = failure.exit_code,
+                    attempt = failure.attempt,
+                    failed_head = failure.failed_head,
+                    record_path = failure.record_path,
+                    record_digest = failure.record_digest,
+                    stdout_digest = failure.stdout_digest,
+                    stderr_digest = failure.stderr_digest,
+                ));
+                current = Some("Deterministic premerge command repair");
             }
         }
     }
     Ok(format!(
-        "\nImplementation lint repair attempt {attempt} of {maximum}.\n\
+        "\n{kind} attempt {attempt} of {maximum}.\n\
          Claim: {claim}\nInvocation: {invocation}\n\
          The authority boundary is unchanged: you MUST NOT push or mutate remote state.\n\
          Correct every cumulative deterministic finding below, rerun tests, and replace the Closeout report:\n{directives}\n",
+        kind = current.ok_or_else(|| "implementation repair has no current cause".to_string())?,
         attempt = state.implementation_repair_attempt,
         maximum = MAX_IMPLEMENTATION_REPAIR_ATTEMPTS,
         claim = state.identity.claim_id,
@@ -11255,6 +11816,16 @@ where
         return Err("executor draft transaction requires exact proven implementation state".into());
     }
     verify_proven_local_state(state, proof)?;
+    if let Some(failure) = latest_premerge_command_failure(state_path, state)? {
+        return update_repaired_draft_pull_request(
+            state_path,
+            state,
+            proof,
+            &failure,
+            adapter,
+            &mut refresh,
+        );
+    }
     let prelaunch = RemoteMutationSnapshot::load(state_path, state)?;
     let observed = normalize_authorized_sibling_remote_deltas(
         state_path,
@@ -11561,6 +12132,201 @@ where
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
     Ok(number)
+}
+
+fn update_repaired_draft_pull_request<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    proof: &ImplementationProof,
+    failure: &PremergeCommandFailure,
+    adapter: &DraftPrAdapter,
+    refresh: &mut Refresh,
+) -> Result<u64, BridgeRunFailure>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
+{
+    if state.pr != Some(failure.pull_request) || proof.head_oid == failure.failed_head {
+        return Err("executor repaired draft requires the preserved PR and a new HEAD".into());
+    }
+    let ancestry = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &failure.failed_head,
+            &proof.head_oid,
+        ])
+        .current_dir(&state.identity.worktree)
+        .status()
+        .map_err(|error| format!("inspect repaired draft ancestry: {error}"))?;
+    if !ancestry.success() {
+        return Err("executor repaired draft HEAD is not a descendant of the failed HEAD".into());
+    }
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor repaired draft base must name origin".to_string())?;
+    let issue_ref = format!("refs/heads/{}", state.identity.branch);
+    let body = canonical_pull_request_body(state, &proof.closeout_body)?;
+    let observe = |state: &PersistedInvocation| RemoteMutationSnapshot::capture(state, adapter);
+    let mut remote = observe(state)?;
+    let matching = |pull_request: &&OpenPullRequest| {
+        pull_request.number == failure.pull_request
+            && pull_request.is_draft
+            && pull_request.head_ref_name == state.identity.branch
+            && pull_request.base_ref_name == base
+    };
+    let baseline = RemoteMutationSnapshot::load(state_path, state)?;
+    let baseline_siblings = baseline
+        .pull_requests
+        .iter()
+        .filter(|pull_request| pull_request.head_ref_name != state.identity.branch)
+        .cloned()
+        .collect::<Vec<_>>();
+    let observed_siblings = remote
+        .pull_requests
+        .iter()
+        .filter(|pull_request| pull_request.head_ref_name != state.identity.branch)
+        .cloned()
+        .collect::<Vec<_>>();
+    if remote.pull_requests.iter().filter(matching).count() != 1
+        || observed_siblings != baseline_siblings
+    {
+        return Err("executor repaired draft requires exactly the preserved open PR".into());
+    }
+    let observed_ref = remote.refs.get(&issue_ref).map(String::as_str);
+    if !matches!(observed_ref, Some(head) if head == failure.failed_head || head == proof.head_oid)
+    {
+        return Err("executor repaired draft remote ref is neither H0 nor H1".into());
+    }
+    if state.phase == BridgePhase::ImplementationProven {
+        state.phase = BridgePhase::BranchPushing;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    if state.phase == BridgePhase::BranchPushing && observed_ref == Some(&failure.failed_head) {
+        if refresh()? == BridgeClaimOwnership::Lost {
+            return Err(BridgeRunFailure::ownership_lost(
+                "executor repaired draft push lost exact claim ownership",
+            ));
+        }
+        let refspec = format!("{}:{issue_ref}", proof.head_oid);
+        let output = Command::new("git")
+            .args(["push", "--porcelain", "origin", &refspec])
+            .current_dir(&state.identity.worktree)
+            .output()
+            .map_err(|error| format!("push repaired executor issue branch: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "push repaired executor issue branch failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        remote = observe(state)?;
+    }
+    if remote.refs.get(&issue_ref) != Some(&proof.head_oid) {
+        return Err("executor repaired draft H1 push could not be proven".into());
+    }
+    if state.phase == BridgePhase::BranchPushing {
+        state.phase = BridgePhase::BranchPushed;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    let exact = remote.pull_requests.iter().filter(|pull_request| {
+        matching(pull_request)
+            && pull_request.head_ref_oid == proof.head_oid
+            && pull_request.body == body
+    });
+    if exact.count() != 1 {
+        state.phase = BridgePhase::DraftCreating;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        if refresh()? == BridgeClaimOwnership::Lost {
+            return Err(BridgeRunFailure::ownership_lost(
+                "executor repaired draft update lost exact claim ownership",
+            ));
+        }
+        edit_draft_pull_request(state_path, state, failure.pull_request, &body, adapter)?;
+        remote = observe(state)?;
+    }
+    let exact = remote.pull_requests.iter().filter(|pull_request| {
+        matching(pull_request)
+            && pull_request.head_ref_oid == proof.head_oid
+            && pull_request.body == body
+    });
+    if exact.count() != 1 {
+        return Err(
+            "executor repaired draft authoritative reread did not prove the same PR at H1".into(),
+        );
+    }
+    state.phase = BridgePhase::DraftCreated;
+    state.pr = Some(failure.pull_request);
+    state.head_oid = Some(proof.head_oid.clone());
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(failure.pull_request)
+}
+
+fn latest_premerge_command_failure(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<Option<PremergeCommandFailure>, String> {
+    for attempt in (1..=state.implementation_repair_attempt).rev() {
+        let path = premerge_command_repair_artifact_path(state_path, state, attempt)?;
+        if path
+            .try_exists()
+            .map_err(|error| format!("inspect premerge command repair artifact: {error}"))?
+        {
+            return read_premerge_command_failure(state_path, state, attempt).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn edit_draft_pull_request(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    pull_request: u64,
+    body: &str,
+    adapter: &DraftPrAdapter,
+) -> Result<(), BridgeRunFailure> {
+    let body_digest = sha256_hex(body.as_bytes());
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor repaired draft body requires a proven H1".to_string())?;
+    let body_path = state_path.with_file_name(format!(
+        "draft-repair-body-{}-{}-{}-{}.md",
+        state.identity.invocation_id,
+        state.implementation_repair_attempt,
+        &head[..12],
+        &body_digest[..16],
+    ));
+    write_private_create_once(&body_path, body.as_bytes(), "executor repaired draft body")?;
+    let output = Command::new(resolve_draft_executable(adapter)?)
+        .args([
+            "pr",
+            "edit",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--body-file",
+            body_path
+                .to_str()
+                .ok_or_else(|| "executor repaired draft body path is not UTF-8".to_string())?,
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("update repaired executor draft PR: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "update repaired executor draft PR failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -14680,6 +15446,17 @@ fn verify_proven_local_state(
     state: &PersistedInvocation,
     proof: &ImplementationProof,
 ) -> Result<(), String> {
+    verify_proven_local_identity(state, proof)?;
+    if !sandboxed_executor_diff(state)?.is_empty() {
+        return Err("executor proven implementation worktree must be clean before mutation".into());
+    }
+    Ok(())
+}
+
+fn verify_proven_local_identity(
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+) -> Result<(), String> {
     let binding = trusted_worktree_git(state)?;
     let branch = binding
         .command()
@@ -14695,9 +15472,6 @@ fn verify_proven_local_state(
     let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
     if branch != state.identity.branch {
         return Err("executor proven implementation branch changed before mutation".to_string());
-    }
-    if !sandboxed_executor_diff(state)?.is_empty() {
-        return Err("executor proven implementation worktree must be clean before mutation".into());
     }
     let head = binding
         .command()

@@ -536,7 +536,15 @@ fn foreground_retires_orphaned_executor_receipt_after_selection_is_lost() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stdout={} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
     assert!(fixture.read_state().selected_issue().is_none());
     assert!(
         !fixture
@@ -1638,6 +1646,87 @@ fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() 
             .exists(),
         "terminal recovery retires the local acquisition receipt"
     );
+}
+
+#[test]
+fn premerge_command_failure_relaunches_same_pr() {
+    let _bridge_e2e = autonomous_conductor_process::real_bridge_e2e_lock();
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("premerge.failed");
+    let harness_launches = fixture.root.join("premerge-harness.launches");
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
+        .env("AUTOSPEC_BRIDGE_PREMERGE_REPAIR", "1")
+        .env("AUTOSPEC_BRIDGE_PREMERGE_FAIL_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
+        .output()
+        .expect("run deterministic premerge repair");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Dispatch);
+    let recovered = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
+        .env("AUTOSPEC_BRIDGE_PREMERGE_REPAIR", "1")
+        .env("AUTOSPEC_BRIDGE_PREMERGE_FAIL_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
+        .output()
+        .expect("resume deterministic premerge repair");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stdout={} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        2,
+        "the failed H0 must relaunch one implementer for H1"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nedit\n17\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    let pull_requests: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&fixture.pull_requests).expect("pull request inventory"),
+    )
+    .expect("parse pull request inventory");
+    assert_eq!(pull_requests.as_array().map(Vec::len), Some(1));
 }
 
 #[test]
@@ -6639,7 +6728,9 @@ fi
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
-    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
+    smoke_command='/bin/test -s tests/smoke/generation.sh'
+    if [ "${AUTOSPEC_BRIDGE_PREMERGE_REPAIR:-0}" = 1 ]; then smoke_command='./tests/smoke/generation.sh'; fi
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n$smoke_command\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n$smoke_command\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
   elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   else
@@ -6814,6 +6905,17 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
   done
   jq -n --rawfile body "$body_file" --arg head "$head" --arg base "$base" '[{"number":17,"body":$body,"headRefName":"feat/autonomous-issue-42","headRefOid":$head,"isDraft":true,"baseRefName":$base}]' > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
   printf '%s\n' 'https://example.invalid/test/repo/pull/17'
+  exit 0
+fi
+if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = edit ]; then
+  head=$(git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" rev-parse refs/heads/feat/autonomous-issue-42)
+  body_file=""; previous=""
+  for value in "$@"; do
+    if [ "$previous" = --body-file ]; then body_file="$value"; fi
+    previous="$value"
+  done
+  jq --rawfile body "$body_file" --arg head "$head" '.[0].body = $body | .[0].headRefOid = $head' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS" > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS.tmp"
+  mv "$AUTOSPEC_FOREGROUND_PULL_REQUESTS.tmp" "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
   exit 0
 fi
 if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = ready ]; then
@@ -7010,7 +7112,12 @@ if [ -n "${AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_F
   fi
   exit 42
 fi
-printf '%s\n' '#!/bin/sh' 'exit 0' > tests/smoke/generation.sh
+bridge_exit=0
+if [ -n "${AUTOSPEC_BRIDGE_PREMERGE_FAIL_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_PREMERGE_FAIL_ONCE" ]; then
+  bridge_exit=7
+  : > "$AUTOSPEC_BRIDGE_PREMERGE_FAIL_ONCE"
+fi
+printf '%s\n' '#!/bin/sh' "exit $bridge_exit" > tests/smoke/generation.sh
 chmod 755 tests/smoke/generation.sh
 git add tests/smoke/generation.sh
 git commit -m 'test: prove native bridge execution'

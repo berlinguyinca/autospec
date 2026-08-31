@@ -18,6 +18,7 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_uses_complete_markers_and_alias_order_fallback() {
@@ -399,9 +400,184 @@ fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
     let target = artifact.with_extension("target");
     fs::rename(&artifact, &target).expect("move repair artifact");
     symlink(&target, &artifact).expect("replace repair artifact with symlink");
-    assert!(bridge::implementation_repair_prompt(&state_path, &state)
-        .expect_err("symlinked artifact must fail closed")
-        .contains("symlink"));
+    let error = bridge::implementation_repair_prompt(&state_path, &state)
+        .expect_err("symlinked artifact must fail closed");
+    assert!(error
+        .split_whitespace()
+        .any(|word| word.starts_with("symlink")));
+}
+
+#[cfg(unix)]
+#[test]
+fn premerge_command_failure_prepares_bound_repair() {
+    // Break caught: a deterministic command failure at an already-pushed draft
+    // stayed at DraftCreated and the conductor reran the same immutable head.
+    let (fixture, mut state, snapshot, closeout) =
+        implementation_proof_fixture("premerge-command-repair");
+    super::support_invocation::commit_implementation(&state);
+    let state_path = fixture.root.join("state/invocation.json");
+    let proof = bridge::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+        .expect("prove implementation");
+    state.phase = BridgePhase::DraftCreated;
+    state.pr = Some(17);
+    bridge::write_invocation_atomic(&state_path, &state).expect("persist draft state");
+
+    let plan = bridge::DirectCommandPlan {
+        commands: vec![bridge::DirectCommand::success(vec![
+            "/usr/bin/false".to_string()
+        ])],
+    };
+    let lane = bridge::PremergeLaneIdentity::new(
+        state.identity.repository.clone(),
+        state.identity.issue,
+        state.identity.worker_id.clone(),
+        state.identity.claim_id.clone(),
+        state.identity.branch.clone(),
+        proof.head_oid.clone(),
+    )
+    .expect("failed command lane");
+    let evidence_root = state
+        .identity
+        .worktree
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest())
+        .join("attempts/test/qa/smoke");
+    let error = bridge::execute_direct_plan(
+        &state.identity.worktree,
+        &plan,
+        &evidence_root,
+        None,
+        Duration::from_secs(5),
+    )
+    .expect_err("false must produce durable failure evidence");
+    assert_eq!(
+        error,
+        "executor direct command segment 0 failed with exit status 1"
+    );
+    let paths = bridge::direct_attempt_paths(&evidence_root, 0);
+    let observation = bridge::recover_observed_command(
+        &state.identity.worktree,
+        &paths.record,
+        &plan.commands[0],
+        None,
+    )
+    .expect("recover exact failed command");
+
+    assert_eq!(
+        bridge::prepare_premerge_command_repair(&state_path, &mut state, &proof, &observation,)
+            .expect("prepare deterministic repair"),
+        bridge::PremergeCommandRepairOutcome::RetryPrepared,
+    );
+
+    assert_eq!(state.phase, BridgePhase::Interrupted);
+    assert_eq!(state.implementation_repair_attempt, 1);
+    assert_eq!(state.pr, Some(17));
+    assert_eq!(state.head_oid.as_deref(), Some(proof.head_oid.as_str()));
+    assert!(state.closeout_path.is_none());
+    assert!(state.closeout_digest.is_none());
+    assert!(
+        fs::read_to_string(&closeout)
+            .expect("cleared premerge repair closeout")
+            .is_empty(),
+        "the next implementer must replace the failed-head closeout"
+    );
+    let artifact = bridge::premerge_command_repair_artifact_path(&state_path, &state, 1)
+        .expect("repair artifact path");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(artifact).expect("read repair artifact"))
+            .expect("parse repair artifact");
+    assert_eq!(value["claim_id"], state.identity.claim_id);
+    assert_eq!(value["invocation_id"], state.identity.invocation_id);
+    assert_eq!(value["branch"], state.identity.branch);
+    assert_eq!(value["pull_request"], 17);
+    assert_eq!(value["failed_head"], proof.head_oid);
+    assert_eq!(value["record_digest"], observation.record_digest);
+    assert_eq!(value["stdout_digest"], observation.stdout_digest);
+    assert_eq!(value["stderr_digest"], observation.stderr_digest);
+    assert!(value.get("stdout").is_none());
+    assert!(value.get("stderr").is_none());
+
+    let prompt =
+        bridge::implementation_repair_prompt(&state_path, &state).expect("premerge repair prompt");
+    let lines = prompt.lines().collect::<Vec<_>>();
+    for expected in [
+        "Deterministic premerge command repair attempt 1 of 3.".to_string(),
+        format!("Failed HEAD: {}", proof.head_oid),
+        format!("Record SHA-256: {}", observation.record_digest),
+        format!("stdout SHA-256: {}", observation.stdout_digest),
+        format!("stderr SHA-256: {}", observation.stderr_digest),
+        "The authority boundary is unchanged: you MUST NOT push or mutate remote state."
+            .to_string(),
+    ] {
+        assert!(lines.iter().any(|line| *line == expected), "{prompt}");
+    }
+
+    state.phase = BridgePhase::DraftCreated;
+    state.implementation_repair_attempt = bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS;
+    bridge::write_invocation_atomic(&state_path, &state).expect("persist exhausted draft state");
+    assert_eq!(
+        bridge::prepare_premerge_command_repair(&state_path, &mut state, &proof, &observation)
+            .expect("seal exhausted deterministic repair"),
+        bridge::PremergeCommandRepairOutcome::Exhausted,
+    );
+    let intent = bridge::read_failure_cleanup_intent(&state_path, &state)
+        .expect("read crash-recoverable exhaustion intent");
+    assert!(intent.exhausted);
+    assert_eq!(intent.reason, "executor_premerge_command_repair_exhausted");
+}
+
+#[cfg(unix)]
+#[test]
+fn premerge_qa_nonzero_exit_propagates_typed_observation() {
+    // Break caught: QA returned only a formatted String, so the caller could
+    // neither distinguish deterministic rejection nor bind the durable record.
+    let (fixture, mut state, snapshot, closeout) =
+        implementation_proof_fixture("typed-premerge-command-repair");
+    super::support_invocation::commit_implementation(&state);
+    let state_path = fixture.root.join("state/invocation.json");
+    let proof = bridge::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+        .expect("prove implementation");
+    state.phase = BridgePhase::DraftCreated;
+    state.pr = Some(17);
+    let lane = bridge::PremergeLaneIdentity::new(
+        state.identity.repository.clone(),
+        state.identity.issue,
+        state.identity.worker_id.clone(),
+        state.identity.claim_id.clone(),
+        state.identity.branch.clone(),
+        proof.head_oid.clone(),
+    )
+    .expect("QA lane");
+    let artifact_root = state
+        .identity
+        .worktree
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest())
+        .join("attempts/test/qa/smoke");
+    let plan = bridge::DirectCommandPlan {
+        commands: vec![bridge::DirectCommand::success(vec![
+            "/usr/bin/false".to_string()
+        ])],
+    };
+
+    let error = bridge::execute_premerge_qa_plan(
+        &state.identity.worktree,
+        &plan,
+        &artifact_root,
+        None,
+        Duration::from_secs(5),
+    )
+    .expect_err("nonzero QA must propagate a typed repairable observation");
+    let observation = error
+        .premerge_command_failure()
+        .expect("typed premerge command failure");
+    assert_eq!(observation.commit_oid, proof.head_oid);
+    assert_eq!(observation.terminal, bridge::AttemptTerminal::Exited(1));
+    assert!(observation.record_path.is_file());
+    assert_eq!(
+        error.to_string(),
+        "executor premerge QA command failed with exit status 1"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -495,13 +671,13 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
 
     let foreign = artifact.with_extension("foreign-link");
     fs::hard_link(&artifact, &foreign).expect("create foreign hard link");
-    assert!(bridge::read_implementation_repair_rules(
+    let error = bridge::read_implementation_repair_rules(
         &state_path,
         &state,
         bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
     )
-    .expect_err("foreign hard link must fail closed")
-    .contains("hard link"));
+    .expect_err("foreign hard link must fail closed");
+    assert!(error.ends_with("foreign hard link"), "{error}");
 }
 
 #[test]
@@ -531,7 +707,7 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
     )
     .expect_err("interrupt after needs-human transition");
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
-    assert!(interrupted.to_string().contains("after claim transition"));
+    assert!(interrupted.to_string().ends_with("after claim transition"));
     let durable = bridge::PersistedInvocation::from_json(
         &fs::read_to_string(&state_path).expect("read interrupted state"),
     )
