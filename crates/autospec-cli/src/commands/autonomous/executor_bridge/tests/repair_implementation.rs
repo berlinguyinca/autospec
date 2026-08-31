@@ -400,9 +400,11 @@ fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
     let target = artifact.with_extension("target");
     fs::rename(&artifact, &target).expect("move repair artifact");
     symlink(&target, &artifact).expect("replace repair artifact with symlink");
-    assert!(bridge::implementation_repair_prompt(&state_path, &state)
-        .expect_err("symlinked artifact must fail closed")
-        .contains("symlink"));
+    let error = bridge::implementation_repair_prompt(&state_path, &state)
+        .expect_err("symlinked artifact must fail closed");
+    assert!(error
+        .split_whitespace()
+        .any(|word| word.starts_with("symlink")));
 }
 
 #[cfg(unix)]
@@ -448,7 +450,10 @@ fn premerge_command_failure_prepares_bound_repair() {
         Duration::from_secs(5),
     )
     .expect_err("false must produce durable failure evidence");
-    assert!(error.contains("exit status 1"), "{error}");
+    assert_eq!(
+        error,
+        "executor direct command segment 0 failed with exit status 1"
+    );
     let paths = bridge::direct_attempt_paths(&evidence_root, 0);
     let observation = bridge::recover_observed_command(
         &state.identity.worktree,
@@ -494,12 +499,18 @@ fn premerge_command_failure_prepares_bound_repair() {
 
     let prompt =
         bridge::implementation_repair_prompt(&state_path, &state).expect("premerge repair prompt");
-    assert!(prompt.contains("Deterministic premerge command repair attempt 1 of 3"));
-    assert!(prompt.contains(&format!("Failed HEAD: {}", proof.head_oid)));
-    assert!(prompt.contains(&format!("Record SHA-256: {}", observation.record_digest)));
-    assert!(prompt.contains(&format!("stdout SHA-256: {}", observation.stdout_digest)));
-    assert!(prompt.contains(&format!("stderr SHA-256: {}", observation.stderr_digest)));
-    assert!(prompt.contains("MUST NOT push"), "{prompt}");
+    let lines = prompt.lines().collect::<Vec<_>>();
+    for expected in [
+        "Deterministic premerge command repair attempt 1 of 3.".to_string(),
+        format!("Failed HEAD: {}", proof.head_oid),
+        format!("Record SHA-256: {}", observation.record_digest),
+        format!("stdout SHA-256: {}", observation.stdout_digest),
+        format!("stderr SHA-256: {}", observation.stderr_digest),
+        "The authority boundary is unchanged: you MUST NOT push or mutate remote state."
+            .to_string(),
+    ] {
+        assert!(lines.iter().any(|line| *line == expected), "{prompt}");
+    }
 
     state.phase = BridgePhase::DraftCreated;
     state.implementation_repair_attempt = bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS;
@@ -563,7 +574,10 @@ fn premerge_qa_nonzero_exit_propagates_typed_observation() {
     assert_eq!(observation.commit_oid, proof.head_oid);
     assert_eq!(observation.terminal, bridge::AttemptTerminal::Exited(1));
     assert!(observation.record_path.is_file());
-    assert!(error.to_string().contains("exit status 1"));
+    assert_eq!(
+        error.to_string(),
+        "executor premerge QA command failed with exit status 1"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -657,13 +671,13 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
 
     let foreign = artifact.with_extension("foreign-link");
     fs::hard_link(&artifact, &foreign).expect("create foreign hard link");
-    assert!(bridge::read_implementation_repair_rules(
+    let error = bridge::read_implementation_repair_rules(
         &state_path,
         &state,
         bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
     )
-    .expect_err("foreign hard link must fail closed")
-    .contains("hard link"));
+    .expect_err("foreign hard link must fail closed");
+    assert!(error.ends_with("foreign hard link"), "{error}");
 }
 
 #[test]
@@ -693,7 +707,7 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
     )
     .expect_err("interrupt after needs-human transition");
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
-    assert!(interrupted.to_string().contains("after claim transition"));
+    assert!(interrupted.to_string().ends_with("after claim transition"));
     let durable = bridge::PersistedInvocation::from_json(
         &fs::read_to_string(&state_path).expect("read interrupted state"),
     )
