@@ -1387,14 +1387,22 @@ fn released_predecessor_heartbeat_evidence_exists(
     let issue_name = format!("{}.json", identity.issue);
     match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
         Ok(snapshot) => {
-            let Some(evidence) = parse_startup_heartbeat(&snapshot.document) else {
-                return Ok(false);
-            };
-            return Ok(evidence.repo == identity.repo
+            let evidence = parse_startup_heartbeat(&snapshot.document).ok_or_else(|| {
+                CommandFailure::diagnostic(
+                    "released predecessor heartbeat is present but malformed",
+                )
+            })?;
+            let exact = evidence.repo == identity.repo
                 && evidence.issue == identity.issue.to_string()
                 && evidence.worker_id == identity.worker_id
                 && evidence.branch == identity.branch
-                && evidence.claim_id == identity.claim_id);
+                && evidence.claim_id == identity.claim_id;
+            if !exact {
+                return Err(CommandFailure::diagnostic(
+                    "released predecessor heartbeat belongs to another claim generation",
+                ));
+            }
+            return Ok(true);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
