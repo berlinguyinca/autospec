@@ -1,7 +1,10 @@
 #[path = "../src/commands/mod.rs"]
 mod commands;
 
-use autospec_core::managed_project::ManagedProjectPolicy;
+use autospec_core::managed_project::{
+    ItemKey, ManagedProjectIdentity, ManagedProjectNamespace, ManagedProjectPolicy, PortfolioId,
+    SourceSpecIdentity, SpecPortfolioIdentity,
+};
 use autospec_core::managed_project::{
     ProductKey, RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
     RepositoryRecord,
@@ -123,6 +126,268 @@ fn marker(owner: &str) -> String {
     format!(
         "<!-- autospec-managed-project:begin -->\nschema: 1\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
     )
+}
+
+#[test]
+fn managed_project_portfolio_identity_is_stable_and_changes_with_source_blob() {
+    let source = SourceSpecIdentity::new(
+        "BerlinGuyInCA/AutoSpec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let same_source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let changed_source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "1123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+
+    assert_eq!(source.portfolio_id(), same_source.portfolio_id());
+    assert_ne!(source.portfolio_id(), changed_source.portfolio_id());
+    assert_eq!(
+        source.portfolio_id().as_str(),
+        "6d50c9f07ca522115a08e5d94f402135cc226619fc669ac3329d8eff186a10cd"
+    );
+}
+
+#[test]
+fn managed_project_portfolio_identity_preserves_component_boundaries() {
+    let left = PortfolioId::from_source("a", "bc", "d").unwrap();
+    let right = PortfolioId::from_source("ab", "c", "d").unwrap();
+
+    assert_ne!(left, right);
+}
+
+#[test]
+fn managed_project_binding_evolves_legacy_products_to_schema_two() {
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "product_key": "autospec",
+        "owner": "berlinguyinca",
+        "project_node_id": null,
+        "project_number": null,
+        "project_url": null,
+        "project_title": null,
+        "repositories": [],
+        "last_reconciled_at": null,
+        "pending_projections": [],
+        "relationships": []
+    });
+
+    let binding: autospec_core::managed_project::ManagedProjectBinding =
+        serde_json::from_value(legacy).unwrap();
+    assert_eq!(binding.schema_version, 2);
+    assert_eq!(
+        binding.identity(),
+        &ManagedProjectIdentity::Product {
+            product_key: key("autospec")
+        }
+    );
+    let serialized = serde_json::to_value(binding).unwrap();
+    assert_eq!(serialized["schema_version"], 2);
+    assert_eq!(serialized["identity"]["kind"], "product");
+    assert!(serialized.get("product_key").is_none());
+}
+
+#[test]
+fn managed_project_binding_rejects_incomplete_or_mixed_identity_schemas() {
+    let legacy_spec = serde_json::json!({
+        "schema_version": 1,
+        "kind": "spec_portfolio",
+        "product_key": "autospec"
+    });
+    let schema_two_legacy_shape = serde_json::json!({
+        "schema_version": 2,
+        "kind": "product",
+        "product_key": "autospec"
+    });
+    let schema_two_missing_identity = serde_json::json!({"schema_version": 2});
+    let mismatched_portfolio = serde_json::json!({
+        "schema_version": 2,
+        "identity": {
+            "kind": "spec_portfolio",
+            "portfolio_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source": "berlinguyinca/autospec:docs/specs/automatic-projects.md@0123456789abcdef0123456789abcdef01234567"
+        }
+    });
+
+    for malformed in [
+        legacy_spec,
+        schema_two_legacy_shape,
+        schema_two_missing_identity,
+        mismatched_portfolio,
+    ] {
+        assert!(
+            serde_json::from_value::<autospec_core::managed_project::ManagedProjectBinding>(
+                malformed
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn managed_project_binding_round_trips_closed_spec_portfolio_identity() {
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let identity = ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(source));
+    let binding =
+        autospec_core::managed_project::ManagedProjectBinding::new_identity(identity).unwrap();
+
+    let encoded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(encoded["identity"]["kind"], "spec_portfolio");
+    assert_eq!(
+        encoded["identity"]["portfolio_id"],
+        "6d50c9f07ca522115a08e5d94f402135cc226619fc669ac3329d8eff186a10cd"
+    );
+    assert!(encoded.get("product_key").is_none());
+    let decoded = serde_json::from_value(encoded).unwrap();
+    assert_eq!(binding, decoded);
+}
+
+#[test]
+fn managed_project_namespaces_are_collision_safe_and_round_trip() {
+    let product = ManagedProjectIdentity::Product {
+        product_key: key("repo.owner__name"),
+    }
+    .namespace();
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let portfolio =
+        ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(source)).namespace();
+
+    assert_eq!(product.to_string(), "product.repo.owner__name");
+    assert_eq!(
+        portfolio.to_string(),
+        "portfolio.6d50c9f07ca522115a08e5d94f402135cc226619fc669ac3329d8eff186a10cd"
+    );
+
+    for namespace in [&product, &portfolio] {
+        let encoded = namespace.to_string();
+        let decoded: ManagedProjectNamespace = encoded.parse().unwrap();
+        assert_eq!(&decoded, namespace);
+        assert_eq!(decoded.to_string(), encoded);
+    }
+    assert_ne!(product.to_string(), portfolio.to_string());
+}
+
+#[test]
+fn managed_project_item_keys_preserve_stable_logical_identity() {
+    for value in [
+        "source-tracker",
+        "repo:berlinguyinca/autospec:tracker",
+        "issue:portfolio-identity",
+        "audit:phase-5.5",
+    ] {
+        let key = ItemKey::new(value).unwrap();
+        assert_eq!(key.as_str(), value);
+        assert_eq!(key.to_string(), value);
+        assert_eq!(value.parse::<ItemKey>().unwrap(), key);
+        assert_eq!(
+            serde_json::from_value::<ItemKey>(serde_json::json!(value)).unwrap(),
+            key
+        );
+    }
+}
+
+#[test]
+fn managed_project_item_key_serialization_has_a_durable_golden() {
+    let item_key = ItemKey::new("repo:berlinguyinca/autospec:tracker").unwrap();
+
+    assert_eq!(
+        serde_json::to_string(&item_key).unwrap(),
+        "\"repo:berlinguyinca/autospec:tracker\""
+    );
+}
+
+#[test]
+fn managed_project_spec_portfolio_identity_derives_id_and_rejects_mismatched_serde() {
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let identity = SpecPortfolioIdentity::new(source.clone());
+    assert_eq!(identity.portfolio_id(), &source.portfolio_id());
+    assert_eq!(identity.source(), &source);
+
+    let mismatched = serde_json::json!({
+        "portfolio_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": source.to_string()
+    });
+    assert!(serde_json::from_value::<SpecPortfolioIdentity>(mismatched).is_err());
+}
+
+#[test]
+#[should_panic(expected = "spec portfolio bindings do not expose product compatibility")]
+fn managed_project_spec_portfolio_binding_hides_product_compatibility() {
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let binding = autospec_core::managed_project::ManagedProjectBinding::new_identity(
+        ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(source)),
+    )
+    .unwrap();
+
+    let _ = binding.product_key.as_str();
+}
+
+#[test]
+fn managed_project_source_spec_identity_round_trips_as_a_validated_scalar() {
+    let identity = SourceSpecIdentity::new(
+        "BerlinGuyInCA/AutoSpec",
+        "docs/specs/automatic-projects.md",
+        "0123456789ABCDEF0123456789ABCDEF01234567",
+    )
+    .unwrap();
+    let encoded = identity.to_string();
+
+    assert_eq!(
+        encoded,
+        "berlinguyinca/autospec:docs/specs/automatic-projects.md@0123456789abcdef0123456789abcdef01234567"
+    );
+    assert_eq!(encoded.parse::<SourceSpecIdentity>().unwrap(), identity);
+    assert_eq!(
+        serde_json::from_value::<SourceSpecIdentity>(serde_json::json!(encoded)).unwrap(),
+        identity
+    );
+}
+
+#[test]
+fn managed_project_identity_types_reject_unsafe_keys() {
+    for unsafe_namespace in [
+        "product.../autospec",
+        "portfolio.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\",
+        "C:portfolio.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(unsafe_namespace.parse::<ManagedProjectNamespace>().is_err());
+    }
+    for unsafe_item_key in [
+        "../source-tracker",
+        "repo:owner\\repo:tracker",
+        "issue:nul\0key",
+    ] {
+        assert!(ItemKey::new(unsafe_item_key).is_err());
+    }
 }
 
 fn initialize_repository(path: &Path, remote: &str) {
