@@ -6,10 +6,11 @@ use super::{
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
-    ManagedProjectBinding, ProductKey, RelationshipEdge, RepositoryRecord,
+    ManagedProjectBinding, ManagedProjectIdentity, ManagedProjectNamespace, ProductKey,
+    RelationshipEdge, RepositoryRecord,
 };
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[path = "store/recovery.rs"]
@@ -28,9 +29,11 @@ pub(super) const LOCK_FILE: &str = "binding.lock";
 
 pub struct ManagedProjectStore {
     pub(super) root: PathBuf,
-    pub(super) product_key: ProductKey,
+    identity: ManagedProjectIdentity,
+    namespace: ManagedProjectNamespace,
     pub(super) binding: ManagedProjectBinding,
     event_keys: HashSet<String>,
+    event_records: HashMap<String, (String, Value)>,
     known_projections: HashSet<String>,
     provisional_project: Option<ProjectIdentity>,
     portfolio_snapshot: Option<Value>,
@@ -39,34 +42,56 @@ pub struct ManagedProjectStore {
     next_sequence: u64,
     journal_digest: String,
     append_fault_after: Option<usize>,
+    portfolio_persist_fault: bool,
 }
 
 impl ManagedProjectStore {
-    pub fn open_global(
+    pub fn open_product_global(
         root: &Path,
         legacy_root: Option<&Path>,
         product_key: &ProductKey,
     ) -> Result<Self, ManagedProjectError> {
         import_legacy_state(root, legacy_root, product_key)?;
-        Self::open(root, product_key)
+        Self::open_product(root, product_key)
+    }
+
+    pub fn open_product_read_only(
+        root: &Path,
+        product_key: &ProductKey,
+    ) -> Result<Self, ManagedProjectError> {
+        let identity = ManagedProjectIdentity::Product {
+            product_key: product_key.clone(),
+        };
+        Self::open_read_only_at(root, &identity, product_key.as_str())
     }
 
     pub fn open_read_only(
         root: &Path,
-        product_key: &ProductKey,
+        identity: &ManagedProjectIdentity,
     ) -> Result<Self, ManagedProjectError> {
-        validate_read_only_ancestors(root, product_key)?;
-        let project_root = root.join("projects").join(product_key.as_str());
+        let namespace = require_portfolio_namespace(identity)?;
+        Self::open_read_only_at(root, identity, &namespace.to_string())
+    }
+
+    fn open_read_only_at(
+        root: &Path,
+        identity: &ManagedProjectIdentity,
+        state_segment: &str,
+    ) -> Result<Self, ManagedProjectError> {
+        validate_read_only_ancestors(root, state_segment)?;
+        let namespace = identity.namespace();
+        let project_root = root.join("projects").join(state_segment);
         let binding_path = project_root.join(BINDING_FILE);
         let events_path = project_root.join(EVENTS_FILE);
         let portfolio_path = project_root.join(PORTFOLIO_FILE);
         reject_unsafe_file(&portfolio_path)?;
         let persisted = if binding_path.exists() {
-            Some(read_persisted_binding(&binding_path, product_key)?)
+            Some(read_persisted_binding(&binding_path, identity)?)
         } else {
             None
         };
-        let empty_binding = ManagedProjectBinding::new(product_key.clone());
+        let empty_binding = ManagedProjectBinding::new_identity(identity.clone())
+            .map_err(ManagedProjectError::new)?;
         if !events_path.exists() {
             if portfolio_path.exists() {
                 return Err(ManagedProjectError::new(
@@ -83,9 +108,11 @@ impl ManagedProjectStore {
             }
             return Ok(Self {
                 root: project_root,
-                product_key: product_key.clone(),
+                identity: identity.clone(),
+                namespace,
                 binding: empty_binding,
                 event_keys: HashSet::new(),
+                event_records: HashMap::new(),
                 known_projections: HashSet::new(),
                 provisional_project: None,
                 portfolio_snapshot: None,
@@ -94,14 +121,17 @@ impl ManagedProjectStore {
                 next_sequence: 1,
                 journal_digest: empty_journal_digest(),
                 append_fault_after: None,
+                portfolio_persist_fault: false,
             });
         }
-        let recovered = recover_events(&events_path, product_key, false)?;
+        let recovered = recover_events(&events_path, &namespace, false)?;
         let mut store = Self {
             root: project_root,
-            product_key: product_key.clone(),
+            identity: identity.clone(),
+            namespace,
             binding: empty_binding,
             event_keys: HashSet::new(),
+            event_records: HashMap::new(),
             known_projections: HashSet::new(),
             provisional_project: None,
             portfolio_snapshot: None,
@@ -110,6 +140,7 @@ impl ManagedProjectStore {
             next_sequence: 1,
             journal_digest: empty_journal_digest(),
             append_fault_after: None,
+            portfolio_persist_fault: false,
         };
         for event in &recovered.events {
             store.apply_event(event)?;
@@ -128,11 +159,34 @@ impl ManagedProjectStore {
         Ok(store)
     }
 
-    pub fn open(root: &Path, product_key: &ProductKey) -> Result<Self, ManagedProjectError> {
+    pub fn open_product(
+        root: &Path,
+        product_key: &ProductKey,
+    ) -> Result<Self, ManagedProjectError> {
+        let identity = ManagedProjectIdentity::Product {
+            product_key: product_key.clone(),
+        };
+        Self::open_at(root, &identity, product_key.as_str())
+    }
+
+    pub fn open(
+        root: &Path,
+        identity: &ManagedProjectIdentity,
+    ) -> Result<Self, ManagedProjectError> {
+        let namespace = require_portfolio_namespace(identity)?;
+        Self::open_at(root, identity, &namespace.to_string())
+    }
+
+    fn open_at(
+        root: &Path,
+        identity: &ManagedProjectIdentity,
+        state_segment: &str,
+    ) -> Result<Self, ManagedProjectError> {
+        let namespace = identity.namespace();
         ensure_private_directory(root)?;
         let projects = root.join("projects");
         ensure_private_directory(&projects)?;
-        let root = projects.join(product_key.as_str());
+        let root = projects.join(state_segment);
         ensure_private_directory(&root)?;
         let _lock = ProductLock::acquire(&root.join(LOCK_FILE))?;
 
@@ -144,13 +198,19 @@ impl ManagedProjectStore {
         reject_unsafe_file(&portfolio_path)?;
 
         let persisted = if binding_path.exists() {
-            Some(read_persisted_binding(&binding_path, product_key)?)
+            Some(read_persisted_binding(&binding_path, identity)?)
         } else {
             None
         };
 
         let journal_exists = events_path.exists();
-        let empty_binding = ManagedProjectBinding::new(product_key.clone());
+        let empty_binding = ManagedProjectBinding::new_identity(identity.clone())
+            .map_err(ManagedProjectError::new)?;
+        if !journal_exists && portfolio_path.exists() {
+            return Err(ManagedProjectError::new(
+                "portfolio snapshot is missing its durable event journal",
+            ));
+        }
         if !journal_exists
             && persisted
                 .as_ref()
@@ -161,12 +221,14 @@ impl ManagedProjectStore {
             ));
         }
         ensure_private_file(&events_path)?;
-        let recovered = recover_events(&events_path, product_key, true)?;
+        let recovered = recover_events(&events_path, &namespace, true)?;
         let mut store = Self {
             root,
-            product_key: product_key.clone(),
+            identity: identity.clone(),
+            namespace,
             binding: empty_binding,
             event_keys: HashSet::new(),
+            event_records: HashMap::new(),
             known_projections: HashSet::new(),
             provisional_project: None,
             portfolio_snapshot: None,
@@ -175,6 +237,7 @@ impl ManagedProjectStore {
             next_sequence: 1,
             journal_digest: empty_journal_digest(),
             append_fault_after: None,
+            portfolio_persist_fault: false,
         };
         for event in recovered.events {
             store.apply_event(&event)?;
@@ -219,7 +282,8 @@ impl ManagedProjectStore {
         {
             return Ok(());
         }
-        let key = format!("repository:record:{}:{identity}", self.product_key.as_str());
+        let product_key = self.product_key()?.as_str();
+        let key = format!("repository:record:{product_key}:{identity}");
         self.append_event(
             key,
             "repository-recorded",
@@ -228,7 +292,8 @@ impl ManagedProjectStore {
     }
 
     pub fn record_edge(&mut self, edge: RelationshipEdge) -> Result<(), ManagedProjectError> {
-        if edge.product_key != self.product_key {
+        let product_key = self.product_key()?;
+        if &edge.product_key != product_key {
             return Err(ManagedProjectError::new(
                 "relationship product key does not match the managed project store",
             ));
@@ -236,7 +301,7 @@ impl ManagedProjectStore {
         let evidence_digest = sha256_hex(edge.dedupe_key().as_bytes());
         let key = format!(
             "relationship:{}:{}:{}:{}:{evidence_digest}",
-            self.product_key.as_str(),
+            product_key.as_str(),
             edge.kind.as_str(),
             normalize_identity(&edge.source),
             normalize_identity(&edge.target),
@@ -326,7 +391,7 @@ impl ManagedProjectStore {
     ) -> Result<(), ManagedProjectError> {
         let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
         self.refresh_from_journal()?;
-        validate_portfolio_snapshot(&snapshot)?;
+        validate_portfolio_snapshot(&snapshot, &self.identity)?;
         if self
             .portfolio_snapshot
             .as_ref()
@@ -342,11 +407,11 @@ impl ManagedProjectStore {
         let plan_digest = snapshot["plan_digest"]
             .as_str()
             .expect("validated snapshot has plan digest");
-        self.append_event_locked(
-            format!("portfolio:snapshot:{portfolio_id}:{plan_digest}"),
-            "portfolio-snapshot-recorded",
-            snapshot,
-        )
+        let key = format!("portfolio:snapshot:{portfolio_id}:{plan_digest}");
+        if self.retry_is_complete(&key, "portfolio-snapshot-recorded", &snapshot)? {
+            return Ok(());
+        }
+        self.append_event_locked(key, "portfolio-snapshot-recorded", snapshot)
     }
 
     pub(crate) fn record_portfolio_item_binding(
@@ -355,18 +420,23 @@ impl ManagedProjectStore {
     ) -> Result<(), ManagedProjectError> {
         let _lock = ProductLock::acquire(&self.root.join(LOCK_FILE))?;
         self.refresh_from_journal()?;
+        let item_key = binding["item_key"]
+            .as_str()
+            .ok_or_else(|| ManagedProjectError::new("portfolio item binding has no item key"))?;
+        let key = format!("portfolio:item-binding:{item_key}");
+        if self.retry_is_complete(&key, "portfolio-item-bound", &binding)? {
+            return Ok(());
+        }
         let snapshot = self.portfolio_snapshot.as_ref().ok_or_else(|| {
             ManagedProjectError::new("portfolio item binding requires a recovery capsule")
         })?;
-        validate_portfolio_item_binding(snapshot, &self.portfolio_item_bindings, &binding)?;
-        let item_key = binding["item_key"]
-            .as_str()
-            .expect("validated binding has item key");
-        self.append_event_locked(
-            format!("portfolio:item-binding:{item_key}"),
-            "portfolio-item-bound",
-            binding,
-        )
+        validate_portfolio_item_binding(
+            snapshot,
+            &self.identity,
+            &self.portfolio_item_bindings,
+            &binding,
+        )?;
+        self.append_event_locked(key, "portfolio-item-bound", binding)
     }
 
     pub(crate) fn transition_portfolio_operation(
@@ -382,16 +452,22 @@ impl ManagedProjectStore {
                 "portfolio operation requires a recovery capsule",
             ));
         }
-        validate_operation_transition(&self.portfolio_operations, operation_id, state, &payload)?;
-        self.append_event_locked(
-            format!("portfolio:operation:{operation_id}:{state}"),
-            "portfolio-operation-transitioned",
-            serde_json::json!({
-                "operation_id": operation_id,
-                "state": state,
-                "payload": payload,
-            }),
-        )
+        let event_payload = serde_json::json!({
+            "operation_id": operation_id,
+            "state": state,
+            "payload": payload,
+        });
+        let key = format!("portfolio:operation:{operation_id}:{state}");
+        if self.retry_is_complete(&key, "portfolio-operation-transitioned", &event_payload)? {
+            return Ok(());
+        }
+        validate_operation_transition(
+            &self.portfolio_operations,
+            operation_id,
+            state,
+            &event_payload["payload"],
+        )?;
+        self.append_event_locked(key, "portfolio-operation-transitioned", event_payload)
     }
 
     pub(crate) fn portfolio_snapshot(&self) -> Option<&Value> {
@@ -427,6 +503,11 @@ impl ManagedProjectStore {
         self.append_fault_after = Some(bytes);
     }
 
+    #[cfg(test)]
+    pub fn fail_next_portfolio_persist(&mut self) {
+        self.portfolio_persist_fault = true;
+    }
+
     fn append_event(
         &mut self,
         key: String,
@@ -444,12 +525,12 @@ impl ManagedProjectStore {
         kind: &'static str,
         payload: Value,
     ) -> Result<(), ManagedProjectError> {
-        if self.event_keys.contains(&key) {
-            return self.persist_state();
+        if self.retry_is_complete(&key, kind, &payload)? {
+            return Ok(());
         }
         let event = JournalEvent {
             sequence: self.next_sequence,
-            product_key: self.product_key.clone(),
+            namespace: self.namespace.clone(),
             key,
             kind: kind.to_owned(),
             payload,
@@ -471,10 +552,12 @@ impl ManagedProjectStore {
     }
 
     pub(super) fn refresh_from_journal(&mut self) -> Result<(), ManagedProjectError> {
-        let persisted = read_persisted_binding(&self.root.join(BINDING_FILE), &self.product_key)?;
-        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key, true)?;
-        self.binding = ManagedProjectBinding::new(self.product_key.clone());
+        let persisted = read_persisted_binding(&self.root.join(BINDING_FILE), &self.identity)?;
+        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.namespace, true)?;
+        self.binding = ManagedProjectBinding::new_identity(self.identity.clone())
+            .map_err(ManagedProjectError::new)?;
         self.event_keys.clear();
+        self.event_records.clear();
         self.known_projections.clear();
         self.provisional_project = None;
         self.portfolio_snapshot = None;
@@ -494,13 +577,19 @@ impl ManagedProjectStore {
     }
 
     fn apply_event(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
-        if event.product_key != self.product_key {
+        if event.namespace != self.namespace {
             return Err(ManagedProjectError::new(
-                "journal event product key does not match its state directory",
+                "journal event namespace does not match its state directory",
             ));
         }
-        if self.event_keys.contains(&event.key) {
-            return Ok(());
+        if let Some((kind, payload)) = self.event_records.get(&event.key) {
+            return if kind == &event.kind && payload == &event.payload {
+                Ok(())
+            } else {
+                Err(ManagedProjectError::new(
+                    "journal contains conflicting events with the same key",
+                ))
+            };
         }
         match event.kind.as_str() {
             "project-created" => self.apply_project_created(event)?,
@@ -521,11 +610,16 @@ impl ManagedProjectStore {
             }
         }
         self.event_keys.insert(event.key.clone());
+        self.event_records.insert(
+            event.key.clone(),
+            (event.kind.clone(), event.payload.clone()),
+        );
+        self.update_projection_high_watermark(event.sequence);
         Ok(())
     }
 
     fn apply_project_created(&mut self, event: &JournalEvent) -> Result<(), ManagedProjectError> {
-        let projection = format!("project:create:{}", self.product_key.as_str());
+        let projection = format!("project:create:{}", self.event_identity_key());
         if self.binding.project_node_id.is_some() {
             return Err(ManagedProjectError::new(
                 "provisional project identity follows a final binding",
@@ -599,7 +693,7 @@ impl ManagedProjectStore {
             serde_json::from_value(event.payload.clone()).map_err(|error| {
                 ManagedProjectError::new(format!("invalid relationship journal payload: {error}"))
             })?;
-        if edge.product_key != self.product_key {
+        if &edge.product_key != self.product_key()? {
             return Err(ManagedProjectError::new(
                 "journal relationship product key does not match its state directory",
             ));
@@ -672,7 +766,7 @@ impl ManagedProjectStore {
         &mut self,
         event: &JournalEvent,
     ) -> Result<(), ManagedProjectError> {
-        validate_portfolio_snapshot(&event.payload)?;
+        validate_portfolio_snapshot(&event.payload, &self.identity)?;
         if self
             .portfolio_snapshot
             .as_ref()
@@ -693,7 +787,12 @@ impl ManagedProjectStore {
         let snapshot = self.portfolio_snapshot.as_ref().ok_or_else(|| {
             ManagedProjectError::new("portfolio item binding precedes its recovery capsule")
         })?;
-        validate_portfolio_item_binding(snapshot, &self.portfolio_item_bindings, &event.payload)?;
+        validate_portfolio_item_binding(
+            snapshot,
+            &self.identity,
+            &self.portfolio_item_bindings,
+            &event.payload,
+        )?;
         self.portfolio_item_bindings.push(event.payload.clone());
         Ok(())
     }
@@ -721,12 +820,6 @@ impl ManagedProjectStore {
         let mut operation = event.payload.clone();
         operation["sequence"] = Value::from(event.sequence);
         self.portfolio_operations.push(operation);
-        if state == "acknowledged" {
-            self.portfolio_snapshot
-                .as_mut()
-                .expect("portfolio snapshot checked above")["projection_high_watermark"] =
-                Value::from(event.sequence);
-        }
         Ok(())
     }
 
@@ -741,7 +834,7 @@ impl ManagedProjectStore {
         atomic_write(&self.root.join(BINDING_FILE), &document)
     }
 
-    fn persist_state(&self) -> Result<(), ManagedProjectError> {
+    fn persist_state(&mut self) -> Result<(), ManagedProjectError> {
         self.persist_binding()?;
         self.persist_portfolio()
     }
@@ -759,19 +852,27 @@ impl ManagedProjectStore {
         })
     }
 
-    fn persist_portfolio(&self) -> Result<(), ManagedProjectError> {
+    fn persist_portfolio(&mut self) -> Result<(), ManagedProjectError> {
         if self.portfolio_snapshot.is_none() {
             return Ok(());
+        }
+        if std::mem::take(&mut self.portfolio_persist_fault) {
+            return Err(ManagedProjectError::new(
+                "injected portfolio snapshot persistence failure",
+            ));
         }
         let bytes = serde_json::to_vec_pretty(&self.portfolio_document())?;
         atomic_write(&self.root.join(PORTFOLIO_FILE), &bytes)
     }
 
-    fn validate_or_persist_portfolio(&self) -> Result<(), ManagedProjectError> {
+    fn validate_or_persist_portfolio(&mut self) -> Result<(), ManagedProjectError> {
         self.validate_portfolio_document(true)
     }
 
-    fn validate_portfolio_document(&self, repair_stale: bool) -> Result<(), ManagedProjectError> {
+    fn validate_portfolio_document(
+        &mut self,
+        repair_stale: bool,
+    ) -> Result<(), ManagedProjectError> {
         let path = self.root.join(PORTFOLIO_FILE);
         if !path.exists() {
             if self.portfolio_snapshot.is_some() {
@@ -821,7 +922,7 @@ impl ManagedProjectStore {
     }
 
     fn journal_digest_at(&self, high_watermark: u64) -> Result<String, ManagedProjectError> {
-        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.product_key, false)?;
+        let recovered = recover_events(&self.root.join(EVENTS_FILE), &self.namespace, false)?;
         let index = usize::try_from(high_watermark)
             .map_err(|_| ManagedProjectError::new("portfolio checkpoint overflow"))?;
         recovered
@@ -829,6 +930,66 @@ impl ManagedProjectStore {
             .get(index)
             .cloned()
             .ok_or_else(|| ManagedProjectError::new("portfolio checkpoint exceeds journal"))
+    }
+
+    fn retry_is_complete(
+        &mut self,
+        key: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<bool, ManagedProjectError> {
+        let Some((existing_kind, existing_payload)) = self.event_records.get(key) else {
+            return Ok(false);
+        };
+        if existing_kind != kind || existing_payload != payload {
+            return Err(ManagedProjectError::new(
+                "durable journal event conflicts with retry payload",
+            ));
+        }
+        self.persist_state()?;
+        Ok(true)
+    }
+
+    fn update_projection_high_watermark(&mut self, replay_sequence: u64) {
+        let mut operations: HashMap<&str, (u64, &str)> = HashMap::new();
+        for operation in &self.portfolio_operations {
+            let (Some(operation_id), Some(state), Some(sequence)) = (
+                operation["operation_id"].as_str(),
+                operation["state"].as_str(),
+                operation["sequence"].as_u64(),
+            ) else {
+                continue;
+            };
+            operations
+                .entry(operation_id)
+                .and_modify(|entry| entry.1 = state)
+                .or_insert((sequence, state));
+        }
+        let safe_boundary = operations
+            .values()
+            .filter(|(_, state)| *state != "acknowledged")
+            .map(|(intent_sequence, _)| intent_sequence.saturating_sub(1))
+            .min()
+            .unwrap_or(replay_sequence);
+        if let Some(snapshot) = self.portfolio_snapshot.as_mut() {
+            snapshot["projection_high_watermark"] = Value::from(safe_boundary);
+        }
+    }
+
+    pub(super) fn product_key(&self) -> Result<&ProductKey, ManagedProjectError> {
+        match &self.identity {
+            ManagedProjectIdentity::Product { product_key } => Ok(product_key),
+            ManagedProjectIdentity::SpecPortfolio(_) => Err(ManagedProjectError::new(
+                "product-only managed Project operation cannot use a portfolio store",
+            )),
+        }
+    }
+
+    pub(super) fn event_identity_key(&self) -> String {
+        match &self.identity {
+            ManagedProjectIdentity::Product { product_key } => product_key.to_string(),
+            ManagedProjectIdentity::SpecPortfolio(_) => self.namespace.to_string(),
+        }
     }
 }
 
@@ -838,6 +999,17 @@ fn portfolio_snapshots_match(left: &Value, right: &Value) -> bool {
     left["projection_high_watermark"] = Value::from(0);
     right["projection_high_watermark"] = Value::from(0);
     left == right
+}
+
+fn require_portfolio_namespace(
+    identity: &ManagedProjectIdentity,
+) -> Result<ManagedProjectNamespace, ManagedProjectError> {
+    match identity {
+        ManagedProjectIdentity::SpecPortfolio(_) => Ok(identity.namespace()),
+        ManagedProjectIdentity::Product { .. } => Err(ManagedProjectError::new(
+            "product stores must use the explicit product constructor",
+        )),
+    }
 }
 
 fn import_legacy_state(
@@ -863,9 +1035,9 @@ fn import_legacy_state(
     if !legacy_project.exists() {
         return Ok(());
     }
-    validate_read_only_ancestors(legacy_root, product_key)?;
+    validate_read_only_ancestors(legacy_root, product_key.as_str())?;
     let _legacy_lock = ProductLock::acquire(&legacy_project.join(LOCK_FILE))?;
-    let legacy = ManagedProjectStore::open_read_only(legacy_root, product_key)?;
+    let legacy = ManagedProjectStore::open_product_read_only(legacy_root, product_key)?;
     let legacy_binding = legacy_project.join(BINDING_FILE);
     let legacy_events = legacy_project.join(EVENTS_FILE);
     let binding = super::read_private_file(&legacy_binding)?;
@@ -878,12 +1050,12 @@ fn import_legacy_state(
 
 fn validate_read_only_ancestors(
     root: &Path,
-    product_key: &ProductKey,
+    state_segment: &str,
 ) -> Result<(), ManagedProjectError> {
     for directory in [
         root.to_path_buf(),
         root.join("projects"),
-        root.join("projects").join(product_key.as_str()),
+        root.join("projects").join(state_segment),
     ] {
         let metadata = match std::fs::symlink_metadata(&directory) {
             Ok(metadata) => metadata,

@@ -45,7 +45,7 @@ impl ManagedProjectStore {
             ));
         }
         self.append_event_locked(
-            format!("project:create-identity:{}", self.product_key.as_str()),
+            format!("project:create-identity:{}", self.event_identity_key()),
             "project-created",
             payload,
         )
@@ -97,7 +97,7 @@ impl ManagedProjectStore {
         self.append_event_locked(
             format!(
                 "project:bind:{}:{}",
-                self.product_key.as_str(),
+                self.event_identity_key(),
                 sha256_hex(payload.to_string().as_bytes())
             ),
             "project-bound",

@@ -59,12 +59,16 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
             .join(policy.product_key.as_str())
             .exists()
         {
-            ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
+            ManagedProjectStore::open_product_read_only(&state_root, &policy.product_key)?
         } else {
-            ManagedProjectStore::open_read_only(&legacy_root, &policy.product_key)?
+            ManagedProjectStore::open_product_read_only(&legacy_root, &policy.product_key)?
         }
     } else {
-        ManagedProjectStore::open_global(&state_root, Some(&legacy_root), &policy.product_key)?
+        ManagedProjectStore::open_product_global(
+            &state_root,
+            Some(&legacy_root),
+            &policy.product_key,
+        )?
     };
     if command == "onboard" && !read_only {
         for issue_url in &options.issue_urls {
@@ -806,9 +810,9 @@ pub(crate) fn bound_project_url(
         .join(policy.product_key.as_str())
         .exists()
     {
-        ManagedProjectStore::open_read_only(&state_root, &policy.product_key)?
+        ManagedProjectStore::open_product_read_only(&state_root, &policy.product_key)?
     } else {
-        ManagedProjectStore::open_read_only(&legacy_root, &policy.product_key)?
+        ManagedProjectStore::open_product_read_only(&legacy_root, &policy.product_key)?
     };
     Ok(store.snapshot().project_url.clone())
 }

@@ -3,15 +3,19 @@ use crate::commands::managed_project::{
     empty_journal_digest, extend_journal_digest, io_error, open_private_file,
     open_private_file_read_only,
 };
-use autospec_core::managed_project::{ItemKey, PortfolioId, ProductKey, SourceSpecIdentity};
+use autospec_core::managed_project::{
+    ItemKey, ManagedProjectIdentity, ManagedProjectNamespace, PortfolioId, ProductKey,
+    SourceSpecIdentity,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+#[derive(Clone)]
 pub(super) struct JournalEvent {
     pub(super) sequence: u64,
-    pub(super) product_key: ProductKey,
+    pub(super) namespace: ManagedProjectNamespace,
     pub(super) key: String,
     pub(super) kind: String,
     pub(super) payload: Value,
@@ -19,14 +23,23 @@ pub(super) struct JournalEvent {
 
 impl JournalEvent {
     pub(super) fn to_value(&self) -> Value {
-        json!({
+        let mut value = json!({
             "schema": JOURNAL_SCHEMA,
             "sequence": self.sequence,
-            "product_key": self.product_key,
             "key": self.key,
             "kind": self.kind,
             "payload": self.payload,
-        })
+        });
+        let object = value.as_object_mut().expect("journal event is an object");
+        match &self.namespace {
+            ManagedProjectNamespace::Product(product_key) => {
+                object.insert("product_key".to_owned(), json!(product_key));
+            }
+            ManagedProjectNamespace::Portfolio(_) => {
+                object.insert("namespace".to_owned(), json!(self.namespace));
+            }
+        }
+        value
     }
 
     fn from_value(value: Value) -> Result<Self, ManagedProjectError> {
@@ -42,15 +55,23 @@ impl JournalEvent {
             .get("sequence")
             .and_then(Value::as_u64)
             .ok_or_else(|| ManagedProjectError::new("journal event sequence must be unsigned"))?;
-        let product_key = serde_json::from_value(
-            object
-                .get("product_key")
-                .cloned()
-                .ok_or_else(|| ManagedProjectError::new("journal event has no product key"))?,
-        )
-        .map_err(|error| {
-            ManagedProjectError::new(format!("invalid journal event product key: {error}"))
-        })?;
+        let namespace = match (object.get("product_key"), object.get("namespace")) {
+            (Some(product_key), None) => serde_json::from_value::<ProductKey>(product_key.clone())
+                .map(ManagedProjectNamespace::Product)
+                .map_err(|error| {
+                    ManagedProjectError::new(format!("invalid journal event product key: {error}"))
+                })?,
+            (None, Some(namespace)) => {
+                serde_json::from_value(namespace.clone()).map_err(|error| {
+                    ManagedProjectError::new(format!("invalid journal event namespace: {error}"))
+                })?
+            }
+            _ => {
+                return Err(ManagedProjectError::new(
+                    "journal event must contain exactly one identity field",
+                ))
+            }
+        };
         let string = |field: &str| {
             object
                 .get(field)
@@ -63,7 +84,7 @@ impl JournalEvent {
         };
         Ok(Self {
             sequence,
-            product_key,
+            namespace,
             key: string("key")?,
             kind: string("kind")?,
             payload: object
@@ -86,7 +107,7 @@ pub(super) fn payload_string<'a>(
 
 pub(super) fn recover_events(
     path: &Path,
-    product_key: &ProductKey,
+    namespace: &ManagedProjectNamespace,
     repair_truncated_tail: bool,
 ) -> Result<RecoveredJournal, ManagedProjectError> {
     let mut file = if repair_truncated_tail {
@@ -141,9 +162,9 @@ pub(super) fn recover_events(
                 "managed project journal sequence is not contiguous",
             ));
         }
-        if &event.product_key != product_key {
+        if &event.namespace != namespace {
             return Err(ManagedProjectError::new(
-                "journal event product key does not match its state directory",
+                "journal event namespace does not match its state directory",
             ));
         }
         let mut complete_line = line.to_vec();
@@ -171,7 +192,10 @@ pub(super) struct RecoveredJournal {
     pub(super) final_digest: String,
 }
 
-pub(super) fn validate_portfolio_snapshot(snapshot: &Value) -> Result<(), ManagedProjectError> {
+pub(super) fn validate_portfolio_snapshot(
+    snapshot: &Value,
+    identity: &ManagedProjectIdentity,
+) -> Result<(), ManagedProjectError> {
     let object = snapshot
         .as_object()
         .ok_or_else(|| ManagedProjectError::new("portfolio snapshot must be an object"))?;
@@ -185,6 +209,16 @@ pub(super) fn validate_portfolio_snapshot(snapshot: &Value) -> Result<(), Manage
     if source.portfolio_id() != portfolio_id {
         return Err(ManagedProjectError::new(
             "portfolio snapshot identity does not match its source spec",
+        ));
+    }
+    let ManagedProjectIdentity::SpecPortfolio(expected) = identity else {
+        return Err(ManagedProjectError::new(
+            "portfolio recovery state requires a spec portfolio store",
+        ));
+    };
+    if expected.portfolio_id() != &portfolio_id || expected.source() != &source {
+        return Err(ManagedProjectError::new(
+            "portfolio snapshot identity does not match its store namespace",
         ));
     }
     required_nonempty_string(object, "owner", "portfolio snapshot")?;
@@ -220,10 +254,11 @@ pub(super) fn validate_portfolio_snapshot(snapshot: &Value) -> Result<(), Manage
 
 pub(super) fn validate_portfolio_item_binding(
     snapshot: &Value,
+    identity: &ManagedProjectIdentity,
     existing: &[Value],
     binding: &Value,
 ) -> Result<(), ManagedProjectError> {
-    validate_portfolio_snapshot(snapshot)?;
+    validate_portfolio_snapshot(snapshot, identity)?;
     let capsule_items = snapshot["recovery_capsule"]["items"]
         .as_array()
         .expect("validated recovery capsule has items");
@@ -258,6 +293,15 @@ pub(super) fn validate_portfolio_item_binding(
         ));
     }
     required_nonempty_string(object, "role", "portfolio item binding")?;
+    let completion_policy =
+        required_nonempty_string(object, "completion_policy", "portfolio item binding")?;
+    if expected["role"].as_str() != object["role"].as_str()
+        || expected["completion_policy"].as_str() != Some(completion_policy)
+    {
+        return Err(ManagedProjectError::new(
+            "portfolio item role or completion policy does not match recovery capsule",
+        ));
+    }
     let dependencies = required_string_array(object, "dependencies", "portfolio item binding")?;
     if expected["dependencies"].as_array() != Some(&dependencies) {
         return Err(ManagedProjectError::new(
@@ -352,7 +396,7 @@ fn validate_recovery_capsule(
             ManagedProjectError::new("portfolio recovery capsule item must be an object")
         })?;
         let key = required_item_key(item, "item_key", "portfolio recovery capsule item")?;
-        if !keys.insert(key.to_string()) {
+        if keys.contains(key.as_str()) {
             return Err(ManagedProjectError::new(
                 "portfolio recovery capsule contains duplicate item keys",
             ));
@@ -360,32 +404,46 @@ fn validate_recovery_capsule(
         let repository =
             required_nonempty_string(item, "repository", "portfolio recovery capsule item")?;
         validate_repository(repository)?;
-        repositories.insert(key.to_string(), repository.to_owned());
-        required_string_array(item, "local_parents", "portfolio recovery capsule item")?;
-        required_string_array(item, "dependencies", "portfolio recovery capsule item")?;
-    }
-    for item in items {
-        let item = item
-            .as_object()
-            .expect("validated capsule item is an object");
-        let key = item["item_key"].as_str().expect("validated item key");
-        for dependency in array_strings(&item["dependencies"]) {
-            if dependency == key || !keys.contains(dependency) {
+        required_nonempty_string(item, "role", "portfolio recovery capsule item")?;
+        required_nonempty_string(item, "completion_policy", "portfolio recovery capsule item")?;
+        let local_parents =
+            required_string_array(item, "local_parents", "portfolio recovery capsule item")?;
+        let dependencies =
+            required_string_array(item, "dependencies", "portfolio recovery capsule item")?;
+        reject_duplicate_edges(&local_parents)?;
+        reject_duplicate_edges(&dependencies)?;
+        for dependency in array_strings(&dependencies) {
+            if !keys.contains(dependency) {
                 return Err(ManagedProjectError::new(
-                    "portfolio recovery capsule contains an invalid dependency",
+                    "portfolio recovery capsule dependency must reference an earlier item",
                 ));
             }
         }
-        for parent in array_strings(&item["local_parents"]) {
-            if parent == key
-                || !keys.contains(parent)
-                || repositories.get(parent) != repositories.get(key)
+        for parent in array_strings(&local_parents) {
+            if !keys.contains(parent)
+                || repositories.get(parent).map(String::as_str) != Some(repository)
             {
                 return Err(ManagedProjectError::new(
-                    "portfolio recovery capsule contains an invalid local parent",
+                    "portfolio recovery capsule local parent must be an earlier same-repository item",
                 ));
             }
         }
+        keys.insert(key.to_string());
+        repositories.insert(key.to_string(), repository.to_owned());
+    }
+    Ok(())
+}
+
+fn reject_duplicate_edges(values: &[Value]) -> Result<(), ManagedProjectError> {
+    let mut unique = HashSet::new();
+    if values
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|value| !unique.insert(value))
+    {
+        return Err(ManagedProjectError::new(
+            "portfolio recovery capsule contains a duplicate edge",
+        ));
     }
     Ok(())
 }
@@ -466,12 +524,8 @@ fn required_string_array(
     Ok(values.clone())
 }
 
-fn array_strings(values: &Value) -> impl Iterator<Item = &str> {
-    values
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+fn array_strings(values: &[Value]) -> impl Iterator<Item = &str> {
+    values.iter().filter_map(Value::as_str)
 }
 
 fn validate_repository(repository: &str) -> Result<(), ManagedProjectError> {

@@ -133,12 +133,13 @@ pub(super) fn bind_accountability_epic(
         let state_root = crate::commands::managed_project::managed_state_root(&repo_root)
             .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
         let legacy_root = repo_root.join(".autospec/state");
-        let mut project_store = crate::commands::managed_project::ManagedProjectStore::open_global(
-            &state_root,
-            Some(&legacy_root),
-            &policy.product_key,
-        )
-        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        let mut project_store =
+            crate::commands::managed_project::ManagedProjectStore::open_product_global(
+                &state_root,
+                Some(&legacy_root),
+                &policy.product_key,
+            )
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
         crate::commands::managed_project::resolve_or_create_project(
             &mut project_store,
             &mut github,
