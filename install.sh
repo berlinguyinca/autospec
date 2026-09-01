@@ -16,7 +16,7 @@
 # Flags:
 #   --skill   one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | autospec-playwright | autospec-db-doctor | all
 #             (default: all)
-#   --harness one of: claude | opencode | codex | all
+#   --harness one of: claude | opencode | codex | pi | all
 #             (default: all)
 #   --update  forwarded to each per-skill installer; idempotent overwrite.
 #   --dry-run forwarded to each per-skill installer; print actions, write nothing.
@@ -94,7 +94,7 @@ ALL_SKILLS="$(
 )"
 # Drop the trailing space from the join above.
 ALL_SKILLS="${ALL_SKILLS% }"
-ALL_HARNESSES="claude opencode codex"
+ALL_HARNESSES="claude opencode codex pi"
 
 SKILL_ARG="all"
 HARNESS_ARG="all"
@@ -1366,10 +1366,10 @@ unset _skill_valid _s
 
 # Validate --harness
 case "$HARNESS_ARG" in
-    all|claude|opencode|codex) ;;
+    all|claude|opencode|codex|pi) ;;
     *)
         err "invalid --harness: $HARNESS_ARG"
-        err "must be one of: claude | opencode | codex | all"
+        err "must be one of: claude | opencode | codex | pi | all"
         exit 2
         ;;
 esac

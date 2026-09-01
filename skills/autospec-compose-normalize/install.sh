@@ -26,7 +26,7 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $0 [--harness claude|opencode|codex|all] [--symlink] [--dry-run] [--update]
+Usage: $0 [--harness claude|opencode|codex|pi|all] [--symlink] [--dry-run] [--update]
 
 Installs $SKILL_NAME after verifying the top-level autospec binary supports
 the deterministic Compose normalizer.
@@ -187,7 +187,7 @@ if [ -z "$HARNESS" ]; then
             2) HARNESS=opencode ;;
             3) HARNESS=codex ;;
             4|'') HARNESS=all ;;
-            claude|opencode|codex|all) HARNESS=$choice ;;
+            claude|opencode|codex|pi|all) HARNESS=$choice ;;
             *) err "invalid choice: $choice"; exit 2 ;;
         esac
     else
@@ -195,7 +195,7 @@ if [ -z "$HARNESS" ]; then
     fi
 fi
 case "$HARNESS" in
-    claude|opencode|codex|all) ;;
+    claude|opencode|codex|pi|all) ;;
     *) err "invalid --harness: $HARNESS"; exit 2 ;;
 esac
 
@@ -218,6 +218,7 @@ install_skill_scripts
 CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 OPENCODE_DIR=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}
 CODEX_DIR=${CODEX_HOME:-$HOME/.codex}
+PI_DIR="${PI_SKILLS_DIR:-$HOME/.agents/skills}"
 
 installed=
 if [ "$HARNESS" = claude ] || [ "$HARNESS" = all ]; then

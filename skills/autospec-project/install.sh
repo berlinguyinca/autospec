@@ -38,7 +38,7 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $0 [--harness claude|opencode|codex|all] [--symlink] [--dry-run] [--update]
+Usage: $0 [--harness claude|opencode|codex|pi|all] [--symlink] [--dry-run] [--update]
 
 Installs the ${SKILL_NAME} skill into the chosen harness.
 EOF
@@ -227,6 +227,7 @@ install_fleet_scripts
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+PI_DIR="${PI_SKILLS_DIR:-$HOME/.agents/skills}"
 
 if [ "$HARNESS" = "claude" ] || [ "$HARNESS" = "all" ]; then
     info ""; info "Claude Code:"

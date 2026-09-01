@@ -15,7 +15,7 @@ UPDATE=0
 TMP_DIR=
 
 usage() {
-    printf 'Usage: %s [--harness claude|opencode|codex|all] [--update] [--dry-run]\n' "$0"
+    printf 'Usage: %s [--harness claude|opencode|codex|pi|all] [--update] [--dry-run]\n' "$0"
 }
 
 cleanup() {

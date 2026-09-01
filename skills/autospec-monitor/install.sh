@@ -13,7 +13,7 @@ HARNESS=
 DRY_RUN=0
 
 usage() {
-    printf 'Usage: %s [--harness claude|opencode|codex|all] [--dry-run] [--update]\n' "$0"
+    printf 'Usage: %s [--harness claude|opencode|codex|pi|all] [--dry-run] [--update]\n' "$0"
 }
 
 cleanup() {

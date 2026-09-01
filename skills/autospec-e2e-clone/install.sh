@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./install.sh                     # interactive — prompts for harness
-#   ./install.sh --harness <name>    # one of: claude | opencode | codex | all
+#   ./install.sh --harness <name>    # one of: claude | opencode | codex | pi | all
 #   ./install.sh --update            # update an existing install
 #   ./install.sh --symlink           # symlink instead of copy
 #   ./install.sh --dry-run           # print what would be done; do nothing
@@ -42,7 +42,7 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $0 [--harness claude|opencode|codex|all] [--update] [--symlink] [--dry-run]
+Usage: $0 [--harness claude|opencode|codex|pi|all] [--update] [--symlink] [--dry-run]
 
 Installs the ${SKILL_NAME} skill into the chosen harness.
 EOF
@@ -111,7 +111,7 @@ if [ -z "$HARNESS" ]; then
             2) HARNESS=opencode ;;
             3) HARNESS=codex ;;
             4|"") HARNESS=all ;;
-            claude|opencode|codex|all) HARNESS="$choice" ;;
+            claude|opencode|codex|pi|all) HARNESS="$choice" ;;
             *) err "invalid choice: $choice"; exit 2 ;;
         esac
     else
@@ -120,7 +120,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-    claude|opencode|codex|all) ;;
+    claude|opencode|codex|pi|all) ;;
     *) err "invalid --harness: $HARNESS"; usage; exit 2 ;;
 esac
 
@@ -129,10 +129,12 @@ esac
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+PI_DIR="${PI_SKILLS_DIR:-$HOME/.agents/skills}"
 
 CLAUDE_DEST="$CLAUDE_DIR/skills/$SKILL_NAME/SKILL.md"
 OPENCODE_DEST="$OPENCODE_DIR/agent/$SKILL_NAME.md"
 CODEX_DEST="$CODEX_DIR/prompts/$SKILL_NAME.md"
+PI_DEST="$PI_DIR/$SKILL_NAME/SKILL.md"
 CODEX_SKILLS_DEST="$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
 
 # ---------- install ---------------------------------------------------------

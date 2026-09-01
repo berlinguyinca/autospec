@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./install.sh                     # interactive — prompts for harness
-#   ./install.sh --harness <name>    # one of: claude | opencode | codex | all
+#   ./install.sh --harness <name>    # one of: claude | opencode | codex | pi | all
 #   ./install.sh --symlink           # symlink instead of copy (updates propagate)
 #   ./install.sh --dry-run           # print what would be done; do nothing
 #
@@ -59,7 +59,7 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $0 [--harness claude|opencode|codex|all] [--symlink] [--dry-run] [--update]
+Usage: $0 [--harness claude|opencode|codex|pi|all] [--symlink] [--dry-run] [--update]
 
 Installs the ${SKILL_NAME} skill into the chosen harness's standard
 skill/agent/prompt directory.
@@ -233,7 +233,7 @@ if [ -z "$HARNESS" ]; then
             2) HARNESS=opencode ;;
             3) HARNESS=codex ;;
             4|"") HARNESS=all ;;
-            claude|opencode|codex|all) HARNESS="$choice" ;;
+            claude|opencode|codex|pi|all) HARNESS="$choice" ;;
             *) err "invalid choice: $choice"; exit 2 ;;
         esac
     else
@@ -242,7 +242,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-    claude|opencode|codex|all) ;;
+    claude|opencode|codex|pi|all) ;;
     *) err "invalid --harness: $HARNESS"; usage; exit 2 ;;
 esac
 
@@ -297,14 +297,17 @@ install_skill_scripts
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+PI_DIR="${PI_SKILLS_DIR:-$HOME/.agents/skills}"
 
 CLAUDE_DEST="$CLAUDE_DIR/skills/$SKILL_NAME/SKILL.md"
 OPENCODE_DEST="$OPENCODE_DIR/agent/$SKILL_NAME.md"
 CODEX_DEST="$CODEX_DIR/prompts/$SKILL_NAME.md"
+PI_DEST="$PI_DIR/$SKILL_NAME/SKILL.md"
 
 CLAUDE_SRC="$SKILL_DIR/SKILL.md"
 OPENCODE_SRC="$SKILL_DIR/opencode/agent.md"
 CODEX_SRC="$SKILL_DIR/codex/prompt.md"
+PI_SRC="$SKILL_DIR/SKILL.md"
 
 # ---------- install --------------------------------------------------------
 
@@ -331,6 +334,13 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     install_one "$CLAUDE_SRC" "$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
     installed_paths="${installed_paths}  Codex CLI:   ${CODEX_DEST}\n"
     installed_paths="${installed_paths}  Codex skill: ${CODEX_DIR}/skills/${SKILL_NAME}/SKILL.md\n"
+fi
+
+if [ "$HARNESS" = "pi" ] || [ "$HARNESS" = "all" ]; then
+    info ""
+    info "Pi:"
+    install_one "$PI_SRC" "$PI_DEST"
+    installed_paths="${installed_paths}  Pi:        ${PI_DEST}\n"
 fi
 
 # ---------- final summary --------------------------------------------------
