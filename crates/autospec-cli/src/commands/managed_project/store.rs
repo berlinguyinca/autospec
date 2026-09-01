@@ -10,7 +10,7 @@ use autospec_core::managed_project::{
     RelationshipEdge, RepositoryRecord,
 };
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[path = "store/recovery.rs"]
@@ -35,6 +35,7 @@ pub struct ManagedProjectStore {
     event_keys: HashSet<String>,
     event_records: HashMap<String, (String, Value)>,
     known_projections: HashSet<String>,
+    projection_sequences: BTreeMap<String, u64>,
     provisional_project: Option<ProjectIdentity>,
     portfolio_snapshot: Option<Value>,
     portfolio_item_bindings: Vec<Value>,
@@ -114,6 +115,7 @@ impl ManagedProjectStore {
                 event_keys: HashSet::new(),
                 event_records: HashMap::new(),
                 known_projections: HashSet::new(),
+                projection_sequences: BTreeMap::new(),
                 provisional_project: None,
                 portfolio_snapshot: None,
                 portfolio_item_bindings: Vec::new(),
@@ -133,6 +135,7 @@ impl ManagedProjectStore {
             event_keys: HashSet::new(),
             event_records: HashMap::new(),
             known_projections: HashSet::new(),
+            projection_sequences: BTreeMap::new(),
             provisional_project: None,
             portfolio_snapshot: None,
             portfolio_item_bindings: Vec::new(),
@@ -230,6 +233,7 @@ impl ManagedProjectStore {
             event_keys: HashSet::new(),
             event_records: HashMap::new(),
             known_projections: HashSet::new(),
+            projection_sequences: BTreeMap::new(),
             provisional_project: None,
             portfolio_snapshot: None,
             portfolio_item_bindings: Vec::new(),
@@ -559,6 +563,7 @@ impl ManagedProjectStore {
         self.event_keys.clear();
         self.event_records.clear();
         self.known_projections.clear();
+        self.projection_sequences.clear();
         self.provisional_project = None;
         self.portfolio_snapshot = None;
         self.portfolio_item_bindings.clear();
@@ -713,6 +718,8 @@ impl ManagedProjectStore {
             ));
         }
         self.known_projections.insert(projection.to_owned());
+        self.projection_sequences
+            .insert(projection.to_owned(), event.sequence);
         self.binding.pending_projections.push(projection.to_owned());
         Ok(())
     }
@@ -735,6 +742,8 @@ impl ManagedProjectStore {
         {
             self.binding.pending_projections.push(projection.to_owned());
         }
+        self.projection_sequences
+            .insert(projection.to_owned(), event.sequence);
         Ok(())
     }
 
@@ -759,6 +768,7 @@ impl ManagedProjectStore {
                 )
             })?;
         self.binding.pending_projections.remove(index);
+        self.projection_sequences.remove(projection);
         Ok(())
     }
 
@@ -849,6 +859,7 @@ impl ManagedProjectStore {
             "snapshot": self.portfolio_snapshot,
             "item_bindings": self.portfolio_item_bindings,
             "operations": self.portfolio_operations,
+            "pending_projection_sequences": self.projection_sequences,
         })
     }
 
@@ -965,10 +976,19 @@ impl ManagedProjectStore {
                 .and_modify(|entry| entry.1 = state)
                 .or_insert((sequence, state));
         }
-        let safe_boundary = operations
+        let operation_boundary = operations
             .values()
             .filter(|(_, state)| *state != "acknowledged")
             .map(|(intent_sequence, _)| intent_sequence.saturating_sub(1))
+            .min();
+        let projection_boundary = self
+            .projection_sequences
+            .values()
+            .map(|sequence| sequence.saturating_sub(1))
+            .min();
+        let safe_boundary = operation_boundary
+            .into_iter()
+            .chain(projection_boundary)
             .min()
             .unwrap_or(replay_sequence);
         if let Some(snapshot) = self.portfolio_snapshot.as_mut() {

@@ -117,8 +117,8 @@ fn portfolio_store_snapshot() -> serde_json::Value {
                 {
                     "item_key": "source-tracker",
                     "repository": "berlinguyinca/autospec",
-                    "role": "tracker",
-                    "completion_policy": "children-terminal-success",
+                    "role": "source-tracker",
+                    "completion_policy": "closed-tracker",
                     "local_parents": [],
                     "dependencies": []
                 },
@@ -126,9 +126,17 @@ fn portfolio_store_snapshot() -> serde_json::Value {
                     "item_key": "issue:portfolio-store",
                     "repository": "berlinguyinca/autospec",
                     "role": "implementation",
-                    "completion_policy": "merged-pr-and-checks",
+                    "completion_policy": "merged-pr",
                     "local_parents": ["source-tracker"],
                     "dependencies": ["source-tracker"]
+                },
+                {
+                    "item_key": "audit:phase-5.5",
+                    "repository": "berlinguyinca/autospec",
+                    "role": "audit",
+                    "completion_policy": "audit-receipt",
+                    "local_parents": ["source-tracker"],
+                    "dependencies": ["issue:portfolio-store"]
                 }
             ]
         }
@@ -162,11 +170,11 @@ fn portfolio_item_binding(item_key: &str, issue_number: u64) -> serde_json::Valu
         "item_key": item_key,
         "repository": "berlinguyinca/autospec",
         "issue_url": format!("https://github.com/berlinguyinca/autospec/issues/{issue_number}"),
-        "role": if item_key == "source-tracker" { "tracker" } else { "implementation" },
+        "role": if item_key == "source-tracker" { "source-tracker" } else { "implementation" },
         "completion_policy": if item_key == "source-tracker" {
-            "children-terminal-success"
+            "closed-tracker"
         } else {
-            "merged-pr-and-checks"
+            "merged-pr"
         },
         "dependencies": dependencies,
         "terminal_state": null
@@ -3629,21 +3637,23 @@ fn managed_project_store_retries_durable_events_before_derived_validation() {
         .record_portfolio_item_binding(conflicting_binding)
         .is_err());
 
-    let payload = serde_json::json!({"field": "Status"});
-    store.fail_next_portfolio_persist();
-    assert!(store
-        .transition_portfolio_operation("item:add:source-tracker", "intent", payload.clone())
-        .is_err());
-    store
-        .transition_portfolio_operation("item:add:source-tracker", "intent", payload)
-        .unwrap();
-    assert!(store
-        .transition_portfolio_operation(
-            "item:add:source-tracker",
-            "intent",
-            serde_json::json!({"field": "Different"}),
-        )
-        .is_err());
+    for state in ["intent", "sent", "acknowledged"] {
+        let payload = serde_json::json!({"field": "Status", "boundary": state});
+        store.fail_next_portfolio_persist();
+        assert!(store
+            .transition_portfolio_operation("item:add:source-tracker", state, payload.clone(),)
+            .is_err());
+        store
+            .transition_portfolio_operation("item:add:source-tracker", state, payload.clone())
+            .unwrap();
+        assert!(store
+            .transition_portfolio_operation(
+                "item:add:source-tracker",
+                state,
+                serde_json::json!({"field": "Different", "boundary": state}),
+            )
+            .is_err());
+    }
 }
 
 #[test]
@@ -3674,6 +3684,31 @@ fn managed_project_store_high_watermark_stops_before_earliest_unresolved_operati
     assert_eq!(
         store.portfolio_snapshot().unwrap()["projection_high_watermark"],
         7
+    );
+}
+
+#[test]
+fn managed_project_store_high_watermark_includes_pending_generic_projections() {
+    let fixture = Fixture::new("portfolio-projection-high-watermark");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store.enqueue_projection("portfolio:field:update").unwrap();
+    let payload = serde_json::json!({"field": "Status"});
+    for state in ["intent", "sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation("item:add:a", state, payload.clone())
+            .unwrap();
+    }
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        1
+    );
+    store.ack_projection("portfolio:field:update").unwrap();
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        6
     );
 }
 
@@ -3730,4 +3765,69 @@ fn managed_project_store_freezes_item_role_and_completion_policy() {
     let mut wrong_policy = portfolio_item_binding("source-tracker", 100);
     wrong_policy["completion_policy"] = serde_json::json!("manual-close");
     assert!(store.record_portfolio_item_binding(wrong_policy).is_err());
+}
+
+#[test]
+fn managed_project_store_rejects_invalid_role_policy_order_and_cardinality() {
+    let mut invalid_role = portfolio_store_snapshot();
+    invalid_role["recovery_capsule"]["items"][1]["role"] = serde_json::json!("manual");
+
+    let mut invalid_policy = portfolio_store_snapshot();
+    invalid_policy["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("manual-close");
+
+    let mut incompatible = portfolio_store_snapshot();
+    incompatible["recovery_capsule"]["items"][0]["completion_policy"] =
+        serde_json::json!("merged-pr");
+
+    let mut no_source = portfolio_store_snapshot();
+    no_source["recovery_capsule"]["items"][0]["role"] = serde_json::json!("repo-tracker");
+
+    let mut duplicate_source = portfolio_store_snapshot();
+    duplicate_source["recovery_capsule"]["items"][1]["role"] = serde_json::json!("source-tracker");
+    duplicate_source["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("closed-tracker");
+
+    let mut no_audit = portfolio_store_snapshot();
+    no_audit["recovery_capsule"]["items"][2]["role"] = serde_json::json!("prerequisite");
+    no_audit["recovery_capsule"]["items"][2]["completion_policy"] =
+        serde_json::json!("external-prerequisite");
+
+    let mut duplicate_audit = portfolio_store_snapshot();
+    duplicate_audit["recovery_capsule"]["items"][1]["role"] = serde_json::json!("audit");
+    duplicate_audit["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("audit-receipt");
+
+    let mut audit_not_last = portfolio_store_snapshot();
+    audit_not_last["recovery_capsule"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .swap(1, 2);
+
+    let mut rank_regression = portfolio_store_snapshot();
+    let mut repo_tracker = rank_regression["recovery_capsule"]["items"][1].clone();
+    repo_tracker["item_key"] = serde_json::json!("repo:autospec:tracker");
+    repo_tracker["role"] = serde_json::json!("repo-tracker");
+    repo_tracker["completion_policy"] = serde_json::json!("closed-tracker");
+    rank_regression["recovery_capsule"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .insert(2, repo_tracker);
+
+    let cases = [
+        invalid_role,
+        invalid_policy,
+        incompatible,
+        no_source,
+        duplicate_source,
+        no_audit,
+        duplicate_audit,
+        audit_not_last,
+        rank_regression,
+    ];
+    for (index, snapshot) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("portfolio-role-policy-{index}"));
+        let mut store = open_portfolio_store(fixture.path());
+        assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
 }

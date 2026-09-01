@@ -192,6 +192,71 @@ pub(super) struct RecoveredJournal {
     pub(super) final_digest: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortfolioRole {
+    SourceTracker,
+    RepoTracker,
+    Prerequisite,
+    Implementation,
+    Audit,
+}
+
+impl PortfolioRole {
+    fn parse(value: &str) -> Result<Self, ManagedProjectError> {
+        match value {
+            "source-tracker" => Ok(Self::SourceTracker),
+            "repo-tracker" => Ok(Self::RepoTracker),
+            "prerequisite" => Ok(Self::Prerequisite),
+            "implementation" => Ok(Self::Implementation),
+            "audit" => Ok(Self::Audit),
+            _ => Err(ManagedProjectError::new(
+                "portfolio recovery capsule has an unsupported item role",
+            )),
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::SourceTracker => 0,
+            Self::RepoTracker => 1,
+            Self::Prerequisite => 2,
+            Self::Implementation => 3,
+            Self::Audit => 4,
+        }
+    }
+
+    fn completion_policy(self) -> CompletionPolicy {
+        match self {
+            Self::SourceTracker | Self::RepoTracker => CompletionPolicy::ClosedTracker,
+            Self::Prerequisite => CompletionPolicy::ExternalPrerequisite,
+            Self::Implementation => CompletionPolicy::MergedPr,
+            Self::Audit => CompletionPolicy::AuditReceipt,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionPolicy {
+    MergedPr,
+    ClosedTracker,
+    AuditReceipt,
+    ExternalPrerequisite,
+}
+
+impl CompletionPolicy {
+    fn parse(value: &str) -> Result<Self, ManagedProjectError> {
+        match value {
+            "merged-pr" => Ok(Self::MergedPr),
+            "closed-tracker" => Ok(Self::ClosedTracker),
+            "audit-receipt" => Ok(Self::AuditReceipt),
+            "external-prerequisite" => Ok(Self::ExternalPrerequisite),
+            _ => Err(ManagedProjectError::new(
+                "portfolio recovery capsule has an unsupported completion policy",
+            )),
+        }
+    }
+}
+
 pub(super) fn validate_portfolio_snapshot(
     snapshot: &Value,
     identity: &ManagedProjectIdentity,
@@ -391,7 +456,10 @@ fn validate_recovery_capsule(
         .ok_or_else(|| ManagedProjectError::new("portfolio recovery capsule has no items"))?;
     let mut keys = HashSet::new();
     let mut repositories = HashMap::new();
-    for item in items {
+    let mut prior_rank = None;
+    let mut source_trackers = 0;
+    let mut audits = 0;
+    for (index, item) in items.iter().enumerate() {
         let item = item.as_object().ok_or_else(|| {
             ManagedProjectError::new("portfolio recovery capsule item must be an object")
         })?;
@@ -404,8 +472,38 @@ fn validate_recovery_capsule(
         let repository =
             required_nonempty_string(item, "repository", "portfolio recovery capsule item")?;
         validate_repository(repository)?;
-        required_nonempty_string(item, "role", "portfolio recovery capsule item")?;
-        required_nonempty_string(item, "completion_policy", "portfolio recovery capsule item")?;
+        let role = PortfolioRole::parse(required_nonempty_string(
+            item,
+            "role",
+            "portfolio recovery capsule item",
+        )?)?;
+        let completion_policy = CompletionPolicy::parse(required_nonempty_string(
+            item,
+            "completion_policy",
+            "portfolio recovery capsule item",
+        )?)?;
+        if role.completion_policy() != completion_policy {
+            return Err(ManagedProjectError::new(
+                "portfolio item role and completion policy are incompatible",
+            ));
+        }
+        if prior_rank.is_some_and(|prior| role.rank() < prior) {
+            return Err(ManagedProjectError::new(
+                "portfolio recovery capsule roles are not in canonical order",
+            ));
+        }
+        prior_rank = Some(role.rank());
+        if role == PortfolioRole::SourceTracker {
+            source_trackers += 1;
+        }
+        if role == PortfolioRole::Audit {
+            audits += 1;
+            if index + 1 != items.len() {
+                return Err(ManagedProjectError::new(
+                    "portfolio audit item must be last",
+                ));
+            }
+        }
         let local_parents =
             required_string_array(item, "local_parents", "portfolio recovery capsule item")?;
         let dependencies =
@@ -430,6 +528,11 @@ fn validate_recovery_capsule(
         }
         keys.insert(key.to_string());
         repositories.insert(key.to_string(), repository.to_owned());
+    }
+    if source_trackers != 1 || audits != 1 {
+        return Err(ManagedProjectError::new(
+            "portfolio recovery capsule requires exactly one source tracker and one audit",
+        ));
     }
     Ok(())
 }
