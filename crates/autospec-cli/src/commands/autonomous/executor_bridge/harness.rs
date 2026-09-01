@@ -50,6 +50,7 @@ pub(crate) enum HarnessKind {
     Claude,
     Codex,
     OpenCode,
+    Pi,
 }
 
 impl HarnessKind {
@@ -58,6 +59,7 @@ impl HarnessKind {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::OpenCode),
+            "pi" => Ok(Self::Pi),
             other => Err(format!("unsupported executor harness: {other}")),
         }
     }
@@ -67,6 +69,7 @@ impl HarnessKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
         }
     }
 }
@@ -279,6 +282,10 @@ impl ResolvedHarness {
                 args.push(prompt.into());
                 (self.executable.clone(), args)
             }
+            HarnessKind::Pi => (
+                self.executable.clone(),
+                vec![prompt.into()],
+            ),
         };
         Ok(HarnessInvocation {
             program,
@@ -369,6 +376,11 @@ impl ResolvedHarness {
                 args.push(prompt.into());
                 (adapter, args, false)
             }
+            HarnessKind::Pi => (
+                self.executable.clone(),
+                vec![prompt.into()],
+                false,
+            ),
         };
         Ok(HarnessInvocation {
             program,

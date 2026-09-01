@@ -55,6 +55,7 @@ pub(super) enum HarnessKind {
     Codex,
     Claude,
     OpenCode,
+    Pi,
 }
 
 pub(super) fn scan_native(repo_dir: &Path) -> Tier2Scan {
@@ -162,6 +163,15 @@ impl HarnessKind {
                         .to_string(),
                 )
             }
+            Self::Pi => HarnessInvocation {
+                program: "pi".into(),
+                args: vec![
+                    "--provider".to_string(),
+                    std::env::var("PI_PROVIDER").unwrap_or_else(|_| "default".to_string()),
+                    prompt.to_string(),
+                ],
+                current_dir: scratch_dir.to_path_buf(),
+            },
         })
     }
 }
@@ -196,16 +206,20 @@ fn resolve_harness() -> Result<HarnessKind, String> {
     if std::env::var_os("OPENCODE").is_some() || std::env::var_os("OPENCODE_SESSION_ID").is_some() {
         return Ok(HarnessKind::OpenCode);
     }
+    if std::env::var_os("PI_CODING_AGENT").is_some() || std::env::var_os("PI_SESSION_ID").is_some() {
+        return Ok(HarnessKind::Pi);
+    }
     for (binary, kind) in [
         ("codex", HarnessKind::Codex),
         ("claude", HarnessKind::Claude),
         ("opencode", HarnessKind::OpenCode),
+        ("pi", HarnessKind::Pi),
     ] {
         if binary_on_path(binary) {
             return Ok(kind);
         }
     }
-    Err("no active Codex, Claude, or OpenCode harness is available".to_string())
+    Err("no active Codex, Claude, OpenCode, or Pi harness is available".to_string())
 }
 
 fn parse_harness(value: &str) -> Result<HarnessKind, String> {
@@ -213,6 +227,7 @@ fn parse_harness(value: &str) -> Result<HarnessKind, String> {
         "codex" => Ok(HarnessKind::Codex),
         "claude" | "claude-code" => Ok(HarnessKind::Claude),
         "opencode" => Ok(HarnessKind::OpenCode),
+        "pi" => Ok(HarnessKind::Pi),
         other => Err(format!("unsupported autonomous harness {other}")),
     }
 }
