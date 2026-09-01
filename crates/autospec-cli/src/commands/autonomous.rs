@@ -8192,7 +8192,7 @@ mod project_board_config_tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&state_root, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let mut store = crate::commands::managed_project::ManagedProjectStore::open(
+        let mut store = crate::commands::managed_project::ManagedProjectStore::open_product(
             &state_root,
             &policy.product_key,
         )

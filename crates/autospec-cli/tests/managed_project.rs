@@ -47,6 +47,13 @@ impl Fixture {
     fn state_path(&self, name: &str) -> PathBuf {
         self.0.join("projects").join("autospec").join(name)
     }
+
+    fn portfolio_state_path(&self, name: &str) -> PathBuf {
+        self.0
+            .join("projects")
+            .join(portfolio_store_identity().namespace().to_string())
+            .join(name)
+    }
 }
 
 impl Drop for Fixture {
@@ -84,6 +91,94 @@ fn edge() -> RelationshipEdge {
 
 fn add_item(issue_url: &str) -> String {
     format!("project:item-add:PV_123:{issue_url}")
+}
+
+fn portfolio_store_snapshot() -> serde_json::Value {
+    let source = portfolio_source_identity();
+    let portfolio_id = source.portfolio_id().to_string();
+    serde_json::json!({
+        "schema": "autospec.portfolio-snapshot.v1",
+        "portfolio_id": portfolio_id,
+        "owner": "berlinguyinca",
+        "project_number": 42,
+        "project_node_id": "PVT_42",
+        "project_url": "https://github.com/orgs/berlinguyinca/projects/42",
+        "source_spec": source,
+        "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "lease_generation": 3,
+        "state": "applying",
+        "projection_high_watermark": 0,
+        "recovery_capsule": {
+            "schema": "autospec.portfolio-recovery.v1",
+            "portfolio_id": portfolio_id,
+            "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "create_nonce": "00112233445566778899aabbccddeeff",
+            "items": [
+                {
+                    "item_key": "source-tracker",
+                    "repository": "berlinguyinca/autospec",
+                    "role": "source-tracker",
+                    "completion_policy": "closed-tracker",
+                    "local_parents": [],
+                    "dependencies": []
+                },
+                {
+                    "item_key": "issue:portfolio-store",
+                    "repository": "berlinguyinca/autospec",
+                    "role": "implementation",
+                    "completion_policy": "merged-pr",
+                    "local_parents": ["source-tracker"],
+                    "dependencies": ["source-tracker"]
+                },
+                {
+                    "item_key": "audit:phase-5.5",
+                    "repository": "berlinguyinca/autospec",
+                    "role": "audit",
+                    "completion_policy": "audit-receipt",
+                    "local_parents": ["source-tracker"],
+                    "dependencies": ["issue:portfolio-store"]
+                }
+            ]
+        }
+    })
+}
+
+fn portfolio_source_identity() -> SourceSpecIdentity {
+    SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap()
+}
+
+fn portfolio_store_identity() -> ManagedProjectIdentity {
+    ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(portfolio_source_identity()))
+}
+
+fn open_portfolio_store(root: &Path) -> ManagedProjectStore {
+    ManagedProjectStore::open(root, &portfolio_store_identity()).unwrap()
+}
+
+fn portfolio_item_binding(item_key: &str, issue_number: u64) -> serde_json::Value {
+    let dependencies = if item_key == "source-tracker" {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["source-tracker"])
+    };
+    serde_json::json!({
+        "item_key": item_key,
+        "repository": "berlinguyinca/autospec",
+        "issue_url": format!("https://github.com/berlinguyinca/autospec/issues/{issue_number}"),
+        "role": if item_key == "source-tracker" { "source-tracker" } else { "implementation" },
+        "completion_policy": if item_key == "source-tracker" {
+            "closed-tracker"
+        } else {
+            "merged-pr"
+        },
+        "dependencies": dependencies,
+        "terminal_state": null
+    })
 }
 
 #[derive(Default)]
@@ -495,7 +590,7 @@ fn onboard_admits_explicit_and_allowlisted_evidence_without_executing_manifests(
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/autospec*".to_owned()];
     let state = fixture.path().join("state");
-    let mut store = ManagedProjectStore::open(&state, &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(&state, &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -590,7 +685,7 @@ fn onboard_issue_scanner_keeps_blocks_kind_and_canonical_issue_identity() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     onboard_repositories(
         &mut store,
@@ -636,7 +731,7 @@ fn onboard_issue_scanner_keeps_same_repository_issue_edges() {
     )
     .unwrap();
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     onboard_repositories(
         &mut store,
@@ -685,7 +780,7 @@ fn onboard_bounds_queue_and_excludes_proposed_edges_from_active_graph() {
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     policy.discovery_max_repos = 1;
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -742,7 +837,7 @@ fn onboard_applies_discovery_cap_only_to_expansion_not_explicit_seeds() {
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     policy.discovery_max_repos = 1;
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -798,7 +893,7 @@ fn onboard_retains_under_cap_name_reference_as_proposed_only() {
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     policy.discovery_max_repos = 1;
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -844,7 +939,7 @@ fn onboard_cli_dry_run_emits_stable_sorted_json() {
     )
     .unwrap();
     let state_root = repository_path.join(".autospec/state");
-    let mut persisted = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let mut persisted = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     persisted
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -902,7 +997,7 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
     let fixture = Fixture::new("onboard-selected-issues");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
     let state_root = repository_path.join(".autospec/state");
-    let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -964,7 +1059,7 @@ fn onboard_cli_journals_and_reconciles_every_selected_open_or_closed_issue() {
             .count(),
         2
     );
-    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     assert!(reopened.snapshot().pending_projections.is_empty());
 }
 
@@ -975,7 +1070,7 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
     let state_root = repository_path.join(".autospec/state");
     let issue_url = "https://github.com/berlinguyinca/autospec/issues/45";
     let second_issue_url = "https://github.com/berlinguyinca/autospec/issues/46";
-    let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -1004,7 +1099,7 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
         vec![issue_url.to_owned(), second_issue_url.to_owned()]
     );
     drop(store);
-    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     assert_eq!(
         tracked_issue_urls(&reopened),
         vec![issue_url.to_owned(), second_issue_url.to_owned()]
@@ -1049,7 +1144,7 @@ fn sync_without_a_new_url_restores_every_durably_tracked_issue() {
             .count(),
         1
     );
-    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     assert!(reopened.snapshot().pending_projections.is_empty());
 }
 
@@ -1058,7 +1153,7 @@ fn onboard_cli_journals_selected_issue_before_relationship_fetch_failure() {
     let fixture = Fixture::new("onboard-selected-issue-fetch-failure");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
     let state_root = repository_path.join(".autospec/state");
-    let mut store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -1093,7 +1188,7 @@ fn onboard_cli_journals_selected_issue_before_relationship_fetch_failure() {
     assert_eq!(outcome["inaccessible"], 1);
     assert_eq!(outcome["reconciled_issues"], 1);
 
-    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     assert!(reopened.snapshot().pending_projections.is_empty());
 }
 
@@ -1119,9 +1214,11 @@ fn onboard_cli_journals_selected_issue_before_owner_enumeration_failure() {
 
     assert!(run_with_transport(&args, &mut github).is_err());
 
-    let reopened =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let reopened = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     assert_eq!(
         reopened.snapshot().pending_projections,
         [format!("project:item-add:unresolved:{issue_url}")]
@@ -1206,9 +1303,11 @@ fn active_edges_returns_empty_for_an_external_project_board() {
 fn active_edges_rejects_a_board_other_than_the_managed_binding() {
     let fixture = Fixture::new("active-edges-board-mismatch");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
-    let mut store =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let mut store = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -1268,9 +1367,11 @@ fn sync_cli_journals_normalized_issue_before_project_resolution_failure() {
 
     assert!(run_with_transport(&args, &mut github).is_err());
 
-    let reopened =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let reopened = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     assert_eq!(
         reopened.snapshot().pending_projections,
         ["project:item-add:unresolved:https://github.com/berlinguyinca/autospec/issues/51"]
@@ -1479,7 +1580,7 @@ fn onboard_scans_only_structured_manifest_and_fleet_fields() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     onboard_repositories(
         &mut store,
@@ -1537,7 +1638,7 @@ fn onboard_ignores_non_repository_npm_dependency_protocols() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -1582,7 +1683,7 @@ fn onboard_accepts_npm_git_plus_github_repository_forms() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -1630,7 +1731,8 @@ fn onboard_ignores_non_github_npm_repository_fields() {
         let mut policy = policy("berlinguyinca");
         policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
         let mut store =
-            ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+            ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec"))
+                .unwrap();
 
         let report = onboard_repositories(
             &mut store,
@@ -1683,7 +1785,7 @@ fn onboard_resolves_cargo_paths_and_pnpm_members_with_typed_failures() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let report = onboard_repositories(
         &mut store,
@@ -1720,7 +1822,7 @@ fn onboard_rejects_malformed_explicit_repository_seeds() {
     let mut policy = policy("berlinguyinca");
     policy.repo_allowlist = vec!["berlinguyinca/*".to_owned()];
     let mut store =
-        ManagedProjectStore::open(&fixture.path().join("state"), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product(&fixture.path().join("state"), &key("autospec")).unwrap();
 
     let result = onboard_repositories(
         &mut store,
@@ -1806,9 +1908,11 @@ fn onboard_cli_records_contains_and_only_explicit_creation_records_spawned_from(
             "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/*\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
         )
         .unwrap();
-        let mut store =
-            ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-                .unwrap();
+        let mut store = ManagedProjectStore::open_product(
+            &repository_path.join(".autospec/state"),
+            &key("autospec"),
+        )
+        .unwrap();
         store
             .record_project(
                 "berlinguyinca",
@@ -1837,9 +1941,11 @@ fn onboard_cli_records_contains_and_only_explicit_creation_records_spawned_from(
 
         run_with_transport(&args, &mut github).unwrap();
 
-        let store =
-            ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-                .unwrap();
+        let store = ManagedProjectStore::open_product(
+            &repository_path.join(".autospec/state"),
+            &key("autospec"),
+        )
+        .unwrap();
         assert!(store.snapshot().relationships.iter().any(|edge| {
             edge.kind == RelationshipKind::Contains
                 && edge.source == "product:autospec"
@@ -1908,7 +2014,7 @@ fn onboard_cli_journals_repository_projection_before_remote_reconciliation_failu
     assert_eq!(github.calls.len(), 2);
 
     let state_root = repository_path.join(".autospec/state");
-    let reopened = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     let snapshot = reopened.snapshot();
     assert!(snapshot
         .repositories
@@ -1940,7 +2046,7 @@ fn onboard_cli_journals_repository_projection_before_remote_reconciliation_failu
     assert!(relationship_event < projection_event);
 
     drop(reopened);
-    let mut bound = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let mut bound = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     bound
         .record_project(
             "berlinguyinca",
@@ -1965,7 +2071,7 @@ fn onboard_cli_journals_repository_projection_before_remote_reconciliation_failu
     let synced = run_with_transport(&sync_args, &mut sync_github).unwrap();
     assert_eq!(synced["outcome"], "reconciled");
     assert_eq!(synced["pending_projection"], 0);
-    let synced_store = ManagedProjectStore::open(&state_root, &key("autospec")).unwrap();
+    let synced_store = ManagedProjectStore::open_product(&state_root, &key("autospec")).unwrap();
     assert!(synced_store.snapshot().pending_projections.is_empty());
 }
 
@@ -1995,9 +2101,11 @@ fn onboard_cli_propagates_hard_remote_validation_failure_after_journaling() {
     let error = run_with_transport(&args, &mut github).unwrap_err();
 
     assert!(!error.to_string().is_empty());
-    let reopened =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let reopened = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     assert!(reopened
         .snapshot()
         .pending_projections
@@ -2014,7 +2122,7 @@ fn gh_cli_missing_executable_is_a_hard_nonzero_onboarding_failure() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot execute gh"));
-    let store = ManagedProjectStore::open(
+    let store = ManagedProjectStore::open_product(
         &repository_path.join("test-autospec-home"),
         &key("autospec"),
     )
@@ -2114,9 +2222,11 @@ fn onboard_cli_does_not_project_or_link_an_out_of_bound_spawned_repository() {
         "project_board:\n  mode: managed\n  product_key: autospec\n  owner: berlinguyinca\n  repo_allowlist: [\"berlinguyinca/autospec\"]\n  repository_seeds: [\"berlinguyinca/autospec\"]\n  discovery_max_repos: 25\n",
     )
     .unwrap();
-    let mut store =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let mut store = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -2146,9 +2256,11 @@ fn onboard_cli_does_not_project_or_link_an_out_of_bound_spawned_repository() {
 
     assert_eq!(outcome["outcome"], "reconciled");
     assert_eq!(outcome["out_of_bound"], 1);
-    let reopened =
-        ManagedProjectStore::open(&repository_path.join(".autospec/state"), &key("autospec"))
-            .unwrap();
+    let reopened = ManagedProjectStore::open_product(
+        &repository_path.join(".autospec/state"),
+        &key("autospec"),
+    )
+    .unwrap();
     assert!(!reopened.snapshot().relationships.iter().any(|edge| {
         edge.kind == RelationshipKind::SpawnedFrom && edge.source == "other/created"
     }));
@@ -2200,7 +2312,7 @@ fn github_marker_parser_requires_one_complete_exact_marker() {
 #[test]
 fn github_resolve_creates_marks_verifies_and_persists_when_no_marker_matches() {
     let fixture = Fixture::new("github-create");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let human_readme = "# Human notes\n\nKeep this text.\n \n\t";
     let marked_readme = format!("{human_readme}\n\n{}", marker("berlinguyinca"));
     let mut github = ScriptedGithub::with([
@@ -2246,7 +2358,7 @@ fn github_resolve_creates_marks_verifies_and_persists_when_no_marker_matches() {
 fn github_create_failure_persists_identity_and_resumes_marker_edit_without_duplicate_create() {
     let fixture = Fixture::new("github-create-resume");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let human_readme = "human bytes\n \n";
     let marked = format!("{human_readme}\n\n{}", marker("berlinguyinca"));
     let mut first = ScriptedGithub::with([
@@ -2261,7 +2373,7 @@ fn github_create_failure_persists_identity_and_resumes_marker_edit_without_dupli
     assert_eq!(store.snapshot().pending_projections.len(), 1);
     drop(store);
 
-    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut retry = ScriptedGithub::with([
         Ok(project(7, "berlinguyinca", "Autospec", human_readme)),
         Ok(String::new()),
@@ -2290,7 +2402,7 @@ fn github_create_failure_persists_identity_and_resumes_marker_edit_without_dupli
 fn github_provisional_creation_cannot_authorize_item_mutation() {
     let fixture = Fixture::new("github-provisional-create");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut create = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([]))),
         Ok(project(7, "berlinguyinca", "Autospec", "human")),
@@ -2305,7 +2417,7 @@ fn github_provisional_creation_cannot_authorize_item_mutation() {
     assert!(!journal.contains("\"kind\":\"project-bound\""));
     drop(store);
 
-    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut reconcile = ScriptedGithub::default();
     assert!(reconcile_issue(
         &mut reopened,
@@ -2330,7 +2442,7 @@ fn github_provisional_creation_cannot_authorize_item_mutation() {
 fn github_provisional_recovery_accepts_renamed_project_and_persists_verified_metadata() {
     let fixture = Fixture::new("github-provisional-rename");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut create = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([]))),
         Ok(project(7, "berlinguyinca", "Original title", "human")),
@@ -2339,7 +2451,7 @@ fn github_provisional_recovery_accepts_renamed_project_and_persists_verified_met
     assert!(resolve_or_create_project(&mut store, &mut create, &policy, "Original title").is_err());
     drop(store);
 
-    let mut reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let marked = format!("human\n\n{}", marker("berlinguyinca"));
     let mut renamed: serde_json::Value =
         serde_json::from_str(&project(7, "berlinguyinca", "Human rename", &marked)).unwrap();
@@ -2365,7 +2477,7 @@ fn github_provisional_recovery_accepts_renamed_project_and_persists_verified_met
 fn github_ambiguous_marker_edit_resumes_from_verified_bound_project() {
     let fixture = Fixture::new("github-edit-resume");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let unmarked = project(7, "berlinguyinca", "Autospec", "human");
     let marked = project(
         7,
@@ -2406,7 +2518,7 @@ fn github_ambiguous_marker_edit_resumes_from_verified_bound_project() {
 fn github_pending_create_without_identity_never_creates_a_second_project() {
     let fixture = Fixture::new("github-create-ambiguous");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store.enqueue_projection("project:create:autospec").unwrap();
     let mut github = ScriptedGithub::with([Ok(project_list(serde_json::json!([])))]);
 
@@ -2425,7 +2537,7 @@ fn github_pending_create_without_identity_never_creates_a_second_project() {
 fn github_verified_adoption_acknowledges_a_pending_create_projection() {
     let fixture = Fixture::new("github-create-adopt");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store.enqueue_projection("project:create:autospec").unwrap();
     let mut github = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([{"number": 7}]))),
@@ -2454,7 +2566,8 @@ fn github_project_readme_must_be_a_string_before_any_mutation() {
         ("number", Some(serde_json::json!(7))),
     ] {
         let fixture = Fixture::new(&format!("github-readme-{name}"));
-        let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+        let mut store =
+            ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&project(7, "berlinguyinca", "Autospec", "human")).unwrap();
         match readme {
@@ -2486,7 +2599,7 @@ fn github_project_readme_must_be_a_string_before_any_mutation() {
 #[test]
 fn github_resolve_adopts_one_exact_marker_and_ignores_title_only_matches() {
     let fixture = Fixture::new("github-adopt");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut github = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([
             {"number": 3, "title": "Autospec"},
@@ -2523,7 +2636,7 @@ fn github_resolve_adopts_one_exact_marker_and_ignores_title_only_matches() {
 #[test]
 fn github_resolve_rejects_ambiguous_markers_without_mutation() {
     let fixture = Fixture::new("github-ambiguous");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut github = ScriptedGithub::with([
         Ok(project_list(
             serde_json::json!([{"number": 7}, {"number": 8}]),
@@ -2550,7 +2663,7 @@ fn github_resolve_rejects_ambiguous_markers_without_mutation() {
 #[test]
 fn github_resolve_fails_closed_when_project_discovery_may_be_truncated() {
     let fixture = Fixture::new("github-truncated-projects");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let projects = (1..=500)
         .map(|number| serde_json::json!({"number": number}))
         .collect::<Vec<_>>();
@@ -2572,7 +2685,7 @@ fn github_resolve_fails_closed_when_project_discovery_may_be_truncated() {
 #[test]
 fn github_resolve_fails_closed_on_marker_owner_mismatch() {
     let fixture = Fixture::new("github-owner-mismatch");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut github = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([{"number": 7}]))),
         Ok(project(
@@ -2603,7 +2716,7 @@ fn github_reconcile_is_idempotent_and_journals_failures_before_item_add() {
     let fixture = Fixture::new("github-reconcile");
     let policy = policy("berlinguyinca");
     let issue_url = "https://github.com/berlinguyinca/autospec/issues/42";
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let mut resolver = ScriptedGithub::with([
         Ok(project_list(serde_json::json!([{"number": 7}]))),
         Ok(project(
@@ -2654,7 +2767,7 @@ fn github_reconcile_journals_before_listing_remote_items() {
     let fixture = Fixture::new("github-reconcile-list-failure");
     let policy = policy("berlinguyinca");
     let issue_url = "HTTPS://GITHUB.COM/berlinguyinca/autospec/issues/00046/?view=1";
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -2681,7 +2794,7 @@ fn issue_projection_is_durable_before_project_identity_exists_and_promotes_after
     let fixture = Fixture::new("github-unresolved-issue-outbox");
     let policy = policy("berlinguyinca");
     let issue_url = "HTTPS://GITHUB.COM/BerlinGuyInCA/AutoSpec/issues/00046/?view=1";
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
 
     journal_issue_projection(&mut store, issue_url).unwrap();
     assert_eq!(
@@ -2712,7 +2825,7 @@ fn issue_projection_is_durable_before_project_identity_exists_and_promotes_after
 #[test]
 fn project_binding_refreshes_mutable_title_and_url_for_the_same_project_identity() {
     let fixture = Fixture::new("project-binding-metadata-refresh");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -2734,7 +2847,7 @@ fn project_binding_refreshes_mutable_title_and_url_for_the_same_project_identity
         .unwrap();
     drop(store);
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(
         reopened.snapshot().project_url.as_deref(),
         Some("https://github.com/users/berlinguyinca/projects/7")
@@ -2749,7 +2862,7 @@ fn project_binding_refreshes_mutable_title_and_url_for_the_same_project_identity
 fn github_item_reconciliation_ignores_known_nonissues_but_rejects_unknown_items() {
     let fixture = Fixture::new("github-item-shapes");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -2805,7 +2918,7 @@ fn github_item_reconciliation_ignores_known_nonissues_but_rejects_unknown_items(
 fn github_issue_urls_require_nonempty_identity_and_positive_canonical_number() {
     let fixture = Fixture::new("github-canonical-url");
     let policy = policy("berlinguyinca");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_project(
             "berlinguyinca",
@@ -2847,7 +2960,7 @@ fn github_issue_urls_require_nonempty_identity_and_positive_canonical_number() {
 #[test]
 fn store_reopens_repository_edge_and_pending_projection_from_journal() {
     let fixture = Fixture::new("reopen");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -2859,7 +2972,7 @@ fn store_reopens_repository_edge_and_pending_projection_from_journal() {
         .unwrap();
     drop(store);
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 1);
     assert_eq!(reopened.snapshot().relationships.len(), 1);
     assert_eq!(reopened.snapshot().pending_projections.len(), 1);
@@ -2868,7 +2981,7 @@ fn store_reopens_repository_edge_and_pending_projection_from_journal() {
 #[test]
 fn store_read_only_replays_newest_valid_events_without_repairing_files() {
     let fixture = Fixture::new("read-only-replay");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/first", "explicit-seed"))
         .unwrap();
@@ -2887,7 +3000,8 @@ fn store_read_only_replays_newest_valid_events_without_repairing_files() {
     let binding_before = fs::read(fixture.state_path("binding.json")).unwrap();
     let journal_before = fs::read(fixture.state_path("events.jsonl")).unwrap();
 
-    let read_only = ManagedProjectStore::open_read_only(fixture.path(), &key("autospec")).unwrap();
+    let read_only =
+        ManagedProjectStore::open_product_read_only(fixture.path(), &key("autospec")).unwrap();
 
     assert_eq!(read_only.snapshot().repositories.len(), 2);
     assert_eq!(
@@ -2903,7 +3017,7 @@ fn store_read_only_replays_newest_valid_events_without_repairing_files() {
 #[test]
 fn store_read_only_rejects_nonempty_binding_without_valid_journal() {
     let fixture = Fixture::new("read-only-missing-journal");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -2911,7 +3025,7 @@ fn store_read_only_rejects_nonempty_binding_without_valid_journal() {
     fs::remove_file(fixture.state_path("events.jsonl")).unwrap();
     let binding_before = fs::read(fixture.state_path("binding.json")).unwrap();
 
-    assert!(ManagedProjectStore::open_read_only(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product_read_only(fixture.path(), &key("autospec")).is_err());
     assert_eq!(
         fs::read(fixture.state_path("binding.json")).unwrap(),
         binding_before
@@ -2927,26 +3041,28 @@ fn store_global_open_imports_one_legacy_repo_state_and_reuses_it_across_reposito
     let legacy_two = fixture.path().join("repo-two/.autospec/state");
     fs::create_dir_all(legacy_one.parent().unwrap()).unwrap();
     fs::create_dir_all(legacy_two.parent().unwrap()).unwrap();
-    let mut first = ManagedProjectStore::open(&legacy_one, &key("autospec")).unwrap();
+    let mut first = ManagedProjectStore::open_product(&legacy_one, &key("autospec")).unwrap();
     first
         .record_repository(repository("berlinguyinca/one", "explicit-seed"))
         .unwrap();
     drop(first);
-    let mut second = ManagedProjectStore::open(&legacy_two, &key("autospec")).unwrap();
+    let mut second = ManagedProjectStore::open_product(&legacy_two, &key("autospec")).unwrap();
     second
         .record_repository(repository("berlinguyinca/two", "explicit-seed"))
         .unwrap();
     drop(second);
 
     let imported =
-        ManagedProjectStore::open_global(&global, Some(&legacy_one), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product_global(&global, Some(&legacy_one), &key("autospec"))
+            .unwrap();
     assert_eq!(
         imported.snapshot().repositories[0].repository,
         "berlinguyinca/one"
     );
     drop(imported);
     let reused =
-        ManagedProjectStore::open_global(&global, Some(&legacy_two), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product_global(&global, Some(&legacy_two), &key("autospec"))
+            .unwrap();
     assert_eq!(reused.snapshot().repositories.len(), 1);
     assert_eq!(
         reused.snapshot().repositories[0].repository,
@@ -2961,7 +3077,7 @@ fn store_global_open_ignores_corrupt_legacy_after_global_state_exists() {
     let global = fixture.path().join("global");
     let legacy = fixture.path().join("repo/.autospec/state");
     fs::create_dir_all(fixture.path()).unwrap();
-    let mut existing = ManagedProjectStore::open(&global, &key("autospec")).unwrap();
+    let mut existing = ManagedProjectStore::open_product(&global, &key("autospec")).unwrap();
     existing
         .record_repository(repository("berlinguyinca/global", "explicit-seed"))
         .unwrap();
@@ -2972,7 +3088,7 @@ fn store_global_open_ignores_corrupt_legacy_after_global_state_exists() {
     fs::write(legacy_project.join("events.jsonl"), "not-json\n").unwrap();
 
     let reopened =
-        ManagedProjectStore::open_global(&global, Some(&legacy), &key("autospec")).unwrap();
+        ManagedProjectStore::open_product_global(&global, Some(&legacy), &key("autospec")).unwrap();
 
     assert_eq!(reopened.snapshot().repositories.len(), 1);
     assert_eq!(
@@ -2987,25 +3103,25 @@ fn store_read_only_rejects_a_symlinked_or_public_ancestor_before_reading_state()
     let fixture = Fixture::new("read-only-ancestor");
     let state = fixture.path().join("state");
     fs::create_dir_all(fixture.path()).unwrap();
-    let mut store = ManagedProjectStore::open(&state, &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(&state, &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
     drop(store);
 
     fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(ManagedProjectStore::open_read_only(&state, &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product_read_only(&state, &key("autospec")).is_err());
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
 
     let linked = fixture.path().join("linked-state");
     std::os::unix::fs::symlink(&state, &linked).unwrap();
-    assert!(ManagedProjectStore::open_read_only(&linked, &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product_read_only(&linked, &key("autospec")).is_err());
 }
 
 #[test]
 fn store_duplicate_event_keys_are_no_ops() {
     let fixture = Fixture::new("dedupe");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let repository = repository("berlinguyinca/autospec", "explicit-seed");
     let edge = edge();
     let projection = add_item("https://github.com/berlinguyinca/autospec/issues/42");
@@ -3032,8 +3148,8 @@ fn store_duplicate_event_keys_are_no_ops() {
 #[test]
 fn store_two_writers_refresh_under_lock_without_losing_events() {
     let fixture = Fixture::new("two-writers");
-    let mut first = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
-    let mut second = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut first = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
+    let mut second = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
 
     first
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
@@ -3043,7 +3159,7 @@ fn store_two_writers_refresh_under_lock_without_losing_events() {
         .unwrap();
     drop((first, second));
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 2);
     assert_eq!(
         fs::read_to_string(fixture.state_path("events.jsonl"))
@@ -3057,7 +3173,7 @@ fn store_two_writers_refresh_under_lock_without_losing_events() {
 #[test]
 fn store_partial_append_failure_rolls_back_before_same_instance_retry() {
     let fixture = Fixture::new("append-rollback");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3074,7 +3190,7 @@ fn store_partial_append_failure_rolls_back_before_same_instance_retry() {
         .unwrap();
     drop(store);
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 2);
     assert_eq!(fs::read_to_string(journal_path).unwrap().lines().count(), 2);
 }
@@ -3082,7 +3198,7 @@ fn store_partial_append_failure_rolls_back_before_same_instance_retry() {
 #[test]
 fn store_ack_projection_is_retryable_but_unknown_keys_fail_closed() {
     let fixture = Fixture::new("ack");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     let projection = add_item("https://github.com/berlinguyinca/autospec/issues/42");
     store.enqueue_projection(projection.clone()).unwrap();
 
@@ -3097,7 +3213,7 @@ fn store_ack_projection_is_retryable_but_unknown_keys_fail_closed() {
 #[test]
 fn store_discards_only_a_truncated_jsonl_tail_and_rebuilds_the_snapshot() {
     let fixture = Fixture::new("truncated-tail");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3110,7 +3226,7 @@ fn store_discards_only_a_truncated_jsonl_tail_and_rebuilds_the_snapshot() {
         .unwrap();
     fs::remove_file(fixture.state_path("binding.json")).unwrap();
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 1);
     assert!(fs::read_to_string(fixture.state_path("events.jsonl"))
         .unwrap()
@@ -3121,7 +3237,7 @@ fn store_discards_only_a_truncated_jsonl_tail_and_rebuilds_the_snapshot() {
 #[test]
 fn store_rejects_empty_interior_journal_lines() {
     let fixture = Fixture::new("empty-journal-line");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3133,13 +3249,13 @@ fn store_rejects_empty_interior_journal_lines() {
         .write_all(b"\n")
         .unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
 }
 
 #[test]
 fn store_rebuilds_a_stale_snapshot_from_the_journal() {
     let fixture = Fixture::new("stale-snapshot");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3152,14 +3268,14 @@ fn store_rebuilds_a_stale_snapshot_from_the_journal() {
     #[cfg(unix)]
     fs::set_permissions(&binding_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let reopened = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     assert_eq!(reopened.snapshot().repositories.len(), 1);
 }
 
 #[test]
 fn store_missing_journal_fails_closed_without_overwriting_a_nonempty_binding() {
     let fixture = Fixture::new("missing-journal");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3168,7 +3284,7 @@ fn store_missing_journal_fails_closed_without_overwriting_a_nonempty_binding() {
     let binding_before = fs::read(&binding_path).unwrap();
     fs::remove_file(fixture.state_path("events.jsonl")).unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
     assert_eq!(fs::read(binding_path).unwrap(), binding_before);
     assert!(!fixture.state_path("events.jsonl").exists());
 }
@@ -3176,7 +3292,7 @@ fn store_missing_journal_fails_closed_without_overwriting_a_nonempty_binding() {
 #[test]
 fn store_zero_length_journal_fails_closed_without_modifying_state() {
     let fixture = Fixture::new("empty-journal");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3190,7 +3306,7 @@ fn store_zero_length_journal_fails_closed_without_modifying_state() {
         .open(&journal_path)
         .unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
     assert_eq!(fs::read(binding_path).unwrap(), binding_before);
     assert!(fs::read(journal_path).unwrap().is_empty());
 }
@@ -3198,7 +3314,7 @@ fn store_zero_length_journal_fails_closed_without_modifying_state() {
 #[test]
 fn store_valid_journal_prefix_behind_snapshot_fails_closed_without_modifying_state() {
     let fixture = Fixture::new("journal-prefix");
-    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     store
         .record_repository(repository("berlinguyinca/autospec", "explicit-seed"))
         .unwrap();
@@ -3215,7 +3331,7 @@ fn store_valid_journal_prefix_behind_snapshot_fails_closed_without_modifying_sta
     #[cfg(unix)]
     fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
     assert_eq!(fs::read(binding_path).unwrap(), binding_before);
     assert_eq!(fs::read(journal_path).unwrap(), first_line.as_bytes());
 }
@@ -3223,7 +3339,7 @@ fn store_valid_journal_prefix_behind_snapshot_fails_closed_without_modifying_sta
 #[test]
 fn store_rejects_mismatched_binding_and_edge_product_keys() {
     let fixture = Fixture::new("mismatched-key");
-    let store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     drop(store);
     let binding_path = fixture.state_path("binding.json");
     let mut binding: serde_json::Value =
@@ -3232,10 +3348,10 @@ fn store_rejects_mismatched_binding_and_edge_product_keys() {
     fs::write(&binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
     #[cfg(unix)]
     fs::set_permissions(&binding_path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
 
     let other = Fixture::new("mismatched-edge");
-    let mut store = ManagedProjectStore::open(other.path(), &key("autospec")).unwrap();
+    let mut store = ManagedProjectStore::open_product(other.path(), &key("autospec")).unwrap();
     let mut wrong_edge = edge();
     wrong_edge.product_key = key("other");
     assert!(store.record_edge(wrong_edge).is_err());
@@ -3245,7 +3361,7 @@ fn store_rejects_mismatched_binding_and_edge_product_keys() {
 #[cfg(unix)]
 fn store_uses_private_state_and_rejects_public_binding_files() {
     let fixture = Fixture::new("private-state");
-    let store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     drop(store);
     let project_dir = fixture
         .state_path("binding.json")
@@ -3272,14 +3388,14 @@ fn store_uses_private_state_and_rejects_public_binding_files() {
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
 }
 
 #[test]
 #[cfg(unix)]
 fn store_rejects_a_public_product_lock_file() {
     let fixture = Fixture::new("public-lock");
-    let store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    let store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
     drop(store);
     fs::set_permissions(
         fixture.state_path("binding.lock"),
@@ -3287,7 +3403,7 @@ fn store_rejects_a_public_product_lock_file() {
     )
     .unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
 }
 
 #[test]
@@ -3303,5 +3419,415 @@ fn store_rejects_symlinked_product_state_directories() {
     fs::create_dir(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, projects.join("autospec")).unwrap();
 
-    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+    assert!(ManagedProjectStore::open_product(fixture.path(), &key("autospec")).is_err());
+}
+
+#[test]
+fn managed_project_store_persists_ordered_portfolio_bindings_and_operation_states() {
+    let fixture = Fixture::new("portfolio-state");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    assert!(store
+        .record_portfolio_item_binding(portfolio_item_binding("issue:portfolio-store", 101))
+        .is_err());
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("issue:portfolio-store", 101))
+        .unwrap();
+    assert!(store
+        .transition_portfolio_operation(
+            "item:add:issue:portfolio-store",
+            "sent",
+            serde_json::json!({"field": "Status"}),
+        )
+        .is_err());
+    for state in ["intent", "sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation(
+                "item:add:issue:portfolio-store",
+                state,
+                serde_json::json!({"field": "Status"}),
+            )
+            .unwrap();
+    }
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+
+    let reopened = open_portfolio_store(fixture.path());
+    assert_eq!(reopened.portfolio_item_bindings().len(), 2);
+    assert_eq!(
+        reopened.portfolio_operation_states(),
+        vec![
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "intent".to_owned()
+            ),
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "sent".to_owned()
+            ),
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "acknowledged".to_owned()
+            ),
+        ]
+    );
+    assert!(reopened.portfolio_snapshot().is_some());
+    assert!(
+        reopened.portfolio_snapshot().unwrap()["projection_high_watermark"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
+}
+
+#[test]
+fn managed_project_store_rejects_incomplete_or_mismatched_recovery_capsules() {
+    let mut cases = Vec::new();
+
+    let mut missing_capsule = portfolio_store_snapshot();
+    missing_capsule
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery_capsule");
+    cases.push(missing_capsule);
+
+    let mut mismatched_identity = portfolio_store_snapshot();
+    mismatched_identity["recovery_capsule"]["portfolio_id"] =
+        serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    cases.push(mismatched_identity);
+
+    let mut duplicate_item = portfolio_store_snapshot();
+    duplicate_item["recovery_capsule"]["items"][1]["item_key"] =
+        serde_json::json!("source-tracker");
+    cases.push(duplicate_item);
+
+    let mut dangling_dependency = portfolio_store_snapshot();
+    dangling_dependency["recovery_capsule"]["items"][1]["dependencies"] =
+        serde_json::json!(["issue:missing"]);
+    cases.push(dangling_dependency);
+
+    for (index, snapshot) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("incomplete-capsule-{index}"));
+        let mut store = open_portfolio_store(fixture.path());
+        assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
+}
+
+#[test]
+fn managed_project_store_repairs_partial_portfolio_journal_tail_from_complete_capsule() {
+    let fixture = Fixture::new("portfolio-truncated-tail");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    drop(store);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.portfolio_state_path("events.jsonl"))
+        .unwrap()
+        .write_all(br#"{"schema":1,"sequence":3,"kind":"portfolio-operation""#)
+        .unwrap();
+    fs::remove_file(fixture.portfolio_state_path("portfolio.json")).unwrap();
+
+    let reopened = open_portfolio_store(fixture.path());
+    assert_eq!(reopened.portfolio_item_bindings().len(), 1);
+    assert!(fixture.portfolio_state_path("portfolio.json").is_file());
+    assert!(
+        fs::read_to_string(fixture.portfolio_state_path("events.jsonl"))
+            .unwrap()
+            .ends_with('\n')
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn managed_project_store_keeps_portfolio_snapshot_private_and_rejects_unsafe_files() {
+    let fixture = Fixture::new("private-portfolio");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+    let portfolio_path = fixture.portfolio_state_path("portfolio.json");
+    assert_eq!(
+        fs::metadata(&portfolio_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::set_permissions(&portfolio_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(ManagedProjectStore::open(fixture.path(), &portfolio_store_identity()).is_err());
+
+    let symlink_fixture = Fixture::new("symlinked-portfolio");
+    let store = open_portfolio_store(symlink_fixture.path());
+    drop(store);
+    let target = symlink_fixture.path().join("outside.json");
+    fs::write(&target, b"{}").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(
+        &target,
+        symlink_fixture.portfolio_state_path("portfolio.json"),
+    )
+    .unwrap();
+    assert!(
+        ManagedProjectStore::open(symlink_fixture.path(), &portfolio_store_identity()).is_err()
+    );
+}
+
+#[test]
+fn managed_project_store_binds_portfolio_identity_and_rejects_product_events() {
+    let fixture = Fixture::new("portfolio-identity");
+    let mut portfolio = open_portfolio_store(fixture.path());
+    portfolio
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    assert!(fixture.portfolio_state_path("portfolio.json").starts_with(
+        fixture.path().join("projects").join(format!(
+            "portfolio.{}",
+            portfolio_source_identity().portfolio_id()
+        ))
+    ));
+
+    let changed = ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(
+        SourceSpecIdentity::new(
+            "berlinguyinca/autospec",
+            "docs/specs/automatic-projects.md",
+            "1123456789abcdef0123456789abcdef01234567",
+        )
+        .unwrap(),
+    ));
+    let mut wrong_identity = ManagedProjectStore::open(fixture.path(), &changed).unwrap();
+    assert!(wrong_identity
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .is_err());
+
+    let mut product = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
+    assert!(product
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .is_err());
+}
+
+#[test]
+fn managed_project_store_retries_durable_events_before_derived_validation() {
+    let fixture = Fixture::new("portfolio-retry-classifier");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+
+    let binding = portfolio_item_binding("source-tracker", 100);
+    store.fail_next_portfolio_persist();
+    assert!(store
+        .record_portfolio_item_binding(binding.clone())
+        .is_err());
+    store
+        .record_portfolio_item_binding(binding.clone())
+        .unwrap();
+    let mut conflicting_binding = binding;
+    conflicting_binding["issue_url"] =
+        serde_json::json!("https://github.com/berlinguyinca/autospec/issues/999");
+    assert!(store
+        .record_portfolio_item_binding(conflicting_binding)
+        .is_err());
+
+    for state in ["intent", "sent", "acknowledged"] {
+        let payload = serde_json::json!({"field": "Status", "boundary": state});
+        store.fail_next_portfolio_persist();
+        assert!(store
+            .transition_portfolio_operation("item:add:source-tracker", state, payload.clone(),)
+            .is_err());
+        store
+            .transition_portfolio_operation("item:add:source-tracker", state, payload.clone())
+            .unwrap();
+        assert!(store
+            .transition_portfolio_operation(
+                "item:add:source-tracker",
+                state,
+                serde_json::json!({"field": "Different", "boundary": state}),
+            )
+            .is_err());
+    }
+}
+
+#[test]
+fn managed_project_store_high_watermark_stops_before_earliest_unresolved_operation() {
+    let fixture = Fixture::new("portfolio-high-watermark");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let payload = serde_json::json!({"field": "Status"});
+    store
+        .transition_portfolio_operation("item:add:a", "intent", payload.clone())
+        .unwrap();
+    for state in ["intent", "sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation("item:add:b", state, payload.clone())
+            .unwrap();
+    }
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        1
+    );
+    for state in ["sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation("item:add:a", state, payload.clone())
+            .unwrap();
+    }
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        7
+    );
+}
+
+#[test]
+fn managed_project_store_high_watermark_includes_pending_generic_projections() {
+    let fixture = Fixture::new("portfolio-projection-high-watermark");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store.enqueue_projection("portfolio:field:update").unwrap();
+    let payload = serde_json::json!({"field": "Status"});
+    for state in ["intent", "sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation("item:add:a", state, payload.clone())
+            .unwrap();
+    }
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        1
+    );
+    store.ack_projection("portfolio:field:update").unwrap();
+    assert_eq!(
+        store.portfolio_snapshot().unwrap()["projection_high_watermark"],
+        6
+    );
+}
+
+#[test]
+fn managed_project_store_mutable_open_rejects_snapshot_without_journal() {
+    let fixture = Fixture::new("portfolio-missing-journal");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+    let events = fixture.portfolio_state_path("events.jsonl");
+    fs::remove_file(&events).unwrap();
+
+    assert!(ManagedProjectStore::open(fixture.path(), &portfolio_store_identity()).is_err());
+    assert!(!events.exists());
+}
+
+#[test]
+fn managed_project_store_rejects_cycles_duplicate_edges_and_forward_references() {
+    let mut cycle = portfolio_store_snapshot();
+    cycle["recovery_capsule"]["items"][0]["dependencies"] =
+        serde_json::json!(["issue:portfolio-store"]);
+    let mut duplicate = portfolio_store_snapshot();
+    duplicate["recovery_capsule"]["items"][1]["dependencies"] =
+        serde_json::json!(["source-tracker", "source-tracker"]);
+    let mut forward_parent = portfolio_store_snapshot();
+    forward_parent["recovery_capsule"]["items"][0]["local_parents"] =
+        serde_json::json!(["issue:portfolio-store"]);
+    let mut self_cycle = portfolio_store_snapshot();
+    self_cycle["recovery_capsule"]["items"][0]["dependencies"] =
+        serde_json::json!(["source-tracker"]);
+
+    for (index, snapshot) in [cycle, duplicate, forward_parent, self_cycle]
+        .into_iter()
+        .enumerate()
+    {
+        let fixture = Fixture::new(&format!("portfolio-graph-{index}"));
+        let mut store = open_portfolio_store(fixture.path());
+        assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
+}
+
+#[test]
+fn managed_project_store_freezes_item_role_and_completion_policy() {
+    let fixture = Fixture::new("portfolio-item-policy");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let mut wrong_role = portfolio_item_binding("source-tracker", 100);
+    wrong_role["role"] = serde_json::json!("implementation");
+    assert!(store.record_portfolio_item_binding(wrong_role).is_err());
+    let mut wrong_policy = portfolio_item_binding("source-tracker", 100);
+    wrong_policy["completion_policy"] = serde_json::json!("manual-close");
+    assert!(store.record_portfolio_item_binding(wrong_policy).is_err());
+}
+
+#[test]
+fn managed_project_store_rejects_invalid_role_policy_order_and_cardinality() {
+    let mut invalid_role = portfolio_store_snapshot();
+    invalid_role["recovery_capsule"]["items"][1]["role"] = serde_json::json!("manual");
+
+    let mut invalid_policy = portfolio_store_snapshot();
+    invalid_policy["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("manual-close");
+
+    let mut incompatible = portfolio_store_snapshot();
+    incompatible["recovery_capsule"]["items"][0]["completion_policy"] =
+        serde_json::json!("merged-pr");
+
+    let mut no_source = portfolio_store_snapshot();
+    no_source["recovery_capsule"]["items"][0]["role"] = serde_json::json!("repo-tracker");
+
+    let mut duplicate_source = portfolio_store_snapshot();
+    duplicate_source["recovery_capsule"]["items"][1]["role"] = serde_json::json!("source-tracker");
+    duplicate_source["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("closed-tracker");
+
+    let mut no_audit = portfolio_store_snapshot();
+    no_audit["recovery_capsule"]["items"][2]["role"] = serde_json::json!("prerequisite");
+    no_audit["recovery_capsule"]["items"][2]["completion_policy"] =
+        serde_json::json!("external-prerequisite");
+
+    let mut duplicate_audit = portfolio_store_snapshot();
+    duplicate_audit["recovery_capsule"]["items"][1]["role"] = serde_json::json!("audit");
+    duplicate_audit["recovery_capsule"]["items"][1]["completion_policy"] =
+        serde_json::json!("audit-receipt");
+
+    let mut audit_not_last = portfolio_store_snapshot();
+    audit_not_last["recovery_capsule"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .swap(1, 2);
+
+    let mut rank_regression = portfolio_store_snapshot();
+    let mut repo_tracker = rank_regression["recovery_capsule"]["items"][1].clone();
+    repo_tracker["item_key"] = serde_json::json!("repo:autospec:tracker");
+    repo_tracker["role"] = serde_json::json!("repo-tracker");
+    repo_tracker["completion_policy"] = serde_json::json!("closed-tracker");
+    rank_regression["recovery_capsule"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .insert(2, repo_tracker);
+
+    let cases = [
+        invalid_role,
+        invalid_policy,
+        incompatible,
+        no_source,
+        duplicate_source,
+        no_audit,
+        duplicate_audit,
+        audit_not_last,
+        rank_regression,
+    ];
+    for (index, snapshot) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("portfolio-role-policy-{index}"));
+        let mut store = open_portfolio_store(fixture.path());
+        assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
 }

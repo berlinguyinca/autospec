@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::autonomous::waterfall::sha256_hex;
-use autospec_core::managed_project::{ManagedProjectBinding, ProductKey};
+use autospec_core::managed_project::{ManagedProjectBinding, ManagedProjectIdentity};
 use serde_json::Value;
 
 #[cfg(unix)]
@@ -95,7 +95,7 @@ pub(super) struct PersistedBinding {
 
 pub(super) fn read_persisted_binding(
     path: &Path,
-    product_key: &ProductKey,
+    identity: &ManagedProjectIdentity,
 ) -> Result<PersistedBinding, ManagedProjectError> {
     let value: Value = serde_json::from_str(&read_private_file(path)?).map_err(|error| {
         ManagedProjectError::new(format!("invalid managed project binding: {error}"))
@@ -104,7 +104,7 @@ pub(super) fn read_persisted_binding(
         serde_json::from_value(value.clone()).map_err(|error| {
             ManagedProjectError::new(format!("invalid managed project binding: {error}"))
         })?;
-    validate_binding_identity(&binding, product_key)?;
+    validate_binding_identity(&binding, identity)?;
     let high_watermark = value.get("journal_high_watermark").and_then(Value::as_u64);
     let digest = value.get("journal_digest").and_then(Value::as_str);
     let checkpoint = match (high_watermark, digest) {
@@ -208,16 +208,16 @@ pub(super) fn extend_journal_digest(prior: &str, line: &[u8]) -> String {
 
 fn validate_binding_identity(
     binding: &ManagedProjectBinding,
-    product_key: &ProductKey,
+    identity: &ManagedProjectIdentity,
 ) -> Result<(), ManagedProjectError> {
     if binding.schema_version != ManagedProjectBinding::SCHEMA_VERSION {
         return Err(ManagedProjectError::new(
             "unsupported managed project binding schema",
         ));
     }
-    if &binding.product_key != product_key {
+    if binding.identity() != identity {
         return Err(ManagedProjectError::new(
-            "managed project binding product key does not match its state directory",
+            "managed project binding identity does not match its state directory",
         ));
     }
     Ok(())
