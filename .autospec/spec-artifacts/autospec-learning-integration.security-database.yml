@@ -1,0 +1,125 @@
+schema: autospec.security_database.v1
+spec_path: docs/specs/2026-09-01-observational-memory-native-sessions-readiness-integration-delta-design.md
+feature_profile: security_database
+required_sections: [Existing authorities to preserve, Shared contracts, Native session delta, Pi observational-memory bridge, Durable structured memory delta, Readiness shadow foundation, Controlled repair and preservation boundary, Outcome and prediction boundary, Security and trust, Error and degraded handling, Testing, Acceptance criteria]
+evidence:
+  - {id: E1, status: verified, source: current AutoSpec AGENTS.md and ADR AS-AEO-001 D1 through D10}
+  - {id: E2, status: verified, source: tracked AutoSpec specs for next generation control multi-model RealWork change graph resources Projects quality and memory}
+  - {id: E3, status: verified, source: existing issues 3172 3315 through 3328 and related merged PRs}
+  - {id: E4, status: verified, source: four operator-supplied source specifications preserved in autospec-inferweave main}
+facts:
+  - {id: F1, evidence: E1, summary: one shared sqlx database and one append-only outcome ledger are binding}
+  - {id: F2, evidence: E1, summary: binding role policy separation of duties and bounded autonomy remain authoritative}
+  - {id: F3, evidence: E2, summary: context routing benchmarks projects DAG and cleanup already have owners}
+  - {id: F4, evidence: E3, summary: provider-neutral executor and Pi runtime portfolios already exist}
+assumptions:
+  - {id: A1, status: blocking, evidence: E4, summary: pi-observational-memory license and pinned version compatibility require verification}
+priority_order: [authority_integrity, secret_and_repository_confidentiality, at_most_once_session_state, preservation_of_canonical_intent, reviewer_independence, bounded_degraded_operation]
+threats:
+  - {id: TH1, description: cross-repository branch or work-item memory disclosure}
+  - {id: TH2, description: untrusted prompt repository issue output or memory alters control policy}
+  - {id: TH3, description: duplicate stale or orphan native sessions and durable mutations}
+  - {id: TH4, description: secret or sensitive repository content persists or reaches remote providers}
+  - {id: TH5, description: repair changes canonical requirements architecture constraints or scope}
+  - {id: TH6, description: stale uncalibrated manipulated or poisoned scores memories and outcomes control routing}
+  - {id: TH7, description: observer provider store retrieval repair or context work exhausts resources or blocks foreground execution}
+  - {id: TH8, description: same execution or vendor self-approves through memory quality or fallback}
+blocking_prerequisites:
+  - id: P1
+    status: blocking
+    evidence: E4
+    description: verify pi-observational-memory license pinned release and Pi compatibility
+    gates: [pi-observation-bridge]
+controls:
+  - {id: C1, threat_id: TH1, threat: cross-scope memory access, failure_consequence: unauthorized_disclosure, owner: platform, authority: authoritative, verification: [N1]}
+  - {id: C2, threat_id: TH2, threat: untrusted data changes policy, failure_consequence: unauthorized_disclosure, owner: platform, authority: authoritative, verification: [N2]}
+  - {id: C3, threat_id: TH3, threat: duplicate or stale session mutation, failure_consequence: data_loss, owner: database, authority: authoritative, verification: [N3]}
+  - {id: C4, threat_id: TH4, threat: secret or repository disclosure, failure_consequence: unauthorized_disclosure, owner: platform, authority: authoritative, verification: [N4]}
+  - {id: C5, threat_id: TH5, threat: requirement drift, failure_consequence: data_loss, owner: platform, authority: authoritative, verification: [N5]}
+  - {id: C6, threat_id: TH6, threat: stale or poisoned evidence, failure_consequence: data_loss, owner: platform, authority: authoritative, verification: [N6]}
+  - {id: C7, threat_id: TH7, threat: unbounded background work, failure_consequence: availability, owner: platform, authority: authoritative, verification: [N7]}
+  - {id: C8, threat_id: TH8, threat: separation of duties bypass, failure_consequence: unauthorized_disclosure, owner: platform, authority: authoritative, verification: [N8]}
+negative_tests:
+  - {id: N1, case: repository branch issue worktree and role scope prevent unauthorized memory and report retrieval}
+  - {id: N2, case: prompt repository issue tool output and memory injection remains untrusted data and cannot change authority}
+  - {id: N3, case: crash retry concurrent attach stale epoch and duplicate ingestion yield one fenced session and revision}
+  - {id: N4, case: secrets credentials raw sensitive files and unauthorized source content are absent from stores logs context and remote providers}
+  - {id: N5, case: repaired artifact with added removed changed or weakened requirement constraint architecture or scope is rejected}
+  - {id: N6, case: stale contradicted preservation-failed uncalibrated or low-evidence memory and score cannot enforce or route}
+  - {id: N7, case: candidate queues retrieval context scoring provider and repair budgets reject or degrade on excess}
+  - {id: N8, case: same execution model or vendor cannot satisfy independent reviewer approver or quality authority where forbidden}
+residual_risks:
+  - {id: R1, status: accepted, summary: source-controlled Markdown and relational memory require reconciliation during migration}
+  - {id: R2, status: accepted, summary: semantic scoring and memory classification remain probabilistic and shadow-first}
+  - {id: R3, status: accepted, summary: provider degradation may temporarily reduce observation and semantic quality evidence}
+atomic_groups:
+  - {id: G1, members: [native-session-schema, session-fencing, reconciliation-tests]}
+  - {id: G2, members: [memory-schema, provenance-revisions, memory-scope-security-tests]}
+  - {id: G3, members: [quality-report-schema, preservation-result, quality-shadow-tests]}
+issues:
+  - key: contract-reconciliation
+    produces: [identity-state-event-mapping, shared-migration-plan, ledger-correlation-contract]
+    consumes: [existing runtime database ledger evidence role project and routing contracts]
+    evidence: [E1, E2, E3, E4]
+    prerequisites: []
+    controls: [C1, C2, C3, C5, C8]
+    negative_tests: [N1, N2, N3, N5, N8]
+    covers: [Existing authorities to preserve, Shared contracts, Outcome and prediction boundary]
+    depends_on: []
+    labels: [auto-implement]
+    atomic_groups: []
+  - key: native-session-extension
+    produces: [native-session-schema, session-fencing, reconciliation-tests]
+    consumes: [identity state event mapping, CodingAgentRuntime, managed work identity]
+    evidence: [E1, E2, E3]
+    prerequisites: []
+    controls: [C1, C3, C4, C7, C8]
+    negative_tests: [N1, N3, N4, N7, N8]
+    covers: [Native session delta, Error and degraded handling]
+    depends_on: [contract-reconciliation]
+    labels: [auto-implement]
+    atomic_groups: [G1]
+  - key: pi-observation-bridge
+    produces: [pinned-observer-adapter, observer-health-degraded-mode, candidate-ingestion-redaction]
+    consumes: [native session extension, existing Markdown memory, provider routing]
+    evidence: [E2, E3, E4]
+    prerequisites: [P1]
+    controls: [C1, C2, C4, C7]
+    negative_tests: [N1, N2, N4, N7]
+    covers: [Pi observational-memory bridge, Error and degraded handling]
+    depends_on: [native-session-extension]
+    labels: [autospec:blocked-prerequisite, autospec:needs-human]
+    atomic_groups: []
+  - key: durable-memory-core
+    produces: [memory-schema, provenance-revisions, memory-scope-security-tests, failed-approach-retrieval, challenge-staleness-supersession]
+    consumes: [shared database, Markdown memory, native session lineage, evidence contracts]
+    evidence: [E1, E2, E4]
+    prerequisites: []
+    controls: [C1, C2, C3, C4, C6, C7]
+    negative_tests: [N1, N2, N3, N4, N6, N7]
+    covers: [Durable structured memory delta, Security and trust, Error and degraded handling]
+    depends_on: [contract-reconciliation, native-session-extension]
+    labels: [auto-implement]
+    atomic_groups: [G2]
+  - key: readiness-shadow-foundation
+    produces: [quality-report-schema, preservation-result, quality-shadow-tests, provider-neutral-quality-coordinator, deterministic-freshness-dependency-validators]
+    consumes: [context compiler, canonical artifacts, shared database and outcome ledger]
+    evidence: [E1, E2, E4]
+    prerequisites: []
+    controls: [C2, C4, C5, C6, C7, C8]
+    negative_tests: [N2, N4, N5, N6, N7, N8]
+    covers: [Readiness shadow foundation, Controlled repair and preservation boundary, Outcome and prediction boundary]
+    depends_on: [contract-reconciliation]
+    labels: [auto-implement]
+    atomic_groups: [G3]
+  - key: integration-benchmark-gate
+    produces: [cross-session-recovery-tests, compaction-transfer-benchmarks, stale-conflict-security-fixtures, quality-outcome-calibration-report]
+    consumes: [native session extension, durable memory core, readiness shadow foundation, existing RealWork benchmark]
+    evidence: [E1, E2, E3, E4]
+    prerequisites: []
+    controls: [C1, C2, C3, C4, C5, C6, C7, C8]
+    negative_tests: [N1, N2, N3, N4, N5, N6, N7, N8]
+    covers: [Testing, Acceptance criteria]
+    depends_on: [native-session-extension, durable-memory-core, readiness-shadow-foundation]
+    labels: [auto-implement]
+    atomic_groups: []
