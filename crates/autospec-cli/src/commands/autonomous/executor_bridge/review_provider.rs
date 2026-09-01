@@ -110,6 +110,8 @@ fn known_provider(kind: HarnessKind) -> Option<&'static str> {
         // backed by either provider, so treating it as independent would invent
         // evidence the runtime does not possess.
         HarnessKind::OpenCode => None,
+        // Pi's provider is configurable; we cannot assume one.
+        HarnessKind::Pi => None,
     }
 }
 

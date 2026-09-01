@@ -9,6 +9,7 @@ pub enum HarnessKind {
     Claude,
     Codex,
     OpenCode,
+    Pi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub fn build_review_argv(kind: HarnessKind, since: &str, gaps_file: &str) -> Vec
         HarnessKind::Claude => "claude",
         HarnessKind::Codex => "codex",
         HarnessKind::OpenCode => "opencode",
+        HarnessKind::Pi => "pi",
     };
 
     match kind {
@@ -34,7 +36,7 @@ pub fn build_review_argv(kind: HarnessKind, since: &str, gaps_file: &str) -> Vec
             "--skip-git-repo-check".to_string(),
             command,
         ],
-        HarnessKind::Claude | HarnessKind::OpenCode => {
+        HarnessKind::Claude | HarnessKind::OpenCode | HarnessKind::Pi => {
             vec![executable.to_string(), command]
         }
     }
