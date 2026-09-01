@@ -171,7 +171,10 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
     assert!(fs::read_dir(&artifact_root)
         .expect("proxy failure archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .any(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+        }));
 }
 
 #[cfg(unix)]
@@ -213,7 +216,10 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
     assert!(fs::read_dir(&artifact_root)
         .expect("proxy success archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .any(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+        }));
 }
 
 #[cfg(unix)]
