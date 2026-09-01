@@ -1,11 +1,283 @@
 use super::{ManagedProjectError, ManagedProjectPolicy, RemoteProject, PROJECT_FETCH_LIMIT};
-use autospec_core::managed_project::ManagedProjectIdentity;
+use autospec_core::managed_project::{ItemKey, ManagedProjectIdentity};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::ops::Range;
 
 const MARKER_BEGIN: &str = "<!-- autospec-managed-project:begin -->";
 const MARKER_END: &str = "<!-- autospec-managed-project:end -->";
+const MAX_CAPSULE_BYTES: usize = 32 * 1024;
+const MAX_CAPSULE_ITEMS: usize = 200;
+const MAX_ITEM_EDGES: usize = 200;
+const MAX_ITEM_BYTES: usize = 2 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortfolioRecoveryCapsule {
+    schema: String,
+    portfolio_id: String,
+    plan_digest: String,
+    create_nonce: String,
+    items: Vec<PortfolioRecoveryItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortfolioRecoveryItem {
+    item_key: String,
+    repository: String,
+    role: String,
+    completion_policy: String,
+    local_parents: Vec<String>,
+    dependencies: Vec<String>,
+}
+
+impl PortfolioRecoveryCapsule {
+    pub fn from_value(value: &Value) -> Result<Self, ManagedProjectError> {
+        let bytes = serde_json::to_vec(value).map_err(json_error)?;
+        if bytes.len() > MAX_CAPSULE_BYTES {
+            return Err(ManagedProjectError::new(
+                "portfolio recovery capsule exceeds the serialized byte limit",
+            ));
+        }
+        Self::parse_value(value)
+    }
+
+    fn from_json(bytes: &[u8]) -> Result<Self, ManagedProjectError> {
+        if bytes.len() > MAX_CAPSULE_BYTES {
+            return Err(ManagedProjectError::new(
+                "portfolio recovery capsule exceeds the serialized byte limit",
+            ));
+        }
+        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+            ManagedProjectError::new(format!("invalid portfolio recovery capsule: {error}"))
+        })?;
+        Self::parse_value(&value)
+    }
+
+    pub fn to_value(&self) -> Result<Value, ManagedProjectError> {
+        Ok(serde_json::json!({
+            "schema": self.schema,
+            "portfolio_id": self.portfolio_id,
+            "plan_digest": self.plan_digest,
+            "create_nonce": self.create_nonce,
+            "items": self.items.iter().map(|item| serde_json::json!({
+                "item_key": item.item_key,
+                "repository": item.repository,
+                "role": item.role,
+                "completion_policy": item.completion_policy,
+                "local_parents": item.local_parents,
+                "dependencies": item.dependencies,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn to_json(&self) -> Result<String, ManagedProjectError> {
+        let json = serde_json::to_string(&self.to_value()?).map_err(json_error)?;
+        if json.len() > MAX_CAPSULE_BYTES {
+            return Err(ManagedProjectError::new(
+                "portfolio recovery capsule exceeds the serialized byte limit",
+            ));
+        }
+        Ok(json)
+    }
+
+    pub fn portfolio_id(&self) -> &str {
+        &self.portfolio_id
+    }
+
+    pub fn plan_digest(&self) -> &str {
+        &self.plan_digest
+    }
+
+    pub fn create_nonce(&self) -> &str {
+        &self.create_nonce
+    }
+
+    fn parse_value(value: &Value) -> Result<Self, ManagedProjectError> {
+        let object = exact_object(
+            value,
+            &[
+                "schema",
+                "portfolio_id",
+                "plan_digest",
+                "create_nonce",
+                "items",
+            ],
+            "portfolio recovery capsule",
+        )?;
+        let items = object
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ManagedProjectError::new("portfolio recovery capsule items must be an array")
+            })?
+            .iter()
+            .map(|item| {
+                let item = exact_object(
+                    item,
+                    &[
+                        "item_key",
+                        "repository",
+                        "role",
+                        "completion_policy",
+                        "local_parents",
+                        "dependencies",
+                    ],
+                    "portfolio recovery capsule item",
+                )?;
+                Ok(PortfolioRecoveryItem {
+                    item_key: required_string(item, "item_key", "portfolio recovery capsule item")?,
+                    repository: required_string(
+                        item,
+                        "repository",
+                        "portfolio recovery capsule item",
+                    )?,
+                    role: required_string(item, "role", "portfolio recovery capsule item")?,
+                    completion_policy: required_string(
+                        item,
+                        "completion_policy",
+                        "portfolio recovery capsule item",
+                    )?,
+                    local_parents: required_string_array(item, "local_parents")?,
+                    dependencies: required_string_array(item, "dependencies")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ManagedProjectError>>()?;
+        let capsule = Self {
+            schema: required_string(object, "schema", "portfolio recovery capsule")?,
+            portfolio_id: required_string(object, "portfolio_id", "portfolio recovery capsule")?,
+            plan_digest: required_string(object, "plan_digest", "portfolio recovery capsule")?,
+            create_nonce: required_string(object, "create_nonce", "portfolio recovery capsule")?,
+            items,
+        };
+        capsule.validate()?;
+        Ok(capsule)
+    }
+
+    fn validate(&self) -> Result<(), ManagedProjectError> {
+        if self.schema != "autospec.portfolio-recovery.v1" {
+            return Err(ManagedProjectError::new(
+                "unsupported portfolio recovery capsule schema",
+            ));
+        }
+        require_lower_hex(&self.portfolio_id, 64, "portfolio id")?;
+        require_lower_hex(&self.plan_digest, 64, "plan digest")?;
+        require_lower_hex(&self.create_nonce, 32, "create nonce")?;
+        if self.items.is_empty() || self.items.len() > MAX_CAPSULE_ITEMS {
+            return Err(ManagedProjectError::new(
+                "portfolio recovery capsule item count is outside the strict bound",
+            ));
+        }
+        for item in &self.items {
+            if serde_json::to_vec(&item.to_value())
+                .map_err(json_error)?
+                .len()
+                > MAX_ITEM_BYTES
+            {
+                return Err(ManagedProjectError::new(
+                    "portfolio recovery capsule item exceeds the serialized byte limit",
+                ));
+            }
+            ItemKey::new(&item.item_key).map_err(ManagedProjectError::new)?;
+            validate_repository(&item.repository)?;
+            let expected_policy = match item.role.as_str() {
+                "source-tracker" | "repo-tracker" => "closed-tracker",
+                "prerequisite" => "external-prerequisite",
+                "implementation" => "merged-pr",
+                "audit" => "audit-receipt",
+                _ => {
+                    return Err(ManagedProjectError::new(
+                        "portfolio recovery capsule has an unsupported item role",
+                    ))
+                }
+            };
+            if item.completion_policy != expected_policy {
+                return Err(ManagedProjectError::new(
+                    "portfolio recovery capsule item role and completion policy conflict",
+                ));
+            }
+            for edges in [&item.local_parents, &item.dependencies] {
+                if edges.len() > MAX_ITEM_EDGES {
+                    return Err(ManagedProjectError::new(
+                        "portfolio recovery capsule item edge count exceeds the strict bound",
+                    ));
+                }
+                for edge in edges {
+                    ItemKey::new(edge).map_err(ManagedProjectError::new)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PortfolioRecoveryItem {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "item_key": self.item_key,
+            "repository": self.repository,
+            "role": self.role,
+            "completion_policy": self.completion_policy,
+            "local_parents": self.local_parents,
+            "dependencies": self.dependencies,
+        })
+    }
+}
+
+fn exact_object<'a>(
+    value: &'a Value,
+    fields: &[&str],
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, ManagedProjectError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| ManagedProjectError::new(format!("{context} must be an object")))?;
+    if object.len() != fields.len() || object.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(ManagedProjectError::new(format!(
+            "{context} contains missing or unknown fields"
+        )));
+    }
+    Ok(object)
+}
+
+fn required_string(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<String, ManagedProjectError> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| ManagedProjectError::new(format!("{context} has invalid {field}")))
+}
+
+fn required_string_array(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Vec<String>, ManagedProjectError> {
+    object
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ManagedProjectError::new(format!(
+                "portfolio recovery capsule item has invalid {field}"
+            ))
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    ManagedProjectError::new(format!(
+                        "portfolio recovery capsule item has invalid {field}"
+                    ))
+                })
+        })
+        .collect()
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum MarkerDisposition {
@@ -24,7 +296,7 @@ pub(super) fn classify_marker(
     readme: &str,
     identity: &ManagedProjectIdentity,
     owner: &str,
-    recovery_capsule: Option<&Value>,
+    recovery_capsule: Option<&PortfolioRecoveryCapsule>,
 ) -> Result<MarkerDisposition, ManagedProjectError> {
     let Some(marker) = parse_marker(readme)? else {
         return Ok(MarkerDisposition::Missing);
@@ -51,7 +323,9 @@ pub(super) fn classify_marker(
                     "spec portfolio marker ID conflicts with its source identity",
                 ));
             }
-            if portfolio_matches && recovery_capsule != Some(actual_capsule) {
+            if portfolio_matches
+                && recovery_capsule.is_some_and(|expected| expected != actual_capsule)
+            {
                 return Err(ManagedProjectError::new(
                     "spec portfolio marker recovery capsule conflicts with local state",
                 ));
@@ -78,7 +352,7 @@ pub(super) fn upsert_marker(
     readme: &str,
     identity: &ManagedProjectIdentity,
     owner: &str,
-    recovery_capsule: Option<&Value>,
+    recovery_capsule: Option<&PortfolioRecoveryCapsule>,
 ) -> Result<String, ManagedProjectError> {
     let marker = render_marker(identity, owner, recovery_capsule)?;
     let Some(range) = marker_range(readme)? else {
@@ -107,11 +381,25 @@ pub(super) fn parse_project_candidates(
     output: &str,
 ) -> Result<Vec<ProjectCandidate>, ManagedProjectError> {
     let value: Value = serde_json::from_str(output).map_err(json_error)?;
+    if value.is_array() {
+        return parse_graphql_project_pages(&value);
+    }
+    parse_legacy_project_candidates(&value)
+}
+
+fn parse_legacy_project_candidates(
+    value: &Value,
+) -> Result<Vec<ProjectCandidate>, ManagedProjectError> {
     let projects = value
         .get("projects")
         .and_then(Value::as_array)
         .ok_or_else(|| ManagedProjectError::new("GitHub Project list has no projects array"))?;
-    let total_count = value.get("totalCount").and_then(Value::as_u64);
+    let total_count = match value.get("totalCount") {
+        None => None,
+        Some(value) => Some(value.as_u64().ok_or_else(|| {
+            ManagedProjectError::new("GitHub Project list totalCount must be an unsigned integer")
+        })?),
+    };
     if total_count.is_some_and(|count| count != projects.len() as u64)
         || (total_count.is_none() && projects.len() >= PROJECT_FETCH_LIMIT)
     {
@@ -119,6 +407,65 @@ pub(super) fn parse_project_candidates(
             "GitHub Project discovery may be truncated at the transport limit",
         ));
     }
+    collect_project_candidates(projects, &mut HashSet::new())
+}
+
+fn parse_graphql_project_pages(
+    value: &Value,
+) -> Result<Vec<ProjectCandidate>, ManagedProjectError> {
+    let pages = value.as_array().expect("checked GraphQL pages array");
+    if pages.is_empty() {
+        return Err(ManagedProjectError::new(
+            "GitHub Project pagination returned no pages",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for (index, page) in pages.iter().enumerate() {
+        let connection = page
+            .pointer("/data/repositoryOwner/projectsV2")
+            .ok_or_else(|| {
+                ManagedProjectError::new("GitHub Project page has no projectsV2 connection")
+            })?;
+        let nodes = connection
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ManagedProjectError::new("GitHub Project page has no nodes array"))?;
+        candidates.extend(collect_project_candidates(nodes, &mut seen)?);
+        let page_info = connection
+            .get("pageInfo")
+            .and_then(Value::as_object)
+            .ok_or_else(|| ManagedProjectError::new("GitHub Project page has no pageInfo"))?;
+        let has_next = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                ManagedProjectError::new("GitHub Project page has invalid hasNextPage")
+            })?;
+        let is_last = index + 1 == pages.len();
+        if has_next == is_last {
+            return Err(ManagedProjectError::new(
+                "GitHub Project pagination is truncated or contains an extra page",
+            ));
+        }
+        if has_next
+            && !page_info
+                .get("endCursor")
+                .and_then(Value::as_str)
+                .is_some_and(|cursor| !cursor.is_empty())
+        {
+            return Err(ManagedProjectError::new(
+                "GitHub Project pagination has no continuation cursor",
+            ));
+        }
+    }
+    Ok(candidates)
+}
+
+fn collect_project_candidates(
+    projects: &[Value],
+    seen: &mut HashSet<u64>,
+) -> Result<Vec<ProjectCandidate>, ManagedProjectError> {
     projects
         .iter()
         .map(|project| {
@@ -127,6 +474,11 @@ pub(super) fn parse_project_candidates(
                 .and_then(Value::as_u64)
                 .filter(|number| *number > 0)
                 .ok_or_else(|| ManagedProjectError::new("GitHub Project has invalid number"))?;
+            if !seen.insert(number) {
+                return Err(ManagedProjectError::new(
+                    "GitHub Project pagination contains a duplicate project number",
+                ));
+            }
             let title = project
                 .get("title")
                 .and_then(Value::as_str)
@@ -262,7 +614,7 @@ enum MarkerIdentity {
     SpecPortfolio {
         portfolio_id: String,
         source: String,
-        recovery_capsule: Value,
+        recovery_capsule: PortfolioRecoveryCapsule,
     },
 }
 
@@ -304,11 +656,8 @@ fn parse_marker(readme: &str) -> Result<Option<Marker>, ManagedProjectError> {
             let owner = required_marker_value(owner, "owner: ", "owner")?;
             let recovery_capsule =
                 required_marker_value(recovery_capsule, "recovery-capsule: ", "recovery capsule")?;
-            let recovery_capsule = serde_json::from_str(recovery_capsule).map_err(|error| {
-                ManagedProjectError::new(format!(
-                    "GitHub Project managed marker has invalid recovery capsule: {error}"
-                ))
-            })?;
+            let recovery_capsule =
+                PortfolioRecoveryCapsule::from_json(recovery_capsule.as_bytes())?;
             Ok(Some(Marker {
                 identity: MarkerIdentity::SpecPortfolio {
                     portfolio_id: portfolio_id.to_owned(),
@@ -354,7 +703,7 @@ fn required_marker_value<'a>(
 fn render_marker(
     identity: &ManagedProjectIdentity,
     owner: &str,
-    recovery_capsule: Option<&Value>,
+    recovery_capsule: Option<&PortfolioRecoveryCapsule>,
 ) -> Result<String, ManagedProjectError> {
     if owner.trim().is_empty() {
         return Err(ManagedProjectError::new(
@@ -370,14 +719,12 @@ fn render_marker(
             let capsule = recovery_capsule.ok_or_else(|| {
                 ManagedProjectError::new("spec portfolio marker requires a frozen recovery capsule")
             })?;
-            if capsule.get("portfolio_id").and_then(Value::as_str)
-                != Some(identity.portfolio_id().as_str())
-            {
+            if capsule.portfolio_id() != identity.portfolio_id().as_str() {
                 return Err(ManagedProjectError::new(
                     "spec portfolio recovery capsule identity does not match marker identity",
                 ));
             }
-            let capsule = serde_json::to_string(capsule).map_err(json_error)?;
+            let capsule = capsule.to_json()?;
             format!(
                 "schema: 2\nkind: spec_portfolio\nportfolio-id: {}\nsource: {}\nowner: {owner}\nrecovery-capsule: {capsule}",
                 identity.portfolio_id(),
@@ -386,6 +733,82 @@ fn render_marker(
         }
     };
     Ok(format!("{MARKER_BEGIN}\n{payload}\n{MARKER_END}"))
+}
+
+pub(super) fn recoverable_portfolio_capsule(
+    readme: &str,
+    identity: &ManagedProjectIdentity,
+    owner: &str,
+) -> Result<Option<PortfolioRecoveryCapsule>, ManagedProjectError> {
+    let ManagedProjectIdentity::SpecPortfolio(expected) = identity else {
+        return Ok(None);
+    };
+    let Some(marker) = parse_marker(readme)? else {
+        return Ok(None);
+    };
+    let MarkerIdentity::SpecPortfolio {
+        portfolio_id,
+        source,
+        recovery_capsule,
+    } = marker.identity
+    else {
+        return Ok(None);
+    };
+    if portfolio_id != expected.portfolio_id().as_str() || source != expected.source().to_string() {
+        return Ok(None);
+    }
+    if marker.owner != owner {
+        return Err(ManagedProjectError::new(
+            "spec portfolio marker owner conflicts with approved owner",
+        ));
+    }
+    if recovery_capsule.portfolio_id() != expected.portfolio_id().as_str() {
+        return Err(ManagedProjectError::new(
+            "spec portfolio marker capsule identity conflicts with its marker",
+        ));
+    }
+    Ok(Some(recovery_capsule))
+}
+
+fn require_lower_hex(value: &str, length: usize, field: &str) -> Result<(), ManagedProjectError> {
+    if value.len() != length
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(ManagedProjectError::new(format!(
+            "portfolio recovery capsule {field} must be lowercase hexadecimal"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_repository(repository: &str) -> Result<(), ManagedProjectError> {
+    let parts = repository.split('/').collect::<Vec<_>>();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || part.len() > 100
+                || !part.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                })
+                || !part
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                || !part
+                    .as_bytes()
+                    .last()
+                    .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+    {
+        return Err(ManagedProjectError::new(
+            "portfolio recovery capsule repository is not canonical",
+        ));
+    }
+    Ok(())
 }
 
 fn json_error(error: serde_json::Error) -> ManagedProjectError {
@@ -414,7 +837,7 @@ mod tests {
         ))
     }
 
-    fn capsule() -> Value {
+    fn capsule_value() -> Value {
         serde_json::json!({
             "schema": "autospec.portfolio-recovery.v1",
             "portfolio_id": match portfolio() {
@@ -423,8 +846,19 @@ mod tests {
             },
             "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "create_nonce": "00112233445566778899aabbccddeeff",
-            "items": [{"item_key": "source-tracker"}]
+            "items": [{
+                "item_key": "source-tracker",
+                "repository": "berlinguyinca/autospec",
+                "role": "source-tracker",
+                "completion_policy": "closed-tracker",
+                "local_parents": [],
+                "dependencies": []
+            }]
         })
+    }
+
+    fn capsule() -> PortfolioRecoveryCapsule {
+        PortfolioRecoveryCapsule::from_value(&capsule_value()).unwrap()
     }
 
     #[test]
@@ -464,10 +898,11 @@ mod tests {
             classify_marker(&marker, &product(), "berlinguyinca", None).unwrap(),
             MarkerDisposition::Other
         );
-        let mut wrong_capsule = capsule.clone();
+        let mut wrong_capsule = capsule_value();
         wrong_capsule["plan_digest"] = Value::String(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
+        let wrong_capsule = PortfolioRecoveryCapsule::from_value(&wrong_capsule).unwrap();
         assert!(
             classify_marker(&marker, &portfolio(), "berlinguyinca", Some(&wrong_capsule))
                 .unwrap_err()
@@ -505,5 +940,52 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("truncated"));
+    }
+
+    #[test]
+    fn project_candidate_total_count_rejects_every_present_non_u64_shape() {
+        for total_count in ["\"2\"", "-1", "{\"value\":2}", "18446744073709551616"] {
+            let output = format!("{{\"projects\":[],\"totalCount\":{total_count}}}");
+            assert!(parse_project_candidates(&output)
+                .unwrap_err()
+                .to_string()
+                .contains("totalCount"));
+        }
+    }
+
+    #[test]
+    fn project_candidate_graphql_pages_are_exhaustive_and_duplicate_safe() {
+        let pages = (0..6)
+            .map(|page| {
+                let start = page * 100 + 1;
+                let nodes = (start..start + 100)
+                    .map(|number| serde_json::json!({"number": number, "title": format!("P{number}")}))
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "data": {"repositoryOwner": {"projectsV2": {
+                        "nodes": nodes,
+                        "pageInfo": {
+                            "hasNextPage": page < 5,
+                            "endCursor": if page < 5 { Some(format!("cursor-{page}")) } else { None }
+                        }
+                    }}}
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_project_candidates(&serde_json::to_string(&pages).unwrap())
+                .unwrap()
+                .len(),
+            600
+        );
+
+        let duplicate = serde_json::json!([
+            {"data":{"repositoryOwner":{"projectsV2":{"nodes":[{"number":7,"title":"one"}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor"}}}}},
+            {"data":{"repositoryOwner":{"projectsV2":{"nodes":[{"number":7,"title":"two"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+        ]);
+        assert!(parse_project_candidates(&duplicate.to_string())
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
     }
 }
