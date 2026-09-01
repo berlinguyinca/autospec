@@ -168,6 +168,7 @@ impl GithubCommand {
                     "json".into(),
                     "--limit".into(),
                     "500".into(),
+                    "--closed".into(),
                 ],
                 None,
             ),

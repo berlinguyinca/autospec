@@ -219,7 +219,27 @@ fn policy(owner: &str) -> ManagedProjectPolicy {
 
 fn marker(owner: &str) -> String {
     format!(
+        "<!-- autospec-managed-project:begin -->\nschema: 2\nkind: product\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
+    )
+}
+
+fn legacy_product_marker(owner: &str) -> String {
+    format!(
         "<!-- autospec-managed-project:begin -->\nschema: 1\nproduct-key: autospec\nowner: {owner}\n<!-- autospec-managed-project:end -->"
+    )
+}
+
+fn portfolio_marker(owner: &str) -> String {
+    let identity = match portfolio_store_identity() {
+        ManagedProjectIdentity::SpecPortfolio(identity) => identity,
+        ManagedProjectIdentity::Product { .. } => unreachable!(),
+    };
+    let snapshot = portfolio_store_snapshot();
+    let capsule = serde_json::to_string(&snapshot["recovery_capsule"]).unwrap();
+    format!(
+        "<!-- autospec-managed-project:begin -->\nschema: 2\nkind: spec_portfolio\nportfolio-id: {}\nsource: {}\nowner: {owner}\nrecovery-capsule: {capsule}\n<!-- autospec-managed-project:end -->",
+        identity.portfolio_id(),
+        identity.source(),
     )
 }
 
@@ -2301,12 +2321,257 @@ fn item_list(urls: &[&str]) -> String {
 #[test]
 fn github_marker_parser_requires_one_complete_exact_marker() {
     assert!(verify_managed_marker(&marker("berlinguyinca"), &policy("berlinguyinca")).unwrap());
+    assert!(verify_managed_marker(
+        &legacy_product_marker("berlinguyinca"),
+        &policy("berlinguyinca")
+    )
+    .unwrap());
     assert!(!verify_managed_marker("# Human project", &policy("berlinguyinca")).unwrap());
     assert!(verify_managed_marker(
         &format!("{}\n{}", marker("berlinguyinca"), marker("berlinguyinca")),
         &policy("berlinguyinca")
     )
     .is_err());
+}
+
+#[test]
+fn github_bound_spec_portfolio_rejects_product_kind_without_mutation() {
+    let fixture = Fixture::new("github-spec-portfolio-kind-mismatch");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store
+        .record_project(
+            "berlinguyinca",
+            "PVT_7",
+            7,
+            "https://github.com/orgs/berlinguyinca/projects/7",
+            "Delivery",
+        )
+        .unwrap();
+    let mut github = ScriptedGithub::with([Ok(project(
+        7,
+        "berlinguyinca",
+        "Delivery",
+        &marker("berlinguyinca"),
+    ))]);
+
+    let error = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Delivery",
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("different managed marker"));
+    assert!(github
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::EditProjectMarker { .. })));
+}
+
+#[test]
+fn github_legacy_product_adoption_migrates_the_existing_marker_block() {
+    let fixture = Fixture::new("github-legacy-marker-migration");
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
+    let legacy = format!(
+        "# Human notes\n\n{}\n\nKeep this too.",
+        legacy_product_marker("berlinguyinca")
+    );
+    let migrated = format!(
+        "# Human notes\n\n{}\n\nKeep this too.",
+        marker("berlinguyinca")
+    );
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(7, "berlinguyinca", "Human title", &legacy)),
+        Ok(String::new()),
+        Ok(project(7, "berlinguyinca", "Human title", &migrated)),
+    ]);
+
+    let resolved = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap();
+
+    assert_eq!(resolved.number, 7);
+    let edited = github.calls.iter().find_map(|call| match call {
+        GithubCommand::EditProjectMarker { readme, .. } => Some(readme.as_str()),
+        _ => None,
+    });
+    assert_eq!(edited, Some(migrated.as_str()));
+}
+
+#[test]
+fn github_legacy_product_migration_requires_the_schema_two_marker_on_requery() {
+    let fixture = Fixture::new("github-legacy-marker-stale-requery");
+    let mut store = ManagedProjectStore::open_product(fixture.path(), &key("autospec")).unwrap();
+    let legacy = legacy_product_marker("berlinguyinca");
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(7, "berlinguyinca", "Human title", &legacy)),
+        Ok(String::new()),
+        Ok(project(7, "berlinguyinca", "Human title", &legacy)),
+    ]);
+
+    let error = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Autospec",
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("expected managed marker"));
+    assert!(store.snapshot().project_node_id.is_none());
+}
+
+#[test]
+fn github_spec_portfolio_adopts_exactly_one_marker_bearing_project() {
+    let fixture = Fixture::new("github-spec-portfolio-adopt");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let marker = portfolio_marker("berlinguyinca");
+    let mut github = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{"number": 7}]))),
+        Ok(project(7, "berlinguyinca", "Delivery", &marker)),
+    ]);
+
+    let resolved = resolve_or_create_project(
+        &mut store,
+        &mut github,
+        &policy("berlinguyinca"),
+        "Delivery",
+    )
+    .unwrap();
+
+    assert_eq!(resolved.number, 7);
+    assert!(github.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateProject { .. } | GithubCommand::EditProjectMarker { .. }
+    )));
+}
+
+#[test]
+fn github_spec_portfolio_create_unknown_waits_when_nonce_title_is_not_visible() {
+    let fixture = Fixture::new("github-spec-portfolio-create-unknown-zero");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let mut first = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Err(GithubFailure::Ambiguous("create response lost".to_owned())),
+    ]);
+    assert!(resolve_or_create_project(
+        &mut store,
+        &mut first,
+        &policy("berlinguyinca"),
+        "Delivery"
+    )
+    .is_err());
+
+    let mut retry = ScriptedGithub::with([Ok(project_list(serde_json::json!([])))]);
+    let error =
+        resolve_or_create_project(&mut store, &mut retry, &policy("berlinguyinca"), "Delivery")
+            .unwrap_err();
+    assert!(error.to_string().contains("create_unknown"));
+    assert!(retry
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProject { .. })));
+}
+
+#[test]
+fn github_spec_portfolio_create_unknown_recovers_one_nonce_title_candidate() {
+    let fixture = Fixture::new("github-spec-portfolio-create-unknown-one");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let exact_title = "Delivery [autospec:00112233445566778899aabbccddeeff]";
+    let mut first = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Err(GithubFailure::Ambiguous("create response lost".to_owned())),
+    ]);
+    assert!(resolve_or_create_project(
+        &mut store,
+        &mut first,
+        &policy("berlinguyinca"),
+        "Delivery"
+    )
+    .is_err());
+
+    let marked = format!("human\n\n{}", portfolio_marker("berlinguyinca"));
+    let unmarked = project(7, "berlinguyinca", exact_title, "human");
+    let mut retry = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([{
+            "number": 7,
+            "title": exact_title
+        }]))),
+        Ok(unmarked.clone()),
+        Ok(unmarked),
+        Ok(String::new()),
+        Ok(project(7, "berlinguyinca", exact_title, &marked)),
+    ]);
+
+    let resolved =
+        resolve_or_create_project(&mut store, &mut retry, &policy("berlinguyinca"), "Delivery")
+            .unwrap();
+
+    assert_eq!(resolved.number, 7);
+    assert!(store.snapshot().pending_projections.is_empty());
+    assert!(retry
+        .calls
+        .iter()
+        .all(|call| !matches!(call, GithubCommand::CreateProject { .. })));
+}
+
+#[test]
+fn github_spec_portfolio_create_unknown_refuses_two_nonce_title_candidates() {
+    let fixture = Fixture::new("github-spec-portfolio-create-unknown-two");
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    let exact_title = "Delivery [autospec:00112233445566778899aabbccddeeff]";
+    let mut first = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([]))),
+        Err(GithubFailure::Ambiguous("create response lost".to_owned())),
+    ]);
+    assert!(resolve_or_create_project(
+        &mut store,
+        &mut first,
+        &policy("berlinguyinca"),
+        "Delivery"
+    )
+    .is_err());
+
+    let mut retry = ScriptedGithub::with([
+        Ok(project_list(serde_json::json!([
+            {"number": 7, "title": exact_title},
+            {"number": 8, "title": exact_title}
+        ]))),
+        Ok(project(7, "berlinguyinca", exact_title, "human one")),
+        Ok(project(8, "berlinguyinca", exact_title, "human two")),
+    ]);
+
+    let error =
+        resolve_or_create_project(&mut store, &mut retry, &policy("berlinguyinca"), "Delivery")
+            .unwrap_err();
+
+    assert!(error.to_string().contains("create_unknown: 2"));
+    assert!(retry.calls.iter().all(|call| !matches!(
+        call,
+        GithubCommand::CreateProject { .. } | GithubCommand::EditProjectMarker { .. }
+    )));
 }
 
 #[test]
