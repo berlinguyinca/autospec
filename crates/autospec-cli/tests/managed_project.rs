@@ -86,6 +86,65 @@ fn add_item(issue_url: &str) -> String {
     format!("project:item-add:PV_123:{issue_url}")
 }
 
+fn portfolio_store_snapshot() -> serde_json::Value {
+    let source = SourceSpecIdentity::new(
+        "berlinguyinca/autospec",
+        "docs/specs/automatic-projects.md",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let portfolio_id = source.portfolio_id().to_string();
+    serde_json::json!({
+        "schema": "autospec.portfolio-snapshot.v1",
+        "portfolio_id": portfolio_id,
+        "owner": "berlinguyinca",
+        "project_number": 42,
+        "project_node_id": "PVT_42",
+        "project_url": "https://github.com/orgs/berlinguyinca/projects/42",
+        "source_spec": source,
+        "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "lease_generation": 3,
+        "state": "applying",
+        "projection_high_watermark": 0,
+        "recovery_capsule": {
+            "schema": "autospec.portfolio-recovery.v1",
+            "portfolio_id": portfolio_id,
+            "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "create_nonce": "00112233445566778899aabbccddeeff",
+            "items": [
+                {
+                    "item_key": "source-tracker",
+                    "repository": "berlinguyinca/autospec",
+                    "local_parents": [],
+                    "dependencies": []
+                },
+                {
+                    "item_key": "issue:portfolio-store",
+                    "repository": "berlinguyinca/autospec",
+                    "local_parents": ["source-tracker"],
+                    "dependencies": ["source-tracker"]
+                }
+            ]
+        }
+    })
+}
+
+fn portfolio_item_binding(item_key: &str, issue_number: u64) -> serde_json::Value {
+    let dependencies = if item_key == "source-tracker" {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["source-tracker"])
+    };
+    serde_json::json!({
+        "item_key": item_key,
+        "repository": "berlinguyinca/autospec",
+        "issue_url": format!("https://github.com/berlinguyinca/autospec/issues/{issue_number}"),
+        "role": if item_key == "source-tracker" { "tracker" } else { "implementation" },
+        "dependencies": dependencies,
+        "terminal_state": null
+    })
+}
+
 #[derive(Default)]
 struct ScriptedGithub {
     responses: VecDeque<Result<String, GithubFailure>>,
@@ -3304,4 +3363,155 @@ fn store_rejects_symlinked_product_state_directories() {
     std::os::unix::fs::symlink(&outside, projects.join("autospec")).unwrap();
 
     assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+}
+
+#[test]
+fn store_persists_ordered_portfolio_bindings_and_operation_states() {
+    let fixture = Fixture::new("portfolio-state");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    assert!(store
+        .record_portfolio_item_binding(portfolio_item_binding("issue:portfolio-store", 101))
+        .is_err());
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("issue:portfolio-store", 101))
+        .unwrap();
+    assert!(store
+        .transition_portfolio_operation(
+            "item:add:issue:portfolio-store",
+            "sent",
+            serde_json::json!({"field": "Status"}),
+        )
+        .is_err());
+    for state in ["intent", "sent", "acknowledged"] {
+        store
+            .transition_portfolio_operation(
+                "item:add:issue:portfolio-store",
+                state,
+                serde_json::json!({"field": "Status"}),
+            )
+            .unwrap();
+    }
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+
+    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    assert_eq!(reopened.portfolio_item_bindings().len(), 2);
+    assert_eq!(
+        reopened.portfolio_operation_states(),
+        vec![
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "intent".to_owned()
+            ),
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "sent".to_owned()
+            ),
+            (
+                "item:add:issue:portfolio-store".to_owned(),
+                "acknowledged".to_owned()
+            ),
+        ]
+    );
+    assert!(reopened.portfolio_snapshot().is_some());
+    assert!(
+        reopened.portfolio_snapshot().unwrap()["projection_high_watermark"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
+}
+
+#[test]
+fn store_rejects_four_incomplete_or_mismatched_recovery_capsules() {
+    let mut cases = Vec::new();
+
+    let mut missing_capsule = portfolio_store_snapshot();
+    missing_capsule
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery_capsule");
+    cases.push(missing_capsule);
+
+    let mut mismatched_identity = portfolio_store_snapshot();
+    mismatched_identity["recovery_capsule"]["portfolio_id"] =
+        serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    cases.push(mismatched_identity);
+
+    let mut duplicate_item = portfolio_store_snapshot();
+    duplicate_item["recovery_capsule"]["items"][1]["item_key"] =
+        serde_json::json!("source-tracker");
+    cases.push(duplicate_item);
+
+    let mut dangling_dependency = portfolio_store_snapshot();
+    dangling_dependency["recovery_capsule"]["items"][1]["dependencies"] =
+        serde_json::json!(["issue:missing"]);
+    cases.push(dangling_dependency);
+
+    for (index, snapshot) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(&format!("incomplete-capsule-{index}"));
+        let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+        assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
+}
+
+#[test]
+fn store_repairs_partial_portfolio_journal_tail_from_complete_capsule() {
+    let fixture = Fixture::new("portfolio-truncated-tail");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    drop(store);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.state_path("events.jsonl"))
+        .unwrap()
+        .write_all(br#"{"schema":1,"sequence":3,"kind":"portfolio-operation""#)
+        .unwrap();
+    fs::remove_file(fixture.state_path("portfolio.json")).unwrap();
+
+    let reopened = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    assert_eq!(reopened.portfolio_item_bindings().len(), 1);
+    assert!(fixture.state_path("portfolio.json").is_file());
+    assert!(fs::read_to_string(fixture.state_path("events.jsonl"))
+        .unwrap()
+        .ends_with('\n'));
+}
+
+#[test]
+#[cfg(unix)]
+fn store_keeps_portfolio_snapshot_private_and_rejects_unsafe_files() {
+    let fixture = Fixture::new("private-portfolio");
+    let mut store = ManagedProjectStore::open(fixture.path(), &key("autospec")).unwrap();
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+    let portfolio_path = fixture.state_path("portfolio.json");
+    assert_eq!(
+        fs::metadata(&portfolio_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::set_permissions(&portfolio_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(ManagedProjectStore::open(fixture.path(), &key("autospec")).is_err());
+
+    let symlink_fixture = Fixture::new("symlinked-portfolio");
+    let store = ManagedProjectStore::open(symlink_fixture.path(), &key("autospec")).unwrap();
+    drop(store);
+    let target = symlink_fixture.path().join("outside.json");
+    fs::write(&target, b"{}").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, symlink_fixture.state_path("portfolio.json")).unwrap();
+    assert!(ManagedProjectStore::open(symlink_fixture.path(), &key("autospec")).is_err());
 }
