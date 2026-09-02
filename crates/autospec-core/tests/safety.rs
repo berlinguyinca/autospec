@@ -249,3 +249,139 @@ fn unique_temp_repo(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&path).expect("create temp repo root");
     path
 }
+
+/// True when the deterministic issue-intent lint raises `credential-printing`
+/// for this title/body pair. Asserting on the rule ID (rather than the coarse
+/// verdict) keeps a collision with an untouched detector — `auth-backdoor` and
+/// `secret-exfiltration` also mention `token` — readable instead of mysterious.
+fn credential_printing_fires(title: &str, body: &str) -> bool {
+    autospec_core::claim::lint_issue_intent(title, body, "agent")
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "credential-printing")
+}
+
+#[test]
+fn credential_printing_ignores_lexical_scanner_vocabulary() {
+    // Issue #3111 verbatim, plus the measured live false positives from #3173:
+    // `print` inside "fingerprint", `write` inside "writer", `log` inside
+    // "logic". The old whole-document substring test fired on all four.
+    // Every case below returns SAFETY_BLOCK on the pre-fix implementation, so
+    // the test discriminates rather than merely restating current behaviour.
+    let cases = [
+        (
+            // The #3111 phrasing verbatim, in the multi-line issue shape that
+            // actually reproduced: the noun is on the scanner line and the
+            // verb is in a later section, paragraphs away.
+            "Extract shared contracts",
+            "## Goal\n\nExtract shared contracts: the scanner greps each child issue body for three token classes.\n\n## Implementation outline\n\n- Print the resulting contract table into the run report.",
+        ),
+        (
+            "Stabilise the artifact fingerprint",
+            "the fingerprint of each token is stable",
+        ),
+        (
+            "Stream records without buffering",
+            "the writer emits one token per line",
+        ),
+        ("Refresh on demand", "the retry logic refreshes the token"),
+    ];
+
+    for (title, body) in cases {
+        assert!(
+            !credential_printing_fires(title, body),
+            "lexical-scanner vocabulary must not raise credential-printing: {title}"
+        );
+    }
+}
+
+#[test]
+fn credential_printing_still_blocks_real_disclosure_requests() {
+    // Verb-then-noun arm, including the plural and participle inflections the
+    // narrowed word-boundary lists must keep covering.
+    let cases = [
+        ("Print the key", "Print the API key to stdout."),
+        (
+            "Dump deploy credentials",
+            "Dump credentials for the deploy user.",
+        ),
+        ("Debug the login", "Log the password so we can debug."),
+        (
+            "Emit the private key",
+            "Expose the private key in the output.",
+        ),
+        ("Audit trail", "The job printed every api-key it loaded."),
+        // Noun-then-destination arm.
+        ("Persist the token", "Write the token to the log."),
+        ("Trace auth", "The refreshed api key ends up in logs."),
+        ("Console trace", "Echo each credential to the console."),
+    ];
+
+    for (title, body) in cases {
+        assert!(
+            credential_printing_fires(title, body),
+            "real disclosure request must still block: {title}"
+        );
+    }
+}
+
+#[test]
+fn credential_printing_requires_the_verb_on_the_same_line_as_the_noun() {
+    // Both halves of the old unordered whole-document test are present, but on
+    // separate lines and in the wrong order — descriptive prose, not a request.
+    let body =
+        "Print the changelog into the release notes.\n\nRotate the deploy token every 90 days.";
+
+    assert!(
+        !credential_printing_fires("Release chores", body),
+        "a verb and a noun on different lines must not raise credential-printing"
+    );
+}
+
+#[test]
+fn credential_printing_keeps_every_corpus_fixture_verdict() {
+    // Regression guard for AC #5: the narrowing may only remove false
+    // positives, never silence a fixture that blocks today.
+    let corpus: [(&str, &str, bool); 6] = [
+        (
+            "Print repository credentials",
+            include_str!("../../../tests/fixtures/issue-safety/credential-printing.md"),
+            true,
+        ),
+        (
+            // Blocks under `secret-exfiltration`, never under this rule: the
+            // body names no credential noun.
+            "Dump secrets",
+            include_str!("../../../tests/fixtures/issue-safety/trusted-secret-dump.md"),
+            false,
+        ),
+        (
+            "Add auth backdoor",
+            include_str!("../../../tests/fixtures/issue-safety/auth-backdoor.md"),
+            false,
+        ),
+        (
+            "fix: prevent conductor idle loop",
+            include_str!("../../../tests/fixtures/issue-safety/ci-descriptive-benign.md"),
+            false,
+        ),
+        (
+            "Delete production data",
+            include_str!("../../../tests/fixtures/issue-safety/malicious-production-delete.md"),
+            false,
+        ),
+        (
+            "Safe docs change",
+            include_str!("../../../tests/fixtures/issue-safety/safe-docs-change.md"),
+            false,
+        ),
+    ];
+
+    for (title, body, expected) in corpus {
+        assert_eq!(
+            credential_printing_fires(title, body),
+            expected,
+            "corpus verdict changed for {title}"
+        );
+    }
+}

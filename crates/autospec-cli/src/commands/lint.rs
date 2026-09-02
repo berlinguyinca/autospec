@@ -1019,6 +1019,15 @@ fn is_builtin_issue_safety_pattern(pattern: &str) -> bool {
             | "(?i)drop .*prod(uction)? .*database"
             | "(?i)(dump|print|exfiltrate|send).*secret"
             | "(?i)(aws|github|stripe).*token"
+            // credential-printing. This allowlist is not a second evaluator:
+            // `autospec_core::claim::contains_credential_printing` is the only
+            // one. These strings declare what it implements — word boundaries,
+            // line-scoped `[^\n]` instead of `.`, and an explicit verb→noun /
+            // noun→destination order (issue #3113).
+            | "(?i)\\b(print|prints|printed|printing|dump|dumps|dumped|dumping|log|logs|logged|logging|write|writes|show|shows|showed|showing|shown|expose|exposes|exposed|send|sends|sending)\\b[^\\n]*\\b(credential|credentials|password|passwords|api[ -]?keys?|private[ -]?keys?|token|tokens)\\b"
+            | "(?i)\\b(credential|credentials|password|passwords|api[ -]?keys?|private[ -]?keys?|token|tokens)\\b[^\\n]*\\b(to (the )?(logs?|console|stdout)|in logs?)\\b"
+            // Historical unbounded spellings, kept accepted so an existing
+            // repo policy naming them is not flipped to `invalid-policy-regex`.
             | "(?i)(print|dump|log|write|show|expose|send).*(credential|password|api[ -]?key|private[ -]?key|token)"
             | "(?i)(credential|password|api[ -]?key|private[ -]?key|token).*(to (the )?(log|console|stdout)|in logs?)"
             | "(?i)ignore (all )?(previous|system|developer|agent) instructions"
@@ -1196,7 +1205,36 @@ fn print_implementation_contract_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_function_names;
+    use super::{is_builtin_issue_safety_pattern, shell_function_names};
+
+    /// Issue #3113 AC #4. `is_builtin_issue_safety_pattern` is an allowlist for
+    /// repo policy YAML, not a second evaluator — the only evaluator is
+    /// `autospec_core::claim::contains_credential_printing`. Pin the declared
+    /// credential-printing strings so they cannot silently re-diverge from the
+    /// narrowed core semantics: word boundaries, line-scoped `[^\n]` rather
+    /// than `.`, and an explicit order.
+    #[test]
+    fn credential_printing_patterns_declare_the_narrowed_core_semantics() {
+        let narrowed = [
+            "(?i)\\b(print|prints|printed|printing|dump|dumps|dumped|dumping|log|logs|logged|logging|write|writes|show|shows|showed|showing|shown|expose|exposes|exposed|send|sends|sending)\\b[^\\n]*\\b(credential|credentials|password|passwords|api[ -]?keys?|private[ -]?keys?|token|tokens)\\b",
+            "(?i)\\b(credential|credentials|password|passwords|api[ -]?keys?|private[ -]?keys?|token|tokens)\\b[^\\n]*\\b(to (the )?(logs?|console|stdout)|in logs?)\\b",
+        ];
+
+        for pattern in narrowed {
+            assert!(
+                is_builtin_issue_safety_pattern(pattern),
+                "narrowed pattern is no longer declared: {pattern}"
+            );
+            assert!(pattern.contains("\\b"), "missing word boundary: {pattern}");
+            assert!(!pattern.contains(".*"), "unbounded gap survives: {pattern}");
+        }
+
+        // The historical spellings stay accepted so an existing repo policy
+        // naming them is not flipped to `invalid-policy-regex`.
+        assert!(is_builtin_issue_safety_pattern(
+            "(?i)(print|dump|log|write|show|expose|send).*(credential|password|api[ -]?key|private[ -]?key|token)"
+        ));
+    }
 
     #[test]
     fn shell_function_names_preserves_current_shell_declaration_forms() {

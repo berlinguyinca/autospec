@@ -806,23 +806,78 @@ fn contains_secret_exfiltration(text: &str) -> bool {
         || contains_any(text, &["aws token", "github token", "stripe token"])
 }
 
+/// Disclosure verbs, with the inflections the previous substring test already
+/// caught (every entry embeds its base verb). Forms that do NOT embed their
+/// base — "written", "wrote", "sent", "exposing" — never matched before and
+/// stay out: adding them would widen a rule this change narrows.
+const CREDENTIAL_DISCLOSURE_VERBS: &[&str] = &[
+    "print", "prints", "printed", "printing", "dump", "dumps", "dumped", "dumping", "log", "logs",
+    "logged", "logging", "write", "writes", "show", "shows", "showed", "showing", "shown",
+    "expose", "exposes", "exposed", "send", "sends", "sending",
+];
+
+/// Credential nouns, including the separator-free and plural spellings the CLI
+/// policy regex declares via `api[ -]?keys?`.
+const CREDENTIAL_DISCLOSURE_NOUNS: &[&str] = &[
+    "credential",
+    "credentials",
+    "password",
+    "passwords",
+    "api key",
+    "api keys",
+    "api-key",
+    "api-keys",
+    "apikey",
+    "apikeys",
+    "private key",
+    "private keys",
+    "private-key",
+    "private-keys",
+    "privatekey",
+    "privatekeys",
+    "token",
+    "tokens",
+];
+
+/// Disclosure destinations for the noun-first arm, covering the optional
+/// article and plural the CLI regex spells `to (the )?(logs?|console|stdout)`.
+const CREDENTIAL_DISCLOSURE_DESTINATIONS: &[&str] = &[
+    "to the log",
+    "to the logs",
+    "to log",
+    "to logs",
+    "to the console",
+    "to console",
+    "to the stdout",
+    "to stdout",
+    "in log",
+    "in logs",
+];
+
+/// Credential disclosure is line-scoped, word-boundary aware, and ordered —
+/// the same shape as `contains_production_destruction` and the CLI policy
+/// regexes in `commands/lint.rs`, where `.` never crosses a newline and the
+/// verb precedes the noun.
+///
+/// The previous implementation tested two unordered whole-document substring
+/// memberships, so a lexical scanner's own vocabulary tripped it: `token`
+/// inside "tokens", `print` inside "fingerprint", `write` inside "writer",
+/// `log` inside "logic" (issues #3111, #3173, #3349). Requiring a real word on
+/// the same line, in order, removes those without weakening the posture: a
+/// genuine request ("print the API key to stdout", "write the token to the
+/// log") still blocks.
 fn contains_credential_printing(text: &str) -> bool {
-    let subject = [
-        "credential",
-        "password",
-        "api key",
-        "api-key",
-        "private key",
-        "private-key",
-        "token",
-    ];
-    let action = ["print", "dump", "log", "write", "show", "expose", "send"];
-    (contains_any(text, &subject) && contains_any(text, &action))
-        || (contains_any(text, &subject)
-            && contains_any(
-                text,
-                &["to the log", "to log", "to console", "to stdout", "in logs"],
-            ))
+    text.lines().any(|line| {
+        CREDENTIAL_DISCLOSURE_VERBS.iter().any(|verb| {
+            CREDENTIAL_DISCLOSURE_NOUNS
+                .iter()
+                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+        }) || CREDENTIAL_DISCLOSURE_NOUNS.iter().any(|noun| {
+            CREDENTIAL_DISCLOSURE_DESTINATIONS
+                .iter()
+                .any(|destination| ordered_pair_start(line, noun, destination).is_some())
+        })
+    })
 }
 
 fn contains_instruction_bypass(text: &str) -> bool {
