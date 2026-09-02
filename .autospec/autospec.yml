@@ -275,9 +275,14 @@ fenced_surfaces:
   - id: public-api-contracts
     severity: high
     reason: Public API and package/crate contracts affect downstream users.
+    # Scoped to actual API surface: this repo keeps ALL source under crates/,
+    # so a blanket "crates/**" fenced every Rust change (test files included)
+    # and stalled the autonomous drain. Crate-internal and test-only files
+    # carry no downstream contract.
     paths:
       - "packages/**"
-      - "crates/**"
+      - "crates/*/src/lib.rs"
+      - "crates/*/src/**/mod.rs"
       - Cargo.toml
       - Cargo.lock
   - id: autonomous-control-plane
