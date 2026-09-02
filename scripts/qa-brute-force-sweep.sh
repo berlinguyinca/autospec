@@ -474,7 +474,71 @@ function_ranges_brace() {
     # `{`/`}` to find the matching close brace.
     local file="$1" lang="$2"
 
-    awk -v lang="$lang" '
+    awk -v lang="$lang" -v sq="'" '
+        # Strip string and char literals from a line so `{`/`}` inside them
+        # are never counted as real braces (issue #3471). Handles escaped
+        # quotes (\"), single-char literals (e.g. sq{sq), Rust raw strings
+        # (r"...", r#"..."#, r##"..."#... with any hash count), and leaves
+        # Rust lifetime apostrophes (e.g. &sq a str) untouched since they
+        # have no closing quote. sq holds a literal single-quote character
+        # passed in via -v so the awk source never has to embed one.
+        # Single-line only, matching the existing `//` comment strip scope —
+        # no cross-line string state.
+        function strip_strings(s,   out, i, n, c, c1, c2, j, k, hashes, closer, rest, pos, found) {
+            out = ""
+            n = length(s)
+            i = 1
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "r" && (i == 1 || substr(s, i - 1, 1) !~ /[A-Za-z0-9_]/)) {
+                    j = i + 1
+                    hashes = 0
+                    while (substr(s, j, 1) == "#") { hashes++; j++ }
+                    if (substr(s, j, 1) == "\"") {
+                        closer = "\""
+                        for (k = 0; k < hashes; k++) closer = closer "#"
+                        rest = substr(s, j + 1)
+                        pos = index(rest, closer)
+                        if (pos > 0) i = j + pos + length(closer)
+                        else i = n + 1
+                        continue
+                    }
+                }
+                if (c == "\"") {
+                    j = i + 1
+                    found = 0
+                    while (j <= n) {
+                        c2 = substr(s, j, 1)
+                        if (c2 == "\\") { j += 2; continue }
+                        if (c2 == "\"") { found = 1; j++; break }
+                        j++
+                    }
+                    i = found ? j : n + 1
+                    continue
+                }
+                if (c == sq) {
+                    c1 = substr(s, i + 1, 1)
+                    if (c1 == "\\") {
+                        found = 0
+                        for (k = i + 2; k <= n && k <= i + 8; k++) {
+                            if (substr(s, k, 1) == sq) { found = k; break }
+                        }
+                        if (found) { i = found + 1; continue }
+                    } else if (c1 != "" && substr(s, i + 2, 1) == sq) {
+                        i = i + 3
+                        continue
+                    }
+                    # Not a recognizable char literal (e.g. a lifetime like
+                    # &sq a) — copy the apostrophe through unchanged.
+                    out = out c
+                    i++
+                    continue
+                }
+                out = out c
+                i++
+            }
+            return out
+        }
         function is_sig(s,   r) {
             if (lang == "javascript") {
                 # Accept: classic `function name(`, arrow `const name = (...) =>`,
@@ -548,12 +612,17 @@ function_ranges_brace() {
             return "<unknown>"
         }
         {
-            line = $0
-            # strip line comments to avoid counting braces in `// {`
+            # Strip string/char literals BEFORE the `//` comment strip, so a
+            # `//` sequence inside a string (e.g. a URL literal) is never
+            # mistaken for a line comment. Both is_sig() and extract_name()
+            # below now run against this stripped `line`, not raw $0, so a
+            # brace or keyword-lookalike inside a string literal cannot be
+            # mistaken for a signature or miscounted as a real brace.
+            line = strip_strings($0)
             gsub(/\/\/.*/, "", line)
             if (!in_fn) {
-                if (is_sig($0)) {
-                    fname = extract_name($0)
+                if (is_sig(line)) {
+                    fname = extract_name(line)
                     start_line = NR
                     last_line = NR
                     n_open = gsub(/\{/, "{", line)
