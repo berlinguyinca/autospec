@@ -330,7 +330,16 @@ optionally `max_wall_clock_ms:` — before a local profile can be routed to.
 ## Evidence-based model routing
 `scripts/routing-ledger.sh` records what each dispatch cost and how it turned out;
 `scripts/routing-cost.sh` scores candidate profiles on measured **effective** cost;
-`scripts/route-decide.sh` makes the call.
+`scripts/route-decide.sh` computes the call these two would produce.
+
+**`route-decide.sh` is advisory tooling, not yet wired into the live dispatch
+path** (tracked in `docs/decisions/0001-as-aeo-001-phase-0-integration-strategy.md`).
+`scripts/dispatch-implementer.sh` — the script that actually creates the
+worktree and prompt for a Phase 4 dispatch — consults no routing helper today;
+model/profile selection currently happens upstream of it via the harness's own
+tier detection. Run `route-decide.sh --labels "<issue-labels>" --explain`
+by hand to see what the evidence-based router *would* choose; nothing consumes
+that output automatically yet.
 
 | Var | Default | Effect |
 |---|---|---|

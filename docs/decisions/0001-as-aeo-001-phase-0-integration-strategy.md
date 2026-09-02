@@ -47,6 +47,16 @@ assignments" stream to compare against.
 
 Tracked as a defect in its own right: **#3179**.
 
+**Resolution (#3179):** documented as advisory tooling rather than wired into
+`scripts/dispatch-implementer.sh`. `dispatch-implementer.sh` has no
+model-selection logic or `--labels` input today, so a shadow invocation there
+would mean inventing new plumbing on the critical dispatch path to log a
+decision nothing currently compares against — not restoring an existing call
+site. This is also the option consistent with this ADR's own finding above
+that the bash routing layer is "advisory scaffolding beside the pipeline, not
+inside it." `README.md`, `docs/USER_MANUAL.md`, and `docs/CONFIG_REFERENCE.md`
+now say so explicitly; `scripts/route-decide.sh`'s decision logic is unchanged.
+
 ### There is no database — load-bearing for cost
 
 No `sqlx` / `rusqlite` / `diesel` / `postgres` dependency in any `Cargo.toml`.

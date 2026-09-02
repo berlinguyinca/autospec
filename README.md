@@ -423,6 +423,9 @@ usefully are emitted commented out rather than silently offered. Add `--only
 A profile may also declare an `effort:` tier, reported by `route-decide.sh
 --print-effort`. Raising effort on the same model is often a better dial than
 swapping models, because a model switch invalidates the whole prompt cache.
+`route-decide.sh` itself is advisory tooling — see
+[`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md#evidence-based-model-routing)
+for its current (not-yet-wired) dispatch status.
 
 The autonomous research-cycle preview wiring is maintained alongside this
 documentation so its environment contract remains discoverable.
