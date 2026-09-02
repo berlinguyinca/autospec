@@ -71,10 +71,16 @@ fn public_api_fence_covers_api_surface_but_not_crate_test_files() {
         );
     }
 
-    // Test-only files carry no downstream API contract.
+    // Test-only files and crate-internal modules carry no downstream API
+    // contract. `mod.rs` is Rust module organization, not an API marker: the
+    // first narrowing pass fenced it and still quarantined 18 internal files,
+    // reproducing the original defect at smaller scale. `lib.rs` already
+    // covers every crate root.
     for path in [
         "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
         "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
+        "crates/autospec-core/src/claim/mod.rs",
+        "crates/autospec-cli/src/commands/mod.rs",
     ] {
         assert!(
             !fenced_by_public_api(path),
