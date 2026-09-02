@@ -5537,7 +5537,10 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"branch\":\"master_ai\""));
+    assert_eq!(
+        json_string_field(&String::from_utf8_lossy(&output.stdout), "branch"),
+        "master_ai"
+    );
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     assert!(calls.contains("repos/test/repo/branches/master_ai"));
     assert!(!calls.contains("repo\nview"));
@@ -5560,7 +5563,10 @@ fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
         .expect("missing branch health must retain a policy-bound observation");
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert_eq!(
+        json_string_field(lines[0], "diagnostic"),
+        "default-branch-missing"
+    );
     assert_eq!(
         json_string_field(lines[0], "effective_policy_digest"),
         UNRESOLVED_POLICY_DIGEST
@@ -5587,7 +5593,10 @@ fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy()
         .expect("foreground health halt must retain a policy-bound observation");
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert_eq!(
+        json_string_field(lines[0], "diagnostic"),
+        "default-branch-missing"
+    );
     assert_eq!(
         json_string_field(lines[0], "effective_policy_digest"),
         UNRESOLVED_POLICY_DIGEST
@@ -5737,7 +5746,10 @@ fn repository_root_config_is_used_when_repo_dir_is_a_subdirectory() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"branch\":\"master_ai\""));
+    assert_eq!(
+        json_string_field(&String::from_utf8_lossy(&output.stdout), "branch"),
+        "master_ai"
+    );
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     assert!(calls.contains("repos/test/repo/branches/master_ai"));
     assert!(!calls.contains("repo\nview"));
@@ -8125,13 +8137,24 @@ printf '%s\n' '[]' > "$report"
     }
 }
 
+/// STRING_MATCH_DOMAIN_LOGIC regression: a brute-force `"field":"` marker
+/// scan finds the FIRST textual occurrence of the marker, which is wrong
+/// when a nested object happens to reuse the same key name. Parsing the
+/// document as JSON and reading the top-level field is immune to this.
+#[test]
+fn json_string_field_prefers_top_level_over_nested_duplicate_keys() {
+    let document = r#"{"meta":{"diagnostic":"decoy"},"diagnostic":"real-value"}"#;
+    assert_eq!(json_string_field(document, "diagnostic"), "real-value");
+}
+
 fn json_string_field(document: &str, field: &str) -> String {
-    let marker = format!("\"{field}\":\"");
-    document
-        .split_once(&marker)
-        .and_then(|(_, remainder)| remainder.split_once('"'))
-        .map(|(value, _)| value.to_string())
+    let parsed: serde_json::Value = serde_json::from_str(document)
+        .unwrap_or_else(|err| panic!("invalid JSON document {document}: {err}"));
+    parsed
+        .get(field)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| panic!("missing string field {field} in {document}"))
+        .to_string()
 }
 
 impl Drop for ForegroundFixture {
