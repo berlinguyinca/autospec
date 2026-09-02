@@ -197,5 +197,10 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     install_one "$SKILL_DIR/SKILL.md" "$CODEX_SKILLS_DEST"
 fi
 
+if [ "$HARNESS" = "pi" ] || [ "$HARNESS" = "all" ]; then
+    info ""; info "Pi:"
+    install_one "$SKILL_DIR/SKILL.md" "$PI_DEST"
+fi
+
 [ "$UPDATE_MODE" -eq 0 ] || info "Update mode complete."
 info "Done. Run /autospec-sweep init to create .autospec/autospec.yml."

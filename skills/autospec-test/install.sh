@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$HARNESS" ] || HARNESS=all
-case "$HARNESS" in claude|opencode|codex|all) ;; *) usage >&2; exit 2 ;; esac
+case "$HARNESS" in claude|opencode|codex|pi|all) ;; *) usage >&2; exit 2 ;; esac
 
 if [ -z "$SKILL_DIR" ]; then
     command -v curl >/dev/null 2>&1 || { printf 'error: curl is required\n' >&2; exit 1; }
@@ -65,6 +65,7 @@ copy_file() {
 CLAUDE_ROOT=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 OPENCODE_ROOT=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}
 CODEX_ROOT=${CODEX_HOME:-$HOME/.codex}
+PI_ROOT=${PI_SKILLS_DIR:-$HOME/.agents/skills}
 AUTOSPEC_SCRIPTS_DIR=${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}
 
 if [ -f "$SKILL_DIR/shared-scripts/loop-classifier-docs-extension.mjs" ]; then
@@ -83,5 +84,8 @@ fi
 if [ "$HARNESS" = codex ] || [ "$HARNESS" = all ]; then
     copy_file "$SKILL_DIR/codex/prompt.md" "$CODEX_ROOT/prompts/$SKILL_NAME.md"
     copy_file "$SKILL_DIR/SKILL.md" "$CODEX_ROOT/skills/$SKILL_NAME/SKILL.md"
+fi
+if [ "$HARNESS" = pi ] || [ "$HARNESS" = all ]; then
+    copy_file "$SKILL_DIR/SKILL.md" "$PI_ROOT/$SKILL_NAME/SKILL.md"
 fi
 printf 'installed %s for %s\n' "$SKILL_NAME" "$HARNESS"

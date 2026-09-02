@@ -158,6 +158,12 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     install_one "$CODEX_SKILLS_DEST" "SKILL.md"
 fi
 
+if [ "$HARNESS" = "pi" ] || [ "$HARNESS" = "all" ]; then
+    info ""
+    info "Pi:"
+    install_one "$PI_DEST"
+fi
+
 info ""
 if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run complete. No files were written."

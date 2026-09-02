@@ -237,6 +237,11 @@ if [ "$HARNESS" = codex ] || [ "$HARNESS" = all ]; then
     install_one "$SKILL_DIR/SKILL.md" "$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
     installed="${installed}  $CODEX_DIR/prompts/$SKILL_NAME.md\n  $CODEX_DIR/skills/$SKILL_NAME/SKILL.md\n"
 fi
+if [ "$HARNESS" = pi ] || [ "$HARNESS" = all ]; then
+    info "\nPi:"
+    install_one "$SKILL_DIR/SKILL.md" "$PI_DIR/$SKILL_NAME/SKILL.md"
+    installed="${installed}  $PI_DIR/$SKILL_NAME/SKILL.md\n"
+fi
 
 info ""
 if [ "$DRY_RUN" -eq 1 ]; then
