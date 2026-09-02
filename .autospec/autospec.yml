@@ -282,7 +282,6 @@ fenced_surfaces:
     paths:
       - "packages/**"
       - "crates/*/src/lib.rs"
-      - "crates/*/src/**/mod.rs"
       - Cargo.toml
       - Cargo.lock
   - id: autonomous-control-plane
