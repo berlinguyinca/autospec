@@ -462,11 +462,14 @@ Generated artifacts committed to every target repo:
 | `llms.txt` | Short curated index (≤200 lines) |
 | `llms-full.txt` | Full concatenated doc content |
 
-## Inspecting model-routing decisions
+## Inspecting model-routing decisions (advisory)
+
+`scripts/route-decide.sh` is advisory tooling: it is not yet invoked by any
+dispatch path, so it does not decide what model an issue actually ran on. Run it
+by hand to see what the evidence-based router *would* recommend.
 
 `scripts/route-decide.sh --labels "<issue-labels>" --explain` prints the routing
-decision and the reason for it on stderr, without dispatching anything. Use it to
-answer "why did this issue run on that model?".
+recommendation and the reason for it on stderr, without dispatching anything.
 
 - `--print-profile` prints the profile name instead of the model id.
 - Exit 3 means nothing was resolvable, and the caller keeps its harness-detected
