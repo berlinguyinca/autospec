@@ -130,7 +130,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$HARNESS" ] || HARNESS=all
-case "$HARNESS" in claude|opencode|codex|all) ;; *) err "invalid --harness: $HARNESS"; exit 2 ;; esac
+case "$HARNESS" in claude|opencode|codex|pi|all) ;; *) err "invalid --harness: $HARNESS"; exit 2 ;; esac
 
 need_fetch=0
 if [ -z "$SKILL_DIR" ]; then
@@ -172,6 +172,10 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     info ""; info "Codex CLI:"
     install_one "$SKILL_DIR/codex/prompt.md" "$CODEX_DIR/prompts/$SKILL_NAME.md"
     install_one "$SKILL_DIR/SKILL.md" "$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
+fi
+if [ "$HARNESS" = "pi" ] || [ "$HARNESS" = "all" ]; then
+    info ""; info "Pi:"
+    install_one "$SKILL_DIR/SKILL.md" "$PI_DIR/$SKILL_NAME/SKILL.md"
 fi
 
 info ""
