@@ -45,6 +45,25 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 - Design record and the gap list against the specification's acceptance criteria:
   [`docs/specs/2026-09-03-agentic-rag-subsystem-design.md`](docs/specs/2026-09-03-agentic-rag-subsystem-design.md).
 
+#### Adaptive Agent Runtime (AAR) foundation (2026-09-02)
+- Added `autospec_core::aar`, a harness- and model-agnostic decision engine that turns a work item
+  into an execution policy: deterministic-first classification with evidence and confidence,
+  versioned model capability profiles, adaptive reasoning budgets, a narrow-first retrieval ladder,
+  cache-friendly prompt assembly with stable-prefix hashing, worktree-local durable task memory,
+  agent topology with programmatic separation-of-duty enforcement, edit guards and thrashing
+  detection, the InferWeave capability contract, a quota- and separation-aware escalation chain,
+  versioned execution telemetry, and cheapest-adequate profile recommendation.
+- Three rules are enforced in code rather than prose: a larger reasoning budget is kept only with
+  measured evidence that it helps; a node without enough free context is rejected outright rather
+  than out-scored by speed; and every fallback re-checks separation of duties, so a quota failure
+  cannot put the implementer and the reviewer on one model.
+- Added `autospec aar classify|plan|explain|memory init|rules`. `plan --json` emits the
+  policy-versioned, auditable decision record; `explain` renders the prose rationale for the
+  selected profile.
+- Added `scripts/validate-aar.sh`, guarding the module and test inventory, the documented defaults,
+  and the load-bearing invariants, then running the AAR suites single-threaded.
+- Design and acceptance-criteria status: `docs/specs/2026-09-02-adaptive-agent-runtime-design.md`.
+
 #### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
 - Added one marker-verified managed GitHub Project per product, backed by a private product-global
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
