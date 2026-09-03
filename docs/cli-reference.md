@@ -11,6 +11,13 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
+| `autospec initiative init --id INIT-YYYY-NNNN --slug <slug> [--spec <path>] [--root <dir>]` | yes | creates the Initiative artifact registry and its first audit event; refuses an existing Initiative |
+| `autospec initiative validate --id INIT-YYYY-NNNN [--json]` | yes | checks the Definition, workspace, plan, and task DAG against each other; exits `1` when the Initiative is not executable |
+| `autospec initiative ready --id INIT-YYYY-NNNN [--now <unix>] [--json]` | yes | read-only scheduler pass; lists releasable tasks and the first reason each blocked task is held |
+| `autospec initiative coverage --id INIT-YYYY-NNNN [--json]` | yes | requirement coverage matrix, including evidence discarded for lacking independence |
+| `autospec initiative verify --id INIT-YYYY-NNNN [--json]` | yes | final completion gate; exits `1` while an unwaived requirement is unverified |
+| `autospec initiative project --id INIT-YYYY-NNNN [--json]` | yes | renders the GitHub projection from canonical state and stores it; performs no GitHub mutation |
+| `autospec initiative status --id INIT-YYYY-NNNN [--json]` | yes | Initiative snapshot: stage, repository and owner span, task states, requirement coverage, completion |
 | `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; shell wrapper remains the executor |
 | `autospec validate --shadow-results <captured-results.json> [--json]` | yes | aggregates captured shell outcomes without executing commands; returns non-zero when a required captured result failed |
 | `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |

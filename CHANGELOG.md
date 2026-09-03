@@ -9,6 +9,32 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### AutoSpec Initiatives: planning and multi-repository orchestration v2 (2026-09-03)
+- Added the Initiative as a first-class coordination unit that belongs to no repository and no
+  organization. `crates/autospec-core/src/initiative/` carries the model: globally qualified
+  `host/owner/repository` identity with per-repository capability records, the normalized
+  Definition (`REQ-*`/`AC-*` with provenance and verifiability gaps), versioned architecture
+  plans, and the executable cross-repository task DAG.
+- Cross-repository dependencies are AutoSpec task ids, never repository-local issue numbers. The
+  scheduler releases independent branches concurrently and reports the first reason each blocked
+  task is held, so a missing permission in one organization blocks only that branch and its
+  descendants.
+- Added role-aware model routing with auditable fallback: roles declare capability class, vision,
+  context floor, locality, privacy ceiling, and an integer cost ceiling; every rejected candidate
+  keeps its reason. Fallback narrows the model set and never collapses two roles into one session.
+- Added the evidence and coverage model. A requirement completes only when an independent session
+  verified it or an approved waiver exists; review or verification evidence produced by the
+  session that implemented the task is discarded and named in `rejected_evidence`.
+- Added the GitHub projection, derived from canonical state on every render, with `import`,
+  `reject`, `approval_required`, and `drift` reconciliation policies. A synchronization failure
+  degrades the view and leaves canonical state untouched.
+- Added `autospec initiative init|validate|ready|coverage|verify|project|status`. `validate` and
+  `verify` exit non-zero when the Initiative is not executable or not complete, so both work as
+  gates. Added `schemas/autospec-initiative.schema.json`,
+  `scripts/autospec-initiative-contract.sh` (a drift gate over the module surface, the CLI, the
+  schema, and the design document), and
+  `docs/specs/2026-09-03-initiative-planning-multi-repo-orchestration-v2-design.md`.
+
 #### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
 - Added one marker-verified managed GitHub Project per product, backed by a private product-global
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps

@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "autospec-core",
  "nix",
+ "serde",
  "serde_json",
  "yaml-edit",
 ]
