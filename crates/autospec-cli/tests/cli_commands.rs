@@ -82,6 +82,7 @@ fn cli_commands_help_lists_required_commands() {
         help_command_names(&stdout),
         [
             "init",
+            "initiative",
             "lint",
             "claim",
             "parent",
