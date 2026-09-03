@@ -38,8 +38,14 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
         .expect("full direct plan builds");
     // +9 for the orphaned-suite ratchet and the suites it caught (#3360);
     // see validation_runner.rs.
-    assert_eq!(full.ids().len(), 153);
-    assert_eq!(full.unique_ids().len(), 148);
+    // +1 for check_code_intelligence_contract (#3483), which is full-plan only:
+    // `fast.ids()` below is deliberately unchanged at 137.
+    // +2 for check_proxy_direct_borrow_lifetime and
+    // check_qa_function_ranges_string_literals (#3485), the two orphaned bats
+    // suites the #3360 ratchet caught. Both are BatsSuite owners, so like the
+    // suites above them they are full-plan only and `fast.ids()` stays at 137.
+    assert_eq!(full.ids().len(), 156);
+    assert_eq!(full.unique_ids().len(), 151);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");

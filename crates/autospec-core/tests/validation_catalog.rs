@@ -36,8 +36,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 154); // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code intelligence gateway contract
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 149); // a call no gate repeats
+    // +9: orphaned-suite ratchet and the suites it caught (#3360); +1: code
+    // intelligence gateway (#3483); +2: the two suites the ratchet caught (#3485).
+    assert_eq!(calls.len(), 156);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 151); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +68,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 165); // +1: code intelligence gateway contract
+    assert_eq!(frozen_catalog_ids().len(), 167); // +1: code intelligence (#3483); +2: #3485
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 165);
+    assert_eq!(ids.len(), 167);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -640,52 +642,23 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
     );
 
     for (id, suite) in [
-        (
-            "check_lint_heredoc_handling",
-            "tests/lint/test_complexity_heredoc.bats",
-        ),
-        (
-            "check_lint_reuse_triage",
-            "tests/lint/test_reuse_triage.bats",
-        ),
+        ("check_lint_heredoc_handling", "tests/lint/test_complexity_heredoc.bats"),
+        ("check_lint_reuse_triage", "tests/lint/test_reuse_triage.bats"),
         ("check_ship_completeness", "tests/ship-completeness.bats"),
         // Registered by #3360: the ratchet suite shipped invoked by nothing.
-        (
-            "check_bats_negation_ratchet",
-            "tests/lint/test_bats_negation_checker.bats",
-        ),
-        (
-            "check_code_intelligence_contract",
-            "tests/code-intel/code-intelligence.bats",
-        ),
-        (
-            "check_autospec_fleet_enabled_false",
-            "tests/unit/test_autospec_fleet_enabled_false.bats",
-        ),
-        (
-            "check_autospec_sweep_enabled_false",
-            "tests/unit/test_autospec_sweep_enabled_false.bats",
-        ),
-        (
-            "check_classify_lang_labels",
-            "tests/unit/test_classify_lang_labels.bats",
-        ),
-        (
-            "check_classify_language",
-            "tests/unit/test_classify_language.bats",
-        ),
-        (
-            "check_define_phase0_language",
-            "tests/unit/test_define_phase0_language.bats",
-        ),
-        (
-            "check_language_axis_integration",
-            "tests/unit/test_language_axis_integration.bats",
-        ),
-        (
-            "check_language_table",
-            "tests/unit/test_language_table.bats",
-        ),
+        ("check_bats_negation_ratchet", "tests/lint/test_bats_negation_checker.bats"),
+        ("check_code_intelligence_contract", "tests/code-intel/code-intelligence.bats"),
+        ("check_autospec_fleet_enabled_false", "tests/unit/test_autospec_fleet_enabled_false.bats"),
+        ("check_autospec_sweep_enabled_false", "tests/unit/test_autospec_sweep_enabled_false.bats"),
+        ("check_classify_lang_labels", "tests/unit/test_classify_lang_labels.bats"),
+        ("check_classify_language", "tests/unit/test_classify_language.bats"),
+        ("check_define_phase0_language", "tests/unit/test_define_phase0_language.bats"),
+        ("check_language_axis_integration", "tests/unit/test_language_axis_integration.bats"),
+        ("check_language_table", "tests/unit/test_language_table.bats"),
+        // Registered by #3485: both suites shipped during the 2026-09-02 batch
+        // with no catalog owner, which is what the #3360 ratchet caught.
+        ("check_proxy_direct_borrow_lifetime", "tests/unit/proxy-direct-borrow-lifetime.bats"),
+        ("check_qa_function_ranges_string_literals", "tests/unit/qa-function-ranges-string-literals.bats"),
     ] {
         assert_eq!(
             catalog

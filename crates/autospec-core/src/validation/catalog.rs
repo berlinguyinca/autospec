@@ -15,6 +15,13 @@ pub struct ValidationCheck {
     pub owner: CheckOwner,
 }
 
+// Every Bats-suite owner in one shape. Spelled out inline these arms cost three
+// lines each, which is how `catalog.rs` grew past the file-size ratchet it now
+// has to stay under; registering another suite should cost one line, not three.
+fn bats_suite(path: &'static str) -> CheckOwner {
+    CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(path))
+}
+
 impl ValidationCheck {
     pub fn catalog_entry(id: &'static str) -> Self {
         let owner = match id {
@@ -141,45 +148,23 @@ impl ValidationCheck {
             "check_brute_force_rule_ids" => {
                 CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)
             }
-            "check_lint_heredoc_handling" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/lint/test_complexity_heredoc.bats",
-            )),
-            "check_lint_reuse_triage" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/lint/test_reuse_triage.bats",
-            )),
+            "check_lint_heredoc_handling" => bats_suite("tests/lint/test_complexity_heredoc.bats"),
+            "check_lint_reuse_triage" => bats_suite("tests/lint/test_reuse_triage.bats"),
             "check_bats_suite_registration" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)
             }
-            "check_bats_negation_ratchet" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/lint/test_bats_negation_checker.bats",
-            )),
-            "check_code_intelligence_contract" => CheckOwner::ExternalBatch(
-                ExternalCheck::BatsSuite("tests/code-intel/code-intelligence.bats"),
-            ),
-            "check_autospec_fleet_enabled_false" => CheckOwner::ExternalBatch(
-                ExternalCheck::BatsSuite("tests/unit/test_autospec_fleet_enabled_false.bats"),
-            ),
-            "check_autospec_sweep_enabled_false" => CheckOwner::ExternalBatch(
-                ExternalCheck::BatsSuite("tests/unit/test_autospec_sweep_enabled_false.bats"),
-            ),
-            "check_classify_lang_labels" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/unit/test_classify_lang_labels.bats",
-            )),
-            "check_classify_language" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/unit/test_classify_language.bats",
-            )),
-            "check_define_phase0_language" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/unit/test_define_phase0_language.bats",
-            )),
-            "check_language_axis_integration" => CheckOwner::ExternalBatch(
-                ExternalCheck::BatsSuite("tests/unit/test_language_axis_integration.bats"),
-            ),
-            "check_language_table" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
-                "tests/unit/test_language_table.bats",
-            )),
-            "check_ship_completeness" => {
-                CheckOwner::ExternalBatch(ExternalCheck::BatsSuite("tests/ship-completeness.bats"))
-            }
+            "check_bats_negation_ratchet" => bats_suite("tests/lint/test_bats_negation_checker.bats"),
+            "check_code_intelligence_contract" => bats_suite("tests/code-intel/code-intelligence.bats"),
+            "check_autospec_fleet_enabled_false" => bats_suite("tests/unit/test_autospec_fleet_enabled_false.bats"),
+            "check_autospec_sweep_enabled_false" => bats_suite("tests/unit/test_autospec_sweep_enabled_false.bats"),
+            "check_classify_lang_labels" => bats_suite("tests/unit/test_classify_lang_labels.bats"),
+            "check_classify_language" => bats_suite("tests/unit/test_classify_language.bats"),
+            "check_define_phase0_language" => bats_suite("tests/unit/test_define_phase0_language.bats"),
+            "check_language_axis_integration" => bats_suite("tests/unit/test_language_axis_integration.bats"),
+            "check_language_table" => bats_suite("tests/unit/test_language_table.bats"),
+            "check_proxy_direct_borrow_lifetime" => bats_suite("tests/unit/proxy-direct-borrow-lifetime.bats"),
+            "check_qa_function_ranges_string_literals" => bats_suite("tests/unit/qa-function-ranges-string-literals.bats"),
+            "check_ship_completeness" => bats_suite("tests/ship-completeness.bats"),
             "check_usage_limit_helper" => CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
                 "scripts/autospec-usage-limit.sh",
             )),

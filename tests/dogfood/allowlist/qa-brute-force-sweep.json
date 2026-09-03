@@ -48,12 +48,6 @@
     "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/proxy_direct.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
-  },
-  {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/pull_mutation.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -76,18 +70,6 @@
     "function": "validate_launch_mode",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "The branches enforce distinct incompatible CLI option combinations and return different diagnostics; a table would obscure the validation contract."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/queue.rs",
-    "function": "read_issue",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The GitHub query is one fixed argument vector; the heuristic counts its JSON projection punctuation as repeated branches despite no repeated control flow."
-  },
-  {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "executor_result_rejects_malformed_protocol_input_without_mutating_claim_state",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
@@ -133,12 +115,6 @@
   },
   {
     "file": "crates/autospec-cli/tests/cli_commands.rs",
-    "function": "status_json_reports_persisted_lifecycle_counts",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
-  },
-  {
-    "file": "crates/autospec-cli/tests/cli_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
@@ -154,5 +130,47 @@
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/result_reviewer.rs",
+    "function": "autonomous_executor_bridge_reviewer_rejects_forged_github_comment",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Test-only: the repeated rows are `git` argument vectors and arms of a shell `gh` stub that model GitHub protocol responses. They are fixture data for one forged-comment scenario, not production dispatch logic."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/initiative.rs",
+    "function": "validate",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Each branch validates a different typed model (initiative, definition, workspace, plan, graph) whose validate() has its own signature and error shape; there is no common row type to tabulate, and the graph arm maps violations rather than extending directly."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "new",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Test-only fixture builder: the repeated rows are fake GitHub CLI responses keyed by command, the same shape already allowlisted for autonomous_integration_base_sync.rs. Attribution moved to this function when #3472 fixed function_ranges_brace()."
+  },
+  {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "autonomous_timeline_reports_forecast_and_planned_steps",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "CLI integration test: the repeated rows are JSON-field assertions over one timeline response fixture. Assertion data, not production branching. Attribution moved to this function when #3472 fixed function_ranges_brace()."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/guards.rs",
+    "function": "observe",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The arms match distinct EditAction variants with different bindings and different guard policies; the inner ifs each raise a differently named violation with its own message. A table would have to carry a closure per row and would hide which policy produced which violation id."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/outcome.rs",
+    "function": "score_outcome",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The genuinely uniform part — the four signal penalties — is already a table with a single dispatcher loop. The remaining branches each apply a different scoring formula (flat credit, clamped coverage ratio, cache-hit rate, churn ratio) to a different field, so they share no row shape."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/topology.rs",
+    "function": "select_topology",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The branches are cumulative escalation thresholds, not parallel cases: each adds a different role set to the same accumulator, one arm removes a role, and one returns early. Order is semantic, so a predicate table would change behaviour."
   }
 ]
