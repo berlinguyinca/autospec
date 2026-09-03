@@ -93,9 +93,9 @@ teardown() { rm -rf "$TMP"; }
     # error) — the label MUST go through `gh api -X POST .../labels`, never
     # through the historical `pr edit --add-label` form.
     grep -q "api -X POST repos/o/r/issues/6/labels -f labels\[\]=autospec:needs-human" "$GH_LOG"
-    ! grep -q "add-label" "$GH_LOG"
-    ! grep -q "pr edit" "$GH_LOG"
-    ! grep -q "pr merge 6" "$GH_LOG"
+    run ! grep -q "add-label" "$GH_LOG"
+    run ! grep -q "pr edit" "$GH_LOG"
+    run ! grep -q "pr merge 6" "$GH_LOG"
 }
 
 @test "quarantine: label ensured to exist before it is applied" {

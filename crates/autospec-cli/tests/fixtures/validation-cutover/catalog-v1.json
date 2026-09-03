@@ -97,6 +97,8 @@
     "check_define_phase0_language",
     "check_language_axis_integration",
     "check_language_table",
+    "check_proxy_direct_borrow_lifetime",
+    "check_qa_function_ranges_string_literals",
     "check_reviewer_reuse_lens",
     "check_quality_differential",
     "check_repo_quality_audit_loop",
