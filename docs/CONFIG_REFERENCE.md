@@ -525,6 +525,22 @@ are excluded from both the pending and the failing counts.
 The genuinely unbypassable fence is still branch protection with a required
 status check; this wrapper is the strongest per-diff gate available without it.
 
+### Quarantine labeling
+
+When the blast-radius domain fence quarantines a PR (`blocked fenced_surface`,
+exit 1), `autospec-guarded-merge.sh` applies the human-review label
+(`autospec:needs-human` by default, `--human-label`) via
+`gh api -X POST repos/<repo>/issues/<pr>/labels`, never `gh pr edit
+--add-label` — the latter fails on repos where Projects (classic) has been
+deprecated. The label is created first if it does not already exist (same
+idempotent, non-`--force` convention as `ensure_label()` in
+`scripts/autonomous-promote-open-issues.sh`). If either the label application
+or the explanatory PR comment fails, the script prints a `WARNING` naming the
+PR and the label to stderr rather than swallowing the failure — a quarantine
+must always leave an operator-visible trace. The label/comment outcome never
+changes the exit 1 / `blocked fenced_surface` verdict: a failed label
+application still blocks the merge.
+
 ## Testing & QA
 | Var | Default | Effect |
 |---|---|---|

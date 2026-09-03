@@ -67,6 +67,19 @@ _die() {
     exit 2
 }
 
+_warn() {
+    printf 'autospec-guarded-merge: WARNING: %s\n' "$1" >&2
+}
+
+# ensure_label — same idempotent convention as
+# autonomous-promote-open-issues.sh's ensure_label(): create the label if
+# missing (never force a recolor of a pre-existing repo label), never fail
+# the caller.
+ensure_label() {
+    # $1 = label name, $2 = repo (OWNER/REPO)
+    gh label create "$1" --repo "$2" >/dev/null 2>&1 || true
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --pr) PR="${2:-}"; shift 2 ;;
@@ -132,8 +145,23 @@ else
                 "$PR" "$OVERRIDE_LABEL"
         else
             _surfaces="$(printf '%s\n' "$_blast_out" | grep '^SURFACE:' || true)"
-            gh pr edit "$PR" --repo "$REPO" --add-label "$HUMAN_LABEL" >/dev/null 2>&1 || true
-            gh pr comment "$PR" --repo "$REPO" --body "$(printf 'Blocked by the blast-radius domain fence: this PR touches a fenced surface and requires human review before merge.\n\n```\n%s\n```\n\nAdd the `%s` label after review to override.' "${_surfaces:-$_blast_out}" "$OVERRIDE_LABEL")" >/dev/null 2>&1 || true
+            # gh pr edit --add-label is broken on this repo (Projects-classic
+            # GraphQL deprecation error on repository.pullRequest.projectCards)
+            # — go through the Issues API directly instead. Ensure the label
+            # exists first (reuses the ensure_label convention above), then
+            # apply it. Neither call is swallowed: a failure here must be
+            # operator-visible, since a silent failure leaves a quarantined PR
+            # with no queryable trace that a human decision is pending. A
+            # failed label/comment call NEVER changes the exit 1 / "blocked
+            # fenced_surface" verdict below — that is the load-bearing
+            # invariant of this fence.
+            ensure_label "$HUMAN_LABEL" "$REPO"
+            if ! gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$HUMAN_LABEL" >/dev/null 2>&1; then
+                _warn "could not apply label '$HUMAN_LABEL' to PR #$PR — quarantine is NOT visible via labels; check manually"
+            fi
+            if ! gh pr comment "$PR" --repo "$REPO" --body "$(printf 'Blocked by the blast-radius domain fence: this PR touches a fenced surface and requires human review before merge.\n\n```\n%s\n```\n\nAdd the `%s` label after review to override.' "${_surfaces:-$_blast_out}" "$OVERRIDE_LABEL")" >/dev/null 2>&1; then
+                _warn "could not comment on PR #$PR to explain the quarantine"
+            fi
             printf '%s\n' "$_blast_out"
             printf 'blocked fenced_surface\n'
             _cleanup

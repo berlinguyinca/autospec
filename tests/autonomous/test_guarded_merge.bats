@@ -3,7 +3,8 @@
 # Guarded-merge wrapper: per-diff blast-radius domain fence at the merge
 # chokepoint. Uses the REAL classifier + guardrails against a fixture
 # fenced-surfaces registry; stubs gh to drive changed-files/labels and to
-# record merge/edit/comment calls.
+# record merge/label/comment calls. LABEL_API_FAIL / COMMENT_FAIL force the
+# `gh api .../labels` and `gh pr comment` calls to fail (issue #3479).
 
 bats_require_minimum_version 1.5.0
 
@@ -43,6 +44,21 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
             exit 0 ;;
     esac
 fi
+if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then
+    [ "${COMMENT_FAIL:-0}" = "1" ] && exit 1
+    exit 0
+fi
+if [ "$1" = "api" ]; then
+    case "$*" in
+        *"/labels"*)
+            [ "${LABEL_API_FAIL:-0}" = "1" ] && exit 1
+            exit 0 ;;
+    esac
+    exit 0
+fi
+if [ "$1" = "label" ] && [ "$2" = "create" ]; then
+    exit 0
+fi
 exit 0
 STUB
     chmod +x "$TMP/bin/gh"
@@ -73,8 +89,41 @@ teardown() { rm -rf "$TMP"; }
     run bash "$WRAPPER" --pr 6 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
     [ "$status" -eq 1 ]
     grep -q "blocked fenced_surface" <<<"$output"
-    grep -q "add-label autospec:needs-human" "$GH_LOG"
+    # gh pr edit --add-label is broken on this repo (Projects-classic GraphQL
+    # error) — the label MUST go through `gh api -X POST .../labels`, never
+    # through the historical `pr edit --add-label` form.
+    grep -q "api -X POST repos/o/r/issues/6/labels -f labels\[\]=autospec:needs-human" "$GH_LOG"
+    ! grep -q "add-label" "$GH_LOG"
+    ! grep -q "pr edit" "$GH_LOG"
     ! grep -q "pr merge 6" "$GH_LOG"
+}
+
+@test "quarantine: label ensured to exist before it is applied" {
+    export FILES="crates/risk-engine/src/lib.rs" LABELS=""
+    run bash "$WRAPPER" --pr 20 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 1 ]
+    grep -q "label create autospec:needs-human --repo o/r" "$GH_LOG"
+}
+
+@test "quarantine: failed label application warns on stderr and still blocks the merge" {
+    export FILES="crates/risk-engine/src/lib.rs" LABELS="" LABEL_API_FAIL=1
+    run --separate-stderr bash "$WRAPPER" --pr 21 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 1 ]
+    grep -q "blocked fenced_surface" <<<"$output"
+    # The warning must actually land on stderr (not merely somewhere in
+    # combined output) and must name both the PR and the label that could
+    # not be applied, on the same line, so the operator can act on it.
+    grep -qi "WARNING.*autospec:needs-human.*PR #21" <<<"$stderr"
+    ! grep -q "pr merge 21" "$GH_LOG"
+}
+
+@test "quarantine: failed comment warns on stderr and still blocks the merge" {
+    export FILES="crates/risk-engine/src/lib.rs" LABELS="" COMMENT_FAIL=1
+    run --separate-stderr bash "$WRAPPER" --pr 22 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 1 ]
+    grep -q "blocked fenced_surface" <<<"$output"
+    grep -qi "WARNING.*PR #22" <<<"$stderr"
+    ! grep -q "pr merge 22" "$GH_LOG"
 }
 
 @test "override: fenced diff with override label merges" {
