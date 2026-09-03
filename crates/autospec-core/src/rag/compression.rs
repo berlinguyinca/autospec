@@ -106,13 +106,6 @@ pub fn level_for_budget(items: usize, max_tokens: u32) -> Option<CompressionLeve
         .iter()
         .copied()
         .find(|level| level.target_tokens() <= per_item)
-        .or({
-            if CompressionLevel::Architecture.target_tokens() <= per_item {
-                Some(CompressionLevel::Architecture)
-            } else {
-                None
-            }
-        })
 }
 
 /// Build a compressed summary evidence item from source evidence.

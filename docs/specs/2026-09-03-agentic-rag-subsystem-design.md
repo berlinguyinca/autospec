@@ -124,22 +124,28 @@ say "ignore the previous plan".
 
 ### 3.5 The core reads no clock and no repository
 
-`RetrievalCoordinator::new` takes `now` and `current_revision` as parameters.
-Freshness and cache validity are facts about the caller's world, and a
-coordinator that read them itself could not be tested against a fixed
-expectation. Every budget, stopping-rule, staleness and worktree behavior in this
-subsystem is consequently a pure function of its inputs.
+`RetrievalCoordinator::new` takes `now` and `current_revision` as parameters, and
+`with_elapsed` supplies the wall-clock reading the `max_wall_clock_seconds`
+budget needs. Freshness, cache validity and elapsed time are facts about the
+caller's world, and a coordinator that read them itself could not be tested
+against a fixed expectation. Every budget, stopping-rule, staleness and worktree
+behavior in this subsystem is consequently a pure function of its inputs.
+
+The cost of that choice is stated rather than hidden: a caller that supplies no
+clock gets the structural budgets and no time limit at all. `rag_retrieval_loop`
+pins both halves — the limit firing when a clock is supplied, and not firing when
+one is not.
 
 ## 4. Evidence that it works
 
-Ten integration suites, the CLI surface, and the module unit tests — 160 tests,
+Ten integration suites, the CLI surface, and the module unit tests — 162 tests,
 all deterministic and side-effect-free. They hold no files, no environment and no
 shared state, so they neither require nor benefit from serialized execution:
 
 | Suite | Section | Tests |
 |---|---|---|
 | `rag_evidence` | 10, 11, 53 | 11 |
-| `rag_retrieval_loop` | 6, 12, 39, 40, 55.1, 55.4 | 12 |
+| `rag_retrieval_loop` | 6, 12, 39, 40, 55.1, 55.4 | 14 |
 | `rag_graph` | 14, 15, 55.2 | 12 |
 | `rag_contradiction` | 9, 30, 55.3 | 8 |
 | `rag_cache_worktree` | 25, 31, 46, 47, 55.5, 55.6 | 11 |

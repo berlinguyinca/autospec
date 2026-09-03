@@ -119,6 +119,7 @@ pub struct RetrievalCoordinator<'a> {
     policy: RetrievalPolicy,
     freshness: FreshnessPolicy,
     cache: Option<&'a mut RetrievalCache>,
+    elapsed: Option<Box<dyn Fn() -> u32 + 'a>>,
     now: u64,
     current_revision: String,
 }
@@ -141,9 +142,20 @@ impl<'a> RetrievalCoordinator<'a> {
             policy: RetrievalPolicy::for_role(role),
             freshness: FreshnessPolicy::default(),
             cache: None,
+            elapsed: None,
             now,
             current_revision: current_revision.into(),
         }
+    }
+
+    /// Supply a wall-clock reading, in seconds since the retrieval began.
+    ///
+    /// Without one the `max_wall_clock_seconds` budget can never fire: the core
+    /// reads no clock, so a time limit it was never told about is not a limit.
+    /// The closure is called once per iteration.
+    pub fn with_elapsed(mut self, elapsed: impl Fn() -> u32 + 'a) -> Self {
+        self.elapsed = Some(Box::new(elapsed));
+        self
     }
 
     /// Override the role policy.
@@ -192,6 +204,9 @@ impl<'a> RetrievalCoordinator<'a> {
         let mut planned = planner.plan_initial(&request.question, &sources);
 
         let stop_reason = loop {
+            if let Some(elapsed) = self.elapsed.as_ref() {
+                ledger.observe_elapsed(elapsed());
+            }
             let iteration = match ledger.start_iteration() {
                 Ok(iteration) => iteration,
                 Err(reason) => break reason,

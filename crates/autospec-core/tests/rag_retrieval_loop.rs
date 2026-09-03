@@ -362,3 +362,60 @@ fn two_sources_quoting_the_same_lines_reach_the_agent_once() {
         "the higher-authority citation is the one kept"
     );
 }
+
+#[test]
+fn the_wall_clock_budget_stops_the_loop_when_the_caller_supplies_a_clock() {
+    let registry = registry_with(vec![Box::new(StaticSource::semantic(
+        SourceKind::Specification,
+        vec![spec_evidence("ev_1", "partial", 900)],
+    ))]);
+    let budget = RetrievalBudget {
+        max_wall_clock_seconds: 5,
+        max_unproductive_iterations: 9,
+        ..RetrievalBudget::default()
+    };
+    let request = RetrievalRequest::new("AS-1", AgentRole::Planner, "unanswerable", scope())
+        .requiring(["never_present".to_string()])
+        .with_budget(budget);
+
+    // A clock that has already passed the limit on the first reading.
+    let mut coordinator =
+        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION)
+            .with_elapsed(|| 9);
+    let outcome = coordinator.retrieve("rag_clock", &request).expect("loop runs");
+
+    assert_eq!(
+        outcome.stop_reason,
+        StopReason::BudgetExhausted(BudgetLimit::WallClock)
+    );
+    assert_eq!(outcome.ledger.iterations(), 0);
+}
+
+#[test]
+fn without_a_clock_the_wall_clock_budget_simply_does_not_fire() {
+    // The core reads no clock. A caller that supplies none gets the structural
+    // budgets and nothing else; this pins that as intended rather than a bug.
+    let registry = registry_with(vec![Box::new(StaticSource::semantic(
+        SourceKind::Specification,
+        vec![spec_evidence("ev_1", "the scheduler picks a node", 900)],
+    ))]);
+    let budget = RetrievalBudget {
+        max_wall_clock_seconds: 1,
+        ..RetrievalBudget::default()
+    };
+    let request = RetrievalRequest::new(
+        "AS-1",
+        AgentRole::Planner,
+        "how does the scheduler work?",
+        scope(),
+    )
+    .requiring(["scheduler".to_string()])
+    .with_budget(budget);
+
+    let mut coordinator =
+        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let outcome = coordinator.retrieve("rag_noclock", &request).expect("loop runs");
+
+    assert_eq!(outcome.stop_reason, StopReason::SufficientEvidence);
+    assert_eq!(outcome.ledger.elapsed_seconds(), 0);
+}
