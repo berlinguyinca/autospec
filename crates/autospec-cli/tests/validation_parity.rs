@@ -38,8 +38,10 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
         .expect("full direct plan builds");
     // +9 for the orphaned-suite ratchet and the suites it caught (#3360);
     // see validation_runner.rs.
-    assert_eq!(full.ids().len(), 153);
-    assert_eq!(full.unique_ids().len(), 148);
+    // +1 for check_code_intelligence_contract (#3483), which is full-plan only:
+    // `fast.ids()` below is deliberately unchanged at 137.
+    assert_eq!(full.ids().len(), 154);
+    assert_eq!(full.unique_ids().len(), 149);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");
