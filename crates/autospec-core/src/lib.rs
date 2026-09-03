@@ -31,6 +31,7 @@ pub mod initiative;
 pub mod lint;
 pub mod managed_project;
 pub mod rag;
+pub mod resources;
 pub mod runtime_env;
 pub mod runtime_policy;
 pub mod safety;
