@@ -91,6 +91,7 @@ fn cli_commands_help_lists_required_commands() {
             "status",
             "autonomous",
             "plan",
+            "rag",
             "validate",
             "run",
             "runtime",
