@@ -8,6 +8,11 @@ scripts remain operational surfaces while V62+ commands mature.
 | --- | --- | --- |
 | `autospec init --spec <id> [--spec <id>]... [--json]` | yes | initialize persisted planned state without executing work; refuses existing state |
 | `autospec doctor --json` | yes | implemented |
+| `autospec aar classify --title <text> [--body <text>\|--body-file <path>] [--label <l>]... [--path <p>]... [--files <n>] [--language <name>] [--json]` | yes | deterministic task classification with evidence and confidence; no LLM call |
+| `autospec aar plan --title <text> [...] [--policy-version <v>] [--json]` | yes | full execution policy: topology, model, reasoning budget, retrieval ladder, guards, escalation |
+| `autospec aar explain --title <text> [...]` | no | prose explanation of the selected profile and why |
+| `autospec aar memory init [--worktree <dir>] [--json]` | yes | scaffolds `.autospec/` durable task memory; never overwrites existing state |
+| `autospec aar rules` | no | prints the harness working rules injected into every agent session |
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |

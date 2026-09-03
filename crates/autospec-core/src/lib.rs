@@ -1,3 +1,4 @@
+pub mod aar;
 pub mod agent;
 pub mod autonomous {
     pub mod audit;
