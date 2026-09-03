@@ -1,3 +1,4 @@
+pub mod aar;
 pub mod agent;
 pub mod autonomous {
     pub mod audit;
@@ -17,6 +18,7 @@ pub mod autonomous {
 }
 pub mod autonomous_lifecycle;
 pub mod claim;
+pub mod code_intel;
 pub mod context;
 pub mod coordination;
 pub mod error;
@@ -25,8 +27,10 @@ pub mod execution;
 pub mod explore;
 pub mod graph;
 pub mod growth;
+pub mod initiative;
 pub mod lint;
 pub mod managed_project;
+pub mod rag;
 pub mod resources;
 pub mod runtime_env;
 pub mod runtime_policy;

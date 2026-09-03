@@ -330,6 +330,31 @@ downgraded from verified. Unix state directories are `0700`, state files are `06
 [runtime manifest runbook](docs/runbooks/agent-runtime-manifest.md) and the checked-in
 [forty-stack proof](reports/runtime-isolation/compose-40-stack.json).
 
+## Semantic code intelligence
+
+AutoSpec gives agents IDE-grade navigation from self-hosted language servers: definitions,
+references, implementations, callers, diagnostics and impact analysis, behind an
+AutoSpec-owned gateway rather than raw LSP access. Source and indexes stay on the execution
+host; no paid external service is required.
+
+Every query names a workspace, and a workspace resolves to exactly one worktree root, so
+concurrent issue worktrees can never see each other's diagnostics or cache entries. Every
+result carries provenance (`workspace`, `repository`, `revision`, `backend`, `source`,
+`confidence`), and a backend failure degrades through `ast-grep` and then `ripgrep` instead
+of failing the task — with the lowered confidence travelling with the result.
+
+Three gates are mandatory by default: the planner needs a semantic Impact Set, the
+implementer needs a post-change diagnostic delta with no new errors, and the reviewer must
+run its own analysis rather than reuse the implementer's.
+
+```bash
+autospec doctor code-intel          # backend, servers, fallbacks, security posture
+autospec doctor code-intel --json
+```
+
+Configured in [`.autospec/code-intelligence.yaml`](.autospec/code-intelligence.yaml); see
+the [code intelligence guide](docs/code-intelligence.md).
+
 ## No-Side-Effect Demo
 
 The launch demo shows the shape of an AutoSpec run without creating GitHub issues
@@ -448,6 +473,7 @@ Start here:
 - [`docs/release-checklist.md`](docs/release-checklist.md)
 - [`docs/public-launch-checklist.md`](docs/public-launch-checklist.md)
 - [`docs/cli-reference.md`](docs/cli-reference.md)
+- [`docs/code-intelligence.md`](docs/code-intelligence.md)
 - [`SKILLS.md`](SKILLS.md)
 
 ## Contributing

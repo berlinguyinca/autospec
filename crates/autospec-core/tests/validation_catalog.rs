@@ -36,8 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 153); // +9: orphaned-suite ratchet and suites it caught (#3360)
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 148); // a call no gate repeats
+    assert_eq!(calls.len(), 154); // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code intelligence gateway contract
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 149); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +66,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 164);
+    assert_eq!(frozen_catalog_ids().len(), 165); // +1: code intelligence gateway contract
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 164);
+    assert_eq!(ids.len(), 165);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -653,6 +653,10 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         (
             "check_bats_negation_ratchet",
             "tests/lint/test_bats_negation_checker.bats",
+        ),
+        (
+            "check_code_intelligence_contract",
+            "tests/code-intel/code-intelligence.bats",
         ),
         (
             "check_autospec_fleet_enabled_false",

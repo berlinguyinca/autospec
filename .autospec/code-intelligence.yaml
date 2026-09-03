@@ -1,0 +1,51 @@
+# AutoSpec Code Intelligence Gateway.
+#
+# Read by `autospec doctor code-intel` and by the semantic gates in the
+# planner / implementer / reviewer workflow. Unknown keys are rejected rather
+# than ignored, so a typo in a gate name fails loudly instead of silently
+# turning that gate off.
+#
+# Reference: docs/code-intelligence.md
+version: 1
+enabled: true
+
+backend:
+  # agent-lsp sits behind an AutoSpec-owned adapter; swapping in multilspy or
+  # lsproxy means a sibling adapter, not a change to any caller.
+  type: agent-lsp
+  mode: local
+  binary: agent-lsp
+
+workspace:
+  isolation: worktree
+  idle_ttl_minutes: 30
+  warm_cache: true
+
+languages:
+  auto_detect: true
+  overrides:
+    python: { server: pyright-langserver }
+    rust: { server: rust-analyzer }
+    java: { server: jdtls }
+    go: { server: gopls }
+    typescript: { server: typescript-language-server }
+
+fallback:
+  structural: ast-grep
+  textual: rg
+
+workflow:
+  require_pre_change_impact: true
+  require_post_change_diagnostics: true
+  reviewer_independent_analysis: true
+  block_new_errors: true
+
+context:
+  prefer_semantic: true
+  include_related_tests: true
+  include_rag: true
+  include_git_history: targeted
+
+security:
+  allow_public_bind: false
+  trust_project_build_scripts: false

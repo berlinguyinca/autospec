@@ -82,6 +82,8 @@ fn cli_commands_help_lists_required_commands() {
         help_command_names(&stdout),
         [
             "init",
+            "aar",
+            "initiative",
             "lint",
             "claim",
             "parent",
@@ -90,6 +92,7 @@ fn cli_commands_help_lists_required_commands() {
             "status",
             "autonomous",
             "plan",
+            "rag",
             "validate",
             "run",
             "runtime",

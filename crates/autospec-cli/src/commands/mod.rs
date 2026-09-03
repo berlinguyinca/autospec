@@ -1,3 +1,4 @@
+pub mod aar;
 pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
@@ -5,12 +6,14 @@ pub mod doctor;
 pub mod explore;
 pub mod growth_report;
 pub mod init;
+pub mod initiative;
 pub mod issue;
 pub mod lint;
 pub mod managed_project;
 pub mod parent;
 pub mod plan;
 pub mod queue;
+pub mod rag;
 pub mod report;
 pub mod resume;
 pub mod run;
@@ -75,14 +78,23 @@ impl std::fmt::Display for CommandFailure {
 
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
+    ("aar", "Inspect adaptive agent runtime policy"),
+    (
+        "initiative",
+        "Inspect cross-repository initiatives",
+    ),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),
     ("queue", "Compute the safe GitHub issue queue"),
-    ("doctor", "Check the Rust core workspace"),
+    (
+        "doctor",
+        "Check the Rust core workspace (`doctor code-intel` for LSP health)",
+    ),
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
     ("plan", "Inspect a generated spec package"),
+    ("rag", "Inspect Agentic RAG policy and routing"),
     ("validate", "Run configured validation gates"),
     ("run", "Execute the spec queue"),
     ("runtime", "Inspect runtime ownership policy"),
@@ -108,6 +120,8 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] => match command.as_str() {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
+            "aar" => aar::run(rest),
+            "initiative" => initiative::run(rest),
             "issue" => issue::run(rest),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),
@@ -118,6 +132,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
+            "rag" => rag::run(rest),
             "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
             "run" => run::run(rest).map_err(CommandFailure::diagnostic),
             "runtime" => runtime::run(rest),

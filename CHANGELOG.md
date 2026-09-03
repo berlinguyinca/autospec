@@ -9,6 +9,87 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### Agentic RAG subsystem — core retrieval, evidence and policy layer (2026-09-03)
+- Added `autospec_core::rag`, the evidence and retrieval layer specified by the Agentic RAG
+  subsystem specification: an iterative loop (`RetrievalCoordinator`) that plans retrieval,
+  chooses among pluggable `KnowledgeSource` adapters, evaluates what comes back, reformulates
+  when the evidence falls short, and stops for a stated reason. It replaces the fixed top-K
+  model with a structured `ContextPackage` carrying provenance for every item rather than a
+  concatenated text blob.
+- Evidence is immutable and fully attributed: source, revision, worktree, lines, authority
+  class, privacy, content hash, and — for a model-written summary — the evidence ids it was
+  derived from, which the builder requires rather than accepts. A summary inherits the
+  strictest privacy and the weakest authority of its sources, so compression cannot launder a
+  blog post into current code.
+- Retrieval is revision- and worktree-aware. A Pi worktree reads its own copy of a modified
+  file and the base revision for everything else; worktree-scoped evidence is never written to
+  the shared cache, and a cached answer from one commit is never served for another.
+- Contradictions are surfaced, never resolved: the authority ladder names a preferred side
+  while both remain in the package, and a high-severity conflict blocks autonomous
+  implementation.
+- Retrieved text is treated as data. Content is fenced with its citation under a
+  `RETRIEVED EVIDENCE` trust band, and content that unambiguously tries to seize the agent is
+  quarantined out of the package entirely rather than fenced.
+- Budgets, stopping rules, role policies (eight roles, each with its own source ordering and
+  token ceiling), per-source staleness rules, the memory write gate, retrieval traces, metrics,
+  and InferWeave capability routing that filters on free context capacity before speed.
+- Added `autospec rag config|policy|sources|route` for inspecting the effective configuration,
+  a role's policy, which sources a role and task may reach, and why a routing decision chose
+  the node it chose. The command is read-only and performs no retrieval.
+- Added `scripts/validate-agentic-rag.sh`, gating the module inventory, per-module
+  specification cross-references, the integer-score rule, the file-size ratchet, and the
+  evaluation suites.
+- Scores are integers in permille rather than the specification's decimals: the workspace bans
+  `f64` in Rust crates, and a loop that branches on thresholds needs comparisons that are
+  reproducible across hosts.
+- Design record and the gap list against the specification's acceptance criteria:
+  [`docs/specs/2026-09-03-agentic-rag-subsystem-design.md`](docs/specs/2026-09-03-agentic-rag-subsystem-design.md).
+
+#### Adaptive Agent Runtime (AAR) foundation (2026-09-02)
+- Added `autospec_core::aar`, a harness- and model-agnostic decision engine that turns a work item
+  into an execution policy: deterministic-first classification with evidence and confidence,
+  versioned model capability profiles, adaptive reasoning budgets, a narrow-first retrieval ladder,
+  cache-friendly prompt assembly with stable-prefix hashing, worktree-local durable task memory,
+  agent topology with programmatic separation-of-duty enforcement, edit guards and thrashing
+  detection, the InferWeave capability contract, a quota- and separation-aware escalation chain,
+  versioned execution telemetry, and cheapest-adequate profile recommendation.
+- Three rules are enforced in code rather than prose: a larger reasoning budget is kept only with
+  measured evidence that it helps; a node without enough free context is rejected outright rather
+  than out-scored by speed; and every fallback re-checks separation of duties, so a quota failure
+  cannot put the implementer and the reviewer on one model.
+- Added `autospec aar classify|plan|explain|memory init|rules`. `plan --json` emits the
+  policy-versioned, auditable decision record; `explain` renders the prose rationale for the
+  selected profile.
+- Added `scripts/validate-aar.sh`, guarding the module and test inventory, the documented defaults,
+  and the load-bearing invariants, then running the AAR suites single-threaded.
+- Design and acceptance-criteria status: `docs/specs/2026-09-02-adaptive-agent-runtime-design.md`.
+
+#### AutoSpec Initiatives: planning and multi-repository orchestration v2 (2026-09-03)
+- Added the Initiative as a first-class coordination unit that belongs to no repository and no
+  organization. `crates/autospec-core/src/initiative/` carries the model: globally qualified
+  `host/owner/repository` identity with per-repository capability records, the normalized
+  Definition (`REQ-*`/`AC-*` with provenance and verifiability gaps), versioned architecture
+  plans, and the executable cross-repository task DAG.
+- Cross-repository dependencies are AutoSpec task ids, never repository-local issue numbers. The
+  scheduler releases independent branches concurrently and reports the first reason each blocked
+  task is held, so a missing permission in one organization blocks only that branch and its
+  descendants.
+- Added role-aware model routing with auditable fallback: roles declare capability class, vision,
+  context floor, locality, privacy ceiling, and an integer cost ceiling; every rejected candidate
+  keeps its reason. Fallback narrows the model set and never collapses two roles into one session.
+- Added the evidence and coverage model. A requirement completes only when an independent session
+  verified it or an approved waiver exists; review or verification evidence produced by the
+  session that implemented the task is discarded and named in `rejected_evidence`.
+- Added the GitHub projection, derived from canonical state on every render, with `import`,
+  `reject`, `approval_required`, and `drift` reconciliation policies. A synchronization failure
+  degrades the view and leaves canonical state untouched.
+- Added `autospec initiative init|validate|ready|coverage|verify|project|status`. `validate` and
+  `verify` exit non-zero when the Initiative is not executable or not complete, so both work as
+  gates. Added `schemas/autospec-initiative.schema.json`,
+  `scripts/autospec-initiative-contract.sh` (a drift gate over the module surface, the CLI, the
+  schema, and the design document), and
+  `docs/specs/2026-09-03-initiative-planning-multi-repo-orchestration-v2-design.md`.
+
 #### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
 - Added one marker-verified managed GitHub Project per product, backed by a private product-global
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
