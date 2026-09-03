@@ -33,6 +33,7 @@ batch-donel.json
 .autospec/*
 !.autospec/
 !.autospec/autospec.yml
+!.autospec/code-intelligence.yaml
 !.autospec/dogfood.yml
 !.autospec/competitors.yml
 # Keep generated spec packages when they are part of release planning.

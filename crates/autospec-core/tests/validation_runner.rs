@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 153); // +9: orphaned-suite ratchet and suites it caught (#3360)
-    assert_eq!(full.unique_ids().len(), 148); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 154); // +9: orphaned-suite ratchet (#3360); +1: code intelligence
+    assert_eq!(full.unique_ids().len(), 149); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -175,6 +175,7 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_persona_suite"
                 | "check_reuse_lens_suite"
                 | "check_bats_negation_ratchet"
+                | "check_code_intelligence_contract"
                 | "check_autospec_fleet_enabled_false"
                 | "check_autospec_sweep_enabled_false"
                 | "check_classify_lang_labels"

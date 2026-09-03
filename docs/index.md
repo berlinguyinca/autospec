@@ -17,6 +17,7 @@ AutoSpec is a spec-first workflow suite for AI-assisted software delivery. These
 
 ## Reference Docs
 
+- [Code intelligence gateway](code-intelligence.md)
 - [Configuration reference](CONFIG_REFERENCE.md)
 - [Flags](FLAGS.md)
 - [API reference](API_REFERENCE.md)

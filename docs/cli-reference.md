@@ -9,6 +9,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec init --spec <id> [--spec <id>]... [--json]` | yes | initialize persisted planned state without executing work; refuses existing state |
 | `autospec doctor --json` | yes | implemented |
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
+| `autospec doctor code-intel [--json]` | yes | code intelligence backend, language-server and fallback health ([docs](code-intelligence.md)) |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
 | `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; shell wrapper remains the executor |
