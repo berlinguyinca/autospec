@@ -38,7 +38,11 @@ impl PlannedQuery {
 
     /// Identity used to detect a repeated query (spec section 41.1).
     pub fn signature(&self) -> String {
-        format!("{}::{}", self.mode.as_str(), self.query.trim().to_lowercase())
+        format!(
+            "{}::{}",
+            self.mode.as_str(),
+            self.query.trim().to_lowercase()
+        )
     }
 }
 
@@ -144,7 +148,10 @@ impl QueryPlanner {
         }
         for symbol in known_symbols.iter().take(2) {
             for (mode, reformulation) in [
-                (SearchMode::Implementations, Reformulation::SymbolToImplementations),
+                (
+                    SearchMode::Implementations,
+                    Reformulation::SymbolToImplementations,
+                ),
                 (SearchMode::SymbolReferences, Reformulation::SymbolToCallers),
                 (SearchMode::Tests, Reformulation::SymbolToTests),
             ] {
@@ -197,10 +204,14 @@ impl QueryPlanner {
 pub fn extract_symbols(text: &str) -> Vec<String> {
     let mut symbols = Vec::new();
     for token in text.split(|character: char| {
-        !(character.is_ascii_alphanumeric() || character == '_' || character == '.' || character == ':')
+        !(character.is_ascii_alphanumeric()
+            || character == '_'
+            || character == '.'
+            || character == ':')
     }) {
         let token = token.trim_matches(|character| character == '.' || character == ':');
-        if token.len() < 3 || !token.starts_with(|character: char| character.is_ascii_alphabetic()) {
+        if token.len() < 3 || !token.starts_with(|character: char| character.is_ascii_alphabetic())
+        {
             continue;
         }
         if is_symbol_shaped(token) && !symbols.iter().any(|known| known == token) {

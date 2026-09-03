@@ -8,11 +8,11 @@ use autospec_core::rag::budget::{BudgetLimit, RetrievalBudget, StopReason};
 use autospec_core::rag::coordinator::{RetrievalCoordinator, RetrievalRequest};
 use autospec_core::rag::policy::AgentRole;
 use autospec_core::rag::source::{SearchMode, SourceKind, SourceRegistry};
-use rag_support::{
-    CountingSource, FailingSource, NOW, REVISION, StaticSource, evidence, scope,
-};
+use rag_support::{evidence, scope, CountingSource, FailingSource, StaticSource, NOW, REVISION};
 
-fn registry_with(sources: Vec<Box<dyn autospec_core::rag::source::KnowledgeSource>>) -> SourceRegistry {
+fn registry_with(
+    sources: Vec<Box<dyn autospec_core::rag::source::KnowledgeSource>>,
+) -> SourceRegistry {
     let mut registry = SourceRegistry::new();
     for source in sources {
         registry.register(source).expect("distinct source kinds");
@@ -20,7 +20,11 @@ fn registry_with(sources: Vec<Box<dyn autospec_core::rag::source::KnowledgeSourc
     registry
 }
 
-fn spec_evidence(id: &str, content: &str, relevance: u16) -> autospec_core::rag::evidence::Evidence {
+fn spec_evidence(
+    id: &str,
+    content: &str,
+    relevance: u16,
+) -> autospec_core::rag::evidence::Evidence {
     evidence(
         id,
         SourceKind::Specification,
@@ -40,8 +44,7 @@ fn retrieval_stops_once_the_evidence_covers_every_required_aspect() {
             spec_evidence("ev_2", "the registry reports available seats", 880),
         ],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-482",
         AgentRole::Planner,
@@ -65,8 +68,7 @@ fn insufficient_evidence_reformulates_rather_than_stopping() {
         SourceKind::Specification,
         vec![spec_evidence("ev_1", "the scheduler selects a node", 900)],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-482",
         AgentRole::Planner,
@@ -77,7 +79,11 @@ fn insufficient_evidence_reformulates_rather_than_stopping() {
 
     let outcome = coordinator.retrieve("rag_2", &request).expect("loop runs");
 
-    assert!(!outcome.stop_reason.is_satisfied(), "{:?}", outcome.stop_reason);
+    assert!(
+        !outcome.stop_reason.is_satisfied(),
+        "{:?}",
+        outcome.stop_reason
+    );
     let assessment = outcome.assessment.expect("an assessment was produced");
     assert_eq!(assessment.uncovered_aspects, vec!["telemetry".to_string()]);
     assert!(outcome.trace.count_events("evaluation") >= 1);
@@ -89,8 +95,7 @@ fn the_result_states_why_retrieval_stopped() {
         SourceKind::Specification,
         vec![spec_evidence("ev_1", "unrelated content", 100)],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new("AS-1", AgentRole::Planner, "anything", scope())
         .requiring(["absent".to_string()]);
 
@@ -112,8 +117,7 @@ fn the_iteration_budget_stops_the_loop() {
         SourceKind::Specification,
         vec![spec_evidence("ev_1", "partial answer", 900)],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let budget = RetrievalBudget {
         max_iterations: 1,
         max_unproductive_iterations: 9,
@@ -138,8 +142,7 @@ fn the_query_budget_stops_the_loop() {
         SourceKind::Specification,
         vec![spec_evidence("ev_1", "partial", 900)],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let budget = RetrievalBudget {
         max_queries: 1,
         max_external_queries: 1,
@@ -173,8 +176,7 @@ fn an_authoritative_answer_ends_the_loop_immediately() {
         SourceKind::Specification,
         vec![user_requirement],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -196,8 +198,7 @@ fn a_repeated_query_is_never_issued_twice() {
         vec![spec_evidence("ev_1", "partial", 900)],
     ));
     let registry = registry_with(vec![counting]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -227,8 +228,7 @@ fn a_failing_source_degrades_the_retrieval_without_ending_it() {
             vec![spec_evidence("ev_1", "the scheduler picks a node", 900)],
         )),
     ]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -252,14 +252,13 @@ fn the_evidence_item_budget_caps_what_the_loop_retains() {
         SourceKind::Specification,
         many,
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let budget = RetrievalBudget {
         max_evidence_items: 3,
         ..RetrievalBudget::default()
     };
-    let request = RetrievalRequest::new("AS-1", AgentRole::Planner, "facts", scope())
-        .with_budget(budget);
+    let request =
+        RetrievalRequest::new("AS-1", AgentRole::Planner, "facts", scope()).with_budget(budget);
 
     let outcome = coordinator.retrieve("rag_9", &request).expect("loop runs");
 
@@ -295,8 +294,7 @@ fn a_budget_with_a_zero_limit_is_refused_rather_than_silently_returning_nothing(
         SourceKind::Specification,
         vec![spec_evidence("ev_1", "content", 900)],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let budget = RetrievalBudget {
         max_iterations: 0,
         ..RetrievalBudget::default()
@@ -338,8 +336,7 @@ fn two_sources_quoting_the_same_lines_reach_the_agent_once() {
             ),
         ],
     ))]);
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -348,7 +345,9 @@ fn two_sources_quoting_the_same_lines_reach_the_agent_once() {
     )
     .requiring(["scheduler".to_string()]);
 
-    let outcome = coordinator.retrieve("rag_dup", &request).expect("loop runs");
+    let outcome = coordinator
+        .retrieve("rag_dup", &request)
+        .expect("loop runs");
 
     let package = outcome.package.expect("package assembled");
     assert_eq!(
@@ -380,9 +379,10 @@ fn the_wall_clock_budget_stops_the_loop_when_the_caller_supplies_a_clock() {
 
     // A clock that has already passed the limit on the first reading.
     let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION)
-            .with_elapsed(|| 9);
-    let outcome = coordinator.retrieve("rag_clock", &request).expect("loop runs");
+        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION).with_elapsed(|| 9);
+    let outcome = coordinator
+        .retrieve("rag_clock", &request)
+        .expect("loop runs");
 
     assert_eq!(
         outcome.stop_reason,
@@ -412,9 +412,10 @@ fn without_a_clock_the_wall_clock_budget_simply_does_not_fire() {
     .requiring(["scheduler".to_string()])
     .with_budget(budget);
 
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
-    let outcome = coordinator.retrieve("rag_noclock", &request).expect("loop runs");
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let outcome = coordinator
+        .retrieve("rag_noclock", &request)
+        .expect("loop runs");
 
     assert_eq!(outcome.stop_reason, StopReason::SufficientEvidence);
     assert_eq!(outcome.ledger.elapsed_seconds(), 0);

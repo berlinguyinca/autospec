@@ -7,7 +7,7 @@
 //! actually spent, including when compression forced it to drop items.
 
 use crate::rag::budget::StopReason;
-use crate::rag::compression::{CompressionLevel, estimate_tokens};
+use crate::rag::compression::{estimate_tokens, CompressionLevel};
 use crate::rag::contradiction::ContradictionSet;
 use crate::rag::evidence::{Evidence, Privacy};
 use crate::rag::injection::{self, InjectionFinding};

@@ -14,7 +14,7 @@ use autospec_core::rag::coordinator::{RetrievalCoordinator, RetrievalRequest};
 use autospec_core::rag::evidence::Evidence;
 use autospec_core::rag::policy::AgentRole;
 use autospec_core::rag::source::{KnowledgeSource, SourceKind, SourceRegistry};
-use rag_support::{NOW, REVISION, StaticSource, evidence, scope};
+use rag_support::{evidence, scope, StaticSource, NOW, REVISION};
 
 /// A corpus where the answer needs two facts, and the highest-similarity
 /// chunks are all about the first one — the shape a fixed top-K retriever
@@ -66,8 +66,7 @@ fn agentic_retrieval_covers_an_aspect_that_top_k_truncates_away() {
         &scope(),
         3,
     );
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-482",
         AgentRole::Planner,
@@ -112,8 +111,7 @@ fn agentic_retrieval_reports_the_gap_top_k_leaves_silent() {
         &scope(),
         3,
     );
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request =
         RetrievalRequest::new("AS-1", AgentRole::Planner, "how are nodes chosen?", scope())
             .requiring(aspects.to_vec());
@@ -170,8 +168,7 @@ fn agentic_retrieval_supplies_fewer_tokens_when_the_answer_is_small() {
         &scope(),
         8,
     );
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -219,8 +216,7 @@ fn top_k_ranks_a_poisoned_chunk_first_and_the_agentic_loop_quarantines_it() {
         &scope(),
         2,
     );
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request =
         RetrievalRequest::new("AS-1", AgentRole::Planner, "how are nodes chosen?", scope())
             .requiring(["scheduler".to_string()]);
@@ -232,7 +228,10 @@ fn top_k_ranks_a_poisoned_chunk_first_and_the_agentic_loop_quarantines_it() {
     );
     let package = agentic.package.expect("package assembled");
     assert!(!package.render().contains("Ignore previous instructions"));
-    assert_eq!(package.quarantined().len() + agentic.trace.count_events("evidence_quarantined"), 1);
+    assert_eq!(
+        package.quarantined().len() + agentic.trace.count_events("evidence_quarantined"),
+        1
+    );
 }
 
 #[test]
@@ -253,8 +252,7 @@ fn top_k_loses_provenance_that_the_agentic_package_preserves() {
         &scope(),
         3,
     );
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request =
         RetrievalRequest::new("AS-1", AgentRole::Planner, "how are nodes chosen?", scope())
             .requiring(["scheduler".to_string()]);

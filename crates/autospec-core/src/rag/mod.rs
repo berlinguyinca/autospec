@@ -68,19 +68,19 @@ pub mod metrics;
 pub mod policy;
 pub mod query;
 pub mod routing;
-pub mod score;
 pub mod scope;
+pub mod score;
 pub mod source;
 pub mod trace;
 
 pub use authority::{AuthorityLadder, SourceAuthority};
-pub use baseline::{BaselineOutcome, retrieve_top_k};
+pub use baseline::{retrieve_top_k, BaselineOutcome};
 pub use budget::{BudgetLedger, BudgetLimit, RetrievalBudget, StopReason};
 pub use cache::{CacheClass, CacheEntry, CacheKey, CacheStats, RetrievalCache};
-pub use compression::{CompressionLevel, estimate_tokens};
+pub use compression::{estimate_tokens, CompressionLevel};
 pub use config::RagConfig;
 pub use context_package::{ContextPackage, ContextPackageBuilder};
-pub use contradiction::{Contradiction, ContradictionSeverity, ContradictionSet};
+pub use contradiction::{Contradiction, ContradictionSet, ContradictionSeverity};
 pub use coordinator::{RetrievalCoordinator, RetrievalOutcome, RetrievalRequest};
 pub use evaluator::{
     EvaluationRequest, EvidenceAssessment, EvidenceEvaluator, SufficiencyDecision,
@@ -96,10 +96,12 @@ pub use memory::{MemoryCandidate, MemoryTier, MemoryWritePolicy};
 pub use metrics::RetrievalMetrics;
 pub use policy::{AgentRole, PolicySet, RetrievalPolicy};
 pub use query::{PlannedQuery, QueryPlanner};
-pub use routing::{ModelCapabilities, NodeCandidate, RagModelTask, select_node};
-pub use score::Score;
+pub use routing::{select_node, ModelCapabilities, NodeCandidate, RagModelTask};
 pub use scope::{PathState, RetrievalScope};
-pub use source::{KnowledgeSource, SearchMode, SearchRequest, SearchResult, SourceKind, SourceRegistry};
+pub use score::Score;
+pub use source::{
+    KnowledgeSource, SearchMode, SearchRequest, SearchResult, SourceKind, SourceRegistry,
+};
 pub use trace::{RetrievalTrace, TraceEvent};
 
 /// Schema version of the evidence, context-package and trace wire formats.

@@ -4,9 +4,7 @@
 mod rag_support;
 
 use autospec_core::rag::authority::{AuthorityLadder, SourceAuthority};
-use autospec_core::rag::contradiction::{
-    Contradiction, ContradictionSeverity, ContradictionSet,
-};
+use autospec_core::rag::contradiction::{Contradiction, ContradictionSet, ContradictionSeverity};
 use autospec_core::rag::source::SourceKind;
 use rag_support::evidence;
 
@@ -131,7 +129,10 @@ fn equal_authority_leaves_the_conflict_unresolved() {
         ContradictionSeverity::Medium,
     );
 
-    assert_eq!(contradiction.preferred_evidence(&AuthorityLadder::default()), None);
+    assert_eq!(
+        contradiction.preferred_evidence(&AuthorityLadder::default()),
+        None
+    );
 }
 
 #[test]
@@ -173,7 +174,14 @@ fn the_same_conflict_recorded_twice_is_held_once() {
     let (spec, code) = timeout_disagreement();
     let mut set = ContradictionSet::new();
     let make = |id: &str, left, right| {
-        Contradiction::new(id, "timeout", left, right, "30 vs 60", ContradictionSeverity::High)
+        Contradiction::new(
+            id,
+            "timeout",
+            left,
+            right,
+            "30 vs 60",
+            ContradictionSeverity::High,
+        )
     };
 
     set.record(make("con_1", &spec, &code));

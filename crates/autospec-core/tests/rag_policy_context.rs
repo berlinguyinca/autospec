@@ -7,11 +7,9 @@ use autospec_core::rag::authority::SourceAuthority;
 use autospec_core::rag::budget::{RetrievalBudget, StopReason};
 use autospec_core::rag::compression::{self, CompressionLevel};
 use autospec_core::rag::context_package::ContextPackageBuilder;
-use autospec_core::rag::contradiction::{
-    Contradiction, ContradictionSeverity, ContradictionSet,
-};
+use autospec_core::rag::contradiction::{Contradiction, ContradictionSet, ContradictionSeverity};
 use autospec_core::rag::evidence::Privacy;
-use autospec_core::rag::policy::{ALL_ROLES, AgentRole, PolicySet, RetrievalPolicy};
+use autospec_core::rag::policy::{AgentRole, PolicySet, RetrievalPolicy, ALL_ROLES};
 use autospec_core::rag::source::SourceKind;
 use rag_support::evidence;
 
@@ -191,7 +189,10 @@ fn compression_chooses_a_coarser_level_as_the_budget_tightens() {
     let generous = compression::level_for_budget(4, 4_000).expect("a level fits");
     let tight = compression::level_for_budget(40, 4_000).expect("a level fits");
 
-    assert!(tight > generous, "{tight:?} should be coarser than {generous:?}");
+    assert!(
+        tight > generous,
+        "{tight:?} should be coarser than {generous:?}"
+    );
 }
 
 #[test]
@@ -228,7 +229,10 @@ fn a_role_policy_override_replaces_only_that_role() {
         .with_max_context_tokens(1_000);
     policies.set(narrowed);
 
-    assert_eq!(policies.policy(AgentRole::Planner).max_context_tokens(), 1_000);
+    assert_eq!(
+        policies.policy(AgentRole::Planner).max_context_tokens(),
+        1_000
+    );
     assert_eq!(
         policies.policy(AgentRole::Reviewer).max_context_tokens(),
         40_000

@@ -191,7 +191,14 @@ fn role_defaults(role: AgentRole) -> (Vec<SourceKind>, Vec<SourceKind>, u32) {
     match role {
         // Conceptual and contractual knowledge over line-level detail (7.1).
         AgentRole::Specification => (
-            vec![Specification, Adr, Documentation, GitHub, Memory, Repository],
+            vec![
+                Specification,
+                Adr,
+                Documentation,
+                GitHub,
+                Memory,
+                Repository,
+            ],
             vec![Runtime, Web],
             60_000,
         ),
@@ -259,7 +266,11 @@ pub struct PolicySet {
 impl Default for PolicySet {
     fn default() -> Self {
         Self {
-            policies: ALL_ROLES.iter().copied().map(RetrievalPolicy::for_role).collect(),
+            policies: ALL_ROLES
+                .iter()
+                .copied()
+                .map(RetrievalPolicy::for_role)
+                .collect(),
         }
     }
 }

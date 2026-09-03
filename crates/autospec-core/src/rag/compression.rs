@@ -7,7 +7,7 @@
 //! to the lines.
 
 use crate::rag::evidence::{
-    ContentForm, Evidence, EvidenceBuilder, EvidenceCapture, inherited_privacy,
+    inherited_privacy, ContentForm, Evidence, EvidenceBuilder, EvidenceCapture,
 };
 use crate::rag::score::Score;
 

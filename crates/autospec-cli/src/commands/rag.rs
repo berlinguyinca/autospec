@@ -7,8 +7,8 @@
 //! can check it without running a retrieval.
 
 use autospec_core::rag::config::RagConfig;
-use autospec_core::rag::policy::{ALL_ROLES, AgentRole};
-use autospec_core::rag::routing::{NodeCandidate, RagModelTask, ReasoningClass, select_node};
+use autospec_core::rag::policy::{AgentRole, ALL_ROLES};
+use autospec_core::rag::routing::{select_node, NodeCandidate, RagModelTask, ReasoningClass};
 use autospec_core::rag::source::ALL_SOURCE_KINDS;
 
 use super::CommandFailure;
@@ -60,9 +60,9 @@ fn print_help() {
 
 fn config(args: &[String]) -> Result<(), CommandFailure> {
     let config = build_config(args)?;
-    config
-        .validate()
-        .map_err(|error| CommandFailure::diagnostic(format!("invalid agentic_rag config: {error}")))?;
+    config.validate().map_err(|error| {
+        CommandFailure::diagnostic(format!("invalid agentic_rag config: {error}"))
+    })?;
     if super::is_json(args) {
         println!("{}", config_json(&config));
     } else {
@@ -94,10 +94,7 @@ fn policy(args: &[String]) -> Result<(), CommandFailure> {
         println!("  max_context_tokens:  {}", policy.max_context_tokens());
         println!("  max_iterations:      {}", budget.max_iterations);
         println!("  max_queries:         {}", budget.max_queries);
-        println!(
-            "  sufficiency:         {}",
-            policy.sufficiency_threshold()
-        );
+        println!("  sufficiency:         {}", policy.sufficiency_threshold());
         println!(
             "  independent_review:  {}",
             policy.requires_independent_verification()
@@ -196,7 +193,10 @@ fn route(args: &[String]) -> Result<(), CommandFailure> {
         return Ok(());
     }
     println!("task:                    {}", task.as_str());
-    println!("reasoning_class:         {}", capabilities.reasoning_class.as_str());
+    println!(
+        "reasoning_class:         {}",
+        capabilities.reasoning_class.as_str()
+    );
     println!("coding:                  {}", capabilities.coding);
     println!(
         "latency_priority:        {}",
@@ -221,9 +221,9 @@ fn build_config(args: &[String]) -> Result<RagConfig, CommandFailure> {
     let mut index = 0;
     while index < args.len() {
         if args[index] == "--set" {
-            let assignment = args.get(index + 1).ok_or_else(|| {
-                CommandFailure::diagnostic("--set expects KEY=VALUE".to_string())
-            })?;
+            let assignment = args
+                .get(index + 1)
+                .ok_or_else(|| CommandFailure::diagnostic("--set expects KEY=VALUE".to_string()))?;
             let (key, value) = assignment.split_once('=').ok_or_else(|| {
                 CommandFailure::diagnostic(format!("--set expects KEY=VALUE, found: {assignment}"))
             })?;

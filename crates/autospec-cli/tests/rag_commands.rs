@@ -200,5 +200,8 @@ fn an_unknown_rag_subcommand_is_an_error() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unknown autospec rag subcommand"), "{stderr}");
+    assert!(
+        stderr.contains("unknown autospec rag subcommand"),
+        "{stderr}"
+    );
 }

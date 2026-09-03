@@ -165,7 +165,12 @@ mod tests {
 
     #[test]
     fn multiply_rounds_half_up() {
-        assert_eq!(Score::from_permille(500).multiply(Score::from_permille(3)).permille(), 2);
+        assert_eq!(
+            Score::from_permille(500)
+                .multiply(Score::from_permille(3))
+                .permille(),
+            2
+        );
     }
 
     #[test]

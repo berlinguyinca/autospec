@@ -240,12 +240,7 @@ impl KnowledgeGraph {
     /// Both endpoints must already exist. A dangling edge is the graph-level
     /// form of a hallucinated reference (section 41.2), and rejecting it here
     /// means a traversal can never return a node that was never indexed.
-    pub fn add_edge(
-        &mut self,
-        from: &str,
-        relation: Relation,
-        to: &str,
-    ) -> Result<(), String> {
+    pub fn add_edge(&mut self, from: &str, relation: Relation, to: &str) -> Result<(), String> {
         if !self.nodes.contains_key(from) {
             return Err(format!("unknown edge source node: {from}"));
         }

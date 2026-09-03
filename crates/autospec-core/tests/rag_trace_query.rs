@@ -7,13 +7,13 @@ use autospec_core::rag::authority::SourceAuthority;
 use autospec_core::rag::budget::{BudgetLedger, RetrievalBudget, StopReason};
 use autospec_core::rag::coordinator::{RetrievalCoordinator, RetrievalRequest};
 use autospec_core::rag::evaluator::SufficiencyDecision;
-use autospec_core::rag::metrics::{RetrievalMetrics, outcome_label};
+use autospec_core::rag::metrics::{outcome_label, RetrievalMetrics};
 use autospec_core::rag::policy::AgentRole;
-use autospec_core::rag::query::{QueryPlanner, extract_symbols};
+use autospec_core::rag::query::{extract_symbols, QueryPlanner};
 use autospec_core::rag::score::Score;
 use autospec_core::rag::source::{KnowledgeSource, SearchMode, SourceKind, SourceRegistry};
 use autospec_core::rag::trace::{RetrievalTrace, TraceEvent};
-use rag_support::{NOW, REVISION, StaticSource, evidence, scope};
+use rag_support::{evidence, scope, StaticSource, NOW, REVISION};
 
 #[test]
 fn symbol_shaped_terms_are_extracted_and_english_words_are_not() {
@@ -36,12 +36,12 @@ fn the_opening_round_pairs_a_semantic_search_with_a_symbol_lookup() {
         &[SourceKind::Repository, SourceKind::Specification],
     );
 
-    assert!(planned.iter().any(|query| query.mode == SearchMode::Semantic));
-    assert!(
-        planned
-            .iter()
-            .any(|query| query.mode == SearchMode::SymbolDefinition)
-    );
+    assert!(planned
+        .iter()
+        .any(|query| query.mode == SearchMode::Semantic));
+    assert!(planned
+        .iter()
+        .any(|query| query.mode == SearchMode::SymbolDefinition));
 }
 
 #[test]
@@ -172,8 +172,7 @@ fn metrics_are_derived_from_the_trace_and_the_package() {
         )],
     ));
     registry.register(source).expect("registers");
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, REVISION);
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,

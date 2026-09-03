@@ -149,7 +149,9 @@ impl StopReason {
     pub fn describe(&self) -> String {
         match self {
             Self::SufficientEvidence => "evidence sufficiency threshold reached".to_string(),
-            Self::AuthoritativeAnswerFound => "an authoritative source answered the question".to_string(),
+            Self::AuthoritativeAnswerFound => {
+                "an authoritative source answered the question".to_string()
+            }
             Self::BudgetExhausted(limit) => format!("budget exhausted: {}", limit.as_str()),
             Self::NoNewEvidence {
                 unproductive_iterations,

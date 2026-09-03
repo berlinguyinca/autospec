@@ -194,7 +194,10 @@ mod tests {
     #[test]
     fn parse_round_trips_every_authority() {
         for authority in DEFAULT_PRECEDENCE {
-            assert_eq!(SourceAuthority::parse(authority.as_str()).unwrap(), authority);
+            assert_eq!(
+                SourceAuthority::parse(authority.as_str()).unwrap(),
+                authority
+            );
         }
     }
 

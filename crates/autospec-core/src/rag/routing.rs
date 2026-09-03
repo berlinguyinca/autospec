@@ -84,9 +84,7 @@ impl RagModelTask {
             Self::TaskClassification | Self::QueryRewriting | Self::RelevanceScoring => {
                 (ReasoningClass::Small, false, LatencyPriority::High)
             }
-            Self::CodeRelationshipAnalysis => {
-                (ReasoningClass::Medium, true, LatencyPriority::High)
-            }
+            Self::CodeRelationshipAnalysis => (ReasoningClass::Medium, true, LatencyPriority::High),
             Self::ArchitectureSynthesis => (ReasoningClass::Strong, false, LatencyPriority::Normal),
             Self::ImplementationPlan => (ReasoningClass::Strong, true, LatencyPriority::Normal),
         };

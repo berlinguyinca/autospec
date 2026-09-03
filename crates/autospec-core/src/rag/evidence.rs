@@ -6,8 +6,8 @@
 //! what the agent actually saw.
 
 use crate::rag::authority::SourceAuthority;
-use crate::rag::score::Score;
 use crate::rag::scope::RetrievalScope;
+use crate::rag::score::Score;
 use crate::rag::source::SourceKind;
 
 /// Where in a source an evidence item was read from.

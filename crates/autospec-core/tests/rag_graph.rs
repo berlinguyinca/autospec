@@ -144,7 +144,10 @@ fn a_cycle_does_not_make_traversal_diverge() {
         .expect("origin exists");
 
     assert!(reached.len() < graph.node_count() + 1);
-    let mut ids = reached.iter().map(|node| node.node.id.clone()).collect::<Vec<_>>();
+    let mut ids = reached
+        .iter()
+        .map(|node| node.node.id.clone())
+        .collect::<Vec<_>>();
     ids.sort();
     let unique = ids.len();
     ids.dedup();

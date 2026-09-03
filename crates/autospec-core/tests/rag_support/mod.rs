@@ -7,9 +7,11 @@
 #![allow(dead_code)]
 
 use autospec_core::rag::authority::SourceAuthority;
-use autospec_core::rag::evidence::{Evidence, EvidenceBuilder, EvidenceCapture, Privacy, QueryProvenance, SourceLocation};
-use autospec_core::rag::score::Score;
+use autospec_core::rag::evidence::{
+    Evidence, EvidenceBuilder, EvidenceCapture, Privacy, QueryProvenance, SourceLocation,
+};
 use autospec_core::rag::scope::RetrievalScope;
+use autospec_core::rag::score::Score;
 use autospec_core::rag::source::{
     KnowledgeSource, SearchMode, SearchRequest, SearchResult, SourceKind,
 };
@@ -126,9 +128,7 @@ impl KnowledgeSource for StaticSource {
     fn search(&self, request: &SearchRequest) -> Result<SearchResult, String> {
         let limit = request.limit as usize;
         if self.evidence.len() > limit {
-            return Ok(SearchResult::truncated(
-                self.evidence[..limit].to_vec(),
-            ));
+            return Ok(SearchResult::truncated(self.evidence[..limit].to_vec()));
         }
         Ok(SearchResult::found(self.evidence.clone()))
     }

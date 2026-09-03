@@ -6,20 +6,16 @@ mod rag_support;
 use autospec_core::rag::authority::SourceAuthority;
 use autospec_core::rag::config::{RagConfig, SourceAvailability};
 use autospec_core::rag::evidence::Privacy;
-use autospec_core::rag::freshness::{
-    Freshness, FreshnessInput, FreshnessPolicy, StalenessRule,
-};
-use autospec_core::rag::memory::{
-    MemoryCandidate, MemoryRejection, MemoryTier, MemoryWritePolicy,
-};
+use autospec_core::rag::freshness::{Freshness, FreshnessInput, FreshnessPolicy, StalenessRule};
+use autospec_core::rag::memory::{MemoryCandidate, MemoryRejection, MemoryTier, MemoryWritePolicy};
 use autospec_core::rag::metrics::ContextEfficiency;
 use autospec_core::rag::policy::AgentRole;
 use autospec_core::rag::routing::{
-    LatencyPriority, ModelCapabilities, NodeCandidate, RagModelTask, ReasoningClass, select_node,
+    select_node, LatencyPriority, ModelCapabilities, NodeCandidate, RagModelTask, ReasoningClass,
 };
 use autospec_core::rag::score::Score;
 use autospec_core::rag::source::SourceKind;
-use rag_support::{NOW, REVISION, evidence};
+use rag_support::{evidence, NOW, REVISION};
 
 fn node(id: &str, free_context: u32, speed: u32) -> NodeCandidate {
     NodeCandidate {
@@ -53,12 +49,10 @@ fn a_faster_node_without_the_context_capacity_is_not_selected() {
     let decision = select_node(&needs(60_000), &[fast, slow]);
 
     assert_eq!(decision.selected.expect("a node is eligible").id, "B");
-    assert!(
-        decision
-            .rejected
-            .iter()
-            .any(|rejection| rejection.node_id == "A" && rejection.reason.contains("free context"))
-    );
+    assert!(decision
+        .rejected
+        .iter()
+        .any(|rejection| rejection.node_id == "A" && rejection.reason.contains("free context")));
 }
 
 #[test]
@@ -86,7 +80,10 @@ fn routing_reserves_a_margin_above_the_token_estimate() {
     assert_eq!(exact.required_context_tokens, 11_000);
     assert!(exact.selected.is_none());
     assert_eq!(
-        with_margin.selected.expect("the roomier node is eligible").id,
+        with_margin
+            .selected
+            .expect("the roomier node is eligible")
+            .id,
         "roomy"
     );
 }
@@ -152,9 +149,18 @@ fn runtime_telemetry_goes_stale_after_its_window() {
         superseded: false,
     };
 
-    assert_eq!(policy.assess(SourceKind::Runtime, &make(10)), Freshness::Current);
-    assert_eq!(policy.assess(SourceKind::Runtime, &make(50)), Freshness::Aging);
-    assert_eq!(policy.assess(SourceKind::Runtime, &make(61)), Freshness::Stale);
+    assert_eq!(
+        policy.assess(SourceKind::Runtime, &make(10)),
+        Freshness::Current
+    );
+    assert_eq!(
+        policy.assess(SourceKind::Runtime, &make(50)),
+        Freshness::Aging
+    );
+    assert_eq!(
+        policy.assess(SourceKind::Runtime, &make(61)),
+        Freshness::Stale
+    );
 }
 
 #[test]
@@ -185,7 +191,10 @@ fn a_project_can_override_one_sources_staleness_rule() {
         superseded: false,
     };
 
-    assert_eq!(policy.assess(SourceKind::Runtime, &input), Freshness::Current);
+    assert_eq!(
+        policy.assess(SourceKind::Runtime, &input),
+        Freshness::Current
+    );
 }
 
 #[test]
@@ -201,7 +210,10 @@ fn a_memory_candidate_without_provenance_is_rejected() {
         durable: true,
     };
 
-    assert_eq!(policy.evaluate(&candidate), Err(MemoryRejection::NoProvenance));
+    assert_eq!(
+        policy.evaluate(&candidate),
+        Err(MemoryRejection::NoProvenance)
+    );
 }
 
 #[test]
@@ -226,7 +238,10 @@ fn private_evidence_cannot_enter_global_autospec_memory() {
         .evaluate(&candidate)
         .expect_err("internal evidence must not reach global memory");
 
-    assert!(matches!(rejection, MemoryRejection::PrivacyViolation { .. }));
+    assert!(matches!(
+        rejection,
+        MemoryRejection::PrivacyViolation { .. }
+    ));
 }
 
 #[test]
@@ -393,10 +408,18 @@ fn the_rendered_configuration_names_every_role_and_source() {
     let yaml = RagConfig::default().render_yaml();
 
     for role in autospec_core::rag::policy::ALL_ROLES {
-        assert!(yaml.contains(role.as_str()), "missing role {}", role.as_str());
+        assert!(
+            yaml.contains(role.as_str()),
+            "missing role {}",
+            role.as_str()
+        );
     }
     for kind in autospec_core::rag::source::ALL_SOURCE_KINDS {
-        assert!(yaml.contains(kind.as_str()), "missing source {}", kind.as_str());
+        assert!(
+            yaml.contains(kind.as_str()),
+            "missing source {}",
+            kind.as_str()
+        );
     }
 }
 

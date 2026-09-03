@@ -164,10 +164,7 @@ impl TraceEvent {
                 evidence_id,
                 source,
                 reason,
-            } => format!(
-                "dropped {evidence_id} from {}: {reason}",
-                source.as_str()
-            ),
+            } => format!("dropped {evidence_id} from {}: {reason}", source.as_str()),
             Self::EvidenceQuarantined {
                 evidence_id,
                 markers,

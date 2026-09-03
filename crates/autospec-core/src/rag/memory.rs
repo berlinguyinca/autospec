@@ -5,7 +5,7 @@
 //! which must pass, evaluated in a fixed order so a rejection always names the
 //! first thing wrong rather than a random one.
 
-use crate::rag::evidence::{Evidence, Privacy, inherited_privacy};
+use crate::rag::evidence::{inherited_privacy, Evidence, Privacy};
 use crate::rag::score::Score;
 
 /// How long a memory entry is meant to live (spec section 16).
@@ -94,12 +94,20 @@ impl MemoryCandidate {
         durable: bool,
     ) -> Self {
         let privacy = inherited_privacy(supporting);
-        let confidence = Score::mean(&supporting.iter().map(Evidence::confidence).collect::<Vec<_>>());
+        let confidence = Score::mean(
+            &supporting
+                .iter()
+                .map(Evidence::confidence)
+                .collect::<Vec<_>>(),
+        );
         Self {
             id: id.into(),
             tier,
             content: content.into(),
-            provenance: supporting.iter().map(|item| item.id().to_string()).collect(),
+            provenance: supporting
+                .iter()
+                .map(|item| item.id().to_string())
+                .collect(),
             confidence,
             privacy,
             durable,
@@ -265,9 +273,7 @@ impl MemoryWritePolicy {
     pub fn admit(&mut self, mut entry: MemoryEntry) -> &MemoryEntry {
         entry.state = MemoryState::Active;
         self.active.push(entry);
-        self.active
-            .last()
-            .expect("an entry was just pushed")
+        self.active.last().expect("an entry was just pushed")
     }
 
     /// Find an active entry the candidate contradicts.
@@ -297,9 +303,15 @@ fn normalized(text: &str) -> String {
 
 fn is_negated(text: &str) -> bool {
     let lowered = text.to_lowercase();
-    [" never ", " not ", " no longer ", " must not ", " does not "]
-        .iter()
-        .any(|marker| lowered.contains(marker))
+    [
+        " never ",
+        " not ",
+        " no longer ",
+        " must not ",
+        " does not ",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
 }
 
 fn subject(text: &str) -> String {

@@ -21,7 +21,7 @@ use crate::rag::evidence::Evidence;
 use crate::rag::freshness::{Freshness, FreshnessInput, FreshnessPolicy};
 use crate::rag::injection;
 use crate::rag::policy::{AgentRole, RetrievalPolicy};
-use crate::rag::query::{PlannedQuery, QueryPlanner, extract_symbols};
+use crate::rag::query::{extract_symbols, PlannedQuery, QueryPlanner};
 use crate::rag::scope::RetrievalScope;
 use crate::rag::source::{SearchRequest, SourceKind, SourceRegistry};
 use crate::rag::trace::{RetrievalTrace, TraceEvent};
@@ -429,9 +429,7 @@ impl<'a> RetrievalCoordinator<'a> {
     }
 
     fn cache_get(&mut self, key: &CacheKey, scope: &RetrievalScope) -> Option<Vec<Evidence>> {
-        self.cache
-            .as_mut()
-            .and_then(|cache| cache.get(key, scope))
+        self.cache.as_mut().and_then(|cache| cache.get(key, scope))
     }
 
     fn cache_store(&mut self, key: &CacheKey, evidence: &[Evidence], scope: &RetrievalScope) {

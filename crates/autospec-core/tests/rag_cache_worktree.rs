@@ -11,7 +11,7 @@ use autospec_core::rag::scope::{PathState, RetrievalScope};
 use autospec_core::rag::source::{
     KnowledgeSource, SearchMode, SearchRequest, SourceKind, SourceRegistry,
 };
-use rag_support::{CountingSource, NOW, REVISION, evidence, evidence_in, scope};
+use rag_support::{evidence, evidence_in, scope, CountingSource, NOW, REVISION};
 
 fn key_for(scope: &RetrievalScope) -> CacheKey {
     let request = SearchRequest::new("scheduler", SearchMode::Semantic, scope.clone(), 10);
@@ -243,8 +243,7 @@ fn evidence_from_a_superseded_revision_is_dropped_and_the_trace_says_why() {
         )],
     ));
     registry.register(source).expect("registers");
-    let mut coordinator =
-        RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, "def456");
+    let mut coordinator = RetrievalCoordinator::new(&registry, AgentRole::Planner, NOW, "def456");
     let request = RetrievalRequest::new(
         "AS-1",
         AgentRole::Planner,
@@ -253,7 +252,9 @@ fn evidence_from_a_superseded_revision_is_dropped_and_the_trace_says_why() {
     )
     .requiring(["scheduler".to_string()]);
 
-    let outcome = coordinator.retrieve("rag_stale", &request).expect("loop runs");
+    let outcome = coordinator
+        .retrieve("rag_stale", &request)
+        .expect("loop runs");
 
     // Once per query that surfaced it: the loop reformulates and the source
     // returns the same superseded item, which is dropped again each time.
@@ -262,5 +263,8 @@ fn evidence_from_a_superseded_revision_is_dropped_and_the_trace_says_why() {
         !outcome.stop_reason.is_satisfied(),
         "stale evidence cannot satisfy the request"
     );
-    assert!(outcome.trace.render().contains("current revision is def456"));
+    assert!(outcome
+        .trace
+        .render()
+        .contains("current revision is def456"));
 }

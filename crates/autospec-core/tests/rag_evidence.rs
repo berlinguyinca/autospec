@@ -5,13 +5,13 @@ mod rag_support;
 use autospec_core::rag::authority::SourceAuthority;
 use autospec_core::rag::compression::{self, CompressionLevel};
 use autospec_core::rag::evidence::{
-    ContentForm, EvidenceBuilder, EvidenceCapture, Privacy, QueryProvenance, SourceLocation,
-    content_hash,
+    content_hash, ContentForm, EvidenceBuilder, EvidenceCapture, Privacy, QueryProvenance,
+    SourceLocation,
 };
-use autospec_core::rag::score::Score;
 use autospec_core::rag::scope::RetrievalScope;
+use autospec_core::rag::score::Score;
 use autospec_core::rag::source::SourceKind;
-use rag_support::{NOW, capture, evidence, evidence_in, scope};
+use rag_support::{capture, evidence, evidence_in, scope, NOW};
 
 #[test]
 fn evidence_citation_names_source_revision_authority_and_form() {
@@ -173,11 +173,19 @@ fn summary_records_every_source_it_was_derived_from() {
         900,
     );
 
-    let summary =
-        compression::summarize("ev_s", CompressionLevel::Module, "a and b", &[first, second], NOW)
-            .expect("summary builds");
+    let summary = compression::summarize(
+        "ev_s",
+        CompressionLevel::Module,
+        "a and b",
+        &[first, second],
+        NOW,
+    )
+    .expect("summary builds");
 
-    assert_eq!(summary.derived_from(), ["ev_1".to_string(), "ev_2".to_string()]);
+    assert_eq!(
+        summary.derived_from(),
+        ["ev_1".to_string(), "ev_2".to_string()]
+    );
 }
 
 #[test]

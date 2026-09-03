@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::rag::budget::RetrievalBudget;
-use crate::rag::policy::{ALL_ROLES, AgentRole, PolicySet, RetrievalPolicy};
-use crate::rag::source::{ALL_SOURCE_KINDS, SourceKind};
+use crate::rag::policy::{AgentRole, PolicySet, RetrievalPolicy, ALL_ROLES};
+use crate::rag::source::{SourceKind, ALL_SOURCE_KINDS};
 
 /// Whether a source may be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,14 +202,15 @@ impl RagConfig {
         self.default_budget.validate()?;
         self.cache.validate()?;
         if self.graph.enabled && self.graph.max_depth == 0 {
-            return Err("graph.max_depth must be greater than zero when the graph is enabled"
-                .to_string());
+            return Err(
+                "graph.max_depth must be greater than zero when the graph is enabled".to_string(),
+            );
         }
         for role in ALL_ROLES {
             let budget = self.budget_for(role);
-            budget.validate().map_err(|error| {
-                format!("role {} budget is invalid: {error}", role.as_str())
-            })?;
+            budget
+                .validate()
+                .map_err(|error| format!("role {} budget is invalid: {error}", role.as_str()))?;
         }
         Ok(())
     }
@@ -296,7 +297,11 @@ impl RagConfig {
     }
 }
 
-fn apply_budget_field(budget: &mut RetrievalBudget, field: &str, value: &str) -> Result<(), String> {
+fn apply_budget_field(
+    budget: &mut RetrievalBudget,
+    field: &str,
+    value: &str,
+) -> Result<(), String> {
     let parsed = parse_u32(value)?;
     match field {
         "max_iterations" => budget.max_iterations = parsed,
