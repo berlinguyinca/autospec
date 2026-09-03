@@ -87,7 +87,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),
     ("queue", "Compute the safe GitHub issue queue"),
-    ("doctor", "Check the Rust core workspace"),
+    (
+        "doctor",
+        "Check the Rust core workspace (`doctor code-intel` for LSP health)",
+    ),
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
     ("plan", "Inspect a generated spec package"),

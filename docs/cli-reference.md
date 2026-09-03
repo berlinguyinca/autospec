@@ -14,6 +14,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec aar memory init [--worktree <dir>] [--json]` | yes | scaffolds `.autospec/` durable task memory; never overwrites existing state |
 | `autospec aar rules` | no | prints the harness working rules injected into every agent session |
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
+| `autospec doctor code-intel [--json]` | yes | code intelligence backend, language-server and fallback health ([docs](code-intelligence.md)) |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
 | `autospec initiative init --id INIT-YYYY-NNNN --slug <slug> [--spec <path>] [--root <dir>]` | yes | creates the Initiative artifact registry and its first audit event; refuses an existing Initiative |

@@ -18,6 +18,7 @@ pub mod autonomous {
 }
 pub mod autonomous_lifecycle;
 pub mod claim;
+pub mod code_intel;
 pub mod context;
 pub mod coordination;
 pub mod error;

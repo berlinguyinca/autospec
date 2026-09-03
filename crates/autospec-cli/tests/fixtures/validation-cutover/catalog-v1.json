@@ -89,6 +89,7 @@
     "check_lint_reuse_triage",
     "check_bats_suite_registration",
     "check_bats_negation_ratchet",
+    "check_code_intelligence_contract",
     "check_autospec_fleet_enabled_false",
     "check_autospec_sweep_enabled_false",
     "check_classify_lang_labels",

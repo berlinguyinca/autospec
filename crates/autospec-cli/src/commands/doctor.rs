@@ -1,4 +1,15 @@
+pub mod code_intel;
+
 pub fn run(args: &[String]) -> Result<(), String> {
+    if args
+        .first()
+        .is_some_and(|argument| argument == "code-intel")
+    {
+        let root = std::env::current_dir()
+            .map_err(|error| format!("could not resolve the current worktree: {error}"))?;
+        println!("{}", code_intel::run(&root, super::is_json(args))?);
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--readiness") {
         let report = readiness_report();
         if super::is_json(args) {

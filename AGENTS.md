@@ -20,6 +20,24 @@
   `RUNTIME_STATE_SYMLINK_REJECTED` and ownership ambiguity as fail-closed recovery signals;
   never delete an environment or session root manually.
 
+## Semantic code intelligence
+
+- Every code intelligence query names a workspace; a workspace resolves to exactly one
+  worktree root. Never reuse a result across worktrees or revisions -- cache keys are
+  `workspace:revision:operation:request`.
+- Three gates are mandatory (`.autospec/code-intelligence.yaml` -> `workflow`): the planner
+  produces a semantic Impact Set, the implementer produces a post-change diagnostic delta
+  with no new errors, and the reviewer runs its own analysis instead of reusing the
+  implementer's report.
+- Baseline diagnostics stay visible but never fail a task on their own; only errors the
+  change introduced block completion under `block_new_errors`.
+- A backend failure degrades `lsp -> ast-grep -> ripgrep`. Degraded results carry
+  `confidence: structural|textual` and `degraded: true` -- never call a degraded result
+  semantic evidence. `code.hover`, `code.type_hierarchy` and `code.diagnostics` have no
+  fallback and fail closed.
+- `autospec doctor code-intel [--json]` reports backend, server, fallback and security
+  health. See [`docs/code-intelligence.md`](docs/code-intelligence.md).
+
 ## Subagent model selection (two-tier, cost-aware)
 
 When the workflow dispatches a subagent, choose tier based on the **type of work**, not by phase number alone. Two tiers:
