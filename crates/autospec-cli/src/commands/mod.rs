@@ -11,6 +11,7 @@ pub mod managed_project;
 pub mod parent;
 pub mod plan;
 pub mod queue;
+pub mod rag;
 pub mod report;
 pub mod resume;
 pub mod run;
@@ -83,6 +84,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
     ("plan", "Inspect a generated spec package"),
+    ("rag", "Inspect Agentic RAG policy and routing"),
     ("validate", "Run configured validation gates"),
     ("run", "Execute the spec queue"),
     ("runtime", "Inspect runtime ownership policy"),
@@ -118,6 +120,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
+            "rag" => rag::run(rest),
             "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
             "run" => run::run(rest).map_err(CommandFailure::diagnostic),
             "runtime" => runtime::run(rest),

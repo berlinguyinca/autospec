@@ -9,6 +9,42 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### Agentic RAG subsystem — core retrieval, evidence and policy layer (2026-09-03)
+- Added `autospec_core::rag`, the evidence and retrieval layer specified by the Agentic RAG
+  subsystem specification: an iterative loop (`RetrievalCoordinator`) that plans retrieval,
+  chooses among pluggable `KnowledgeSource` adapters, evaluates what comes back, reformulates
+  when the evidence falls short, and stops for a stated reason. It replaces the fixed top-K
+  model with a structured `ContextPackage` carrying provenance for every item rather than a
+  concatenated text blob.
+- Evidence is immutable and fully attributed: source, revision, worktree, lines, authority
+  class, privacy, content hash, and — for a model-written summary — the evidence ids it was
+  derived from, which the builder requires rather than accepts. A summary inherits the
+  strictest privacy and the weakest authority of its sources, so compression cannot launder a
+  blog post into current code.
+- Retrieval is revision- and worktree-aware. A Pi worktree reads its own copy of a modified
+  file and the base revision for everything else; worktree-scoped evidence is never written to
+  the shared cache, and a cached answer from one commit is never served for another.
+- Contradictions are surfaced, never resolved: the authority ladder names a preferred side
+  while both remain in the package, and a high-severity conflict blocks autonomous
+  implementation.
+- Retrieved text is treated as data. Content is fenced with its citation under a
+  `RETRIEVED EVIDENCE` trust band, and content that unambiguously tries to seize the agent is
+  quarantined out of the package entirely rather than fenced.
+- Budgets, stopping rules, role policies (eight roles, each with its own source ordering and
+  token ceiling), per-source staleness rules, the memory write gate, retrieval traces, metrics,
+  and InferWeave capability routing that filters on free context capacity before speed.
+- Added `autospec rag config|policy|sources|route` for inspecting the effective configuration,
+  a role's policy, which sources a role and task may reach, and why a routing decision chose
+  the node it chose. The command is read-only and performs no retrieval.
+- Added `scripts/validate-agentic-rag.sh`, gating the module inventory, per-module
+  specification cross-references, the integer-score rule, the file-size ratchet, and the
+  evaluation suites.
+- Scores are integers in permille rather than the specification's decimals: the workspace bans
+  `f64` in Rust crates, and a loop that branches on thresholds needs comparisons that are
+  reproducible across hosts.
+- Design record and the gap list against the specification's acceptance criteria:
+  [`docs/specs/2026-09-03-agentic-rag-subsystem-design.md`](docs/specs/2026-09-03-agentic-rag-subsystem-design.md).
+
 #### Managed GitHub Projects and bounded repository onboarding (2026-08-28)
 - Added one marker-verified managed GitHub Project per product, backed by a private product-global
   binding and append-only projection journal. Reconciliation is additive and idempotent, keeps
