@@ -46,9 +46,18 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
 | `autospec report --json` | yes | local release summary from persisted spec state |
+| `autospec rag config [--set KEY=VALUE] [--json]` | yes | renders the effective `agentic_rag:` configuration and rejects an invalid one (a revision-blind cache, an unknown key) |
+| `autospec rag policy [--role ROLE] [--json]` | yes | prints per-role source ordering, context ceiling, sufficiency threshold, and whether the role must verify independently |
+| `autospec rag sources [--role ROLE] [--external] [--json]` | yes | reports, per source, the administrator's availability setting and whether that role and task may actually reach it |
+| `autospec rag route --task TASK [--context N] [--node id:reasoning:free_context:speed:seats]... [--json]` | yes | explains one InferWeave routing decision: required context including margin, the selected node, and why each other node was rejected |
 | `autospec showcase --json` | yes | demo stub |
 | `autospec benchmark` | no | documented stub, exits non-zero |
 | `autospec growth-report --json` | yes | local-only metrics stub |
+
+`autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
+subsystem's configuration and policy *would* do, so an operator can check a role budget or a
+routing rejection without running a retrieval or reaching a knowledge source. Retrieval itself
+is a library API (`autospec_core::rag::RetrievalCoordinator`), not yet a command.
 
 `autospec plan` only reads and parses Markdown from one generated package. It does not
 execute validation, calculate an execution order, or report persisted lifecycle state.
