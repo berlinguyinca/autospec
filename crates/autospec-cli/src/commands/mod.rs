@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod explore;
 pub mod growth_report;
 pub mod init;
+pub mod initiative;
 pub mod issue;
 pub mod lint;
 pub mod managed_project;
@@ -78,6 +79,10 @@ impl std::fmt::Display for CommandFailure {
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("aar", "Inspect adaptive agent runtime policy"),
+    (
+        "initiative",
+        "Inspect cross-repository initiatives",
+    ),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),
@@ -113,6 +118,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
         [command, rest @ ..] => match command.as_str() {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
             "aar" => aar::run(rest),
+            "initiative" => initiative::run(rest),
             "issue" => issue::run(rest),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),

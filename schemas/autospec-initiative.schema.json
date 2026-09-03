@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-initiative.schema.json",
+  "title": "AutoSpec Initiative",
+  "description": "The Initiative record at .autospec/initiatives/<INIT-YYYY-NNNN>/initiative.json. An Initiative is the top-level coordination unit and belongs to no single repository or organization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "slug", "spec", "definition_version"],
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/initiativeId"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "spec": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the Specification, relative to the Initiative registry root."
+    },
+    "definition_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The Definition version in force; 0 before autospec define has run."
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/repositoryId"
+      },
+      "uniqueItems": true
+    },
+    "architecture_plan": {
+      "anyOf": [{ "$ref": "#/$defs/planId" }, { "type": "null" }]
+    },
+    "task_graph": {
+      "anyOf": [{ "$ref": "#/$defs/graphId" }, { "type": "null" }]
+    },
+    "github_projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["owner", "project_number"],
+        "properties": {
+          "owner": { "type": "string", "minLength": 1 },
+          "project_number": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "initiativeId": {
+      "type": "string",
+      "pattern": "^INIT-[0-9]{4}-[0-9]+$"
+    },
+    "repositoryId": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+/[^/\\s]+$",
+      "description": "Globally qualified host/owner/repository. A bare owner/repository is rejected because it assumes a host."
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^PLAN-ARCH-[0-9]+$"
+    },
+    "graphId": {
+      "type": "string",
+      "pattern": "^DAG-[0-9]+$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]+$"
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^REQ-[0-9]+$"
+    },
+    "criterionId": {
+      "type": "string",
+      "pattern": "^AC-[0-9]+$"
+    },
+    "capability": {
+      "type": "string",
+      "enum": [
+        "read",
+        "issues",
+        "branches",
+        "push",
+        "pull_requests",
+        "workflows",
+        "project_mutation",
+        "administration"
+      ]
+    },
+    "agentRole": {
+      "type": "string",
+      "enum": [
+        "spec-author",
+        "architect",
+        "task-planner",
+        "implementer",
+        "test-engineer",
+        "ux-reviewer",
+        "reviewer",
+        "spec-verifier"
+      ]
+    },
+    "taskState": {
+      "type": "string",
+      "enum": [
+        "DEFINED",
+        "BLOCKED",
+        "READY",
+        "LEASED",
+        "RUNNING",
+        "AWAITING_TEST",
+        "AWAITING_REVIEW",
+        "CHANGES_REQUESTED",
+        "FAILED_RETRYABLE",
+        "FAILED_TERMINAL",
+        "SUPERSEDED",
+        "VERIFIED"
+      ]
+    },
+    "coverageState": {
+      "type": "string",
+      "enum": [
+        "defined",
+        "planned",
+        "in_progress",
+        "implemented",
+        "tested",
+        "reviewed",
+        "verified",
+        "failed",
+        "blocked",
+        "waived"
+      ]
+    }
+  }
+}

@@ -83,6 +83,7 @@ fn cli_commands_help_lists_required_commands() {
         [
             "init",
             "aar",
+            "initiative",
             "lint",
             "claim",
             "parent",
