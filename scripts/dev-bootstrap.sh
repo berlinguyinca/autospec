@@ -4,10 +4,11 @@
 # Spec reference: docs/specs/2026-05-01-autospec-meta-improvements-design.md §6.5
 #
 # This script makes a fresh contributor checkout runnable: it detects the
-# system package manager (brew / apt / npm), installs bats-core and the ajv
-# JSON-schema CLI if missing, and verifies that gh, jq, python3, and ajv are on
-# PATH. It exits non-zero with a helpful diagnostic on missing tools so CI / a
-# pre-commit cannot proceed silently into a broken state.
+# system package manager (brew / apt / npm), installs bats-core, the ajv
+# JSON-schema CLI, and the license-checker CLI if missing, and verifies that
+# gh, jq, python3, ajv, and license-checker are on PATH. It exits non-zero
+# with a helpful diagnostic on missing tools so CI / a pre-commit cannot
+# proceed silently into a broken state.
 
 set -eu
 
@@ -108,11 +109,48 @@ install_ajv() {
     fi
 }
 
-# check_tools — verify gh, jq, python3, ajv are present. Missing any causes a
-# non-zero exit with a clear message.
+# install_license_checker — install the license-checker npm CLI. Idempotent:
+# a present license-checker is left alone.
+#
+# license-checker is not optional. `install.sh` lists it in
+# AUTOSPEC_EXECUTOR_SCANNERS (readonly, always appended to
+# AUTOSPEC_REQUIRED_SYSTEM_TOOLS), so `tests/install/test_autospec_bin_path.sh`
+# and `tests/install/test_star_prompt.sh` cannot pass without it actually
+# present — the CI runner image does not ship it. Same install path shared by
+# contributors and CI, mirroring install_ajv above.
+install_license_checker() {
+    if command -v license-checker > /dev/null 2>&1; then
+        info "license-checker already installed: $(command -v license-checker)"
+        return 0
+    fi
+    ensure_tool="$repo_root/skills/autospec-shared/scripts/ensure-tool.sh"
+    if [ -f "$ensure_tool" ]; then
+        info "installing license-checker via ensure-tool.sh ..."
+        bash "$ensure_tool" license-checker || true
+        hash -r 2> /dev/null || true
+    fi
+    if command -v license-checker > /dev/null 2>&1; then
+        return 0
+    fi
+    # Same system-owned npm prefix escalation install_ajv uses: one-sided
+    # `if`/`then`, never `cmd || true` chained onto a test (set -e trap).
+    if command -v npm > /dev/null 2>&1 \
+        && [ "$(id -u)" != "0" ] \
+        && command -v sudo > /dev/null 2>&1; then
+        info "installing license-checker via sudo npm (global) ..."
+        sudo npm install -g license-checker || true
+        hash -r 2> /dev/null || true
+    fi
+    if ! command -v license-checker > /dev/null 2>&1; then
+        warn "license-checker install did not succeed; check_tools will report it"
+    fi
+}
+
+# check_tools — verify gh, jq, python3, ajv, license-checker are present.
+# Missing any causes a non-zero exit with a clear message.
 check_tools() {
     missing=""
-    for tool in gh jq python3 ajv; do
+    for tool in gh jq python3 ajv license-checker; do
         if command -v "$tool" >/dev/null 2>&1; then
             ver="$("$tool" --version 2>/dev/null | head -1 || true)"
             info "$tool: ${ver:-present}"
@@ -131,6 +169,7 @@ main() {
     repo_root="$(cd "$(dirname "$0")/.." && pwd)"
     install_bats
     install_ajv
+    install_license_checker
     check_tools
     info "all required tools present"
     info ""
