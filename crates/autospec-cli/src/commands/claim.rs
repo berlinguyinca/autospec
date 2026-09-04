@@ -2088,6 +2088,28 @@ fn expired_prior_generation_heartbeat(
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
 
+    // A heartbeat whose worker and claim differ from the authoritative record is only
+    // reclaimable as a prior generation once that record has itself been abandoned.
+    //
+    // Nothing here ties a heartbeat to a *lineage*. Real worker ids are
+    // `host:user:harness:pid`, so two concurrent sessions on one machine share every
+    // component but the pid, and a prefix test would still admit exactly the collision
+    // this guard exists to stop. The one field that would settle it, `session_id`, is
+    // carried by the heartbeat but dropped from a released record: a `claimed` record
+    // keeps it inside `step`, a `released` one does not. Lineage is therefore not
+    // expressible for the records this path sees.
+    //
+    // Abandonment is expressible, and it separates the two cases the identity test
+    // below cannot. A record still inside its own TTL is ordinary lease contention,
+    // which the lease-timeout path arbitrates; clearing a distinct worker's heartbeat
+    // there discards the only marker that worker has WIP on the branch (#3505). Once
+    // the record has aged past its TTL nothing recent holds the issue, and a
+    // provably-dead heartbeat left beside it is the garbage that wedged the drain for
+    // nine hours (#3503). An unparseable timestamp is not stale, so a malformed record
+    // fails closed and keeps its evidence.
+    if !server_lease_is_stale(&record.updated_at, record.ttl_seconds) {
+        return Ok(None);
+    }
     let root_path = heartbeat_root()?;
     let root = match open(
         &root_path,

@@ -59,6 +59,12 @@ pub(super) fn retire(
     // foreign owner still blocks acquisition and only the dead-foreign-generation case
     // takes the new path. The snapshot is re-read inside the quarantine, so its race
     // guard still compares it against this authorization.
+    //
+    // "Dead foreign generation" needed one more precondition than that. It also answers
+    // `None` while the authoritative record is still inside its own TTL, because a
+    // distinct worker's expired heartbeat beside a live record is ordinary lease
+    // contention for the lease-timeout path to arbitrate, not this issue's own
+    // abandoned garbage (#3505).
     if let Some(prior) = expired_prior_generation_heartbeat(repo, issue, record)? {
         if quarantine_authoritative_stale_heartbeat(
             repo,
