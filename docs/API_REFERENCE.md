@@ -897,6 +897,15 @@ Env:   AUTOSPEC_SKIP_ENSURE_TOOL=1          disable ALL auto-installs
        AUTOSPEC_SKIP_ENSURE_TOOL_<TOOL>=1   disable auto-install for one tool
 ```
 
+`trivy` has no apt package on Ubuntu, so its `apt-get install trivy` fallback
+never resolves on `ubuntu-24.04`. CI therefore installs it from a pinned,
+sha256-verified release tarball in the `Install pinned executor integration
+tools` step of `.github/workflows/rust.yml`, alongside `gitleaks`. This matters
+because `install.sh` hard-verifies `AUTOSPEC_EXECUTOR_SCANNERS` (`gitleaks
+semgrep trivy license-checker`) and `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` suppresses
+auto-install but not that verification — so `check_install_tests` fails on any
+host where the binary is genuinely absent.
+
 Exit: always 0 (best-effort by design; unknown tools are a silent no-op).
 
 ### `bootstrap.ps1`
