@@ -464,8 +464,14 @@ mod tests {
         workspace.insert(writable("github.com/InferWeave/gateway", "bbb2222"));
 
         let drift = workspace.drifted_since(&BTreeMap::from([
-            (repository("github.com/InferWeave/autospec"), "aaa1111".into()),
-            (repository("github.com/InferWeave/gateway"), "ccc3333".into()),
+            (
+                repository("github.com/InferWeave/autospec"),
+                "aaa1111".into(),
+            ),
+            (
+                repository("github.com/InferWeave/gateway"),
+                "ccc3333".into(),
+            ),
         ]));
 
         assert_eq!(drift.len(), 1);

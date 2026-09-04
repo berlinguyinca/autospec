@@ -508,10 +508,7 @@ mod tests {
     fn projection(workspace: &Workspace) -> GithubProjection {
         let graph = graph();
         let coverage = CoverageMatrix::build(&definition(), &plan(), &graph, &[], &[]);
-        let schedule = graph.schedule(SchedulingContext {
-            workspace,
-            now: 0,
-        });
+        let schedule = graph.schedule(SchedulingContext { workspace, now: 0 });
         GithubProjection::build(
             &initiative(),
             &graph,
@@ -578,7 +575,9 @@ mod tests {
     fn a_lost_project_rebuilds_identically_from_canonical_state() {
         let workspace = workspace();
         let mut original = projection(&workspace);
-        original.link_issue(&task_id("TASK-0001"), 412).expect("linked");
+        original
+            .link_issue(&task_id("TASK-0001"), 412)
+            .expect("linked");
 
         let rebuilt = projection(&workspace);
 
@@ -600,7 +599,10 @@ mod tests {
         projection.degrade("GitHub returned 502 for the Project mutation");
 
         assert!(!projection.is_synced());
-        assert_eq!(graph.get(&task_id("TASK-0001")).map(|task| task.state), Some(TaskState::Defined));
+        assert_eq!(
+            graph.get(&task_id("TASK-0001")).map(|task| task.state),
+            Some(TaskState::Defined)
+        );
         assert!(graph.validate(&definition(), &workspace).is_ok());
     }
 

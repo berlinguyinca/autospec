@@ -312,9 +312,16 @@ impl Task {
     }
 
     /// Claim the task for `session_name` until `expires_at`.
-    pub fn lease(&mut self, session_name: impl Into<String>, expires_at: u64) -> Result<(), String> {
+    pub fn lease(
+        &mut self,
+        session_name: impl Into<String>,
+        expires_at: u64,
+    ) -> Result<(), String> {
         if self.state != TaskState::Ready {
-            return Err(format!("{} is not READY to lease ({})", self.id, self.state));
+            return Err(format!(
+                "{} is not READY to lease ({})",
+                self.id, self.state
+            ));
         }
         self.state = TaskState::Leased;
         self.attempts += 1;
@@ -457,7 +464,9 @@ mod tests {
     fn leasing_requires_a_ready_task_and_counts_the_attempt() {
         let mut task = task();
 
-        assert!(task.lease("aspec-INIT-0042-TASK-0001-impl-a1", 100).is_err());
+        assert!(task
+            .lease("aspec-INIT-0042-TASK-0001-impl-a1", 100)
+            .is_err());
 
         task.transition_to(TaskState::Ready).expect("ready");
         task.lease("aspec-INIT-0042-TASK-0001-impl-a1", 100)

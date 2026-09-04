@@ -87,7 +87,10 @@ impl CacheFriendlyPrompt {
         let mut seen = Vec::new();
         for block in &blocks {
             if seen.contains(&block.segment) {
-                return Err(format!("duplicate prompt segment {}", block.segment.as_str()));
+                return Err(format!(
+                    "duplicate prompt segment {}",
+                    block.segment.as_str()
+                ));
             }
             seen.push(block.segment);
         }
@@ -107,7 +110,11 @@ impl CacheFriendlyPrompt {
 
     /// Text after the cache boundary.
     pub fn volatile_suffix(&self) -> String {
-        render(self.blocks.iter().filter(|block| !block.segment.is_stable()))
+        render(
+            self.blocks
+                .iter()
+                .filter(|block| !block.segment.is_stable()),
+        )
     }
 
     /// Stable identity of the prefix, for provider prefix-cache keys.
@@ -218,7 +225,11 @@ impl ContextPolicy {
     ///
     /// A round that produced evidence stops the ladder: widening after a hit
     /// spends context on material the model did not need.
-    pub fn next_step(&self, round: u8, previous_round_found_evidence: bool) -> Option<&RetrievalStep> {
+    pub fn next_step(
+        &self,
+        round: u8,
+        previous_round_found_evidence: bool,
+    ) -> Option<&RetrievalStep> {
         if previous_round_found_evidence || round >= self.max_expansion_rounds {
             return None;
         }

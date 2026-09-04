@@ -142,7 +142,9 @@ fn json_output_carries_the_auditable_decision_record() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert_eq!(value["policy_version"], "aar-v1");
     assert_eq!(value["task_class"], "bugfix");
-    assert!(value["rationale"].as_array().is_some_and(|entries| !entries.is_empty()));
+    assert!(value["rationale"]
+        .as_array()
+        .is_some_and(|entries| !entries.is_empty()));
     assert!(value["classification_evidence"]
         .as_array()
         .is_some_and(|entries| !entries.is_empty()));
@@ -172,7 +174,9 @@ fn rules_prints_the_harness_working_rules() {
 
 #[test]
 fn a_body_file_supplies_the_work_item_body() {
-    let _guard = FILESYSTEM_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = FILESYSTEM_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let root = temp_dir("aar-body");
     let body = root.join("body.md");
     std::fs::write(&body, "The parser panics on an empty document.").expect("body written");
@@ -210,7 +214,9 @@ fn a_missing_body_file_fails_with_the_path_in_the_message() {
 
 #[test]
 fn memory_init_scaffolds_every_durable_file_and_the_telemetry_directory() {
-    let _guard = FILESYSTEM_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = FILESYSTEM_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let root = temp_dir("aar-memory");
 
     let (success, stdout, stderr) = run(&[
@@ -244,14 +250,19 @@ fn memory_init_scaffolds_every_durable_file_and_the_telemetry_directory() {
 /// A second init must never erase an in-flight task's durable state.
 #[test]
 fn memory_init_is_idempotent_and_never_overwrites_existing_state() {
-    let _guard = FILESYSTEM_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = FILESYSTEM_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let root = temp_dir("aar-memory-idempotent");
     let worktree = root.to_str().expect("utf-8 path");
     run(&["aar", "memory", "init", "--worktree", worktree]);
 
     let findings = root.join(".autospec/findings.md");
-    std::fs::write(&findings, "# Findings\n\n- the parser panics on empty input\n")
-        .expect("state written");
+    std::fs::write(
+        &findings,
+        "# Findings\n\n- the parser panics on empty input\n",
+    )
+    .expect("state written");
 
     let (success, stdout, stderr) = run(&["aar", "memory", "init", "--worktree", worktree]);
 

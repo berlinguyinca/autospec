@@ -97,10 +97,9 @@ impl InitiativeArtifact {
             InitiativeArtifact::TaskGraph { version } => {
                 PathBuf::from(format!("graph/task-graph-v{version}.json"))
             }
-            InitiativeArtifact::TaskPlan { task, version } => PathBuf::from(format!(
-                "tasks/{}/task-plan-v{version}.json",
-                task.as_str()
-            )),
+            InitiativeArtifact::TaskPlan { task, version } => {
+                PathBuf::from(format!("tasks/{}/task-plan-v{version}.json", task.as_str()))
+            }
             InitiativeArtifact::ImplementationResult { task, attempt } => PathBuf::from(format!(
                 "tasks/{}/implementation-result-a{attempt}.json",
                 task.as_str()
@@ -278,7 +277,10 @@ impl InitiativeStore {
         value: &T,
     ) -> Result<PathBuf, AutospecError> {
         let rendered = serde_json::to_string_pretty(value).map_err(|error| {
-            AutospecError::parse(artifact.relative_path().display().to_string(), error.to_string())
+            AutospecError::parse(
+                artifact.relative_path().display().to_string(),
+                error.to_string(),
+            )
         })?;
         self.write(artifact, &format!("{rendered}\n"))
     }
@@ -297,7 +299,10 @@ impl InitiativeStore {
     ) -> Result<T, AutospecError> {
         let contents = self.read(artifact)?;
         serde_json::from_str(&contents).map_err(|error| {
-            AutospecError::parse(artifact.relative_path().display().to_string(), error.to_string())
+            AutospecError::parse(
+                artifact.relative_path().display().to_string(),
+                error.to_string(),
+            )
         })
     }
 
@@ -352,9 +357,7 @@ impl InitiativeStore {
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(AutospecError::io("read", path.display().to_string(), error))
-            }
+            Err(error) => return Err(AutospecError::io("read", path.display().to_string(), error)),
         };
         contents
             .lines()
@@ -423,7 +426,9 @@ mod tests {
     fn the_layout_follows_the_specification() {
         let store = temp_store("layout");
 
-        assert!(store.root().ends_with(".autospec/initiatives/INIT-2026-0042"));
+        assert!(store
+            .root()
+            .ends_with(".autospec/initiatives/INIT-2026-0042"));
         assert_eq!(
             InitiativeArtifact::TaskPlan {
                 task: TaskId::parse("TASK-0017").expect("valid task id"),

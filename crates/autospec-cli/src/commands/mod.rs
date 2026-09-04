@@ -79,10 +79,7 @@ impl std::fmt::Display for CommandFailure {
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("aar", "Inspect adaptive agent runtime policy"),
-    (
-        "initiative",
-        "Inspect cross-repository initiatives",
-    ),
+    ("initiative", "Inspect cross-repository initiatives"),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),

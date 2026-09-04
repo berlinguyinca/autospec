@@ -43,6 +43,7 @@ mod full_suite;
 mod generation_input;
 #[cfg(target_os = "linux")]
 mod harness_death;
+mod harness_model_routing;
 #[cfg(target_os = "linux")]
 mod harness_supervisor;
 #[cfg(target_os = "linux")]

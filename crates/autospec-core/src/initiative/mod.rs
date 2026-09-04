@@ -380,10 +380,12 @@ mod tests {
     }
 
     fn initiative() -> Initiative {
-        let mut initiative = Initiative::new(initiative_id(), "planning-orchestration-v2", "spec/spec.md");
+        let mut initiative =
+            Initiative::new(initiative_id(), "planning-orchestration-v2", "spec/spec.md");
         initiative.definition_version = 1;
         initiative.repositories = workspace().repositories.keys().cloned().collect();
-        initiative.architecture_plan = Some(PlanId::parse("PLAN-ARCH-0003").expect("valid plan id"));
+        initiative.architecture_plan =
+            Some(PlanId::parse("PLAN-ARCH-0003").expect("valid plan id"));
         initiative.task_graph = Some(GraphId::parse("DAG-0007").expect("valid graph id"));
         initiative
     }

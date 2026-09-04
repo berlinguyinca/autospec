@@ -115,7 +115,9 @@ impl Requirement {
 
     /// Whether the requirement is ready to be planned against.
     pub fn is_plannable(&self) -> bool {
-        self.kind.is_actionable() && self.has_verifiable_criterion() && self.open_questions.is_empty()
+        self.kind.is_actionable()
+            && self.has_verifiable_criterion()
+            && self.open_questions.is_empty()
     }
 }
 
@@ -236,7 +238,9 @@ impl Definition {
             problems.push("definition versions start at 1".to_string());
         }
         if self.spec_digest.trim().is_empty() {
-            problems.push("a definition must record the specification digest it normalized".to_string());
+            problems.push(
+                "a definition must record the specification digest it normalized".to_string(),
+            );
         }
 
         let mut seen_requirements = BTreeSet::new();
@@ -256,7 +260,10 @@ impl Definition {
             }
             for criterion in &requirement.acceptance {
                 if !seen_criteria.insert(criterion.id.clone()) {
-                    problems.push(format!("duplicate acceptance criterion id {}", criterion.id));
+                    problems.push(format!(
+                        "duplicate acceptance criterion id {}",
+                        criterion.id
+                    ));
                 }
             }
         }
@@ -339,7 +346,10 @@ mod tests {
             statement: format!("{id} must hold"),
             kind: RequirementKind::Functional,
             acceptance: vec![AcceptanceCriterion {
-                id: CriterionId::from_sequence(id.trim_start_matches("REQ-").parse().unwrap_or(1), 3),
+                id: CriterionId::from_sequence(
+                    id.trim_start_matches("REQ-").parse().unwrap_or(1),
+                    3,
+                ),
                 statement: "a check".to_string(),
                 objectively_verifiable: verifiable,
                 provenance: Provenance::section("Acceptance Criteria"),
@@ -358,7 +368,10 @@ mod tests {
 
     #[test]
     fn a_definition_flags_requirements_without_an_objective_criterion() {
-        let definition = definition(vec![requirement("REQ-001", true), requirement("REQ-002", false)]);
+        let definition = definition(vec![
+            requirement("REQ-001", true),
+            requirement("REQ-002", false),
+        ]);
 
         let gaps = definition.gaps();
 
@@ -413,11 +426,16 @@ mod tests {
 
     #[test]
     fn duplicate_requirement_ids_are_rejected() {
-        let problems = definition(vec![requirement("REQ-001", true), requirement("REQ-001", true)])
-            .validate()
-            .expect_err("duplicates are rejected");
+        let problems = definition(vec![
+            requirement("REQ-001", true),
+            requirement("REQ-001", true),
+        ])
+        .validate()
+        .expect_err("duplicates are rejected");
 
-        assert!(problems.iter().any(|problem| problem.contains("duplicate requirement id")));
+        assert!(problems
+            .iter()
+            .any(|problem| problem.contains("duplicate requirement id")));
     }
 
     #[test]

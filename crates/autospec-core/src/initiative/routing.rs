@@ -304,9 +304,12 @@ impl RoutingDecision {
                 self.role,
                 self.selected.clone(),
             ),
-            None => {
-                SessionIdentity::for_initiative(initiative, attempt, self.role, self.selected.clone())
-            }
+            None => SessionIdentity::for_initiative(
+                initiative,
+                attempt,
+                self.role,
+                self.selected.clone(),
+            ),
         }
     }
 }
@@ -402,9 +405,7 @@ impl ModelCatalog {
             return Err(RoutingError::FallbackForbidden {
                 role,
                 preferred: preferred.model.clone(),
-                rejection: preferred
-                    .rejection
-                    .unwrap_or(RejectionReason::QuotaUnknown),
+                rejection: preferred.rejection.unwrap_or(RejectionReason::QuotaUnknown),
             });
         }
 
@@ -577,7 +578,12 @@ mod tests {
         requirements.local_only = true;
 
         let decision = catalog()
-            .select(AgentRole::Implementer, Some(task()), &requirements, &quota())
+            .select(
+                AgentRole::Implementer,
+                Some(task()),
+                &requirements,
+                &quota(),
+            )
             .expect("a local model exists");
 
         assert_eq!(decision.selected, "inferweave/local-high");
@@ -668,7 +674,12 @@ mod tests {
         requirements.max_cost_per_1k_millicents = Some(100);
 
         let decision = catalog()
-            .select(AgentRole::TestEngineer, Some(task()), &requirements, &quota())
+            .select(
+                AgentRole::TestEngineer,
+                Some(task()),
+                &requirements,
+                &quota(),
+            )
             .expect("the free local model is under the ceiling");
 
         assert_eq!(decision.selected, "inferweave/local-high");

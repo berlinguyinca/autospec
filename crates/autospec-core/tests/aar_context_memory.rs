@@ -13,12 +13,21 @@ use autospec_core::aar::memory::{
 
 fn blocks() -> Vec<PromptBlock> {
     vec![
-        PromptBlock::new(ContextSegment::LatestResult, "cargo test failed on one case"),
+        PromptBlock::new(
+            ContextSegment::LatestResult,
+            "cargo test failed on one case",
+        ),
         PromptBlock::new(ContextSegment::RetrievedCode, "fn parse() {}"),
-        PromptBlock::new(ContextSegment::HarnessInstructions, "you are a coding agent"),
+        PromptBlock::new(
+            ContextSegment::HarnessInstructions,
+            "you are a coding agent",
+        ),
         PromptBlock::new(ContextSegment::Task, "fix the parser panic"),
         PromptBlock::new(ContextSegment::Tools, "read, edit, run"),
-        PromptBlock::new(ContextSegment::ModelRules, "make one logical change at a time"),
+        PromptBlock::new(
+            ContextSegment::ModelRules,
+            "make one logical change at a time",
+        ),
         PromptBlock::new(ContextSegment::RepositoryInstructions, "see AGENTS.md"),
         PromptBlock::new(ContextSegment::Role, "implementer"),
         PromptBlock::new(ContextSegment::State, "step 3 of 5"),
@@ -31,7 +40,12 @@ fn assembly_orders_stable_segments_before_volatile_ones() {
 
     let rendered = prompt.render();
     let boundary = rendered.find(CACHE_BOUNDARY).expect("boundary present");
-    for stable in ["harness_instructions", "tools", "model_rules", "repository_instructions"] {
+    for stable in [
+        "harness_instructions",
+        "tools",
+        "model_rules",
+        "repository_instructions",
+    ] {
         assert!(
             rendered.find(stable).expect("segment present") < boundary,
             "{stable} must precede the cache boundary"
@@ -63,16 +77,28 @@ fn the_prefix_hash_survives_a_changed_task_but_not_a_changed_rule() {
 
     let mut changed_task = blocks();
     changed_task.retain(|block| block.segment != ContextSegment::Task);
-    changed_task.push(PromptBlock::new(ContextSegment::Task, "an entirely different task"));
+    changed_task.push(PromptBlock::new(
+        ContextSegment::Task,
+        "an entirely different task",
+    ));
     let after_task = CacheFriendlyPrompt::assemble(changed_task).expect("blocks assemble");
 
     let mut changed_rule = blocks();
     changed_rule.retain(|block| block.segment != ContextSegment::ModelRules);
-    changed_rule.push(PromptBlock::new(ContextSegment::ModelRules, "different rules"));
+    changed_rule.push(PromptBlock::new(
+        ContextSegment::ModelRules,
+        "different rules",
+    ));
     let after_rule = CacheFriendlyPrompt::assemble(changed_rule).expect("blocks assemble");
 
-    assert_eq!(original.stable_prefix_hash(), after_task.stable_prefix_hash());
-    assert_ne!(original.stable_prefix_hash(), after_rule.stable_prefix_hash());
+    assert_eq!(
+        original.stable_prefix_hash(),
+        after_task.stable_prefix_hash()
+    );
+    assert_ne!(
+        original.stable_prefix_hash(),
+        after_rule.stable_prefix_hash()
+    );
 }
 
 #[test]
@@ -126,8 +152,9 @@ fn the_retrieval_budget_grows_with_complexity() {
 
 #[test]
 fn expansion_stops_once_a_round_found_evidence() {
-    let classification = classify(&ClassificationInput::new("Implement the exporter", "See plan.")
-        .with_estimated_files(6));
+    let classification = classify(
+        &ClassificationInput::new("Implement the exporter", "See plan.").with_estimated_files(6),
+    );
     let policy = context_policy_for(&classification);
 
     assert!(policy.next_step(0, false).is_some());
@@ -139,8 +166,8 @@ fn expansion_stops_once_a_round_found_evidence() {
 
 #[test]
 fn expansion_stops_at_the_round_ceiling() {
-    let classification = classify(&ClassificationInput::new("Fix typo", "One line.")
-        .with_paths(["docs/a.md"]));
+    let classification =
+        classify(&ClassificationInput::new("Fix typo", "One line.").with_paths(["docs/a.md"]));
     let policy = context_policy_for(&classification);
 
     assert!(policy
@@ -155,7 +182,10 @@ fn a_prompt_that_does_not_fit_reports_why() {
     let fit = check_context_fit(&prompt, 10, 0);
 
     assert!(!fit.fits);
-    assert!(fit.reasons.iter().any(|reason| reason.contains("only 10 are free")));
+    assert!(fit
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("only 10 are free")));
 }
 
 #[test]
@@ -196,13 +226,19 @@ fn memory_entries_round_trip_through_the_rendered_file() {
             "crates/autospec-core/src/execution/queue_parser.rs:41",
         ),
     );
-    memory.append(MemoryFile::Findings, MemoryEntry::new("the fixture reproduces it"));
+    memory.append(
+        MemoryFile::Findings,
+        MemoryEntry::new("the fixture reproduces it"),
+    );
 
     let rendered = memory.render(MemoryFile::Findings);
     let mut reloaded = WorktreeMemory::new();
     reloaded.load(MemoryFile::Findings, &rendered);
 
-    assert_eq!(reloaded.entries(MemoryFile::Findings), memory.entries(MemoryFile::Findings));
+    assert_eq!(
+        reloaded.entries(MemoryFile::Findings),
+        memory.entries(MemoryFile::Findings)
+    );
 }
 
 #[test]

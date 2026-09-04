@@ -88,7 +88,10 @@ impl GraphViolation {
                 format!("{task} maps to non-goal {requirement}")
             }
             GraphViolation::UnknownRepository { task, repository } => {
-                format!("{task} targets undiscovered repository {}", repository.as_str())
+                format!(
+                    "{task} targets undiscovered repository {}",
+                    repository.as_str()
+                )
             }
             GraphViolation::InvalidTask { task, problem } => format!("{task}: {problem}"),
             GraphViolation::UncoveredRequirement { requirement } => {
@@ -746,10 +749,9 @@ mod tests {
             .validate(&definition(), &workspace())
             .expect_err("unknown requirement");
 
-        assert!(violations.iter().any(|violation| matches!(
-            violation,
-            GraphViolation::UnknownRequirement { .. }
-        )));
+        assert!(violations
+            .iter()
+            .any(|violation| matches!(violation, GraphViolation::UnknownRequirement { .. })));
     }
 
     #[test]
@@ -810,7 +812,10 @@ mod tests {
             now: 0,
         });
 
-        assert_eq!(schedule.ready, vec![task_id("TASK-001"), task_id("TASK-004")]);
+        assert_eq!(
+            schedule.ready,
+            vec![task_id("TASK-001"), task_id("TASK-004")]
+        );
         assert_eq!(schedule.ready_repositories(&graph).len(), 2);
     }
 
@@ -869,7 +874,10 @@ mod tests {
             now: 0,
         });
 
-        assert_eq!(graph.descendants(&task_id("TASK-003")), BTreeSet::from([task_id("TASK-005")]));
+        assert_eq!(
+            graph.descendants(&task_id("TASK-003")),
+            BTreeSet::from([task_id("TASK-005")])
+        );
         assert!(matches!(
             schedule.block_reason(&task_id("TASK-005")),
             Some(BlockReason::AncestorBlocked { .. })

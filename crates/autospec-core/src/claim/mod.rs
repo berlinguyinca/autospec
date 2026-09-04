@@ -922,12 +922,16 @@ fn contains_ci_or_review_bypass(text: &str) -> bool {
     text.lines().any(|line| {
         // Collect every bypass-phrase start position on the line, across both
         // arms.
-        let mut matches: Vec<usize> = Vec::new();
+        // (start, end) — `end` is where the SECOND word of the pair begins, which
+        // failure_condition_governs needs: the governing phrase can sit between
+        // the two words ("test below, and confirm each one fails when … removed")
+        // rather than before them.
+        let mut matches: Vec<(usize, usize)> = Vec::new();
         // verb→noun arm.
         for verb in VERBS {
             for noun in NOUNS {
-                if let Some(index) = ordered_pair_start(line, verb, noun) {
-                    matches.push(index);
+                if let Some(pair) = ordered_pair_span(line, verb, noun) {
+                    matches.push(pair);
                 }
             }
         }
@@ -935,8 +939,8 @@ fn contains_ci_or_review_bypass(text: &str) -> bool {
         // excluded (the #1799 shape) via NOUN_FIRST_VERBS.
         for noun in NOUNS {
             for verb in NOUN_FIRST_VERBS {
-                if let Some(index) = ordered_pair_start(line, noun, verb) {
-                    matches.push(index);
+                if let Some(pair) = ordered_pair_span(line, noun, verb) {
+                    matches.push(pair);
                 }
             }
         }
@@ -945,17 +949,64 @@ fn contains_ci_or_review_bypass(text: &str) -> bool {
         // bypass request — suppress it (issue #2175). The line still fires if
         // ANY bypass phrase is ungoverned, so a real request ("disable CI",
         // "skip the test suite", or "do not touch X; skip CI") still trips.
-        matches
-            .iter()
-            .any(|&index| !prohibition_precedes(line, index))
+        matches.iter().any(|&(start, end)| {
+            !prohibition_precedes(line, start) && !failure_condition_governs(line, end)
+        })
     })
 }
 
 /// Byte offset of `first` when a `second` word occurs later on the same line.
+/// Retained for the callers that need only the start; the CI/review-bypass arm
+/// uses `ordered_pair_span` because it also needs where `second` begins.
 fn ordered_pair_start(text: &str, first: &str, second: &str) -> Option<usize> {
-    word_positions(text, first)
-        .into_iter()
-        .find(|index| !word_positions(&text[index + first.len()..], second).is_empty())
+    ordered_pair_span(text, first, second).map(|(start, _)| start)
+}
+
+/// Byte offsets of `first` and of the `second` word occurring later on the same
+/// line.
+fn ordered_pair_span(text: &str, first: &str, second: &str) -> Option<(usize, usize)> {
+    word_positions(text, first).into_iter().find_map(|index| {
+        let tail = index + first.len();
+        word_positions(&text[tail..], second)
+            .first()
+            .map(|offset| (index, tail + offset))
+    })
+}
+
+/// True when the bypass phrase is the CONDITION of a failure requirement rather
+/// than an instruction — "confirm each one fails when the control it covers is
+/// removed", "verify each assertion fails if the hook is disabled".
+///
+/// This is the anti-vacuous proof rule AGENTS.md requires: a test must fail when
+/// the control it covers is taken away, or it is not evidence. Read as a bypass
+/// it inverts the rule's meaning — and it quarantined the root bootstrap task of
+/// a 123-issue programme along with five others (InferWeave/inferweave #1, #2,
+/// #5, #10, #50, #123), leaving the whole queue transitively blocked.
+///
+/// `prohibition_precedes` cannot cover this: it recognises prohibitions ("do not
+/// skip"), and this is a requirement. The signal is a failure verb followed by a
+/// conditional connector, both before the bypass word and in the same clause.
+/// A real request keeps blocking because it states no failure at all ("disable
+/// the CI checks before merging"), and so does a bypass merely adjacent to one
+/// ("the build fails, so disable CI" — no connector between them).
+fn failure_condition_governs(line: &str, match_end: usize) -> bool {
+    const CONNECTORS: &[&str] = &["when ", "if ", "unless ", "without "];
+    let prefix = &line[..match_end];
+    let clause_start = [
+        prefix.rfind(';').map(|index| index + 1),
+        prefix.rfind(". ").map(|index| index + 2),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+    let clause = &prefix[clause_start..];
+    match clause.rfind("fail") {
+        Some(index) => CONNECTORS
+            .iter()
+            .any(|connector| clause[index..].contains(connector)),
+        None => false,
+    }
 }
 
 /// True when a prohibition cue sits in the SAME CLAUSE before a bypass phrase

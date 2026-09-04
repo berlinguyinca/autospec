@@ -52,7 +52,10 @@ fn a_session_appends_extra_rules_after_the_standard_block() {
     let rules = session.rules();
 
     assert_eq!(rules.len(), WORKING_RULES.len() + 1);
-    assert_eq!(rules.last().map(String::as_str), Some("Never touch migrations in this task."));
+    assert_eq!(
+        rules.last().map(String::as_str),
+        Some("Never touch migrations in this task.")
+    );
 }
 
 #[test]
@@ -114,7 +117,10 @@ fn an_invalid_session_spec_is_rejected_before_launch() {
         ),
     ] {
         let error = build_pi_argv(&session).unwrap_err();
-        assert!(error.contains(expected), "{error} should mention {expected}");
+        assert!(
+            error.contains(expected),
+            "{error} should mention {expected}"
+        );
     }
 }
 
@@ -134,8 +140,10 @@ fn events_parse_from_the_wire_format() {
         }
     );
     assert_eq!(
-        parse_pi_event("context_measurement prompt_tokens=1000 cached_tokens=800 free_tokens=64000")
-            .expect("parses"),
+        parse_pi_event(
+            "context_measurement prompt_tokens=1000 cached_tokens=800 free_tokens=64000"
+        )
+        .expect("parses"),
         PiEvent::ContextMeasurement {
             prompt_tokens: 1_000,
             cached_tokens: 800,
@@ -146,8 +154,8 @@ fn events_parse_from_the_wire_format() {
 
 #[test]
 fn quoted_values_preserve_spaces() {
-    let event = parse_pi_event(r#"result success=true summary="fixed the parser panic""#)
-        .expect("parses");
+    let event =
+        parse_pi_event(r#"result success=true summary="fixed the parser panic""#).expect("parses");
 
     assert_eq!(
         event,
@@ -221,7 +229,11 @@ fn an_event_stream_folds_into_a_structured_result() {
 
     assert!(result.success);
     assert_eq!(result.tool_calls, 2);
-    assert_eq!(result.files_read, vec!["src/a.rs"], "reads are deduplicated");
+    assert_eq!(
+        result.files_read,
+        vec!["src/a.rs"],
+        "reads are deduplicated"
+    );
     assert_eq!(result.files_edited, vec!["src/a.rs"]);
     assert_eq!(result.lines_changed, 12);
     assert_eq!(result.prompt_tokens, 5_000);

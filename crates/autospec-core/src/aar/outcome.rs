@@ -65,7 +65,10 @@ pub fn score_outcome(outcome: &ExecutionOutcome, signals: &OutcomeSignals) -> Ou
         let coverage = f64::from(signals.acceptance_criteria_met)
             / f64::from(signals.acceptance_criteria_total);
         quality += 0.2 * coverage.clamp(0.0, 1.0);
-        reasons.push(format!("acceptance coverage {coverage:.2} (+{:.2})", 0.2 * coverage));
+        reasons.push(format!(
+            "acceptance coverage {coverage:.2} (+{:.2})",
+            0.2 * coverage
+        ));
     }
     for (count, penalty, label) in [
         (signals.regressions_introduced, 0.25, "regression"),
@@ -90,7 +93,10 @@ pub fn score_outcome(outcome: &ExecutionOutcome, signals: &OutcomeSignals) -> Ou
     if outcome.prompt_tokens > 0 {
         let cache_rate = outcome.cached_prompt_tokens as f64 / outcome.prompt_tokens as f64;
         efficiency += 0.1 * cache_rate;
-        reasons.push(format!("cache hit rate {cache_rate:.2} (+{:.2})", 0.1 * cache_rate));
+        reasons.push(format!(
+            "cache hit rate {cache_rate:.2} (+{:.2})",
+            0.1 * cache_rate
+        ));
     }
     if signals.edits > 0 && signals.unnecessary_changes > 0 {
         let churn = f64::from(signals.unnecessary_changes) / f64::from(signals.edits);
@@ -221,9 +227,10 @@ pub fn recommend(candidates: &[ProfileStats], threshold: &QualityThreshold) -> R
             }
         }
         None => {
-            rationale
-                .push("no candidate met the quality threshold; keeping the configured default"
-                    .to_string());
+            rationale.push(
+                "no candidate met the quality threshold; keeping the configured default"
+                    .to_string(),
+            );
             Recommendation {
                 profile_key: None,
                 reasoning_budget: None,
@@ -264,9 +271,9 @@ pub fn apply_policy_override(
 
     if let Some(pinned) = &policy.pinned_profile {
         if recommendation.profile_key.as_ref() != Some(pinned) {
-            recommendation
-                .rationale
-                .push(format!("policy pins {pinned}; learned recommendation overridden"));
+            recommendation.rationale.push(format!(
+                "policy pins {pinned}; learned recommendation overridden"
+            ));
             recommendation.overridden_by_policy = true;
         }
         recommendation.profile_key = Some(pinned.clone());

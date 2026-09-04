@@ -174,7 +174,8 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
         .any(|entry| {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
-            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+            name.rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
         }));
 }
 
@@ -220,7 +221,8 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
         .any(|entry| {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
-            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+            name.rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
         }));
 }
 
@@ -353,8 +355,7 @@ fn autonomous_executor_bridge_codex_sandbox_preserves_host_auth_for_codex_only()
         executable: fake_codex.canonicalize().expect("canonical fake Codex"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::NetworkPermissionProfile,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
     let previous_codex = std::env::var_os("CODEX_API_KEY");
     let previous_openai = std::env::var_os("OPENAI_API_KEY");

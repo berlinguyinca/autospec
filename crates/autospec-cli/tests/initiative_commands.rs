@@ -352,7 +352,11 @@ fn init_refuses_to_overwrite_an_existing_initiative() {
     let output = fixture.run(&arguments);
 
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("already exists"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("already exists"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -525,7 +529,9 @@ fn coverage_traces_each_requirement_through_its_evidence() {
     assert_eq!(matrix["statuses"]["REQ-001"]["state"], "verified");
     assert_eq!(matrix["statuses"]["REQ-002"]["state"], "in_progress");
     assert_eq!(
-        matrix["statuses"]["REQ-001"]["evidence"].as_array().map(Vec::len),
+        matrix["statuses"]["REQ-001"]["evidence"]
+            .as_array()
+            .map(Vec::len),
         Some(4)
     );
 }
@@ -535,10 +541,20 @@ fn project_renders_issues_across_two_owners_and_is_rebuilt_from_canonical_state(
     let fixture = Fixture::new("project");
     fixture.seed(&workspace(), &graph());
 
-    let first = fixture.run(&["project", "--id", INITIATIVE, "--json", "--now", "1772000000"]);
+    let first = fixture.run(&[
+        "project",
+        "--id",
+        INITIATIVE,
+        "--json",
+        "--now",
+        "1772000000",
+    ]);
     assert!(first.status.success(), "{}", stderr(&first));
     let projection = json(&first);
-    assert_eq!(projection["issues"].as_object().map(serde_json::Map::len), Some(3));
+    assert_eq!(
+        projection["issues"].as_object().map(serde_json::Map::len),
+        Some(3)
+    );
     assert_eq!(
         projection["issues"]["TASK-003"]["repository"],
         "github.com/OtherOrg/frontend"
@@ -549,7 +565,14 @@ fn project_renders_issues_across_two_owners_and_is_rebuilt_from_canonical_state(
     // Deleting the rendered projection loses nothing: it rebuilds identically.
     let rendered = fixture.store().path(&InitiativeArtifact::GithubProjection);
     fs::remove_file(&rendered).expect("projection removed");
-    let second = fixture.run(&["project", "--id", INITIATIVE, "--json", "--now", "1772000000"]);
+    let second = fixture.run(&[
+        "project",
+        "--id",
+        INITIATIVE,
+        "--json",
+        "--now",
+        "1772000000",
+    ]);
 
     assert!(second.status.success(), "{}", stderr(&second));
     assert_eq!(json(&second), projection);
@@ -561,7 +584,14 @@ fn status_summarizes_stage_scheduling_and_coverage() {
     let fixture = Fixture::new("status");
     fixture.seed(&workspace(), &graph());
 
-    let output = fixture.run(&["status", "--id", INITIATIVE, "--json", "--now", "1772000000"]);
+    let output = fixture.run(&[
+        "status",
+        "--id",
+        INITIATIVE,
+        "--json",
+        "--now",
+        "1772000000",
+    ]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     let snapshot = json(&output);

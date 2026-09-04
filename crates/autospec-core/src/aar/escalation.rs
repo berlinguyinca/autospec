@@ -10,9 +10,7 @@ use std::collections::BTreeMap;
 
 use super::profile::{ModelProfileRegistry, ModelRequirements};
 use super::reasoning::ReasoningBudget;
-use super::topology::{
-    preserves_separation_after_fallback, RoleAssignment, SeparationPolicy,
-};
+use super::topology::{preserves_separation_after_fallback, RoleAssignment, SeparationPolicy};
 
 /// Rungs of the escalation chain, cheapest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -189,12 +187,14 @@ pub fn next_attempt(context: &EscalationContext<'_>, failed: &Attempt) -> Escala
                 }
             }
             EscalationStep::HigherModelClass => {
-                let higher = higher_classes(&context.policy.class_ladder, &failed.assignment.model_class);
+                let higher =
+                    higher_classes(&context.policy.class_ladder, &failed.assignment.model_class);
                 if higher.is_empty() {
                     rationale.push("higher model class: no class above current".to_string());
                 }
                 for class in higher {
-                    if let Some(outcome) = try_class(context, failed, step, &class, &mut rationale) {
+                    if let Some(outcome) = try_class(context, failed, step, &class, &mut rationale)
+                    {
                         return outcome;
                     }
                 }
