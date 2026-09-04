@@ -334,12 +334,65 @@ optionally `max_wall_clock_ms:` — before a local profile can be routed to.
 
 **`route-decide.sh` is advisory tooling, not yet wired into the live dispatch
 path** (tracked in `docs/decisions/0001-as-aeo-001-phase-0-integration-strategy.md`).
-`scripts/dispatch-implementer.sh` — the script that actually creates the
-worktree and prompt for a Phase 4 dispatch — consults no routing helper today;
-model/profile selection currently happens upstream of it via the harness's own
-tier detection. Run `route-decide.sh --labels "<issue-labels>" --explain`
-by hand to see what the evidence-based router *would* choose; nothing consumes
-that output automatically yet.
+Run `route-decide.sh --labels "<issue-labels>" --explain` by hand to see what the
+*evidence-based* router would choose; nothing consumes that output
+automatically. The ledger-scored layer is what remains unwired — the *baseline*
+selector below is now live.
+
+### Phase 4 dispatch routing
+`scripts/dispatch-implementer.sh` — the script that actually creates the worktree
+and prompt for a Phase 4 dispatch — accepts a routing decision and makes it
+visible to the agent that runs. Without this surface the guardrail work in
+`select-model-profile.sh` and the profile catalog would land in scripts nothing
+calls.
+
+```bash
+dispatch-implementer.sh --issue 3346 --branch feat/x --prompt-file p.md \
+    --model claude-haiku-4-5 --provider codex --kind implementer
+dispatch-implementer.sh --issue 3346 --branch feat/x --prompt-file p.md \
+    --labels "ctx:64k,reasoning:medium"
+```
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_DISPATCH_BASE_REF` | `origin/main` | Base ref the Phase 4 worktree is branched from. |
+| `AUTOSPEC_DISPATCH_REPO` | (unset) | `<owner>/<repo>` for the open-PR rung of the branch ladder. Unset skips that rung. |
+| `AUTOSPEC_DISPATCH_MODEL` | (unset) | Model id to route the dispatch to; `--model` overrides it. |
+| `AUTOSPEC_DISPATCH_PROVIDER` | (unset) | Provider/harness (`claude`, `codex`, `opencode`); `--provider` overrides it. |
+| `AUTOSPEC_DISPATCH_KIND` | `implementer` | Dispatch kind recorded with the routing; `--kind` overrides it. |
+
+`--labels` with no explicit model resolves one through
+`select-model-profile.sh --print-model`, reading the catalog named by
+`AUTOSPEC_MODEL_PROFILES`. An explicit `--model` always wins and skips resolution.
+
+**Fail closed.** If no model can be resolved — selector missing, or
+`select-model-profile.sh` exits 3 because the resolved profile states no `model:`
+id — **no routing is emitted at all** and the reason is printed on stderr. The
+dispatch still succeeds and the implementer keeps its harness-detected tier. A
+guessed model id would be recorded by the routing ledger as though it had been
+chosen on evidence, which is worse than no routing.
+
+When routing *is* present it is emitted twice, exactly as the branch verdict is:
+a machine-readable header comment for the orchestrator, and a human-readable
+block in the prompt body, because the agent reading the prompt is what actually
+honours it.
+
+```
+<!-- dispatch-implementer: routing={"provider":"codex","model":"claude-haiku-4-5","kind":"implementer","source":"explicit"} -->
+```
+
+`source` is `explicit` when the model came from `--model`/`AUTOSPEC_DISPATCH_MODEL`
+and `profile` when it was resolved from labels. Routing values are restricted to
+`[A-Za-z0-9._:@/+-]` (labels may also contain commas) and an out-of-set value
+exits 1, so a value can never break out of the comment or its JSON. With no
+routing arguments and no `AUTOSPEC_DISPATCH_MODEL`/`_PROVIDER`/`_KIND`, stdout is
+byte-identical to a dispatch from before routing existed
+(`tests/dispatch-implementer-routing.bats` diffs against a golden captured from
+the pre-change script).
+
+### Evidence-based routing knobs
+These configure the ledger-scored layer (`routing-ledger.sh`, `routing-cost.sh`,
+`route-decide.sh`), which is still advisory.
 
 | Var | Default | Effect |
 |---|---|---|
