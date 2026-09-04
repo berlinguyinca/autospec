@@ -22,6 +22,10 @@ fn bats_suite(path: &'static str) -> CheckOwner {
     CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(path))
 }
 
+fn rust_native(check: StructuralCheck) -> CheckOwner {
+    CheckOwner::RustNative(check)
+}
+
 impl ValidationCheck {
     pub fn catalog_entry(id: &'static str) -> Self {
         let owner = match id {
@@ -31,12 +35,8 @@ impl ValidationCheck {
             "check_frontmatter" => CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
             "check_flag_sentinel_docs" => CheckOwner::RustNative(StructuralCheck::FlagSentinelDocs),
-            "check_subagent_model_tier" => {
-                CheckOwner::RustNative(StructuralCheck::SubagentModelTier)
-            }
-            "check_harness_detection_block" => {
-                CheckOwner::RustNative(StructuralCheck::HarnessDetection)
-            }
+            "check_subagent_model_tier" => rust_native(StructuralCheck::SubagentModelTier),
+            "check_harness_detection_block" => rust_native(StructuralCheck::HarnessDetection),
             "check_monitor_batch_exit" => CheckOwner::RustNative(StructuralCheck::MonitorBatchExit),
             "check_agents_md_subagent_section" => {
                 CheckOwner::RustNative(StructuralCheck::AgentsMdSubagentSection)
@@ -44,20 +44,14 @@ impl ValidationCheck {
             "check_agents_md_subagent_matrix" => {
                 CheckOwner::RustNative(StructuralCheck::AgentsMdSubagentMatrix)
             }
-            "check_autospec_listen_files" => {
-                CheckOwner::RustNative(StructuralCheck::AutospecListenFiles)
-            }
+            "check_autospec_listen_files" => rust_native(StructuralCheck::AutospecListenFiles),
             "check_examples_dir" => CheckOwner::RustNative(StructuralCheck::ExamplesDirectory),
-            "check_governance_headings" => {
-                CheckOwner::RustNative(StructuralCheck::GovernanceHeadings)
-            }
+            "check_governance_headings" => rust_native(StructuralCheck::GovernanceHeadings),
             "check_autospec_stl_design_guardrails" => {
                 CheckOwner::RustNative(StructuralCheck::StlDesignGuardrails)
             }
             "check_existing_spec_mode" => CheckOwner::RustNative(StructuralCheck::ExistingSpecMode),
-            "check_docs_amendment_presence" => {
-                CheckOwner::RustNative(StructuralCheck::DocsAmendmentPresence)
-            }
+            "check_docs_amendment_presence" => rust_native(StructuralCheck::DocsAmendmentPresence),
             "check_autospec_review_skill_present" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecReviewSkill)
             }
@@ -97,21 +91,13 @@ impl ValidationCheck {
             "check_loop_handoff_harness_awareness" => {
                 CheckOwner::ExternalBatch(ExternalCheck::LoopHandoffHarnessAwareness)
             }
-            "check_agents_md_git_hygiene" => {
-                CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene)
-            }
-            "check_palette_single_source" => {
-                CheckOwner::RustNative(StructuralCheck::PaletteSingleSource)
-            }
+            "check_agents_md_git_hygiene" => rust_native(StructuralCheck::AgentsMdGitHygiene),
+            "check_palette_single_source" => rust_native(StructuralCheck::PaletteSingleSource),
             "check_mermaid_documentation_contract" => {
                 CheckOwner::RustNative(StructuralCheck::MermaidDocumentation)
             }
-            "check_qa_documentation_gate" => {
-                CheckOwner::RustNative(StructuralCheck::QaDocumentationGate)
-            }
-            "check_autospec_harmonize_contract" => {
-                CheckOwner::RustNative(StructuralCheck::AutospecHarmonize)
-            }
+            "check_qa_documentation_gate" => rust_native(StructuralCheck::QaDocumentationGate),
+            "check_autospec_harmonize_contract" => rust_native(StructuralCheck::AutospecHarmonize),
             "check_autospec_autonomous_skill_contract" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecAutonomousSkill)
             }
@@ -133,21 +119,15 @@ impl ValidationCheck {
             "check_team_personality_phase4_and_docs_contract" => {
                 CheckOwner::RustNative(StructuralCheck::TeamPersonalityPhase4AndDocs)
             }
-            "check_team_personality_contract" => {
-                CheckOwner::RustNative(StructuralCheck::TeamPersonality)
-            }
+            "check_team_personality_contract" => rust_native(StructuralCheck::TeamPersonality),
             "check_autospec_release_contract" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecReleaseContract)
             }
-            "check_qa_verdict_contract" => {
-                CheckOwner::RustNative(StructuralCheck::QaVerdictContract)
-            }
+            "check_qa_verdict_contract" => rust_native(StructuralCheck::QaVerdictContract),
             "check_release_verdict_script" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReleaseVerdictScript)
             }
-            "check_brute_force_rule_ids" => {
-                CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)
-            }
+            "check_brute_force_rule_ids" => rust_native(StructuralCheck::BruteForceRuleIds),
             "check_lint_heredoc_handling" => bats_suite("tests/lint/test_complexity_heredoc.bats"),
             "check_lint_reuse_triage" => bats_suite("tests/lint/test_reuse_triage.bats"),
             "check_bats_suite_registration" => {
@@ -383,15 +363,11 @@ impl ValidationCheck {
             "check_autospec_run_codex_bounded_handoff" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecRunCodexBoundedHandoff)
             }
-            "check_phase4_adaptive_retry" => {
-                CheckOwner::RustNative(StructuralCheck::Phase4AdaptiveRetry)
-            }
+            "check_phase4_adaptive_retry" => rust_native(StructuralCheck::Phase4AdaptiveRetry),
             "check_phase4_full_test_suite_gate" => {
                 CheckOwner::RustNative(StructuralCheck::Phase4FullTestSuite)
             }
-            "check_data_scope_review_lens" => {
-                CheckOwner::RustNative(StructuralCheck::DataScopeReviewLens)
-            }
+            "check_data_scope_review_lens" => rust_native(StructuralCheck::DataScopeReviewLens),
             "check_phase4_cost_epic_parity_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::Phase4CostEpicParity)
             }
@@ -399,26 +375,16 @@ impl ValidationCheck {
                 CheckOwner::RustNative(StructuralCheck::DocsDriftGateRegenConditionalParity)
             }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
-            "check_keyword_routing_section" => {
-                CheckOwner::RustNative(StructuralCheck::KeywordRouting)
-            }
-            "check_gap_remediation_section" => {
-                CheckOwner::RustNative(StructuralCheck::GapRemediation)
-            }
-            "check_review_remediation_section" => {
-                CheckOwner::RustNative(StructuralCheck::ReviewRemediation)
-            }
+            "check_keyword_routing_section" => rust_native(StructuralCheck::KeywordRouting),
+            "check_gap_remediation_section" => rust_native(StructuralCheck::GapRemediation),
+            "check_review_remediation_section" => rust_native(StructuralCheck::ReviewRemediation),
             "check_enforcement_defaults_section" => {
                 CheckOwner::RustNative(StructuralCheck::EnforcementDefaults)
             }
             "check_self_update" => CheckOwner::RustNative(StructuralCheck::SelfUpdateTrio),
             "check_self_update_duo" => CheckOwner::RustNative(StructuralCheck::SelfUpdateDuo),
-            "check_codex_skills_install" => {
-                CheckOwner::RustNative(StructuralCheck::CodexSkillsInstall)
-            }
-            "check_shared_script_install" => {
-                CheckOwner::RustNative(StructuralCheck::SharedScriptInstall)
-            }
+            "check_codex_skills_install" => rust_native(StructuralCheck::CodexSkillsInstall),
+            "check_shared_script_install" => rust_native(StructuralCheck::SharedScriptInstall),
             "check_root_helper_wrapper_policy" => {
                 CheckOwner::RustNative(StructuralCheck::RootHelperWrapperPolicy)
             }
