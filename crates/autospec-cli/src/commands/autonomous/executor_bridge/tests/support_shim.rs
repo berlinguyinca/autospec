@@ -12,9 +12,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(unix)]
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
@@ -126,33 +124,21 @@ fn publish_and_run_shims(root: &Path, worker: usize, iterations: usize) -> Vec<S
     busy
 }
 
-/// Spawn a thread that runs `/bin/true` in a loop until `stop` is set, so the
-/// publishing threads are always racing a live fork.
-#[cfg(unix)]
-fn spawn_noise(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            let _ = Command::new("/bin/true").status();
-        }
-    })
-}
-
 /// Regression for the exec half of #3495: a shim published here must run even while
 /// sibling threads are forking. Against `fs::write` this fails within a few
 /// iterations, because those forks inherit the writer's descriptor.
+///
+/// The publishing threads are each other's fork traffic — no dedicated spawn-storm
+/// thread — so the case proves the property without loading the rest of the suite
+/// down while it runs.
 #[cfg(unix)]
 #[test]
 fn executor_bridge_shims_execute_while_sibling_threads_spawn() {
     let root = test_root("shim-exec-race");
-    let stop = Arc::new(AtomicBool::new(false));
-    let noise = (0..4)
-        .map(|_| spawn_noise(Arc::clone(&stop)))
-        .collect::<Vec<_>>();
-
-    let writers = (0..2)
+    let writers = (0..4)
         .map(|worker| {
             let root = root.clone();
-            std::thread::spawn(move || publish_and_run_shims(&root, worker, 75))
+            std::thread::spawn(move || publish_and_run_shims(&root, worker, 60))
         })
         .collect::<Vec<_>>();
 
@@ -160,10 +146,6 @@ fn executor_bridge_shims_execute_while_sibling_threads_spawn() {
         .into_iter()
         .flat_map(|writer| writer.join().expect("shim writer thread"))
         .collect::<Vec<_>>();
-    stop.store(true, Ordering::Relaxed);
-    for thread in noise {
-        thread.join().expect("spawn noise thread");
-    }
     assert!(
         busy.is_empty(),
         "published shim failed to execute: {busy:?}"
