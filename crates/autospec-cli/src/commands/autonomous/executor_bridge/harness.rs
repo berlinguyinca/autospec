@@ -11,7 +11,10 @@
 use super::*;
 
 #[cfg(unix)]
+mod model_routing;
 mod trusted_executable;
+
+use model_routing::ModelRouting;
 #[cfg(all(unix, test))]
 pub(super) use trusted_executable::trusted_executable_owner_allowed;
 #[cfg(unix)]
@@ -94,8 +97,7 @@ pub(crate) struct ResolvedHarness {
     pub(crate) executable: PathBuf,
     pub(super) opencode_adapter: Option<PathBuf>,
     pub(super) codex_sandbox: CodexSandboxPolicy,
-    pub(super) opencode_model: Option<String>,
-    pub(super) opencode_variant: Option<String>,
+    pub(super) routing: ModelRouting,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,41 +196,19 @@ impl HarnessConfig {
             executable: safe_executable(Path::new(&alias.binary), env)?,
             opencode_adapter: self.opencode_adapter.clone(),
             codex_sandbox: CodexSandboxPolicy::Default,
-            opencode_model: env
-                .get("AUTOSPEC_OPENCODE_MODEL")
-                .and_then(|value| value.to_str())
-                .map(str::to_string),
-            opencode_variant: env
-                .get("AUTOSPEC_OPENCODE_VARIANT")
-                .and_then(|value| value.to_str())
-                .map(str::to_string),
+            routing: ModelRouting::load(requested, env).with_context(requested, env)?,
         })
     }
 }
 
 impl ResolvedHarness {
-    /// Append `--model` / `--variant` for OpenCode when the operator's routing
-    /// layer has selected a tier. Maps directly onto the AGENTS.md two-tier model
-    /// selection: Tier A (top model + high reasoning) vs Tier B (smaller model +
-    /// medium reasoning). Absent env vars leave the harness default untouched.
-    fn opencode_model_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(model) = &self.opencode_model {
-            args.push("--model".into());
-            args.push(model.clone());
-        }
-        if let Some(variant) = &self.opencode_variant {
-            args.push("--variant".into());
-            args.push(variant.clone());
-        }
-        args
-    }
     pub(super) fn review_invocation(
         &self,
         worktree: &Path,
         artifact: &Path,
         prompt: &str,
     ) -> Result<HarnessInvocation, String> {
+        let routing = self.routing_args()?;
         let (program, args) = match self.kind {
             HarnessKind::Codex => (
                 self.executable.clone(),
@@ -243,8 +223,11 @@ impl ResolvedHarness {
                     "--ephemeral".into(),
                     "--output-last-message".into(),
                     artifact.display().to_string(),
-                    prompt.into(),
-                ],
+                ]
+                .into_iter()
+                .chain(routing.clone())
+                .chain(std::iter::once(prompt.to_string()))
+                .collect(),
             ),
             HarnessKind::Claude => (
                 self.executable.clone(),
@@ -268,8 +251,11 @@ impl ResolvedHarness {
                     "--no-session-persistence".into(),
                     "--output-format".into(),
                     "text".into(),
-                    prompt.into(),
-                ],
+                ]
+                .into_iter()
+                .chain(routing.clone())
+                .chain(std::iter::once(prompt.to_string()))
+                .collect(),
             ),
             HarnessKind::OpenCode => {
                 let mut args = vec![
@@ -278,14 +264,15 @@ impl ResolvedHarness {
                     "--agent".into(),
                     OPENCODE_REVIEWER_AGENT.into(),
                 ];
-                args.extend(self.opencode_model_args());
+                args.extend(routing.clone());
                 args.push(prompt.into());
                 (self.executable.clone(), args)
             }
-            HarnessKind::Pi => (
-                self.executable.clone(),
-                vec![prompt.into()],
-            ),
+            HarnessKind::Pi => {
+                let mut args = routing.clone();
+                args.push(prompt.into());
+                (self.executable.clone(), args)
+            }
         };
         Ok(HarnessInvocation {
             program,
@@ -317,6 +304,7 @@ impl ResolvedHarness {
                 requires_mutation_snapshots: false,
             });
         }
+        let routing = self.routing_args()?;
         let (program, args, requires_mutation_snapshots) = match self.kind {
             HarnessKind::Codex => {
                 let mut args = vec!["exec".into(), "-C".into(), worktree.display().to_string()];
@@ -329,8 +317,9 @@ impl ResolvedHarness {
                     "--ephemeral".into(),
                     "--output-last-message".into(),
                     artifact.display().to_string(),
-                    prompt.into(),
                 ]);
+                args.extend(routing.clone());
+                args.push(prompt.into());
                 (self.executable.clone(), args, false)
             }
             HarnessKind::Claude => (
@@ -358,8 +347,11 @@ impl ResolvedHarness {
                     "--include-partial-messages".into(),
                     "--output-format".into(),
                     "stream-json".into(),
-                    prompt.into(),
-                ],
+                ]
+                .into_iter()
+                .chain(routing.clone())
+                .chain(std::iter::once(prompt.to_string()))
+                .collect(),
                 true,
             ),
             HarnessKind::OpenCode => {
@@ -372,15 +364,15 @@ impl ResolvedHarness {
                     "--pure".into(),
                     "run".into(),
                 ];
-                args.extend(self.opencode_model_args());
+                args.extend(routing.clone());
                 args.push(prompt.into());
                 (adapter, args, false)
             }
-            HarnessKind::Pi => (
-                self.executable.clone(),
-                vec![prompt.into()],
-                false,
-            ),
+            HarnessKind::Pi => {
+                let mut args = routing.clone();
+                args.push(prompt.into());
+                (self.executable.clone(), args, false)
+            }
         };
         Ok(HarnessInvocation {
             program,
