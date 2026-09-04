@@ -383,8 +383,12 @@ honours it.
 
 `source` is `explicit` when the model came from `--model`/`AUTOSPEC_DISPATCH_MODEL`
 and `profile` when it was resolved from labels. Routing values are restricted to
-`[A-Za-z0-9._:@/+-]` (labels may also contain commas) and an out-of-set value
-exits 1, so a value can never break out of the comment or its JSON. With no
+`[A-Za-z0-9._:@/+[]-]` (labels may also contain commas) and an out-of-set value
+exits 1, so a value can never break out of the comment or its JSON. Brackets are
+admitted because real model ids carry them (`claude-opus-5[1m]`) and they are
+inert in both an HTML comment and a JSON string. The gate applies to the dispatch
+path only: `--cleanup` emits no routing, so a malformed `AUTOSPEC_DISPATCH_*` left
+in the environment cannot strand a worktree. With no
 routing arguments and no `AUTOSPEC_DISPATCH_MODEL`/`_PROVIDER`/`_KIND`, stdout is
 byte-identical to a dispatch from before routing existed
 (`tests/dispatch-implementer-routing.bats` diffs against a golden captured from

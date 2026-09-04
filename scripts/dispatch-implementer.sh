@@ -136,7 +136,7 @@ fi
 _routing_charset_ok() {
     case "$1" in
         '')                          return 0 ;;
-        *[!A-Za-z0-9._:@/+-]*)       return 1 ;;
+        *[!]A-Za-z0-9._:@/+[-]*)     return 1 ;;
     esac
     return 0
 }
@@ -144,21 +144,16 @@ _routing_charset_ok() {
 _routing_label_charset_ok() {
     case "$1" in
         '')                          return 0 ;;
-        *[!A-Za-z0-9._:@/+,-]*)      return 1 ;;
+        *[!]A-Za-z0-9._:@/+,[-]*)    return 1 ;;
     esac
     return 0
 }
 
 _reject_routing_value() {
     printf 'dispatch-implementer.sh: invalid %s value: %s\n' "$1" "$2" >&2
-    printf 'dispatch-implementer.sh: routing values are limited to [A-Za-z0-9._:@/+-] (labels may also contain commas) so they cannot break out of the routing comment or its JSON\n' >&2
+    printf 'dispatch-implementer.sh: routing values are limited to [A-Za-z0-9._:@/+[]-] (labels may also contain commas) so they cannot break out of the routing comment or its JSON\n' >&2
     exit 1
 }
-
-_routing_charset_ok "$MODEL"          || _reject_routing_value "--model" "$MODEL"
-_routing_charset_ok "$PROVIDER"       || _reject_routing_value "--provider" "$PROVIDER"
-_routing_charset_ok "$KIND"           || _reject_routing_value "--kind" "$KIND"
-_routing_label_charset_ok "$LABELS"   || _reject_routing_value "--labels" "$LABELS"
 
 # Locate worktree-guard.sh: prefer the repo-local copy, then ~/.autospec/scripts/.
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || SCRIPT_DIR=""
@@ -183,6 +178,14 @@ if [ "$CLEANUP" -eq 1 ]; then
     fi
     exit 0
 fi
+
+# Validate routing values only on the dispatch path. --cleanup emits no routing,
+# so a malformed AUTOSPEC_DISPATCH_* left in the operator's environment must not
+# be able to strand a worktree: cleanup exits above, before this gate.
+_routing_charset_ok "$MODEL"          || _reject_routing_value "--model" "$MODEL"
+_routing_charset_ok "$PROVIDER"       || _reject_routing_value "--provider" "$PROVIDER"
+_routing_charset_ok "$KIND"           || _reject_routing_value "--kind" "$KIND"
+_routing_label_charset_ok "$LABELS"   || _reject_routing_value "--labels" "$LABELS"
 
 if [ -z "$PROMPT_FILE" ] || [ ! -r "$PROMPT_FILE" ]; then
     echo "dispatch-implementer.sh: --prompt-file must point to a readable file" >&2

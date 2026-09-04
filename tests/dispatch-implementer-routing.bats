@@ -252,8 +252,10 @@ YML
 
 @test "a model id that could break out of the HTML comment is refused, not emitted" {
     # `-->` inside a routing value would terminate the machine-readable comment
-    # early and hand the rest of the value to the implementer as prose.
-    run dispatch --model 'evil --> injected'
+    # early and hand the rest of the value to the implementer as prose. The value
+    # deliberately contains NO whitespace: a spaced variant is rejected for the
+    # space alone, so it would pass even if `>` were admitted to the charset.
+    run dispatch --model 'evil-->injected'
     [ "$status" -eq 1 ]
     [ -z "$output" ]
     run cat "$STDERR_FILE"
@@ -266,6 +268,30 @@ YML
     [ -z "$output" ]
     run cat "$STDERR_FILE"
     [[ "$output" == *"invalid --provider value"* ]]
+}
+
+@test "a bracketed model id is routable — brackets break neither the comment nor the JSON" {
+    # Real ids carry them (e.g. claude-opus-5[1m]). Rejecting them would fail a
+    # dispatch on the one surface whose entire purpose is naming a model.
+    run dispatch --model 'claude-opus-5[1m]' --provider claude
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"model":"claude-opus-5[1m]"'* ]]
+    [[ "$output" == *'- model: `claude-opus-5[1m]`'* ]]
+}
+
+@test "--cleanup succeeds even with a malformed routing value in the environment" {
+    # Cleanup emits no routing, so the charset gate must not stand in its way.
+    # Regression: a stray AUTOSPEC_DISPATCH_MODEL used to abort teardown with
+    # exit 1, stranding /tmp/wt-<branch> so the next dispatch on that branch hit
+    # worktree-guard's dirty-reuse refusal.
+    dispatch --model valid-id > /dev/null
+    [ -d "$WT" ]
+
+    export AUTOSPEC_DISPATCH_MODEL='bad value!'
+    run env AUTOSPEC_DISPATCH_MODEL='bad value!' bash "$HELPER" \
+        --issue "$ISSUE" --branch "$BRANCH" --cleanup
+    [ "$status" -eq 0 ]
+    [ ! -d "$WT" ]
 }
 
 # ── usage text ────────────────────────────────────────────────────────────────
