@@ -493,3 +493,36 @@ fn infra_keywords_in_out_of_scope_text_are_ignored() {
     );
     assert!(real.ambiguous);
 }
+
+#[test]
+fn anti_vacuous_test_requirements_do_not_trip_ci_bypass() {
+    // Break caught (InferWeave/inferweave #1, #2, #5, #10, #50, #123): every one
+    // of the six quarantined issues carries the repository's own anti-vacuous
+    // proof rule — "confirm each test fails when the control it covers is
+    // removed" — which the noun→verb arm reads as test…removed and blocks as a
+    // review bypass.
+    //
+    // That is the inversion the rule exists to prevent: the sentence demands a
+    // test that CAN fail, the strongest anti-bypass instruction in AGENTS.md,
+    // and it quarantined the root bootstrap task of a 123-issue programme. No
+    // prohibition cue precedes the phrase, so the #2175 suppression never
+    // applies — "confirm X fails when Y is removed" is a REQUIREMENT, not a
+    // prohibition, and the existing cue list only recognises prohibitions.
+    let requirements = [
+        "Write each required test below, and confirm each one fails when the control it covers is removed. A test that cannot fail is not evidence.",
+        "Set the proof status: `proven` only if a test exists that fails without the control, otherwise `owed`.",
+        "A test that cannot fail when the control is removed is not evidence.",
+        "Confirm the check fails when the guard is removed.",
+        "Verify each assertion fails if the hook is disabled.",
+    ];
+    for body in requirements {
+        let lint = lint_issue_intent("P0-T01 — Bootstrap clean monorepo", body, "agent");
+        assert!(
+            !lint
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "ci-or-review-bypass"),
+            "anti-vacuous proof requirement wrongly flagged as ci-or-review-bypass: {body:?}"
+        );
+    }
+}
