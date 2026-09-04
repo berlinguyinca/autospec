@@ -146,9 +146,10 @@ fn prior_generation_authorization_rejects_heartbeat_replacement() {
     )
     .unwrap());
     assert!(!source.exists());
-    let retained = claim::expired_prior_generation_heartbeat("owner/repo", 42, &record)
-        .unwrap()
-        .expect("retained authorization");
+    let retained =
+        claim::heartbeat_predecessor::expired_prior_generation_heartbeat("owner/repo", 42, &record)
+            .unwrap()
+            .expect("retained authorization");
     assert!(claim::quarantine_authoritative_stale_heartbeat(
         "owner/repo",
         42,
