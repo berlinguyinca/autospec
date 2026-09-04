@@ -1,4 +1,4 @@
-// claim tests: heartbeat / prior — 5 cases.
+// claim tests: heartbeat / prior — 6 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
@@ -479,4 +479,83 @@ fn startup_heartbeat_process_identity() {
         }
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A released claim whose only remaining artefact is a dead prior generation's
+/// heartbeat must still be acquirable.
+///
+/// `retire` probed for exact-identity evidence before running the prior-generation
+/// quarantine, and that probe answers a generation mismatch with a hard error. The
+/// quarantine that exists to clear precisely this file therefore sat behind a guard
+/// that rejected precisely this file, so the issue stayed unacquirable for as long
+/// as the file existed: `claim acquire` deferred on every attempt, and
+/// `claim state recover-stale-startup` declined too, because the authoritative
+/// record says `released` rather than `claimed` and there is no stale claim to
+/// recover. Nothing in the loop closed over that state.
+///
+/// The portable `retire` has always returned `Ok` here, retaining the file rather
+/// than failing the acquisition, so this also settles a platform split.
+#[cfg(target_os = "linux")]
+#[test]
+fn released_claim_acquires_over_a_dead_prior_generation_heartbeat() {
+    let _guard = lock_heartbeat_env();
+    let (sandbox, _) = startup_heartbeat_fixture("released-prior-generation-wedge");
+    let heartbeat_root = sandbox.join("heartbeats");
+    let repo_key = super::super::super::autonomous::drain::repository_progress_key("owner/repo");
+    let repo = heartbeat_root.join(repo_key);
+    std::fs::create_dir_all(&repo).unwrap();
+    for directory in [&heartbeat_root, &repo] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .unwrap()
+        .trim()
+        .to_string();
+    let boot = super::super::super::autonomous::current_boot_identity().unwrap();
+    let nonce = claim::startup_heartbeat_nonce("owner/repo", 42, "prior-claim");
+    // ts 1 with a 10s ttl is long expired, and pid 2147483647 on this host and boot
+    // is dead, so the snapshot classifies ExpiredDead rather than Blocking.
+    let document = format!(
+        r#"{{"repo":"owner/repo","issue":"42","worker_id":"prior-worker","branch":"feat/worker","pr":"","claim_id":"prior-claim","step":"claimed","ts":1,"ttl_seconds":10,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot}","process_start":"1"}}"#
+    );
+    let stale = repo.join("42.json");
+    std::fs::write(&stale, &document).unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let released = RunStateRecord::new(
+        "owner/repo",
+        42,
+        "current-worker",
+        "released",
+        "feat/worker",
+        "",
+        "released",
+        Vec::new(),
+        "2026-08-13T00:00:00Z",
+        "2026-08-13T00:00:00Z",
+        300,
+    )
+    .with_claim_id("current-claim");
+    let predecessor = claim::ClaimRefHead {
+        oid: "oid".to_string(),
+        generation: "generation".to_string(),
+        record: released,
+    };
+
+    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+    std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root);
+
+    let retired = claim::heartbeat_predecessor::retire("owner/repo", 42, Some(&predecessor));
+
+    match previous {
+        Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+        None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+    }
+
+    retired.expect("a dead prior generation must not block a released claim");
+    assert!(
+        !stale.exists(),
+        "the dead prior generation's heartbeat was left in place"
+    );
+    std::fs::remove_dir_all(sandbox).unwrap();
 }

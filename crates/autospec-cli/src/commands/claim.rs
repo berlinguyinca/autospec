@@ -2246,7 +2246,7 @@ fn quarantine_authoritative_stale_heartbeat_with_sync_hook(
         claim_id,
         step: "claimed",
     };
-    let classified = if heartbeat_lifecycle_step(&record.step) {
+    let classified = if heartbeat_lifecycle_step(&record.step) || authorized_prior.is_some() {
         match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 StartupHeartbeatClassification::Absent
