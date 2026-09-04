@@ -433,12 +433,7 @@ YAML
     origin_git="$TMP/origin.git"
     mkdir -p "$real_root"
     "$REAL_GIT_BIN" init -q -b main "$real_root"
-    # GitHub-hosted runners set no global user.name/user.email, so this
-    # fixture must configure its own local identity before committing rather
-    # than relying on one (#3487).
-    ( cd "$real_root" && "$REAL_GIT_BIN" config user.email "autospec-test@example.invalid" )
-    ( cd "$real_root" && "$REAL_GIT_BIN" config user.name "Autospec Test" )
-    ( cd "$real_root" && "$REAL_GIT_BIN" commit -q --allow-empty -m init )
+    ( cd "$real_root" && "$REAL_GIT_BIN" config user.email "autospec-test@example.invalid" && "$REAL_GIT_BIN" config user.name "Autospec Test" && "$REAL_GIT_BIN" commit -q --allow-empty -m init )
     "$REAL_GIT_BIN" init -q --bare "$origin_git"
     ( cd "$real_root" && "$REAL_GIT_BIN" remote add origin "$origin_git" )
     ( cd "$real_root" && "$REAL_GIT_BIN" push -q origin main )
