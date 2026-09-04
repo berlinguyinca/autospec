@@ -130,6 +130,7 @@ impl ValidationCheck {
             "check_brute_force_rule_ids" => rust_native(StructuralCheck::BruteForceRuleIds),
             "check_lint_heredoc_handling" => bats_suite("tests/lint/test_complexity_heredoc.bats"),
             "check_lint_reuse_triage" => bats_suite("tests/lint/test_reuse_triage.bats"),
+            "check_lint_deferral_refs" => bats_suite("tests/lint/test_deferral_refs.bats"),
             "check_bats_suite_registration" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)
             }
