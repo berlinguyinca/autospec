@@ -8,6 +8,7 @@ use super::support_invocation::{commit_implementation, implementation_proof_fixt
 use super::support_launch::{
     adapter_path, draft_pr_adapter_fixture, prepared_draft_transaction, DRAFT_ISSUE_BODY,
 };
+use super::support_shim::write_executable_mode;
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::fs;
 #[cfg(unix)]
@@ -502,9 +503,7 @@ fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable()
     let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
     assert_eq!(calls.matches("pr create").count(), 0);
 
-    fs::write(&executable, executable_body).expect("restore fixture executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
-        .expect("restore fixture executable mode");
+    write_executable_mode(&executable, &executable_body, executable_mode);
     prepared.adapter.environment.remove(std::ffi::OsStr::new(
         "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
     ));
@@ -554,9 +553,7 @@ fn autonomous_executor_bridge_recovers_after_durable_intent_clear_crash() {
     let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
     assert_eq!(calls.matches("pr create").count(), 0);
 
-    fs::write(&executable, executable_body).expect("restore fixture executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
-        .expect("restore fixture executable mode");
+    write_executable_mode(&executable, &executable_body, executable_mode);
     prepared.adapter.environment.remove(std::ffi::OsStr::new(
         "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
     ));

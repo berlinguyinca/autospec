@@ -358,17 +358,10 @@ pub(super) fn write_alias_table(root: &Path, body: &str) -> PathBuf {
     path
 }
 
-pub(super) fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).expect("write executable fixture");
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(path)
-            .expect("executable fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("executable fixture mode");
-    }
-}
+// Publishing an executable fixture is its own concern now: `fs::write` here left a
+// write descriptor that concurrently forked children inherited, and the exec that
+// followed failed with ETXTBSY (#3495). See support_shim.rs.
+pub(super) use super::support_shim::write_executable;
 
 pub(super) fn environment(table: &Path) -> BTreeMap<String, OsString> {
     BTreeMap::from([
