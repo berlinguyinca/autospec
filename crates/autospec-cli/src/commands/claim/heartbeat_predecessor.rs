@@ -38,9 +38,27 @@ pub(super) fn retire(
         branch: &record.branch,
         claim_id,
     };
-    if !released_predecessor_heartbeat_evidence_exists(identity)? {
-        return Ok(());
-    }
+    // The prior-generation quarantine runs before the evidence probe because it is
+    // the only thing that clears a heartbeat left by an older, dead generation of
+    // this issue, and that probe answers exactly such a file with a hard error naming
+    // the generation mismatch. Probing first made the quarantine unreachable in the
+    // one case it exists for, and nothing else closed over the state:
+    // `recover-stale-startup` declines too, because the authoritative record reads
+    // `released` rather than `claimed`, so there is no stale claim to recover. The
+    // issue stayed unacquirable for as long as the file survived.
+    //
+    // Reaching the quarantine is not sufficient on its own, which is why it now also
+    // selects its prior-generation-aware classification on `authorized_prior` being
+    // present. It had selected on `heartbeat_lifecycle_step` alone, and a `released`
+    // record never reads as one, so it classified the foreign file against its own
+    // identity, called it Blocking, and refused. The authorization passed here is the
+    // same evidence that branch derives for itself.
+    //
+    // Both steps stay narrow. `expired_prior_generation_heartbeat` answers `None` for
+    // a heartbeat of this generation and for one whose owner is still alive, so a live
+    // foreign owner still blocks acquisition and only the dead-foreign-generation case
+    // takes the new path. The snapshot is re-read inside the quarantine, so its race
+    // guard still compares it against this authorization.
     if let Some(prior) = expired_prior_generation_heartbeat(repo, issue, record)? {
         if quarantine_authoritative_stale_heartbeat(
             repo,
@@ -51,6 +69,9 @@ pub(super) fn retire(
         )? {
             return Ok(());
         }
+    }
+    if !released_predecessor_heartbeat_evidence_exists(identity)? {
+        return Ok(());
     }
     retire_released_startup_heartbeat_with_hook(identity, true, &mut |_, _| Ok(()))
 }
