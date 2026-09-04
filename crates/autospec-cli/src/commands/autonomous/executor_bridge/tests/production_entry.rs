@@ -359,8 +359,7 @@ fn autonomous_executor_bridge_production_entry_rejects_foreign_worktree() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
 
     let error = bridge::supervise_resolved_harness(
@@ -395,8 +394,7 @@ fn autonomous_executor_bridge_production_entry_rejects_foreign_artifact() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
 
     let error = bridge::supervise_resolved_harness(
@@ -436,8 +434,7 @@ fn autonomous_executor_bridge_production_entry_rejects_symlinked_artifact() {
             .expect("canonical shell"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
 
     let error = bridge::supervise_resolved_harness(

@@ -130,8 +130,7 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
         executable: codex,
         opencode_adapter: None,
         codex_sandbox: policy,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
     let invocation = harness
         .invocation(
@@ -499,8 +498,7 @@ fn autonomous_executor_bridge_codex_sandbox_cleanup_skips_failing_probe() {
         executable: PathBuf::from("/missing/codex"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::Default,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
     let called = std::cell::Cell::new(false);
     bridge::configure_codex_sandbox_for_phase(&mut harness, BridgePhase::CleanupPending, |_| {

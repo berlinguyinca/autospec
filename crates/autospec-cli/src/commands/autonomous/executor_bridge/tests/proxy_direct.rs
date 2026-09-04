@@ -353,8 +353,7 @@ fn autonomous_executor_bridge_codex_sandbox_preserves_host_auth_for_codex_only()
         executable: fake_codex.canonicalize().expect("canonical fake Codex"),
         opencode_adapter: None,
         codex_sandbox: bridge::CodexSandboxPolicy::NetworkPermissionProfile,
-        opencode_model: None,
-        opencode_variant: None,
+        routing: Default::default(),
     };
     let previous_codex = std::env::var_os("CODEX_API_KEY");
     let previous_openai = std::env::var_os("OPENAI_API_KEY");
