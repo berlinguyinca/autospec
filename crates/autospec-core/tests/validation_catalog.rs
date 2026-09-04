@@ -36,10 +36,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    // +9: orphaned-suite ratchet and the suites it caught (#3360); +1: code
-    // intelligence gateway (#3483); +2: the two suites the ratchet caught (#3485).
-    assert_eq!(calls.len(), 156);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 151); // a call no gate repeats
+    // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code
+    // intelligence (#3483); +2: suites the ratchet caught (#3485); +1: lint (#3497).
+    assert_eq!(calls.len(), 157);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 152); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -68,14 +68,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 167); // +1: code intelligence (#3483); +2: #3485
+    assert_eq!(frozen_catalog_ids().len(), 168); // +1: #3483; +2: #3485; +1: #3497
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 167);
+    assert_eq!(ids.len(), 168);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 

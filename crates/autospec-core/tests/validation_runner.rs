@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 156); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners
-    assert_eq!(full.unique_ids().len(), 151); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 157); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497)
+    assert_eq!(full.unique_ids().len(), 152); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
