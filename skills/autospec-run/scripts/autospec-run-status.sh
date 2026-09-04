@@ -124,8 +124,18 @@ if [ -n "$repo" ]; then
 fi
 
 # Queue counts (best-effort; needs gh + the Rust queue command). Degrade to nulls.
+#
+# NOTE (#3490): `autospec queue ready` output can carry the FULL ready/blocked
+# issue bodies — measured at 317KB on a real 56-ready/23-blocked queue, far
+# past Linux's per-argument MAX_ARG_STRLEN (128 KiB, distinct from the much
+# larger total ARG_MAX). The two jq calls below need only `claimed[].number`
+# and `claimed[].title` (147 bytes in that same measurement), so the raw
+# queue output is projected down to `queue_claimed` on jq's STDIN — never
+# passed through `--argjson` — before it reaches any downstream jq call.
+# `ready`/`blocked` are never kept beyond their already-separate `$queue`
+# counts below.
 queue='{"ready":null,"blocked":null,"claimed":null}'
-queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
+queue_claimed='{"claimed":[]}'
 queue_known=0
 queue_bin="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}"
 if [ -z "$queue_bin" ] && [ -x "$SCRIPT_DIR/../../../target/debug/autospec" ]; then
@@ -137,8 +147,14 @@ fi
 if [ -n "$queue_bin" ] && command -v gh >/dev/null 2>&1; then
   q="$("$queue_bin" queue ready ${REPO_ARG:+--repo "$REPO_ARG"} 2>/dev/null)"
   if [ -n "$q" ]; then
-    queue_full="$(printf '%s' "$q" | jq '{ready:(.ready // []),blocked:(.blocked // []),claimed:(.claimed // []),conflicts:(.conflicts // []),batch:(.batch // [])}' 2>/dev/null)"
-    [ -n "$queue_full" ] || queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
+    queue_claimed="$(printf '%s' "$q" | jq -c '
+      {claimed: (.claimed // [] | map({number: (.number | tonumber), title: (.title // "")}))}
+    ' 2>&1)"
+    qc_rc=$?
+    if [ "$qc_rc" -ne 0 ] || [ -z "$queue_claimed" ]; then
+      echo "autospec-run-status: WARN failed to project queue.claimed (jq exit $qc_rc): $queue_claimed" >&2
+      queue_claimed='{"claimed":[]}'
+    fi
     queue="$(printf '%s' "$q" | jq '{ready:(.ready|length),blocked:(.blocked|length),claimed:(.claimed|length)}' 2>/dev/null)"
     [ -n "$queue" ] || queue='{"ready":null,"blocked":null,"claimed":null}'
     queue_known=1
@@ -146,20 +162,28 @@ if [ -n "$queue_bin" ] && command -v gh >/dev/null 2>&1; then
 fi
 all_rows="$rows"
 if [ "$queue_known" -eq 1 ]; then
-  rows="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_full" '
+  rows="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_claimed" '
     ($queue.claimed // [] | map(.number | tonumber)) as $claimed_issues
     | [ $rows[]? | (.issue | tonumber) as $issue | select($claimed_issues | index($issue)) ]
-  ' 2>/dev/null)"
-  [ -n "$rows" ] || rows="[]"
+  ' 2>&1)"
+  rows_rc=$?
+  if [ "$rows_rc" -ne 0 ] || [ -z "$rows" ]; then
+    echo "autospec-run-status: WARN claimed-intersection jq failed (exit $rows_rc): $rows" >&2
+    rows="[]"
+  fi
 fi
-claimed_without_heartbeat="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_full" '
+claimed_without_heartbeat="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_claimed" '
   ($rows | map(.issue | tonumber)) as $heartbeat_issues
   | [ $queue.claimed[]?
       | (.number | tonumber) as $issue
       | select(($heartbeat_issues | index($issue)) | not)
       | {issue:.number, title:(.title // ""), reason:"claimed_without_heartbeat"} ]
-' 2>/dev/null)"
-[ -n "$claimed_without_heartbeat" ] || claimed_without_heartbeat="[]"
+' 2>&1)"
+cwh_rc=$?
+if [ "$cwh_rc" -ne 0 ] || [ -z "$claimed_without_heartbeat" ]; then
+  echo "autospec-run-status: WARN claimed-without-heartbeat jq failed (exit $cwh_rc): $claimed_without_heartbeat" >&2
+  claimed_without_heartbeat="[]"
+fi
 
 stop_flag=false
 [ -f "$STATE_DIR/stop.flag" ] && stop_flag=true
