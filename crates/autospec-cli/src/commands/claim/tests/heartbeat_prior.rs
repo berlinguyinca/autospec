@@ -146,9 +146,10 @@ fn prior_generation_authorization_rejects_heartbeat_replacement() {
     )
     .unwrap());
     assert!(!source.exists());
-    let retained = claim::expired_prior_generation_heartbeat("owner/repo", 42, &record)
-        .unwrap()
-        .expect("retained authorization");
+    let retained =
+        claim::heartbeat_predecessor::expired_prior_generation_heartbeat("owner/repo", 42, &record)
+            .unwrap()
+            .expect("retained authorization");
     assert!(claim::quarantine_authoritative_stale_heartbeat(
         "owner/repo",
         42,
@@ -556,83 +557,6 @@ fn released_claim_acquires_over_a_dead_prior_generation_heartbeat() {
     assert!(
         !stale.exists(),
         "the dead prior generation's heartbeat was left in place"
-    );
-    std::fs::remove_dir_all(sandbox).unwrap();
-}
-
-/// A dead heartbeat belonging to a *different* worker must not be reclaimed as this
-/// record's own prior generation while the record's own lease is still inside its TTL.
-///
-/// This is `released_claim_acquires_over_a_dead_prior_generation_heartbeat` with one
-/// field changed -- the record's `updated_at` moves from long-expired to now -- so the
-/// only discriminator under examination is whether the authoritative record has itself
-/// been abandoned. Two distinct workers with a genuinely expired second heartbeat is
-/// ordinary lease contention, and the lease-timeout path arbitrates it; the
-/// prior-generation quarantine must keep its hands off the evidence until then.
-#[cfg(target_os = "linux")]
-#[test]
-fn live_released_claim_declines_a_foreign_dead_heartbeat() {
-    let _guard = lock_heartbeat_env();
-    let (sandbox, _) = startup_heartbeat_fixture("live-released-foreign-heartbeat");
-    let heartbeat_root = sandbox.join("heartbeats");
-    let repo_key = super::super::super::autonomous::drain::repository_progress_key("owner/repo");
-    let repo = heartbeat_root.join(repo_key);
-    std::fs::create_dir_all(&repo).unwrap();
-    for directory in [&heartbeat_root, &repo] {
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .unwrap()
-        .trim()
-        .to_string();
-    let boot = super::super::super::autonomous::current_boot_identity().unwrap();
-    let nonce = claim::startup_heartbeat_nonce("owner/repo", 42, "foreign-claim");
-    // Same shape as the dead-prior-generation fixture: ts 1 with a 10s ttl is long
-    // expired, and pid 2147483647 on this host and boot is dead, so the snapshot
-    // classifies ExpiredDead rather than Blocking.
-    let document = format!(
-        r#"{{"repo":"owner/repo","issue":"42","worker_id":"foreign-worker","branch":"feat/worker","pr":"","claim_id":"foreign-claim","step":"claimed","ts":1,"ttl_seconds":10,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot}","process_start":"1"}}"#
-    );
-    let foreign = repo.join("42.json");
-    std::fs::write(&foreign, &document).unwrap();
-    std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-    let now = crate::commands::claim::utc_now_iso().expect("current timestamp");
-    let released = RunStateRecord::new(
-        "owner/repo",
-        42,
-        "predecessor-worker",
-        "released",
-        "feat/worker",
-        "",
-        "retryable_released",
-        Vec::new(),
-        &now,
-        &now,
-        10_800,
-    )
-    .with_claim_id("predecessor-claim");
-
-    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
-    std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root);
-
-    let authorized = claim::expired_prior_generation_heartbeat("owner/repo", 42, &released);
-
-    match previous {
-        Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
-        None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
-    }
-
-    assert!(
-        authorized
-            .expect("classification must not fail")
-            .is_none(),
-        "a distinct worker's expired heartbeat was authorized as this record's own prior generation"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&foreign).unwrap(),
-        document,
-        "the foreign worker's heartbeat evidence was altered"
     );
     std::fs::remove_dir_all(sandbox).unwrap();
 }

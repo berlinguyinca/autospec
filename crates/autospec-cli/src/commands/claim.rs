@@ -2031,7 +2031,7 @@ fn recover_authoritative_stale_startup(
         }
     };
     let authorized_prior = if branch_blocked {
-        expired_prior_generation_heartbeat(repo, issue, &selected.record)?
+        heartbeat_predecessor::expired_prior_generation_heartbeat(repo, issue, &selected.record)?
     } else {
         None
     };
@@ -2077,127 +2077,6 @@ fn recover_authoritative_stale_startup(
         reason: "released_stale_startup_claim".to_string(),
         previous_claim_id: selected.record.claim_id.clone(),
     })
-}
-
-#[cfg(unix)]
-fn expired_prior_generation_heartbeat(
-    repo_name: &str,
-    issue: u64,
-    record: &RunStateRecord,
-) -> Result<Option<Box<StartupHeartbeatSnapshot>>, CommandFailure> {
-    use nix::fcntl::{open, OFlag};
-    use nix::sys::stat::Mode;
-
-    // A heartbeat whose worker and claim differ from the authoritative record is only
-    // reclaimable as a prior generation once that record has itself been abandoned.
-    //
-    // Nothing here ties a heartbeat to a *lineage*. Real worker ids are
-    // `host:user:harness:pid`, so two concurrent sessions on one machine share every
-    // component but the pid, and a prefix test would still admit exactly the collision
-    // this guard exists to stop. The one field that would settle it, `session_id`, is
-    // carried by the heartbeat but dropped from a released record: a `claimed` record
-    // keeps it inside `step`, a `released` one does not. Lineage is therefore not
-    // expressible for the records this path sees.
-    //
-    // Abandonment is expressible, and it separates the two cases the identity test
-    // below cannot. A record still inside its own TTL is ordinary lease contention,
-    // which the lease-timeout path arbitrates; clearing a distinct worker's heartbeat
-    // there discards the only marker that worker has WIP on the branch (#3505). Once
-    // the record has aged past its TTL nothing recent holds the issue, and a
-    // provably-dead heartbeat left beside it is the garbage that wedged the drain for
-    // nine hours (#3503). An unparseable timestamp is not stale, so a malformed record
-    // fails closed and keeps its evidence.
-    if !server_lease_is_stale(&record.updated_at, record.ttl_seconds) {
-        return Ok(None);
-    }
-    let root_path = heartbeat_root()?;
-    let root = match open(
-        &root_path,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    ) {
-        Err(nix::errno::Errno::ENOENT) => return Ok(None),
-        Err(error) => {
-            return Err(CommandFailure::diagnostic(format!(
-                "heartbeat root inspection failed: {error}"
-            )))
-        }
-        Ok(root) => fs::File::from(root),
-    };
-    private_heartbeat_directory_identity(&root, "prior-generation root")?;
-    let repo_key = super::autonomous::drain::repository_progress_key(repo_name);
-    let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_key))? else {
-        return Ok(None);
-    };
-    let issue_name = format!("{issue}.json");
-    let file = match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(
-                match classify_retained_prior_generation(
-                    &repo,
-                    repo_name,
-                    issue,
-                    record,
-                    unix_now()?,
-                )? {
-                    StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
-                    StartupHeartbeatClassification::Absent
-                    | StartupHeartbeatClassification::Blocking => None,
-                },
-            )
-        }
-        Err(error) => {
-            return Err(CommandFailure::diagnostic(format!(
-                "prior-generation heartbeat inspection failed: {error}"
-            )))
-        }
-        Ok(file) => file,
-    };
-    let Some(evidence) = parse_startup_heartbeat(&file.document) else {
-        return Ok(None);
-    };
-    let Some(claim_id) = record.claim_id.as_deref() else {
-        return Ok(None);
-    };
-    if evidence.repo != repo_name
-        || evidence.issue != issue.to_string()
-        || evidence.branch != record.branch
-        || !evidence.pr.is_empty()
-        || (evidence.worker_id == record.worker_id && evidence.claim_id == claim_id)
-    {
-        return Ok(None);
-    }
-    let expected = StartupHeartbeatExpectation {
-        repo: &evidence.repo,
-        issue,
-        worker_id: &evidence.worker_id,
-        branch: &evidence.branch,
-        pull_request: &evidence.pr,
-        claim_id: &evidence.claim_id,
-        step: &evidence.step,
-    };
-    Ok(
-        match classify_startup_heartbeat_snapshot(
-            file,
-            expected,
-            unix_now()?,
-            observe_local_startup_pid,
-        ) {
-            StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
-            StartupHeartbeatClassification::Absent | StartupHeartbeatClassification::Blocking => {
-                None
-            }
-        },
-    )
-}
-
-#[cfg(not(unix))]
-fn expired_prior_generation_heartbeat(
-    _repo: &str,
-    _issue: u64,
-    _record: &RunStateRecord,
-) -> Result<Option<Box<StartupHeartbeatSnapshot>>, CommandFailure> {
-    Ok(None)
 }
 
 #[cfg(unix)]
