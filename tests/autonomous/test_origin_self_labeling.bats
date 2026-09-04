@@ -166,7 +166,10 @@ function saveAuth(token) {
   localStorage.setItem('authToken', token);
 }
 JS
-    ( cd "$FIXTURE_REPO" && git init -q && git add -A && git commit -q -m init )
+    # GitHub-hosted runners set no global user.name/user.email, so this
+    # fixture must configure its own local identity before committing rather
+    # than relying on one (#3487).
+    ( cd "$FIXTURE_REPO" && git init -q && git config user.email "autospec-test@example.invalid" && git config user.name "Autospec Test" && git add -A && git commit -q -m init )
 
     cat > "$STUB_DIR/gh" <<'SH'
 #!/usr/bin/env bash
