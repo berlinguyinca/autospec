@@ -4,10 +4,11 @@
 // one test module builds on, so they are `pub(super)` rather than private.
 
 use super::super::{BridgePhase, PersistedInvocation};
-use super::support_base::{git, git_stdout, write_executable, GitFixture};
+use super::support_base::{git, git_stdout, GitFixture};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, persisted_invocation,
 };
+use super::support_shim::write_executable;
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
@@ -45,7 +46,7 @@ pub(super) fn draft_pr_adapter_fixture(
         })
         .unwrap_or_else(|| serde_json::json!({}));
     fs::write(&closed, closed_document.to_string()).expect("closed PR fixture");
-    fs::write(
+    write_executable(
         &gh,
         "#!/bin/sh\n\
          set -eu\n\
@@ -76,9 +77,7 @@ pub(super) fn draft_pr_adapter_fixture(
            exit 0\n\
          fi\n\
          exit 64\n",
-    )
-    .expect("gh fixture");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("executable gh");
+    );
     bridge::DraftPrAdapter {
         gh,
         environment: BTreeMap::from([

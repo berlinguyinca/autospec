@@ -5,11 +5,10 @@
 use super::support_base::{git, git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::DRAFT_ISSUE_BODY;
+use super::support_shim::write_executable;
 use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::atomic::Ordering;
 
@@ -41,15 +40,13 @@ fn autonomous_executor_bridge_claim_takeover_blocks_admin_merge() {
     bridge::write_invocation_atomic(&state_path, &state).expect("accepted state");
     let gh = fixture.root.join("gh-merge");
     let calls = fixture.root.join("merge-calls");
-    fs::write(
+    write_executable(
         &gh,
-        format!("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+        &format!("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
          if [ \"$1 $2\" = 'pr view' ]; then\n\
          printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":null,\"body\":{body}}}'\n\
          exit 0\nfi\nexit 64\n"),
-    )
-    .expect("gh");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+    );
     let adapter = bridge::DraftPrAdapter {
         gh,
         environment: BTreeMap::from([("GH_CALLS".into(), calls.clone().into_os_string())]),
@@ -99,9 +96,9 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
     let fail_once = fixture.root.join("fail-once");
     let merged = fixture.root.join("merged");
     fs::write(&fail_once, "").expect("fail marker");
-    fs::write(
+    write_executable(
         &gh,
-        format!(
+        &format!(
             "#!/bin/sh\nset -eu\n\
              if [ \"$1 $2\" = 'pr view' ]; then\n\
                if [ -e \"$MERGED\" ]; then printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"body\":{body}}}';\n\
@@ -115,9 +112,7 @@ fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
              fi\n\
              exit 64\n"
         ),
-    )
-    .expect("gh");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+    );
     let adapter = bridge::DraftPrAdapter {
         gh,
         environment: BTreeMap::from([
@@ -186,9 +181,9 @@ fn autonomous_executor_bridge_recovers_merged_pr_after_branch_deletion_and_base_
     );
     git(&fixture.root.join("seed"), &["push", "origin", "main"]);
     let gh = fixture.root.join("gh-merged-observation");
-    fs::write(
+    write_executable(
         &gh,
-        format!(
+        &format!(
             "#!/bin/sh\nset -eu\n\
              if [ \"$1 $2\" = 'pr view' ]; then\n\
                printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"body\":{body}}}'\n\
@@ -196,9 +191,7 @@ fn autonomous_executor_bridge_recovers_merged_pr_after_branch_deletion_and_base_
              fi\n\
              exit 64\n"
         ),
-    )
-    .expect("gh");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+    );
     let adapter = bridge::DraftPrAdapter {
         gh,
         environment: BTreeMap::new(),
