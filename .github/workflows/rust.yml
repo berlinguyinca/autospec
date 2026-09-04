@@ -39,6 +39,8 @@ jobs:
           codex_bwrap_sha256=e73dc46e2ec7176499cb14e26c7b80b9d8e24a39cd51fe8fa0d45ddd8f6fb87c
           gitleaks_version=8.30.1
           gitleaks_sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          trivy_version=0.74.0
+          trivy_sha256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
           semgrep_version=1.173.0
           semgrep_image=semgrep/semgrep@sha256:44dd022c29d4f881a939f7281b4ba8855cb940a2dd272883908d8947325a4ba7
 
@@ -67,6 +69,17 @@ jobs:
           printf '%s  %s\n' "$gitleaks_sha256" "$gitleaks_archive" | sha256sum --check
           tar -xzf "$gitleaks_archive" -C "$HOME/.local/bin" gitleaks
 
+          # trivy is not in Ubuntu's apt repositories, so ensure-tool.sh's
+          # `apt-get install trivy` never resolves on ubuntu-24.04. install.sh
+          # hard-verifies AUTOSPEC_EXECUTOR_SCANNERS, so check_install_tests
+          # fails without it (measured in #3487, once license-checker was ruled out).
+          trivy_archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-64bit.tar.gz" \
+            --output "$trivy_archive"
+          printf '%s  %s\n' "$trivy_sha256" "$trivy_archive" | sha256sum --check
+          tar -xzf "$trivy_archive" -C "$HOME/.local/bin" trivy
+
           docker pull "$semgrep_image"
           cat > "$HOME/.local/bin/semgrep" <<'SEMGREP_WRAPPER'
           #!/bin/sh
@@ -84,6 +97,7 @@ jobs:
 
           "$HOME/.local/bin/codex" --version
           "$HOME/.local/bin/gitleaks" version
+          "$HOME/.local/bin/trivy" --version
           test "$("$HOME/.local/bin/semgrep" --version)" = "$semgrep_version"
           printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
 
