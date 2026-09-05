@@ -49,6 +49,23 @@ stub_tool() {
   printf '%s\n' "$output" | grep -Fq "shellcheck"
 }
 
+@test "a monorepo marker in a workspace-member subdirectory is discovered" {
+  # Mirrors the #3112 fixture: a Rust workspace at the root plus a
+  # JavaScript subproject under web/.
+  mkdir -p "$FIXTURE/crates/foo/src" "$FIXTURE/web"
+  : > "$FIXTURE/Cargo.toml"
+  for i in $(seq 1 30); do printf 'fn item%d() {}\n' "$i" >> "$FIXTURE/crates/foo/src/lib.rs"; done
+  : > "$FIXTURE/web/package.json"
+  : > "$FIXTURE/web/app.js"
+
+  run bash "$DISCOVER" --repo-root "$FIXTURE"
+
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  printf '%s\n' "$output" | grep -Fq "Cargo.toml${TAB}cargo clippy --workspace --all-targets -- -D warnings"
+  printf '%s\n' "$output" | grep -Fq "package.json${TAB}npm run lint"
+}
+
 @test "a repo with no language markers discovers nothing and exits clean" {
   run bash "$DISCOVER" --repo-root "$FIXTURE"
   [ "$status" -eq 0 ]
