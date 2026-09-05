@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::{Command, Output};
 
+use autospec_core::claim::intent_scope::body_intent_is_clean;
 use autospec_core::claim::{
     replace_safety_review_section, ClaimSafetyInput, SafetyReviewDecision, SafetyReviewVerdict,
 };
@@ -166,8 +167,8 @@ fn review_safety_candidate(
     if !reviewable_issue_with_recheck(&current, scope) {
         return Ok(ReviewSafetyOutcome::Stale);
     }
-    let stale_label = accountability::stale_safety_label(&current, scope);
-    if confirm_issue_safety_for_queue(&issue_safety_input(&current))? && !stale_label {
+    let stale = scope.liftable_labels(&current);
+    if confirm_issue_safety_for_queue(&issue_safety_input(&current))? && stale.is_empty() {
         return Ok(ReviewSafetyOutcome::Skipped);
     }
     // The single point a stale safety label comes off. Doing it in the Pass arm
@@ -176,8 +177,7 @@ fn review_safety_candidate(
     // issue reviewed AND quarantined, and every later recheck hit the guard
     // below and returned Conflicted forever. The passing screen is the
     // re-derived verdict the removal stands on.
-    let stale = scope.liftable_labels(&current);
-    if !stale.is_empty() && confirm_issue_safety_for_queue(&issue_safety_input(&current))? {
+    if !stale.is_empty() && body_intent_is_clean(&current.title, &current.body, &current.author) {
         for label in stale {
             remove_issue_label(repo, current.number, label)?;
         }

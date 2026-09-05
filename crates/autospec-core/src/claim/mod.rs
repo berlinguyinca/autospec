@@ -106,7 +106,7 @@ impl ClaimRunState {
         }
     }
 }
-mod intent_scope;
+pub mod intent_scope;
 
 use std::{collections::BTreeMap, fmt, ops::Range};
 
