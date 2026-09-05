@@ -31,14 +31,24 @@ fn a_quarantined_issue_is_reviewable_only_under_recheck() {
     // Default stays sticky, exactly as today.
     assert!(!reviewable_issue(issue));
     // Under recheck the reviewer may re-derive a verdict for it.
-    assert!(reviewable_issue_with_recheck(issue, true));
+    assert!(reviewable_issue_with_recheck(
+        issue,
+        RecheckScope {
+            recheck: true,
+            targeted: false,
+        }
+    ));
 }
 
-/// Recheck relaxes the quarantine gate and nothing else. An issue withheld for a
-/// human, awaiting classification, or an accountability epic stays out of the
-/// queue however it is asked for.
+/// A bulk recheck relaxes the quarantine gate and nothing else. An issue
+/// withheld for a human, awaiting classification, or an accountability epic
+/// stays out of the queue when the sweep is not aimed at it.
 #[test]
-fn recheck_does_not_relax_any_gate_other_than_quarantine() {
+fn an_untargeted_recheck_relaxes_no_gate_other_than_quarantine() {
+    let sweep = RecheckScope {
+        recheck: true,
+        targeted: false,
+    };
     for labels in [
         r#""auto-implement","autospec:needs-human""#,
         r#""auto-implement","needs-classify""#,
@@ -49,8 +59,45 @@ fn recheck_does_not_relax_any_gate_other_than_quarantine() {
         );
         let page = parse_remote_issue_page_json(&json).expect("parse issue page");
         assert!(
-            !reviewable_issue_with_recheck(&page.issues[0], true),
-            "recheck wrongly admitted an issue held back by another gate: {labels}"
+            !reviewable_issue_with_recheck(&page.issues[0], sweep),
+            "an untargeted recheck wrongly admitted an issue held back by another gate: {labels}"
+        );
+    }
+}
+
+/// A recheck aimed at one issue may re-derive an AMBIGUOUS verdict, and only
+/// that. `autospec:needs-human` is overloaded — the safety reviewer writes it
+/// for AMBIGUOUS, the orchestrator writes it when an implementer failed
+/// repeatedly — so naming the issue is what separates "re-judge this verdict"
+/// from a sweep that would clear failures it cannot re-derive.
+///
+/// Without this, a needs-human label applied by a classifier defect outlived the
+/// fix to that defect: InferWeave/inferweave#6 was the sole dependency-ready
+/// task in a 133-task graph, so one stale label idled the other 124 issues with
+/// no sanctioned way back.
+#[test]
+fn a_targeted_recheck_admits_needs_human_but_still_no_other_gate() {
+    let aimed = RecheckScope {
+        recheck: true,
+        targeted: true,
+    };
+    let page = parse_remote_issue_page_json(
+        r#"{"raw_count":1,"items":[{"number":6,"title":"P0-T05","body":"storage","labels":["auto-implement","autospec:needs-human"],"author":{"login":"autospec"}}]}"#,
+    )
+    .expect("parse issue page");
+    assert!(reviewable_issue_with_recheck(&page.issues[0], aimed));
+
+    for labels in [
+        r#""auto-implement","needs-classify""#,
+        r#""auto-implement","autospec:run-accountability""#,
+    ] {
+        let json = format!(
+            r#"{{"raw_count":1,"items":[{{"number":7,"title":"t","body":"b","labels":[{labels}],"author":{{"login":"autospec"}}}}]}}"#
+        );
+        let page = parse_remote_issue_page_json(&json).expect("parse issue page");
+        assert!(
+            !reviewable_issue_with_recheck(&page.issues[0], aimed),
+            "a targeted recheck wrongly admitted an issue held back by another gate: {labels}"
         );
     }
 }
