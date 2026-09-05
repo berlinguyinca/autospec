@@ -106,6 +106,8 @@ impl ClaimRunState {
         }
     }
 }
+mod intent_scope;
+
 use std::{collections::BTreeMap, fmt, ops::Range};
 
 use crate::state::json::{JsonParser, JsonValue};
@@ -622,19 +624,7 @@ pub fn lint_issue_intent_with_trusted_actors(
             "weakened security control",
         );
     }
-    if contains_any_word(
-        &infra_lower,
-        &[
-            "production",
-            "prod",
-            "billing",
-            "payments",
-            "migration",
-            "terraform",
-            "iam",
-            "kms",
-        ],
-    ) {
+    if intent_scope::mentions_production_or_infra_touch(&infra_lower) {
         add(
             "ambiguous",
             "production-or-infra-touch",
