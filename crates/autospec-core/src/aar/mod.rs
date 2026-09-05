@@ -21,6 +21,7 @@
 pub mod classify;
 pub mod context;
 pub mod escalation;
+pub mod frontier_review;
 pub mod guards;
 pub mod inferweave;
 pub mod memory;
