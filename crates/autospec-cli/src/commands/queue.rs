@@ -22,7 +22,9 @@ use super::lint::{
 use super::CommandFailure;
 
 mod accountability;
+mod issue_writes;
 use accountability::{is_accountability_issue, reviewable_issue_with_recheck, RecheckScope};
+use issue_writes::{add_issue_label, remove_issue_label, update_issue_body};
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -168,6 +170,19 @@ fn review_safety_candidate(
     if confirm_issue_safety_for_queue(&issue_safety_input(&current))? && !stale_label {
         return Ok(ReviewSafetyOutcome::Skipped);
     }
+    // The single point a stale safety label comes off. Doing it in the Pass arm
+    // was unreachable for an issue already stamped `safety:reviewed`: that stamp
+    // is written before the pass is confirmed, so a failed confirmation left the
+    // issue reviewed AND quarantined, and every later recheck hit the guard
+    // below and returned Conflicted forever. The passing screen is the
+    // re-derived verdict the removal stands on.
+    let stale = scope.liftable_labels(&current);
+    if !stale.is_empty() && confirm_issue_safety_for_queue(&issue_safety_input(&current))? {
+        for label in stale {
+            remove_issue_label(repo, current.number, label)?;
+        }
+        return Ok(ReviewSafetyOutcome::Pass);
+    }
     if issue_has_label(&current, "safety:reviewed") {
         return Ok(ReviewSafetyOutcome::Conflicted);
     }
@@ -178,9 +193,6 @@ fn review_safety_candidate(
             // here, after the typed reviewer has said pass on the CURRENT body
             // under the CURRENT rules — never as a standalone label edit, so the
             // audit trail always carries a verdict that justifies it.
-            for label in scope.liftable_labels(&current) {
-                remove_issue_label(repo, current.number, label)?;
-            }
             Ok(ReviewSafetyOutcome::Pass)
         }
         SafetyReviewDecision::Pass => Ok(ReviewSafetyOutcome::Conflicted),
@@ -336,20 +348,6 @@ fn reviewable_pass(issue: &RemoteIssue) -> Result<bool, CommandFailure> {
         && confirm_issue_safety_for_queue(&issue_safety_input(issue))?)
 }
 
-fn update_issue_body(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {
-    let endpoint = format!("repos/{repo}/issues/{number}");
-    let body_field = format!("body={body}");
-    let output = run_gh(&["api", "--method", "PATCH", &endpoint, "-f", &body_field])?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(CommandFailure::diagnostic(format!(
-            "gh issue body update {number} failed: {}",
-            command_error(&output)
-        )))
-    }
-}
-
 fn apply_non_passing_safety_review(
     repo: &str,
     issue: &RemoteIssue,
@@ -429,42 +427,6 @@ fn post_issue_comment(repo: &str, number: u64, body: &str) -> Result<(), Command
             command_error(&output)
         )))
     }
-}
-
-fn add_issue_label(repo: &str, number: u64, label: &str) -> Result<(), CommandFailure> {
-    let endpoint = format!("repos/{repo}/issues/{number}/labels");
-    let label_field = format!("labels[]={label}");
-    let output = run_gh(&["api", "--method", "POST", &endpoint, "-f", &label_field])?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(CommandFailure::diagnostic(format!(
-            "gh safety label {label} write for issue {number} failed: {}",
-            command_error(&output)
-        )))
-    }
-}
-
-/// Removes one label, tolerating its absence.
-///
-/// Only reached on a re-derived pass under `--recheck`, so the removal always
-/// has a verdict behind it. A 404 means the label is already gone, which is the
-/// state we wanted — treating that as failure would make a retried recheck fail
-/// on a queue it had already repaired.
-fn remove_issue_label(repo: &str, number: u64, label: &str) -> Result<(), CommandFailure> {
-    let endpoint = format!("repos/{repo}/issues/{number}/labels/{label}");
-    let output = run_gh(&["api", "--method", "DELETE", &endpoint])?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("404") || stderr.contains("Label does not exist") {
-        return Ok(());
-    }
-    Err(CommandFailure::diagnostic(format!(
-        "gh safety label {label} removal for issue {number} failed: {}",
-        command_error(&output)
-    )))
 }
 
 fn safety_decision_name(decision: &SafetyReviewDecision) -> &'static str {
