@@ -71,3 +71,15 @@ fn mentions_unscoped_migration(body: &str) -> bool {
             .any(|text| DEVELOPMENT_SCOPE.iter().any(|scope| text.contains(scope)))
     })
 }
+
+/// Whether the issue BODY, judged on its own, is clean.
+///
+/// Deliberately not `evaluate_claim_safety`: that rejects on the presence of
+/// `autospec:needs-human` itself, so gating a lift of that label on it is
+/// circular — the label could only come off once it was already off. The
+/// body-level intent is what a classifier defect gets wrong, and therefore the
+/// verdict a stale-label removal has to stand on.
+pub fn body_intent_is_clean(title: &str, body: &str, actor: &str) -> bool {
+    let intent = super::lint_issue_intent(title, body, actor);
+    !intent.blocking && !intent.ambiguous
+}
