@@ -526,3 +526,61 @@ fn anti_vacuous_test_requirements_do_not_trip_ci_bypass() {
         );
     }
 }
+
+/// A database migration inside a development crate is routine engineering, not a
+/// production or infrastructure touch.
+///
+/// The rule matched the bare word `migration`, so this real task card —
+/// InferWeave P0-T05, whose whole subject is a *local* Compose profile and a
+/// *disposable* test database — was quarantined as `production-or-infra-touch`.
+/// It was the only task in a 133-task graph with every dependency closed, so one
+/// false positive stalled the other 124 issues until a human cleared the label.
+///
+/// Nearly every storage task names migrations, so an unqualified match on the
+/// word does not separate risky work from ordinary work — it just quarantines
+/// the category.
+#[test]
+fn a_development_scoped_migration_is_not_a_production_or_infra_touch() {
+    let lint = lint_issue_intent(
+        "P0-T05 — PostgreSQL development storage foundation",
+        "Create storage crate, migrations, transaction helpers and local PostgreSQL \
+         Compose profile.\n\n## Required tests\n- migration up/down in disposable DB\n\
+         - transaction/idempotency tests",
+        "agent",
+    );
+
+    assert!(
+        !lint
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "production-or-infra-touch"),
+        "development-scoped migrations were flagged: {:?}",
+        lint.findings.iter().map(|f| f.rule_id).collect::<Vec<_>>()
+    );
+}
+
+/// The exoneration is scoped, not blanket: a migration that is not qualified as
+/// development work still earns the ambiguous finding, and so does one that
+/// names production directly.
+#[test]
+fn an_unqualified_or_production_migration_still_reports_infra_touch() {
+    for (title, body) in [
+        (
+            "Run the migration",
+            "Apply the pending migration to the cluster.",
+        ),
+        (
+            "Storage migration",
+            "Run the production migration against the primary database.",
+        ),
+    ] {
+        let lint = lint_issue_intent(title, body, "agent");
+        assert!(
+            lint.findings
+                .iter()
+                .any(|finding| finding.rule_id == "production-or-infra-touch"),
+            "{title:?} should still be flagged: {:?}",
+            lint.findings.iter().map(|f| f.rule_id).collect::<Vec<_>>()
+        );
+    }
+}
