@@ -267,6 +267,7 @@ mod requeue {
 
     #[test]
     fn a_concurrent_lease_renewal_prevents_label_requeue() {
+        let _guard = lock_heartbeat_env();
         let selected = ClaimRefHead {
             oid: "expired-generation".to_string(),
             generation: "generation-1".to_string(),
