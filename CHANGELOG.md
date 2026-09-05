@@ -9,6 +9,29 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### Fail-loud verification primitives (2026-09-04)
+- Added `autospec_core::verification`, the shared encoding of the fail-loud
+  verification doctrine (issue #3535): a metric the verifier did not measure
+  renders as `unknown`, never `0` and never a pass, because a fabricated zero
+  is indistinguishable from a measured one.
+- `Metric` (`Measured(u64)` / `Unknown(reason)`) is the only numeric field type
+  in a `StatusRecord`, so unmeasured fields round-trip as the string
+  `"unknown"` and stay distinct from `0` in both JSON and rendered reports.
+- Tool preflight: `assert_tool_available` / `measure` turn an absent tool
+  (the `command -v` probe fails) into a hard `MissingTool` error that names the
+  tool; the measurement probe never runs, so empty output can no longer be
+  reported as "0 unformatted".
+- `SuiteOutput` captures the real process exit status: success is the captured
+  status, never the absence of output, and `result_counts` reports
+  `(unknown, unknown)` when no result lines parsed at all — the `go test`
+  without `-v` `PASS=0` artifact is no longer producible.
+- `compare_failures` reports pre-existing failures as `Clean` (never as new
+  regressions) and a missing baseline as `Unmeasured` (never as `Clean`);
+  `acceptance_verdict` reports 0/0 as `Unmeasured` (never as `Regressed`).
+- `produced_work` counts both uncommitted changes and commits ahead of the
+  base, so a work-production gate no longer fails an agent that committed its
+  work.
+
 #### Agentic RAG subsystem — core retrieval, evidence and policy layer (2026-09-03)
 - Added `autospec_core::rag`, the evidence and retrieval layer specified by the Agentic RAG
   subsystem specification: an iterative loop (`RetrievalCoordinator`) that plans retrieval,
