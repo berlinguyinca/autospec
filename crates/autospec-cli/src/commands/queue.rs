@@ -22,7 +22,7 @@ use super::lint::{
 use super::CommandFailure;
 
 mod accountability;
-use accountability::{is_accountability_issue, reviewable_issue_with_recheck};
+use accountability::{is_accountability_issue, reviewable_issue_with_recheck, RecheckScope};
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -96,10 +96,11 @@ pub(crate) fn review_safety_for_repo_with_recheck(
     issue: Option<u64>,
     recheck: bool,
 ) -> Result<ReviewSafetyTotals, CommandFailure> {
+    let scope = RecheckScope::new(recheck, issue.is_some());
     let issues = review_safety_issues(repo, issue)?;
-    let (mut totals, candidates) = review_safety_candidates(issues, limit, recheck)?;
+    let (mut totals, candidates) = review_safety_candidates(issues, limit, scope)?;
     for candidate in candidates {
-        let outcome = review_safety_candidate(repo, &candidate, recheck).unwrap_or_else(|error| {
+        let outcome = review_safety_candidate(repo, &candidate, scope).unwrap_or_else(|error| {
             eprintln!(
                 "queue safety conflict for issue {}: {error}",
                 candidate.number
@@ -131,7 +132,7 @@ fn review_safety_issues(
 fn review_safety_candidates(
     candidates: Vec<RemoteIssue>,
     limit: usize,
-    recheck: bool,
+    scope: RecheckScope,
 ) -> Result<(ReviewSafetyTotals, Vec<RemoteIssue>), CommandFailure> {
     let mut totals = ReviewSafetyTotals::default();
     let mut unreviewed = Vec::new();
@@ -140,9 +141,8 @@ fn review_safety_candidates(
         // review. Under recheck a quarantined issue is the exception: the screen
         // allowing it now is precisely the evidence that its quarantine is
         // stale, and skipping it would leave the label no path back off.
-        let stale_quarantine = recheck && issue_has_label(&candidate, "security:quarantined");
-        if reviewable_issue_with_recheck(&candidate, recheck)
-            && (stale_quarantine
+        if reviewable_issue_with_recheck(&candidate, scope)
+            && (accountability::stale_safety_label(&candidate, scope)
                 || !confirm_issue_safety_for_queue(&issue_safety_input(&candidate))?)
         {
             unreviewed.push(candidate);
@@ -158,14 +158,14 @@ fn review_safety_candidates(
 fn review_safety_candidate(
     repo: &str,
     candidate: &RemoteIssue,
-    recheck: bool,
+    scope: RecheckScope,
 ) -> Result<ReviewSafetyOutcome, CommandFailure> {
     let current = read_issue(repo, candidate.number)?;
-    if !reviewable_issue_with_recheck(&current, recheck) {
+    if !reviewable_issue_with_recheck(&current, scope) {
         return Ok(ReviewSafetyOutcome::Stale);
     }
-    let quarantined = issue_has_label(&current, "security:quarantined");
-    if confirm_issue_safety_for_queue(&issue_safety_input(&current))? && !(recheck && quarantined) {
+    let stale_label = accountability::stale_safety_label(&current, scope);
+    if confirm_issue_safety_for_queue(&issue_safety_input(&current))? && !stale_label {
         return Ok(ReviewSafetyOutcome::Skipped);
     }
     if issue_has_label(&current, "safety:reviewed") {
@@ -178,8 +178,8 @@ fn review_safety_candidate(
             // here, after the typed reviewer has said pass on the CURRENT body
             // under the CURRENT rules — never as a standalone label edit, so the
             // audit trail always carries a verdict that justifies it.
-            if recheck && issue_has_label(&current, "security:quarantined") {
-                remove_issue_label(repo, current.number, "security:quarantined")?;
+            for label in scope.liftable_labels(&current) {
+                remove_issue_label(repo, current.number, label)?;
             }
             Ok(ReviewSafetyOutcome::Pass)
         }
@@ -1251,7 +1251,7 @@ fn print_help() {
 mod tests {
     include!("queue/accountability_tests.rs");
     use super::accountability::reviewable_issue;
-    use super::{fetch_issue_page_with_retries, reviewable_issue_with_recheck};
+    use super::{fetch_issue_page_with_retries, reviewable_issue_with_recheck, RecheckScope};
     use autospec_core::coordination::parse_remote_issue_page_json;
 
     #[test]
