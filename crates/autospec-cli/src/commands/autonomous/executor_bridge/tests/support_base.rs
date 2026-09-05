@@ -376,7 +376,8 @@ pub(super) fn environment(table: &Path) -> BTreeMap<String, OsString> {
 pub(super) fn installed_aliases() -> &'static str {
     "claude\ttrue\t--dangerously-skip-permissions\tClaude Code\n\
      codex\tsh\t--yolo\tCodex CLI\n\
-     opencode\tfalse\t\tOpenCode\n"
+     opencode\tfalse\t\tOpenCode\n\
+     pi\ttrue\t--approve\tPi\n"
 }
 
 pub(crate) struct GitFixture {

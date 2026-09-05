@@ -3,9 +3,11 @@
 function claude; autospec-env session -- claude --dangerously-skip-permissions $argv; end
 function codex; autospec-env session -- codex --yolo $argv; end
 function opencode; autospec-env session -- opencode $argv; end
+function pi; autospec-env session -- pi --approve $argv; end
 # END AUTOSPEC RUNTIME ALIASES
 # BEGIN AUTOSPEC ROLLOVER WRAPPERS
 function claude; autospec-session claude --dangerously-skip-permissions $argv; end # autospec-env session -- claude --dangerously-skip-permissions
 function codex; autospec-session codex --yolo $argv; end # autospec-env session -- codex --yolo
 function opencode; autospec-session opencode $argv; end # autospec-env session -- opencode
+function pi; autospec-session pi --approve $argv; end # autospec-env session -- pi --approve
 # END AUTOSPEC ROLLOVER WRAPPERS

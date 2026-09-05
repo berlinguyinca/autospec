@@ -4,6 +4,7 @@
 alias claude='autospec-env session -- claude --dangerously-skip-permissions'
 alias codex='autospec-env session -- codex --yolo'
 alias opencode='autospec-env session -- opencode'
+alias pi='autospec-env session -- pi --approve'
 # END AUTOSPEC RUNTIME ALIASES
 # BEGIN AUTOSPEC ROLLOVER WRAPPERS
 unalias claude 2>/dev/null || true
@@ -12,4 +13,6 @@ unalias codex 2>/dev/null || true
 codex() { autospec-session codex --yolo "$@"; } # autospec-env session -- codex --yolo
 unalias opencode 2>/dev/null || true
 opencode() { autospec-session opencode "$@"; } # autospec-env session -- opencode
+unalias pi 2>/dev/null || true
+pi() { autospec-session pi --approve "$@"; } # autospec-env session -- pi --approve
 # END AUTOSPEC ROLLOVER WRAPPERS

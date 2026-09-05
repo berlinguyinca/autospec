@@ -1,7 +1,8 @@
 //! AAR spec section 9: the Pi harness adapter boundary.
 
 use autospec_core::aar::pi::{
-    build_pi_argv, fold_events, parse_pi_event, working_rules_block, PiEvent, PiSessionSpec,
+    build_pi_argv, fold_events, parse_pi_event, pi_current_dir, thinking_level_for,
+    with_skills, working_rules_block, PiEvent, PiSessionSpec,
     WORKING_RULES,
 };
 use autospec_core::aar::reasoning::SamplingProfile;
@@ -56,18 +57,17 @@ fn a_session_appends_extra_rules_after_the_standard_block() {
 }
 
 #[test]
-fn argv_carries_every_policy_decision_as_a_distinct_argument() {
+fn argv_uses_only_flags_a_released_pi_accepts() {
     let argv = build_pi_argv(&spec()).expect("spec is valid");
 
     assert_eq!(argv[0], "pi");
+    // Non-interactive, or the harness waits forever on a prompt.
+    assert!(argv.contains(&"--print".to_string()), "argv: {argv:?}");
+
     for (flag, value) in [
-        ("--worktree", "/work/autospec"),
-        ("--role", "implementer"),
+        ("--session-id", "session-1"),
         ("--model", "qwen3.8-27b"),
-        ("--reasoning-tokens", "2048"),
-        ("--sampling-profile", "qwen-thinking@v1"),
-        ("--max-context-tokens", "65536"),
-        ("--prefix-cache-key", "abc123"),
+        ("--provider", "inferweave"),
     ] {
         let index = argv
             .iter()
@@ -78,14 +78,75 @@ fn argv_carries_every_policy_decision_as_a_distinct_argument() {
 }
 
 #[test]
-fn forks_are_disabled_with_an_explicit_flag() {
-    let argv = build_pi_argv(&PiSessionSpec {
-        allow_forks: false,
-        ..spec()
-    })
-    .expect("spec is valid");
+fn argv_never_emits_a_flag_pi_would_reject() {
+    let argv = build_pi_argv(&spec()).expect("spec is valid");
 
-    assert!(argv.contains(&"--no-forks".to_string()));
+    // Every one of these was emitted by the previous implementation and is
+    // rejected by pi 0.85.0. `session` is the worst of them: it is NOT rejected,
+    // it is swallowed as a positional prompt, silently contaminating the real
+    // prompt with the word "session".
+    for rejected in [
+        "session",
+        "--worktree",
+        "--role",
+        "--reasoning-tokens",
+        "--sampling-profile",
+        "--temperature",
+        "--top-p",
+        "--top-k",
+        "--max-output-tokens",
+        "--max-context-tokens",
+        "--prefix-cache-key",
+        "--no-forks",
+    ] {
+        assert!(
+            !argv.iter().any(|entry| entry == rejected),
+            "argv still contains {rejected}: {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn worktree_is_a_working_directory_not_a_flag() {
+    let s = spec();
+    assert_eq!(pi_current_dir(&s), "/work/autospec");
+    assert!(!build_pi_argv(&s)
+        .expect("spec is valid")
+        .contains(&"/work/autospec".to_string()));
+}
+
+#[test]
+fn reasoning_budget_maps_onto_a_thinking_level() {
+    // Pi takes a named level, not a token count. Biased low on purpose: an agent
+    // that spends its whole per-turn budget thinking emits no tool call, and the
+    // harness then has nothing to execute.
+    assert_eq!(thinking_level_for(0), "off");
+    assert_eq!(thinking_level_for(512), "minimal");
+    assert_eq!(thinking_level_for(2048), "low");
+    assert_eq!(thinking_level_for(8192), "medium");
+    assert_eq!(thinking_level_for(100_000), "high");
+
+    let argv = build_pi_argv(&spec()).expect("spec is valid");
+    let index = argv
+        .iter()
+        .position(|entry| entry == "--thinking")
+        .expect("--thinking missing");
+    assert_eq!(argv[index + 1], "low", "2048 reasoning tokens maps to low");
+}
+
+#[test]
+fn skills_are_appended_as_repeated_skill_flags() {
+    let argv = with_skills(
+        build_pi_argv(&spec()).expect("spec is valid"),
+        &[
+            "/home/u/.agents/skills/autospec".to_string(),
+            String::new(), // empty entries are skipped, not passed as ""
+            "/opt/skills/extra".to_string(),
+        ],
+    );
+    let count = argv.iter().filter(|e| *e == "--skill").count();
+    assert_eq!(count, 2, "argv: {argv:?}");
+    assert!(argv.contains(&"/home/u/.agents/skills/autospec".to_string()));
 }
 
 #[test]

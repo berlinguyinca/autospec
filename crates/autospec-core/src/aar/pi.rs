@@ -77,44 +77,86 @@ impl PiSessionSpec {
 /// Options are kept as distinct argv entries rather than one shell string: the
 /// review dispatcher already learned that joining them re-introduces
 /// shell-specific splitting bugs.
+/// Map a reasoning-token budget onto Pi's `--thinking` level.
+///
+/// Pi takes a named level, not a token count. The mapping is deliberately
+/// coarse and biased low: an agent that spends its whole per-turn output budget
+/// thinking emits no tool call at all, and the harness then has nothing to run.
+/// Measured on Qwen3.8-27B, two runs that produced no diff ended with a single
+/// assistant message holding 34,538 and 31,089 characters of thinking -- roughly
+/// 8.6k tokens against an 8,192-token cap -- and no action.
+pub fn thinking_level_for(reasoning_tokens: u32) -> &'static str {
+    match reasoning_tokens {
+        0 => "off",
+        1..=1_024 => "minimal",
+        1_025..=4_096 => "low",
+        4_097..=16_384 => "medium",
+        _ => "high",
+    }
+}
+
+/// Build the argv for a real, released Pi.
+///
+/// The previous version emitted a `session` subcommand and eleven flags that no
+/// released Pi accepts (`--worktree`, `--role`, `--reasoning-tokens`,
+/// `--sampling-profile`, `--temperature`, `--top-p`, `--top-k`,
+/// `--max-output-tokens`, `--max-context-tokens`, `--prefix-cache-key`,
+/// `--no-forks`). Pi rejects the flags outright, and `session` is *not*
+/// rejected -- it is swallowed as a positional prompt, silently contaminating
+/// the real prompt.
+///
+/// Three spec fields deliberately do NOT become flags, because Pi has no
+/// equivalent and inventing one is how the previous version broke:
+///
+/// * `worktree` is the working directory. The caller sets it via
+///   [`PiSessionSpec::worktree`] when spawning; see `pi_current_dir`.
+/// * `sampling` and `max_context_tokens` belong to the provider entry in Pi's
+///   `models.json` (`contextWindow`, `maxTokens`, and the sampling fields), not
+///   to argv. Passing them here would be silently ignored at best.
+/// * `role` and `extra_rules` are prompt content, not CLI configuration.
+///
+/// `stable_prefix_hash` and `allow_forks` have no released-Pi equivalent and are
+/// intentionally dropped rather than guessed at.
 pub fn build_pi_argv(spec: &PiSessionSpec) -> Result<Vec<String>, String> {
     spec.validate()?;
     let mut argv = vec![
         "pi".to_string(),
-        "session".to_string(),
-        "--worktree".to_string(),
-        spec.worktree.clone(),
+        // Non-interactive: process the prompt and exit.
+        "--print".to_string(),
         "--session-id".to_string(),
         spec.session_id.clone(),
-        "--role".to_string(),
-        spec.role.as_str().to_string(),
-        "--provider".to_string(),
-        spec.provider.clone(),
         "--model".to_string(),
         spec.model.clone(),
-        "--reasoning-tokens".to_string(),
-        spec.reasoning_tokens.to_string(),
-        "--sampling-profile".to_string(),
-        spec.sampling.identity(),
-        "--temperature".to_string(),
-        format!("{:.2}", spec.sampling.temperature),
-        "--top-p".to_string(),
-        format!("{:.2}", spec.sampling.top_p),
-        "--top-k".to_string(),
-        spec.sampling.top_k.to_string(),
-        "--max-output-tokens".to_string(),
-        spec.sampling.max_output_tokens.to_string(),
-        "--max-context-tokens".to_string(),
-        spec.max_context_tokens.to_string(),
+        "--thinking".to_string(),
+        thinking_level_for(spec.reasoning_tokens).to_string(),
     ];
-    if !spec.stable_prefix_hash.is_empty() {
-        argv.push("--prefix-cache-key".to_string());
-        argv.push(spec.stable_prefix_hash.clone());
-    }
-    if !spec.allow_forks {
-        argv.push("--no-forks".to_string());
+    // `--provider` is optional in Pi; omit it rather than passing an empty value.
+    if !spec.provider.trim().is_empty() {
+        argv.push("--provider".to_string());
+        argv.push(spec.provider.clone());
     }
     Ok(argv)
+}
+
+/// The directory Pi must run in. `worktree` is a working directory, not a flag.
+pub fn pi_current_dir(spec: &PiSessionSpec) -> &str {
+    &spec.worktree
+}
+
+/// Append `--skill <path>` for each installed autospec skill directory.
+///
+/// Pi loads skills from an explicit path, which is how the autospec skills reach
+/// it (`skills/autospec/install.sh --harness pi` writes them under
+/// `$PI_SKILLS_DIR`, default `$HOME/.agents/skills`).
+pub fn with_skills(mut argv: Vec<String>, skill_paths: &[String]) -> Vec<String> {
+    for path in skill_paths {
+        if path.trim().is_empty() {
+            continue;
+        }
+        argv.push("--skill".to_string());
+        argv.push(path.clone());
+    }
+    argv
 }
 
 /// Events Pi reports back during a session.

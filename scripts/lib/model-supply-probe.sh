@@ -139,12 +139,23 @@ probe_runtimes() {
         printf '[]'
         return 0
     fi
+    # Every runtime takes a host override, not just ollama. Hardcoding loopback
+    # made a self-hosted server undiscoverable: a model server on another node --
+    # which is the normal case on a cluster, where the GPU is never the machine
+    # you are sitting on -- was reported `reachable:false`, indistinguishable
+    # from "not installed". The probe is the only source of endpoints, so an
+    # unreachable probe silently removes a working runtime from supply.
+    #
+    # Each variable takes host[:port] and defaults to the runtime's own default.
+    _lmstudio_host="${AUTOSPEC_LMSTUDIO_HOST:-127.0.0.1:1234}"
+    _vllm_host="${AUTOSPEC_VLLM_HOST:-127.0.0.1:8000}"
+    _llamacpp_host="${AUTOSPEC_LLAMACPP_HOST:-127.0.0.1:8080}"
     _out=""
     for _spec in \
         "ollama|http://${OLLAMA_HOST}/api/tags" \
-        "lmstudio|http://127.0.0.1:1234/v1/models" \
-        "vllm|http://127.0.0.1:8000/v1/models" \
-        "llamacpp|http://127.0.0.1:8080/v1/models"
+        "lmstudio|http://${_lmstudio_host}/v1/models" \
+        "vllm|http://${_vllm_host}/v1/models" \
+        "llamacpp|http://${_llamacpp_host}/v1/models"
     do
         _rt="${_spec%%|*}"
         _url="${_spec#*|}"
