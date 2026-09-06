@@ -651,5 +651,24 @@ inside every script autospec runs.
 | `AUTOSPEC_EXPLORE_MIN_CONFIDENCE` | `0.3` | Constitution confidence floor (D2). |
 | `AUTOSPEC_EXPLORE_CONSTITUTION` | `.autospec/explore-constitution.md` | Proposal-constitution path. |
 
+## Stall detection, handoff & model rotation (#3563)
+
+Read by `autospec-core`'s `stall` module. Behaviour: [`stall-handoff.md`](stall-handoff.md).
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_ISSUE_LEASE_SECS` | `900` | How long a claim lease lives from issue or renewal. An expired lease is what puts an issue back on the queue when an implementer dies. |
+| `AUTOSPEC_ISSUE_LEASE_RENEW_SECS` | `120` | Minimum spacing between renewals, so a chatty transcript cannot make a lease immortal without making progress observable. Must be shorter than the lease duration (`StallPolicy::validate` rejects otherwise). |
+| `AUTOSPEC_ISSUE_STALL_SECS` | `1800` | Seconds of flat transcript + flat output before a quiet run is declared `Hung`. |
+| `AUTOSPEC_STALL_MAX_ATTEMPTS` | `2` | Attempts per issue before escalation. Checked **before** rotation is chosen, so the limit holds even when the roster is longer. Clamped to `>= 1`. |
+| `AUTOSPEC_STALL_TRANSCRIPT_TAIL_BYTES` | `65536` | Bytes of transcript tail captured per attempt into `attempt-N-transcript-tail.txt`. Must be `> 0`. |
+| `AUTOSPEC_GIT_PROGRAM` | `git` | The git binary used by `GitWorktreeEvidence` for read-only capture (`log`, `diff`, `ls-files`, `format-patch`). Set it when the PATH `git` is not the one you want: container images, remote runners, pinned builds. |
+
+Escalation applies the labels `stalled-attempts-exhausted` and `spec-repair`, and
+writes a `SpecRepairReport` listing every attempt (model, configuration, duration,
+work produced, last activity) with the paths of the captured artifacts. Artifacts
+are written `0600` in `0700` directories on Unix. Validation:
+`scripts/validate-stall-handoff.sh`.
+
 For automation toggles (skip-review, stop, no-heal, …) see [`FLAGS.md`](FLAGS.md).
 This reference covers the operator-facing knobs; run `grep -rho 'AUTOSPEC_[A-Z0-9_]*' skills scripts | sort -u` for the exhaustive internal set.
