@@ -88,6 +88,8 @@
     "check_lint_heredoc_handling",
     "check_lint_reuse_triage",
     "check_lint_deferral_refs",
+    "check_verify_gate",
+    "check_verify_produced_work",
     "check_bats_suite_registration",
     "check_bats_negation_ratchet",
     "check_code_intelligence_contract",

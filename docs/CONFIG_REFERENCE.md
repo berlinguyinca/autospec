@@ -549,6 +549,7 @@ application still blocks the merge.
 | `AUTOSPEC_QA_STRICT` | (unset) | Stricter autospec-qa gating. |
 | `AUTOSPEC_CUSTOM_VERIFY_CMD` / `_SNAPSHOT_CMD` / `_RESTORE_CMD` | (unset) | Custom verify/snapshot/restore hooks for E2E reset. |
 | `AUTOSPEC_WITH_DOCS` | (unset) | Include the docs dimension in sweeps/reviews. |
+| `AUTOSPEC_BASE_REF` | branch upstream | Base revision for commits-ahead counts (`scripts/verify-produced-work.sh`, `scripts/qa-phase4.sh`); overrides the branch's own upstream. |
 
 ## Implementation size gates
 `scripts/lint-implementation-gates.sh` wraps `lint-implementation.sh` and corrects its

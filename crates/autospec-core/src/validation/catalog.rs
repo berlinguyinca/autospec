@@ -131,6 +131,8 @@ impl ValidationCheck {
             "check_lint_heredoc_handling" => bats_suite("tests/lint/test_complexity_heredoc.bats"),
             "check_lint_reuse_triage" => bats_suite("tests/lint/test_reuse_triage.bats"),
             "check_lint_deferral_refs" => bats_suite("tests/lint/test_deferral_refs.bats"),
+            "check_verify_gate" => bats_suite("tests/unit/test_verify_gate.bats"),
+            "check_verify_produced_work" => bats_suite("tests/unit/test_verify_produced_work.bats"),
             "check_bats_suite_registration" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)
             }

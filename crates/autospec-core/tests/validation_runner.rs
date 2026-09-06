@@ -142,8 +142,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 157); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497)
-    assert_eq!(full.unique_ids().len(), 152); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 159); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535)
+    assert_eq!(full.unique_ids().len(), 154); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -173,6 +173,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_language_table"
                 | "check_proxy_direct_borrow_lifetime"
                 | "check_qa_function_ranges_string_literals"
+                | "check_verify_gate"
+                | "check_verify_produced_work"
         )
     }));
 }
@@ -1990,6 +1992,9 @@ fn runner_executes_the_newly_registered_bats_suites() {
         ("check_language_table", "tests/unit/test_language_table.bats"),
         ("check_proxy_direct_borrow_lifetime", "tests/unit/proxy-direct-borrow-lifetime.bats"),
         ("check_qa_function_ranges_string_literals", "tests/unit/qa-function-ranges-string-literals.bats"),
+        // Registered by #3535: the loud-failure verification gates.
+        ("check_verify_gate", "tests/unit/test_verify_gate.bats"),
+        ("check_verify_produced_work", "tests/unit/test_verify_produced_work.bats"),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
             id,
