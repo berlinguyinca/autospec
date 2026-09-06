@@ -766,6 +766,81 @@ an intentional change is a reviewable commit rather than a silent one.
 `skills/autospec-shared/tests/unit/ui-a11y-baseline.test.mjs` drives a real browser through
 four cosmetic refactors and five semantic regressions.
 
+## Loud-failure verification gates (`$AUTOSPEC_SCRIPTS_DIR`)
+
+Two gates for the failure class where a check answers the question it was not
+asked. Both are POSIX sh, both take their vocabulary from `ui-evidence-gates.sh`
+(0 pass, 1 fail, 2 unknown, plus 3 for a toolchain that is not there), and both
+write `unknown` where an uninitialised counter would have written `0`.
+
+### `verify-gate.sh`
+
+Runs command-declared verification lanes and reports a lane that measured
+nothing as `unknown`, never as a pass.
+
+```
+Usage: verify-gate.sh [--repo-root <dir>] [--report <file>]
+                      [--require-tool <tool>]... [--fail-regex <ERE>] <manifest>
+
+Manifest (one lane per line, tab-separated):
+  <name>\t<command>[\t<result-regex>]
+
+Writes:   --report <file> (JSON: one record per lane + aggregate)
+Exit:     0 PASS, 1 FAIL, 2 UNKNOWN (a lane parsed nothing),
+          3 UNAVAILABLE (a tool is missing; nothing measured), 64 usage
+Final line: verify-gate: PASS|FAIL|UNKNOWN|UNAVAILABLE (<n> lanes, <n> failed, <n> unknown)
+```
+
+Three rules, each the answer to a gate that said PASS while verifying nothing.
+Tools are asserted **before** the first lane runs — `awk`, `cat` and `mktemp`
+plus whatever `--require-tool` declares — and each missing tool is named on
+stderr, because a linter that is not installed reports zero findings *and* zero
+evidence. Lanes run as `sh -c '<command>' >file 2>&1` with the status captured
+by `|| lane_code=$?`: no pipe is introduced anywhere, so there is no
+tail-of-pipeline status to mistake for the head's, and `127` is recorded as the
+observed exit code with a status of `unknown` rather than as a failure or a
+pass. A lane whose output yields zero result lines is `unknown`, which is the
+shape of a suite that died before printing its summary or a reporter whose
+format changed under the parser — and a lane with no `<result-regex>` can never
+prove it measured anything, so it fails closed the same way. Counting failures
+is one-directional too: a result line whose failure tokens are all zero
+(`5 passed; 0 failed`) is not a failure line, while `0 failed, 2 errors` still
+is, so the default `--fail-regex` does not turn every harness summary into a
+false alarm.
+
+Findings outrank unknown: a lane that could not run must not mask a defect a
+lane that did run reported. `tests/unit/test_verify_gate.bats` covers all four
+historical shapes (missing tool, unparsable suite, inferred success, zero lines
+read as zero failures) plus the positive controls that keep the gate from being
+permanently red.
+
+### `verify-produced-work.sh`
+
+Decides whether a task produced work by counting **both** uncommitted changes
+and commits ahead of a base, instead of asking `git status --porcelain` alone.
+
+```
+Usage: verify-produced-work.sh [--repo-root <dir>] [--base <ref>] [--json]
+
+Base precedence: --base, then $AUTOSPEC_BASE_REF, then the branch's upstream.
+Exit:     0 WORK, 1 NONE (both sides measured, both zero), 2 UNKNOWN (a side
+          could not be measured), 3 UNAVAILABLE (git/awk missing), 64 usage
+Final line: produced-work: yes|no|unknown (uncommitted_changes=<n>|"unknown",
+            commits_ahead=<n>|"unknown", base=<ref>|"unknown")
+```
+
+`git status --porcelain` cannot see a commit. A subagent that committed its work
+and left a clean tree looked identical to one that did nothing, and a
+`git rev-list` that errored printed nothing, which read as zero commits ahead.
+The verdict is monotone in what was actually measured: `yes` needs one positive
+side, so an unknown commits-ahead count cannot erase a dirty tree; `no` requires
+**both** sides measured at zero; everything else is `unknown` and exits 2.
+Concluding "nothing happened" from "I could not look" is the defect. Every
+numeric field carries the literal `unknown` when unmeasured, in the JSON record
+as in the status line. `tests/unit/test_verify_produced_work.bats` pins the
+committed-work-on-clean-tree case, both-sides counting, `0`-as-a-real-measurement
+versus `unknown`, and the git-absent path.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.
