@@ -2,14 +2,16 @@ use super::{ManagedProjectError, ManagedProjectStore, RemoteProject};
 use crate::commands::autonomous::accountability::github::{
     GithubCommand, GithubFailure, GithubTransport,
 };
+use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::{
-    ManagedProjectPolicy, RelationshipEdge, RelationshipEvidence, RelationshipKind,
-    RelationshipState,
+    ManagedProjectIdentity, ManagedProjectPolicy, RelationshipEdge, RelationshipEvidence,
+    RelationshipKind, RelationshipState,
 };
 use std::collections::HashSet;
 
 #[path = "github/parse.rs"]
 mod parse;
+pub use parse::PortfolioRecoveryCapsule;
 
 const PROJECT_FETCH_LIMIT: usize = 500;
 
@@ -56,29 +58,60 @@ pub fn resolve_or_create_project<T: GithubTransport>(
         },
         "cannot list GitHub Projects",
     )?;
-    let numbers = parse::parse_project_numbers(&output)?;
+    let candidates = parse::parse_project_candidates(&output)?;
+    let marker = marker_material(store)?;
+    let missing_portfolio_state =
+        matches!(marker.identity, ManagedProjectIdentity::SpecPortfolio(_))
+            && marker.recovery_capsule.is_none();
     let mut matches = Vec::new();
-    for number in numbers {
-        let project = view_project(github, &policy.owner, number)?;
+    let mut projects = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let project = view_project(github, &policy.owner, candidate.number)?;
         validate_returned_owner(&project, &policy.owner)?;
-        if verify_managed_marker(&project.readme, policy)? {
-            matches.push(project);
+        let recovered_capsule = if missing_portfolio_state {
+            parse::recoverable_portfolio_capsule(&project.readme, &marker.identity, &policy.owner)?
+        } else {
+            None
+        };
+        let exact = if missing_portfolio_state {
+            recovered_capsule.is_some()
+        } else {
+            matches!(
+                parse::classify_marker(
+                    &project.readme,
+                    &marker.identity,
+                    &policy.owner,
+                    marker.recovery_capsule.as_ref(),
+                )?,
+                parse::MarkerDisposition::Exact { .. }
+            )
+        };
+        if exact {
+            matches.push((project.clone(), recovered_capsule));
         }
+        projects.push(project);
     }
     match matches.len() {
         1 => {
-            let project = matches.pop().expect("one verified match");
+            let (project, recovered_capsule) = matches.pop().expect("one verified match");
+            if let Some(capsule) = recovered_capsule {
+                return recover_missing_portfolio_state(store, github, policy, project, capsule);
+            }
+            let project = ensure_project_marker(store, github, policy, project, false)?;
             persist_project(store, &project)?;
-            ack_create_projection_if_pending(store, policy)?;
+            ack_create_projection_if_pending(store)?;
             Ok(project)
         }
         count if count > 1 => Err(ManagedProjectError::new(format!(
             "multiple GitHub Projects have the managed marker for {}",
-            policy.product_key.as_str()
+            marker_identity_key(store)
         ))),
-        _ if has_pending_create(store, policy) => Err(ManagedProjectError::new(
-            "pending project creation has no verified project identity",
+        _ if missing_portfolio_state => Err(ManagedProjectError::new(
+            "missing local spec portfolio state has no strict marker-bearing Project",
         )),
+        _ if has_pending_create(store) => {
+            recover_create_unknown(store, github, policy, title, projects)
+        }
         _ => create_project(store, github, policy, title),
     }
 }
@@ -228,13 +261,18 @@ fn create_project<T: GithubTransport>(
             "managed GitHub Project title must not be empty",
         ));
     }
-    let projection = create_projection(policy);
-    store.enqueue_projection(projection.clone())?;
+    let create_title = exact_nonce_title(store, title)?.unwrap_or_else(|| title.to_owned());
+    validate_create_title(&create_title)?;
+    let projection = create_projection(store);
+    store.ensure_projection_pending(&projection)?;
+    if let Some(title_projection) = create_title_projection(store, &create_title)? {
+        store.ensure_projection_pending(&title_projection)?;
+    }
     let created = parse::parse_project(&execute(
         github,
         GithubCommand::CreateProject {
             owner: policy.owner.clone(),
-            title: title.to_owned(),
+            title: create_title,
         },
         "cannot create managed GitHub Project",
     )?)?;
@@ -255,31 +293,10 @@ fn resume_created_project<T: GithubTransport>(
 ) -> Result<RemoteProject, ManagedProjectError> {
     let before_edit = view_project(github, &policy.owner, provisional.number)?;
     validate_created_identity(&before_edit, provisional)?;
-    let verified = if verify_managed_marker(&before_edit.readme, policy)? {
-        before_edit
-    } else {
-        if !has_pending_create(store, policy) {
-            return Err(ManagedProjectError::new(
-                "provisional Project has no pending create projection",
-            ));
-        }
-        let readme = parse::append_marker(&before_edit.readme, policy)?;
-        execute(
-            github,
-            GithubCommand::EditProjectMarker {
-                owner: policy.owner.clone(),
-                number: provisional.number,
-                readme,
-            },
-            "cannot write managed GitHub Project marker",
-        )?;
-        let verified = view_project(github, &policy.owner, provisional.number)?;
-        validate_created_identity(&verified, provisional)?;
-        validate_project(&verified, policy)?;
-        verified
-    };
+    let verified = ensure_project_marker(store, github, policy, before_edit, true)?;
+    validate_created_identity(&verified, provisional)?;
     persist_project(store, &verified)?;
-    ack_create_projection_if_pending(store, policy)?;
+    ack_create_projection_if_pending(store)?;
     Ok(verified)
 }
 
@@ -316,44 +333,39 @@ fn resume_bound_project<T: GithubTransport>(
             "verified remote project identity conflicts with local binding",
         ));
     }
-    if verify_managed_marker(&before_edit.readme, policy)? {
-        persist_project(store, &before_edit)?;
-        ack_create_projection_if_pending(store, policy)?;
-        return Ok(before_edit);
-    }
-    if !has_pending_create(store, policy) {
-        return Err(ManagedProjectError::new(
-            "GitHub Project does not contain the expected managed marker",
-        ));
-    }
-    let readme = parse::append_marker(&before_edit.readme, policy)?;
-    execute(
+    let verified = ensure_project_marker(
+        store,
         github,
-        GithubCommand::EditProjectMarker {
-            owner: policy.owner.clone(),
-            number,
-            readme,
-        },
-        "cannot write managed GitHub Project marker",
+        policy,
+        before_edit,
+        has_pending_create(store),
     )?;
-    let verified = view_project(github, &policy.owner, number)?;
     if verified.node_id != expected_node_id || verified.number != number {
         return Err(ManagedProjectError::new(
             "GitHub returned a different Project after marker update",
         ));
     }
-    validate_project(&verified, policy)?;
     persist_project(store, &verified)?;
-    ack_create_projection_if_pending(store, policy)?;
+    ack_create_projection_if_pending(store)?;
     Ok(verified)
 }
 
 fn validate_project(
+    store: &ManagedProjectStore,
     project: &RemoteProject,
     policy: &ManagedProjectPolicy,
 ) -> Result<(), ManagedProjectError> {
     validate_returned_owner(project, &policy.owner)?;
-    if !verify_managed_marker(&project.readme, policy)? {
+    let marker = marker_material(store)?;
+    if !matches!(
+        parse::classify_marker(
+            &project.readme,
+            &marker.identity,
+            &policy.owner,
+            marker.recovery_capsule.as_ref(),
+        )?,
+        parse::MarkerDisposition::Exact { legacy: false }
+    ) {
         return Err(ManagedProjectError::new(
             "GitHub Project does not contain the expected managed marker",
         ));
@@ -437,7 +449,7 @@ fn bound_identity(
     store: &ManagedProjectStore,
     policy: &ManagedProjectPolicy,
 ) -> Result<BoundIdentity, ManagedProjectError> {
-    if has_pending_create(store, policy) {
+    if has_pending_create(store) {
         return Err(ManagedProjectError::new(
             "managed GitHub Project creation is not verified",
         ));
@@ -468,12 +480,29 @@ fn projection_key(node_id: &str, issue_url: &str) -> String {
     format!("project:item-add:{node_id}:{issue_url}")
 }
 
-fn create_projection(policy: &ManagedProjectPolicy) -> String {
-    format!("project:create:{}", policy.product_key.as_str())
+fn create_projection(store: &ManagedProjectStore) -> String {
+    format!("project:create:{}", marker_identity_key(store))
 }
 
-fn has_pending_create(store: &ManagedProjectStore, policy: &ManagedProjectPolicy) -> bool {
-    let projection = create_projection(policy);
+fn create_title_projection(
+    store: &ManagedProjectStore,
+    title: &str,
+) -> Result<Option<String>, ManagedProjectError> {
+    match store.snapshot().identity() {
+        ManagedProjectIdentity::Product { .. } => Ok(None),
+        ManagedProjectIdentity::SpecPortfolio(_) => {
+            validate_create_title(title)?;
+            Ok(Some(format!(
+                "project:create-title:{}:{}",
+                marker_identity_key(store),
+                encode_title(title)
+            )))
+        }
+    }
+}
+
+fn has_pending_create(store: &ManagedProjectStore) -> bool {
+    let projection = create_projection(store);
     store
         .snapshot()
         .pending_projections
@@ -483,13 +512,310 @@ fn has_pending_create(store: &ManagedProjectStore, policy: &ManagedProjectPolicy
 
 fn ack_create_projection_if_pending(
     store: &mut ManagedProjectStore,
-    policy: &ManagedProjectPolicy,
 ) -> Result<(), ManagedProjectError> {
-    let projection = create_projection(policy);
-    if has_pending_create(store, policy) {
+    let pending = pending_create_projections(store)?;
+    for projection in pending {
         store.ack_projection(&projection)?;
     }
     Ok(())
+}
+
+struct MarkerMaterial {
+    identity: ManagedProjectIdentity,
+    recovery_capsule: Option<PortfolioRecoveryCapsule>,
+}
+
+fn marker_material(store: &ManagedProjectStore) -> Result<MarkerMaterial, ManagedProjectError> {
+    let identity = store.snapshot().identity().clone();
+    let recovery_capsule = match &identity {
+        ManagedProjectIdentity::Product { .. } => None,
+        ManagedProjectIdentity::SpecPortfolio(expected) => {
+            let Some(capsule) = store
+                .portfolio_snapshot()
+                .and_then(|snapshot| snapshot.get("recovery_capsule"))
+            else {
+                return Ok(MarkerMaterial {
+                    identity,
+                    recovery_capsule: None,
+                });
+            };
+            let capsule = PortfolioRecoveryCapsule::from_value(capsule)?;
+            if capsule.portfolio_id() != expected.portfolio_id().as_str() {
+                return Err(ManagedProjectError::new(
+                    "spec portfolio recovery capsule identity conflicts with its store",
+                ));
+            }
+            Some(capsule)
+        }
+    };
+    Ok(MarkerMaterial {
+        identity,
+        recovery_capsule,
+    })
+}
+
+fn marker_identity_key(store: &ManagedProjectStore) -> String {
+    match store.snapshot().identity() {
+        ManagedProjectIdentity::Product { product_key } => product_key.to_string(),
+        ManagedProjectIdentity::SpecPortfolio(identity) => {
+            format!("portfolio.{}", identity.portfolio_id())
+        }
+    }
+}
+
+fn exact_nonce_title(
+    store: &ManagedProjectStore,
+    title: &str,
+) -> Result<Option<String>, ManagedProjectError> {
+    let ManagedProjectIdentity::SpecPortfolio(_) = store.snapshot().identity() else {
+        return Ok(None);
+    };
+    let marker = marker_material(store)?;
+    let nonce = marker
+        .recovery_capsule
+        .as_ref()
+        .map(PortfolioRecoveryCapsule::create_nonce)
+        .ok_or_else(|| {
+            ManagedProjectError::new("portfolio recovery capsule has no create nonce")
+        })?;
+    Ok(Some(format!("{title} [autospec:{nonce}]")))
+}
+
+fn recover_create_unknown<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+    title: &str,
+    projects: Vec<RemoteProject>,
+) -> Result<RemoteProject, ManagedProjectError> {
+    let persisted_title = pending_create_title(store)?;
+    let Some(expected_title) = persisted_title.or(exact_nonce_title(store, title)?) else {
+        return Err(ManagedProjectError::new(
+            "pending project creation has no verified project identity",
+        ));
+    };
+    let mut candidates = projects
+        .into_iter()
+        .filter(|project| project.title == expected_title)
+        .collect::<Vec<_>>();
+    match candidates.len() {
+        0 => Err(ManagedProjectError::journaled_projection_pending(
+            "create_unknown: pending spec Project is not yet visible by its exact nonce title",
+        )),
+        1 => {
+            let project = candidates.pop().expect("one exact nonce-title candidate");
+            store.record_created_project(&project)?;
+            let provisional = store
+                .provisional_project()
+                .cloned()
+                .ok_or_else(|| ManagedProjectError::new("recovered project was not journaled"))?;
+            resume_created_project(store, github, policy, &provisional)
+        }
+        count => Err(ManagedProjectError::new(format!(
+            "create_unknown: {count} Projects match the exact nonce title"
+        ))),
+    }
+}
+
+fn ensure_project_marker<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+    project: RemoteProject,
+    allow_missing: bool,
+) -> Result<RemoteProject, ManagedProjectError> {
+    let marker = marker_material(store)?;
+    let disposition = parse::classify_marker(
+        &project.readme,
+        &marker.identity,
+        &policy.owner,
+        marker.recovery_capsule.as_ref(),
+    )?;
+    match disposition {
+        parse::MarkerDisposition::Exact { legacy: false } => {
+            ack_marker_projection_if_pending(store, &project)?;
+            return Ok(project);
+        }
+        parse::MarkerDisposition::Missing if !allow_missing => {
+            return Err(ManagedProjectError::new(
+                "GitHub Project does not contain the expected managed marker",
+            ))
+        }
+        parse::MarkerDisposition::Other => {
+            return Err(ManagedProjectError::new(
+                "GitHub Project contains a different managed marker",
+            ))
+        }
+        parse::MarkerDisposition::Exact { legacy: true }
+            if matches!(marker.identity, ManagedProjectIdentity::SpecPortfolio(_)) =>
+        {
+            return Err(ManagedProjectError::new(
+                "spec portfolio marker cannot use the legacy product schema",
+            ))
+        }
+        parse::MarkerDisposition::Exact { legacy: true } | parse::MarkerDisposition::Missing => {}
+    }
+    let readme = parse::upsert_marker(
+        &project.readme,
+        &marker.identity,
+        &policy.owner,
+        marker.recovery_capsule.as_ref(),
+    )?;
+    let projection = marker_projection(&project.node_id, &readme);
+    store.ensure_projection_pending(&projection)?;
+    execute(
+        github,
+        GithubCommand::EditProjectMarker {
+            owner: policy.owner.clone(),
+            number: project.number,
+            readme,
+        },
+        "cannot write managed GitHub Project marker",
+    )?;
+    let verified = view_project(github, &policy.owner, project.number)?;
+    if verified.node_id != project.node_id || verified.number != project.number {
+        return Err(ManagedProjectError::new(
+            "GitHub returned a different Project after marker update",
+        ));
+    }
+    validate_project(store, &verified, policy)?;
+    store.ack_projection(&projection)?;
+    Ok(verified)
+}
+
+fn marker_projection(node_id: &str, readme: &str) -> String {
+    format!("project:marker:{node_id}:{}", sha256_hex(readme.as_bytes()))
+}
+
+fn ack_marker_projection_if_pending(
+    store: &mut ManagedProjectStore,
+    project: &RemoteProject,
+) -> Result<(), ManagedProjectError> {
+    let projection = marker_projection(&project.node_id, &project.readme);
+    if store
+        .snapshot()
+        .pending_projections
+        .iter()
+        .any(|pending| pending == &projection)
+    {
+        store.ack_projection(&projection)?;
+    }
+    Ok(())
+}
+
+fn recover_missing_portfolio_state<T: GithubTransport>(
+    store: &mut ManagedProjectStore,
+    github: &mut T,
+    policy: &ManagedProjectPolicy,
+    project: RemoteProject,
+    capsule: PortfolioRecoveryCapsule,
+) -> Result<RemoteProject, ManagedProjectError> {
+    let ManagedProjectIdentity::SpecPortfolio(identity) = store.snapshot().identity().clone()
+    else {
+        return Err(ManagedProjectError::new(
+            "recovery requires a spec portfolio store",
+        ));
+    };
+    let snapshot = serde_json::json!({
+        "schema": "autospec.portfolio-snapshot.v1",
+        "portfolio_id": identity.portfolio_id(),
+        "owner": policy.owner,
+        "project_number": project.number,
+        "project_node_id": project.node_id,
+        "project_url": project.url,
+        "source_spec": identity.source(),
+        "plan_digest": capsule.plan_digest(),
+        "lease_generation": 0,
+        "state": "recovered",
+        "projection_high_watermark": 0,
+        "recovery_capsule": capsule.to_value()?,
+    });
+    store.record_portfolio_snapshot(snapshot)?;
+    persist_project(store, &project)?;
+    let verified = view_project(github, &policy.owner, project.number)?;
+    validate_project(store, &verified, policy)?;
+    persist_project(store, &verified)?;
+    Ok(verified)
+}
+
+fn pending_create_projections(
+    store: &ManagedProjectStore,
+) -> Result<Vec<String>, ManagedProjectError> {
+    let create = create_projection(store);
+    let title_prefix = format!("project:create-title:{}:", marker_identity_key(store));
+    let pending = store
+        .snapshot()
+        .pending_projections
+        .iter()
+        .filter(|projection| projection.as_str() == create || projection.starts_with(&title_prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    if pending
+        .iter()
+        .filter(|projection| projection.starts_with(&title_prefix))
+        .count()
+        > 1
+    {
+        return Err(ManagedProjectError::new(
+            "managed Project has multiple pending create-title intents",
+        ));
+    }
+    Ok(pending)
+}
+
+fn pending_create_title(
+    store: &ManagedProjectStore,
+) -> Result<Option<String>, ManagedProjectError> {
+    let prefix = format!("project:create-title:{}:", marker_identity_key(store));
+    let Some(projection) = pending_create_projections(store)?
+        .into_iter()
+        .find(|projection| projection.starts_with(&prefix))
+    else {
+        return Ok(None);
+    };
+    let encoded = projection
+        .strip_prefix(&prefix)
+        .expect("matched title prefix");
+    decode_title(encoded).map(Some)
+}
+
+fn validate_create_title(title: &str) -> Result<(), ManagedProjectError> {
+    if title.is_empty() || title.len() > 256 || title.chars().any(char::is_control) {
+        return Err(ManagedProjectError::new(
+            "managed GitHub Project title is outside the safe byte or character bound",
+        ));
+    }
+    Ok(())
+}
+
+fn encode_title(title: &str) -> String {
+    title
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decode_title(encoded: &str) -> Result<String, ManagedProjectError> {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(2) || encoded.len() > 512 {
+        return Err(ManagedProjectError::new(
+            "invalid durable Project create title",
+        ));
+    }
+    let bytes = encoded
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|value| u8::from_str_radix(value, 16).ok())
+                .ok_or_else(|| ManagedProjectError::new("invalid durable Project create title"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let title = String::from_utf8(bytes)
+        .map_err(|_| ManagedProjectError::new("invalid durable Project create title"))?;
+    validate_create_title(&title)?;
+    Ok(title)
 }
 
 fn execute<T: GithubTransport>(
