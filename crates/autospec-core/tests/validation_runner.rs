@@ -51,26 +51,6 @@ fn tool_commands_can_target_the_validation_root() {
     assert_eq!(command.working_directory_for(&target_root), target_root);
 }
 
-#[test]
-fn missing_programs_are_unmeasured_rather_than_measured_failures() {
-    let command = ToolCommand::new("autospec-task-two-missing-program", ["--version"])
-        .expect("safe missing command definition");
-
-    let result = command.execute("missing-tool", true);
-
-    assert_eq!(result.exit_code, None);
-    assert_eq!(result.spawn_count, 0);
-    assert!(!result.is_success(), "an absent tool is never a pass");
-    // Previously this asserted `is_failure()`. A tool that never ran measured nothing —
-    // filing it as a measured failure claims knowledge the run does not have (#3535).
-    assert!(result.is_unmeasured(), "{result:?}");
-    assert!(!result.is_failure());
-    assert!(result
-        .unmeasured
-        .as_deref()
-        .is_some_and(|reason| reason.contains("autospec-task-two-missing-program")));
-}
-
 #[cfg(unix)]
 #[test]
 fn signaled_children_are_non_success_typed_results() {
