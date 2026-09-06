@@ -67,24 +67,47 @@ fn block_expansion_failure_digest_preserves_child_evidence() {
 }
 
 #[test]
-fn aggregate_preserves_a_missing_child_tool_failure() {
+fn aggregate_preserves_a_missing_child_tool_as_unmeasured() {
     let result = aggregate(
         "check",
         true,
-        vec![CheckResult {
-            id: "child".to_string(),
-            required: true,
-            exit_code: None,
-            elapsed_ms: 0,
-            spawn_count: 0,
-            stdout_bytes: 0,
-            stderr_bytes: 0,
-            output_digest: "child".to_string(),
-        }],
+        vec![CheckResult::unmeasured(
+            "child",
+            true,
+            "bats is not on PATH, so nothing was measured",
+        )],
     );
 
     assert_eq!(result.exit_code, None);
+    assert!(result.is_unmeasured(), "{result:?}");
+    assert!(
+        !result.is_success(),
+        "an aggregate over an absent tool must not read as a pass"
+    );
+}
+
+#[test]
+fn aggregate_over_no_sub_checks_is_unmeasured_rather_than_a_pass() {
+    let result = aggregate("check", true, Vec::new());
+
+    assert!(result.is_unmeasured(), "{result:?}");
+    assert!(!result.is_success());
+}
+
+#[test]
+fn aggregate_reports_a_measured_failure_ahead_of_an_unmeasured_sibling() {
+    let result = aggregate(
+        "check",
+        true,
+        vec![
+            CheckResult::completed("broken", true, 1, 0, 1, 0, 0, "broken"),
+            CheckResult::unmeasured("absent", true, "bats is not on PATH"),
+        ],
+    );
+
+    assert_eq!(result.exit_code, Some(1));
     assert!(result.is_failure());
+    assert!(!result.is_unmeasured());
 }
 
 #[test]

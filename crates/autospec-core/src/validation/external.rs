@@ -666,7 +666,7 @@ fn run_bats_suites(id: &str, required: bool, root: &Path, suites: &[&str]) -> Ch
         }
     }
     if !program_on_path("bats") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "bats");
     }
     let commands = suites.iter().map(|suite| bats_command(suite));
     run_commands(id, required, root, commands)
@@ -679,14 +679,14 @@ fn run_bats_suites_if_available(
     suites: &[&str],
 ) -> CheckResult {
     if !program_on_path("bats") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "bats");
     }
     run_bats_suites(id, required, root, suites)
 }
 
 fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {
     if !program_on_path("bats") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "bats");
     }
     let directory_path = root.join(directory);
     let mut suites = fs::read_dir(&directory_path)
@@ -720,7 +720,7 @@ fn run_bats_directory_allow_empty_if_available(
     directory: &str,
 ) -> CheckResult {
     if !program_on_path("bats") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "bats");
     }
     let Ok(entries) = fs::read_dir(root.join(directory)) else {
         return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
@@ -5053,7 +5053,7 @@ fn run_optional_jsonschema_checks(
     schemas: &[&str],
 ) -> CheckResult {
     if !program_on_path("python3") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "python3");
     }
     const CHECK: &str = r#"import json, sys
 try:
@@ -5078,7 +5078,7 @@ fn run_matching_bats_suites_if_available(
     prefix: &str,
 ) -> CheckResult {
     if !program_on_path("bats") {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        return unmeasured_tool(id, required, "bats");
     }
     let mut suites = fs::read_dir(root.join(directory))
         .into_iter()
@@ -6294,7 +6294,8 @@ fn trio_directories(root: &Path) -> Vec<PathBuf> {
 
 fn aggregate(id: &str, required: bool, results: Vec<CheckResult>) -> CheckResult {
     if results.is_empty() {
-        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+        // Zero sub-checks is not zero failures: nothing ran, so nothing was measured.
+        return CheckResult::unmeasured(id, required, "no sub-checks ran, so nothing was measured");
     }
 
     let failure = results.iter().find(|result| result.is_failure());
@@ -6302,19 +6303,43 @@ fn aggregate(id: &str, required: bool, results: Vec<CheckResult>) -> CheckResult
         .iter()
         .flat_map(|result| result.output_digest.bytes().chain(std::iter::once(b'\n')))
         .collect::<Vec<_>>();
+    // An unmeasured sub-check taints the aggregate unless something outright failed: a
+    // suite where half the tools were missing has not passed, whatever the other half did.
+    let unmeasured = failure.is_none().then(|| {
+        results
+            .iter()
+            .filter_map(|result| result.unmeasured.as_deref())
+            .collect::<Vec<_>>()
+            .join("; ")
+    });
+    let unmeasured = unmeasured.filter(|reason| !reason.is_empty());
     CheckResult {
         id: id.to_string(),
         required,
-        exit_code: match failure {
-            Some(result) => result.exit_code,
-            None => Some(0),
+        exit_code: match (&unmeasured, failure) {
+            (Some(_), _) => None,
+            (None, Some(result)) => result.exit_code,
+            (None, None) => Some(0),
         },
         elapsed_ms: results.iter().map(|result| result.elapsed_ms).sum(),
         spawn_count: results.iter().map(|result| result.spawn_count).sum(),
         stdout_bytes: results.iter().map(|result| result.stdout_bytes).sum(),
         stderr_bytes: results.iter().map(|result| result.stderr_bytes).sum(),
         output_digest: output_digest(&combined_digests, &[]),
+        unmeasured,
     }
+}
+
+/// A check that could not be measured because the tool it needs is not installed.
+///
+/// Every call site below used to return `CheckResult::completed(id, required, 0, …)` — an
+/// absent tool rendered as a clean pass, which is the #3535 failure exactly.
+fn unmeasured_tool(id: &str, required: bool, program: &str) -> CheckResult {
+    CheckResult::unmeasured(
+        id,
+        required,
+        format!("{program} is not on PATH, so nothing was measured"),
+    )
 }
 
 fn failure(id: &str, required: bool, message: &str) -> CheckResult {

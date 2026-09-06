@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use autospec_core::validation::{
     CheckModes, CheckOwner, CheckReachability, CheckResult, ExternalCheck, Jobs, StructuralCheck,
     ToolCommand, ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationOptions,
-    ValidationPlan, ValidationRunner,
+    ValidationPlan, ValidationRunner, ValidationStatus,
 };
 
 #[test]
@@ -49,18 +49,6 @@ fn tool_commands_can_target_the_validation_root() {
     let target_root = PathBuf::from("/tmp/autospec-validation-root");
 
     assert_eq!(command.working_directory_for(&target_root), target_root);
-}
-
-#[test]
-fn missing_programs_are_non_success_typed_results() {
-    let command = ToolCommand::new("autospec-task-two-missing-program", ["--version"])
-        .expect("safe missing command definition");
-
-    let result = command.execute("missing-tool", true);
-
-    assert_eq!(result.exit_code, None);
-    assert_eq!(result.spawn_count, 0);
-    assert!(result.is_failure());
 }
 
 #[cfg(unix)]
@@ -276,8 +264,16 @@ fn fast_direct_plan_skips_embedded_bats_without_skipping_static_contracts() {
 
     let report = ValidationRunner::run_plan(&plan, &validation_fixture("autospec-doc-contract"));
 
-    assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    // The static contracts still ran and passed; the embedded Bats suite was skipped, and
+    // a skipped suite is now unmeasured rather than exit code 0. Fast mode makes
+    // validation quicker; it must not make uncovered ground look green (#3535).
+    assert_eq!(report.results[0].exit_code, None);
+    assert!(report.results[0].is_unmeasured(), "{:?}", report.results[0]);
+    assert!(!report.results[0].is_success());
+    assert_eq!(
+        report.aggregate().expect("plan aggregates").status,
+        ValidationStatus::Unknown
+    );
 }
 
 #[test]

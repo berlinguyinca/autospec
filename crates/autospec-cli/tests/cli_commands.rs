@@ -1165,6 +1165,32 @@ fn validate_shadow_results_aggregates_captured_shell_outcomes_without_execution(
     assert!(stdout.contains(&expected));
 }
 
+/// #3535's acceptance criterion at the CLI boundary: a report whose required check could
+/// not be measured must exit non-zero and name the tool, not print a clean report.
+#[test]
+fn validate_shadow_results_reports_an_unmeasured_required_check_as_unknown() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-unmeasured-tool.json");
+    let output = autospec()
+        .args(["validate", "--shadow-results", fixture.to_str().unwrap()])
+        .output()
+        .expect("shadow validation starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "an unmeasured required check must not exit zero: stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("status=unknown"), "{stdout}");
+    assert!(stdout.contains("unknown=1"), "{stdout}");
+    assert!(stdout.contains("required_unknown=1"), "{stdout}");
+    assert!(
+        stderr.contains("unknown, not a pass"),
+        "the exit must say why: {stderr}"
+    );
+}
+
 #[test]
 fn validate_shadow_results_preserves_a_required_failure_exit() {
     let fixture = workspace_root()
