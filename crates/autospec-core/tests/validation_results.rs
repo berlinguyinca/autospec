@@ -15,9 +15,13 @@ fn validation_results_aggregate_required_and_optional_outcomes_without_execution
     assert_eq!(aggregate.failed, 1);
     assert_eq!(aggregate.required_failed, 0);
     assert_eq!(aggregate.optional_failed, 1);
+    // Schema 2 adds `unknown` and `required_unknown`: a report that cannot distinguish an
+    // unmeasured check from a measured zero cannot be trusted to mean what it says.
+    assert_eq!(aggregate.unknown, 0);
+    assert_eq!(aggregate.required_unknown, 0);
     assert_eq!(
         aggregate.to_json(),
-        "{\"schema\":1,\"status\":\"passed\",\"total\":2,\"passed\":1,\"failed\":1,\"required_failed\":0,\"optional_failed\":1}"
+        "{\"schema\":2,\"status\":\"passed\",\"total\":2,\"passed\":1,\"failed\":1,\"unknown\":0,\"required_failed\":0,\"required_unknown\":0,\"optional_failed\":1}"
     );
 }
 

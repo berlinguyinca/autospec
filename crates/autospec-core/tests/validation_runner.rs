@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use autospec_core::validation::{
     CheckModes, CheckOwner, CheckReachability, CheckResult, ExternalCheck, Jobs, StructuralCheck,
     ToolCommand, ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationOptions,
-    ValidationPlan, ValidationRunner,
+    ValidationPlan, ValidationRunner, ValidationStatus,
 };
 
 #[test]
@@ -52,7 +52,7 @@ fn tool_commands_can_target_the_validation_root() {
 }
 
 #[test]
-fn missing_programs_are_non_success_typed_results() {
+fn missing_programs_are_unmeasured_rather_than_measured_failures() {
     let command = ToolCommand::new("autospec-task-two-missing-program", ["--version"])
         .expect("safe missing command definition");
 
@@ -60,7 +60,15 @@ fn missing_programs_are_non_success_typed_results() {
 
     assert_eq!(result.exit_code, None);
     assert_eq!(result.spawn_count, 0);
-    assert!(result.is_failure());
+    assert!(!result.is_success(), "an absent tool is never a pass");
+    // Previously this asserted `is_failure()`. A tool that never ran measured nothing —
+    // filing it as a measured failure claims knowledge the run does not have (#3535).
+    assert!(result.is_unmeasured(), "{result:?}");
+    assert!(!result.is_failure());
+    assert!(result
+        .unmeasured
+        .as_deref()
+        .is_some_and(|reason| reason.contains("autospec-task-two-missing-program")));
 }
 
 #[cfg(unix)]
@@ -276,8 +284,16 @@ fn fast_direct_plan_skips_embedded_bats_without_skipping_static_contracts() {
 
     let report = ValidationRunner::run_plan(&plan, &validation_fixture("autospec-doc-contract"));
 
-    assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    // The static contracts still ran and passed; the embedded Bats suite was skipped, and
+    // a skipped suite is now unmeasured rather than exit code 0. Fast mode makes
+    // validation quicker; it must not make uncovered ground look green (#3535).
+    assert_eq!(report.results[0].exit_code, None);
+    assert!(report.results[0].is_unmeasured(), "{:?}", report.results[0]);
+    assert!(!report.results[0].is_success());
+    assert_eq!(
+        report.aggregate().expect("plan aggregates").status,
+        ValidationStatus::Unknown
+    );
 }
 
 #[test]
