@@ -143,7 +143,7 @@ impl ToolCommand {
             .current_dir(self.working_directory_for(root))
             .output();
 
-        captured_result(id, required, started, output)
+        captured_result(id, required, &self.program, started, output)
     }
 
     pub(crate) fn execute_in_with_stdin_capturing(
@@ -181,7 +181,7 @@ impl ToolCommand {
             Err(error) => Err(error),
         };
 
-        captured_result(id, required, started, output)
+        captured_result(id, required, &self.program, started, output)
     }
 }
 
@@ -191,8 +191,15 @@ fn should_skip_bats_in_fast_mode(program: &Path) -> bool {
 }
 
 fn skipped_result(id: String, required: bool) -> CapturedCheckResult {
+    // A skipped check used to be recorded as exit code 0 — indistinguishable from a suite
+    // that ran and passed. Fast mode makes validation quicker; it does not make Bats
+    // coverage green (#3535).
     CapturedCheckResult {
-        result: CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[])),
+        result: CheckResult::unmeasured(
+            id,
+            required,
+            "bats suites are skipped in fast validation mode, so nothing was measured",
+        ),
         stdout: Vec::new(),
     }
 }
@@ -200,6 +207,7 @@ fn skipped_result(id: String, required: bool) -> CapturedCheckResult {
 fn captured_result(
     id: String,
     required: bool,
+    program: &Path,
     started: Instant,
     output: std::io::Result<Output>,
 ) -> CapturedCheckResult {
@@ -219,21 +227,23 @@ fn captured_result(
                     stdout_bytes: stdout.len(),
                     stderr_bytes: stderr.len(),
                     output_digest: output_digest(&stdout, &stderr),
+                    unmeasured: None,
                 },
                 stdout,
             }
         }
-        Err(_) => CapturedCheckResult {
-            result: CheckResult {
+        // The process never produced an exit status, so there is nothing to report about
+        // it. Naming the program matters: the historical failure was a report that said
+        // "0 problems" when the tool it was measuring with had never been installed.
+        Err(error) => CapturedCheckResult {
+            result: CheckResult::unmeasured(
                 id,
                 required,
-                exit_code: None,
-                elapsed_ms,
-                spawn_count: 0,
-                stdout_bytes: 0,
-                stderr_bytes: 0,
-                output_digest: output_digest(&[], &[]),
-            },
+                format!(
+                    "{} did not run ({error}), so nothing was measured",
+                    program.display()
+                ),
+            ),
             stdout: Vec::new(),
         },
     }

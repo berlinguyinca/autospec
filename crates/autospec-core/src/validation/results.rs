@@ -5,7 +5,7 @@ use crate::state::json::{JsonParser, JsonValue};
 use super::ValidationStatus;
 
 const VALIDATION_REPORT_SCHEMA: u64 = 1;
-const VALIDATION_AGGREGATE_SCHEMA: u64 = 1;
+const VALIDATION_AGGREGATE_SCHEMA: u64 = 2;
 const VALIDATION_EXECUTION_SCHEMA: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,12 @@ pub struct CheckResult {
     pub stdout_bytes: usize,
     pub stderr_bytes: usize,
     pub output_digest: String,
+    /// Why this check measured nothing, when it measured nothing.
+    ///
+    /// A check whose tool is absent, or that was skipped, used to be recorded as exit
+    /// code `0` — byte-identical to a check that ran and passed. This field is what makes
+    /// the two distinguishable, so it must never be `Some` alongside a real measurement.
+    pub unmeasured: Option<String>,
 }
 
 impl CheckResult {
@@ -41,20 +47,48 @@ impl CheckResult {
             stdout_bytes,
             stderr_bytes,
             output_digest: output_digest.into(),
+            unmeasured: None,
+        }
+    }
+
+    /// A check that produced no measurement at all, and why.
+    ///
+    /// `exit_code` stays `None` deliberately: there was no process outcome to record, and
+    /// borrowing `0` for one is the fabrication this constructor exists to replace.
+    pub fn unmeasured(id: impl Into<String>, required: bool, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self {
+            id: id.into(),
+            required,
+            exit_code: None,
+            elapsed_ms: 0,
+            spawn_count: 0,
+            stdout_bytes: 0,
+            stderr_bytes: reason.len(),
+            output_digest: output_digest(&[], reason.as_bytes()),
+            unmeasured: Some(reason),
         }
     }
 
     pub fn is_success(&self) -> bool {
-        self.exit_code == Some(0)
+        self.unmeasured.is_none() && self.exit_code == Some(0)
+    }
+
+    /// Whether this check measured nothing.
+    ///
+    /// Checked before `is_failure` everywhere a result is classified, so that an
+    /// unmeasured check lands in exactly one bucket.
+    pub fn is_unmeasured(&self) -> bool {
+        self.unmeasured.is_some()
     }
 
     pub fn is_failure(&self) -> bool {
-        !self.is_success()
+        !self.is_success() && !self.is_unmeasured()
     }
 
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{VALIDATION_EXECUTION_SCHEMA},\"id\":\"{}\",\"required\":{},\"exit_code\":{},\"elapsed_ms\":{},\"spawn_count\":{},\"stdout_bytes\":{},\"stderr_bytes\":{},\"output_digest\":\"{}\"}}",
+            "{{\"schema\":{VALIDATION_EXECUTION_SCHEMA},\"id\":\"{}\",\"required\":{},\"exit_code\":{},\"elapsed_ms\":{},\"spawn_count\":{},\"stdout_bytes\":{},\"stderr_bytes\":{},\"output_digest\":\"{}\",\"unmeasured\":{}}}",
             escape(&self.id),
             self.required,
             option_number(self.exit_code),
@@ -63,6 +97,7 @@ impl CheckResult {
             self.stdout_bytes,
             self.stderr_bytes,
             escape(&self.output_digest),
+            option_string(self.unmeasured.as_deref()),
         )
     }
 }
@@ -84,12 +119,21 @@ impl ValidationExecutionReport {
             total: self.results.len(),
             passed: 0,
             failed: 0,
+            unknown: 0,
             required_failed: 0,
+            required_unknown: 0,
             optional_failed: 0,
         };
 
         for result in &self.results {
-            if result.is_success() {
+            // Unmeasured first: a check with no measurement is neither a pass nor a
+            // failure, and folding it into either loses the distinction this counts.
+            if result.is_unmeasured() {
+                aggregate.unknown += 1;
+                if result.required {
+                    aggregate.required_unknown += 1;
+                }
+            } else if result.is_success() {
                 aggregate.passed += 1;
             } else {
                 aggregate.failed += 1;
@@ -100,9 +144,7 @@ impl ValidationExecutionReport {
                 }
             }
         }
-        if aggregate.required_failed > 0 {
-            aggregate.status = ValidationStatus::Failed;
-        }
+        aggregate.status = resolve_status(aggregate.required_failed, aggregate.required_unknown);
         Ok(aggregate)
     }
 
@@ -138,7 +180,10 @@ pub struct ValidationExecutionAggregate {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Checks that measured nothing. `total == passed + failed + unknown` always holds.
+    pub unknown: usize,
     pub required_failed: usize,
+    pub required_unknown: usize,
     pub optional_failed: usize,
 }
 
@@ -152,14 +197,31 @@ impl ValidationExecutionAggregate {
 
     fn json_fields(&self) -> String {
         format!(
-            "\"status\":\"{}\",\"total\":{},\"passed\":{},\"failed\":{},\"required_failed\":{},\"optional_failed\":{}",
+            "\"status\":\"{}\",\"total\":{},\"passed\":{},\"failed\":{},\"unknown\":{},\"required_failed\":{},\"required_unknown\":{},\"optional_failed\":{}",
             self.status.as_str(),
             self.total,
             self.passed,
             self.failed,
+            self.unknown,
             self.required_failed,
+            self.required_unknown,
             self.optional_failed,
         )
+    }
+}
+
+/// A failure outranks an unknown, and both outrank a pass.
+///
+/// Ordering matters: a run with one broken check and one unmeasured check is `Failed`,
+/// because the defect is the actionable fact. What must never happen is either one
+/// resolving to `Passed`.
+fn resolve_status(required_failed: usize, required_unknown: usize) -> ValidationStatus {
+    if required_failed > 0 {
+        ValidationStatus::Failed
+    } else if required_unknown > 0 {
+        ValidationStatus::Unknown
+    } else {
+        ValidationStatus::Passed
     }
 }
 
@@ -182,6 +244,11 @@ pub struct ValidationObservation {
     pub name: String,
     pub required: bool,
     pub exit_code: i32,
+    /// Why this observation measured nothing, when it measured nothing.
+    ///
+    /// Optional on the wire, so a captured report written before #3535 still parses; an
+    /// absent key means the observation really was measured.
+    pub unmeasured: Option<String>,
 }
 
 impl ValidationObservation {
@@ -190,15 +257,31 @@ impl ValidationObservation {
             name: name.into(),
             required,
             exit_code,
+            unmeasured: None,
         }
+    }
+
+    /// An observation that produced no measurement at all, and why.
+    pub fn unmeasured(name: impl Into<String>, required: bool, reason: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            required,
+            exit_code: 0,
+            unmeasured: Some(reason.into()),
+        }
+    }
+
+    pub fn is_unmeasured(&self) -> bool {
+        self.unmeasured.is_some()
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"name\":\"{}\",\"required\":{},\"exit_code\":{}}}",
+            "{{\"name\":\"{}\",\"required\":{},\"exit_code\":{},\"unmeasured\":{}}}",
             escape(&self.name),
             self.required,
-            self.exit_code
+            self.exit_code,
+            option_string(self.unmeasured.as_deref())
         )
     }
 }
@@ -251,11 +334,20 @@ impl ValidationReport {
             total: self.observations.len(),
             passed: 0,
             failed: 0,
+            unknown: 0,
             required_failed: 0,
+            required_unknown: 0,
             optional_failed: 0,
         };
         for observation in &self.observations {
-            if observation.exit_code == 0 {
+            // Unmeasured first, for the same reason as the execution aggregate: an exit
+            // code of 0 that nobody earned must not be counted as a pass.
+            if observation.is_unmeasured() {
+                aggregate.unknown += 1;
+                if observation.required {
+                    aggregate.required_unknown += 1;
+                }
+            } else if observation.exit_code == 0 {
                 aggregate.passed += 1;
             } else {
                 aggregate.failed += 1;
@@ -266,9 +358,7 @@ impl ValidationReport {
                 }
             }
         }
-        if aggregate.required_failed > 0 {
-            aggregate.status = ValidationStatus::Failed;
-        }
+        aggregate.status = resolve_status(aggregate.required_failed, aggregate.required_unknown);
         Ok(aggregate)
     }
 
@@ -295,19 +385,24 @@ pub struct ValidationAggregate {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Observations that measured nothing. `total == passed + failed + unknown`.
+    pub unknown: usize,
     pub required_failed: usize,
+    pub required_unknown: usize,
     pub optional_failed: usize,
 }
 
 impl ValidationAggregate {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{VALIDATION_AGGREGATE_SCHEMA},\"status\":\"{}\",\"total\":{},\"passed\":{},\"failed\":{},\"required_failed\":{},\"optional_failed\":{}}}",
+            "{{\"schema\":{VALIDATION_AGGREGATE_SCHEMA},\"status\":\"{}\",\"total\":{},\"passed\":{},\"failed\":{},\"unknown\":{},\"required_failed\":{},\"required_unknown\":{},\"optional_failed\":{}}}",
             self.status.as_str(),
             self.total,
             self.passed,
             self.failed,
+            self.unknown,
             self.required_failed,
+            self.required_unknown,
             self.optional_failed
         )
     }
@@ -317,7 +412,7 @@ fn parse_observation(value: JsonValue) -> Result<ValidationObservation, String> 
     let mut object = value.into_object("validation observation")?;
     require_keys(
         &object,
-        &["name", "required", "exit_code"],
+        &["name", "required", "exit_code", "unmeasured"],
         "validation observation",
     )?;
     let exit_code = i32::try_from(
@@ -325,10 +420,17 @@ fn parse_observation(value: JsonValue) -> Result<ValidationObservation, String> 
             .into_signed_number("exit_code")?,
     )
     .map_err(|_| "validation exit code exceeds i32".to_string())?;
+    // Absent or null means measured: reports captured before #3535 carry no such key,
+    // and reading their silence as "unmeasured" would invent unknowns rather than zeros.
+    let unmeasured = match object.remove("unmeasured") {
+        None | Some(JsonValue::Null) => None,
+        Some(value) => Some(value.into_string("unmeasured")?),
+    };
     Ok(ValidationObservation {
         name: take(&mut object, "name", "validation observation")?.into_string("name")?,
         required: take(&mut object, "required", "validation observation")?.into_bool("required")?,
         exit_code,
+        unmeasured,
     })
 }
 
@@ -340,6 +442,12 @@ fn take(
     object
         .remove(key)
         .ok_or_else(|| format!("missing {key} in {context}"))
+}
+
+fn option_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", escape(value)))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn option_number(value: Option<i32>) -> String {

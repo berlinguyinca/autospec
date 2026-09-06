@@ -43,28 +43,26 @@ fn run_direct(options: &ValidationOptions) -> Result<(), String> {
         println!("{}", report.to_json()?);
     } else {
         println!(
-            "AutoSpec validation: status={} total={} passed={} failed={} required_failed={} optional_failed={}",
+            "AutoSpec validation: status={} total={} passed={} failed={} unknown={} required_failed={} required_unknown={} optional_failed={}",
             aggregate.status.as_str(),
             aggregate.total,
             aggregate.passed,
             aggregate.failed,
+            aggregate.unknown,
             aggregate.required_failed,
+            aggregate.required_unknown,
             aggregate.optional_failed
         );
         for result in &report.results {
-            let status = if result.is_success() {
-                "passed"
-            } else {
-                "failed"
-            };
-            println!("- {}: {status}", result.id);
+            match &result.unmeasured {
+                Some(reason) => println!("- {}: unknown ({reason})", result.id),
+                None if result.is_success() => println!("- {}: passed", result.id),
+                None => println!("- {}: failed", result.id),
+            }
         }
     }
 
-    if aggregate.status == ValidationStatus::Failed {
-        return Err("direct Rust validation failed required checks".to_string());
-    }
-    Ok(())
+    unmeasured_or_failed(aggregate.status, "direct Rust validation")
 }
 
 fn changed_paths_from_git(root: &std::path::Path, base: &str) -> Result<Vec<String>, String> {
@@ -105,10 +103,23 @@ fn render_shadow_results(path: &PathBuf, json: bool) -> Result<(), String> {
     } else {
         render_shadow_text(&aggregate);
     }
-    if aggregate.status == ValidationStatus::Failed {
-        return Err("captured validation results failed required checks".to_string());
+    unmeasured_or_failed(aggregate.status, "captured validation results")
+}
+
+/// Turns a non-passing status into an error, keeping "unknown" out of the success path.
+///
+/// The predicate is `is_passed`, not `== Failed`. An `== Failed` test lets the new
+/// `Unknown` status through as success, which is precisely the class of false pass this
+/// exists to stop (#3535): a gate that reports clean because its tools never ran.
+fn unmeasured_or_failed(status: ValidationStatus, subject: &str) -> Result<(), String> {
+    match status {
+        ValidationStatus::Passed => Ok(()),
+        ValidationStatus::Failed => Err(format!("{subject} failed required checks")),
+        ValidationStatus::Unknown => Err(format!(
+            "{subject} could not measure required checks; \
+             the report is unknown, not a pass"
+        )),
     }
-    Ok(())
 }
 
 fn render_text(affected: &AffectedSet) {
@@ -149,12 +160,14 @@ fn render_shadow_json(aggregate: &ValidationAggregate) {
 
 fn render_shadow_text(aggregate: &ValidationAggregate) {
     println!(
-        "AutoSpec validation shadow: status={} total={} passed={} failed={} required_failed={} optional_failed={}; no commands were run",
+        "AutoSpec validation shadow: status={} total={} passed={} failed={} unknown={} required_failed={} required_unknown={} optional_failed={}; no commands were run",
         aggregate.status.as_str(),
         aggregate.total,
         aggregate.passed,
         aggregate.failed,
+        aggregate.unknown,
         aggregate.required_failed,
+        aggregate.required_unknown,
         aggregate.optional_failed
     );
 }
