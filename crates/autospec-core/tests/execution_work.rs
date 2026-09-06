@@ -145,3 +145,66 @@ fn an_unreadable_repository_is_an_error_rather_than_an_empty_result() {
 
     assert!(error.contains("git"), "{error}");
 }
+
+/// The caller's verdict already discounts its own bookkeeping files. If detection does
+/// not discount the same ones, a routine empty run reads as "work produced" — the mirror
+/// image of the bug, and just as wrong.
+#[test]
+fn excluded_paths_are_not_counted_as_the_agents_work() {
+    let (root, base) = repository("excluded");
+    fs::create_dir_all(root.join(".autospec")).expect("create the harness scratch directory");
+    fs::write(root.join(".autospec/executor-closeout.md"), "# Closeout\n")
+        .expect("write the harness's own bookkeeping");
+
+    let counted = ProducedWork::detect(&root, &base).expect("detect without exclusions");
+    assert!(
+        !counted.is_empty(),
+        "without exclusions the harness's own file looks like work"
+    );
+
+    let work =
+        ProducedWork::detect_excluding(&root, &base, &[":(exclude).autospec/executor-closeout.md"])
+            .expect("detect with exclusions");
+
+    assert!(
+        work.is_empty(),
+        "an excluded bookkeeping file must not read as produced work: {}",
+        work.to_json()
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Uncommitted work that survived the commit step is still work, and is exactly the case
+/// the executor's zero-effect path can reach with a clean index.
+#[test]
+fn uncommitted_work_outside_the_exclusions_is_still_counted() {
+    let (root, base) = repository("excluded-partial");
+    fs::create_dir_all(root.join(".autospec")).expect("create the harness scratch directory");
+    fs::write(root.join(".autospec/executor-closeout.md"), "# Closeout\n")
+        .expect("write the harness's own bookkeeping");
+    fs::write(root.join("agent.rs"), "fn agent() {}\n").expect("write the agent's change");
+
+    let work =
+        ProducedWork::detect_excluding(&root, &base, &[":(exclude).autospec/executor-closeout.md"])
+            .expect("detect with exclusions");
+
+    assert_eq!(work.uncommitted_paths, vec!["agent.rs".to_string()]);
+    assert!(!work.is_empty());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `git status -z` spends two records on a rename: the new path, then the original.
+/// Counting the second as a change of its own would report one edit as two.
+#[test]
+fn a_rename_counts_once_rather_than_twice() {
+    let (root, base) = repository("rename");
+    git(&root, &["mv", "README.md", "GUIDE.md"]);
+
+    let work = ProducedWork::detect(&root, &base).expect("detect produced work");
+
+    assert_eq!(work.uncommitted_paths, vec!["GUIDE.md".to_string()]);
+
+    let _ = fs::remove_dir_all(&root);
+}

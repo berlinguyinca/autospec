@@ -1,0 +1,1 @@
+{"schema":1,"results":[{"name":"check-gofmt","required":true,"exit_code":0,"unmeasured":"gofmt is not on PATH, so nothing was measured"}]}

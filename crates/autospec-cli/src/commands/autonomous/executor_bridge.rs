@@ -10501,8 +10501,15 @@ fn capture_work_before_zero_effect(
     state_path: &Path,
     state: &PersistedInvocation,
 ) -> Result<(), BridgeRunFailure> {
-    let work = ProducedWork::detect(&state.identity.worktree, &state.identity.base_oid)
-        .map_err(BridgeRunFailure::invariant)?;
+    // The same exclusions the zero-effect verdict itself is computed under. Without them
+    // this would count the executor's own closeout report and evidence scratch as agent
+    // work, and refuse every legitimate empty run.
+    let work = ProducedWork::detect_excluding(
+        &state.identity.worktree,
+        &state.identity.base_oid,
+        &EXECUTOR_INTERNAL_PATHSPECS,
+    )
+    .map_err(BridgeRunFailure::invariant)?;
     if work.is_empty() {
         return Ok(());
     }

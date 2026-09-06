@@ -37,7 +37,21 @@ impl ProducedWork {
     /// Fails loudly when `git` cannot be run: an unreadable repository must not be
     /// reported as an empty one, which would recreate the bug in a new disguise.
     pub fn detect(repository: &Path, base_ref: &str) -> Result<Self, String> {
-        let uncommitted_paths = uncommitted_paths(repository)?;
+        Self::detect_excluding(repository, base_ref, &[])
+    }
+
+    /// As [`ProducedWork::detect`], ignoring paths matched by `exclusions`.
+    ///
+    /// `exclusions` are git pathspecs (`:(exclude)…`). A caller whose own verdict already
+    /// discounts some paths — a harness's bookkeeping files, say — must pass the same set
+    /// here, or this will report the harness's own scratch as the agent's work and turn a
+    /// routine empty run into a hard failure.
+    pub fn detect_excluding(
+        repository: &Path,
+        base_ref: &str,
+        exclusions: &[&str],
+    ) -> Result<Self, String> {
+        let uncommitted_paths = uncommitted_paths(repository, exclusions)?;
         let commits_ahead = commits_ahead(repository, base_ref)?;
         let committed_patch = if commits_ahead > 0 {
             Some(committed_patch(repository, base_ref)?)
@@ -101,18 +115,34 @@ impl ProducedWork {
     }
 }
 
-fn uncommitted_paths(repository: &Path) -> Result<Vec<String>, String> {
+fn uncommitted_paths(repository: &Path, exclusions: &[&str]) -> Result<Vec<String>, String> {
     // NUL-delimited, so a path containing a newline or a quote cannot split one record
     // into two and inflate the count.
-    let stdout = git_stdout(
-        repository,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    Ok(stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| record.len() > 3)
-        .map(|record| String::from_utf8_lossy(&record[3..]).into_owned())
-        .collect())
+    let mut args = vec![
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        ".",
+    ];
+    args.extend_from_slice(exclusions);
+    let stdout = git_stdout(repository, &args)?;
+
+    let mut paths = Vec::new();
+    let mut records = stdout.split(|byte| *byte == 0).filter(|r| !r.is_empty());
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+        // A rename or copy spends two records: the new path, then the original. Reading
+        // the second as a change of its own would count one edit as two.
+        if matches!(record[0], b'R' | b'C') {
+            records.next();
+        }
+        paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+    }
+    Ok(paths)
 }
 
 fn commits_ahead(repository: &Path, base_ref: &str) -> Result<usize, String> {

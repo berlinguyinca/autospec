@@ -262,6 +262,11 @@ impl ValidationObservation {
     }
 
     /// An observation that produced no measurement at all, and why.
+    ///
+    /// `exit_code` is `0` only because this record's wire format has carried a bare
+    /// integer since schema 1 and has no `null` to offer — unlike [`CheckResult`], whose
+    /// `Option<i32>` can say "no status". `unmeasured` is what makes the record honest,
+    /// and every reader consults it before `exit_code`.
     pub fn unmeasured(name: impl Into<String>, required: bool, reason: impl Into<String>) -> Self {
         Self {
             name: name.into(),
