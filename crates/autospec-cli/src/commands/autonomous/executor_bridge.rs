@@ -45,6 +45,7 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::execution::ProducedWork;
 use autospec_core::lint::implementation::parse_blocking_hook_failure;
 use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
 use autospec_core::lint::{
@@ -1487,6 +1488,7 @@ fn run_executor_bridge_with_codex_probe_observed(
             if repaired_zero_effect_completion
                 && error == "executor implementation HEAD is unchanged from the validated base" =>
         {
+            capture_work_before_zero_effect(&request.state_path, &state)?;
             prepare_zero_effect_retry(&request.state_path, &state, runtime.take())?;
             return finalize_bridge_failure(
                 request,
@@ -10481,6 +10483,49 @@ fn implementation_commit_failpoint() -> Result<(), String> {
 #[cfg(not(test))]
 fn implementation_commit_failpoint() -> Result<(), String> {
     Ok(())
+}
+
+/// Refuses to record a zero-effect verdict while the worktree still holds work.
+///
+/// The zero-effect path is reached from a *single* signal — `HEAD` equals the validated
+/// base — and the executor's own diff view excludes its internal pathspecs, so a run can
+/// arrive here with real changes still on disk. Recording "produced nothing" then hands
+/// the caller a verdict that authorises tearing the worktree down, and the worktree is
+/// node-local scratch: the evidence goes with it (#3563).
+///
+/// So both signals are counted here, and anything found is written beside the invocation
+/// state file — which lives in the run's state directory, not inside the worktree, and so
+/// outlives it. Uncommitted work is deliberately *not* silently committed: this is the
+/// last honest observation before teardown, not a repair step.
+fn capture_work_before_zero_effect(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), BridgeRunFailure> {
+    let work = ProducedWork::detect(&state.identity.worktree, &state.identity.base_oid)
+        .map_err(BridgeRunFailure::invariant)?;
+    if work.is_empty() {
+        return Ok(());
+    }
+    let captured = state_path
+        .parent()
+        .ok_or_else(|| {
+            BridgeRunFailure::invariant(
+                "executor invocation state has no directory to capture work into".to_string(),
+            )
+        })?
+        .join("captured-work");
+    let patch = work
+        .write_patch(&captured, &state.identity.invocation_id)
+        .map_err(BridgeRunFailure::invariant)?;
+    Err(BridgeRunFailure::invariant(format!(
+        "executor produced work but reached the zero-effect path; refusing to report it as \
+         empty: {}{}",
+        work.to_json(),
+        patch.map_or_else(String::new, |path| format!(
+            "; captured patch at {}",
+            path.display()
+        ))
+    )))
 }
 
 pub(crate) fn prove_implementation(
