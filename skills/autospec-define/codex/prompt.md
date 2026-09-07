@@ -857,7 +857,7 @@ exactly and for free.
    contracts` block (file paths, signatures, names). Identical inputs produce
    byte-identical output. If it reports
    `_No cross-issue contracts detected_`, there is no cross-issue interface —
-   skip the rest of Phase 3.75 and log
+   skip steps 2–3 (step 4 still applies) and log
    `"Phase 3.75: skipped (no cross-issue contracts)"`.
 
 2. **Tier-B reconcile (small, only for genuine conflicts).** Skip unless the
@@ -904,6 +904,35 @@ notes inserted before its closing marker>
    `## Shared contracts` heading: the script emits both. Nesting a second pair
    leaves the outer marker and heading outside the region
     `lint-issue.sh` strips, so they count against the word budget.
+
+4. **Cross-language boundaries (fail-closed).** If the labeled children span
+   **≥2 distinct `lang:*` labels, or any child is `lang:mixed`**, append a
+   `## Cross-language boundaries` table **inside** the same
+   `<!-- autospec-shared-contracts:begin -->` marker region (after the shared
+   contracts block, before the closing marker) — one row per boundary between
+   differently-labeled children:
+
+   ```markdown
+   ## Cross-language boundaries
+
+   | Boundary | Transport | Schema (source of truth) | Owner | Golden fixture |
+   |---|---|---|---|---|
+   | cli→worker | subprocess + JSON stdout | schemas/autospec-x.schema.json | lang:rust | tests/fixtures/boundary/x.json |
+   ```
+
+   The block encodes three rules: the owning side lands the schema **first**;
+   the consuming issue carries `Depends on issue #N` against it; and each
+   boundary gets one golden fixture under `tests/fixtures/` asserted by
+   **both** sides' own test runners. That two-sided assertion is the only
+   thing that actually catches drift. Children within a single language omit
+   the block entirely.
+
+   **Fail-closed schema check.** Before patching any body, verify that every
+   row's Schema path exists as a file under `schemas/` in the repo. A declared
+   boundary whose schema file is missing under `schemas/` **fails Phase 3.75**
+   rather than emitting an unbacked table: log
+   `"Phase 3.75: FAILED (boundary <name>: schema <path> missing under schemas/)"`,
+   patch no child body, and stop.
 
 If there are fewer than 2 child issues, or all child issues are in the same
 file (no cross-issue interface), skip Phase 3.75 and log:

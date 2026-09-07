@@ -59,3 +59,16 @@ setup() {
     grep -q 'fail closed' "$f"
   done
 }
+
+@test "Phase 3.75 carries the Cross-language boundaries block in all three trio members" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-define/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-define/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+  do
+    test "$(grep -c 'Cross-language boundaries' "$f")" -ge 1
+    grep -q '| Boundary | Transport | Schema (source of truth) | Owner | Golden fixture |' "$f"
+    grep -q 'lang:mixed' "$f"
+    grep -q 'schemas/' "$f"
+  done
+}
