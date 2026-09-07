@@ -347,7 +347,9 @@ fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer()
             premerge::set_complete_publication_failpoint(true);
             let error = run_process_generation_producer(&repo, &count, &scanners)
                 .expect_err("post-fsync failpoint must prevent returning Pass");
-            if !error.contains("after complete marker fsync") {
+            // The failpoint returns this exact static message (premerge.rs);
+            // compare the whole string so a reworded or wrapped message fails loudly.
+            if error != "injected failure after complete marker fsync" {
                 eprintln!("{error}");
                 terminate(87);
             }
