@@ -47,7 +47,9 @@ pub use guards::{
     evaluate_stop, EditAction, EditGuard, EditGuardViolation, EditPolicy, ExecutionProgress,
     StepEvent, StopPolicy, StopReason, ThrashDetector, ThrashFinding, ThrashResponse, ThrashSignal,
 };
-pub use inferweave::{route, CapabilityRequest, LatencyPriority, NodeOffer, RoutingDecision, SessionSeat};
+pub use inferweave::{
+    route, CapabilityRequest, LatencyPriority, NodeOffer, RoutingDecision, SessionSeat,
+};
 pub use memory::{MemoryEntry, MemoryFile, WorktreeMemory};
 pub use outcome::{
     apply_policy_override, recommend, score_outcome, ExecutionOutcome, HardPolicy, OutcomeScore,

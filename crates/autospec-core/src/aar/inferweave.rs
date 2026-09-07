@@ -138,7 +138,10 @@ pub struct NodeOffer {
 impl NodeOffer {
     fn serves(&self, request: &CapabilityRequest) -> bool {
         let class_ok = request.model_class.is_empty()
-            || self.model_classes.iter().any(|class| class == &request.model_class);
+            || self
+                .model_classes
+                .iter()
+                .any(|class| class == &request.model_class);
         let model_ok = request.model_allowlist.is_empty()
             || request
                 .model_allowlist
@@ -273,7 +276,9 @@ pub fn route(request: &CapabilityRequest, offers: &[NodeOffer]) -> RoutingDecisi
             .then_with(|| left.node_id.cmp(&right.node_id))
     });
 
-    let selected = candidates.first().map(|candidate| candidate.node_id.clone());
+    let selected = candidates
+        .first()
+        .map(|candidate| candidate.node_id.clone());
     let mut rationale = vec![format!(
         "required_free_context={required_free} eligible={} rejected={}",
         candidates.len(),

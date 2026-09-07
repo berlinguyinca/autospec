@@ -243,9 +243,9 @@ impl SeparationViolation {
             SeparationViolation::JudgeSharesImplementerSession { role, session_name } => {
                 format!("{role} may not judge work produced by its own session {session_name}")
             }
-            SeparationViolation::VerifierImplemented { session_name } => format!(
-                "final verification may not run in implementation session {session_name}"
-            ),
+            SeparationViolation::VerifierImplemented { session_name } => {
+                format!("final verification may not run in implementation session {session_name}")
+            }
             SeparationViolation::PlannerSharesImplementerSession { session_name } => {
                 format!("planning and implementation may not share session {session_name}")
             }
@@ -343,7 +343,10 @@ impl SeparationPolicy {
             AgentRole::Reviewer | AgentRole::UxReviewer => {
                 report
                     .blocking
-                    .push(SeparationViolation::JudgeSharesImplementerSession { role, session_name });
+                    .push(SeparationViolation::JudgeSharesImplementerSession {
+                        role,
+                        session_name,
+                    });
             }
             AgentRole::TaskPlanner | AgentRole::Architect => {
                 push(
@@ -379,11 +382,7 @@ impl SeparationPolicy {
 }
 
 /// File a violation as blocking or advisory according to `enforcement`.
-fn push(
-    enforcement: Enforcement,
-    violation: SeparationViolation,
-    report: &mut SeparationReport,
-) {
+fn push(enforcement: Enforcement, violation: SeparationViolation, report: &mut SeparationReport) {
     match enforcement {
         Enforcement::Blocking => report.blocking.push(violation),
         Enforcement::Advisory => report.advisory.push(violation),
@@ -428,7 +427,10 @@ mod tests {
             "reasoning-high",
         );
 
-        assert_eq!(identity.session_name(), "aspec-INIT-0042-initiative-arch-a1");
+        assert_eq!(
+            identity.session_name(),
+            "aspec-INIT-0042-initiative-arch-a1"
+        );
     }
 
     #[test]

@@ -136,17 +136,33 @@ impl ValidationCheck {
             "check_bats_suite_registration" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuiteRegistration)
             }
-            "check_bats_negation_ratchet" => bats_suite("tests/lint/test_bats_negation_checker.bats"),
-            "check_code_intelligence_contract" => bats_suite("tests/code-intel/code-intelligence.bats"),
-            "check_autospec_fleet_enabled_false" => bats_suite("tests/unit/test_autospec_fleet_enabled_false.bats"),
-            "check_autospec_sweep_enabled_false" => bats_suite("tests/unit/test_autospec_sweep_enabled_false.bats"),
+            "check_bats_negation_ratchet" => {
+                bats_suite("tests/lint/test_bats_negation_checker.bats")
+            }
+            "check_code_intelligence_contract" => {
+                bats_suite("tests/code-intel/code-intelligence.bats")
+            }
+            "check_autospec_fleet_enabled_false" => {
+                bats_suite("tests/unit/test_autospec_fleet_enabled_false.bats")
+            }
+            "check_autospec_sweep_enabled_false" => {
+                bats_suite("tests/unit/test_autospec_sweep_enabled_false.bats")
+            }
             "check_classify_lang_labels" => bats_suite("tests/unit/test_classify_lang_labels.bats"),
             "check_classify_language" => bats_suite("tests/unit/test_classify_language.bats"),
-            "check_define_phase0_language" => bats_suite("tests/unit/test_define_phase0_language.bats"),
-            "check_language_axis_integration" => bats_suite("tests/unit/test_language_axis_integration.bats"),
+            "check_define_phase0_language" => {
+                bats_suite("tests/unit/test_define_phase0_language.bats")
+            }
+            "check_language_axis_integration" => {
+                bats_suite("tests/unit/test_language_axis_integration.bats")
+            }
             "check_language_table" => bats_suite("tests/unit/test_language_table.bats"),
-            "check_proxy_direct_borrow_lifetime" => bats_suite("tests/unit/proxy-direct-borrow-lifetime.bats"),
-            "check_qa_function_ranges_string_literals" => bats_suite("tests/unit/qa-function-ranges-string-literals.bats"),
+            "check_proxy_direct_borrow_lifetime" => {
+                bats_suite("tests/unit/proxy-direct-borrow-lifetime.bats")
+            }
+            "check_qa_function_ranges_string_literals" => {
+                bats_suite("tests/unit/qa-function-ranges-string-literals.bats")
+            }
             "check_ship_completeness" => bats_suite("tests/ship-completeness.bats"),
             "check_usage_limit_helper" => CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
                 "scripts/autospec-usage-limit.sh",

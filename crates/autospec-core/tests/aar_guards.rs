@@ -102,7 +102,9 @@ fn an_explicit_exception_suppresses_the_guard() {
 
 #[test]
 fn an_exception_without_a_reason_is_rejected() {
-    assert!(EditPolicy::default().with_exception("src/a.rs", "  ").is_err());
+    assert!(EditPolicy::default()
+        .with_exception("src/a.rs", "  ")
+        .is_err());
 }
 
 #[test]

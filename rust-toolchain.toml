@@ -1,0 +1,10 @@
+# Pinned so formatting is reproducible across CI, developer machines and cluster
+# agents. Three live rustfmt versions is how this repository drifted fmt-dirty in
+# 52 files, after which every wide agent patch carried ~700 lines of unrelated
+# churn and unrelated changes collided on 46 of 46 files.
+#
+# 1.91.0 specifically: it is the only toolchain available on the HPC cluster the
+# agents run on. CI can install any version; the cluster cannot.
+[toolchain]
+channel = "1.91.0"
+components = ["rustfmt", "clippy"]

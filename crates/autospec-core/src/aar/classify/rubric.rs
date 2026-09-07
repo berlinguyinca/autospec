@@ -162,7 +162,14 @@ pub(super) const DEEP_VERBS: &[&str] = &[
 
 /// Verbs that mark mechanical work.
 pub(super) const SHALLOW_VERBS: &[&str] = &[
-    "typo", "copy", "transcribe", "reword", "bump", "mirror exactly", "one-line", "one line",
+    "typo",
+    "copy",
+    "transcribe",
+    "reword",
+    "bump",
+    "mirror exactly",
+    "one-line",
+    "one line",
 ];
 
 pub(super) const CRITICAL_PATH_MARKERS: &[&str] = &[
@@ -216,7 +223,6 @@ pub(super) const CROSS_CUTTING_MARKERS: &[&str] = &[
     "shared scripts",
     "end-to-end",
 ];
-
 
 pub(super) fn score_class(
     title: &str,
@@ -342,7 +348,9 @@ pub(super) fn score_complexity(
     }
     if let Some(marker) = cross_cutting {
         complexity = complexity.max(Complexity::High);
-        evidence.push(format!("complexity raised by cross-cutting marker '{marker}'"));
+        evidence.push(format!(
+            "complexity raised by cross-cutting marker '{marker}'"
+        ));
     }
     if task_class == TaskClass::Research {
         complexity = complexity.max(Complexity::Medium);
@@ -436,11 +444,15 @@ pub(super) fn capabilities_for(
         TaskClass::Refactor => [Capability::Coding, Capability::RepositoryReasoning]
             .into_iter()
             .collect(),
-        TaskClass::Test => [Capability::Coding, Capability::ToolUse].into_iter().collect(),
+        TaskClass::Test => [Capability::Coding, Capability::ToolUse]
+            .into_iter()
+            .collect(),
         TaskClass::Docs => [Capability::Documentation, Capability::TextualAnalysis]
             .into_iter()
             .collect(),
-        TaskClass::Ui => [Capability::Coding, Capability::Vision].into_iter().collect(),
+        TaskClass::Ui => [Capability::Coding, Capability::Vision]
+            .into_iter()
+            .collect(),
         TaskClass::Research => [
             Capability::Planning,
             Capability::TextualAnalysis,
@@ -455,7 +467,9 @@ pub(super) fn capabilities_for(
         ]
         .into_iter()
         .collect(),
-        TaskClass::Ops => [Capability::ToolUse, Capability::Coding].into_iter().collect(),
+        TaskClass::Ops => [Capability::ToolUse, Capability::Coding]
+            .into_iter()
+            .collect(),
         TaskClass::Review => [
             Capability::Review,
             Capability::RepositoryReasoning,
@@ -498,7 +512,10 @@ pub(super) fn infer_language(paths: &[String]) -> String {
 }
 
 pub(super) fn contains_any<'a>(haystack: &str, needles: &[&'a str]) -> Option<&'a str> {
-    needles.iter().copied().find(|needle| haystack.contains(needle))
+    needles
+        .iter()
+        .copied()
+        .find(|needle| haystack.contains(needle))
 }
 
 pub(super) fn round2(value: f64) -> f64 {

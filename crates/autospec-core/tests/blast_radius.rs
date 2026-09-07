@@ -50,8 +50,7 @@ fn blast_radius_legacy_fallback_also_fences_autospec_policy_config() {
 #[test]
 fn public_api_fence_covers_api_surface_but_not_crate_test_files() {
     let config = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.autospec/autospec.yml"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.autospec/autospec.yml"),
     )
     .expect("repo .autospec/autospec.yml is readable");
     let registry = parse_fenced_surfaces(&config).expect("shipped registry parses");
@@ -64,7 +63,11 @@ fn public_api_fence_covers_api_surface_but_not_crate_test_files() {
     };
 
     // Real public API surface stays fenced.
-    for path in ["crates/autospec-core/src/lib.rs", "Cargo.toml", "Cargo.lock"] {
+    for path in [
+        "crates/autospec-core/src/lib.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+    ] {
         assert!(
             fenced_by_public_api(path),
             "{path} must remain fenced by public-api-contracts"

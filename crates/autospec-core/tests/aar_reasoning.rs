@@ -6,7 +6,11 @@ use autospec_core::aar::reasoning::{
     SamplingProfile, SamplingRegistry, MIN_SAMPLES_FOR_BUDGET_COMPARISON,
 };
 
-fn classification(complexity: Complexity, risk: Risk, class: TaskClass) -> autospec_core::aar::classify::TaskClassification {
+fn classification(
+    complexity: Complexity,
+    risk: Risk,
+    class: TaskClass,
+) -> autospec_core::aar::classify::TaskClassification {
     let mut classification = classify(&ClassificationInput::new("placeholder", "placeholder"));
     classification.complexity = complexity;
     classification.risk = risk;
@@ -249,11 +253,15 @@ fn thinking_profiles_serve_budgets_above_tiny() {
     let registry = SamplingRegistry::default_registry();
 
     assert_eq!(
-        registry.for_budget(ReasoningBudget::Tiny).map(|p| p.name.as_str()),
+        registry
+            .for_budget(ReasoningBudget::Tiny)
+            .map(|p| p.name.as_str()),
         Some("qwen-instruct")
     );
     assert_eq!(
-        registry.for_budget(ReasoningBudget::Complex).map(|p| p.name.as_str()),
+        registry
+            .for_budget(ReasoningBudget::Complex)
+            .map(|p| p.name.as_str()),
         Some("qwen-thinking")
     );
 }

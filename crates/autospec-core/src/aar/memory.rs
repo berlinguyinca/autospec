@@ -85,16 +85,18 @@ impl MemoryFile {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_lowercase().trim_end_matches(".md") {
-            "task" => MemoryFile::Task,
-            "plan" => MemoryFile::Plan,
-            "state" => MemoryFile::State,
-            "findings" => MemoryFile::Findings,
-            "decisions" => MemoryFile::Decisions,
-            "tests" => MemoryFile::Tests,
-            "review" => MemoryFile::Review,
-            _ => return None,
-        })
+        Some(
+            match value.trim().to_ascii_lowercase().trim_end_matches(".md") {
+                "task" => MemoryFile::Task,
+                "plan" => MemoryFile::Plan,
+                "state" => MemoryFile::State,
+                "findings" => MemoryFile::Findings,
+                "decisions" => MemoryFile::Decisions,
+                "tests" => MemoryFile::Tests,
+                "review" => MemoryFile::Review,
+                _ => return None,
+            },
+        )
     }
 }
 

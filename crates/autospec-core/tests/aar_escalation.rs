@@ -128,7 +128,9 @@ fn at_the_budget_ceiling_the_chain_moves_to_an_alternate_model_in_class() {
     };
 
     match next_attempt(&context, &failed) {
-        EscalationOutcome::Retry { step, assignment, .. } => {
+        EscalationOutcome::Retry {
+            step, assignment, ..
+        } => {
             assert_eq!(step, EscalationStep::AlternateModelInClass);
             assert_eq!(assignment.model_key, key("alternate"));
         }
@@ -158,7 +160,11 @@ fn a_provider_without_capacity_is_skipped_before_assignment() {
     };
 
     match next_attempt(&context, &failed) {
-        EscalationOutcome::Retry { assignment, provider, .. } => {
+        EscalationOutcome::Retry {
+            assignment,
+            provider,
+            ..
+        } => {
             assert_eq!(provider, "cloud");
             assert!(assignment.model_key.contains("cloud"));
         }
@@ -217,7 +223,9 @@ fn a_fallback_that_would_break_separation_is_skipped_not_taken() {
                 "rationale must say separation blocked the fallback: {rationale:?}"
             );
         }
-        other => panic!("expected escalation rather than a separation-breaking retry, got {other:?}"),
+        other => {
+            panic!("expected escalation rather than a separation-breaking retry, got {other:?}")
+        }
     }
 }
 
@@ -250,7 +258,9 @@ fn the_chain_climbs_to_a_higher_model_class_when_the_class_is_exhausted() {
     };
 
     match next_attempt(&context, &failed) {
-        EscalationOutcome::Retry { step, assignment, .. } => {
+        EscalationOutcome::Retry {
+            step, assignment, ..
+        } => {
             assert_eq!(step, EscalationStep::HigherModelClass);
             assert_eq!(assignment.model_class, "coding-local-large");
         }

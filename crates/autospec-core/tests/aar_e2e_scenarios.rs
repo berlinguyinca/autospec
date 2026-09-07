@@ -54,8 +54,11 @@ fn node(node_id: &str, free_context: u64) -> NodeOffer {
 #[test]
 fn scenario_trivial_edit_runs_one_agent_at_the_smallest_budget() {
     let decision = plan(
-        ClassificationInput::new("Fix typo in the quickstart", "One line: copy the correction.")
-            .with_paths(["docs/quickstart.md"]),
+        ClassificationInput::new(
+            "Fix typo in the quickstart",
+            "One line: copy the correction.",
+        )
+        .with_paths(["docs/quickstart.md"]),
     );
 
     assert_eq!(decision.policy.complexity, Complexity::Trivial);
@@ -275,7 +278,10 @@ fn scenario_insufficient_node_context_leaves_the_request_unrouted() {
 #[test]
 fn scenario_warm_prefix_cache_wins_and_shows_up_in_telemetry() {
     let prompt = CacheFriendlyPrompt::assemble(vec![
-        PromptBlock::new(ContextSegment::HarnessInstructions, "you are a coding agent"),
+        PromptBlock::new(
+            ContextSegment::HarnessInstructions,
+            "you are a coding agent",
+        ),
         PromptBlock::new(ContextSegment::Tools, "read, edit, run"),
         PromptBlock::new(ContextSegment::ModelRules, "one logical change at a time"),
         PromptBlock::new(ContextSegment::RepositoryInstructions, "see AGENTS.md"),
@@ -349,8 +355,14 @@ fn scenario_a_guarded_run_stops_the_moment_acceptance_is_met() {
     }
     violations.extend(guard.end_step());
 
-    assert!(violations.is_empty(), "clean run must not trip a guard: {violations:?}");
-    assert!(thrash.is_empty(), "clean run must not look like thrashing: {thrash:?}");
+    assert!(
+        violations.is_empty(),
+        "clean run must not trip a guard: {violations:?}"
+    );
+    assert!(
+        thrash.is_empty(),
+        "clean run must not look like thrashing: {thrash:?}"
+    );
     assert_eq!(
         evaluate_stop(
             &decision.policy.stop,

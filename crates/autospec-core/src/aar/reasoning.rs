@@ -94,7 +94,9 @@ impl ReasoningLimits {
         if self.tiny == 0 {
             return Err("reasoning limit tiny must be greater than zero".to_string());
         }
-        if !(self.tiny < self.normal && self.normal < self.complex && self.complex < self.exceptional)
+        if !(self.tiny < self.normal
+            && self.normal < self.complex
+            && self.complex < self.exceptional)
         {
             return Err(
                 "reasoning limits must increase strictly: tiny < normal < complex < exceptional"
@@ -355,7 +357,10 @@ impl SamplingProfile {
 
     pub fn validate(&self) -> Result<(), String> {
         if !(0.0..=2.0).contains(&self.temperature) {
-            return Err(format!("temperature {} out of range 0.0..=2.0", self.temperature));
+            return Err(format!(
+                "temperature {} out of range 0.0..=2.0",
+                self.temperature
+            ));
         }
         if !(0.0..=1.0).contains(&self.top_p) {
             return Err(format!("top_p {} out of range 0.0..=1.0", self.top_p));
@@ -391,7 +396,10 @@ impl SamplingRegistry {
     pub fn default_registry() -> Self {
         Self::new(
             "sampling-v1",
-            vec![SamplingProfile::qwen_thinking(), SamplingProfile::qwen_instruct()],
+            vec![
+                SamplingProfile::qwen_thinking(),
+                SamplingProfile::qwen_instruct(),
+            ],
         )
     }
 

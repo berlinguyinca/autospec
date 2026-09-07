@@ -296,8 +296,8 @@ pub fn classify(input: &ClassificationInput) -> TaskClassification {
     let requires_vision = task_class == TaskClass::Ui
         || contains_any(&title, VISION_MARKERS).is_some()
         || contains_any(&body, VISION_MARKERS).is_some();
-    let requires_web = contains_any(&body, WEB_MARKERS).is_some()
-        || contains_any(&title, WEB_MARKERS).is_some();
+    let requires_web =
+        contains_any(&body, WEB_MARKERS).is_some() || contains_any(&title, WEB_MARKERS).is_some();
     let requires_long_context = estimated_files > 7
         || complexity >= Complexity::High
         || contains_any(&body, CROSS_CUTTING_MARKERS).is_some();

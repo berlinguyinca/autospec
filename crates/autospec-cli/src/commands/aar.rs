@@ -149,8 +149,8 @@ fn classify_command(args: &[String]) -> Result<(), CommandFailure> {
     let classification = autospec_core::aar::classify::classify(&options.input);
 
     if options.json {
-        let decision = decide(&options.input, &config(&options))
-            .map_err(CommandFailure::diagnostic)?;
+        let decision =
+            decide(&options.input, &config(&options)).map_err(CommandFailure::diagnostic)?;
         println!(
             "{}",
             decision.to_json().map_err(CommandFailure::diagnostic)?
@@ -189,8 +189,7 @@ fn classify_command(args: &[String]) -> Result<(), CommandFailure> {
 fn plan_command(args: &[String], output: Output) -> Result<(), CommandFailure> {
     let options = parse_options(args).map_err(CommandFailure::diagnostic)?;
     require_title(&options).map_err(CommandFailure::diagnostic)?;
-    let decision =
-        decide(&options.input, &config(&options)).map_err(CommandFailure::diagnostic)?;
+    let decision = decide(&options.input, &config(&options)).map_err(CommandFailure::diagnostic)?;
 
     if options.json {
         println!(
@@ -274,9 +273,7 @@ fn memory_command(args: &[String]) -> Result<(), CommandFailure> {
         }
     };
     let options = parse_options(rest).map_err(CommandFailure::diagnostic)?;
-    let root = options
-        .worktree
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = options.worktree.unwrap_or_else(|| PathBuf::from("."));
 
     if !root.is_dir() {
         return Err(CommandFailure::diagnostic(format!(

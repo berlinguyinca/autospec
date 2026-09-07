@@ -44,10 +44,7 @@ impl WorktreeScope {
             repository.name()
         );
         Self {
-            worktree: root
-                .join(initiative.short())
-                .join(task.as_str())
-                .join(slug),
+            worktree: root.join(initiative.short()).join(task.as_str()).join(slug),
             branch: format!("aspec/{}/{}", initiative.short(), task.as_str()),
             repository,
         }
@@ -151,7 +148,10 @@ impl PiInvocation {
         };
 
         check("session_name", &self.session_name);
-        check("model_policy.selected_model", &self.model_policy.selected_model);
+        check(
+            "model_policy.selected_model",
+            &self.model_policy.selected_model,
+        );
         check("output_contract", &self.output_contract);
         for (name, path) in &self.artifacts {
             check(&format!("artifacts.{name}"), path);
