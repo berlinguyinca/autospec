@@ -4,6 +4,8 @@
 # per issue into /tmp/issue-<N>-body.md; all later steps consume that file;
 # reviewer re-fetches PR diff only when head SHA changed.
 
+bats_require_minimum_version 1.5.0
+
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
 
 RUN_TRIO=(
@@ -12,10 +14,14 @@ RUN_TRIO=(
   "$REPO_ROOT/skills/autospec-run/opencode/agent.md"
 )
 
+# #3262 turned /autospec into a router that delegates to /autospec-define and
+# /autospec-run; the D5 duplicate-read content this suite asserts now lives in
+# the /autospec-run trio, so the former autospec-trio checks are redirected
+# there ("Validation checks ... are redirected to the delegated skills").
 AUTOSPEC_TRIO=(
-  "$REPO_ROOT/skills/autospec/SKILL.md"
-  "$REPO_ROOT/skills/autospec/codex/prompt.md"
-  "$REPO_ROOT/skills/autospec/opencode/agent.md"
+  "$REPO_ROOT/skills/autospec-run/SKILL.md"
+  "$REPO_ROOT/skills/autospec-run/codex/prompt.md"
+  "$REPO_ROOT/skills/autospec-run/opencode/agent.md"
 )
 
 # ── Single body fetch ─────────────────────────────────────────────────────────
@@ -43,7 +49,8 @@ AUTOSPEC_TRIO=(
 @test "run trio: start-summary awk reads temp file (no ISSUE_BODY var piped to awk)" {
   for f in "${RUN_TRIO[@]}"; do
     # Old pattern: printf '%s\n' "$ISSUE_BODY" | awk ... must be gone from start-summary block
-    ! grep -q 'printf.*ISSUE_BODY.*awk' "$f" \
+    run ! grep -q 'printf.*ISSUE_BODY.*awk' "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale printf/ISSUE_BODY|awk still present in $f"; return 1; }
     # New pattern: awk reads _issue_body_file directly
     grep -q 'awk.*_issue_body_file\|_issue_body_file.*awk' "$f" \
@@ -54,7 +61,8 @@ AUTOSPEC_TRIO=(
 
 @test "autospec trio: start-summary awk reads temp file (no ISSUE_BODY var piped to awk)" {
   for f in "${AUTOSPEC_TRIO[@]}"; do
-    ! grep -q 'printf.*ISSUE_BODY.*awk' "$f" \
+    run ! grep -q 'printf.*ISSUE_BODY.*awk' "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale printf/ISSUE_BODY|awk still present in $f"; return 1; }
     grep -q '"$_issue_body_file"' "$f" \
       || { echo "missing awk reading _issue_body_file in $f"; return 1; }
@@ -69,7 +77,8 @@ AUTOSPEC_TRIO=(
     grep -q 'issue-body.*issue-<ISSUE>-body.md\|issue-<ISSUE>-body.md.*issue-body' "$f" \
       || { echo "gen-implementer-prompt --issue-body not pointing at shared temp file in $f"; return 1; }
     # Old mktemp body_file for implementer must be gone
-    ! grep -q 'mktemp.*autospec-body-XXXXXX' "$f" \
+    run ! grep -q 'mktemp.*autospec-body-XXXXXX' "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale mktemp autospec-body-XXXXXX still present in $f"; return 1; }
   done
 }
@@ -79,7 +88,8 @@ AUTOSPEC_TRIO=(
 @test "run trio: docs-drift-gate reads /tmp/issue-N-body.md (no process-substitution gh issue view)" {
   for f in "${RUN_TRIO[@]}"; do
     # Old pattern: <(gh issue view <ISSUE> --json body --jq .body ...) in drift gate
-    ! grep -q 'grep.*skip.*gh issue view <ISSUE>' "$f" \
+    run ! grep -q 'grep.*skip.*gh issue view <ISSUE>' "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale process-substitution gh issue view in drift gate in $f"; return 1; }
     # New pattern: grep reads the temp file directly
     grep -q 'grep.*skip.*issue-<ISSUE>-body.md' "$f" \
@@ -92,7 +102,8 @@ AUTOSPEC_TRIO=(
 @test "run trio: reviewer prompt uses /tmp/issue-N-body.md (no gh issue view body re-fetch)" {
   for f in "${RUN_TRIO[@]}"; do
     # Old pattern: gh issue view <ISSUE> --json body --jq '.body' > "$_body_file" inside reviewer block
-    ! grep -q "gh issue view <ISSUE> --json body --jq '.body' > " "$f" \
+    run ! grep -q "gh issue view <ISSUE> --json body --jq '.body' > " "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale gh issue view body re-fetch in reviewer block in $f"; return 1; }
     # New pattern: --issue-body pointing at shared temp file
     grep -q -- '--issue-body "/tmp/issue-<ISSUE>-body.md"' "$f" \
@@ -102,7 +113,8 @@ AUTOSPEC_TRIO=(
 
 @test "autospec trio: reviewer prompt uses /tmp/issue-N-body.md (no gh issue view body re-fetch)" {
   for f in "${AUTOSPEC_TRIO[@]}"; do
-    ! grep -q "gh issue view <ISSUE> --json body --jq '.body' > " "$f" \
+    run ! grep -q "gh issue view <ISSUE> --json body --jq '.body' > " "$f"
+    [ "$status" -eq 1 ] \
       || { echo "stale gh issue view body re-fetch in reviewer block in $f"; return 1; }
     grep -q -- '--issue-body "/tmp/issue-<ISSUE>-body.md"' "$f" \
       || { echo "reviewer --issue-body not pointing at shared temp file in $f"; return 1; }
@@ -167,10 +179,13 @@ AUTOSPEC_TRIO=(
   for f in "${RUN_TRIO[@]}"; do
     grep -q 'Done challenge' "$f" \
       || { echo "missing Done challenge contract in $f"; return 1; }
-    grep -q 'Archived summary' "$f" \
-      || { echo "missing Archived summary contract in $f"; return 1; }
-    grep -q 'what should be worked on next' "$f" \
-      || { echo "missing next-work wording in $f"; return 1; }
+  done
+  # Phase 6 report body (archived summary, next work) moved to the
+  # end-of-run reference in #3262.
+  local ref="$REPO_ROOT/skills/autospec-run/references/end-of-run.md"
+  for p in 'Archived summary' 'what should be worked on next'; do
+    grep -q "$p" "$ref" \
+      || { echo "missing $p contract in end-of-run.md"; return 1; }
   done
 }
 
@@ -184,7 +199,3 @@ AUTOSPEC_TRIO=(
     "$REPO_ROOT/skills/autospec-run/SKILL.md"
 }
 
-@test "bash -n: autospec/SKILL.md has no syntax errors" {
-  grep -q '_issue_body_file="/tmp/issue-${ISSUE}-body.md"' \
-    "$REPO_ROOT/skills/autospec/SKILL.md"
-}
