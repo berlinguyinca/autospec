@@ -222,6 +222,28 @@ fn cleanup_prepared_session_verified(
     let cleanup = cleanup_prepared_session(inner);
     let release = session::verify_session_released(&environment_dir, &session_id);
     let resources = session::verify_environment_released(&environment_dir);
+    if cleanup.is_err() || release.is_err() || resources.is_err() {
+        let listing = || {
+            std::fs::read_dir(&environment_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|error| format!("unreadable: {error}"))
+        };
+        eprintln!(
+            "RUNTIME_CLEANUP_DIAG session_id={session_id} pid={} env_dir={} cleanup={:?} release={:?} resources={:?} listing={}",
+            std::process::id(),
+            environment_dir.display(),
+            cleanup.as_ref().map_err(|e| &e.message),
+            release.as_ref().map_err(|e| &e.message),
+            resources.as_ref().map_err(|e| &e.message),
+            listing(),
+        );
+    }
     match (cleanup, release, resources) {
         (Ok(()), Ok(()), resources) => resources,
         (Err(primary), Ok(()), Ok(())) => Err(primary),
