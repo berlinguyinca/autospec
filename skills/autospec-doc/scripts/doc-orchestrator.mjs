@@ -16,6 +16,9 @@
 //
 // Exit codes:
 //   0  handler dispatched
+//   1  a configured scope target (scopes[].path) is missing or mistyped —
+//      fail-fast before any generation/drift work (issue #3211: a scope
+//      pointing at nothing would check nothing, i.e. pass vacuously)
 //   2  usage error, OR a non-`init` subcommand was invoked with no
 //      `documentation:` config present (config is required to know what to
 //      generate; `init` is the bootstrap that CREATES that config).
@@ -28,7 +31,7 @@ import { execSync } from 'node:child_process';
 import { loadConfig, resolveFeatures, resolveCoverageOptions, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
 import { scaffoldFeatures, writeScaffold } from './doc-scaffold.mjs';
 import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
-import { generateAudienceDocs } from './gen-audience-docs.mjs';
+import { generateAudienceDocs, isSingleFileDocPath } from './gen-audience-docs.mjs';
 import { auditCoverage } from './doc-coverage.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -78,7 +81,7 @@ function collectAudiencePages(cfg, repoRoot) {
     if (!fs.existsSync(dir)) continue;
     let stat;
     try { stat = fs.statSync(dir); } catch { continue; }
-    if (stat.isFile() && audPath.replace(/\/+$/, '').endsWith('.md')) {
+    if (stat.isFile() && isSingleFileDocPath(audPath)) {
       // Single-file audience (issue #2968): the configured path is the document
       // itself, not a directory to walk. Mirrors the renderer's `.md` suffix
       // contract — a non-.md file keeps the folder (misconfiguration) behavior.
@@ -137,6 +140,38 @@ async function regenerateLlmsFull(cfg, repoRoot) {
       }
     } catch { /* manifest read/parse failure is non-fatal */ }
   }
+}
+
+// ── Scope target validation (issue #3211) ─────────────────────────────────────
+//
+// scopes[] feeds drift checking, so a scope whose path does not resolve would
+// silently check NOTHING — a vacuous pass. Validate every scopes[].path
+// against the tree with the SAME .md resolution rule as audiences[] (shared
+// isSingleFileDocPath, not re-derived): a .md path must name a FILE, any
+// other path must name a DIRECTORY. Returns an array of human-readable
+// errors (one per bad entry, each naming the entry id); empty = all scopes
+// resolve.
+function validateScopeTargets(cfg, projRoot) {
+  const scopes = (cfg && cfg.documentation && Array.isArray(cfg.documentation.scopes))
+    ? cfg.documentation.scopes : [];
+  const errors = [];
+  for (const scope of scopes) {
+    const id = (scope && (scope.id || scope.label)) || '<unnamed>';
+    const p = scope && scope.path;
+    if (typeof p !== 'string' || p === '') {
+      errors.push(`scope "${id}" has no path`);
+      continue;
+    }
+    const abs = path.resolve(projRoot, p);
+    let stat = null;
+    try { stat = fs.statSync(abs); } catch { /* absent */ }
+    if (isSingleFileDocPath(p)) {
+      if (!stat || !stat.isFile()) errors.push(`scope "${id}" path ${p} does not resolve to a file`);
+    } else if (!stat || !stat.isDirectory()) {
+      errors.push(`scope "${id}" path ${p} does not resolve to a directory`);
+    }
+  }
+  return errors;
 }
 
 // ── Incremental scope-set computation (§D6) ───────────────────────────────────
@@ -256,7 +291,7 @@ async function runAudit(cfg, projRoot, features) {
     if (!aud.path) continue;
     // Single-file audience (issue #2968): features fold into the one composed
     // document, so per-feature folder pages are not expected.
-    if (aud.path.replace(/\/+$/, '').endsWith('.md')) continue;
+    if (isSingleFileDocPath(aud.path)) continue;
     for (const f of features) {
       if (!f || !f.slug) continue;
       const rel = `${aud.path.replace(/\/+$/, '')}/features/${f.slug}.md`;
@@ -644,6 +679,19 @@ async function main() {
       + 'Run `/autospec-doc init` first to scaffold it.',
     );
     return 2;
+  }
+
+  // Scope targets must resolve BEFORE any generation or drift work (issue #3211):
+  // a scope pointing at a missing file/dir would check nothing, so a vacuous
+  // zero-drift pass is worse than a loud failure. Exit 1 (not 2: this is not a
+  // usage error, the config is present but unsatisfiable).
+  if (opts.subcommand !== 'init') {
+    const scopeErrors = validateScopeTargets(loadConfig(CONFIG_PATH), projectRoot());
+    if (scopeErrors.length > 0) {
+      for (const e of scopeErrors) console.error(`[autospec-doc] ${e}`);
+      console.error(`[autospec-doc] ${scopeErrors.length} scope target(s) do not resolve — refusing to run`);
+      return 1;
+    }
   }
 
   switch (opts.subcommand) {

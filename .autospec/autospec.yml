@@ -165,11 +165,6 @@ documentation:
       path: docs/runbooks/OPERATIONS.md
       focus: Daemon operation, concurrency, CI waiting, quota recovery, and incident response.
       require_scope: true
-    - id: troubleshooting
-      label: Troubleshooting
-      path: docs/TROUBLESHOOTING.md
-      focus: Common failures, diagnostics, recovery commands, and escalation paths.
-      require_scope: true
 execution:
   tests:
     run_all_every_sweep: true
