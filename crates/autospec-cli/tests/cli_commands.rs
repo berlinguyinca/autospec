@@ -2242,6 +2242,70 @@ fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
 }
 
 #[test]
+fn autonomous_immediate_stop_text_output_attributes_the_count_and_names_the_live_conductor() {
+    let _lease_test = lease_test_lock();
+    let temp = temp_dir("autospec-autonomous-immediate-stop-text");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let stop_flag = temp.join("stop.flag");
+    let repo_dir = temp.join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("repo dir");
+
+    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let original_conductor = read_pid(&scope, "conductor");
+    // Same fixture substitution as the graceful-stop test above: the one-shot foreground
+    // conductor may finish its empty scan before the stop command runs, and this test pins the
+    // wording printed while a conductor is still live, so it needs a record that stays live.
+    let conductor = seed_unleased_legacy_conductor(&scope);
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "stop",
+            "--immediate",
+            "--repo",
+            "berlinguyinca/autospec",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
+        .output()
+        .expect("autospec autonomous stop runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("mode=immediate"), "stdout={stdout}");
+    // #2997: the line used to read "stopped 2 draining=true", which operators misread as the
+    // conductor having stopped. The count is the companions, and the conductor's state has to be
+    // said in words.
+    assert!(
+        stdout.contains("companion(s)"),
+        "the stopped count must be attributed to the companions; stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("conductor is STILL RUNNING"),
+        "stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("draining=true"),
+        "the misleading bare boolean must not come back; stdout={stdout}"
+    );
+
+    let flag = std::fs::read_to_string(&stop_flag).expect("stop flag written");
+    assert!(flag.starts_with("immediate\n"));
+    assert!(
+        process_is_alive(&conductor),
+        "immediate stop drains the conductor at its next boundary; it is not killed"
+    );
+
+    terminate_fixture_process(&original_conductor);
+    cleanup_pids(&scope);
+}
+
+#[test]
 fn autonomous_list_json_reports_each_repo_scope_with_companions() {
     let _lease_test = lease_test_lock();
     let temp = temp_dir("autospec-autonomous-list");
