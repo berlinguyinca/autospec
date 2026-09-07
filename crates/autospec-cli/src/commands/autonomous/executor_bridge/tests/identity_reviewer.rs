@@ -16,6 +16,28 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+/// Matches the production direct-transaction directory grammar
+/// (`command-NNN.archive-<id>` / `command-NNN.retire-<id>`) instead of a
+/// bare substring scan.
+fn is_direct_transaction(name: &str, marker: &str) -> bool {
+    let Some(tail) = name.strip_prefix("command-") else {
+        return false;
+    };
+    let (digits, suffix) = tail.split_at(tail.len().min(3));
+    digits.len() == 3
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && suffix.starts_with(marker)
+        && suffix.len() > marker.len()
+}
+
+fn is_direct_archive_transaction(name: &str) -> bool {
+    is_direct_transaction(name, ".archive-")
+}
+
+fn is_direct_retire_transaction(name: &str) -> bool {
+    is_direct_transaction(name, ".retire-")
+}
+
 #[test]
 fn autonomous_executor_bridge_installed_tool_retries_spawn_failure() {
     let _environment = test_environment();
@@ -85,7 +107,7 @@ fn autonomous_executor_bridge_installed_tool_retries_spawn_failure() {
         .expect("failure archive")
         .flatten()
         .any(|entry| {
-            entry.file_name().to_string_lossy().contains(".archive-")
+            is_direct_archive_transaction(&entry.file_name().to_string_lossy())
                 && entry.path().join("command-000.json").is_file()
                 && entry.path().join("command-000.intent.json").is_file()
         }));
@@ -112,7 +134,7 @@ fn autonomous_executor_bridge_identical_failures_use_distinct_archives() {
     let archives = fs::read_dir(&artifact_root)
         .expect("archive root")
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+        .filter(|entry| is_direct_archive_transaction(&entry.file_name().to_string_lossy()))
         .collect::<Vec<_>>();
     assert_eq!(archives.len(), 2);
     assert!(archives
@@ -184,7 +206,7 @@ fn automatic_reviewer_identity_change_retries_signaled_failure_once() {
     let archive = fs::read_dir(&evidence)
         .expect("failure archive")
         .flatten()
-        .find(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+        .find(|entry| is_direct_archive_transaction(&entry.file_name().to_string_lossy()))
         .expect("archived failed review")
         .path();
     for name in [
@@ -200,7 +222,7 @@ fn automatic_reviewer_identity_change_retries_signaled_failure_once() {
         .expect("launch retirement evidence")
         .flatten()
         .any(
-            |entry| entry.file_name().to_string_lossy().contains(".retire-")
+            |entry| is_direct_retire_transaction(&entry.file_name().to_string_lossy())
                 && entry.path().join("complete").is_file()
         ));
 }
