@@ -27,6 +27,16 @@
 #       secaudit-pass  safety gate; never local, never downgraded.
 #       spec-decompose spec quality is the upstream bottleneck — a cheap model
 #                      here costs N implementer cycles correcting it downstream.
+#       spec-research  Phase 1 investigation is planning: local models
+#                      collapse on repo-wide planning of complex codebases,
+#                      and a bad plan costs N implementer cycles downstream.
+#       spec-design    Phase 2 design is the same planning shape as research.
+#                      A model that cannot plan a repo cannot design its spec.
+#       broad-audit    Phase 5/5.5 repo-wide audit is planning-shaped: its
+#                      findings reshape the next round of work, so a wrong
+#                      audit propagates forward rather than being re-checked.
+#       refine-scope   scope-rewriting refine lenses re-author the prompt's
+#                      scope; an annotating-only lens stays overridable.
 #       growth-lens    unproven against a ledger; add it when there is evidence.
 #   * A profile is only a candidate if it FITS the cell on both ordinals
 #     (ctx and reasoning); effective cost only orders profiles that already fit.
@@ -140,6 +150,9 @@ fi
 # high-fan-out read-and-report kinds: they consume a lot of tokens producing
 # findings that a later gate re-checks anyway, so a wrong answer is caught
 # downstream rather than merged. Every other kind, present or future, is baseline.
+# The exact contents of this list are pinned by tests/route-decide-allowlist.bats:
+# it fails if a kind is added or removed, so a planning kind cannot become
+# overridable by omission or by a careless edit.
 OVERRIDABLE_KINDS="implementer explore-researcher refine-lens qa-sweep"
 
 _is_overridable() {

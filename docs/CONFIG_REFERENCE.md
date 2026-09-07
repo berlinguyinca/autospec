@@ -389,7 +389,17 @@ until someone deliberately opens it:
 | `verify-voter` | no | Voter independence is a vendor question, not a cost one (see `verify-voter-vendor.sh`). Cost-ordering voters converges them onto one model, which is exactly what a second vote is supposed to rule out. |
 | `secaudit-pass` | no | Safety gate. Never local, never downgraded. |
 | `spec-decompose` | no | Spec quality is the upstream bottleneck; a cheap model here costs N implementer cycles correcting it. |
+| `spec-research` | no | Phase 1 investigation is planning: local models collapse on repo-wide planning of complex codebases, and a bad plan costs N implementer cycles downstream. |
+| `spec-design` | no | Phase 2 design is the same planning shape; a model that cannot plan a repo cannot design its spec. |
+| `broad-audit` | no | Phase 5/5.5 repo-wide audit is planning-shaped: its findings reshape the next round of work instead of being re-checked by a later gate. |
+| `refine-scope` | no | Scope-rewriting refine lenses re-author the prompt's scope; an annotating-only lens (`refine-lens`) stays re-routable. |
 | `growth-lens` | no | No ledger evidence yet. |
+
+The non-overridable set is therefore `lgtm-reviewer`, `verify-voter`,
+`secaudit-pass`, `spec-decompose`, `spec-research`, `spec-design`,
+`broad-audit`, `refine-scope`, and `growth-lens`; `route-decide.sh`'s
+allowlist is pinned by `tests/route-decide-allowlist.bats`, which fails if a
+kind is added to it.
 
 ### Cross-vendor verify voters
 `scripts/verify-voter-vendor.sh --proposer <vendor>` names the vendor for the next
