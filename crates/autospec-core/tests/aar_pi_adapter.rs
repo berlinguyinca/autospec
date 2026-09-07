@@ -1,5 +1,6 @@
 //! AAR spec section 9: the Pi harness adapter boundary.
 
+use autospec_core::aar::capsule::RolePolicy;
 use autospec_core::aar::pi::{
     build_pi_argv, fold_events, parse_pi_event, working_rules_block, PiEvent, PiSessionSpec,
     WORKING_RULES,
@@ -12,6 +13,7 @@ fn spec() -> PiSessionSpec {
         session_id: "session-1".to_string(),
         worktree: "/work/autospec".to_string(),
         role: AgentRole::Implementer,
+        policy: RolePolicy::Builder,
         provider: "inferweave".to_string(),
         model: "qwen3.8-27b".to_string(),
         reasoning_tokens: 2_048,

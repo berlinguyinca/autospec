@@ -18,6 +18,7 @@
 //! functions return, which keeps policy testable without a model, a node, or a
 //! worktree.
 
+pub mod capsule;
 pub mod classify;
 pub mod context;
 pub mod escalation;
@@ -32,6 +33,7 @@ pub mod reasoning;
 pub mod telemetry;
 pub mod topology;
 
+pub use capsule::{RolePolicy, TaskCapsule};
 pub use classify::{
     classify, Capability, ClassificationInput, Complexity, Risk, TaskClass, TaskClassification,
 };
@@ -55,7 +57,9 @@ pub use outcome::{
     apply_policy_override, recommend, score_outcome, ExecutionOutcome, HardPolicy, OutcomeScore,
     ProfileStats, QualityThreshold, Recommendation,
 };
-pub use pi::{build_pi_argv, fold_events, parse_pi_event, PiEvent, PiSessionSpec, WORKING_RULES};
+pub use pi::{
+    build_pi_argv, fold_events, parse_pi_event, pi_tools_for, PiEvent, PiSessionSpec, WORKING_RULES,
+};
 pub use policy::{
     decide, decide_for_classification, DecisionRecord, ExecutionPolicy, PolicyConfig,
     PolicyDecision,
