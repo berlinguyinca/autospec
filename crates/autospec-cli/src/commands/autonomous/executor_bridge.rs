@@ -81,8 +81,7 @@ pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Bash(./gradlew test *),Bash(sbt test),Bash(sbt test *),",
     "Bash(make test),Bash(make test *),",
     "Bash(bats),Bash(bats *),Bash(shellcheck),Bash(shellcheck *),",
-    "Bash(bash -n),Bash(bash -n *),",
-    "Bash(./scripts/validate-all.sh),Bash(./scripts/validate-all.sh *)"
+    "Bash(bash -n),Bash(bash -n *)"
 );
 pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
     "Bash(git push),Bash(git push *),Bash(git fetch),Bash(git fetch *),",
