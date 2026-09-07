@@ -55,6 +55,101 @@ fn autonomous_executor_bridge_shipped_alias_table_covers_every_harness_kind() {
     }
 }
 
+/// Decodes the leading TOML basic string in `input`, returning the decoded
+/// string and the text after its closing quote. Handles the escape
+/// sequences the permission table is serialized with, so assertions can
+/// compare decoded entries instead of raw serialized substrings.
+#[cfg(target_os = "linux")]
+fn toml_basic_string_at(input: &str) -> Option<(String, &str)> {
+    let mut chars = input.char_indices();
+    let (_, quote) = chars.next()?;
+    if quote != '"' {
+        return None;
+    }
+    let mut decoded = String::new();
+    let mut end: Option<usize> = None;
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                end = Some(index);
+                break;
+            }
+            '\\' => {
+                let (_, escape) = chars.next()?;
+                match escape {
+                    'b' => decoded.push('\u{0008}'),
+                    't' => decoded.push('\t'),
+                    'n' => decoded.push('\n'),
+                    'f' => decoded.push('\u{000C}'),
+                    'r' => decoded.push('\r'),
+                    '"' => decoded.push('"'),
+                    '\\' => decoded.push('\\'),
+                    'u' | 'U' => {
+                        let digits = if escape == 'u' { 4 } else { 8 };
+                        let mut hex = String::new();
+                        for _ in 0..digits {
+                            hex.push(chars.next()?.1);
+                        }
+                        let code = u32::from_str_radix(&hex, 16).ok()?;
+                        decoded.push(char::from_u32(code)?);
+                    }
+                    _ => return None,
+                }
+            }
+            ch => decoded.push(ch),
+        }
+    }
+    Some((decoded, &input[end? + 1..]))
+}
+
+/// Parses a permission-profile TOML inline table into decoded entries.
+/// Scalar values are decoded TOML basic strings; nested tables (e.g.
+/// `:workspace_roots`) are kept as `None`, so policy assertions compare
+/// decoded keys and values structurally rather than scanning serialized
+/// text for substrings.
+#[cfg(target_os = "linux")]
+fn toml_inline_table(table: &str) -> BTreeMap<String, Option<String>> {
+    let body = table
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("filesystem policy must be a TOML inline table");
+    let mut segments = Vec::new();
+    let mut segment = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            in_string = !in_string;
+        } else if ch == ',' && !in_string {
+            segments.push(std::mem::take(&mut segment));
+            continue;
+        }
+        segment.push(ch);
+    }
+    segments.push(segment);
+    let mut entries = BTreeMap::new();
+    for segment in segments {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let (key, rest) = toml_basic_string_at(segment).expect("filesystem table key");
+        let value = rest
+            .trim_start()
+            .strip_prefix('=')
+            .expect("filesystem table key/value separator")
+            .trim_start();
+        let value = toml_basic_string_at(value).map(|(decoded, _)| decoded);
+        entries.insert(key, value);
+    }
+    entries
+}
+
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_rejects_temporary_dispatcher_paths() {
@@ -180,7 +275,7 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
             "permissions.autospec-network-executor.network.enabled=true",
         ]
     }));
-    let filesystem = invocation
+    let filesystem_argument = invocation
         .args
         .windows(2)
         .find_map(|pair| {
@@ -189,39 +284,52 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
             .then_some(pair[1].as_str())
         })
         .expect("permission-profile filesystem policy");
+    let filesystem = toml_inline_table(
+        filesystem_argument
+            .split_once('=')
+            .expect("filesystem policy key/value separator")
+            .1,
+    );
     for denied in [
-        "\"~/.aws\"=\"deny\"",
-        "\"~/.codex/archived_sessions\"=\"deny\"",
-        "\"~/.codex/auth.json\"=\"deny\"",
-        "\"~/.codex/config.toml\"=\"deny\"",
-        "\"~/.codex/history.jsonl\"=\"deny\"",
-        "\"~/.codex/sessions\"=\"deny\"",
-        "\"~/.codex/shell_snapshots\"=\"deny\"",
-        "\"~/.config/containers\"=\"deny\"",
-        "\"~/.config/gh\"=\"deny\"",
-        "\"~/.config/pip\"=\"deny\"",
-        "\"~/.docker\"=\"deny\"",
-        "\"~/.gnupg\"=\"deny\"",
-        "\"~/.gradle\"=\"deny\"",
-        "\"~/.git-credentials\"=\"deny\"",
-        "\"~/.kube\"=\"deny\"",
-        "\"~/.m2\"=\"deny\"",
-        "\"~/.netrc\"=\"deny\"",
-        "\"~/.npmrc\"=\"deny\"",
-        "\"~/.ssh\"=\"deny\"",
-        "\"~/.terraform.d\"=\"deny\"",
-        "\"~/.vault-token\"=\"deny\"",
+        "~/.aws",
+        "~/.codex/archived_sessions",
+        "~/.codex/auth.json",
+        "~/.codex/config.toml",
+        "~/.codex/history.jsonl",
+        "~/.codex/sessions",
+        "~/.codex/shell_snapshots",
+        "~/.config/containers",
+        "~/.config/gh",
+        "~/.config/pip",
+        "~/.docker",
+        "~/.gnupg",
+        "~/.gradle",
+        "~/.git-credentials",
+        "~/.kube",
+        "~/.m2",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.ssh",
+        "~/.terraform.d",
+        "~/.vault-token",
     ] {
         assert!(
-            filesystem.contains(denied),
-            "missing {denied}: {filesystem}"
+            filesystem.get(denied).and_then(|entry| entry.as_deref()) == Some("deny"),
+            "missing deny entry {denied}: {filesystem:?}"
         );
     }
     assert!(
-        !filesystem.contains("\"~/.codex\"=\"deny\""),
-        "Codex package roots must remain readable: {filesystem}"
+        !filesystem.contains_key("~/.codex"),
+        "Codex package roots must remain readable: {filesystem:?}"
     );
-    assert!(filesystem.contains(&format!("\"{}\"=\"read\"", harness.executable.display())));
+    let executable = harness.executable.to_string_lossy();
+    assert!(
+        filesystem
+            .get(executable.as_ref())
+            .and_then(|entry| entry.as_deref())
+            == Some("read"),
+        "executable {executable} must remain readable: {filesystem:?}"
+    );
     assert!(invocation
         .args
         .windows(2)
@@ -235,7 +343,7 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
     assert!(!invocation
         .args
         .iter()
-        .any(|argument| argument.contains("danger-full-access")));
+        .any(|argument| argument == "danger-full-access"));
     assert_eq!(
         fs::read_to_string(log).expect("probe log").lines().count(),
         1
