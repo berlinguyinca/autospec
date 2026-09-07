@@ -29,6 +29,7 @@ pub mod pi;
 pub mod policy;
 pub mod profile;
 pub mod reasoning;
+pub mod repair_controller;
 pub mod telemetry;
 pub mod topology;
 
@@ -66,6 +67,10 @@ pub use profile::{
 pub use reasoning::{
     select_reasoning, ReasoningBudget, ReasoningHistory, ReasoningLimits, ReasoningSelection,
     SamplingProfile, SamplingRegistry,
+};
+pub use repair_controller::{
+    AttemptRecord, BlockedHandoff, BuilderTier, FailureClass, RepairAction, RepairController,
+    RepairPolicy, RepairRejection, RepairRequest, REPAIR_SCHEMA_VERSION,
 };
 pub use telemetry::{ExecutionTelemetry, FailureCategory, ReviewOutcome};
 pub use topology::{
