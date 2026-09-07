@@ -1,3 +1,4 @@
+pub mod executor;
 pub mod queue;
 mod queue_parser;
 mod queue_runtime;
@@ -6,6 +7,10 @@ pub mod report;
 pub mod result;
 pub mod work;
 
+pub use executor::{
+    ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
+    FailureClass, Role,
+};
 pub use queue::{
     ExecutionQueue, FailureKind, OneShotIssueSelector, QueueEntry, QueueResultApplication,
     QueueStatus, QueueValidationResult, QueueValidationStatus,
