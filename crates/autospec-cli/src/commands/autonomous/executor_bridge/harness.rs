@@ -163,6 +163,8 @@ impl HarnessConfig {
                     Some(HarnessKind::Claude)
                 } else if env.contains_key("OPENCODE") || env.contains_key("OPENCODE_SESSION_ID") {
                     Some(HarnessKind::OpenCode)
+                } else if env.contains_key("PI_CODING_AGENT") || env.contains_key("PI_SESSION_ID") {
+                    Some(HarnessKind::Pi)
                 } else {
                     None
                 }

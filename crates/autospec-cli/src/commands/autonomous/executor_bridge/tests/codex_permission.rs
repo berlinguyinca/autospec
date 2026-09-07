@@ -29,6 +29,32 @@ fn autonomous_executor_bridge_alias_table_parses_all_four_columns() {
     assert_eq!(aliases[2].approval_alias, "");
 }
 
+#[test]
+fn autonomous_executor_bridge_shipped_alias_table_covers_every_harness_kind() {
+    // Break caught: HarnessKind gained a variant (Pi) that the shipped alias
+    // table did not define, so every Pi dispatch failed with
+    // `executor harness alias missing: pi` and auto-detect could never select
+    // it. The shipped table is the source of truth for what is selectable, so
+    // every variant must resolve against it. This invariant should have fired
+    // the moment Pi was added to the enum (#3509).
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let table = repo_root.join("config/harness-runtime-aliases.tsv");
+    let body = fs::read_to_string(&table).expect("read shipped harness-runtime-aliases.tsv");
+    let aliases = HarnessConfig::parse_alias_table(&body).expect("parse shipped alias table");
+
+    for kind in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::OpenCode,
+        HarnessKind::Pi,
+    ] {
+        assert!(
+            aliases.iter().any(|alias| alias.kind == kind),
+            "shipped alias table has no row for {kind:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_rejects_temporary_dispatcher_paths() {

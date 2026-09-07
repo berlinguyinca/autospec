@@ -30,10 +30,12 @@
 #   schema status output patch input_tokens output_tokens cached_tokens
 #   prompt_tok_s decode_tok_s ttft_ms wall_clock_ms tool_calls failure_class
 #
-# Providers (harnesses, one spelling each): claude codex opencode
+# Providers (harnesses, one spelling each): claude codex opencode pi
 # Local runtimes (ollama, lmstudio, vllm, llamacpp) are deliberately NOT
 # adapters here; wiring them through this contract is issue #3173's scope, and
 # until then they must refuse loudly rather than silently reach a cloud harness.
+# pi is a harness (it can target a self-hosted OpenAI-compatible endpoint), not
+# a local runtime, so it is a first-class provider here.
 #
 # Exit codes:
 #   0   dispatch completed
@@ -49,6 +51,7 @@
 #   AUTOSPEC_EXECUTOR_CLAUDE_BIN      override the resolved claude executable
 #   AUTOSPEC_EXECUTOR_CODEX_BIN       override the resolved codex executable
 #   AUTOSPEC_EXECUTOR_OPENCODE_BIN    override the resolved opencode executable
+#   AUTOSPEC_EXECUTOR_PI_BIN          override the resolved pi executable
 #   AUTOSPEC_SCHEMAS_DIR              installed schema directory (~/.autospec/schemas)
 
 set -u
@@ -71,7 +74,7 @@ Usage: executor-dispatch.sh --request <file.json> [--dry-run]
 Dispatches one request through the provider-neutral executor contract and
 prints the result envelope on stdout.
 
-Providers (harnesses): claude, codex, opencode
+Providers (harnesses): claude, codex, opencode, pi
 
 Request fields: work_item role dispatch_kind model provider context_budget
                 tools workspace acceptance_criteria timeout
@@ -258,8 +261,9 @@ case "$PROVIDER" in
     claude)   BIN_ENV="AUTOSPEC_EXECUTOR_CLAUDE_BIN" ;;
     codex)    BIN_ENV="AUTOSPEC_EXECUTOR_CODEX_BIN" ;;
     opencode) BIN_ENV="AUTOSPEC_EXECUTOR_OPENCODE_BIN" ;;
+    pi)       BIN_ENV="AUTOSPEC_EXECUTOR_PI_BIN" ;;
     *)
-        R_OUTPUT="no adapter for provider: $PROVIDER (claude|codex|opencode)"
+        R_OUTPUT="no adapter for provider: $PROVIDER (claude|codex|opencode|pi)"
         _emit_and_exit failure unsupported_provider 12
         ;;
 esac
@@ -305,6 +309,14 @@ case "$PROVIDER" in
         ;;
     opencode)
         ARGV=("$BIN" --pure run)
+        if [ -n "$MODEL" ]; then ARGV+=(--model "$MODEL"); fi
+        ARGV+=("$PROMPT")
+        ;;
+    pi)
+        # The correct headless flag is still pending #3508; until then mirror
+        # the Rust executor_bridge Pi arm, which appends routing + prompt with
+        # no headless flag. `--provider pi` must not exit unsupported_provider.
+        ARGV=("$BIN")
         if [ -n "$MODEL" ]; then ARGV+=(--model "$MODEL"); fi
         ARGV+=("$PROMPT")
         ;;
@@ -382,6 +394,9 @@ case "$PROVIDER" in
         fi
         ;;
     opencode)
+        R_OUTPUT="$RAW_STDOUT"
+        ;;
+    pi)
         R_OUTPUT="$RAW_STDOUT"
         ;;
 esac
