@@ -14,6 +14,7 @@
 //! `OwnershipClass::External` and must never be deleted (spec §36).
 
 pub mod docker;
+pub mod db;
 pub mod model;
 pub mod process;
 

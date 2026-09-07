@@ -13,6 +13,13 @@ getrandom = "=0.4.3"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 sha2 = "=0.11.0"
+# why: the one shared autospec.db behind a backend-neutral AnyPool with BOTH the
+# SQLite and the Postgres backends real (ADR 0001 D5/D7/D10, spec §7.2/§12);
+# `any` enables AnyPool; migrations are embedded with include_str and tracked
+# per subsystem in autospec_migrations (D7)
+sqlx = { version = "=0.8.6", default-features = false, features = ["any", "postgres", "runtime-tokio", "sqlite"] }
+# why: sqlx's runtime; async stays confined to the storage boundary (resources::db) per D5/D10
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt"] }
 yaml-edit = "=0.2.3" # why: parse manifest v2 resources without losing YAML structure
 
 [target.'cfg(unix)'.dependencies]
