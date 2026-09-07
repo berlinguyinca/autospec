@@ -143,9 +143,11 @@ fn autonomous_executor_bridge_does_not_duplicate_or_signal_mismatched_identity()
         supervision_config(500),
     )
     .expect_err("PID reuse must fail closed");
+    const QUARANTINE_PREFIX: &str =
+        "legacy executor ownership is quarantined; exact parent supervisor could not be proven: ";
     assert!(
-        error.contains("quarantined") || error.contains("full identity"),
-        "unexpected error: {error}"
+        error.starts_with(QUARANTINE_PREFIX),
+        "expected the fail-closed quarantine diagnostic, got: {error}"
     );
     assert!(replacement.try_wait().expect("observe fixture").is_none());
     bridge::terminate_exact_process_group(&replacement_identity, &mut replacement)
