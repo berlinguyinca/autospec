@@ -140,11 +140,14 @@ probe_runtimes() {
         return 0
     fi
     _out=""
+    # Each host is operator-aimable via its AUTOSPEC_*_HOST env var (the CLI
+    # sets them; the :- defaults keep this library self-contained for any
+    # other sourcing caller, per the fail-closed posture in the header).
     for _spec in \
-        "ollama|http://${OLLAMA_HOST}/api/tags" \
-        "lmstudio|http://127.0.0.1:1234/v1/models" \
-        "vllm|http://127.0.0.1:8000/v1/models" \
-        "llamacpp|http://127.0.0.1:8080/v1/models"
+        "ollama|http://${OLLAMA_HOST:-127.0.0.1:11434}/api/tags" \
+        "lmstudio|http://${LMSTUDIO_HOST:-127.0.0.1:1234}/v1/models" \
+        "vllm|http://${VLLM_HOST:-127.0.0.1:8000}/v1/models" \
+        "llamacpp|http://${LLAMACPP_HOST:-127.0.0.1:8080}/v1/models"
     do
         _rt="${_spec%%|*}"
         _url="${_spec#*|}"

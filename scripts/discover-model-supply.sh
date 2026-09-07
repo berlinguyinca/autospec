@@ -45,6 +45,9 @@
 # Environment:
 #   AUTOSPEC_MODEL_CAPABILITY  default output path
 #   AUTOSPEC_OLLAMA_HOST       ollama host:port (default 127.0.0.1:11434)
+#   AUTOSPEC_LMSTUDIO_HOST     lmstudio host:port (default 127.0.0.1:1234)
+#   AUTOSPEC_VLLM_HOST         vllm host:port (default 127.0.0.1:8000)
+#   AUTOSPEC_LLAMACPP_HOST     llamacpp host:port (default 127.0.0.1:8080)
 #   AUTOSPEC_CALIBRATION_DIR   calibrate-profile.sh verdicts (default ~/.autospec/calibration)
 #
 # Exit codes:
@@ -76,6 +79,9 @@ REQUIRE_ACCELERATOR=0
 ONLY_PROFILE=
 CALIBRATION_DIR="${AUTOSPEC_CALIBRATION_DIR:-$HOME/.autospec/calibration}"
 OLLAMA_HOST="${AUTOSPEC_OLLAMA_HOST:-127.0.0.1:11434}"
+LMSTUDIO_HOST="${AUTOSPEC_LMSTUDIO_HOST:-127.0.0.1:1234}"
+VLLM_HOST="${AUTOSPEC_VLLM_HOST:-127.0.0.1:8000}"
+LLAMACPP_HOST="${AUTOSPEC_LLAMACPP_HOST:-127.0.0.1:8080}"
 SCHEMA_VERSION="autospec.model-capability.v1"
 CURL_TIMEOUT=2
 
