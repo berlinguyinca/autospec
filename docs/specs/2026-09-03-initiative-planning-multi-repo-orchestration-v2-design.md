@@ -78,7 +78,7 @@ Evidence never outranks the requirement it is evidence for.
 | `initiative::dag` | graph validation, topological order, the scheduler, concurrency waves |
 | `initiative::roles` | the eight roles, Pi session identity, separation of duties |
 | `initiative::routing` | capability-based model selection, quota/capacity fallback, auditable decisions |
-| `initiative::dispatch` | the Pi invocation contract, worktree scope, secret refusal |
+| `initiative::dispatch` | the Pi invocation contract, worktree scope and its freshness gates, the run record, secret refusal |
 | `initiative::traceability` | evidence, coverage states, the requirement matrix, the completion gate |
 | `initiative::projection` | issue and Project projection, reconciliation policies, degraded sync |
 | `initiative::store` | the artifact registry layout, immutable versions, the audit log |
@@ -118,6 +118,35 @@ task that starts on unreviewed work inherits the risk that the review rejects it
 A permission failure therefore blocks the failing task and its descendants and
 nothing else, which is what lets an Initiative keep making progress in one
 organization while another organization's access is still being granted.
+
+### Worktree freshness
+
+Two properties of every dispatch are checked before an agent is sent into a
+checkout — four gates, because the agent can observe neither the fetch that
+preceded its branch nor the state the checkout started in, and neither failure
+looks like a failure from inside the session:
+
+| Rule | Gate | Refusal |
+|---|---|---|
+| Fetch, then branch from the freshest target | `CheckoutFacts::fetched_before_branch` | a cached clone is never a base |
+| The base is not behind the target | `CheckoutFacts::behind_target` (`git rev-list --count HEAD..<target>`) | stale base, with the distance reported |
+| One worktree per run | `CheckoutFacts::created_for_run`, plus the `<TASK-NNNN>/<ATTEMPT-NNNN>` path slot and the `-a<attempt>` branch suffix | a path or branch from another run is never reused |
+| The checkout starts clean | `CheckoutFacts::clean_at_start` (`git status --porcelain` empty) | a dirty start is a bug, not a workaround |
+
+`BaseRef` carries the target branch the work merges into and the exact commit
+the worktree was cut from, so the base is named in the dispatch rather than
+guessed at afterwards. `RunRecord::begin` opens a record from a verified scope
+only, which puts the base commit and the worktree path of every run on file:
+a merge failure days later is attributable to a commit.
+
+`RunRecord::capture` records the run's commits and patch outside the worktree
+and never on node-local scratch (`is_node_local_scratch`), and
+`RunRecord::teardown` refuses to plan the removal of a scratch checkout — or of
+any checkout holding un-captured commits — until that capture exists.
+
+The gates are unconditional. No flag, environment variable, or role disables
+them, and `PiInvocation::validate` runs them for every scope it carries, so a
+session cannot be assembled around a checkout that would fail them.
 
 ## 7. Separation of duties
 
@@ -265,7 +294,7 @@ complete, so both are usable as gates.
 | 4 | An Initiative spans ≥3 repositories | `repository::Workspace`; CLI fixture spans three |
 | 5 | A fixture spans ≥2 owners | `Workspace::is_multi_organization`; CLI fixture spans `InferWeave` and `OtherOrg` |
 | 6 | Cross-repository dependencies use AutoSpec task ids | `dag::TaskGraph::cross_repository_edges`; `TaskId` rejects issue numbers |
-| 7 | Independent tasks execute concurrently in isolated worktrees | `dag::TaskGraph::schedule`, `concurrency_waves`, `dispatch::WorktreeScope` |
+| 7 | Independent tasks execute concurrently in isolated worktrees | `dag::TaskGraph::schedule`, `concurrency_waves`, `dispatch::WorktreeScope`, `dispatch::WorktreeScope::verify` |
 | 8 | Each implementation task gets a fresh task-local plan | `ids::TaskPlanId`, `dispatch::PiInvocation::with_task_plan` |
 | 9 | Planner/implementer/reviewer separation enforced | `roles::SeparationPolicy`, `traceability::CoverageMatrix::build` |
 | 10 | Model selection and fallback are role-aware and auditable | `routing::ModelCatalog::select`, `RoutingDecision::considered` |
@@ -303,8 +332,10 @@ Each of those consumes this model rather than duplicating it.
 
 ## 16. Validation
 
-- `cargo test --workspace --no-fail-fast` — 113 unit tests in
-  `crates/autospec-core/src/initiative/`, 16 end-to-end tests in
+- `cargo test --workspace --no-fail-fast` — 130 unit tests in
+  `crates/autospec-core/src/initiative/` (25 of them in `dispatch.rs`, covering
+  the stale-base, dirty-worktree, reused-worktree, and capture-before-teardown
+  refusals), 16 end-to-end tests in
   `crates/autospec-cli/tests/initiative_commands.rs`.
 - `scripts/autospec-initiative-contract.sh` — checks that the module surface,
   the CLI subcommands, the schema, and this design document stay in step. It

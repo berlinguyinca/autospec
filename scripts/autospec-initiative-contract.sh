@@ -145,6 +145,30 @@ if [[ -f "$SCHEMA_FILE" ]] && ! python3 -c "import json,sys; json.load(open(sys.
   fail "schemas/autospec-initiative.schema.json is not valid JSON"
 fi
 
+# 12. The dispatch freshness gates exist, are unconditional, and are tested.
+DISPATCH_FILE="$CORE_DIR/dispatch.rs"
+require_file "$DISPATCH_FILE" || true
+for gate in "pub struct BaseRef" "pub struct CheckoutFacts" "pub struct RunRecord" \
+  "pub fn is_node_local_scratch" "fetched_before_branch" "behind_target" \
+  "created_for_run" "clean_at_start"; do
+  require_in_file "$DISPATCH_FILE" "$gate" "dispatch freshness gate"
+done
+require_in_file "$DESIGN_FILE" "Worktree freshness" "documented freshness gates"
+# The gates read no environment at all: there is no flag, switch, or blanket
+# disable for a failure the agent cannot see.
+if grep -nE 'env::var|std[.]env|AUTOSPEC_' "$DISPATCH_FILE" >/dev/null 2>&1; then
+  fail "dispatch.rs reads the environment; the freshness gates must run unconditionally"
+fi
+# Each refusal in the design table has a test that produces it.
+for test_fn in a_stale_base_is_refused_with_the_distance_reported \
+  a_base_that_was_not_fetched_immediately_before_branching_is_refused \
+  a_dirty_starting_worktree_is_refused \
+  a_worktree_borrowed_from_a_previous_run_is_refused \
+  two_attempts_of_one_task_get_their_own_worktree_and_branch \
+  teardown_is_refused_while_commits_are_captured_nowhere; do
+  require_in_file "$DISPATCH_FILE" "fn $test_fn" "dispatch gate test"
+done
+
 if [[ "$FAILURES" -gt 0 ]]; then
   printf 'autospec-initiative-contract: %d failure(s)\n' "$FAILURES" >&2
   exit 1
