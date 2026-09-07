@@ -349,7 +349,7 @@ that output automatically yet.
 | `AUTOSPEC_ROUTING_MIN_SAMPLES` | `10` | Dispatches in a cell before a profile may win it. |
 | `AUTOSPEC_ROUTING_FIRST_PASS_FLOOR` | `0.6` | Quality floor; the cheapest profile *clearing this* wins, not the cheapest outright. |
 | `AUTOSPEC_ROUTING_CACHE_BETA` | `0.5` | Strength of the prompt-cache penalty. |
-| `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
+| `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). Within a run, a profile carrying `local_overthink_abort` rows for this run is never an exploration target. |
 | `AUTOSPEC_ROUTING_PREFIX_TOKENS` | `0` (unknown) | Prefix size this dispatch will stage, tested against each profile's `cache_min_tokens`. `0` fails open and scores exactly as before. |
 
 **Prompt-cache minimums (`cache_min_tokens`).** A prompt cache only engages above a
@@ -444,12 +444,29 @@ autospec already depends on Codex for peer review.
 | `AUTOSPEC_LOCAL_PROVIDER` | `ollama` | Local provider (`ollama` or `lmstudio`). |
 | `AUTOSPEC_LOCAL_TIMEOUT_SECS` | `600` | Wall-clock ceiling per local dispatch. |
 | `AUTOSPEC_LOCAL_LOCK_DIR` | `~/.autospec/locks` | Lock dir serializing the capacity-1 GPU. |
+| `AUTOSPEC_LOCAL_STALL_SECS` | `120` | No-progress window. A dispatch whose combined output does not grow for this long is aborted. `0` disables. |
 
 It exits **3** — meaning *keep the cloud tier* — when Codex is absent, when Codex does
 not advertise `--oss` (an older build would ignore the flag and silently bill a **paid**
 cloud model, the most expensive possible failure), when the capability probe reports the
 model is not `dispatch_recommended`, or when no wall-clock bound can be applied. Exit
 **4** means the dispatch hit its ceiling, kept distinct from a wrong answer.
+
+**No-progress abort (exit 5).** A small local model can loop on one cell for many minutes
+without producing anything. The 600 s ceiling still pays for all of it, so a watchdog
+watches the dispatch output instead of the clock: `AUTOSPEC_LOCAL_STALL_SECS` seconds
+without a single new byte aborts the dispatch with **5** and terminates the executor
+(`SIGTERM`, then `SIGKILL` after a grace) rather than orphaning it. Exit **5** is kept
+distinct from **4** because the two say opposite things about the model: hitting the
+ceiling can mean the task is large, emitting nothing for two minutes means this model is
+not converging on this cell.
+
+The abort is recorded as the ledger outcome `local_overthink_abort` (with the cell, the
+profile and `AUTOSPEC_RUN_ID`), and `route-decide.sh` reads that row back for the rest of
+the run: one abort vetoes the **local tier for that cell**, a second abort anywhere in
+the run demotes the **profile run-wide**. Aborts from earlier runs never apply — the
+ledger row's `run_id` is the scope — and a run with no `AUTOSPEC_RUN_ID` gets no gate, so
+a one-off manual dispatch cannot silently change routing for someone else's run.
 
 ## Provider-neutral executor dispatch
 `scripts/executor-dispatch.sh --request <file.json>` is the single

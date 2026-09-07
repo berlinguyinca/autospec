@@ -28,7 +28,13 @@
 #                     the difference between a cheap model and a cheap dispatch
 #     escalated       true when the dispatch pulled in a stronger advisor/tier
 #     outcome         pending | merged_clean | lgtm_first_pass | retried_ok |
-#                     escalated | qa_failed | reverted | abandoned
+#                     escalated | qa_failed | reverted | abandoned |
+#                     local_overthink_abort
+#                     The last one is written by local-dispatch.sh when it KILLS a
+#                     local dispatch that went silent (exit 5), not by a caller
+#                     grading a finished dispatch: it is the row route-decide.sh
+#                     reads to take a cell off local for the rest of the run, and
+#                     it carries an extra `run_id` key for that scoping.
 #
 # Append-only audit trail: --update-outcome appends a NEW copy of the record with
 # an updated outcome/reason/ts rather than rewriting history. Readers (--show /
@@ -55,7 +61,7 @@
 
 set -u
 
-ALLOWED_OUTCOMES="pending merged_clean lgtm_first_pass retried_ok escalated qa_failed reverted abandoned"
+ALLOWED_OUTCOMES="pending merged_clean lgtm_first_pass retried_ok escalated qa_failed reverted abandoned local_overthink_abort"
 ALLOWED_KINDS="implementer lgtm-reviewer explore-researcher verify-voter refine-lens qa-sweep secaudit-pass growth-lens spec-decompose"
 ALLOWED_CTX="32k 64k 120k"
 ALLOWED_REASONING="shallow medium deep"

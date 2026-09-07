@@ -30,6 +30,15 @@
 #       growth-lens    unproven against a ledger; add it when there is evidence.
 #   * A profile is only a candidate if it FITS the cell on both ordinals
 #     (ctx and reasoning); effective cost only orders profiles that already fit.
+#   * A local dispatch killed for going silent leaves a `local_overthink_abort`
+#     row in the ledger (local-dispatch.sh exit 5), and that row VETOES for the
+#     rest of the run: one abort takes its whole cell off local, a second abort
+#     from the same profile vetoes it in every cell. The veto outranks the
+#     strictly-cheaper gate below — cost is a cost argument, and the cheapest
+#     answer to a question is still worthless when the model that gave it
+#     produced nothing. Scoping is per run (`run_id` on the row +
+#     $AUTOSPEC_RUN_ID here), because a stall is evidence about this run's host
+#     load and prompt, not a permanent verdict on the model.
 #   * Cold-start exploration is OFF by default and, when enabled, is confined to
 #     the lowest-stakes cell. An unproven profile is never explored on real work
 #     it could damage.
@@ -53,6 +62,10 @@
 #                                  auto -> override only when strictly cheaper
 #   AUTOSPEC_ROUTING_EXPLORE_PCT   cold-start exploration percent (default 0=off)
 #   AUTOSPEC_MODEL_PROFILES        profile catalog
+#   AUTOSPEC_ROUTING_LEDGER        ledger read for no-progress aborts
+#                                  (default .autospec/routing-ledger.jsonl)
+#   AUTOSPEC_RUN_ID                the run those aborts are attributed to; WITHOUT
+#                                  it the within-run veto stays off (see above)
 
 set -u
 
@@ -192,7 +205,7 @@ PROFILE_ROWS=""
 if [ -f "$PROFILES_FILE" ]; then
     PROFILE_ROWS="$(awk '
         function lead_ws(s) { match(s, /^ */); return RLENGTH }
-        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md "\t" ef }
+        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md "\t" ef "\t" cm }
         {
             line = $0
             sub(/[[:space:]]*#.*$/, "", line)
@@ -201,7 +214,7 @@ if [ -f "$PROFILES_FILE" ]; then
             if (cur != "" && i <= blocki) { flush(); cur = "" }
             if (key ~ /^[^:]+:[[:space:]]*$/) {
                 name = key; sub(/:[[:space:]]*$/, "", name)
-                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = ""; ef = "" }
+                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = ""; ef = ""; cm = "" }
                 next
             }
             if (cur == "") next
@@ -210,6 +223,11 @@ if [ -f "$PROFILES_FILE" ]; then
             if (key ~ /^reasoning:/) rs = v
             if (key ~ /^model:/) { gsub(/["\047]/, "", v); md = v }
             if (key ~ /^effort:/) { gsub(/["\047]/, "", v); ef = v }
+            # The 6th field is what marks a profile LOCAL: cost_minute is the
+            # GPU-minute opportunity price routing-cost.sh uses in place of token
+            # prices, so its presence — not a name heuristic — is the definition
+            # of "runs on the operator silicon".
+            if (key ~ /^cost_minute:/) cm = v
         }
         END { flush() }
     ' "$PROFILES_FILE")"
@@ -244,6 +262,85 @@ if [ -n "$STATS_FILE" ]; then _cost_args="$_cost_args --stats-file $STATS_FILE";
 # shellcheck disable=SC2086
 scored="$(AUTOSPEC_MODEL_PROFILES="$PROFILES_FILE" bash "$SCRIPT_DIR/routing-cost.sh" $_cost_args 2>/dev/null || printf '[]')"
 
+# ── within-run no-progress veto ───────────────────────────────────────────────
+# local-dispatch.sh kills a local dispatch that emits nothing for STALL_SECS and
+# records the kill as a `local_overthink_abort` row tagged with the run that
+# watched it. Two gates read those rows, both scoped to $AUTOSPEC_RUN_ID:
+#
+#   one abort in this cell   -> no local profile is offered for this cell again;
+#   two aborts from a profile -> that profile is offered in no cell at all.
+#
+# The first treats a stall as evidence about the CELL (a 32k/shallow prompt that
+# makes a 32B model loop will do it again under the same host load) and sends the
+# cell to cloud; the second treats it as evidence about the PROFILE. Neither gate
+# runs without run identity: an unscoped veto would demote a model permanently on
+# rows left by runs that ended days ago, which is history, not a live signal.
+VETO_BASELINE=0
+VETO_JSON="[]"
+_run_id="${AUTOSPEC_RUN_ID:-}"
+_abort_ledger="${AUTOSPEC_ROUTING_LEDGER:-$PWD/.autospec/routing-ledger.jsonl}"
+if [ -z "$_run_id" ]; then
+    _log 'no AUTOSPEC_RUN_ID -> no-progress veto disabled (cannot scope aborts to a run)'
+elif [ ! -f "$_abort_ledger" ]; then
+    _log "no ledger at $_abort_ledger -> no-progress veto has no aborts to read"
+else
+    _aborts="$(bash "$SCRIPT_DIR/routing-ledger.sh" --ledger "$_abort_ledger" --show --json 2>/dev/null \
+        | jq -c --arg run "$_run_id" '
+            [ .[]? | select(.outcome == "local_overthink_abort"
+                            and ((.run_id // "")) == $run) ]' 2>/dev/null || printf '[]')"
+    case "$_aborts" in ''|null|'[]') _aborts='[]' ;; esac
+    if [ "$_aborts" != '[]' ]; then
+        # The LOCAL profiles, from the same cost_minute marker routing-cost.sh
+        # uses (field 6). Gate 1 counts only aborts filed by one of these: a row
+        # written against a cloud profile says nothing about whether the LOCAL
+        # tier stalls in that cell, and evicting local on cloud evidence would
+        # cost the operator a tier they never broke.
+        _local_names=''
+        _old_ifs="$IFS"
+        IFS='
+'
+        for _row in $PROFILE_ROWS; do
+            if [ -n "$(printf '%s' "$_row" | cut -f6)" ]; then
+                _local_names="$_local_names $(printf '%s' "$_row" | cut -f1)"
+            fi
+        done
+        IFS="$_old_ifs"
+        _local_json="$(printf '%s\n' $_local_names | jq -R -s '
+            split("\n") | map(select(length > 0)) | unique' 2>/dev/null || printf '[]')"
+
+        _veto_names=''
+        for _p in $(printf '%s' "$_aborts" | jq -r '
+                group_by(.profile) | map(select(length >= 2) | .[0].profile) | .[]' 2>/dev/null); do
+            _veto_names="$_veto_names $_p"
+        done
+        # $row is bound explicitly: inside `($loc | index(...))` the context `.` is
+        # $loc, so a bare `.profile` there reads a field off the veto list and the
+        # count is silently always 0.
+        _cell_aborts="$(printf '%s' "$_aborts" | jq --arg c "$_cell_ctx" --arg r "$_cell_reasoning" --argjson loc "$_local_json" '
+            map(. as $row | select($row.cell_ctx == $c and $row.cell_reasoning == $r
+                                   and (($loc | index($row.profile)) != null))) | length' 2>/dev/null || printf 0)"
+        if [ "$_cell_aborts" -ge 1 ] 2>/dev/null; then
+            # A stalled cell gets no local profile for the rest of the run.
+            _veto_names="$_veto_names $_local_names"
+        fi
+        VETO_JSON="$(printf '%s\n' $_veto_names | jq -R -s '
+            split("\n") | map(select(length > 0)) | unique')"
+        if [ "$VETO_JSON" != '[]' ]; then
+            # Marked ineligible rather than dropped from `scored`: the baseline keeps
+            # its row, so the strictly-cheaper gate below still has a cost to
+            # compare against instead of silently comparing against nothing.
+            scored="$(printf '%s' "$scored" | jq -c --argjson v "$VETO_JSON" '
+                map(. as $row | if ($v | index($row.profile)) != null
+                    then .eligible = false | .reason = "no-progress abort this run"
+                    else $row end)' 2>/dev/null || printf '%s' "$scored")"
+            if printf '%s' "$VETO_JSON" | jq -e --arg b "$baseline_profile" 'index($b) != null' >/dev/null 2>&1; then
+                VETO_BASELINE=1
+            fi
+            _log "no-progress veto (local_overthink_abort): $VETO_JSON for cell $_cell_ctx/$_cell_reasoning, run $_run_id"
+        fi
+    fi
+fi
+
 winner="$(printf '%s' "$scored" | jq -r 'map(select(.eligible)) | first | .profile // empty')"
 
 if [ -z "$winner" ]; then
@@ -270,8 +367,13 @@ if [ -z "$winner" ]; then
     if [ "$_explore" -eq 1 ]; then
         # Cheapest scoreable candidate that is NOT the baseline and has too few
         # samples to be eligible — i.e. the thing we lack evidence about.
-        _probe="$(printf '%s' "$scored" | jq -r --arg b "$baseline_profile" '
-            map(select(.eligible == false and .unit != null and .profile != $b))
+        # A vetoed profile is ineligible for a reason that exploration cannot
+        # cure: gathering more evidence about the thing that just went silent is
+        # the one thing the veto exists to stop.
+        _probe="$(printf '%s' "$scored" | jq -r --arg b "$baseline_profile" --argjson v "$VETO_JSON" '
+            map(. as $row | select($row.eligible == false and $row.unit != null
+                                   and $row.profile != $b
+                                   and (($v | index($row.profile)) == null)))
             | first | .profile // empty')"
         if [ -n "$_probe" ]; then
             _log "cold-start exploration (pct=$EXPLORE_PCT, lowest-stakes cell): trying $_probe"
@@ -280,6 +382,12 @@ if [ -z "$winner" ]; then
     fi
 
     if [ -z "$winner" ]; then
+        if [ "$VETO_BASELINE" -eq 1 ]; then
+            # Nothing else fits the cell, so the vetoed baseline is still the best
+            # offer available. Say so: the caller cannot tell from the exit code
+            # that it was handed a profile this run already watched go silent.
+            _log "baseline $baseline_profile is itself vetoed and no alternative fits -> baseline"
+        fi
         _log "no eligible profile (thin ledger or all below floor) -> baseline $baseline_profile"
         _emit_baseline
     fi
@@ -290,7 +398,7 @@ fi
 # very exploration that exists to gather its evidence.
 if [ "${_explore:-0}" -eq 1 ]; then
     _log "exploration bypasses the strictly-cheaper gate"
-elif [ "$POLICY" = "auto" ] && [ -n "$baseline_profile" ]; then
+elif [ "$POLICY" = "auto" ] && [ -n "$baseline_profile" ] && [ "$VETO_BASELINE" -eq 0 ]; then
     # Override only when STRICTLY cheaper than the baseline. If the baseline is
     # unscored (no cost keys) there is nothing to beat, so stand aside.
     _strictly_cheaper="$(printf '%s' "$scored" | jq -r --arg w "$winner" --arg b "$baseline_profile" '
@@ -301,6 +409,11 @@ elif [ "$POLICY" = "auto" ] && [ -n "$baseline_profile" ]; then
         _log "winner $winner not strictly cheaper than baseline $baseline_profile -> baseline"
         _emit_baseline
     fi
+elif [ "${VETO_BASELINE:-0}" -eq 1 ]; then
+    # The gate is skipped, not failed. Being cheaper is exactly why a stalled
+    # local profile is the baseline in the first place, so letting it veto here
+    # would resurrect the profile the veto exists to remove.
+    _log "baseline $baseline_profile is vetoed by a no-progress abort; strictly-cheaper gate does not resurrect it"
 fi
 
 if [ "$winner" = "$baseline_profile" ]; then
