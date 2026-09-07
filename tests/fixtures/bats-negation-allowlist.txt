@@ -15,7 +15,7 @@ tests/autonomous/test_blast_radius_quarantine.bats 1
 tests/autonomous/test_conductor_provenance_dispatch.bats 3
 tests/autonomous/test_conductor_selfmerge_aftermath.bats 3
 tests/autonomous/test_control_channel_promote_discard.bats 29
-tests/autonomous/test_integration_branch.bats 14
+tests/autonomous/test_integration_branch.bats 0
 tests/autonomous/test_process_tree_helper.bats 1
 tests/autonomous/test_promote_open_issues.bats 6
 tests/autonomous/test_quality_workstream.bats 2
