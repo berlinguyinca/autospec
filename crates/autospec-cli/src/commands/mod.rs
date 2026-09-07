@@ -7,6 +7,7 @@ pub mod explore;
 pub mod growth_report;
 pub mod init;
 pub mod initiative;
+pub mod integrate;
 pub mod issue;
 pub mod lint;
 pub mod managed_project;
@@ -79,10 +80,7 @@ impl std::fmt::Display for CommandFailure {
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("aar", "Inspect adaptive agent runtime policy"),
-    (
-        "initiative",
-        "Inspect cross-repository initiatives",
-    ),
+    ("initiative", "Inspect cross-repository initiatives"),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),
@@ -90,6 +88,10 @@ const COMMANDS: &[(&str, &str)] = &[
     (
         "doctor",
         "Check the Rust core workspace (`doctor code-intel` for LSP health)",
+    ),
+    (
+        "integrate",
+        "Rebase and land a batch of branches with symbol-preservation gates",
     ),
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
@@ -128,6 +130,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
+            "integrate" => integrate::run(rest),
             "explore" => explore::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest),

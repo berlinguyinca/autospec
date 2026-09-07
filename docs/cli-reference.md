@@ -26,6 +26,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec initiative status --id INIT-YYYY-NNNN [--json]` | yes | Initiative snapshot: stage, repository and owner span, task states, requirement coverage, completion |
 | `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; shell wrapper remains the executor |
 | `autospec validate --shadow-results <captured-results.json> [--json]` | yes | aggregates captured shell outcomes without executing commands; returns non-zero when a required captured result failed |
+| `autospec integrate --repo <path> --base <trunk> --branch <b>... [--verify-cmd <cmd>] [--json]` | yes | integration phase: rebase-and-land a branch batch in dependency order, gated on symbol preservation (never `--skip`) with per-branch re-verification ([docs](integration-phase.md)) |
 | `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |
 | `autospec runtime audit --json` | yes | implemented read-only R0-R4 inventory; it neither migrates nor executes candidates |
 | `autospec runtime env init [--repo <path>] [--manifest agent\|autospec] [--force]` | no | creates a conservative v1 runtime manifest; refuses an existing manifest without `--force` |

@@ -28,6 +28,7 @@ pub mod explore;
 pub mod graph;
 pub mod growth;
 pub mod initiative;
+pub mod integration;
 pub mod lint;
 pub mod managed_project;
 pub mod rag;
