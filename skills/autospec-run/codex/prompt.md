@@ -170,7 +170,7 @@ profiles:
     ctx: 64k
     reasoning: medium
   claude-sonnet-cloud:
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     ctx: 120k
     reasoning: deep
 ```
@@ -194,7 +194,7 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
-| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: current spark/cost-optimized Codex + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 | Local model dispatch        | not native — `Agent(model:)` takes Claude tiers only; shell out to `local-dispatch.sh` | provider pointed at `:11434/v1` (or `:8000` for vLLM) | `codex exec --oss --local-provider ollama` | cloud tier (fail closed) |
 <!-- autospec-block:harness-adapter-core -->
 
@@ -205,8 +205,8 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 Detect your harness by checking available tools before any phase:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -214,7 +214,7 @@ Detect your harness by checking available tools before any phase:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry by passing a bounded handoff containing the issue number, repo path, branch/worktree plan, relevant issue body sections, last error, and current queue/claim state. Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork; do not ask Codex to inherit/fork the full parent conversation when those fields are set. If a role-specialized reviewer has a fixed model binding, retry through a fresh configurable independent agent at `TIER_A` with the identical reviewer prompt, evidence inputs, tool budget, and verdict schema. Never fall back to the author/main lane or a weaker model. The orchestrator records the requested model, actual model, availability error class, and reviewed head SHA in a sidecar review artifact; never append metadata to the reviewer's byte-exact verdict channel. If no equal-or-stronger independent reviewer can run, fail closed and do not merge. Never ask the user.
 

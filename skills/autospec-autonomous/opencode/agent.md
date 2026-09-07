@@ -227,7 +227,7 @@ This workflow assumes six capabilities. Map each one to your harness's actual to
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | **Forbidden in conductor path**       | **forbidden**                            | **forbidden**                            | Out-of-band `autospec:*` labels / priorities file only |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
-| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: current spark/cost-optimized Codex + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — recognized by Claude Code, OpenCode, and Codex. Per AGENTS.md, subagent dispatches use the two-tier policy: Tier A for waterfall-level decisions and ranking; Tier B for individual issue drain and deterministic steps (inherited from `/autospec-run`).
@@ -237,8 +237,8 @@ This workflow assumes six capabilities. Map each one to your harness's actual to
 Detect your harness by checking available tools before any pipeline step runs:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -246,7 +246,7 @@ Detect your harness by checking available tools before any pipeline step runs:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness, silently retry the same subagent dispatch with `TIER_A`. Preserve parent context on retry. Never ask the user.
 
