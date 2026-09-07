@@ -381,9 +381,7 @@ impl ThrashDetector {
                 if *count > self.thresholds.identical_tests {
                     findings.push(ThrashFinding {
                         signal: ThrashSignal::IdenticalTestsWithoutChangedInputs,
-                        evidence: format!(
-                            "'{command}' run {count} times with unchanged inputs"
-                        ),
+                        evidence: format!("'{command}' run {count} times with unchanged inputs"),
                         response: ThrashResponse::SummarizeState,
                     });
                 }

@@ -1982,19 +1982,52 @@ fn every_unbaselined_bats_suite_in_this_repository_is_registered() {
 #[test]
 fn runner_executes_the_newly_registered_bats_suites() {
     for (id, suite) in [
-        ("check_bats_negation_ratchet", "tests/lint/test_bats_negation_checker.bats"),
-        ("check_autospec_fleet_enabled_false", "tests/unit/test_autospec_fleet_enabled_false.bats"),
-        ("check_autospec_sweep_enabled_false", "tests/unit/test_autospec_sweep_enabled_false.bats"),
-        ("check_classify_lang_labels", "tests/unit/test_classify_lang_labels.bats"),
-        ("check_classify_language", "tests/unit/test_classify_language.bats"),
-        ("check_define_phase0_language", "tests/unit/test_define_phase0_language.bats"),
-        ("check_language_axis_integration", "tests/unit/test_language_axis_integration.bats"),
-        ("check_language_table", "tests/unit/test_language_table.bats"),
-        ("check_proxy_direct_borrow_lifetime", "tests/unit/proxy-direct-borrow-lifetime.bats"),
-        ("check_qa_function_ranges_string_literals", "tests/unit/qa-function-ranges-string-literals.bats"),
+        (
+            "check_bats_negation_ratchet",
+            "tests/lint/test_bats_negation_checker.bats",
+        ),
+        (
+            "check_autospec_fleet_enabled_false",
+            "tests/unit/test_autospec_fleet_enabled_false.bats",
+        ),
+        (
+            "check_autospec_sweep_enabled_false",
+            "tests/unit/test_autospec_sweep_enabled_false.bats",
+        ),
+        (
+            "check_classify_lang_labels",
+            "tests/unit/test_classify_lang_labels.bats",
+        ),
+        (
+            "check_classify_language",
+            "tests/unit/test_classify_language.bats",
+        ),
+        (
+            "check_define_phase0_language",
+            "tests/unit/test_define_phase0_language.bats",
+        ),
+        (
+            "check_language_axis_integration",
+            "tests/unit/test_language_axis_integration.bats",
+        ),
+        (
+            "check_language_table",
+            "tests/unit/test_language_table.bats",
+        ),
+        (
+            "check_proxy_direct_borrow_lifetime",
+            "tests/unit/proxy-direct-borrow-lifetime.bats",
+        ),
+        (
+            "check_qa_function_ranges_string_literals",
+            "tests/unit/qa-function-ranges-string-literals.bats",
+        ),
         // Registered by #3535: the loud-failure verification gates.
         ("check_verify_gate", "tests/unit/test_verify_gate.bats"),
-        ("check_verify_produced_work", "tests/unit/test_verify_produced_work.bats"),
+        (
+            "check_verify_produced_work",
+            "tests/unit/test_verify_produced_work.bats",
+        ),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
             id,

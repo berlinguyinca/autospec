@@ -310,7 +310,12 @@ impl PolicyDecision {
             .collect::<Vec<_>>()
             .join(", ");
         explanation.push_str(&format!(" Topology: {roles}."));
-        if self.policy.topology.roles.iter().any(|role| role.is_producer())
+        if self
+            .policy
+            .topology
+            .roles
+            .iter()
+            .any(|role| role.is_producer())
             && self
                 .policy
                 .topology
@@ -453,7 +458,11 @@ fn projected_context_need(classification: &TaskClassification, config: &PolicyCo
     let retrieval = context_policy_for(classification);
     let retrieved = (retrieval.max_retrieved_files as u64).saturating_mul(per_file_tokens);
     let overhead: u64 = 6_000;
-    let vision_extra = if classification.requires_vision { 4_000 } else { 0 };
+    let vision_extra = if classification.requires_vision {
+        4_000
+    } else {
+        0
+    };
     retrieved
         .saturating_add(overhead)
         .saturating_add(vision_extra)

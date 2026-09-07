@@ -174,7 +174,8 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
         .any(|entry| {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
-            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+            name.rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
         }));
 }
 
@@ -220,7 +221,8 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
         .any(|entry| {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
-            name.rsplit_once(".archive-").is_some_and(|(_, suffix)| !suffix.is_empty())
+            name.rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
         }));
 }
 

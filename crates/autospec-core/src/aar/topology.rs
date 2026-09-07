@@ -40,19 +40,21 @@ impl AgentRole {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-            "coordinator" => AgentRole::Coordinator,
-            "explorer" => AgentRole::Explorer,
-            "planner" => AgentRole::Planner,
-            "implementer" => AgentRole::Implementer,
-            "tester" => AgentRole::Tester,
-            "reviewer" => AgentRole::Reviewer,
-            "documentation_writer" => AgentRole::DocumentationWriter,
-            "ui_evaluator" => AgentRole::UiEvaluator,
-            "security_reviewer" => AgentRole::SecurityReviewer,
-            "performance_reviewer" => AgentRole::PerformanceReviewer,
-            _ => return None,
-        })
+        Some(
+            match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+                "coordinator" => AgentRole::Coordinator,
+                "explorer" => AgentRole::Explorer,
+                "planner" => AgentRole::Planner,
+                "implementer" => AgentRole::Implementer,
+                "tester" => AgentRole::Tester,
+                "reviewer" => AgentRole::Reviewer,
+                "documentation_writer" => AgentRole::DocumentationWriter,
+                "ui_evaluator" => AgentRole::UiEvaluator,
+                "security_reviewer" => AgentRole::SecurityReviewer,
+                "performance_reviewer" => AgentRole::PerformanceReviewer,
+                _ => return None,
+            },
+        )
     }
 
     /// Roles that produce the change under review.
@@ -149,7 +151,9 @@ pub fn select_topology(classification: &TaskClassification) -> AgentTopology {
     {
         roles.insert(AgentRole::Planner);
         roles.insert(AgentRole::Coordinator);
-        reasons.push("planner and coordinator added for high-complexity or migration work".to_string());
+        reasons.push(
+            "planner and coordinator added for high-complexity or migration work".to_string(),
+        );
     }
 
     if classification.risk >= Risk::Critical {
@@ -297,7 +301,8 @@ pub fn enforce_separation(
     }
 
     if !producers.is_empty() && reviewers.is_empty() && assignments.len() > 1 {
-        violations.push("multi-agent topology has a producer but no independent reviewer".to_string());
+        violations
+            .push("multi-agent topology has a producer but no independent reviewer".to_string());
     }
 
     violations.sort();
@@ -352,7 +357,10 @@ impl Handoff {
         }
     }
 
-    pub fn with_artifacts(mut self, artifacts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_artifacts(
+        mut self,
+        artifacts: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         self.artifacts = artifacts.into_iter().map(Into::into).collect();
         self
     }

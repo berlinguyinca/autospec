@@ -206,8 +206,12 @@ pub fn parse_pi_event(line: &str) -> Result<PiEvent, String> {
     }
 
     Ok(match kind {
-        "tool_call" => PiEvent::ToolCall { name: field("name")? },
-        "file_read" => PiEvent::FileRead { path: field("path")? },
+        "tool_call" => PiEvent::ToolCall {
+            name: field("name")?,
+        },
+        "file_read" => PiEvent::FileRead {
+            path: field("path")?,
+        },
         "file_edit" => PiEvent::FileEdit {
             path: field("path")?,
             lines: number("lines")? as usize,
@@ -247,7 +251,10 @@ fn parse_fields(rest: &str) -> Result<Vec<(String, String)>, String> {
             let close = quoted
                 .find('"')
                 .ok_or_else(|| format!("unterminated quoted value for {key}"))?;
-            (quoted[..close].to_string(), quoted[close + 1..].trim_start())
+            (
+                quoted[..close].to_string(),
+                quoted[close + 1..].trim_start(),
+            )
         } else {
             match after.find(' ') {
                 Some(space) => (after[..space].to_string(), after[space + 1..].trim_start()),

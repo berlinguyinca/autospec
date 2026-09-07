@@ -144,10 +144,7 @@ impl ArchitecturePlan {
         let known = definition.requirement_ids();
         for stream in &self.work_streams {
             if stream.satisfies.is_empty() {
-                problems.push(format!(
-                    "work stream {} maps to no requirement",
-                    stream.id
-                ));
+                problems.push(format!("work stream {} maps to no requirement", stream.id));
             }
             for requirement in &stream.satisfies {
                 if !known.contains(requirement) {
@@ -193,7 +190,10 @@ impl ArchitecturePlan {
 
         for requirement in definition.actionable_requirements() {
             if !self.covered_requirements().contains(&requirement.id) {
-                problems.push(format!("{} is not covered by any work stream", requirement.id));
+                problems.push(format!(
+                    "{} is not covered by any work stream",
+                    requirement.id
+                ));
             }
         }
 
@@ -512,7 +512,9 @@ mod tests {
             .validate(&definition(1), &workspace())
             .expect_err("a plan without revisions is rejected");
 
-        assert!(problems.iter().any(|problem| problem.contains("records no revision")));
+        assert!(problems
+            .iter()
+            .any(|problem| problem.contains("records no revision")));
     }
 
     #[test]
@@ -524,7 +526,9 @@ mod tests {
             .validate(&definition(1), &workspace())
             .expect_err("unmapped work streams are rejected");
 
-        assert!(problems.iter().any(|problem| problem.contains("maps to no requirement")));
+        assert!(problems
+            .iter()
+            .any(|problem| problem.contains("maps to no requirement")));
     }
 
     #[test]
@@ -595,7 +599,9 @@ mod tests {
         )
         .expect("replan allowed");
 
-        assert!(!record.impacted_tasks.contains(&TaskId::parse("TASK-0001").expect("valid")));
+        assert!(!record
+            .impacted_tasks
+            .contains(&TaskId::parse("TASK-0001").expect("valid")));
         assert_eq!(record.impacted_tasks.len(), 2);
     }
 

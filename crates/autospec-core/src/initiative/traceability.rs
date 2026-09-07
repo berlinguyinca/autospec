@@ -240,7 +240,9 @@ impl CoverageMatrix {
             if collapsed {
                 rejected_evidence.push(format!(
                     "{}: {} evidence came from implementation session {}",
-                    record.id, record.kind.as_str(), record.session_name
+                    record.id,
+                    record.kind.as_str(),
+                    record.session_name
                 ));
             } else {
                 accepted.push(record);
@@ -390,10 +392,7 @@ fn coverage_state(
     evidence: &[&EvidenceRecord],
     waived: bool,
 ) -> CoverageState {
-    if evidence
-        .iter()
-        .any(|record| !record.outcome.is_positive())
-    {
+    if evidence.iter().any(|record| !record.outcome.is_positive()) {
         return CoverageState::Failed;
     }
     let has = |kind: EvidenceKind| {
@@ -611,7 +610,9 @@ mod tests {
             vec!["REQ-017", "PLAN-04", "TASK-123", "EV-010", "EV-011", "EV-012", "EV-013"]
         );
         assert_eq!(
-            matrix.status(&requirement_id("REQ-017")).map(|status| status.state),
+            matrix
+                .status(&requirement_id("REQ-017"))
+                .map(|status| status.state),
             Some(CoverageState::Verified)
         );
     }
@@ -637,8 +638,7 @@ mod tests {
             approved_at: 1_772_000_000,
         };
 
-        let matrix =
-            CoverageMatrix::build(&definition(), &plan(), &graph(), &evidence, &[waiver]);
+        let matrix = CoverageMatrix::build(&definition(), &plan(), &graph(), &evidence, &[waiver]);
         let gate = matrix.completion_gate();
 
         assert!(gate.complete);
@@ -653,7 +653,9 @@ mod tests {
         let matrix = CoverageMatrix::build(&definition(), &plan(), &graph(), &evidence, &[]);
 
         assert_eq!(
-            matrix.status(&requirement_id("REQ-017")).map(|status| status.state),
+            matrix
+                .status(&requirement_id("REQ-017"))
+                .map(|status| status.state),
             Some(CoverageState::Reviewed)
         );
         assert_eq!(matrix.rejected_evidence.len(), 1);
@@ -670,7 +672,9 @@ mod tests {
         let matrix = CoverageMatrix::build(&definition(), &plan(), &graph(), &evidence, &[]);
 
         assert_eq!(
-            matrix.status(&requirement_id("REQ-017")).map(|status| status.state),
+            matrix
+                .status(&requirement_id("REQ-017"))
+                .map(|status| status.state),
             Some(CoverageState::Failed)
         );
     }
@@ -686,7 +690,9 @@ mod tests {
         let matrix = CoverageMatrix::build(&definition(), &plan(), &graph, &[], &[]);
 
         assert_eq!(
-            matrix.status(&requirement_id("REQ-017")).map(|status| status.state),
+            matrix
+                .status(&requirement_id("REQ-017"))
+                .map(|status| status.state),
             Some(CoverageState::Blocked)
         );
     }
@@ -710,7 +716,9 @@ mod tests {
         let matrix = CoverageMatrix::build(&definition(), &plan(), &graph, &[], &[]);
 
         assert_eq!(
-            matrix.status(&requirement_id("REQ-018")).map(|status| status.state),
+            matrix
+                .status(&requirement_id("REQ-018"))
+                .map(|status| status.state),
             Some(CoverageState::Planned)
         );
     }

@@ -100,13 +100,17 @@ fn resolution_rejects_a_model_whose_window_cannot_hold_the_request() {
     let resolution = registry.resolve(&requirements);
 
     assert_eq!(resolution.matches.len(), 1);
-    assert_eq!(resolution.best().map(|p| p.model_id.clone()).as_deref(), Some("large"));
+    assert_eq!(
+        resolution.best().map(|p| p.model_id.clone()).as_deref(),
+        Some("large")
+    );
     assert!(resolution.rejections[0].reason.contains("context window"));
 }
 
 #[test]
 fn resolution_rejects_a_model_below_the_minimum_capability_score() {
-    let registry = ModelProfileRegistry::new("test-v1", vec![profile("weak", "q4_k_m", 0.2, 65_536)]);
+    let registry =
+        ModelProfileRegistry::new("test-v1", vec![profile("weak", "q4_k_m", 0.2, 65_536)]);
     let requirements = ModelRequirements {
         required_capabilities: vec![Capability::Coding],
         minimum_capability_score: 0.6,
@@ -173,11 +177,14 @@ fn the_allowlist_excludes_every_other_model() {
 
 #[test]
 fn recording_an_outcome_updates_the_profile_observations() {
-    let mut registry = ModelProfileRegistry::new("test-v1", vec![profile("qwen", "q4_k_m", 0.8, 65_536)]);
+    let mut registry =
+        ModelProfileRegistry::new("test-v1", vec![profile("qwen", "q4_k_m", 0.8, 65_536)]);
     let key = registry.profiles()[0].key();
 
     registry.record_outcome(&key, true).expect("profile exists");
-    registry.record_outcome(&key, false).expect("profile exists");
+    registry
+        .record_outcome(&key, false)
+        .expect("profile exists");
 
     let observations = registry.get(&key).expect("profile exists").observations;
     assert_eq!(observations.tasks, 2);
@@ -198,7 +205,10 @@ fn recording_an_outcome_for_an_unknown_profile_is_an_error() {
 fn local_profiles_are_preferred_when_the_requirements_ask_for_it() {
     let mut cloud = profile("cloud", "none", 0.99, 200_000);
     cloud.is_local = false;
-    let registry = ModelProfileRegistry::new("test-v1", vec![cloud, profile("local", "q4_k_m", 0.7, 65_536)]);
+    let registry = ModelProfileRegistry::new(
+        "test-v1",
+        vec![cloud, profile("local", "q4_k_m", 0.7, 65_536)],
+    );
     let requirements = ModelRequirements {
         prefer_local: true,
         required_capabilities: vec![Capability::Coding],
@@ -210,7 +220,10 @@ fn local_profiles_are_preferred_when_the_requirements_ask_for_it() {
     let resolution = registry.resolve(&requirements);
 
     assert_eq!(
-        resolution.best().map(|profile| profile.model_id.clone()).as_deref(),
+        resolution
+            .best()
+            .map(|profile| profile.model_id.clone())
+            .as_deref(),
         Some("local"),
         "prefer_local must beat a higher capability score"
     );
@@ -235,5 +248,8 @@ fn cost_estimation_scales_with_token_counts() {
     candidate.cost_per_1k_prompt_micros = 3_000;
     candidate.cost_per_1k_output_micros = 15_000;
 
-    assert_eq!(candidate.estimated_cost_micros(10_000, 2_000), 30_000 + 30_000);
+    assert_eq!(
+        candidate.estimated_cost_micros(10_000, 2_000),
+        30_000 + 30_000
+    );
 }

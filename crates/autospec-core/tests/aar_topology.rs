@@ -22,7 +22,11 @@ fn classification(
 
 #[test]
 fn trivial_low_risk_work_runs_a_single_agent() {
-    let topology = select_topology(&classification(Complexity::Trivial, Risk::Low, TaskClass::Docs));
+    let topology = select_topology(&classification(
+        Complexity::Trivial,
+        Risk::Low,
+        TaskClass::Docs,
+    ));
 
     assert!(topology.is_single_agent());
     assert!(!topology.isolated_contexts);
@@ -30,7 +34,11 @@ fn trivial_low_risk_work_runs_a_single_agent() {
 
 #[test]
 fn anything_above_trivial_gets_an_independent_reviewer() {
-    let topology = select_topology(&classification(Complexity::Low, Risk::Low, TaskClass::Bugfix));
+    let topology = select_topology(&classification(
+        Complexity::Low,
+        Risk::Low,
+        TaskClass::Bugfix,
+    ));
 
     assert!(topology.contains(AgentRole::Reviewer));
     assert!(topology.contains(AgentRole::Implementer));
@@ -39,7 +47,11 @@ fn anything_above_trivial_gets_an_independent_reviewer() {
 
 #[test]
 fn medium_complexity_adds_an_explorer_and_a_tester() {
-    let topology = select_topology(&classification(Complexity::Medium, Risk::Low, TaskClass::Feature));
+    let topology = select_topology(&classification(
+        Complexity::Medium,
+        Risk::Low,
+        TaskClass::Feature,
+    ));
 
     assert!(topology.contains(AgentRole::Explorer));
     assert!(topology.contains(AgentRole::Tester));
@@ -47,7 +59,11 @@ fn medium_complexity_adds_an_explorer_and_a_tester() {
 
 #[test]
 fn high_complexity_adds_a_planner_and_a_coordinator() {
-    let topology = select_topology(&classification(Complexity::High, Risk::Low, TaskClass::Feature));
+    let topology = select_topology(&classification(
+        Complexity::High,
+        Risk::Low,
+        TaskClass::Feature,
+    ));
 
     assert!(topology.contains(AgentRole::Planner));
     assert!(topology.contains(AgentRole::Coordinator));
@@ -82,7 +98,11 @@ fn ui_work_adds_a_ui_evaluator() {
 
 #[test]
 fn handoffs_default_to_structured_summaries_not_transcripts() {
-    let topology = select_topology(&classification(Complexity::High, Risk::High, TaskClass::Feature));
+    let topology = select_topology(&classification(
+        Complexity::High,
+        Risk::High,
+        TaskClass::Feature,
+    ));
 
     assert_eq!(topology.handoff, HandoffStyle::StructuredSummary);
 }
@@ -90,8 +110,18 @@ fn handoffs_default_to_structured_summaries_not_transcripts() {
 #[test]
 fn separation_holds_when_implementer_and_reviewer_are_distinct() {
     let assignments = [
-        RoleAssignment::new(AgentRole::Implementer, "qwen@q4", "coding-local", "session-a"),
-        RoleAssignment::new(AgentRole::Reviewer, "qwen@bf16", "coding-local", "session-b"),
+        RoleAssignment::new(
+            AgentRole::Implementer,
+            "qwen@q4",
+            "coding-local",
+            "session-a",
+        ),
+        RoleAssignment::new(
+            AgentRole::Reviewer,
+            "qwen@bf16",
+            "coding-local",
+            "session-b",
+        ),
     ];
 
     let verdict = enforce_separation(&assignments, &SeparationPolicy::default());
@@ -102,7 +132,12 @@ fn separation_holds_when_implementer_and_reviewer_are_distinct() {
 #[test]
 fn one_model_instance_may_not_both_implement_and_review() {
     let assignments = [
-        RoleAssignment::new(AgentRole::Implementer, "qwen@q4", "coding-local", "session-a"),
+        RoleAssignment::new(
+            AgentRole::Implementer,
+            "qwen@q4",
+            "coding-local",
+            "session-a",
+        ),
         RoleAssignment::new(AgentRole::Reviewer, "qwen@q4", "coding-local", "session-b"),
     ];
 
@@ -195,7 +230,8 @@ fn a_fallback_that_collapses_the_reviewer_onto_the_implementer_is_rejected() {
         RoleAssignment::new(AgentRole::Reviewer, "qwen@q4", "coding-local", "b"),
     ];
 
-    let verdict = preserves_separation_after_fallback(&before, &after, &SeparationPolicy::default());
+    let verdict =
+        preserves_separation_after_fallback(&before, &after, &SeparationPolicy::default());
 
     assert!(!verdict.satisfied);
     assert!(verdict.violations[0].contains("fallback weakened separation"));
@@ -212,8 +248,10 @@ fn a_fallback_onto_a_different_model_preserves_separation() {
         RoleAssignment::new(AgentRole::Reviewer, "third@bf16", "coding-cloud", "c"),
     ];
 
-    assert!(preserves_separation_after_fallback(&before, &after, &SeparationPolicy::default())
-        .satisfied);
+    assert!(
+        preserves_separation_after_fallback(&before, &after, &SeparationPolicy::default())
+            .satisfied
+    );
 }
 
 #[test]
@@ -235,7 +273,11 @@ fn a_handoff_carries_summaries_and_artifacts_not_a_transcript() {
 
 #[test]
 fn an_empty_handoff_renders_explicit_none_sections() {
-    let handoff = Handoff::new(AgentRole::Planner, AgentRole::Implementer, "Plan is in plan.md.");
+    let handoff = Handoff::new(
+        AgentRole::Planner,
+        AgentRole::Implementer,
+        "Plan is in plan.md.",
+    );
 
     let markdown = handoff.to_markdown();
 

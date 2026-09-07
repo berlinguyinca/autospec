@@ -206,7 +206,8 @@ fn resolve_harness() -> Result<HarnessKind, String> {
     if std::env::var_os("OPENCODE").is_some() || std::env::var_os("OPENCODE_SESSION_ID").is_some() {
         return Ok(HarnessKind::OpenCode);
     }
-    if std::env::var_os("PI_CODING_AGENT").is_some() || std::env::var_os("PI_SESSION_ID").is_some() {
+    if std::env::var_os("PI_CODING_AGENT").is_some() || std::env::var_os("PI_SESSION_ID").is_some()
+    {
         return Ok(HarnessKind::Pi);
     }
     for (binary, kind) in [

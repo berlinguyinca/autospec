@@ -181,7 +181,11 @@ fn load(options: &Options) -> Result<Loaded, CommandFailure> {
         },
     )?;
     let workspace: Workspace = read(&store, &InitiativeArtifact::WorkspaceRepositories)?;
-    let plan_version = latest(&store, ArtifactFamily::ArchitecturePlan, "architecture plan")?;
+    let plan_version = latest(
+        &store,
+        ArtifactFamily::ArchitecturePlan,
+        "architecture plan",
+    )?;
     let plan: ArchitecturePlan = read(
         &store,
         &InitiativeArtifact::ArchitecturePlan {
@@ -332,7 +336,10 @@ fn validate(options: &Options) -> Result<(), CommandFailure> {
             })
         );
     } else if problems.is_empty() {
-        println!("{}: definition, plan, and graph agree", loaded.initiative.id);
+        println!(
+            "{}: definition, plan, and graph agree",
+            loaded.initiative.id
+        );
     } else {
         println!("{}: {} problem(s)", loaded.initiative.id, problems.len());
         for problem in &problems {

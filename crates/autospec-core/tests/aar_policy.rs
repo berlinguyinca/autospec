@@ -2,9 +2,7 @@
 
 use autospec_core::aar::classify::{ClassificationInput, Complexity, Risk, TaskClass};
 use autospec_core::aar::inferweave::LatencyPriority;
-use autospec_core::aar::policy::{
-    decide, role_capabilities, PolicyConfig, POLICY_SCHEMA_VERSION,
-};
+use autospec_core::aar::policy::{decide, role_capabilities, PolicyConfig, POLICY_SCHEMA_VERSION};
 use autospec_core::aar::profile::ModelProfileRegistry;
 use autospec_core::aar::reasoning::{ReasoningBudget, ReasoningLimits};
 use autospec_core::aar::topology::AgentRole;
@@ -135,7 +133,9 @@ fn an_unroutable_request_explains_that_no_model_was_eligible() {
     .expect("config is valid");
 
     assert_eq!(decision.selected_model(), None);
-    assert!(decision.explain().contains("No profile in registry empty-v1"));
+    assert!(decision
+        .explain()
+        .contains("No profile in registry empty-v1"));
 }
 
 #[test]
@@ -251,7 +251,10 @@ fn critical_risk_work_carries_a_security_reviewer_and_a_larger_budget() {
     .expect("config is valid");
 
     assert_eq!(decision.policy.risk, Risk::Critical);
-    assert!(decision.policy.topology.contains(AgentRole::SecurityReviewer));
+    assert!(decision
+        .policy
+        .topology
+        .contains(AgentRole::SecurityReviewer));
     assert!(decision.policy.reasoning.budget >= ReasoningBudget::Complex);
 }
 

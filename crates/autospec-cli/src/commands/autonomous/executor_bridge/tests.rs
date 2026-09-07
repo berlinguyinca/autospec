@@ -41,9 +41,9 @@ mod draft_release;
 mod explore_pin_staleness;
 mod full_suite;
 mod generation_input;
+mod harness_death;
 #[cfg(target_os = "linux")]
 mod harness_model_routing;
-mod harness_death;
 #[cfg(target_os = "linux")]
 mod harness_supervisor;
 #[cfg(target_os = "linux")]
