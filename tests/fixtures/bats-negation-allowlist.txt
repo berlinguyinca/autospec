@@ -28,7 +28,7 @@ tests/autospec-monitor-recovery-split.bats 4
 tests/autospec-run-agent-env-contract.bats 3
 tests/autospec-run-wait-failure.bats 2
 tests/autospec-startup-self-update.bats 1
-tests/autospec/autonomous-promote-open-issues.bats 25
+tests/autospec/autonomous-promote-open-issues.bats 0
 tests/autospec/list-groomable.bats 1
 tests/autospec/test_conductor_wiring.bats 8
 tests/batch-size-gating.bats 2

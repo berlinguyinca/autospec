@@ -3,6 +3,8 @@
 # orchestrator: safety → classify → eligibility → promote/groom/split/hold,
 # policy-gated. All sub-scripts and `gh` are stubbed; no live GitHub, no live LLM.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   TMP="$(mktemp -d)"; mkdir -p "$TMP/bin"
   SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/autonomous-promote-open-issues.sh"
@@ -109,10 +111,12 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_PASS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'remove-label needs-classify' "$GH_LOG"
   grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
-  ! grep -Fq -- '--body-file' "$GH_LOG"
+  run grep -Fq -- '--body-file' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'issue comment' "$GH_LOG"
 }
 
@@ -120,9 +124,11 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_BLOCK"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
-  ! grep -q 'add-label security:quarantined' "$GH_LOG"
+  run grep -q 'add-label security:quarantined' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
   printf '%s' "$output" | jq -e '.promoted | length == 0' >/dev/null
 }
@@ -136,10 +142,13 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
-  ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  run grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'issue comment 42 .*--body-file' "$GH_LOG"
-  ! grep -q 'issue edit 42 .*--body-file' "$GH_LOG"
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'issue edit 42 .*--body-file' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
 
@@ -148,8 +157,10 @@ teardown() { rm -rf "$TMP"; }
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
   printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
@@ -160,8 +171,10 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label hold:needs-human' "$GH_LOG"
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'add-label groom:proposed' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label groom:proposed' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.held[] | select(.reason | test("fill-"))' >/dev/null
 }
 
@@ -174,8 +187,10 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label hold:needs-human' "$GH_LOG"
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'add-label groom:proposed' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label groom:proposed' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.held[] | select(.reason | test("fill-empty-body"))' >/dev/null
 }
 
@@ -185,8 +200,10 @@ teardown() { rm -rf "$TMP"; }
   mk_view_labels '{"name":"needs-autospec-template"},{"name":"groom:proposed"}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label groom:proposed' "$GH_LOG"   # not re-proposed
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'add-label groom:proposed' "$GH_LOG"   # not re-proposed
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.skipped[] | select(.reason=="already-groomed")' >/dev/null
 }
 
@@ -205,9 +222,12 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
   grep -q 'issue comment 42 .*--body-file' "$GH_LOG"
-  ! grep -q 'add-label ctx:' "$GH_LOG"
-  ! grep -q 'reasoning:' "$GH_LOG"
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'add-label ctx:' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'reasoning:' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   ! grep -q 'autospec issue promote' "$GH_LOG"
 }
 
@@ -215,8 +235,10 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_AMBIGUOUS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'add-label security:quarantined' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'add-label security:quarantined' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.held[] | select(.issue==42 and .reason=="rust-safety-review")' >/dev/null
 }
 
@@ -237,8 +259,10 @@ teardown() { rm -rf "$TMP"; }
   mk_view_labels '{"name":"needs-autospec-template"}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label ctx:' "$GH_LOG"
-  ! grep -q 'reasoning:' "$GH_LOG"
+  run grep -q 'add-label ctx:' "$GH_LOG"
+  [ "$status" -eq 1 ]
+  run grep -q 'reasoning:' "$GH_LOG"
+  [ "$status" -eq 1 ]
   ! grep -q 'remove-label needs-classify' "$GH_LOG"
 }
 
@@ -247,9 +271,11 @@ teardown() { rm -rf "$TMP"; }
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  run grep -q 'add-label auto-implement' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
-  ! grep -q 'autospec issue promote' "$GH_LOG"
+  run grep -q 'autospec issue promote' "$GH_LOG"
+  [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '.routed[] | select(.issue==42 and .action=="groom-canary")' >/dev/null
 }
 
@@ -257,6 +283,7 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_PASS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  ! grep -q 'autospec queue review-safety' "$GH_LOG"
+  run grep -q 'autospec queue review-safety' "$GH_LOG"
+  [ "$status" -eq 1 ]
   grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
 }
