@@ -207,21 +207,41 @@ fn review_safety_candidate(
     }
 }
 
+type ReviewOptionSetter =
+    fn(&mut ReviewSafetyOptions, &[String], &mut usize) -> Result<(), CommandFailure>;
+
+const REVIEW_OPTION_SETTERS: &[(&str, ReviewOptionSetter)] = &[
+    ("--repo", set_review_repo),
+    ("--limit", set_review_limit),
+    ("--issue", set_review_issue),
+    ("--recheck", set_review_recheck),
+];
+
 fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, CommandFailure> {
     let mut options = ReviewSafetyOptions::default();
     let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--repo" => set_review_repo(&mut options, args, &mut index)?,
-            "--limit" => set_review_limit(&mut options, args, &mut index)?,
-            "--issue" => set_review_issue(&mut options, args, &mut index)?,
-            "--recheck" => options.recheck = true,
-            "--help" | "-h" => return review_safety_help_error(),
-            option => return unknown_review_safety_option(option),
+        let option = args[index].as_str();
+        match REVIEW_OPTION_SETTERS
+            .iter()
+            .find(|(name, _)| *name == option)
+        {
+            Some((_, setter)) => setter(&mut options, args, &mut index)?,
+            None if matches!(option, "--help" | "-h") => return review_safety_help_error(),
+            None => return unknown_review_safety_option(option),
         }
         index += 1;
     }
     Ok(options)
+}
+
+fn set_review_recheck(
+    options: &mut ReviewSafetyOptions,
+    _args: &[String],
+    _index: &mut usize,
+) -> Result<(), CommandFailure> {
+    options.recheck = true;
+    Ok(())
 }
 
 fn set_review_issue(
