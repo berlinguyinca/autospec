@@ -530,3 +530,101 @@ EOF
   [[ "$output" == *"0 page(s) on disk"* ]]
   [[ "$output" != *"docs/NOTES.txt"* ]]
 }
+
+# ── Scope target validation (issue #3211) ────────────────────────────────────
+#
+# scopes[].path shares the {id, label, path} shape with audiences[] and the
+# same .md resolution rule: a path ending in .md names a FILE, anything else
+# names a DIRECTORY. A scope whose target is absent must fail loudly (non-zero
+# exit, entry id printed) instead of checking nothing (vacuous drift pass).
+
+seed_scope_config() {
+  # Unquoted heredoc on purpose: $1 (the scope entries) must expand.
+  # The fixed lines carry no other shell-active characters.
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<EOF
+documentation:
+  audiences:
+    - {name: user, path: docs/user, focus: "tasks"}
+  scopes:
+$1
+EOF
+}
+
+@test "#3211: a scope naming a missing .md file exits non-zero and prints the id" {
+  seed_scope_config '    - {id: troubleshooting, path: docs/TROUBLESHOOTING.md}
+    - {id: repository-overview, path: README.md}'
+  touch README.md
+  run node "$ORCH" --full
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"troubleshooting"* ]]
+  [[ "$output" == *"docs/TROUBLESHOOTING.md"* ]]
+}
+
+@test "#3211: a scope naming a missing directory exits non-zero and prints the id" {
+  seed_scope_config '    - {id: operations-runbooks, path: docs/runbooks}'
+  run node "$ORCH" --full
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"operations-runbooks"* ]]
+  [[ "$output" == *"docs/runbooks"* ]]
+}
+
+@test "#3211: .md scope path pointing at a directory is a mistyped target" {
+  seed_scope_config '    - {id: overview, path: README.md}'
+  mkdir -p README.md
+  run node "$ORCH" --full
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"overview"* ]]
+}
+
+@test "#3211: every scope target present exits 0 and full proceeds" {
+  seed_scope_config '    - {id: repository-overview, path: README.md}
+    - {id: operations-runbooks, path: docs/runbooks}'
+  touch README.md
+  mkdir -p docs/runbooks
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"full:"* ]]
+}
+
+@test "#3211: missing scope target fails --audit too (not only --full)" {
+  seed_scope_config '    - {id: api-reference, path: docs/API_REFERENCE.md}'
+  run node "$ORCH" --audit
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"api-reference"* ]]
+}
+
+@test "#3211: .autospec/autospec.yml scopes[] all resolve against the repo tree" {
+  REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+  export REPO_ROOT SCOPECFG="$REPO_ROOT/.autospec/autospec.yml"
+  export CONFMOD="${BATS_TEST_DIRNAME}/../scripts/doc-config.mjs"
+  # Real files, no mocks: load the ACTUAL repo config and stat every scope
+  # target with the SAME shared .md resolution rule the orchestrator uses
+  # (isSingleFileDocPath, issue #2968/#3211) — not a re-derived copy.
+  export GENMOD="${BATS_TEST_DIRNAME}/../scripts/gen-audience-docs.mjs"
+  run node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    Promise.all([
+      import(process.env.CONFMOD),
+      import(process.env.GENMOD),
+    ]).then(([conf, gen]) => {
+      const c = conf.loadConfig(process.env.SCOPECFG);
+      const isSingleFileDocPath = gen.isSingleFileDocPath;
+      const scopes = (c.documentation && c.documentation.scopes) || [];
+      if (!Array.isArray(scopes) || scopes.length === 0) { console.error("no scopes parsed"); process.exit(1); }
+      let bad = 0;
+      for (const s of scopes) {
+        if (!s.path) { console.error(`scope ${s.id} has no path`); bad++; continue; }
+        const abs = path.resolve(process.env.REPO_ROOT, s.path);
+        const singleFile = isSingleFileDocPath(s.path);
+        let ok = false;
+        try { ok = singleFile ? fs.statSync(abs).isFile() : fs.statSync(abs).isDirectory(); } catch {}
+        if (!ok) { console.error(`scope ${s.id} -> ${s.path} does not resolve (${singleFile ? "file" : "directory"})`); bad++; }
+      }
+      if (bad) process.exit(bad);
+      console.log(`scopes-ok(${scopes.length})`);
+    }).catch(e => { console.error(e); process.exit(1); });
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scopes-ok"* ]]
+}

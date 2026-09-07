@@ -151,6 +151,16 @@ function scopeBlock(srcGlobs, reason, extraLines = []) {
   ].filter(l => l !== '').join('\n');
 }
 
+// ── Single-file doc resolution rule (issue #2968; extended to scopes[] in #3211) ──
+//
+// The ONE rule for `{id, name, path}` doc targets: a path whose final segment
+// ends in `.md` (trailing slashes ignored) names a single document FILE at that
+// exact path; any other path names a DIRECTORY subtree. Both audiences[] and
+// scopes[] resolve through this predicate — never re-derive the rule inline.
+export function isSingleFileDocPath(p) {
+  return typeof p === 'string' && p !== '' && p.replace(/\/+$/, '').endsWith('.md');
+}
+
 // Reject path components that would escape the documentation tree. Audience
 // paths and feature slugs flow into on-disk write targets (path.join(outputDir,
 // page.path)); a value like `../outside` or an absolute path must never let a
@@ -734,7 +744,8 @@ export async function generateAudienceDocs({
     const base = audience.path.replace(/\/+$/, '');
     // Single-file mode (issue #2968): a path ending in .md renders ONE composed
     // document at that exact path. Anything else keeps the folder contract.
-    const isSingleFile = base.endsWith('.md');
+    // Shared with scopes[] resolution (issue #3211) via isSingleFileDocPath.
+    const isSingleFile = isSingleFileDocPath(audience.path);
 
     let pageSpecs;
     if (isSingleFile) {

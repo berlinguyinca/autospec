@@ -521,6 +521,10 @@ export function loadConfig(configPath) {
   if (Array.isArray(doc.features)) documentation.features = doc.features;
   if (doc.features_file != null) documentation.features_file = doc.features_file;
 
+  // scopes[] (preserved verbatim like audiences): the drift-check target set.
+  // The orchestrator validates every scopes[].path against the tree (issue #3211).
+  if (Array.isArray(doc.scopes)) documentation.scopes = doc.scopes;
+
   // Pass through the `documentation.coverage` block verbatim (when present) so
   // the orchestrator can read answerability-audit knobs via resolveCoverageOptions.
   const docDocRaw = (typeof doc.documentation === 'object' && doc.documentation !== null && !Array.isArray(doc.documentation))
