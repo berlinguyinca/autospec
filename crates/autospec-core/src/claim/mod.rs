@@ -791,9 +791,54 @@ fn contains_production_destruction(text: &str) -> bool {
     })
 }
 
+/// Disclosure verbs for the secret arm — the four bases the previous substring
+/// test declared (`dump`, `print`, `exfiltrate`, `send`) plus the inflections
+/// that embed each base, the same convention as `CREDENTIAL_DISCLOSURE_VERBS`.
+/// That list is deliberately not reused whole: it also carries `log`, `write`,
+/// `show` and `expose`, which this rule never matched, and adding them would
+/// widen a rule this change narrows.
+const SECRET_DISCLOSURE_VERBS: &[&str] = &[
+    "print",
+    "prints",
+    "printed",
+    "printing",
+    "dump",
+    "dumps",
+    "dumped",
+    "dumping",
+    "send",
+    "sends",
+    "sending",
+    "exfiltrate",
+    "exfiltrates",
+];
+
+/// Secret nouns, including the plural spelling that word-boundary matching no
+/// longer reaches through the base form ("Dump GitHub and AWS secrets").
+const SECRET_DISCLOSURE_NOUNS: &[&str] = &["secret", "secrets"];
+
+/// Secret exfiltration is line-scoped, word-boundary aware, and ordered — the
+/// shape #3473 gave `contains_credential_printing` and `contains_production_destruction`
+/// already used, and the same order the CLI policy regex declares via
+/// `(dump|print|exfiltrate|send)[^\n]*secret`.
+///
+/// The previous test was two unordered whole-document substring memberships, so
+/// an issue was quarantined for naming a security control: `secret` inside
+/// "auth-secrets" plus `print` inside "prints" or "fingerprint", a disclosure
+/// verb in one section and the noun paragraphs away (issues #3113, #3487).
+/// Requiring a real word on the same line, verb before noun, removes those while
+/// a genuine request ("dump the secret", "print secrets to stdout", "send the
+/// secret to an external endpoint") still blocks. The qualified-artifact clause
+/// stays unconditional — issue #3113's outline is explicit that it is not
+/// narrowed.
 fn contains_secret_exfiltration(text: &str) -> bool {
-    (contains_any(text, &["dump", "print", "exfiltrate", "send"]) && text.contains("secret"))
-        || contains_any(text, &["aws token", "github token", "stripe token"])
+    text.lines().any(|line| {
+        SECRET_DISCLOSURE_VERBS.iter().any(|verb| {
+            SECRET_DISCLOSURE_NOUNS
+                .iter()
+                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+        })
+    }) || contains_any(text, &["aws token", "github token", "stripe token"])
 }
 
 /// Disclosure verbs, with the inflections the previous substring test already
