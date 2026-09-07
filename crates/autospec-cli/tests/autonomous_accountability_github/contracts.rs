@@ -15,14 +15,14 @@ fn github_project_transport_commands_have_explicit_owner_contracts() {
                 owner: "berlinguyinca".into(),
             },
             vec![
-                "project",
-                "list",
-                "--owner",
-                "berlinguyinca",
-                "--format",
-                "json",
-                "--limit",
-                "500",
+                "api",
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-f",
+                "query=query($owner:String!,$endCursor:String){repositoryOwner(login:$owner){... on Organization{projectsV2(first:100,after:$endCursor){nodes{number title}pageInfo{hasNextPage endCursor}}}... on User{projectsV2(first:100,after:$endCursor){nodes{number title}pageInfo{hasNextPage endCursor}}}}}",
+                "-F",
+                "owner=berlinguyinca",
             ],
             None,
         ),
@@ -643,4 +643,36 @@ fn launcher_binds_verified_epic_before_any_conductor_spawn_and_supervisor_reuses
         foreground_binding < foreground_cycles,
         "inherited foreground workers must verify accountability before work"
     );
+}
+
+#[test]
+fn autonomous_accountability_github_managed_project_marker_source_exposes_portfolio_recovery_contracts(
+) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let github = fs::read_to_string(root.join("src/commands/managed_project/github.rs")).unwrap();
+    let parser =
+        fs::read_to_string(root.join("src/commands/managed_project/github/parse.rs")).unwrap();
+
+    for required in [
+        "MarkerDisposition::Exact",
+        "create_unknown",
+        "exact_nonce_title",
+        "record_created_project",
+    ] {
+        assert!(
+            github.contains(required),
+            "managed Project orchestration must contain {required}"
+        );
+    }
+    for required in [
+        "kind: spec_portfolio",
+        "recovery-capsule:",
+        "parse_project_candidates",
+        "totalCount",
+    ] {
+        assert!(
+            parser.contains(required),
+            "managed Project marker parser must contain {required}"
+        );
+    }
 }
