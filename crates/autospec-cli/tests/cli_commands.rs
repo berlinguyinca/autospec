@@ -580,12 +580,14 @@ fn lint_implementation_opt_in_test_gates_do_not_require_pre_commit_mode() {
         .expect("assertion density lint runs");
 
     assert_eq!(vacuous_output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_GREP_INVERSE_OR_TRUE:")
-    );
-    assert!(!String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_OR_TRUE:"));
+    let vacuous_stdout = String::from_utf8_lossy(&vacuous_output.stdout).into_owned();
+    let vacuous_codes = lint_finding_codes(&vacuous_stdout);
+    assert!(vacuous_codes.contains("VACUOUS_GREP_INVERSE_OR_TRUE"));
+    assert!(!vacuous_codes.contains("VACUOUS_OR_TRUE"));
     assert_eq!(density_output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&density_output.stdout).contains("ASSERTION_DENSITY:"));
+    let density_stdout = String::from_utf8_lossy(&density_output.stdout).into_owned();
+    let density_codes = lint_finding_codes(&density_stdout);
+    assert!(density_codes.contains("ASSERTION_DENSITY"));
 }
 
 #[test]
