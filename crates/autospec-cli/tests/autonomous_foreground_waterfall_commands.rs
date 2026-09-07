@@ -5,6 +5,13 @@ mod foreground_waterfall_fixture;
 
 use foreground_waterfall_fixture::ForegroundWaterfallFixture;
 
+/// Native tier2 dispatch is only hermetic because `foreground_waterfall_fixture`
+/// pins `AUTOSPEC_HANDOFF_DISPATCHER_KIND=codex`. Without that pin,
+/// `tier2_runner::resolve_harness` falls back to ambient harness detection: in a
+/// Claude Code session (`CLAUDECODE` set) it selects Claude, whose binary the
+/// fixture does not fake, so the spawn fails before the native executor runs and
+/// `executor_launches()` reads 0 instead of 1. The pin keeps this test stable
+/// across operator/CI environments (regression fixed in a02618c6).
 #[test]
 fn repeated_empty_foreground_cycles_reach_and_retain_failed_native_tier2() {
     let fixture = ForegroundWaterfallFixture::empty_repository();

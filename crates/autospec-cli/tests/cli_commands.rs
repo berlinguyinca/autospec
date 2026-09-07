@@ -743,8 +743,28 @@ fn lint_implementation_does_not_follow_symlinked_diff_paths_outside_the_reposito
     assert!(output.stderr.is_empty());
 }
 
+/// The reuse-lens lint tests shell out to the system `rg` (ripgrep) binary:
+/// `FilesystemRepositoryIndex::populate_reuse_evidence` (commands/lint.rs) runs
+/// `rg --files` / `rg -l` and *fails open* when the binary is missing —
+/// `Command::new("rg").output().ok()?` yields `None`, so no caller evidence is
+/// gathered, no `NEW_ABSTRACTION_SINGLE_CALLER` finding is emitted, and the
+/// command exits 0. On a host without `rg` the "expect exit 1" assertions below
+/// degrade into a misleading `Some(0)` vs `Some(1)` mismatch instead of a clear
+/// diagnostic. Assert `rg` is present up front so the environmental gap is
+/// self-explanatory.
+fn require_ripgrep_for_reuse_lens() {
+    let probe = Command::new("rg").arg("--version").output();
+    assert!(
+        probe.is_ok(),
+        "reuse-lens lint tests require the system `rg` (ripgrep) binary on PATH: \n\
+         the detector shells out to `rg` and fails open (no findings, exit 0) when \n\
+         it is absent. Install ripgrep or add it to PATH before running these tests."
+    );
+}
+
 #[test]
 fn lint_implementation_reuse_lens_ignores_hidden_ignored_and_non_shell_evidence() {
+    require_ripgrep_for_reuse_lens();
     let root = temp_dir("autospec-lint-implementation-reuse-evidence");
     make_git_repo(&root, None);
     std::fs::create_dir_all(root.join("scripts")).expect("scripts directory");
@@ -819,6 +839,7 @@ fn lint_implementation_reuse_lens_ignores_hidden_ignored_and_non_shell_evidence(
 
 #[test]
 fn lint_implementation_reuse_lens_excludes_an_in_repo_diff_from_abstraction_callers() {
+    require_ripgrep_for_reuse_lens();
     let root = temp_dir("autospec-lint-implementation-in-repo-diff");
     make_git_repo(&root, None);
     std::fs::create_dir_all(root.join("src")).expect("source directory");
