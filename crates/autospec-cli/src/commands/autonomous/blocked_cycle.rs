@@ -24,7 +24,9 @@ pub(super) const EXECUTOR_RECEIPT_FAILURE_PAUSE: &str = "executor_receipt_failed
 /// the backlog under that name produces an invalid `AllBlocked` outcome.
 const RETRY_EXHAUSTION_GOVERNOR_KEY: &str = "retry_exhaustion_recovered";
 
-/// Retire a persisted pause the conductor can never resume.
+/// Retire a persisted state the conductor can never resume: an exhausted
+/// retry pause, or a sealed `AllBlocked` backlog (see
+/// [`recover_sealed_backlog`]).
 ///
 /// `record_retryable_dispatch` clears `resume_phase` when the retry limit is
 /// exhausted, so `resume()` fails with "paused conductor state requires explicit
@@ -43,6 +45,11 @@ pub(super) fn abandon_exhausted_retries(
     path: &std::path::Path,
     state: ConductorState,
 ) -> Result<ConductorState, String> {
+    if state.phase() == ConductorPhase::AllBlocked {
+        let recovered = recover_sealed_backlog(state)?;
+        persist_foreground_state(path, &recovered)?;
+        return Ok(recovered);
+    }
     if state.phase() != ConductorPhase::Paused
         || state.pause_reason() != Some(RETRY_LIMIT_EXHAUSTED_PAUSE)
     {
@@ -61,6 +68,37 @@ pub(super) fn abandon_exhausted_retries(
     };
     persist_foreground_state(path, &state)?;
     Ok(state)
+}
+
+/// Recover a persisted `AllBlocked` seal at load time, the way
+/// [`abandon_exhausted_retries`] recovers a persisted pause.
+///
+/// `foreground_cycle_is_loopable` accepts `AllBlocked` because a sealed backlog
+/// stops Tier 1 selection within a running loop, not the conductor itself. On a
+/// fresh start it is not: `run_foreground_with_lease` rejects any phase that is
+/// not `Scan`, so a persisted seal made every conductor start fail and a
+/// supervisor restarted it into the identical file. That is the same shape as
+/// the retry-exhausted pause: in-loop containment works, the persisted state
+/// poisons startup.
+///
+/// A fresh process must re-scan, so the seal unseals back to `Scan`. The
+/// governor's identity (reason and issue set) is re-recorded as one charged
+/// cycle, so `record_blocked_backlog_cycle` keeps counting the same issue and
+/// the seal still bounds retries in the new run instead of starting a fresh
+/// budget.
+fn recover_sealed_backlog(state: ConductorState) -> Result<ConductorState, String> {
+    if state.phase() != ConductorPhase::AllBlocked {
+        return Ok(state);
+    }
+    let reason = state.blocked_backlog_reason().map(str::to_string);
+    let issues = state.blocked_backlog_issues().to_vec();
+    let recovered = state.clear_blocked_backlog_governor()?;
+    match (reason, issues) {
+        (Some(reason), issues) if !issues.is_empty() => {
+            recovered.record_blocked_backlog_cycle(reason, issues)
+        }
+        _ => Ok(recovered),
+    }
 }
 
 /// The governor key a lost claim is charged to.
