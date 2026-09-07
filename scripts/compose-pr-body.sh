@@ -20,15 +20,19 @@
 # Usage:
 #   compose-pr-body.sh --issue <n> [--base <ref>] [--head <ref>]
 #                      [--summary-file <path>] [--ac-test <path>]
+#   compose-pr-body.sh --assert-closes <body-file>
 #
 # Defaults: --base origin/${AUTOSPEC_BASE_BRANCH:-main}, --head HEAD,
 #           --ac-test tests/ac/issue-<n>.bats
 #
 # Exit codes:
-#   0  a body was printed
-#   1  usage error (missing/invalid --issue, unreadable --summary-file)
+#   0  a body was printed, or the asserted body carries `Closes #<n>`
+#   1  usage error (missing/invalid --issue, unreadable --summary-file,
+#      missing --assert-closes file)
 #   3  no commits in <base>..<head> — there is nothing to open a PR for, and the
 #      caller must not run `gh pr create`
+#   4  the asserted body carries no `Closes #<n>` keyword — the caller must not
+#      run `gh pr create`
 #
 # bash 3.2+. set -u; if/then/fi one-sided conditionals; no RETURN traps.
 
@@ -42,6 +46,7 @@ BASE="origin/${AUTOSPEC_BASE_BRANCH:-main}"
 HEAD_REF="HEAD"
 SUMMARY_FILE=
 AC_TEST=
+ASSERT_FILE=
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -61,9 +66,29 @@ while [ $# -gt 0 ]; do
         --ac-test)
             if [ $# -lt 2 ]; then _die '--ac-test requires a path'; fi
             AC_TEST="$2"; shift 2 ;;
+        --assert-closes)
+            if [ $# -lt 2 ]; then _die '--assert-closes requires a path'; fi
+            ASSERT_FILE="$2"; shift 2 ;;
         *) _die "unknown option: $1" ;;
     esac
 done
+
+# ── pre-open closing-keyword assertion ────────────────────────────────────────
+# PR #3114 merged with only a title-style (#3048) reference in the title and no
+# closing keyword in the body; the issue stayed open for four days. GitHub
+# auto-closes on the BODY keyword, never on a title reference, so the gate runs
+# against the body file before `gh pr create` and fails closed with its own
+# exit code. It is opt-in per body: a PR that intentionally closes nothing
+# simply never asserts.
+if [ -n "$ASSERT_FILE" ]; then
+    if [ ! -f "$ASSERT_FILE" ]; then
+        _die "--assert-closes not found: $ASSERT_FILE"
+    fi
+    if grep -Eq 'Closes #[0-9]+' "$ASSERT_FILE"; then
+        exit 0
+    fi
+    _die "PR body carries no closing keyword (Closes #<issue>); do not run gh pr create: $ASSERT_FILE" 4
+fi
 
 if [ -z "$ISSUE" ]; then _die '--issue is required'; fi
 case "$ISSUE" in
