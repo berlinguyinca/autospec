@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::agent::session::{
+    CreationIntent, NativeSessionV1, SessionCapabilities, SessionEvent, SessionHarness,
+    SessionLineage,
+};
 use crate::state::json::{JsonParser, JsonValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +134,61 @@ impl SafeModePolicy {
         }
         Ok(())
     }
+}
+
+/// Provider-neutral coding agent runtime.
+///
+/// [`CodingAgentRuntime::execute_once`] preserves the existing one-shot
+/// `AgentTask`/`AgentResult` handoff contract; the session operations carry
+/// the "Native session delta" of
+/// `docs/specs/2026-09-01-observational-memory-native-sessions-readiness-integration-delta-design.md`
+/// (scoped native IDs, resume/inspect/attach, heartbeat/lease/fencing,
+/// reconciliation, truthful capability reporting, typed event streams).
+pub trait CodingAgentRuntime {
+    /// Run a one-shot task under the existing `AgentTask`/`AgentResult`
+    /// compatibility contract.
+    fn execute_once(&self, task: &AgentTask) -> Result<AgentResult, String>;
+
+    /// Create a session idempotently. Retrying a crashed create with the same
+    /// `idempotency_key` must return the already-created session and must
+    /// never create a second one. `capabilities` is the caller's truthful
+    /// report of what the harness actually supports; a harness fallback maps
+    /// to a degraded capability set, never a widened one.
+    fn create_session(
+        &mut self,
+        harness: SessionHarness,
+        intent: CreationIntent,
+        idempotency_key: &str,
+        lineage: SessionLineage,
+        capabilities: SessionCapabilities,
+    ) -> Result<NativeSessionV1, String>;
+
+    /// Resume the session under a new lease epoch, invalidating every stale
+    /// client epoch. Lineage is preserved across the resume.
+    fn resume(&mut self, session_id: &str, holder: &str) -> Result<NativeSessionV1, String>;
+
+    /// Inspect the session without mutating it.
+    fn inspect(&self, session_id: &str) -> Option<NativeSessionV1>;
+
+    /// Attach to the session under `lease_epoch`. A stale epoch must be
+    /// rejected and must not mutate the session.
+    fn attach(
+        &self,
+        session_id: &str,
+        holder: &str,
+        lease_epoch: u64,
+    ) -> Result<NativeSessionV1, String>;
+
+    /// Record a heartbeat under the lease fence.
+    fn heartbeat(&mut self, session_id: &str, holder: &str, lease_epoch: u64)
+        -> Result<(), String>;
+
+    /// Reconcile live sessions against one work item; returns every session
+    /// with that lineage, ordered by scoped ID.
+    fn reconcile(&self, work_item: &str) -> Vec<NativeSessionV1>;
+
+    /// The session's typed event stream, in order.
+    fn events(&self, session_id: &str) -> Option<Vec<SessionEvent>>;
 }
 
 pub fn render_handoff_prompt(agent: &str, task: &AgentTask) -> String {
