@@ -46,9 +46,11 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
     // suites above them they are full-plan only and `fast.ids()` stays at 137.
     // +2 for the loud-failure verification gates (#3535). The two counts here
     // were left one behind by #3497, which bumped the catalog and runner
-    // assertions but not this file; they are back in step at 159/154.
-    assert_eq!(full.ids().len(), 159);
-    assert_eq!(full.unique_ids().len(), 154);
+    // assertions but not this file; they were back in step at 159/154.
+    // +2 for the epic #3104 language-axis suites; both are BatsSuite owners,
+    // full-plan only, so `fast.ids()` stays at 137 below.
+    assert_eq!(full.ids().len(), 161);
+    assert_eq!(full.unique_ids().len(), 156);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");

@@ -38,9 +38,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
     // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code
     // intelligence (#3483); +2: suites the ratchet caught (#3485); +1: lint (#3497);
-    // +2: the loud-failure verification gates (#3535).
-    assert_eq!(calls.len(), 159);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 154); // a call no gate repeats
+    // +2: the loud-failure verification gates (#3535);
+    // +2: the epic #3104 language-axis suites.
+    assert_eq!(calls.len(), 161);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 156); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -69,14 +70,15 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 170); // +1: #3483; +2: #3485; +1: #3497; +2: #3535
+    // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +2: #3104.
+    assert_eq!(frozen_catalog_ids().len(), 172);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 170);
+    assert_eq!(ids.len(), 172); // +2: #3104 language-axis suites
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -688,6 +690,16 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         (
             "check_language_table",
             "tests/unit/test_language_table.bats",
+        ),
+        // Registered by #3104 (epic: language selection axis): the
+        // cross-language boundary block scanner and the Phase 5.5 audit.
+        (
+            "check_cross_language_boundaries",
+            "tests/unit/test_cross_language_boundaries.bats",
+        ),
+        (
+            "check_language_axis_audit",
+            "tests/unit/test_language_axis_audit.bats",
         ),
         // Registered by #3485: both suites shipped during the 2026-09-02 batch
         // with no catalog owner, which is what the #3360 ratchet caught.

@@ -142,8 +142,11 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 159); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535)
-    assert_eq!(full.unique_ids().len(), 154); // reached directly, duplicated by nothing
+    // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan
+    // owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535);
+    // +2: epic #3104 language-axis suites (BatsSuite owners, full-plan only).
+    assert_eq!(full.ids().len(), 161);
+    assert_eq!(full.unique_ids().len(), 156); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -2013,6 +2016,15 @@ fn runner_executes_the_newly_registered_bats_suites() {
         (
             "check_language_table",
             "tests/unit/test_language_table.bats",
+        ),
+        // Registered by #3104 (epic: language selection axis).
+        (
+            "check_cross_language_boundaries",
+            "tests/unit/test_cross_language_boundaries.bats",
+        ),
+        (
+            "check_language_axis_audit",
+            "tests/unit/test_language_axis_audit.bats",
         ),
         (
             "check_proxy_direct_borrow_lifetime",

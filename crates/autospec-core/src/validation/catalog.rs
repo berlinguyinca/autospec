@@ -157,6 +157,12 @@ impl ValidationCheck {
                 bats_suite("tests/unit/test_language_axis_integration.bats")
             }
             "check_language_table" => bats_suite("tests/unit/test_language_table.bats"),
+            // Registered by #3104 (epic: language selection axis): the
+            // cross-language boundary block scanner and the Phase 5.5 audit.
+            "check_cross_language_boundaries" => {
+                bats_suite("tests/unit/test_cross_language_boundaries.bats")
+            }
+            "check_language_axis_audit" => bats_suite("tests/unit/test_language_axis_audit.bats"),
             "check_proxy_direct_borrow_lifetime" => {
                 bats_suite("tests/unit/proxy-direct-borrow-lifetime.bats")
             }
