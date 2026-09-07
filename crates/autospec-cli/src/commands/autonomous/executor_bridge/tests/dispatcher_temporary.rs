@@ -1,4 +1,4 @@
-// executor_bridge tests: dispatcher / temporary — 7 cases.
+// executor_bridge tests: dispatcher / temporary — 8 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
@@ -143,8 +143,6 @@ fn autonomous_executor_bridge_builds_exact_claude_arguments() {
         "Bash(shellcheck *)",
         "Bash(bash -n)",
         "Bash(bash -n *)",
-        "Bash(./scripts/validate-all.sh)",
-        "Bash(./scripts/validate-all.sh *)",
     ] {
         assert!(
             CLAUDE_LOCAL_TOOLS.split(',').any(|tool| tool == required),
@@ -196,6 +194,31 @@ fn autonomous_executor_bridge_builds_exact_claude_arguments() {
         );
     }
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn autonomous_executor_bridge_allowlist_grants_no_absent_script_paths() {
+    // Break caught: an allowlist grant for a ./scripts/ binary absent from the repository
+    // is dead authority — no caller resolves the path at runtime, so the grant must not
+    // exist. Every ./scripts/... grant must resolve to a file in this repository.
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for tool in CLAUDE_LOCAL_TOOLS.split(',') {
+        let Some(granted) = tool
+            .strip_prefix("Bash(")
+            .and_then(|inner| inner.strip_suffix(')'))
+            .and_then(|inner| inner.split_whitespace().next())
+        else {
+            continue;
+        };
+        let Some(script) = granted.strip_prefix("./scripts/") else {
+            continue;
+        };
+        let path = repo_root.join("scripts").join(script);
+        assert!(
+            path.is_file(),
+            "allowlist grants {tool} but ./scripts/{script} does not exist in the repository"
+        );
+    }
 }
 
 #[cfg(unix)]
