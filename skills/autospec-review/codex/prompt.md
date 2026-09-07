@@ -34,8 +34,8 @@ normal pipeline.
 Detect your harness by checking available tools before any phase:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -43,7 +43,7 @@ Detect your harness by checking available tools before any phase:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the needed context with a bounded handoff; for Codex native subagents, use a fresh configurable independent agent and the runtime/repository frontier model instead of moving the work into the main/authoring session. When a role-specialized reviewer has a fixed unavailable model binding, the configurable fallback must receive the identical prompt, evidence, validation steps, and output schema. Record `requested_model`, `actual_model`, `fallback_reason`, and reviewed head SHA in an orchestrator-owned sidecar artifact so the reviewer verdict remains byte-exact. Never use a weaker model or self-review. If no equal-or-stronger independent reviewer can run, fail closed for merge/release decisions. Never ask the user.
 

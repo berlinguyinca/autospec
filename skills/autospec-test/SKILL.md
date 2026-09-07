@@ -380,8 +380,8 @@ Install: `npm install --save-dev @autospec/test` (wizard handles this during `--
 Detect your harness by checking available tools before dispatching work:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -389,7 +389,7 @@ Detect your harness by checking available tools before dispatching work:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
 
@@ -403,7 +403,7 @@ Hold `TIER_A` and `TIER_B` for the entire skill run.
 | Shell execution             | `Bash` tool                             | shell tool                            | `apply_patch` + shell                  | Required; skill cannot run without shell    |
 | Read-only codebase research | `Agent` (subagent_type=Explore)         | `task` agent in read-only mode        | shell `grep` / `rg`                    | In-thread grep                              |
 | Ask the user a question     | `AskUserQuestion`                       | inline prompt                         | inline prompt                          | Ask in the response and wait               |
-| Subagent model tier         | TIER_B: `sonnet`; TIER_A: `opus` + ultrathink | TIER_B: smaller task model       | TIER_B: `gpt-5.1-codex-spark`          | Fall back UP to TIER_A on unavailability    |
+| Subagent model tier         | TIER_B: `sonnet`; TIER_A: `opus` + ultrathink | TIER_B: smaller task model       | TIER_B: current spark/cost-optimized Codex          | Fall back UP to TIER_A on unavailability    |
 <!-- autospec-block:harness-adapter-core -->
 
 ## Stop mode

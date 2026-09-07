@@ -35,8 +35,8 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 Detect your harness by checking available tools before dispatching work:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -44,7 +44,7 @@ Detect your harness by checking available tools before dispatching work:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
 
@@ -60,7 +60,7 @@ This skill assumes four capabilities. Map each one to your harness's actual tool
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Run `gh` CLI                | shell tool                           | shell tool                               | shell tool                               | Have the user run the command and confirm          |
 | Hand off to another skill   | `Skill` invocation (`/autospec-define`) | nested skill invocation                | `/autospec-define` slash command         | Print the suggested command for the user to run    |
-| Subagent model tier         | Tier B: `sonnet` + medium thinking; Tier A only if escalating to /autospec-define which honors its own tier policy | Tier B: smaller-tier `task` + medium reasoning; escalation honors target skill | Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium`; escalation honors target | Honor AGENTS.md tier mapping; retry the same subagent UP on unavailability |
+| Subagent model tier         | Tier B: `sonnet` + medium thinking; Tier A only if escalating to /autospec-define which honors its own tier policy | Tier B: smaller-tier `task` + medium reasoning; escalation honors target skill | Tier B: current spark/cost-optimized Codex + `reasoning_effort=medium`; escalation honors target | Honor AGENTS.md tier mapping; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. Per AGENTS.md, this listener runs at **Tier B** (it's a router, not a designer); when it hands off to `/autospec-define` for a spec trigger, the downstream skill applies its own tier policy. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.

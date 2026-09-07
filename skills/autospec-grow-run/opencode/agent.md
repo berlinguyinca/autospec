@@ -85,7 +85,7 @@ actual tool. If a capability is missing, use the listed fallback.
 | HTTP calls for measurement adapters | `curl` via Bash | `curl` via shell tool | `curl` via shell | Degrade that adapter to `{}` and continue |
 | Human-visible run notifications | `PushNotification` | inline message / OS notify equivalent | inline message | Print the notice to the transcript and continue |
 | Browser (site/UI verification, best-effort) | `autospec-playwright` / Claude-in-Chrome if available | equivalent browser tool if available | not typically available | Skip browser verification; note it as unverified |
-| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: current spark/cost-optimized Codex + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in
@@ -103,8 +103,8 @@ Detect your harness by checking available tools before Phase R0:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is
    available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available
    (no `subagent_type`).
@@ -114,7 +114,7 @@ Detect your harness by checking available tools before Phase R0:
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is
    available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model
 unknown, quota/capacity failure, authorization failure, or tool call returns

@@ -60,7 +60,7 @@ Detect your harness by checking available tools before any phase:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available (quota, capacity, or authorization failure),
 silently retry with `TIER_A`. Never ask the user.
