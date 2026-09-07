@@ -359,6 +359,25 @@ fn autonomous_executor_bridge_exit_record_requires_complete_synced_fence() {
 }
 
 #[cfg(target_os = "linux")]
+fn parsed_event_log(events: &str) -> (Vec<String>, Vec<String>) {
+    let mut event_names = Vec::new();
+    let mut outputs = Vec::new();
+    for line in events.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).expect("event log line is JSON");
+        if let Some(event) = value.get("event").and_then(serde_json::Value::as_str) {
+            event_names.push(event.to_string());
+        }
+        if let Some(output) = value.get("output").and_then(serde_json::Value::as_str) {
+            outputs.push(output.to_string());
+        }
+    }
+    (event_names, outputs)
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopts_daemonizing_success_and_failure() {
     let _environment = test_environment();
@@ -405,9 +424,19 @@ fn autonomous_executor_bridge_adopts_daemonizing_success_and_failure() {
             "adopted daemon survived exact pidfd cleanup"
         );
         let events = fs::read_to_string(&event_log).expect("adopted events");
-        assert!(events.contains("\"event\":\"child_adopted\""), "{events}");
-        assert!(!events.contains("\"event\":\"child_exited\""), "{events}");
-        assert!(events.contains(&format!("adopted-{exit_code}")), "{events}");
+        let (event_names, outputs) = parsed_event_log(&events);
+        assert!(
+            event_names.contains(&"child_adopted".to_string()),
+            "{events}"
+        );
+        assert!(
+            !event_names.contains(&"child_exited".to_string()),
+            "{events}"
+        );
+        assert!(
+            outputs.contains(&format!("adopted-{exit_code}")),
+            "{events}"
+        );
     }
 }
 
@@ -440,6 +469,13 @@ fn autonomous_executor_bridge_adopted_restart_waits_for_delayed_stderr_tail() {
     let events = fs::read_to_string(event_log).expect("adopted delayed events");
 
     assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
-    assert!(events.contains("adopted-delayed-tail"), "{events}");
-    assert!(events.contains("\"event\":\"child_exited\""), "{events}");
+    let (event_names, outputs) = parsed_event_log(&events);
+    assert!(
+        outputs.contains(&"adopted-delayed-tail".to_string()),
+        "{events}"
+    );
+    assert!(
+        event_names.contains(&"child_exited".to_string()),
+        "{events}"
+    );
 }
