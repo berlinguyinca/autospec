@@ -3173,6 +3173,29 @@ pub(crate) fn run_required_scanners(
     Ok(observations)
 }
 
+/// The closed set of verdict tokens the model reviewer may emit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ModelReviewVerdict {
+    Pass,
+    Lgtm,
+}
+
+impl ModelReviewVerdict {
+    /// Parse the reviewer's verdict from free-form model output by taking the
+    /// first whitespace-delimited token, stripping surrounding ASCII
+    /// punctuation, and matching it case-insensitively against the closed
+    /// verdict set. Any other output is `None` (a finding, not a verdict).
+    fn parse(output: &str) -> Option<Self> {
+        const PUNCTUATION: &[char] = &['.', '!', '?', ',', ':', '"', '(', ')'];
+        let token = output.split_whitespace().next()?.trim_matches(PUNCTUATION);
+        match token.to_ascii_uppercase().as_str() {
+            "PASS" => Some(Self::Pass),
+            "LGTM" => Some(Self::Lgtm),
+            _ => None,
+        }
+    }
+}
+
 fn typed_evidence_from_observed(
     worktree: &Path,
     expected_base_oid: &str,
@@ -3219,7 +3242,7 @@ fn typed_evidence_from_observed(
             .map(str::trim)
             .filter(|output| !output.is_empty())
         {
-            if !matches!(output.to_ascii_uppercase().as_str(), "PASS" | "LGTM") {
+            if ModelReviewVerdict::parse(output).is_none() {
                 security_verdict = EvidenceVerdict::Blocked {
                     finding_codes: vec!["MODEL_REVIEW_FINDING".to_string()],
                 };
