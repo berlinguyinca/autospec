@@ -846,19 +846,22 @@ signatures / file paths / naming tokens is not reasoning work — a grep does it
 exactly and for free.
 
 1. **Deterministic extract (no LLM).** Dump each child issue body
-   (skip the umbrella/tracker) to a temp dir, then run the shared scanner:
+   (skip the umbrella/tracker) to a temp dir, then run the shared scanner from
+   the target repo root (it resolves boundary schemas against `--repo-root`):
 
    ```bash
-   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/extract-shared-contracts.sh" --dir "$bodies_dir" > /tmp/shared-contracts.md
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/extract-shared-contracts.sh" --dir "$bodies_dir" --repo-root "$PWD" > /tmp/shared-contracts.md
    ```
 
-   It greps every file path, `name(...)` signature, and ALL-CAPS naming/env-var
-   token that appears in **≥2 distinct** issues and emits a `## Shared
+   It greps every file path, call-signature token (`name(...)`,
+   `Foo::bar(...)`, generic `name<G>(...)`), and ALL-CAPS naming/env-var token
+   that appears in **≥2 distinct** issues and emits a `## Shared
    contracts` block (file paths, signatures, names). Identical inputs produce
    byte-identical output. If it reports
    `_No cross-issue contracts detected_`, there is no cross-issue interface —
-   skip the rest of Phase 3.75 and log
-   `"Phase 3.75: skipped (no cross-issue contracts)"`.
+   skip the Tier-B reconcile (step 2); the scanner still emits the
+   cross-language boundary block (step 4) when its trigger fires. Log
+   `"Phase 3.75: skipped (no cross-issue contracts)"` only for step 2.
 
 2. **Tier-B reconcile (small, only for genuine conflicts).** Skip unless the
    scan surfaced an actual contradiction — the same path/name used with
@@ -884,6 +887,24 @@ notes inserted before its closing marker>
    `## Shared contracts` heading: the script emits both. Nesting a second pair
    leaves the outer marker and heading outside the region
     `lint-issue.sh` strips, so they count against the word budget.
+
+4. **Cross-language boundary block (issue #3111).** The scanner emits a
+   `## Cross-language boundaries` table INSIDE the same shared-contract marker
+   region when the children span **≥2 distinct `lang:*` labels** (read from
+   each child's `## Language fit` block; `lang:unknown` is an abstention and
+   never counts) **or any child is `lang:mixed`**. A row a child declares
+   under its own `## Cross-language boundaries` table is a positive assertion
+   of a boundary and is emitted even for a single-language sibling set. The
+   table columns are exactly:
+   `| Boundary | Transport | Schema (source of truth) | Owner | Golden fixture |`.
+   The block encodes the rules every boundary must follow: the owning side
+   lands the schema **first**; the consuming issue carries `Depends on issue
+   #N` against it; each boundary gets one golden fixture under
+   `tests/fixtures/` asserted by **both** sides' own test runners. If the
+   scanner exits **3**, a declared boundary row names a schema that is not an
+   existing file under `schemas/`: fail closed — do NOT patch the children,
+   log `"Phase 3.75: failed closed (boundary schema missing)"`, and stop
+   until the schema file lands. Never hand-edit or emit an unbacked table.
 
 If there are fewer than 2 child issues, or all child issues are in the same
 file (no cross-issue interface), skip Phase 3.75 and log:
