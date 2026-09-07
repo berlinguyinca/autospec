@@ -254,7 +254,7 @@ source of truth.
 | Read-only codebase research  | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`            |
 | Foreground delegation        | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output      | spawn nested CLI session                 | Do the work in-thread (more context cost)           |
 | Ask the user a question      | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn      |
-| Subagent model tier          | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
+| Subagent model tier          | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: current spark/cost-optimized Codex + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Model tier:** `TIER_B` for the deterministic resolve/`sync`/`status`

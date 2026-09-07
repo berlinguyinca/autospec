@@ -30,7 +30,7 @@ written and exit.
 
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
-| Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: `gpt-5.1-codex` + `reasoning_effort=high` | Fall back UP on unavailability |
+| Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: current top GPT + `reasoning_effort=high` | Fall back UP on unavailability |
 | Subagent dispatch policy     | per AGENTS.md decision matrix         | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline if subagents unavailable                    |
 | Deterministic scanners       | gitleaks, semgrep, trivy, license-checker via `ensure-tool.sh` | same | same | LLM-only fallback per missing scanner (loud WARN) |
 
@@ -42,8 +42,8 @@ findings with the top-tier reasoning model for the active harness (see row above
 Detect your harness by checking available tools before scanning:
 
 1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
-   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
-   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+   - `TIER_A` = `opus` + `ultrathink`  (the alias, which resolves to the current Claude Opus generation)
+   - `TIER_B` = `sonnet`               (the alias, which resolves to the current Claude Sonnet generation)
 
 2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
    - `TIER_A` = top-tier task model + high reasoning
@@ -51,7 +51,7 @@ Detect your harness by checking available tools before scanning:
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_B` = the spark / cost-optimized variant of the configured model when one exists, else the configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
 
