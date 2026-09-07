@@ -24,18 +24,35 @@ pub struct WorktreeScope {
     pub worktree: PathBuf,
     /// The branch created inside the worktree.
     pub branch: String,
+    /// The branch the finished work will merge into. Never assumed across
+    /// repositories; the base ref defaults to it.
+    #[serde(default)]
+    pub target_branch: String,
+    /// The ref the implementer starts from. Defaults to [`Self::target_branch`];
+    /// a pipeline may override it, and any override is recorded as-is.
+    #[serde(default)]
+    pub base_ref: String,
+    /// The exact commit `base_ref` resolved to when the dispatch was recorded.
+    ///
+    /// Recorded with every dispatch so a merge failure can be attributed
+    /// rather than guessed at.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 impl WorktreeScope {
     /// The isolated worktree for `task` in `repository`.
     ///
     /// The path and branch are derived from Initiative and task identity, so
-    /// two concurrent tasks can never share a checkout.
+    /// two concurrent tasks can never share a checkout. The base ref is
+    /// derived from `target_branch` — where the work will merge — never from a
+    /// remembered constant, so a pipeline cannot silently clone a stale base.
     pub fn for_task(
         root: &std::path::Path,
         initiative: &InitiativeId,
         task: &TaskId,
         repository: RepositoryId,
+        target_branch: impl Into<String>,
     ) -> Self {
         let slug = format!(
             "{}-{}-{}",
@@ -43,11 +60,162 @@ impl WorktreeScope {
             repository.owner(),
             repository.name()
         );
+        let target_branch = target_branch.into();
         Self {
             worktree: root.join(initiative.short()).join(task.as_str()).join(slug),
             branch: format!("aspec/{}/{}", initiative.short(), task.as_str()),
             repository,
+            target_branch: target_branch.clone(),
+            base_ref: target_branch,
+            base_commit: None,
         }
+    }
+
+    /// Override the base ref the implementer starts from.
+    ///
+    /// The override is recorded as-is so a stale override is attributable.
+    pub fn with_base_ref(mut self, base_ref: impl Into<String>) -> Self {
+        self.base_ref = base_ref.into();
+        self
+    }
+
+    /// Record the exact commit the base ref resolved to at dispatch time.
+    pub fn recorded_against(mut self, base_commit: impl Into<String>) -> Self {
+        self.base_commit = Some(base_commit.into());
+        self
+    }
+}
+
+/// A VCS capability the base-freshness gate relies on.
+///
+/// The pipeline asks only for the one number it can act on — how many commits
+/// the base is behind the target (git: `rev-list --count base..target`).
+/// Implementations may wrap git, another VCS, or an in-memory table for tests;
+/// nothing here assumes a particular host or tool.
+pub trait BaseFreshnessProbe {
+    /// The number of commits on `target` that `base` does not contain.
+    fn behind_target(&self, base: &str, target: &str) -> Result<u64, String>;
+}
+
+/// How far behind the target a base may sit and still be allowed to dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshnessPolicy {
+    /// The base may be at most this many commits behind the target. The
+    /// default is zero: *any* commits behind is stale, and spending an
+    /// agent-hour on a stale base is pure waste.
+    pub max_behind: u64,
+}
+
+impl Default for FreshnessPolicy {
+    fn default() -> Self {
+        Self { max_behind: 0 }
+    }
+}
+
+/// The outcome of a base-freshness gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FreshnessVerdict {
+    /// The base is close enough to the target to dispatch.
+    Fresh { behind: u64 },
+    /// The base sits behind the target farther than the policy allows; the
+    /// dispatch must be refused, or the branch rebased onto the target first.
+    Stale { behind: u64, max_behind: u64 },
+}
+
+impl FreshnessVerdict {
+    /// The measured distance, commits behind the target.
+    pub fn behind(&self) -> u64 {
+        match self {
+            FreshnessVerdict::Fresh { behind } => *behind,
+            FreshnessVerdict::Stale { behind, .. } => *behind,
+        }
+    }
+
+    /// Whether the dispatch must be refused (or rebased first).
+    pub fn is_stale(&self) -> bool {
+        matches!(self, FreshnessVerdict::Stale { .. })
+    }
+}
+
+/// Gate a dispatch on base freshness.
+///
+/// The distance is measured against the recorded base commit when one exists,
+/// so a recorded dispatch is always checked against what actually ran, and
+/// otherwise against the base ref itself.
+pub fn gate_dispatch(
+    probe: &dyn BaseFreshnessProbe,
+    scope: &WorktreeScope,
+    policy: &FreshnessPolicy,
+) -> Result<FreshnessVerdict, String> {
+    let base = scope.base_commit.as_deref().unwrap_or(&scope.base_ref);
+    let behind = probe
+        .behind_target(base, &scope.target_branch)
+        .map_err(|error| format!("base freshness probe failed: {error}"))?;
+    if behind > policy.max_behind {
+        Ok(FreshnessVerdict::Stale {
+            behind,
+            max_behind: policy.max_behind,
+        })
+    } else {
+        Ok(FreshnessVerdict::Fresh { behind })
+    }
+}
+
+/// Which of the three different problems a merge conflict actually is.
+///
+/// The three causes look identical at merge time but have three different
+/// fixes: refuse-or-rebase at dispatch, re-check and rebase now, or a genuine
+/// content conflict to resolve by hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeConflictCause {
+    /// The base was already behind the target by more than the policy allows
+    /// when the dispatch was recorded. Fix: the dispatch should have been
+    /// refused or rebased first.
+    StaleAtDispatch {
+        behind_at_dispatch: u64,
+        max_behind: u64,
+    },
+    /// The base was within policy at dispatch, but the target moved on since.
+    /// Fix: rebase the branch onto the current target and re-verify.
+    DriftSinceDispatch {
+        behind_at_dispatch: u64,
+        behind_at_merge: u64,
+    },
+    /// The target has not moved in a way that explains the conflict; the
+    /// change genuinely collides with content that landed.
+    ContentConflict { behind_at_merge: u64 },
+}
+
+impl MergeConflictCause {
+    /// The stable wire name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MergeConflictCause::StaleAtDispatch { .. } => "stale_at_dispatch",
+            MergeConflictCause::DriftSinceDispatch { .. } => "drift_since_dispatch",
+            MergeConflictCause::ContentConflict { .. } => "content_conflict",
+        }
+    }
+}
+
+/// Classify a merge conflict from the measured base distance at dispatch and
+/// at merge, under the policy that governed the dispatch.
+pub fn classify_merge_conflict(
+    behind_at_dispatch: u64,
+    behind_at_merge: u64,
+    policy: &FreshnessPolicy,
+) -> MergeConflictCause {
+    if behind_at_dispatch > policy.max_behind {
+        MergeConflictCause::StaleAtDispatch {
+            behind_at_dispatch,
+            max_behind: policy.max_behind,
+        }
+    } else if behind_at_merge > behind_at_dispatch {
+        MergeConflictCause::DriftSinceDispatch {
+            behind_at_dispatch,
+            behind_at_merge,
+        }
+    } else {
+        MergeConflictCause::ContentConflict { behind_at_merge }
     }
 }
 
@@ -161,8 +329,16 @@ impl PiInvocation {
             check("scope.worktree", &scope.worktree.to_string_lossy());
         }
 
-        if self.role.is_producing() && self.scope.is_none() {
-            problems.push("an implementation session needs an isolated worktree".to_string());
+        if self.role.is_producing() {
+            match &self.scope {
+                None => problems
+                    .push("an implementation session needs an isolated worktree".to_string()),
+                Some(scope) if scope.base_commit.is_none() => problems.push(
+                    "an implementation dispatch records the exact base commit it started from"
+                        .to_string(),
+                ),
+                _ => {}
+            }
         }
         if self.output_contract.trim().is_empty() {
             problems.push("every invocation declares an output contract".to_string());
@@ -236,7 +412,22 @@ mod tests {
             &initiative(),
             &task(task_id),
             repository("github.com/InferWeave/autospec-orchestrator"),
+            "main",
         )
+        .recorded_against("d0621f87")
+    }
+
+    /// An in-memory probe standing in for a VCS: maps (base, target) to the
+    /// commit distance the real tool would report.
+    struct TableProbe(std::collections::BTreeMap<(String, String), u64>);
+
+    impl BaseFreshnessProbe for TableProbe {
+        fn behind_target(&self, base: &str, target: &str) -> Result<u64, String> {
+            self.0
+                .get(&(base.to_string(), target.to_string()))
+                .copied()
+                .ok_or_else(|| format!("no distance recorded for {base}..{target}"))
+        }
     }
 
     #[test]
@@ -274,9 +465,180 @@ mod tests {
             &initiative(),
             &task("TASK-0017"),
             repository("github.com/OtherOrg/frontend"),
+            "trunk",
         );
 
         assert_ne!(orchestrator.worktree, frontend.worktree);
+    }
+
+    #[test]
+    fn the_base_ref_defaults_to_the_branch_the_work_will_merge_into() {
+        let scope = WorktreeScope::for_task(
+            Path::new("/worktrees"),
+            &initiative(),
+            &task("TASK-0017"),
+            repository("github.com/InferWeave/autospec-orchestrator"),
+            "trunk",
+        );
+
+        assert_eq!(scope.target_branch, "trunk");
+        assert_eq!(scope.base_ref, "trunk");
+    }
+
+    #[test]
+    fn an_overridden_base_ref_is_recorded_as_is() {
+        let scope = scope("TASK-0017").with_base_ref("integration/2026-08");
+
+        assert_eq!(scope.base_ref, "integration/2026-08");
+        assert_eq!(scope.target_branch, "main");
+    }
+
+    #[test]
+    fn the_base_commit_appears_in_the_dispatch_record() {
+        let invocation = invocation(AgentRole::Implementer, Some(scope("TASK-0017")));
+
+        let rendered = serde_json::to_string(&invocation).expect("serializable");
+
+        assert!(
+            rendered.contains("\"base_commit\":\"d0621f87\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"target_branch\":\"main\""),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_producing_dispatch_without_a_recorded_base_commit_is_refused() {
+        let scope = WorktreeScope::for_task(
+            Path::new("/worktrees"),
+            &initiative(),
+            &task("TASK-0017"),
+            repository("github.com/InferWeave/autospec-orchestrator"),
+            "main",
+        );
+        let invocation = invocation(AgentRole::Implementer, Some(scope));
+
+        let problems = invocation.validate().expect_err("base commit is mandatory");
+
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("base commit")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_base_dispatches() {
+        let probe = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            0,
+        )]));
+        let scope = scope("TASK-0017");
+
+        let verdict =
+            gate_dispatch(&probe, &scope, &FreshnessPolicy::default()).expect("probe answered");
+
+        assert_eq!(verdict, FreshnessVerdict::Fresh { behind: 0 });
+        assert!(!verdict.is_stale());
+    }
+
+    #[test]
+    fn a_stale_base_is_refused_with_the_distance_reported() {
+        // The incident: branched 25 commits behind main.
+        let probe = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            25,
+        )]));
+        let scope = scope("TASK-0017");
+
+        let verdict =
+            gate_dispatch(&probe, &scope, &FreshnessPolicy::default()).expect("probe answered");
+
+        assert_eq!(
+            verdict,
+            FreshnessVerdict::Stale {
+                behind: 25,
+                max_behind: 0
+            }
+        );
+        assert!(verdict.is_stale());
+        assert_eq!(verdict.behind(), 25);
+    }
+
+    #[test]
+    fn the_staleness_threshold_is_configurable() {
+        let probe = TableProbe(std::collections::BTreeMap::from([
+            (("aaa".to_string(), "main".to_string()), 5),
+            (("bbb".to_string(), "main".to_string()), 25),
+        ]));
+        let policy = FreshnessPolicy { max_behind: 10 };
+
+        let within = gate_dispatch(&probe, &scope("TASK-0017").recorded_against("aaa"), &policy)
+            .expect("probe answered");
+        let beyond = gate_dispatch(&probe, &scope("TASK-0017").recorded_against("bbb"), &policy)
+            .expect("probe answered");
+
+        assert_eq!(within, FreshnessVerdict::Fresh { behind: 5 });
+        assert_eq!(
+            beyond,
+            FreshnessVerdict::Stale {
+                behind: 25,
+                max_behind: 10
+            }
+        );
+    }
+
+    #[test]
+    fn a_gate_against_an_unanswered_probe_is_an_error_not_a_guess() {
+        let probe = TableProbe(std::collections::BTreeMap::new());
+        let scope = scope("TASK-0017");
+
+        let error = gate_dispatch(&probe, &scope, &FreshnessPolicy::default())
+            .expect_err("no distance is not a fresh base");
+
+        assert!(error.contains("probe failed"), "{error}");
+    }
+
+    #[test]
+    fn a_conflict_reports_stale_base_at_dispatch() {
+        let cause = classify_merge_conflict(25, 30, &FreshnessPolicy::default());
+
+        assert_eq!(
+            cause,
+            MergeConflictCause::StaleAtDispatch {
+                behind_at_dispatch: 25,
+                max_behind: 0
+            }
+        );
+        assert_eq!(cause.as_str(), "stale_at_dispatch");
+    }
+
+    #[test]
+    fn a_conflict_reports_drift_after_a_fresh_dispatch() {
+        let cause = classify_merge_conflict(0, 7, &FreshnessPolicy::default());
+
+        assert_eq!(
+            cause,
+            MergeConflictCause::DriftSinceDispatch {
+                behind_at_dispatch: 0,
+                behind_at_merge: 7
+            }
+        );
+        assert_eq!(cause.as_str(), "drift_since_dispatch");
+    }
+
+    #[test]
+    fn a_conflict_with_no_base_movement_is_genuine_content() {
+        let cause = classify_merge_conflict(0, 0, &FreshnessPolicy::default());
+
+        assert_eq!(
+            cause,
+            MergeConflictCause::ContentConflict { behind_at_merge: 0 }
+        );
+        assert_eq!(cause.as_str(), "content_conflict");
     }
 
     #[test]
