@@ -4,6 +4,8 @@
 //! callers can classify token usage without performing any external I/O. The
 //! driver remains responsible for executing returned actions.
 
+pub mod context_control;
+
 /// State of the context monitor threshold machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextState {
