@@ -180,6 +180,38 @@ Run one staging pass:
    ```
 
    The emitted gaps carry `dimension: "fab-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. A non-fab run (no `.autospec/fab.yml`), a missing helper, or a `jq` error only logs to `/tmp/fab-completeness.err` and emits nothing — this dimension NEVER blocks run completion (same failure semantics as the docs dimension above).
+1e. **Language-axis dimension** (epic #3104, child #3112 — runs only on round 1, after the fab-completeness dimension merges into `${GAPS_FILE}`): audit the language-selection-axis contract over the bodies of the issues this run closed. Every body must carry a `## Language fit` block naming exactly one `lang:*` label from the closed set, and every declared cross-language boundary row must have its `schemas/` file and `tests/fixtures/` golden fixture on disk — the two-sided assertion is the only thing that catches drift, so a boundary whose schema or fixture never landed is a live gap, not a pass. The deterministic helper prints one `GAP <body>: <reason>` line per finding; convert the lines to gap objects carrying `dimension: "language-axis"` and **append** them onto `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
+
+   ```bash
+   LAX_DIR="$(mktemp -d)"
+   if command -v gh >/dev/null 2>&1; then
+     gh issue list --label auto-implement --state closed \
+         --search "closed:>=${BATCH_START_DATE:-}" --limit 100 \
+         --json number --jq '.[].number' 2>/dev/null | \
+       while IFS= read -r n; do
+         [ -n "$n" ] || continue
+         gh issue view "$n" --json body --jq .body > "$LAX_DIR/issue-$n.md" 2>/dev/null || true
+       done
+   fi
+   LAX_GAPS="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/language-axis-audit.sh" \
+     --bodies-dir "$LAX_DIR" --repo-root . 2>/tmp/language-axis-audit.err \
+     | jq -Rsc 'split("\n") | map(select(length>0)) | to_entries | map({
+         gap_id: ("LA" + ((.key + 1) | tostring)),
+         dimension: "language-axis", severity: "high",
+         file: (.value | sub("^GAP "; "") | sub(":.*$"; "")), line: 1,
+         title: ("language-axis: " + .value),
+         body: ("Phase 5.5 language-axis audit found: " + .value + ". Every issue body carries a ## Language fit block naming exactly one lang:* label, and every declared cross-language boundary names an existing schemas/ file and a tests/fixtures/ golden fixture asserted by both sides. Land the missing artifact and re-run scripts/language-axis-audit.sh."),
+         dedupe_key: ("language-axis-" + (.value | gsub("[^a-zA-Z0-9]+"; "-")))
+       })' 2>/dev/null || printf '[]')"
+   if [ -s "${GAPS_FILE}" ]; then
+     jq -s '.[0] + .[1]' "${GAPS_FILE}" <(printf '%s' "${LAX_GAPS}") > "${GAPS_FILE}.laxmerged" \
+       && mv "${GAPS_FILE}.laxmerged" "${GAPS_FILE}"
+   else
+     printf '%s' "${LAX_GAPS}" > "${GAPS_FILE}"
+   fi
+   ```
+
+   The emitted gaps carry `dimension: "language-axis"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. No `gh` (empty bodies dir), an empty run, a missing helper, or a `jq` error only log to `/tmp/language-axis-audit.err` and emit an empty array — this dimension NEVER blocks run completion (same failure semantics as the dimensions above).
 2. **File survivors:**
 
    ```bash
