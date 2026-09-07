@@ -39,6 +39,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template]` | yes | validates the canonical GitHub issue, records review with owned labels without editing its body, and verifies authoritative re-reads |
+| `autospec spec-repair propose\|check\|assumption\|stall\|ledger ...` | yes | repair loop for issues the pipeline judged unusable: one five-part proposal comment plus `needs-spec-clarification` label, maintainer-reply classification, low/high-stakes assumption gate, stall threshold, and queryable defect ledger ([docs](spec-repair.md)) |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |

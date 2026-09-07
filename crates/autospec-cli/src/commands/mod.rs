@@ -19,6 +19,7 @@ pub mod resume;
 pub mod run;
 pub mod runtime;
 pub mod showcase;
+pub mod spec_repair;
 pub mod status;
 pub mod validate;
 
@@ -79,11 +80,12 @@ impl std::fmt::Display for CommandFailure {
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("aar", "Inspect adaptive agent runtime policy"),
-    (
-        "initiative",
-        "Inspect cross-repository initiatives",
-    ),
+    ("initiative", "Inspect cross-repository initiatives"),
     ("lint", "Lint issue and implementation policy inputs"),
+    (
+        "spec-repair",
+        "Run the repair loop for issues the pipeline judged unusable",
+    ),
     ("claim", "Manage GitHub-backed issue claim state"),
     ("parent", "Reconcile decomposed parent issue state"),
     ("queue", "Compute the safe GitHub issue queue"),
@@ -124,6 +126,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "initiative" => initiative::run(rest),
             "issue" => issue::run(rest),
             "lint" => lint::run(rest),
+            "spec-repair" => spec_repair::run(rest),
             "claim" => claim::run(rest),
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
