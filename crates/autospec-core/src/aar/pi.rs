@@ -5,6 +5,7 @@
 //! handed to Pi as configuration, so the same boundary works for another
 //! harness without moving policy into prompt prose.
 
+use super::capsule::RolePolicy;
 use super::reasoning::SamplingProfile;
 use super::topology::AgentRole;
 
@@ -35,6 +36,9 @@ pub struct PiSessionSpec {
     pub session_id: String,
     pub worktree: String,
     pub role: AgentRole,
+    /// The role's provider-neutral tool policy; `build_pi_argv` maps it onto
+    /// Pi's `--tools` flag, so callers never spell out a Pi tool name.
+    pub policy: RolePolicy,
     pub provider: String,
     pub model: String,
     pub reasoning_tokens: u32,
@@ -72,6 +76,14 @@ impl PiSessionSpec {
     }
 }
 
+/// Map a provider-neutral role policy onto Pi's `--tools` value.
+///
+/// This is the only place a role policy becomes a Pi flag: AutoSpec callers
+/// pass the policy and never see a Pi tool name.
+pub fn pi_tools_for(policy: RolePolicy) -> String {
+    policy.tools().join(",")
+}
+
 /// Build the Pi argv for a session.
 ///
 /// Options are kept as distinct argv entries rather than one shell string: the
@@ -88,6 +100,8 @@ pub fn build_pi_argv(spec: &PiSessionSpec) -> Result<Vec<String>, String> {
         spec.session_id.clone(),
         "--role".to_string(),
         spec.role.as_str().to_string(),
+        "--tools".to_string(),
+        pi_tools_for(spec.policy),
         "--provider".to_string(),
         spec.provider.clone(),
         "--model".to_string(),
