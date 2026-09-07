@@ -678,3 +678,74 @@ fn json_string(value: &str) -> String {
             .replace('\"', "\\\"")
     )
 }
+
+#[test]
+fn queue_ready_predicts_file_collisions_and_suggests_refactors_for_persistent_hotspots() {
+    let fixture = QueueFixture::new();
+    // Isolate the cross-batch collision ledger from the real HOME.
+    let home = fixture.root.join("home");
+    fs::create_dir_all(&home).expect("create fixture home");
+    fs::write(
+        &fixture.auto,
+        format!(
+            "[{},{},{}]",
+            passing_issue(11, "cmd/gateway/main.go"),
+            passing_issue(12, "cmd/gateway/main.go:42"),
+            passing_issue(13, "docs/faq.md")
+        ),
+    )
+    .expect("write colliding candidates");
+
+    let output = fixture
+        .command()
+        .env("HOME", &home)
+        .args(["queue", "ready", "--repo", "test/repo", "--batch-size", "3"])
+        .output()
+        .expect("queue command starts");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The collider is serialised into a later wave; the disjoint issue keeps
+    // parallel breadth with the first main.go toucher.
+    assert!(
+        stdout.contains("\"collision\":{\"waves\":[[11,13],[12]]"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "2 of 3 issues are likely to touch cmd/gateway/main.go; \
+             consider serialising or splitting that file first"
+        ),
+        "stdout={stdout}"
+    );
+    assert!(stderr.contains("WARN: 2 of 3 issues are likely to touch cmd/gateway/main.go"));
+    // One batch alone is not yet a persistent hotspot.
+    assert!(!stdout.contains("refactor_suggestions\":[{\""));
+
+    // A second, distinct batch colliding on the same file escalates it.
+    fs::write(
+        &fixture.auto,
+        format!(
+            "[{},{}]",
+            passing_issue(21, "cmd/gateway/main.go"),
+            passing_issue(22, "cmd/gateway/main.go:9"),
+        ),
+    )
+    .expect("write second colliding batch");
+    let output = fixture
+        .command()
+        .env("HOME", &home)
+        .args(["queue", "ready", "--repo", "test/repo", "--batch-size", "2"])
+        .output()
+        .expect("second queue command starts");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"batch_count\":2") && stdout.contains("consider splitting this file"),
+        "stdout={stdout}"
+    );
+}

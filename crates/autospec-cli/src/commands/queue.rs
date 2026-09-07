@@ -6,9 +6,11 @@ use autospec_core::claim::{
     replace_safety_review_section, ClaimSafetyInput, SafetyReviewDecision, SafetyReviewVerdict,
 };
 use autospec_core::coordination::{
-    dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
-    parse_remote_pull_request_page_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
-    QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue, RemoteIssuePage,
+    commit_shares, dependency_numbers, parse_declared_hotspots, parse_dependency_issue_json,
+    parse_remote_issue_page_json, parse_remote_pull_request_page_json,
+    plan_ready_queue_with_trusted_actors, predict_collisions, CollisionPlan, CommitHistory,
+    HotspotLedger, PullRequestEvidence, QueueIssueView, QueuePolicy, ReadyQueueInput,
+    ReadyQueuePlan, RefactorSuggestion, RemoteIssue, RemoteIssuePage, RepoSignals,
 };
 
 use super::autonomous::gh_read::run_gh_read_with_retry;
@@ -516,8 +518,156 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
     let batch_size = options.batch_size.unwrap_or_else(default_batch_size);
     let plan = ready_plan_for(&repo, batch_size)?;
     let constrained = !only_issues().is_empty();
-    println!("{}", plan_json(&plan, constrained));
+    let collision = ready_collision_report(&plan);
+    if let Some(report) = &collision {
+        for warning in &report.plan.warnings {
+            eprintln!("WARN: {}", warning.message);
+        }
+        for suggestion in &report.refactor_suggestions {
+            eprintln!("WARN: {}", suggestion.message);
+        }
+    }
+    println!("{}", plan_json(&plan, constrained, collision.as_ref()));
     Ok(())
+}
+
+/// Recent commits examined when estimating statistical file hotspots.
+const COMMIT_HISTORY_WINDOW: usize = 200;
+
+/// Governance documents scanned for declared conflict hotspots.
+const DECLARED_HOTSPOT_DOCUMENTS: &[&str] = &["AGENTS.md", "CONTRIBUTING.md"];
+
+#[derive(Debug)]
+struct CollisionReport {
+    plan: CollisionPlan,
+    refactor_suggestions: Vec<RefactorSuggestion>,
+}
+
+/// Predict file collisions for the dispatch batch before anything runs:
+/// estimated touch sets from issue text, declared and statistical hotspots,
+/// serialisation waves, and cross-batch refactor suggestions (issue #3564).
+fn ready_collision_report(plan: &ReadyQueuePlan) -> Option<CollisionReport> {
+    if plan.batch.is_empty() {
+        return None;
+    }
+    let signals = collision_signals();
+    let texts = plan
+        .batch
+        .iter()
+        .map(|view| {
+            (
+                view.issue.number,
+                format!("{}\n{}", view.issue.title, view.issue.body),
+            )
+        })
+        .collect::<Vec<_>>();
+    let collision = predict_collisions(
+        &texts
+            .iter()
+            .map(|(number, text)| (*number, text.as_str()))
+            .collect::<Vec<_>>(),
+        &signals,
+    );
+    let signature = plan
+        .batch
+        .iter()
+        .map(|view| view.issue.number.to_string())
+        .collect::<Vec<_>>()
+        .join("+");
+    let mut ledger = load_collision_ledger();
+    if !collision.colliding_files.is_empty() {
+        ledger.record(&signature, &collision.colliding_files);
+        save_collision_ledger(&ledger);
+    }
+    let refactor_suggestions = ledger
+        .suggestions()
+        .into_iter()
+        .filter(|suggestion| {
+            collision
+                .colliding_files
+                .iter()
+                .any(|path| path == &suggestion.path)
+        })
+        .collect();
+    Some(CollisionReport {
+        plan: collision,
+        refactor_suggestions,
+    })
+}
+
+fn collision_signals() -> RepoSignals {
+    let mut signals = RepoSignals::default();
+    for document in DECLARED_HOTSPOT_DOCUMENTS {
+        if let Ok(text) = std::fs::read_to_string(document) {
+            signals
+                .declared_hotspots
+                .extend(parse_declared_hotspots(&text));
+        }
+    }
+    signals.commit_share = commit_shares(&GitCommitHistory, COMMIT_HISTORY_WINDOW);
+    signals
+}
+
+/// Local git checkout behind the VCS-agnostic [`CommitHistory`] interface;
+/// unreadable history fails open to no statistical hotspots.
+struct GitCommitHistory;
+
+impl CommitHistory for GitCommitHistory {
+    fn touched_files_per_commit(&self, max_commits: usize) -> Vec<Vec<String>> {
+        let limit = format!("-n={max_commits}");
+        let output = std::process::Command::new("git")
+            .args([
+                "log",
+                "--no-merges",
+                "--no-color",
+                "--name-only",
+                "--pretty=format:\u{1}",
+                limit.as_str(),
+            ])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let mut commits: Vec<Vec<String>> = Vec::new();
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    if line.starts_with('\u{1}') {
+                        commits.push(Vec::new());
+                    } else if !line.trim().is_empty() {
+                        if let Some(files) = commits.last_mut() {
+                            files.push(line.trim().to_string());
+                        }
+                    }
+                }
+                commits
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn collision_ledger_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::Path::new(&home)
+            .join(".autospec")
+            .join("collision-ledger.json")
+    })
+}
+
+fn load_collision_ledger() -> HotspotLedger {
+    collision_ledger_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map_or_else(HotspotLedger::default, |text| {
+            HotspotLedger::from_json(&text).unwrap_or_default()
+        })
+}
+
+fn save_collision_ledger(ledger: &HotspotLedger) {
+    let Some(path) = collision_ledger_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, ledger.to_json());
 }
 
 pub(crate) fn ready_plan_for(
@@ -937,7 +1087,79 @@ fn discovered_workers() -> usize {
     1
 }
 
-fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
+/// JSON for the dispatch-time collision prediction. Emitted only when the
+/// batch is not fully parallel, carries hotspot warnings, or has persistent
+/// refactor suggestions, so a disjoint batch keeps the legacy output shape.
+fn collision_json(collision: Option<&CollisionReport>) -> Option<String> {
+    let report = collision?;
+    if report.plan.is_fully_parallel()
+        && report.plan.warnings.is_empty()
+        && report.refactor_suggestions.is_empty()
+    {
+        return None;
+    }
+    let waves = report
+        .plan
+        .waves
+        .iter()
+        .map(|wave| {
+            format!(
+                "[{}]",
+                wave.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let warnings = report
+        .plan
+        .warnings
+        .iter()
+        .map(|warning| {
+            format!(
+                "{{\"path\":\"{}\",\"issue_count\":{},\"batch_size\":{},\"message\":\"{}\"}}",
+                json_escape(&warning.path),
+                warning.issue_count,
+                warning.batch_size,
+                json_escape(&warning.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let suggestions = report
+        .refactor_suggestions
+        .iter()
+        .map(|suggestion| {
+            format!(
+                "{{\"path\":\"{}\",\"batch_count\":{},\"message\":\"{}\"}}",
+                json_escape(&suggestion.path),
+                suggestion.batch_count,
+                json_escape(&suggestion.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        ",\"collision\":{{\"waves\":[{waves}],\"warnings\":[{warnings}],\"refactor_suggestions\":[{suggestions}]}}"
+    ))
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn plan_json(
+    plan: &ReadyQueuePlan,
+    constrained: bool,
+    collision: Option<&CollisionReport>,
+) -> String {
     let diagnostics = local_diagnostics_json(plan);
     let diagnostics_field = if diagnostics == "[]" {
         String::new()
@@ -945,7 +1167,7 @@ fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
         format!(",\"diagnostics\":{diagnostics}")
     };
     format!(
-        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
+        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}{}}}",
         views_json(&plan.ready),
         views_json(&plan.blocked),
         issues_json(&plan.claimed),
@@ -958,6 +1180,7 @@ fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
         plan.worker_cap.remaining,
         json_bool(plan.worker_cap.reached),
         views_json(&plan.batch),
+        collision_json(collision).unwrap_or_default(),
     )
 }
 

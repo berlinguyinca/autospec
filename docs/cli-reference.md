@@ -134,7 +134,20 @@ object for discovered, candidate, reviewed,
 blocked, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and selected
 issues. `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
-whole-queue completion.
+whole-queue completion. It also carries a `collision` object — present only when the dispatch
+batch is not fully parallel — that predicts file collisions before anything is dispatched
+(issue #3564). Each issue's estimated touch set comes from path-shaped tokens in its title and
+body (`path`, `path:line`, trailing-slash `dir/` references), hotspot files declared in
+`AGENTS.md`/`CONTRIBUTING` conflict lines, and files appearing in at least 40% of the last 200
+commits behind the VCS-agnostic `CommitHistory` trait (no GitHub or git-host assumption). A
+referenced directory is upgraded to the hotspot files beneath it. `collision.waves` lists
+dispatch order breadth-first: issues inside one wave are predicted disjoint and run in parallel;
+predicted colliders are serialised into later waves. Each `collision.warnings` entry names the
+count and the file ("6 of 8 issues are likely to touch cmd/gateway/main.go; consider serialising
+or splitting that file first") and is echoed to stderr, as are `collision.refactor_suggestions`
+for files that stay hotspots across batches, tracked in `~/.autospec/collision-ledger.json`.
+A batch with no predicted overlap emits no `collision` field and dispatches fully in parallel,
+unchanged.
 
 `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` requires a positive bound
 and scans only unreviewed open `auto-implement` issues. `--issue N` re-reads and reviews that

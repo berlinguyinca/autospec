@@ -1,6 +1,13 @@
+mod collision;
 mod conductor;
 mod ready_queue;
 mod repositories;
+
+pub use collision::{
+    commit_shares, estimate_touch_set, parse_declared_hotspots, predict_collisions, CollisionPlan,
+    CollisionWarning, CommitHistory, HotspotLedger, LedgerEntry, RefactorSuggestion, RepoSignals,
+    LEDGER_MAX_BATCHES, REFACTOR_SUGGESTION_MIN_BATCHES, STATISTICAL_HOTSPOT_SHARE,
+};
 
 pub use conductor::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
