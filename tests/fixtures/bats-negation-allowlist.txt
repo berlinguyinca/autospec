@@ -2,7 +2,7 @@
 # Format: <path> <count>. Regenerate with scripts/lint-bats-negations.sh --seed.
 # A count may only shrink; a new site in any file is a blocking finding.
 skills/autospec-qa/tests/gen-layout-guardrails.bats 1
-skills/autospec-run/tests/duplicate-read.bats 6
+skills/autospec-run/tests/duplicate-read.bats 0
 skills/autospec-run/tests/reviewer-tier.bats 3
 skills/autospec-shared/tests/integration/gap-remediation-compose.bats 1
 skills/autospec-shared/tests/integration/lang-matrix.bats 1
