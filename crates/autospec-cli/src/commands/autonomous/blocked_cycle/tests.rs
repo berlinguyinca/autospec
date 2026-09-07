@@ -377,8 +377,7 @@ fn a_persisted_all_blocked_seal_recovers_to_scan_with_the_governor_armed() {
         std::process::id()
     ));
 
-    let recovered =
-        abandon_exhausted_retries(&path, state).expect("recover the sealed backlog");
+    let recovered = abandon_exhausted_retries(&path, state).expect("recover the sealed backlog");
 
     assert_eq!(
         recovered.phase(),
@@ -392,7 +391,10 @@ fn a_persisted_all_blocked_seal_recovers_to_scan_with_the_governor_armed() {
     );
     // The governor's identity survives the recovery, so the same issue re-seals
     // the backlog in the new run instead of earning a fresh five-cycle budget.
-    assert_eq!(recovered.blocked_backlog_reason(), Some("candidate_blocked"));
+    assert_eq!(
+        recovered.blocked_backlog_reason(),
+        Some("candidate_blocked")
+    );
     assert_eq!(recovered.blocked_backlog_issues(), [51]);
     assert!(
         recovered.blocked_backlog_cycles() > 0,
