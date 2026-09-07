@@ -37,6 +37,11 @@
 #                         (local; GPU-minutes are not free, see R9)
 #   max_wall_clock_ms     per-profile latency ceiling; a profile whose MEASURED mean
 #                         exceeds it is ineligible however cheap it looks (R9)
+#   advertised_first_pass optional vendor/bench claim in [0,1]. §27 makes it a
+#                         PRIOR FOR THE NO-DATA CASE ONLY: it replaces the
+#                         pessimistic 0.5 while a profile has zero rows, and is
+#                         discarded the moment anything is observed. A profile
+#                         can never buy a better rate by advertising one.
 #   cache_min_tokens      the model's prompt-cache MINIMUM. Below it nothing is
 #                         cached, so a hit ratio measured under a larger prefix
 #                         must not be credited to a dispatch that cannot cache.
@@ -53,9 +58,20 @@
 #                   [--profiles-file <path>] [--stats-file <path>]
 #                   [--alpha N] [--min-samples N] [--floor F] [--json|--explain]
 #
+#   routing-cost.sh --jq-prelude      (no other arguments required)
+#
+# Prelude mode exists so the smoothing formula has ONE home. It prints
+#   {alpha, min_samples, jq, smooth_def}
+# where `jq` is the `smooth/3` definition text and alpha/min_samples are the
+# effective constants (env, or the defaults below). routing-ledger.sh reads this
+# back and embeds the helper in its own program instead of restating a second
+# smoothing implementation that can drift.
+#
 # Output (--json): array sorted by effective_cost ascending, each entry
-#   {profile, unit_cost, n, first_pass_rate, mean_retries, escalation_rate,
-#    cache_hit_ratio, effective_cost, eligible, reason}
+#   {profile, unit_cost, n, first_pass_rate, first_pass_prior, first_pass_source,
+#    mean_retries, escalation_rate, cache_hit_ratio, effective_cost, eligible, reason}
+# first_pass_source is "observed" when the profile has rows, "advertised" when it
+# has none but the catalog carries a claim, else "none".
 #
 # Environment:
 #   AUTOSPEC_MODEL_PROFILES        profile catalog (default ~/.autospec/model-profiles.yml)
@@ -101,6 +117,13 @@ CLOUD_MULT="${AUTOSPEC_ROUTING_CLOUD_MULTIPLIER:-1.0}"
 PREFIX_TOKENS="${AUTOSPEC_ROUTING_PREFIX_TOKENS:-0}"
 JSON_OUT=0
 EXPLAIN=0
+PRELUDE=0
+
+# ── the smoothing helper, defined exactly once ───────────────────────────────
+# Both this script's scorer and routing-ledger.sh's grouped stats embed this
+# text; `--jq-prelude` is how the ledger reads it. $alpha stays a jq variable so
+# each caller binds its own value with --argjson.
+SMOOTH_JQ='def smooth($hits; $n; $prior): (($hits + ($alpha * $prior)) / ($n + $alpha));'
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -120,9 +143,27 @@ while [ $# -gt 0 ]; do
         --prefix-tokens)     PREFIX_TOKENS="${2:-}"; shift 2 ;;
         --json)          JSON_OUT=1; shift ;;
         --explain)       EXPLAIN=1; shift ;;
+        --jq-prelude)    PRELUDE=1; shift ;;
         *) _die "unknown option: $1" ;;
     esac
 done
+
+# Prelude mode answers one question — "what is the smoothing helper and what are
+# its constants?" — and needs none of the scoring arguments, so it answers before
+# the required-args check. The constants are echoed as JSON numbers, which means
+# a garbage env value must be rejected here rather than emitted as malformed JSON.
+if [ "$PRELUDE" -eq 1 ]; then
+    if ! printf '%s' "$ALPHA" | jq -e 'type == "number"' >/dev/null 2>&1; then
+        _die "AUTOSPEC_ROUTING_ALPHA is not a number: $ALPHA"
+    fi
+    if ! printf '%s' "$MIN_SAMPLES" | jq -e 'type == "number"' >/dev/null 2>&1; then
+        _die "AUTOSPEC_ROUTING_MIN_SAMPLES is not a number: $MIN_SAMPLES"
+    fi
+    jq -nc --argjson alpha "$ALPHA" --argjson min_samples "$MIN_SAMPLES" --arg jq "$SMOOTH_JQ" '
+        { alpha: $alpha, min_samples: $min_samples, jq: $jq,
+          smooth_def: "smooth($hits; $n; $prior)" }'
+    exit 0
+fi
 
 if [ -z "$KIND" ] || [ -z "$CTX" ] || [ -z "$REASONING" ] || [ -z "$CANDIDATES" ]; then
     _die 'required: --kind --ctx --reasoning --candidates'
@@ -157,7 +198,7 @@ _catalog() {
             k = kv[1]
             v = key; sub(/^[^:]*:[[:space:]]*/, "", v)
             gsub(/[[:space:]]+$/, "", v)
-            if (k == "cost_in" || k == "cost_out" || k == "cost_minute" || k == "max_wall_clock_ms" || k == "cache_min_tokens") {
+            if (k == "cost_in" || k == "cost_out" || k == "cost_minute" || k == "max_wall_clock_ms" || k == "cache_min_tokens" || k == "advertised_first_pass") {
                 printf "%s\t%s\t%s\n", cur, k, v
             }
         }
@@ -195,7 +236,7 @@ result="$(jq -n \
     --argjson alpha "$ALPHA" --argjson min_samples "$MIN_SAMPLES" \
     --argjson floor "$FLOOR" --argjson cache_beta "$CACHE_BETA" \
     --argjson max_wall_ms "$MAX_WALL_MS" --argjson cloud_mult "$CLOUD_MULT" \
-    --argjson prefix_tokens "$PREFIX_TOKENS" '
+    --argjson prefix_tokens "$PREFIX_TOKENS" "${SMOOTH_JQ}"'
     def cell($p): ($stats | map(select(
         .dispatch_kind == $kind and .profile == $p and
         .cell_ctx == $ctx and .cell_reasoning == $reasoning)) | first);
@@ -210,14 +251,31 @@ result="$(jq -n \
           then ($c.cost_minute * 10)   # a dispatch is priced at ten GPU-minutes
           else null end;
 
-    # Bayesian smoothing. Quality shrinks toward 0.5; every cost-increasing term
-    # shrinks toward a pessimistic prior so no-data never looks cheap.
-    def smooth($hits; $n; $prior): (($hits + ($alpha * $prior)) / ($n + $alpha));
+    # Bayesian smoothing (smooth/3) is injected from SMOOTH_JQ above so the
+    # ledger and this script cannot drift apart. Quality shrinks toward 0.5;
+    # every cost-increasing term shrinks toward a pessimistic prior so no-data
+    # never looks cheap.
+
+    # §27: an advertised quality claim is a prior for the no-data case, never an
+    # override. With rows present the observed rate is smoothed toward the
+    # pessimistic 0.5 exactly as before, so advertising cannot improve a score;
+    # with zero rows the claim replaces the 0.5 that smooth() would use, and the
+    # profile is still ineligible because eligibility requires n >= min_samples.
+    def advertised($p):
+        (($catalog[$p] // {}).advertised_first_pass) as $adv
+        | if ($adv | type) == "number" and $adv >= 0 and $adv <= 1 then $adv else null end;
 
     ($candidates | map({ profile: ., unit: unit(.), row: cell(.) })
       | map(. + { n: (.row.dispatches // 0) })
       | map(. + {
-          first_pass_rate: smooth(((.row.first_pass_rate // 0) * .n); .n; 0.5),
+          first_pass_prior: (if (.n == 0 and advertised(.profile) != null)
+                             then advertised(.profile) else 0.5 end),
+          first_pass_source: (if .n > 0 then "observed"
+                              elif advertised(.profile) != null then "advertised"
+                              else "none" end)
+        })
+      | map(. + {
+          first_pass_rate: smooth(((.row.first_pass_rate // 0) * .n); .n; .first_pass_prior),
           mean_retries:    smooth(((.row.mean_retries // 0) * .n); .n; 1.0),
           escalation_rate: smooth(((.row.escalation_rate // 0) * .n); .n; 0.5),
           failure_rate:    smooth(((.row.failure_rate // 0) * .n); .n; 0.5),

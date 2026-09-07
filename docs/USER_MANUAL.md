@@ -479,6 +479,11 @@ recommendation and the reason for it on stderr, without dispatching anything.
   the resulting effective cost.
 - `scripts/routing-ledger.sh --stats` shows what the decisions are being learned
   from, per dispatch kind and routing cell.
+- `scripts/routing-ledger.sh --stats --group-by model,context_band` reports one row
+  per cell across any of the 13 grouping dimensions, with `evidence: observed`,
+  `smoothed` (blended toward the parent cell) or `unknown` (no dispatches) on each
+  row. Add `--cell model=X,context_band=64k` for a single cell. See
+  [`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md#multidimensional-smoothed-statistics).
 
 With an empty ledger the decision is identical to the pre-existing behaviour, so
 `--explain` on a fresh install reports the baseline and why no override applied.

@@ -372,6 +372,51 @@ that states no effort exits 3, so the caller keeps its own default rather than b
 handed a guess — and on an override, effort follows the winning profile, never the
 baseline it replaced.
 
+### Multidimensional smoothed statistics
+
+`scripts/routing-ledger.sh --stats --group-by <dims>` reports one row per cell for any
+ordered subset of the grouping dimensions — `provider`, `model`, `model_version`,
+`hardware_fingerprint`, `runtime`, `quantization`, `role`, `dispatch_kind`,
+`language`, `repository`, `context_band`, `concurrency`, `risk` — with every derived
+metric as a column: first-pass and eventual-success rates, mean and median retries,
+escalation, review-rejection, test-failure and revert rates, median and P95
+completion, prompt / decode / aggregate tok/s, cache-hit ratio, and cost per
+success. `runtime` and `concurrency` resolve to the fields that exist today
+(`harness`, `concurrency_at_start`); `context_band` reads `cell_ctx` first and falls
+back to a band derived from `context_used`. A record missing a dimension's field
+groups into `unknown` instead of disappearing from the report.
+
+**A thin cell borrows from its parent, and says so.** Its rate is blended toward the
+cell one dimension coarser — `(hits + alpha * parent_rate) / (n + alpha)` — using the
+same `smooth()` definition `routing-cost.sh` scores with, published verbatim by
+`routing-cost.sh --jq-prelude` so the two cannot drift apart. The row carries
+`evidence: smoothed` plus its `parent` object and `parent_dispatches`. At
+`AUTOSPEC_ROUTING_MIN_SAMPLES` dispatches or more the raw rate stands alone as
+`evidence: observed`; a cell with no dispatches reports `unknown` for every rate
+rather than its parent's number, so an empty cell never reads as evidence. Medians,
+percentiles, tok/s and the cache ratio are never blended — averaging them across a
+parent would describe neither cell. `evidence` names the sample-size class, not
+whether alpha moved the number: with `AUTOSPEC_ROUTING_ALPHA=0` a thin cell still
+reads `smoothed` while its value equals the raw rate.
+
+`--cell k=v[,k=v]` narrows the report to one cell and requires every `--group-by`
+dimension to be addressed exactly once; anything else exits 1 rather than silently
+ignoring the filter.
+
+Metrics whose telemetry only #3174 records — `review_outcome`, `tests_outcome`,
+`cost_usd`, `prompt_tok_s` — report `unknown` until those fields are written, and
+their denominators count only rows that report them: a row answering `approved`
+lowers a rejection rate, an unreported row neither raises nor lowers it.
+`cost_per_success` divides by *priced* successes for the same reason, so partial cost
+telemetry cannot read as a cheaper unit cost.
+
+`routing-cost.sh` carries the other half of §27. A profile's advertised
+`advertised_first_pass` becomes `first_pass_prior` only where the ledger observed
+nothing, and `first_pass_source` names which of `observed`, `advertised`, `none` the
+number came from. An advertised value outside `[0,1]` is treated as absent — a vendor
+claim of "5× first-pass" is not a probability, and a prior of 0.5 is honest where
+that number is not.
+
 **Which dispatch kinds may be re-routed.** `route-decide.sh` holds an
 **allowlist**, so a kind added to the ledger vocabulary later is baseline-only
 until someone deliberately opens it:
