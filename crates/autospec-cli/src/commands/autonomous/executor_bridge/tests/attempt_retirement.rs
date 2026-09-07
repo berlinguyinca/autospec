@@ -99,7 +99,12 @@ fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
     assert!(fs::read_dir(&artifact_root)
         .expect("failure archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .any(|entry| {
+            let name = entry.file_name();
+            name.to_string_lossy()
+                .rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
+        }));
 }
 
 #[cfg(target_os = "linux")]
@@ -148,7 +153,12 @@ fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_rec
     assert!(fs::read_dir(&artifact_root)
         .expect("cleanup archives")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .any(|entry| {
+            let name = entry.file_name();
+            name.to_string_lossy()
+                .rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
+        }));
 }
 
 #[cfg(target_os = "linux")]
@@ -197,7 +207,12 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
         let archives = fs::read_dir(&artifact_root)
             .expect("archive directory")
             .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                name.to_string_lossy()
+                    .rsplit_once(".archive-")
+                    .is_some_and(|(_, suffix)| !suffix.is_empty())
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             archives.len(),
@@ -337,7 +352,12 @@ fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_point
     assert!(fs::read_dir(&artifact_root)
         .expect("failure archive")
         .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+        .any(|entry| {
+            let name = entry.file_name();
+            name.to_string_lossy()
+                .rsplit_once(".archive-")
+                .is_some_and(|(_, suffix)| !suffix.is_empty())
+        }));
 }
 
 #[cfg(target_os = "linux")]
