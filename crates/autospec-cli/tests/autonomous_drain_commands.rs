@@ -14,17 +14,187 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// Reports whether Rust source `text` contains a literal call-site for
-/// `pattern` outside of `//` line comments. Raw `str::contains` over the
-/// whole file body would also match the pattern inside a comment (e.g. a
-/// doc note explaining why the legacy invocation was removed), which is
-/// not an actual restoration of the forbidden authority. Stripping each
-/// line's trailing `//...` comment before scanning keeps the check
-/// anchored to real code content.
-fn source_invokes(text: &str, pattern: &str) -> bool {
-    text.lines()
-        .map(|line| line.split("//").next().unwrap_or(""))
-        .any(|code| code.contains(pattern))
+/// One lexical token of Rust source: an identifier, a single punctuation
+/// character, or the content of a string literal.
+#[derive(Debug, PartialEq, Eq)]
+enum SourceToken {
+    Ident(String),
+    Punct(char),
+    Literal(String),
+}
+
+/// Lexes `source` into a token stream, dropping `//` and (nested) `/* */`
+/// comments and skipping char literals and lifetimes. Anchoring the
+/// source-scan checks to real lexical tokens is what a raw substring scan
+/// cannot do: `//` inside a string literal (e.g. a URL) is data, not a
+/// comment, and a forbidden name inside a comment is documentation, not a
+/// call site.
+fn lex_rust_source(source: &str) -> Vec<SourceToken> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' | '\t' | '\n' | '\r' => i += 1,
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            '/' => {
+                tokens.push(SourceToken::Punct('/'));
+                i += 1;
+            }
+            '"' => {
+                let (value, next) = read_string_literal(&chars, i + 1, 0);
+                tokens.push(SourceToken::Literal(value));
+                i = next;
+            }
+            'r' if matches!(chars.get(i + 1), Some('"') | Some('#')) => {
+                // Raw string `r"..."` / `r#"..."#` or raw identifier `r#name`.
+                let mut j = i + 1;
+                let mut hashes = 0;
+                if chars.get(j) == Some(&'#') {
+                    while chars.get(j) == Some(&'#') {
+                        hashes += 1;
+                        j += 1;
+                    }
+                }
+                if chars.get(j) == Some(&'"') {
+                    let (value, next) = read_string_literal(&chars, j + 1, hashes);
+                    tokens.push(SourceToken::Literal(value));
+                    i = next;
+                } else {
+                    let name = read_ident(&chars, j);
+                    let len = name.chars().count();
+                    tokens.push(SourceToken::Ident(name));
+                    i = j + len;
+                }
+            }
+            '\'' => {
+                if chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'') {
+                    i += 4; // escaped char literal
+                } else if chars.get(i + 2) == Some(&'\'') {
+                    i += 3; // plain char literal
+                } else {
+                    i += 1; // lifetime: not relevant to call-site shape
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        i += 1;
+                    }
+                }
+            }
+            '0'..='9' => {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+            }
+            c if c.is_alphabetic() || c == '_' => {
+                let name = read_ident(&chars, i);
+                let len = name.chars().count();
+                tokens.push(SourceToken::Ident(name));
+                i += len;
+            }
+            other => {
+                tokens.push(SourceToken::Punct(other));
+                i += 1;
+            }
+        }
+    }
+    tokens
+}
+
+/// Reads a string literal body starting just after the opening quote.
+/// `hashes` is the raw-string `#` count (0 for plain strings, where
+/// backslash escapes are decoded). Returns the literal content and the
+/// index just past the closing quote.
+fn read_string_literal(chars: &[char], start: usize, hashes: usize) -> (String, usize) {
+    let mut value = String::new();
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if hashes == 0 && c == '\\' {
+            match chars.get(i + 1) {
+                Some('n') => value.push('\n'),
+                Some('t') => value.push('\t'),
+                Some('r') => value.push('\r'),
+                Some(escaped) => value.push(*escaped),
+                None => break,
+            }
+            i += 2;
+            continue;
+        }
+        if c == '"' && (hashes == 0 || raw_string_closes(chars, i + 1, hashes)) {
+            return (value, i + 1 + hashes);
+        }
+        value.push(c);
+        i += 1;
+    }
+    (value, i)
+}
+
+/// True if the `#` run at `chars[from]` closes a raw string of `hashes` hashes.
+fn raw_string_closes(chars: &[char], from: usize, hashes: usize) -> bool {
+    (0..hashes).all(|k| chars.get(from + k) == Some(&'#')) && chars.get(from + hashes) != Some(&'#')
+}
+
+/// Reads an identifier starting at `chars[start]`.
+fn read_ident(chars: &[char], start: usize) -> String {
+    let mut end = start;
+    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+        end += 1;
+    }
+    chars[start..end].iter().collect()
+}
+
+/// True if `tokens` hold a `command::new(program)` call site — the lexical
+/// shape of a `std::process::Command` launch — with `program` as the exact
+/// string literal argument.
+fn lexically_invokes(tokens: &[SourceToken], command: &str, program: &str) -> bool {
+    tokens.windows(7).any(|w| {
+        matches!(
+            w,
+            [
+                SourceToken::Ident(cmd),
+                SourceToken::Punct(':'),
+                SourceToken::Punct(':'),
+                SourceToken::Ident(ctor),
+                SourceToken::Punct('('),
+                SourceToken::Literal(arg),
+                SourceToken::Punct(')'),
+            ] if cmd.as_str() == command && ctor.as_str() == "new" && arg.as_str() == program
+        )
+    })
+}
+
+/// True if `tokens` hold the fully qualified path `head::tail` as adjacent
+/// identifiers.
+fn lexically_references(tokens: &[SourceToken], head: &str, tail: &str) -> bool {
+    tokens.windows(4).any(|w| {
+        matches!(
+            w,
+            [
+                SourceToken::Ident(a),
+                SourceToken::Punct(':'),
+                SourceToken::Punct(':'),
+                SourceToken::Ident(b),
+            ] if a.as_str() == head && b.as_str() == tail
+        )
+    })
 }
 
 #[test]
@@ -33,25 +203,31 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
         workspace_root().join("crates/autospec-cli/src/commands/autonomous/drain.rs"),
     )
     .expect("read drain command source");
+    let tokens = lex_rust_source(&source);
 
     assert!(
-        source.contains("DrainExecutorInput::omx_autospec_run"),
+        lexically_references(&tokens, "DrainExecutorInput", "omx_autospec_run"),
         "drain command must receive typed executor input from autospec-core"
     );
     assert!(
-        !source.contains("DRAIN_RUN_PROMPT"),
+        !tokens
+            .iter()
+            .any(|t| matches!(t, SourceToken::Ident(name) if name.as_str() == "DRAIN_RUN_PROMPT")),
         "drain command must not retain a raw shell-shaped prompt string"
     );
-    for forbidden in [
-        "Command::new(\"sh\")",
-        "Command::new(\"bash\")",
-        "autospec-autonomous-run-drain.sh",
-    ] {
+    for program in ["sh", "bash"] {
         assert!(
-            !source_invokes(&source, forbidden),
-            "drain command retains legacy authority: {forbidden}"
+            !lexically_invokes(&tokens, "Command", program),
+            "drain command launches a shell interpreter: {program}"
         );
     }
+    assert!(
+        !tokens.iter().any(|t| matches!(
+            t,
+            SourceToken::Literal(text) if text.contains("autospec-autonomous-run-drain.sh")
+        )),
+        "drain command retains a legacy drain script reference"
+    );
 }
 
 #[test]
