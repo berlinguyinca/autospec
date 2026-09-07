@@ -1,3 +1,4 @@
+use autospec_core::issue_lock::IssueLockManager;
 use autospec_core::state::{SpecRunState, SpecStateStore};
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -8,10 +9,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         None => store.clone(),
     };
     let parent_counts = parent_store.parent_issue_counts();
+    let lock_manager = match std::env::var_os("AUTOSPEC_PARENT_STATE_ROOT") {
+        Some(root) => IssueLockManager::new(root.to_string_lossy().as_ref()),
+        None => IssueLockManager::new("."),
+    };
+    let locks = lock_manager
+        .status_json()
+        .map_err(|error| error.to_string())?;
 
     if super::is_json(args) {
         println!(
-            "{{\"command\":\"status\",\"status\":\"ok\",\"specs\":{{\"planned\":{},\"ready\":{},\"running\":{},\"passed\":{},\"failed\":{},\"blocked\":{},\"deferred\":{},\"superseded\":{}}},\"parent_issues\":{{\"pending_children\":{},\"quarantined_parent_decomposed\":{},\"complete_but_stale\":{},\"closed\":{}}}}}",
+            "{{\"command\":\"status\",\"status\":\"ok\",\"specs\":{{\"planned\":{},\"ready\":{},\"running\":{},\"passed\":{},\"failed\":{},\"blocked\":{},\"deferred\":{},\"superseded\":{}}},\"parent_issues\":{{\"pending_children\":{},\"quarantined_parent_decomposed\":{},\"complete_but_stale\":{},\"closed\":{}}},\"locks\":{}}}",
             counts.planned,
             counts.ready,
             counts.running,
@@ -23,7 +31,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             parent_counts.pending_children,
             parent_counts.quarantined_parent_decomposed,
             parent_counts.complete_but_stale,
-            parent_counts.closed
+            parent_counts.closed,
+            locks
         );
     } else {
         println!(
@@ -46,6 +55,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
         for line in parent_store.parent_issue_status_lines() {
             println!("parent issue {line}");
+        }
+        for line in lock_manager
+            .status_lines()
+            .map_err(|error| error.to_string())?
+        {
+            println!("{line}");
         }
     }
     Ok(())
