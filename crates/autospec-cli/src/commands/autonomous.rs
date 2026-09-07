@@ -6119,6 +6119,14 @@ fn validate_repo_dir(options: &Options) -> Result<(), String> {
 }
 
 fn git_top_level(repo_dir: &str) -> Result<Option<PathBuf>, String> {
+    let inside = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|error| format!("inspect repository worktree: {error}"))?;
+    if !inside.status.success() {
+        return Ok(None);
+    }
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(repo_dir)
@@ -6126,11 +6134,7 @@ fn git_top_level(repo_dir: &str) -> Result<Option<PathBuf>, String> {
         .map_err(|error| format!("inspect repository worktree: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return if stderr.contains("not a git repository") {
-            Ok(None)
-        } else {
-            Err(format!("inspect repository worktree: {}", stderr.trim()))
-        };
+        return Err(format!("inspect repository worktree: {}", stderr.trim()));
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok((!path.is_empty()).then(|| PathBuf::from(path)))
