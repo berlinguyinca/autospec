@@ -482,7 +482,9 @@ The subagent must:
    - Type signatures / data structures used across ≥2 issues.
    - File-layout constraints (which file owns what).
    - Naming conventions (e.g. class names, env var prefixes).
-4. Patch each child issue body by appending:
+4. Patch each child issue body by inserting the block
+   **immediately before the first `## Dependencies` line** (append at end of body
+   only when the body has no `## Dependencies` heading):
 
 ```
 <!-- autospec-shared-contracts:begin -->
@@ -492,7 +494,25 @@ The subagent must:
 <!-- autospec-shared-contracts:end -->
 ```
 
-   using `gh issue edit <N> --body "$(gh issue view <N> --json body -q .body)<newblock>"`.
+   Never plain-append: the block's HTML markers and `## Shared contracts` heading
+   must not land inside the `## Dependencies` section — `scripts/lint-issue.sh`
+   reads that section until the next `## ` heading and reports `DEPS_MALFORMED`
+   for every line that is not `Depends on issue #N` or `none` (that append
+   placement is what broke the 13 `#3112`-generation bodies). Write the block to
+   `/tmp/shared-contracts-<N>.md`, insert deterministically, and apply:
+
+   ```bash
+   body="$(gh issue view <N> --json body -q .body)"
+   printf '%s\n' "$body" | awk -v f=/tmp/shared-contracts-<N>.md '
+     !done && /^## Dependencies$/ { while ((getline line < f) > 0) print line; print ""; close(f); done = 1 }
+     { print }
+     END { if (!done) while ((getline line < f) > 0) print line }
+   ' > /tmp/body-<N>.md
+   gh issue edit <N> --body-file /tmp/body-<N>.md
+   ```
+
+   After the patch, `Depends on issue #N` must remain the last line under
+   `## Dependencies`.
    The patch is idempotent — skip if `<!-- autospec-shared-contracts:begin -->` is already
    present in the body.
 
