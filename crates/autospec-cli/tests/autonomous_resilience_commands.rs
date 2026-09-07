@@ -25,7 +25,11 @@ fn resilience_fixture_git_remote_has_a_real_main() {
         &["ls-remote", "--heads", "origin", "main"],
     );
 
-    assert!(remote.starts_with(&local), "local={local} remote={remote}");
+    assert_eq!(
+        remote.split_whitespace().next(),
+        Some(local.as_str()),
+        "local={local} remote={remote}"
+    );
 }
 
 /// Returns the first non-empty line following a `LABEL:` header in `--help`
@@ -398,10 +402,15 @@ fn resilience_decide_reports_filed_and_budget_issue_counters_separately() {
     let status_stdout = stdout(&status);
 
     assert!(status.status.success());
-    assert!(
-        status_stdout.contains(
-            "\"spend\":{\"tokens\":0,\"issues\":2,\"filed_issues\":5,\"budget_issues\":2}"
-        ),
+    let body: serde_json::Value = serde_json::from_str(&status_stdout).expect("status json");
+    assert_eq!(
+        body.get("spend"),
+        Some(&serde_json::json!({
+            "tokens": 0,
+            "issues": 2,
+            "filed_issues": 5,
+            "budget_issues": 2
+        })),
         "status JSON must expose both issue counters by distinct names: {status_stdout}"
     );
 }
@@ -745,10 +754,9 @@ fn autonomous_foreground_releases_an_adopted_lease_when_a_stop_is_persisted() {
         fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
         "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"stop\",\"mode\":\"graceful\"}}\n"
     );
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "a stopped child must release its inherited lease token"
     );
 }
@@ -783,10 +791,9 @@ fn autonomous_foreground_releases_an_adopted_lease_when_the_stop_record_is_inval
 
     assert_eq!(output.status.code(), Some(2));
     assert!(stdout(&output).is_empty());
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "a stop-record diagnostic must release the inherited lease token"
     );
 }
@@ -825,10 +832,9 @@ fn autonomous_foreground_releases_an_inherited_lease_when_config_turns_invalid()
 
     assert_eq!(output.status.code(), Some(2));
     assert!(stdout(&output).is_empty());
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "a config diagnostic must release the inherited lease token"
     );
 }
@@ -865,10 +871,9 @@ fn autonomous_foreground_releases_an_adopted_lease_after_admission_diagnostic() 
 
     assert_eq!(output.status.code(), Some(2));
     assert!(stdout(&output).is_empty());
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "an admission diagnostic must release the inherited lease token"
     );
 }
@@ -907,10 +912,9 @@ fn autonomous_foreground_persists_an_inherited_lease_rejection_before_release() 
         fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
         "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
     );
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "the inherited lease must release after terminal lifecycle persistence"
     );
 }
@@ -957,18 +961,14 @@ fn autonomous_foreground_release_diagnostic_emits_no_decision_json() {
         .expect("start foreground child with release failure");
     let adopted_pid = child.id();
     for _ in 0..80 {
-        if fs::read_to_string(fixture.canonical_state_path())
-            .map(|state| state.contains(&format!("\"lock_pid\":{adopted_pid}")))
-            .unwrap_or(false)
-        {
+        if state_lock_pid(&fixture.canonical_state_path()) == Some(u64::from(adopted_pid)) {
             break;
         }
         thread::sleep(Duration::from_millis(25));
     }
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read adopted conductor lease")
-            .contains(&format!("\"lock_pid\":{adopted_pid}")),
+    assert_eq!(
+        state_lock_pid(&fixture.canonical_state_path()),
+        Some(u64::from(adopted_pid)),
         "the child must adopt before its stop read blocks"
     );
     fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555))
@@ -1030,18 +1030,14 @@ fn autonomous_foreground_token_replacement_during_release_emits_no_decision_json
         .expect("start foreground child with a replaceable lease");
     let adopted_pid = child.id();
     for _ in 0..80 {
-        if fs::read_to_string(fixture.canonical_state_path())
-            .map(|state| state.contains(&format!("\"lock_pid\":{adopted_pid}")))
-            .unwrap_or(false)
-        {
+        if state_lock_pid(&fixture.canonical_state_path()) == Some(u64::from(adopted_pid)) {
             break;
         }
         thread::sleep(Duration::from_millis(25));
     }
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read adopted conductor lease")
-            .contains(&format!("\"lock_pid\":{adopted_pid}")),
+    assert_eq!(
+        state_lock_pid(&fixture.canonical_state_path()),
+        Some(u64::from(adopted_pid)),
         "the child must adopt before its stop read blocks"
     );
     let replacement = token_state(
@@ -1167,10 +1163,9 @@ exit 1
         "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
     );
     assert!(!first.wait().expect("wait for first foreground").success());
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "the first command must release its lease after its terminal diagnostic"
     );
 }
@@ -1284,10 +1279,9 @@ fn restart_releases_new_lease_when_owned_process_termination_is_rejected() {
         String::from_utf8_lossy(&output.stderr).contains("process group ownership is unverified")
     );
     assert!(conductor_survived, "restart must not signal an unowned PID");
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released restart lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released restart lease")["status"],
+        "released",
         "a post-acquisition termination error must release the exact new lease"
     );
 }
@@ -1477,10 +1471,9 @@ fn autonomous_foreground_persists_terminal_lifecycle_before_releasing_lease_when
         fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
         "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
     );
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "the owned lease must release only after terminal lifecycle persistence"
     );
     assert!(
@@ -1510,10 +1503,9 @@ fn autonomous_foreground_persists_initial_preview_rejection_before_releasing_lea
         fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
         "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
     );
-    assert!(
-        fs::read_to_string(fixture.canonical_state_path())
-            .expect("read released conductor lease")
-            .contains("\"status\":\"released\""),
+    assert_eq!(
+        canonical_state_value(&fixture, "read released conductor lease")["status"],
+        "released",
         "the owned lease must release only after terminal lifecycle persistence"
     );
 }
@@ -1708,9 +1700,9 @@ fn autonomous_status_reads_legacy_cycle_suffix_without_writing() {
     let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
 
     assert!(output.status.success());
-    let body = stdout(&output);
-    assert!(body.contains("\"state_status\":\"running:cycle-9\""));
-    assert!(body.contains("\"last_cycle\":\"cycle-9\""));
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_status"], "running:cycle-9");
+    assert_eq!(body["last_cycle"], "cycle-9");
     assert!(!fixture.canonical_state_path().exists());
     assert!(!fixture.operator_lifecycle_path().exists());
 }
@@ -1723,7 +1715,11 @@ fn autonomous_status_ignores_non_running_cycle_suffix() {
     let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("\"last_cycle\":\"\""));
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(
+        body.get("last_cycle").and_then(serde_json::Value::as_str),
+        Some("")
+    );
 }
 
 #[test]
@@ -1740,7 +1736,11 @@ fn autonomous_status_prefers_an_explicit_cycle_over_running_suffix() {
     let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("\"last_cycle\":\"44\""));
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(
+        body.get("last_cycle").and_then(serde_json::Value::as_str),
+        Some("44")
+    );
 }
 
 #[test]
@@ -2397,6 +2397,18 @@ impl Drop for ResilienceFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn canonical_state_value(fixture: &ResilienceFixture, what: &str) -> serde_json::Value {
+    let raw = fs::read_to_string(fixture.canonical_state_path()).expect(what);
+    serde_json::from_str(&raw).unwrap_or_else(|err| panic!("parse {what}: {err}"))
+}
+
+fn state_lock_pid(path: &Path) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|state| state.get("lock_pid").and_then(serde_json::Value::as_u64))
 }
 
 fn valid_state(repo: &str, status: &str, age_secs: u64) -> String {
