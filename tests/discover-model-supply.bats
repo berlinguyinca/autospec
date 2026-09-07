@@ -222,6 +222,33 @@ teardown() {
     [ "$(printf '%s' "$output" | jq '[.[] | select(.reachable | not)] | length')" = "0" ]
 }
 
+@test "AUTOSPEC_VLLM_HOST moves the probed vllm endpoint off the default port" {
+    # The reported asymmetry: a live OpenAI-compatible server on a non-default
+    # port was invisible as vllm while reachable as ollama. The override must
+    # move both the emitted endpoint and the reachability decision.
+    stub_curl_reachable_only ":8001"
+    run env PATH="$PROBE_PATH" HOME="$TMP" AUTOSPEC_VLLM_HOST="127.0.0.1:8001" \
+        bash "$SCRIPT" --out "$OUT"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.runtimes[] | select(.name == "vllm") | .endpoint' "$OUT")" = "http://127.0.0.1:8001/v1/models" ]
+    [ "$(jq -r '.runtimes[] | select(.name == "vllm") | .reachable' "$OUT")" = "true" ]
+    # The other runtimes keep their defaults and stay unreachable.
+    [ "$(jq -r '.runtimes[] | select(.name == "lmstudio") | .endpoint' "$OUT")" = "http://127.0.0.1:1234/v1/models" ]
+    [ "$(jq -r '.runtimes[] | select(.name == "llamacpp") | .endpoint' "$OUT")" = "http://127.0.0.1:8080/v1/models" ]
+}
+
+@test "the probe library is self-contained when sourced without preset hosts" {
+    # discover-model-supply.sh runs `set -eu` and presets OLLAMA_HOST; a plain
+    # sourcing caller that did not must still get a clean probe result, not an
+    # unbound-variable exit.
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash -c \
+        '. "$1"; CURL_TIMEOUT=2 probe_runtimes' _ \
+        "$(dirname "$SCRIPT")/lib/model-supply-probe.sh"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.[0].endpoint')" = "http://127.0.0.1:11434/api/tags" ]
+    [ "$(printf '%s' "$output" | jq -r '[.[] | select(.reachable | not)] | length')" = "4" ]
+}
+
 @test "the stored document still records unreachable runtimes with a flag" {
     stub_curl_reachable_only ":8000"
     run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --runtimes

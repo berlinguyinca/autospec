@@ -266,6 +266,9 @@ writes a capability document consumed by `/autospec-run`'s profile auto-init.
 |---|---|---|
 | `AUTOSPEC_MODEL_CAPABILITY` | `~/.autospec/model-capability.json` | Capability-document path. |
 | `AUTOSPEC_OLLAMA_HOST` | `127.0.0.1:11434` | Ollama host:port probed for local models. |
+| `AUTOSPEC_LMSTUDIO_HOST` | `127.0.0.1:1234` | LM Studio OpenAI-compatible endpoint host:port. |
+| `AUTOSPEC_VLLM_HOST` | `127.0.0.1:8000` | vLLM OpenAI-compatible endpoint host:port (aim it at a remote GPU host here). |
+| `AUTOSPEC_LLAMACPP_HOST` | `127.0.0.1:8080` | llama.cpp OpenAI-compatible endpoint host:port. |
 | `AUTOSPEC_CALIBRATION_DIR` | `~/.autospec/calibration` | Per-role calibration verdicts folded into the document as `calibrated` evidence. |
 
 ### Capability evidence levels
