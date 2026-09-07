@@ -1,4 +1,6 @@
-use autospec_core::claim::RunStateRecord;
+use autospec_core::claim::{
+    parse_remote_comments_json, terminal_merged_comment_exists, RunStateRecord,
+};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -323,9 +325,12 @@ fn run_paged_claim_refresh(
     let log = fixture.join("gh.log");
     std::fs::write(&log, "").expect("claim log fixture");
     let repo = claim_git_repo(fixture);
-    let terminal = std::fs::read_to_string(second_page)
-        .expect("second claim page")
-        .contains("autospec-run-terminal:begin");
+    let terminal = terminal_merged_comment_exists(
+        &parse_remote_comments_json(
+            &std::fs::read_to_string(second_page).expect("second claim page"),
+        )
+        .expect("second claim page is comment JSON"),
+    );
     let state = if terminal { "merged" } else { "claimed" };
     let initial = RunStateRecord::new(
         "testorg/testrepo",
