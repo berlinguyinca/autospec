@@ -6,6 +6,7 @@
 //! those. No persistence, no CLI, no git/Docker inspection, no deletion, and
 //! no `ResourceHandler` (§38) live here.
 
+pub mod db;
 pub mod model;
 
 pub use model::{ManagedResource, ObservedResource, OwnershipClass, ResourceState, ResourceType};
