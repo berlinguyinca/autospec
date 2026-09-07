@@ -24,6 +24,10 @@
 # dir that logs every invocation; bash 3.2-safe (no process substitution;
 # fixtures written to real temp files). No real GitHub calls.
 
+# `run !` (negated run) requires Bats 1.5.0; used for the mid-body negated
+# assertions that the #3091 ratchet forbids as bare `! cmd` statements.
+bats_require_minimum_version 1.5.0
+
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     LOOP_LIB="$REPO_ROOT/scripts/lib/autospec-loop.sh"
@@ -267,7 +271,8 @@ PROMOTE_ISSUE:501"
 
     # Merge is admin+squash but NEVER --delete-branch (reset recreates the branch).
     grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
-    ! grep -q -- "--delete-branch" "$GH_LOG"
+    run ! grep -q -- "--delete-branch" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
     # Order pinned via the shared sequence log: merge BEFORE reset.
     merge_line="$(grep -n "^gh pr merge 42" "$SEQ_LOG" | head -1 | cut -d: -f1)"
@@ -292,7 +297,8 @@ PROMOTE_ISSUE:502"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
     [ ! -s "$INTBRANCH_LOG" ]
     grep -q "^issue comment 502 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 502 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
@@ -308,8 +314,10 @@ DISCARD_ISSUE:504"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr close" "$GH_LOG"
-    ! grep -q "^issue reopen" "$GH_LOG"
+    run ! grep -q "^pr close" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue reopen" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 504 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 504 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }
@@ -324,8 +332,10 @@ PROMOTE_ISSUE:503"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
-    ! grep -q "^reset" "$INTBRANCH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^reset" "$INTBRANCH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 503 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 503 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
 }
@@ -341,8 +351,10 @@ PROMOTE_ISSUE:505"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
-    ! grep -q "^reset" "$INTBRANCH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^reset" "$INTBRANCH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 505 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 505 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
 }
@@ -358,7 +370,8 @@ PROMOTE_ISSUE:506"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 506 --repo test-owner/test-repo" "$GH_LOG"
 }
 
@@ -373,7 +386,8 @@ PROMOTE_ISSUE:508"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 508 --repo test-owner/test-repo" "$GH_LOG"
 }
 
@@ -406,7 +420,8 @@ PROMOTE_ISSUE:507"
     # Phase 1: merged, reset failed → NO issue close (stays open for retry),
     # label still cleared (operator re-fires by re-applying it).
     grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
-    ! grep -q "^issue close 507" "$GH_LOG"
+    run ! grep -q "^issue close 507" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue edit 507 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
 
     # Phase 2: operator re-applies the label; the roll-up is now MERGED and
@@ -420,7 +435,8 @@ PROMOTE_ISSUE:507"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr merge" "$GH_LOG"
+    run ! grep -q "^pr merge" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
     grep -q "^issue close 507 --repo test-owner/test-repo$" "$GH_LOG"
     grep -q "^issue edit 507 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
@@ -475,8 +491,10 @@ EOF
     [ "$status" -eq 0 ]
 
     grep -q "^issue reopen 11 --repo test-owner/test-repo$" "$GH_LOG"
-    ! grep -q "^issue reopen 999" "$GH_LOG"
-    ! grep -q "^issue comment 999" "$GH_LOG"
+    run ! grep -q "^issue reopen 999" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue comment 999" "$GH_LOG"
+    [ "$status" -eq 1 ]
     # The reopen list must not have been derived from PR comments at all.
     ! grep -q "^pr view 77 --repo test-owner/test-repo --json comments" "$GH_LOG"
 }
@@ -494,8 +512,10 @@ DISCARD_ISSUE:605"
     [ "$status" -eq 0 ]
 
     grep -q "^pr close 77" "$GH_LOG"
-    ! grep -q "^issue reopen" "$GH_LOG"
-    ! grep -q "^issue close 605" "$GH_LOG"
+    run ! grep -q "^issue reopen" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue close 605" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 605 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 605 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }
@@ -515,8 +535,10 @@ DISCARD_ISSUE:606"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^issue reopen 11 " "$GH_LOG"
-    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    run ! grep -q "^issue reopen 11 " "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
     grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
 }
@@ -538,8 +560,10 @@ DISCARD_ISSUE:607"
     grep -q "^issue reopen 11" "$GH_LOG"
     # Reopen failed → no per-issue comment, no control-issue close, no
     # success claim; label still cleared so the operator re-fires explicitly.
-    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
-    ! grep -q "^issue close 607" "$GH_LOG"
+    run ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue close 607" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 607 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 607 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
     # Pause marker must NOT be cleared on a partial failure.
@@ -563,8 +587,10 @@ DISCARD_ISSUE:608"
     grep -q "^issue reopen 11 --repo test-owner/test-repo$" "$GH_LOG"
     grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
     grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
-    ! grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
-    ! grep -q "^issue close 608" "$GH_LOG"
+    run ! grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue close 608" "$GH_LOG"
+    [ "$status" -eq 1 ]
     [ -f "$TEST_TMP/.autospec/discard-pending.json" ]
     [ -f "$PAUSE_FILE" ]
 
@@ -577,9 +603,12 @@ DISCARD_ISSUE:608"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr close 77" "$GH_LOG"
-    ! grep -q "^issue reopen 11 " "$GH_LOG"
-    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    run ! grep -q "^pr close 77" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue reopen 11 " "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
     grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
     grep -q "^issue close 608 --repo test-owner/test-repo$" "$GH_LOG"
@@ -599,8 +628,10 @@ DISCARD_ISSUE:603"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr close" "$GH_LOG"
-    ! grep -q "^issue reopen" "$GH_LOG"
+    run ! grep -q "^pr close" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue reopen" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 603 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 603 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }
@@ -615,8 +646,10 @@ DISCARD_ISSUE:602"
     _run_cycle
     [ "$status" -eq 0 ]
 
-    ! grep -q "^pr close" "$GH_LOG"
-    ! grep -q "^issue reopen" "$GH_LOG"
+    run ! grep -q "^pr close" "$GH_LOG"
+    [ "$status" -eq 1 ]
+    run ! grep -q "^issue reopen" "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -q "^issue comment 602 --repo test-owner/test-repo" "$GH_LOG"
     grep -q "^issue edit 602 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }
