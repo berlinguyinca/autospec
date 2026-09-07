@@ -103,13 +103,24 @@ if [ "$SKIP_CAP" -eq 0 ]; then
     if ! command -v jq >/dev/null 2>&1; then
         _refuse 'jq is required to read the capability document'
     fi
+    # A stale or hand-edited document can claim dispatch_recommended=true for a
+    # model while the accelerator block records an ambiguous state (present but
+    # not provably usable). The probe never produces that shape — ambiguous
+    # forces every entry to false — but the document is read from disk, so the
+    # claim is cross-checked against the accelerator fact it is derived from.
     _ok="$(jq -r --arg m "$MODEL" '
-        (.local_models // []) | map(select(.model == $m)) | first
-        | if . == null then "absent" elif .dispatch_recommended then "yes" else "no" end' \
+        (.accelerator.usable // false) as $usable
+        | (.local_models // []) | map(select(.model == $m)) | first
+        | if . == null then "absent"
+          elif .dispatch_recommended != true then "no"
+          elif $usable != true then "ambiguous"
+          else "yes" end' \
         "$CAPABILITY" 2>/dev/null || printf 'absent')"
     case "$_ok" in
         yes) ;;
         no)  _refuse "model $MODEL is present but not dispatch_recommended ($(jq -r '.accelerator.reason // "unknown"' "$CAPABILITY" 2>/dev/null))" ;;
+        ambiguous)
+          _refuse "model $MODEL is dispatch_recommended but the accelerator is not provably usable ($(jq -r '.accelerator.reason // "unknown"' "$CAPABILITY" 2>/dev/null))" ;;
         *)   _refuse "model $MODEL not found in the capability document" ;;
     esac
 fi
