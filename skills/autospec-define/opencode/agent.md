@@ -910,6 +910,49 @@ notes inserted before its closing marker>
    leaves the outer marker and heading outside the region
     `lint-issue.sh` strips, so they count against the word budget.
 
+4. **Cross-language boundaries (conditional, fail closed).** Read the `lang:*`
+   label of every child (`gh issue view <N> --repo {repo} --json labels -q
+   '.labels[].name | select(startswith("lang:"))'`). When the children span **2 or
+   more distinct `lang:*` labels**, or **any** child carries `lang:mixed`, append a
+   `## Cross-language boundaries` table **between the
+   `<!-- autospec-shared-contracts:begin -->` / `:end -->` markers** of each affected
+   child body — one row per interface between children with different `lang:*`
+   labels (write it once, before the closing marker, as part of the same block):
+
+   ```markdown
+   ## Cross-language boundaries
+
+   | Boundary | Transport | Schema (source of truth) | Owner | Golden fixture |
+   |---|---|---|---|---|
+   | cli→worker | subprocess + JSON stdout | schemas/autospec-x.schema.json | lang:rust | tests/fixtures/boundary/x.json |
+   ```
+
+   `Owner` is the `lang:*` label of the side that owns the schema. The table
+   encodes three rules: the owning side lands the schema **first**; the consuming
+   issue carries `Depends on issue #N` against it; each boundary gets one golden
+   fixture under `tests/fixtures/` asserted by **both** sides' own test runners —
+   that two-sided assertion is the only thing that catches drift.
+
+   **Fail-closed schema rule.** Every `Schema` cell must name a file that exists
+   under `schemas/`. A declared boundary whose schema file is missing fails Phase
+   3.75 rather than emitting an unbacked table:
+
+   ```bash
+   boundaries=/tmp/boundaries.md   # the table drafted in this step
+   missing=0
+   while read -r schema; do
+     [ -f "$schema" ] || { echo "PHASE_3_75_FAILED rule=boundary-schema-missing path=$schema"; missing=1; }
+   done < <(grep -oE 'schemas/[A-Za-z0-9._/-]+\.json' "$boundaries" | sort -u)
+   [ "$missing" -eq 0 ] || exit 1
+   ```
+
+   On failure: do not patch any child body with the boundary table, leave
+   `auto-implement` off the children of that boundary, and comment the missing
+   schema paths on the owning issue so the schema can land first. Never emit an
+   empty `Schema` cell or a `TBD` placeholder to satisfy the table — an unbacked
+   row is the exact failure this rule exists to prevent. When the check passes,
+   log `"Phase 3.75: cross-language boundaries verified (<count>)"`.
+
 If there are fewer than 2 child issues, or all child issues are in the same
 file (no cross-issue interface), skip Phase 3.75 and log:
 `"Phase 3.75: skipped (single-file scope)"`
