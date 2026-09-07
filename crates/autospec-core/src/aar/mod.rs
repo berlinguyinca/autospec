@@ -29,6 +29,7 @@ pub mod pi;
 pub mod policy;
 pub mod profile;
 pub mod reasoning;
+pub mod result_target;
 pub mod telemetry;
 pub mod topology;
 
@@ -66,6 +67,9 @@ pub use profile::{
 pub use reasoning::{
     select_reasoning, ReasoningBudget, ReasoningHistory, ReasoningLimits, ReasoningSelection,
     SamplingProfile, SamplingRegistry,
+};
+pub use result_target::{
+    evaluate_result_target, median_wall_ms, GateStatus, GateVerdict, ResultTarget,
 };
 pub use telemetry::{ExecutionTelemetry, FailureCategory, ReviewOutcome};
 pub use topology::{
