@@ -1,9 +1,22 @@
 # Declarative architecture fitness-function registry.
 # Each entry is runnable by scripts/architecture-fitness.sh and can act as a CI gate.
 fitness_functions:
+  # Money here is integer by deliberate convention -- cost_per_1k_millicents
+  # (initiative/routing.rs, commented "integer to keep money off floats") and
+  # cost_per_1k_prompt_micros (aar/profile.rs). Neither lives in a money-named file,
+  # so scoping this gate by file name -- the convention its own scripts/**/*money*
+  # arm uses -- would not have covered them. Scoping it by bare f64 over
+  # crates/**/*.rs, as it was first authored, covered far too much: it counted 100
+  # non-monetary values (capability scores, cache-hit ratios, tokens-per-second,
+  # median wall-clock ms, docker memory parsing) and so the gate never once passed
+  # on main. The pattern is therefore what carries the scope -- it matches f64 only
+  # where it is bound to a money-denominated identifier, which still catches the
+  # realistic regression of retyping or casting a millicents/micros value.
+  # "quantity", named in the original description, is deliberately dropped: it is
+  # too generic to mean money in a repo with no financial domain.
   - id: financial_no_f64
-    name: Financial paths avoid binary floating point
-    description: Money, price, quantity, and PNL paths must not introduce f64.
+    name: Money-denominated values stay off binary floating point
+    description: 'A money-denominated identifier must never be typed f64. Non-monetary f64 -- scores, ratios, throughput, durations -- is allowed.'
     type: forbidden_pattern
     gate: true
     threshold: 0
@@ -12,10 +25,10 @@ fitness_functions:
       - scripts/**/*money*
       - scripts/**/*price*
       - scripts/**/*pnl*
-    pattern: '\bf64\b'
+    pattern: '(?i)\b(?:[a-z0-9]+_)*(price|pnl|money|invoice|payment|revenue|billing|balance|fee|spend|budget|amount|millicents|micros|cents|usd|dollars)[a-z0-9_]*\s*(:|\([^)]*\)\s*->|\s+as)\s*(Option\s*<\s*)?f64'
     metric: forbidden_f64_occurrences
     issue:
-      title: 'fix: remove f64 from financial path'
+      title: 'fix: type a money-denominated value off f64'
       labels: ['auto-implement', 'architecture-fitness']
 
   - id: shell_no_destructive_git
