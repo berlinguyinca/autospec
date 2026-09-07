@@ -144,3 +144,38 @@ commit_change() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Generated with [Claude Code]"* ]]
 }
+
+# ── pre-open closing-keyword assertion ────────────────────────────────────────
+# PR #3114 merged with only a title-style (#3048) reference and no body keyword;
+# the issue stayed open for four days. GitHub auto-closes on the body keyword,
+# not the title, so the gate asserts on the body FILE before `gh pr create`.
+
+@test "--assert-closes passes on a composed body" {
+    commit_change a.txt "feat(x): add a"
+    bash "$COMPOSE" --issue 42 --base start > "$TMP/body.md"
+    run bash "$COMPOSE" --assert-closes "$TMP/body.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "--assert-closes needs no --issue" {
+    # Assertion mode checks a finished body; there is nothing to compose.
+    commit_change a.txt "feat(x): add a"
+    bash "$COMPOSE" --issue 42 --base start > "$TMP/body.md"
+    run bash "$COMPOSE" --assert-closes "$TMP/body.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "a body with only a title-style (#N) reference exits non-zero" {
+    # A title reference is not a body keyword: GitHub does not auto-close on it.
+    commit_change a.txt "feat(x): add a"
+    printf 'fix: something (#42)\n\nA body that never carries the keyword.\n' > "$TMP/body.md"
+    run bash "$COMPOSE" --assert-closes "$TMP/body.md"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"Closes #"* ]]
+}
+
+@test "--assert-closes on a missing file is a usage error, not exit 4" {
+    run bash "$COMPOSE" --assert-closes "$TMP/absent.md"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--assert-closes not found"* ]]
+}

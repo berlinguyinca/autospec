@@ -1206,6 +1206,16 @@ do not fall back to an inline label-swap path.
 >    ```
 >    Exit 3 from the composer means the commit range is empty: do NOT run
 >    `gh pr create`, and investigate why the branch has no commits.
+>    Then — BEFORE `gh pr create` — assert the composed body actually carries the
+>    closing keyword. A merged PR without it leaves its issue open: finished work
+>    becomes indistinguishable from pending work. A title-style `(#<ISSUE>)`
+>    reference is NOT equivalent; GitHub auto-closes only on the body keyword.
+>    ```bash
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/compose-pr-body.sh" \
+>      --assert-closes "$PR_BODY_FILE" || exit 1
+>    ```
+>    Exit 4 means the body carries no `Closes #<ISSUE>` keyword: do NOT run
+>    `gh pr create`.
 >    Then: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body-file "$PR_BODY_FILE". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
 >    Fire the transition notification: `case "$_notify_fired" in *:pr_created:*) ;; *) _notify_fired="${_notify_fired}:pr_created:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: pr_created" "PR #<PR> opened on {repo}" || true ;; esac`
 >    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
