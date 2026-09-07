@@ -132,6 +132,31 @@ EOF
     [[ "$output" == *"nvml_driver_library_mismatch"* ]]
 }
 
+@test "refuses an ambiguous accelerator even when a stale model entry claims dispatch_recommended" {
+    # A hand-edited or partially-updated document can carry a per-model
+    # dispatch_recommended=true while the accelerator block records an
+    # ambiguous state (present but not provably usable). The probe never
+    # produces this shape — ambiguous forces every entry to false — but
+    # local-dispatch consumes documents from disk, so it must cross-check the
+    # document-level accelerator fact it is derived from, or the stale claim
+    # would dispatch onto a broken GPU with a silent CPU fallback.
+    jq -n --arg m "qwen3:32b" \
+        '{accelerator:{usable:false, reason:"nvidia_smi_query_failed"},
+          local_models:[{model:$m, dispatch_recommended:true}]}' > "$CAP"
+    run bash "$SCRIPT" --model qwen3:32b --prompt-file "$PROMPT" --capability-file "$CAP"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"not provably usable"* ]]
+    [[ "$output" == *"nvidia_smi_query_failed"* ]]
+}
+
+@test "refuses a capability document whose accelerator block is missing" {
+    jq -n --arg m "qwen3:32b" \
+        '{local_models:[{model:$m, dispatch_recommended:true}]}' > "$CAP"
+    run bash "$SCRIPT" --model qwen3:32b --prompt-file "$PROMPT" --capability-file "$CAP"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"not provably usable"* ]]
+}
+
 @test "refuses a model absent from the capability document" {
     cap_with "some-other-model" true
     run bash "$SCRIPT" --model qwen3:32b --prompt-file "$PROMPT" --capability-file "$CAP"
