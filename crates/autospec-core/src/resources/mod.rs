@@ -13,6 +13,7 @@
 //! observer) cannot attribute to exactly one AutoSpec run is
 //! `OwnershipClass::External` and must never be deleted (spec §36).
 
+pub mod db;
 pub mod docker;
 pub mod model;
 pub mod process;
