@@ -331,6 +331,97 @@ fn a_retry_exhausted_backlog_seals_without_an_invalid_outcome() {
     assert_eq!(sealing.phase(), ConductorPhase::AllBlocked);
 }
 
+/// Drive a state through identical blocked cycles until the governor seals it
+/// as `AllBlocked`, the way a live run seals before the process exits.
+fn sealed_foreground_state(issue: u64, reason: &str) -> ConductorState {
+    let mut state = blocked_foreground_state(issue, reason);
+    for _ in 0..BLOCKED_BACKLOG_THRESHOLD {
+        let (next, keep_looping) =
+            blocked_cycle_continuation(state).expect("continue after blocked cycle");
+        assert!(keep_looping);
+        state = next;
+        if state.phase() == ConductorPhase::AllBlocked {
+            break;
+        }
+        state = reblock_foreground_state(state, issue, reason);
+    }
+    assert_eq!(state.phase(), ConductorPhase::AllBlocked);
+    state
+}
+
+/// A seal reached inside a running loop keeps the loop alive: it stops Tier 1
+/// selection without ending the run. The persisted path is pinned separately
+/// below, so the in-loop acceptance of `AllBlocked` is not mistaken for
+/// startup recovery.
+#[test]
+fn an_in_loop_seal_stops_tier1_selection_without_ending_the_run() {
+    let sealed = sealed_foreground_state(51, "candidate_blocked");
+    assert_eq!(sealed.phase(), ConductorPhase::AllBlocked);
+
+    assert!(
+        foreground_cycle_is_loopable(&ForegroundCompletion::State(Box::new(sealed)))
+            .expect("a sealed backlog must not end the in-loop run"),
+        "a sealed backlog stops Tier 1 selection, not the conductor itself"
+    );
+}
+
+/// A persisted `AllBlocked` seal used to make every conductor start fail: the
+/// start guard admits only `Scan`, so a supervisor restarted the process into
+/// the identical file. Loading it must recover to a phase the cycle can run.
+#[test]
+fn a_persisted_all_blocked_seal_recovers_to_scan_with_the_governor_armed() {
+    let state = sealed_foreground_state(51, "candidate_blocked");
+    assert_eq!(state.blocked_backlog_cycles(), BLOCKED_BACKLOG_THRESHOLD);
+    let path = std::env::temp_dir().join(format!(
+        "autospec-sealed-backlog-{}.json",
+        std::process::id()
+    ));
+
+    let recovered =
+        abandon_exhausted_retries(&path, state).expect("recover the sealed backlog");
+
+    assert_eq!(
+        recovered.phase(),
+        ConductorPhase::Scan,
+        "a fresh process must re-scan; the start guard only admits Scan"
+    );
+    assert_eq!(recovered.selected_issue(), None);
+    assert!(
+        foreground_cycle_is_loopable(&ForegroundCompletion::State(Box::new(recovered.clone())))
+            .expect("a recovered seal is loopable")
+    );
+    // The governor's identity survives the recovery, so the same issue re-seals
+    // the backlog in the new run instead of earning a fresh five-cycle budget.
+    assert_eq!(recovered.blocked_backlog_reason(), Some("candidate_blocked"));
+    assert_eq!(recovered.blocked_backlog_issues(), [51]);
+    assert!(
+        recovered.blocked_backlog_cycles() > 0,
+        "the blocked-backlog counters must survive the recovery"
+    );
+    let on_disk = std::fs::read_to_string(&path).expect("the recovered state must be persisted");
+    assert_eq!(
+        ConductorState::parse_json(&on_disk).expect("the persisted recovery must re-parse"),
+        recovered,
+        "the next start parses this file, so it must round-trip"
+    );
+
+    // Retries stay bounded: the same issue blocked again re-seals the backlog.
+    let mut resealing = recovered;
+    for _ in 0..BLOCKED_BACKLOG_THRESHOLD - 1 {
+        resealing = reblock_foreground_state(resealing, 51, "candidate_blocked");
+        let (next, keep_looping) =
+            blocked_cycle_continuation(resealing).expect("continue after re-blocked cycle");
+        assert!(keep_looping);
+        resealing = next;
+    }
+    assert_eq!(
+        resealing.phase(),
+        ConductorPhase::AllBlocked,
+        "the governor must re-seal the same issue instead of looping forever"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 /// A retry-exhausted pause has no resume phase, so it used to poison every start.
 #[test]
 fn a_persisted_retry_exhausted_pause_is_retired_instead_of_blocking_startup() {
