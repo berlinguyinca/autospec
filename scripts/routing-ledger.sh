@@ -16,7 +16,8 @@
 #                     issue can be dispatched many times)
 #     dispatch_kind   implementer | lgtm-reviewer | explore-researcher |
 #                     verify-voter | refine-lens | qa-sweep | secaudit-pass |
-#                     growth-lens | spec-decompose
+#                     growth-lens | spec-decompose | spec-research |
+#                     spec-design | broad-audit | refine-scope
 #                     Present from the FIRST record on purpose: retrofitting a
 #                     key dimension into an append-only ledger would invalidate
 #                     every historical row and every stats query.
@@ -56,7 +57,7 @@
 set -u
 
 ALLOWED_OUTCOMES="pending merged_clean lgtm_first_pass retried_ok escalated qa_failed reverted abandoned"
-ALLOWED_KINDS="implementer lgtm-reviewer explore-researcher verify-voter refine-lens qa-sweep secaudit-pass growth-lens spec-decompose"
+ALLOWED_KINDS="implementer lgtm-reviewer explore-researcher verify-voter refine-lens qa-sweep secaudit-pass growth-lens spec-decompose spec-research spec-design broad-audit refine-scope"
 ALLOWED_CTX="32k 64k 120k"
 ALLOWED_REASONING="shallow medium deep"
 
