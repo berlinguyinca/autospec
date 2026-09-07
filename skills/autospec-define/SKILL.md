@@ -876,14 +876,34 @@ exactly and for free.
    shape and note it in the block. Do **not** re-read every body or re-derive
    the whole summary — the deterministic scan already did steps 1-2.
 
-3. **Patch each child issue body** by appending the (possibly reconciled) block:
+3. **Patch each child issue body** by inserting the (possibly reconciled) block
+   **immediately before the first `## Dependencies` line** (append at end of body
+   only when the body has no `## Dependencies` heading):
 
 ```
 <the extract-shared-contracts.sh output verbatim, plus any Tier-B reconcile
 notes inserted before its closing marker>
 ```
 
-   using `gh issue edit <N> --body "$(gh issue view <N> --json body -q .body)<newblock>"`.
+   Never plain-append: the block's HTML markers and `## Shared contracts` heading
+   must not land inside the `## Dependencies` section — `scripts/lint-issue.sh`
+   reads that section until the next `## ` heading and reports `DEPS_MALFORMED`
+   for every line that is not `Depends on issue #N` or `none` (that append
+   placement is what broke the 13 `#3112`-generation bodies). Write the block to
+   `/tmp/shared-contracts-<N>.md`, insert deterministically, and apply:
+
+   ```bash
+   body="$(gh issue view <N> --json body -q .body)"
+   printf '%s\n' "$body" | awk -v f=/tmp/shared-contracts-<N>.md '
+     !done && /^## Dependencies$/ { while ((getline line < f) > 0) print line; print ""; close(f); done = 1 }
+     { print }
+     END { if (!done) while ((getline line < f) > 0) print line }
+   ' > /tmp/body-<N>.md
+   gh issue edit <N> --body-file /tmp/body-<N>.md
+   ```
+
+   After the patch, `Depends on issue #N` must remain the last line under
+   `## Dependencies`.
    The patch is idempotent — skip if `<!-- autospec-shared-contracts:begin -->` is already
    present in the body.
 
