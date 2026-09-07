@@ -85,18 +85,17 @@ fn foreground_recovery_accountability_records_authoritative_successor_once() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let journal = fs::read_to_string(
-        fixture
+    let journal = journal_event_kinds(
+        &fixture
             .scoped_dir()
             .join("accountability-resumes/epic-999/accountability-events.jsonl"),
-    )
-    .expect("recovery accountability journal");
-    assert_eq!(journal.matches("startup_claim_recovered").count(), 1);
-    assert_eq!(journal.matches("issue_claimed").count(), 1);
-    let recovered = journal.find("startup_claim_recovered").unwrap();
-    let claimed = journal.find("issue_claimed").unwrap();
+    );
+    let recovered = journal_kind_positions(&journal, "startup_claim_recovered");
+    let claimed = journal_kind_positions(&journal, "issue_claimed");
+    assert_eq!(recovered.len(), 1, "journal={journal:?}");
+    assert_eq!(claimed.len(), 1, "journal={journal:?}");
     assert!(
-        recovered < claimed,
+        recovered[0] < claimed[0],
         "recovery must precede the successor claim event"
     );
     let projection = fs::read_to_string(&fixture.accountability).unwrap();
@@ -163,14 +162,13 @@ fn foreground_recovery_accountability_integrity_failure_does_not_undo_claim_hand
         fs::read_to_string(&fixture.calls).unwrap_or_default()
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("recovery accountability degraded"));
-    let journal = fs::read_to_string(
-        fixture
+    let journal = journal_event_kinds(
+        &fixture
             .scoped_dir()
             .join("accountability-resumes/epic-999/accountability-events.jsonl"),
-    )
-    .expect("recovery accountability journal");
-    assert!(journal.contains("startup_claim_recovered"));
-    assert!(journal.contains("issue_claimed"));
+    );
+    assert!(journal_has_kind(&journal, "startup_claim_recovered"));
+    assert!(journal_has_kind(&journal, "issue_claimed"));
     assert_ne!(
         fixture.claim_record().claim_id.as_deref(),
         Some("stranded-claim")
@@ -243,15 +241,18 @@ fn foreground_recovery_accountability_records_deferred_then_recovered_once() {
         .join("accountability-resumes/epic-999/accountability-events.jsonl");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        if fs::read_to_string(&journal_path)
-            .is_ok_and(|journal| journal.contains("heartbeat_publication_deferred"))
-        {
+        if fs::read_to_string(&journal_path).is_ok_and(|journal| {
+            journal_has_kind(
+                &parse_journal_kinds(&journal),
+                "heartbeat_publication_deferred",
+            )
+        }) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let deferred = fs::read_to_string(&journal_path).expect("deferred event journal");
-    assert!(deferred.contains("heartbeat_publication_deferred"));
+    let journal = journal_event_kinds(&journal_path);
+    assert!(journal_has_kind(&journal, "heartbeat_publication_deferred"));
     let pending = fixture.claim_record();
     let stale = RunStateRecord::new(
         "test/repo",
@@ -281,17 +282,16 @@ fn foreground_recovery_accountability_records_deferred_then_recovered_once() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let journal = fs::read_to_string(&journal_path).unwrap();
-    assert_eq!(journal.matches("heartbeat_publication_deferred").count(), 1);
-    assert_eq!(journal.matches("startup_claim_recovered").count(), 1);
-    assert_eq!(journal.matches("issue_claimed").count(), 1);
-    let deferred = journal.find("heartbeat_publication_deferred").unwrap();
-    let recovered = journal.find("startup_claim_recovered").unwrap();
-    let claimed = journal.find("issue_claimed").unwrap();
-    assert!(deferred < recovered && recovered < claimed);
-    assert!(journal
-        .find("stopped")
-        .is_none_or(|stopped| stopped > claimed));
+    let journal = journal_event_kinds(&journal_path);
+    let deferred = journal_kind_positions(&journal, "heartbeat_publication_deferred");
+    let recovered = journal_kind_positions(&journal, "startup_claim_recovered");
+    let claimed = journal_kind_positions(&journal, "issue_claimed");
+    assert_eq!(deferred.len(), 1, "journal={journal:?}");
+    assert_eq!(recovered.len(), 1, "journal={journal:?}");
+    assert_eq!(claimed.len(), 1, "journal={journal:?}");
+    assert!(deferred[0] < recovered[0] && recovered[0] < claimed[0]);
+    let stopped = journal_kind_positions(&journal, "stopped");
+    assert!(stopped.first().is_none_or(|stopped| stopped > &claimed[0]));
     let projection = fs::read_to_string(&fixture.accountability).unwrap();
     assert_eq!(projection.matches("autospec:run-epic").count(), 1);
     assert!(projection.lines().any(|line| {
@@ -421,13 +421,15 @@ exec /usr/bin/git "$@"
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"claim_lost\""));
-    let journal = fs::read_to_string(
-        fixture
+    let journal = journal_event_kinds(
+        &fixture
             .scoped_dir()
             .join("accountability-resumes/epic-999/accountability-events.jsonl"),
-    )
-    .unwrap();
-    assert!(!journal.contains("heartbeat_publication_deferred"));
+    );
+    assert!(
+        !journal_has_kind(&journal, "heartbeat_publication_deferred"),
+        "journal={journal:?}"
+    );
     assert!(!fs::read_to_string(&fixture.accountability)
         .unwrap()
         .contains("authoritative claim remains pending"));
@@ -470,6 +472,47 @@ fn seed_recovery_accountability_epic(fixture: &ForegroundFixture, nonce: &str) {
         "{\"repo\":\"test/repo\",\"slug\":\"test__repo\",\"status\":\"released\",\"host\":null,\"session\":null,\"heartbeat_at\":null,\"lock_pid\":null,\"lock_host\":null,\"lock_session\":null,\"lock_acquired_at\":null,\"lease_token\":null,\"lease_generation\":7}\n",
     )
     .unwrap();
+}
+
+/// Event kinds of an accountability journal, in journal order. The journal is
+/// JSON lines (`{"seq":…,"event":{"kind":{"type":…},"what":…,"evidence":…}}`),
+/// so parsing it beats substring-matching the raw text: a kind named inside the
+/// free-form `what`/`why`/`evidence` text would otherwise be counted as an
+/// event, and byte offsets into the file are not event ordering. A line that
+/// does not parse is skipped, which keeps a partially flushed trailing line
+/// from failing a poll of a live journal.
+fn parse_journal_kinds(journal: &str) -> Vec<String> {
+    journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| {
+            record
+                .get("event")?
+                .get("kind")?
+                .get("type")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn journal_event_kinds(path: &Path) -> Vec<String> {
+    let journal = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read accountability journal {}: {error}", path.display()));
+    parse_journal_kinds(&journal)
+}
+
+fn journal_has_kind(kinds: &[String], kind: &str) -> bool {
+    kinds.iter().any(|existing| existing == kind)
+}
+
+fn journal_kind_positions(kinds: &[String], kind: &str) -> Vec<usize> {
+    kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, existing)| existing.as_str() == kind)
+        .map(|(position, _)| position)
+        .collect()
 }
 
 fn assert_recovery_accountability_targets_existing_epic(fixture: &ForegroundFixture) {
