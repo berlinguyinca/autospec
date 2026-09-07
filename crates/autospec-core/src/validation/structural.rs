@@ -38,19 +38,69 @@ pub fn oversized_module_refactor_issues(
             .unwrap_or(&file)
             .display()
             .to_string();
-        let responsibility = text
-            .lines()
-            .find_map(|line| {
-                let trimmed = line.trim();
-                trimmed
-                    .strip_prefix("pub fn ")
-                    .or_else(|| trimmed.strip_prefix("pub async fn "))
-                    .map(|name| name.split('(').next().unwrap_or(name).to_string())
-            })
-            .unwrap_or_else(|| "module responsibilities".to_string());
+        let responsibility =
+            first_public_fn_name(&text).unwrap_or_else(|| "module responsibilities".to_string());
         drafts.push(RefactorDraft { file: relative.clone(), severity, title: format!("Extract {responsibility} from {relative}"), body: format!("Add a characterization test before a behavior-preserving extraction of {responsibility} from {relative}.") });
     }
     drafts
+}
+
+/// Name of the first public function definition in a Rust source document,
+/// recognized by its signature token structure — `pub`, an optional
+/// `(visibility)` qualifier, optional `async`/`const`/`unsafe`/`extern "abi"`
+/// modifiers, the `fn` keyword, then the identifier — rather than by
+/// substring matching on the line.
+fn first_public_fn_name(text: &str) -> Option<String> {
+    text.lines().find_map(|line| public_fn_name(line.trim()))
+}
+
+fn public_fn_name(line: &str) -> Option<String> {
+    let mut tokens = line.split_whitespace();
+    let first = tokens.next()?;
+    if first == "pub" {
+        // Standalone `pub`, optionally followed by a `(visibility)` qualifier.
+        let next = tokens.next()?;
+        let next = if next.starts_with('(') {
+            let mut qualifier = next;
+            while !qualifier.ends_with(')') {
+                qualifier = tokens.next()?;
+            }
+            tokens.next()?
+        } else {
+            next
+        };
+        return fn_name_after_modifiers(&mut tokens, next);
+    }
+
+    // Combined `pub(...)` visibility, e.g. `pub(crate)` or `pub(in crate::mod)`.
+    let mut qualifier = first.strip_prefix("pub(")?;
+    while !qualifier.ends_with(')') {
+        qualifier = tokens.next()?;
+    }
+    let next = tokens.next()?;
+    fn_name_after_modifiers(&mut tokens, next)
+}
+
+fn fn_name_after_modifiers<'a>(
+    tokens: &mut std::str::SplitWhitespace<'a>,
+    mut next: &'a str,
+) -> Option<String> {
+    loop {
+        match next {
+            "async" | "const" | "unsafe" => next = tokens.next()?,
+            "extern" => {
+                // Skip the ABI literal (e.g. `"C"`), then continue to the next keyword.
+                tokens.next()?;
+                next = tokens.next()?;
+            }
+            "fn" => {
+                let name = tokens.next()?;
+                let end = name.find('(').unwrap_or(name.len());
+                return Some(name[..end].to_string());
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn collect_rust_files(root: &Path, output: &mut Vec<std::path::PathBuf>) {
@@ -62,7 +112,9 @@ fn collect_rust_files(root: &Path, output: &mut Vec<std::path::PathBuf>) {
         if path.is_dir() {
             collect_rust_files(&path, output);
         } else if path.extension().is_some_and(|ext| ext == "rs")
-            && path.to_string_lossy().contains("/src/")
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "src")
         {
             output.push(path);
         }
