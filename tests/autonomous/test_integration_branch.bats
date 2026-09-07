@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # tests/autonomous/test_integration_branch.bats — autonomous integration branch lifecycle.
 
+bats_require_minimum_version 1.5.0
+
 write_fake_git() {
     write_fake_git_header > "$FAKE_BIN/git"
     write_fake_git_refs >> "$FAKE_BIN/git"
@@ -225,8 +227,10 @@ YAML
     run bash "$SCRIPT" ensure --parent dev --repo example/repo
 
     [ "$status" -eq 0 ]
-    ! grep -q '^branch ' "$GIT_CALLS"
-    ! grep -q '^push ' "$GIT_CALLS"
+    run ! grep -q '^branch ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
+    run ! grep -q '^push ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
     [ "$(jq -r '.branch' "$GIT_ROOT/.autospec/explore-mode.json")" = "team/integration-dev" ]
     [ "$(jq -r '.base' "$GIT_ROOT/.autospec/explore-mode.json")" = "dev" ]
 }
@@ -305,7 +309,8 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
-    ! grep -q '^branch ' "$GIT_CALLS"
+    run ! grep -q '^branch ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q '^push ' "$GIT_CALLS"
 }
 
@@ -316,8 +321,10 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
-    ! grep -q '^checkout ' "$GIT_CALLS"
-    ! grep -q '^merge ' "$GIT_CALLS"
+    run ! grep -q '^checkout ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
+    run ! grep -q '^merge ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q '^push ' "$GIT_CALLS"
 }
 
@@ -350,7 +357,8 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"code_health:integration_reset_rollup_open"* ]]
-    ! grep -q '^push ' "$GIT_CALLS"
+    run ! grep -q '^push ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q 'worktree add' "$GIT_CALLS"
 }
 
@@ -361,7 +369,8 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
-    ! grep -q '^push ' "$GIT_CALLS"
+    run ! grep -q '^push ' "$GIT_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q 'worktree add' "$GIT_CALLS"
 }
 
@@ -481,8 +490,9 @@ YAML
     [ "$(grep -c '^pr comment ' "$GH_CALLS")" -eq 1 ]
     grep -q 'autospec-rollup:issue-101' "$GH_CALLS"
     # never auto-merges and stays quiet on green CI
-    ! grep -q '^pr merge' "$GH_CALLS"
     [[ "$output" != *"rollup-red"* ]]
+    run ! grep -q '^pr merge' "$GH_CALLS"
+    [ "$status" -eq 1 ]
 }
 
 @test "rollup-update second landing updates the manifest body and adds exactly one new comment" {
@@ -492,7 +502,8 @@ YAML
     run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
 
     [ "$status" -eq 0 ]
-    ! grep -q '^pr create' "$GH_CALLS"
+    run ! grep -q '^pr create' "$GH_CALLS"
+    [ "$status" -eq 1 ]
     [ "$(grep -c '^pr edit 77 --repo example/repo --body' "$GH_CALLS")" -eq 1 ]
     # regenerated manifest carries both the prior and the new issue, and the
     # prior issue's line is enriched with its title from the durable comment
@@ -582,8 +593,10 @@ YAML
 
     [ "$status" -eq 9 ]
     [[ "$output" == *"code_health:integration_rollup_multiple_open"* ]]
-    ! grep -q '^pr edit ' "$GH_CALLS"
-    ! grep -q '^pr comment ' "$GH_CALLS"
+    run ! grep -q '^pr edit ' "$GH_CALLS"
+    [ "$status" -eq 1 ]
+    run ! grep -q '^pr comment ' "$GH_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q '^pr merge' "$GH_CALLS"
 }
 
@@ -592,7 +605,8 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_branch_missing"* ]]
-    ! grep -q '^pr create' "$GH_CALLS"
+    run ! grep -q '^pr create' "$GH_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q '^pr comment ' "$GH_CALLS"
 }
 
@@ -651,8 +665,10 @@ YAML
     [ "$status" -eq 8 ]
     [[ "$output" == *"code_health:integration_rollup_gh_failed"* ]]
     [[ "$output" == *"invalid JSON"* ]]
-    ! grep -q '^pr edit ' "$GH_CALLS"
-    ! grep -q '^pr comment ' "$GH_CALLS"
+    run ! grep -q '^pr edit ' "$GH_CALLS"
+    [ "$status" -eq 1 ]
+    run ! grep -q '^pr comment ' "$GH_CALLS"
+    [ "$status" -eq 1 ]
     ! grep -q '^pr merge' "$GH_CALLS"
 }
 
