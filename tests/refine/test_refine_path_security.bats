@@ -13,10 +13,49 @@ setup() {
     RENDER="$REPO_ROOT/scripts/refine-render-overview.sh"
     TMPDIR_T="$(mktemp -d)"
     export PATH="$REPO_ROOT/scripts:$PATH"
+
+    # #2568: this suite validates path security, not LLM lenses. Pin the
+    # refine lens offline (refine-prompt.sh defaults to auto, which is
+    # LLM-first) and shadow every known LLM dispatcher with a sentinel that
+    # logs any invocation and fails loudly, so a regression that dispatches
+    # a model surfaces as a test failure instead of a billable run.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
+    SENTINEL_LOG="$TMPDIR_T/sentinel-llm-invocations.log"
+    SENTINEL_BIN="$TMPDIR_T/sentinel-bin"
+    mkdir -p "$SENTINEL_BIN"
+    for name in claude codex; do
+        cat > "$SENTINEL_BIN/$name" <<EOF
+#!/usr/bin/env bash
+echo "$name invoked: \$*" >> "$SENTINEL_LOG"
+exit 97
+EOF
+        chmod +x "$SENTINEL_BIN/$name"
+    done
+    export PATH="$SENTINEL_BIN:$PATH"
 }
 
 teardown() {
+    if [ -e "${SENTINEL_LOG:-}" ]; then
+        echo "FAIL: an LLM dispatcher was invoked during a deterministic run:" >&2
+        cat "$SENTINEL_LOG" >&2
+        exit 1
+    fi
     [ -n "${TMPDIR_T:-}" ] && rm -rf "$TMPDIR_T"
+}
+
+@test "deterministic refine run spawns zero LLM dispatchers" {
+    run bash "$REFINE" "path security offline lens probe" --rounds 1 --dry-run \
+        --artifact-dir "$TMPDIR_T/refinements" \
+        --repo-root "$TMPDIR_T" \
+        --memory-root "$TMPDIR_T/memory"
+    [ "$status" -eq 0 ]
+    [ ! -e "$SENTINEL_LOG" ]
+    local artifact
+    artifact="$(ls "$TMPDIR_T"/refinements/*.json 2>/dev/null | head -1)"
+    [ -n "$artifact" ]
+    local impl
+    impl="$(jq -r '.rounds[0].lens_implementation' "$artifact")"
+    [ "$impl" = "deterministic" ]
 }
 
 @test "symlink-to-.env rejected with refine_path_violation" {

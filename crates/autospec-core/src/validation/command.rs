@@ -139,11 +139,31 @@ impl ToolCommand {
         for key in &self.removed_environment {
             command.env_remove(key);
         }
-        let output = command
+        // Own process group + interrupt handler install (#2568): the guard
+        // unregisters when the fixture exits, so an interrupt of validate
+        // kills every live fixture group and only those.
+        crate::validation::bats::run_in_own_process_group(&mut command);
+        // `Command::output()` (the previous implementation) pipes stdout and
+        // stderr implicitly; `spawn()` inherits them, so pipe explicitly to
+        // keep the captured output contract identical.
+        let child = match command
             .current_dir(self.working_directory_for(root))
-            .output();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => return captured_result(id, required, &self.program, started, Err(error)),
+        };
+        let _process_group = crate::validation::bats::register_process_group(child.id() as i32);
 
-        captured_result(id, required, &self.program, started, output)
+        captured_result(
+            id,
+            required,
+            &self.program,
+            started,
+            child.wait_with_output(),
+        )
     }
 
     pub(crate) fn execute_in_with_stdin_capturing(
@@ -165,6 +185,9 @@ impl ToolCommand {
         for key in &self.removed_environment {
             command.env_remove(key);
         }
+        // Own process group + interrupt handler install (#2568); the guard
+        // unregisters when the fixture exits.
+        crate::validation::bats::run_in_own_process_group(&mut command);
         command
             .current_dir(self.working_directory_for(root))
             .stdin(Stdio::piped())
@@ -173,6 +196,10 @@ impl ToolCommand {
 
         let output = match command.spawn() {
             Ok(mut child) => {
+                // Own process-group leader (setpgid(0, 0) between fork and
+                // exec), so pid == group id while the fixture runs.
+                let _process_group =
+                    crate::validation::bats::register_process_group(child.id() as i32);
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(stdin_bytes);
                 }

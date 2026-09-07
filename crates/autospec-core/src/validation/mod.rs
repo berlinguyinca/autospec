@@ -1,4 +1,5 @@
 pub mod affected;
+pub mod bats;
 pub mod catalog;
 pub mod command;
 pub mod external;
