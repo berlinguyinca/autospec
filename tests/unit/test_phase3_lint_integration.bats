@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 # tests/unit/test_phase3_lint_integration.bats — grep assertions verifying that
 # every trio file in skills/autospec, skills/autospec-define, and
 # skills/autospec-classify mentions the Phase 3 lint loop and Phase 3.5 audit
@@ -85,7 +86,8 @@ setup() {
     for file in "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
         assert_before "Pre-filing lint loop" "Pre-filing safety loop" "$file"
         grep -q 'On pass (exit 0), proceed to the safety loop' "$file"
-        ! grep -q 'proceed to `gh issue create` as normal' "$file"
+        run ! grep -q 'proceed to `gh issue create` as normal' "$file"
+        [ "$status" -eq 1 ]
         grep -q "Pre-filing safety loop" "$file"
         grep -q "MAX_SAFETY_RETRIES=5" "$file"
         grep -q 'lint issue safety' "$file"
@@ -143,10 +145,14 @@ setup() {
             "$REPO_ROOT/skills/$skill/opencode/agent.md"
         do
             grep -Fq 'queue review-safety --repo {repo} --limit 1 --issue <N>' "$file"
-            ! grep -Fq 'safety:reviewed' "$file"
-            ! grep -Fq 'security:quarantined' "$file"
-            ! grep -Fq 'autospec-safety:begin' "$file"
-            ! grep -Fq 'autospec-safety:end' "$file"
+            run ! grep -Fq 'safety:reviewed' "$file"
+            [ "$status" -eq 1 ]
+            run ! grep -Fq 'security:quarantined' "$file"
+            [ "$status" -eq 1 ]
+            run ! grep -Fq 'autospec-safety:begin' "$file"
+            [ "$status" -eq 1 ]
+            run ! grep -Fq 'autospec-safety:end' "$file"
+            [ "$status" -eq 1 ]
         done
     done
 }
@@ -198,7 +204,8 @@ setup() {
     do
         grep -Fq 'queue review-safety' "$file"
         grep -Fq 'only automatic writer' "$file"
-        ! grep -Fq 'Generate that decision through `autospec lint issue safety`' "$file"
+        run ! grep -Fq 'Generate that decision through `autospec lint issue safety`' "$file"
+        [ "$status" -eq 1 ]
     done
 }
 
@@ -210,13 +217,20 @@ setup() {
         "$REPO_ROOT/skills/autospec-explore/opencode/agent.md"
     do
         grep -Fq 'queue review-safety --repo {repo} --limit 1 --issue <N>' "$file"
-        ! grep -Fq 'safety:reviewed' "$file"
-        ! grep -Fq 'security:quarantined' "$file"
-        ! grep -Fq 'autospec-safety:begin' "$file"
-        ! grep -Fq 'autospec-safety:end' "$file"
-        ! grep -Fq 'autospec:needs-human' "$file"
-        ! grep -Fq 'autospec-safety-decision:begin' "$file"
-        ! grep -Fq 'autospec-safety-decision:end' "$file"
+        run ! grep -Fq 'safety:reviewed' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'security:quarantined' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'autospec-safety:begin' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'autospec-safety:end' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'autospec:needs-human' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'autospec-safety-decision:begin' "$file"
+        [ "$status" -eq 1 ]
+        run ! grep -Fq 'autospec-safety-decision:end' "$file"
+        [ "$status" -eq 1 ]
     done
 }
 

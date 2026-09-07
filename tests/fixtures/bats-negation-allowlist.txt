@@ -62,7 +62,7 @@ tests/unit/test_final_quality_gate.bats 1
 tests/unit/test_github_publishing.bats 3
 tests/unit/test_lint_gates_ratchet.bats 2
 tests/unit/test_lint_issue_safety.bats 1
-tests/unit/test_phase3_lint_integration.bats 13
+tests/unit/test_phase3_lint_integration.bats 0
 tests/unit/test_phase4_guardian_trio.bats 5
 tests/unit/test_self_update_preflight.bats 2
 tests/unit/test_verifier_v0.bats 1
