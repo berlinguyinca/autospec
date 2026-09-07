@@ -9,7 +9,7 @@
 # Output (default, on fail): one finding per stderr line, format:
 #   <RULE_ID>: <1-line description>
 # where RULE_ID is GOAL_VAGUE | GOAL_HEDGE | GOAL_NOT_ONE_SENTENCE
-#                | AC_PROSE | AC_SUBJECTIVE | AC_TOO_LONG | AC_EMPTY
+#                | AC_PROSE | AC_SUBJECTIVE | AC_TOO_LONG | AC_EMPTY | AC_VACUOUS
 #                | SMOKE_MULTI_LINE | SMOKE_PLACEHOLDER | SMOKE_NOT_FENCED
 #                | MISSING_SECTION_FILES_TO_READ | MISSING_SECTION_IMPL_OUTLINE
 #                | MISSING_SECTION_TESTS | DEPS_MALFORMED
@@ -39,6 +39,9 @@ Rules enforced (§3 quality contract):
   AC_TOO_LONG           AC item exceeds 120 characters (excluding '- [ ] ' prefix).
   AC_EMPTY              Acceptance criteria section has no checkbox items.
   AC_NOT_CHECKABLE      AC item lacks a path, backtick span, integer, or regex token.
+  AC_VACUOUS            AC item asserts 0 occurrences or absence of a literal without a
+                        positive post-condition in the same item (such a criterion cannot
+                        fail once the literal changes for unrelated reasons).
   SMOKE_MULTI_LINE      Primary smoke test block does not have exactly one executable line.
   SMOKE_PLACEHOLDER     Primary smoke test block contains ... <TODO> TBD or XXX.
   SMOKE_NOT_FENCED      No fenced code block found under Primary smoke test heading.
@@ -331,6 +334,26 @@ check_ac() {
         printf '%s' "$line" | grep -qF '\' && has_token=1  # regex literal (backslash present)
         if [ "$has_token" -eq 0 ]; then
             add_finding "AC_NOT_CHECKABLE" "AC item ${line_num} lacks a path, backtick span, integer, or regex token"
+        fi
+
+        # Vacuous absence check (#3203): an AC asserting 0 occurrences of a
+        # literal, or that code does not contain a string, passes without work
+        # once the literal changes for unrelated reasons. Allowed only when the
+        # same AC also asserts a positive post-condition.
+        local line_lower
+        line_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+        local absence_zero_re='\b(0|zero|no)`?[[:space:]]+(occurrences?|matches?|hits?|references?|mentions?|assertions?|uses?|instances?|copies?|invocations?)\b'
+        local absence_neg_re='\b(does not|must not|should not|no longer)[[:space:]]+(contain|include|reference|appear|use|match|emit|hold|carry|mention)\b'
+        local positive_re='\b(add(ed|s|ing)?|creat(e|es|ed|ing)?|emit(s|ted)?|write(s|n)?|return(s|ed)?|pass(es|ed)?|produc(e|es|ed|ing)?|exi(st|sts|sted)?|exits?[[:space:]]*0|contain(s|ed)?|includ(e|es|ed)?|print(s|ed)?|log(s|ged)?|updat(e|es|d)?|call(s|ed)?|verif(y|ies|ied)?|support(s|ed)?|generat(e|es|ed|ing)?)\b'
+        if printf '%s' "$line_lower" | grep -qE "$absence_zero_re" \
+            || printf '%s' "$line_lower" | grep -qE "$absence_neg_re"; then
+            # Strip the absence clause(s), then look for a positive
+            # post-condition in what remains of the same AC line.
+            local remainder
+            remainder="$(printf '%s' "$line_lower" | sed -E "s/$absence_zero_re//g; s/$absence_neg_re//g")"
+            if ! printf '%s' "$remainder" | grep -qE "$positive_re"; then
+                add_finding "AC_VACUOUS" "AC item ${line_num} asserts absence of a literal without a positive post-condition: $(printf '%s' "$line" | cut -c1-60)"
+            fi
         fi
 
         # Subjective words check
