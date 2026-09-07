@@ -72,48 +72,99 @@ impl PiSessionSpec {
     }
 }
 
+/// Map a reasoning token budget onto Pi's `--thinking` enum.
+///
+/// Pi (validated against 0.84.4; still present in 0.85.0) takes no per-call
+/// token budget: reasoning depth is the 7-level enum
+/// `off | minimal | low | medium | high | xhigh | max`. This banding is the
+/// documented starting point that turns a budget into a level; it is a
+/// configuration assumption, not a measurement, and should be revisited once
+/// real Qwen3.8 sessions show which band behaves like which budget.
+pub fn thinking_level(tokens: u32) -> &'static str {
+    match tokens {
+        0 => "off",
+        1..=512 => "minimal",
+        513..=1_024 => "low",
+        1_025..=2_048 => "medium",
+        2_049..=4_096 => "high",
+        4_097..=8_192 => "xhigh",
+        _ => "max",
+    }
+}
+
+/// The Pi `--tools` allowlist for a role.
+///
+/// Separation of duties (spec section 8) is expressed as tool policy: producer
+/// roles get the full built-in set, every other role can read and run things
+/// but can never edit or write files. `--tools` is a comma-separated allowlist
+/// on the 0.84.4 CLI surface.
+pub fn role_tools(role: AgentRole) -> &'static str {
+    if role.is_producer() {
+        "read,edit,write,bash"
+    } else {
+        "read,bash"
+    }
+}
+
+/// Render the role, working directory and rules block for `--append-system-prompt`.
+fn session_prompt_block(spec: &PiSessionSpec) -> String {
+    let mut block = format!("Role: {}", spec.role.as_str());
+    block.push_str(&format!("\nWorking directory: {}", spec.worktree));
+    block.push('\n');
+    for rule in spec.rules() {
+        block.push_str(&rule);
+        block.push('\n');
+    }
+    block
+}
+
 /// Build the Pi argv for a session.
+///
+/// Built against the released headless surface (`--print`, `--mode json` and
+/// friends on Pi 0.84.4); a smoke test spawns the real binary and fails if it
+/// rejects any flag we emit, skipping only when Pi is absent. There is
+/// deliberately **no** `session` subcommand: Pi has none, and passing one
+/// swallows it as a positional message that silently prefixes the model's
+/// prompt.
+///
+/// Policy that has no flag equivalent on the released surface is mapped onto a
+/// supported one instead of being dropped silently:
+///
+/// - `AgentRole` + working rules -> `--append-system-prompt`
+/// - role tool policy -> `--tools` (see [`role_tools`])
+/// - `reasoning_tokens` -> `--thinking` (see [`thinking_level`])
+/// - `worktree` -> the spawned process's `current_dir`; the caller owns the
+///   working directory and Pi has no `--worktree` flag.
+///
+/// The sampling flags, `--max-context-tokens`, `--prefix-cache-key` and
+/// `--no-forks` are not emitted: Pi 0.84.4 rejects all of them, and Pi's
+/// provider/model configuration is where sampling belongs until an equivalent
+/// flag exists. `stable_prefix_hash` and `allow_forks` remain on the spec for
+/// callers that need them once Pi grows equivalents.
 ///
 /// Options are kept as distinct argv entries rather than one shell string: the
 /// review dispatcher already learned that joining them re-introduces
 /// shell-specific splitting bugs.
 pub fn build_pi_argv(spec: &PiSessionSpec) -> Result<Vec<String>, String> {
     spec.validate()?;
-    let mut argv = vec![
+    let argv = vec![
         "pi".to_string(),
-        "session".to_string(),
-        "--worktree".to_string(),
-        spec.worktree.clone(),
+        "--print".to_string(),
+        "--mode".to_string(),
+        "json".to_string(),
         "--session-id".to_string(),
         spec.session_id.clone(),
-        "--role".to_string(),
-        spec.role.as_str().to_string(),
         "--provider".to_string(),
         spec.provider.clone(),
         "--model".to_string(),
         spec.model.clone(),
-        "--reasoning-tokens".to_string(),
-        spec.reasoning_tokens.to_string(),
-        "--sampling-profile".to_string(),
-        spec.sampling.identity(),
-        "--temperature".to_string(),
-        format!("{:.2}", spec.sampling.temperature),
-        "--top-p".to_string(),
-        format!("{:.2}", spec.sampling.top_p),
-        "--top-k".to_string(),
-        spec.sampling.top_k.to_string(),
-        "--max-output-tokens".to_string(),
-        spec.sampling.max_output_tokens.to_string(),
-        "--max-context-tokens".to_string(),
-        spec.max_context_tokens.to_string(),
+        "--thinking".to_string(),
+        thinking_level(spec.reasoning_tokens).to_string(),
+        "--tools".to_string(),
+        role_tools(spec.role).to_string(),
+        "--append-system-prompt".to_string(),
+        session_prompt_block(spec),
     ];
-    if !spec.stable_prefix_hash.is_empty() {
-        argv.push("--prefix-cache-key".to_string());
-        argv.push(spec.stable_prefix_hash.clone());
-    }
-    if !spec.allow_forks {
-        argv.push("--no-forks".to_string());
-    }
     Ok(argv)
 }
 
@@ -206,8 +257,12 @@ pub fn parse_pi_event(line: &str) -> Result<PiEvent, String> {
     }
 
     Ok(match kind {
-        "tool_call" => PiEvent::ToolCall { name: field("name")? },
-        "file_read" => PiEvent::FileRead { path: field("path")? },
+        "tool_call" => PiEvent::ToolCall {
+            name: field("name")?,
+        },
+        "file_read" => PiEvent::FileRead {
+            path: field("path")?,
+        },
         "file_edit" => PiEvent::FileEdit {
             path: field("path")?,
             lines: number("lines")? as usize,
@@ -247,7 +302,10 @@ fn parse_fields(rest: &str) -> Result<Vec<(String, String)>, String> {
             let close = quoted
                 .find('"')
                 .ok_or_else(|| format!("unterminated quoted value for {key}"))?;
-            (quoted[..close].to_string(), quoted[close + 1..].trim_start())
+            (
+                quoted[..close].to_string(),
+                quoted[close + 1..].trim_start(),
+            )
         } else {
             match after.find(' ') {
                 Some(space) => (after[..space].to_string(), after[space + 1..].trim_start()),
