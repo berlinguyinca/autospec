@@ -1453,11 +1453,14 @@ fn run_executor_bridge_with_codex_probe_observed(
             };
             let rules = parse_blocking_hook_failure(hook_failure)
                 .map_err(|parse| BridgeRunFailure::invariant(format!("{error}; {parse}")))?;
+            let advisory = parse_advisory_hook_failure(hook_failure)
+                .map_err(|parse| BridgeRunFailure::invariant(format!("{error}; {parse}")))?;
             let outcome = prepare_implementation_lint_repair(
                 &request.state_path,
                 &mut state,
                 &closeout_path,
                 &rules,
+                &advisory,
             )
             .map_err(BridgeRunFailure::invariant)?;
             return match outcome {
@@ -9786,8 +9789,14 @@ struct PremergeCommandFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ImplementationRepairFindings {
+    blocking: Vec<ImplementationLintRule>,
+    advisory: Vec<ImplementationLintRule>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ImplementationRepairCause {
-    Lint(Vec<ImplementationLintRule>),
+    Lint(ImplementationRepairFindings),
     PremergeCommand(PremergeCommandFailure),
 }
 
@@ -9947,6 +9956,29 @@ fn implementation_repair_artifact_body(
     attempt: u32,
     staged_diff_digest: &str,
     rules: &[ImplementationLintRule],
+    advisory_rules: &[ImplementationLintRule],
+) -> String {
+    serde_json::json!({
+        "schema": 2,
+        "claim_id": state.identity.claim_id,
+        "invocation_id": state.identity.invocation_id,
+        "base_oid": state.identity.base_oid,
+        "branch": state.identity.branch,
+        "attempt": attempt,
+        "staged_diff_digest": staged_diff_digest,
+        "rules": rules.iter().map(|rule| rule.id()).collect::<Vec<_>>(),
+        "advisory_rules": advisory_rules.iter().map(|rule| rule.id()).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Schema 1 body: the blocking tier only, persisted before #3096 carried the
+/// advisory tier. Kept so in-flight repair artifacts still read back.
+fn legacy_implementation_repair_artifact_body(
+    state: &PersistedInvocation,
+    attempt: u32,
+    staged_diff_digest: &str,
+    rules: &[ImplementationLintRule],
 ) -> String {
     serde_json::json!({
         "schema": 1,
@@ -9959,6 +9991,34 @@ fn implementation_repair_artifact_body(
         "rules": rules.iter().map(|rule| rule.id()).collect::<Vec<_>>(),
     })
     .to_string()
+}
+
+/// Advisory (`INFO:`) tier of an implementation hook failure. The blocking
+/// tier comes from `parse_blocking_hook_failure`; this mirrors its line
+/// grammar for the advisory records the shell renders as `Consider` lines so
+/// the repair prompt carries one convention (#3096, #3093).
+fn parse_advisory_hook_failure(failure: &str) -> Result<Vec<ImplementationLintRule>, String> {
+    let mut seen = BTreeSet::new();
+    let mut advisory = Vec::new();
+    for line in failure.lines() {
+        let Some(record) = line.strip_prefix("INFO:") else {
+            continue;
+        };
+        let mut fields = record.splitn(4, ':');
+        let id = fields.next().unwrap_or_default();
+        let path = fields.next().unwrap_or_default();
+        let line_number = fields.next().unwrap_or_default();
+        let message = fields.next().and_then(|value| value.strip_prefix(' '));
+        let rule = ImplementationLintRule::from_id(id)
+            .ok_or_else(|| format!("implementation hook reported unknown rule ID {id:?}"))?;
+        if path.is_empty() || line_number.is_empty() || message.is_none_or(str::is_empty) {
+            return Err("implementation hook finding record is malformed".to_string());
+        }
+        if seen.insert(id) {
+            advisory.push(rule);
+        }
+    }
+    Ok(advisory)
 }
 
 fn validate_implementation_repair_artifact(path: &Path) -> Result<(), String> {
@@ -10081,7 +10141,7 @@ fn read_implementation_repair_rules(
     state_path: &Path,
     state: &PersistedInvocation,
     attempt: u32,
-) -> Result<Vec<ImplementationLintRule>, String> {
+) -> Result<ImplementationRepairFindings, String> {
     let path = implementation_repair_artifact_path(state_path, state, attempt)?;
     validate_implementation_repair_artifact(&path)?;
     let raw = fs::read_to_string(&path)
@@ -10089,22 +10149,45 @@ fn read_implementation_repair_rules(
     if raw.len() > 16 * 1024 {
         return Err("implementation repair artifact exceeds 16384 bytes".to_string());
     }
-    let object = strict_object(
-        serde_json::from_str(&raw)
-            .map_err(|error| format!("parse implementation repair artifact: {error}"))?,
-        &[
-            "schema",
-            "claim_id",
-            "invocation_id",
-            "base_oid",
-            "branch",
-            "attempt",
-            "staged_diff_digest",
-            "rules",
-        ],
-        "implementation repair artifact",
-    )?;
-    if number(&object, "schema")? != 1
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("parse implementation repair artifact: {error}"))?;
+    let object = match parsed
+        .as_object()
+        .and_then(|value| value.get("schema"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1) => strict_object(
+            parsed,
+            &[
+                "schema",
+                "claim_id",
+                "invocation_id",
+                "base_oid",
+                "branch",
+                "attempt",
+                "staged_diff_digest",
+                "rules",
+            ],
+            "implementation repair artifact",
+        )?,
+        Some(2) => strict_object(
+            parsed,
+            &[
+                "schema",
+                "claim_id",
+                "invocation_id",
+                "base_oid",
+                "branch",
+                "attempt",
+                "staged_diff_digest",
+                "rules",
+                "advisory_rules",
+            ],
+            "implementation repair artifact",
+        )?,
+        _ => return Err("implementation repair artifact binding mismatch".to_string()),
+    };
+    if number(&object, "schema")? > 2
         || text(&object, "claim_id")? != state.identity.claim_id
         || text(&object, "invocation_id")? != state.identity.invocation_id
         || text(&object, "base_oid")? != state.identity.base_oid
@@ -10119,7 +10202,7 @@ fn read_implementation_repair_rules(
     }
     let values = required(&object, "rules")?
         .as_array()
-        .filter(|rules| !rules.is_empty() && rules.len() <= 64)
+        .filter(|rules| rules.len() <= 64)
         .ok_or_else(|| "implementation repair artifact rules are invalid".to_string())?;
     let rules = values
         .iter()
@@ -10130,10 +10213,40 @@ fn read_implementation_repair_rules(
                 .ok_or_else(|| "implementation repair artifact has an unknown rule".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if raw != implementation_repair_artifact_body(state, attempt, &digest, &rules) {
+    let advisory = if number(&object, "schema")? == 2 {
+        let values = required(&object, "advisory_rules")?
+            .as_array()
+            .filter(|rules| rules.len() <= 64)
+            .ok_or_else(|| {
+                "implementation repair artifact advisory rules are invalid".to_string()
+            })?;
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .and_then(ImplementationLintRule::from_id)
+                    .ok_or_else(|| "implementation repair artifact has an unknown rule".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    if rules.is_empty() && advisory.is_empty() {
+        return Err("implementation repair artifact rules are invalid".to_string());
+    }
+    let expected = if number(&object, "schema")? == 1 {
+        legacy_implementation_repair_artifact_body(state, attempt, &digest, &rules)
+    } else {
+        implementation_repair_artifact_body(state, attempt, &digest, &rules, &advisory)
+    };
+    if raw != expected {
         return Err("implementation repair artifact is not canonical".to_string());
     }
-    Ok(rules)
+    Ok(ImplementationRepairFindings {
+        blocking: rules,
+        advisory,
+    })
 }
 
 fn read_premerge_command_failure(
@@ -10252,10 +10365,22 @@ fn implementation_repair_prompt(
     let mut current = None;
     for attempt in 1..=state.implementation_repair_attempt {
         match read_implementation_repair_cause(state_path, state, attempt)? {
-            ImplementationRepairCause::Lint(rules) => {
-                for rule in rules {
+            ImplementationRepairCause::Lint(findings) => {
+                for rule in &findings.blocking {
                     if seen.insert(rule.id()) {
-                        directives.push(format!("Fix {}: {}", rule.id(), directive_for(rule)));
+                        directives.push(format!("Fix {}: {}", rule.id(), directive_for(*rule)));
+                    }
+                }
+                // Advisory tier: `Consider` wording matches the shell's
+                // `--directives` output one-to-one (#3093, #3096). A rule that
+                // already carries a Fix directive gets no duplicate Consider.
+                for rule in &findings.advisory {
+                    if seen.insert(rule.id()) {
+                        directives.push(format!(
+                            "Consider {}: {}",
+                            rule.id(),
+                            directive_for(*rule)
+                        ));
                     }
                 }
                 current = Some("Implementation lint repair");
@@ -10284,7 +10409,7 @@ fn implementation_repair_prompt(
         "\n{kind} attempt {attempt} of {maximum}.\n\
          Claim: {claim}\nInvocation: {invocation}\n\
          The authority boundary is unchanged: you MUST NOT push or mutate remote state.\n\
-         Correct every cumulative deterministic finding below, rerun tests, and replace the Closeout report:\n{directives}\n",
+         Correct every cumulative blocking finding below, weigh the advisory findings, rerun tests, and replace the Closeout report:\n{directives}\n",
         kind = current.ok_or_else(|| "implementation repair has no current cause".to_string())?,
         attempt = state.implementation_repair_attempt,
         maximum = MAX_IMPLEMENTATION_REPAIR_ATTEMPTS,
@@ -10299,6 +10424,7 @@ fn prepare_implementation_lint_repair(
     state: &mut PersistedInvocation,
     closeout: &Path,
     rules: &[ImplementationLintRule],
+    advisory_rules: &[ImplementationLintRule],
 ) -> Result<ImplementationLintRepairOutcome, String> {
     if state.phase != BridgePhase::ImplementationComplete {
         return Err("implementation lint repair requires completed implementation output".into());
@@ -10339,8 +10465,13 @@ fn prepare_implementation_lint_repair(
             "implementation repair index differs from worktree; preserving staged bytes".into(),
         );
     }
-    let body =
-        implementation_repair_artifact_body(state, attempt, &sha256_hex(&staged.stdout), rules);
+    let body = implementation_repair_artifact_body(
+        state,
+        attempt,
+        &sha256_hex(&staged.stdout),
+        rules,
+        advisory_rules,
+    );
     write_implementation_repair_artifact(
         &implementation_repair_artifact_path(state_path, state, attempt)?,
         body.as_bytes(),

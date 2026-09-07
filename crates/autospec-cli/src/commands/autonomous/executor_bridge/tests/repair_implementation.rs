@@ -370,6 +370,7 @@ fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
         &mut state,
         &closeout,
         &[bridge::ImplementationLintRule::Complexity],
+        &[],
     )
     .expect_err("staged-only bytes must be preserved");
     assert!(error.contains("differs from worktree"), "{error}");
@@ -382,6 +383,7 @@ fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
             bridge::ImplementationLintRule::Complexity,
             bridge::ImplementationLintRule::Security,
         ],
+        &[],
     )
     .expect("prepare first repair");
 
@@ -393,6 +395,10 @@ fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
     git(&fixture.repo, &["diff", "--cached", "--quiet"]);
     let prompt = bridge::implementation_repair_prompt(&state_path, &state).expect("repair prompt");
     assert!(prompt.contains("Fix COMPLEXITY:") && prompt.contains("Fix SECURITY:"));
+    assert!(
+        !prompt.lines().any(|line| line.starts_with("Consider ")),
+        "blocking-only artifact must not render the advisory tier: {prompt}"
+    );
     assert!(prompt.contains("Claim: claim-42"), "{prompt}");
     assert!(prompt.contains("MUST NOT push"), "{prompt}");
     let artifact = bridge::implementation_repair_artifact_path(&state_path, &state, 1)
@@ -610,6 +616,7 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
                 &mut state,
                 &closeout,
                 &[rule],
+                &[],
             )
             .expect("prepare bounded repair"),
             bridge::ImplementationLintRepairOutcome::RetryPrepared,
@@ -632,6 +639,7 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
                 &mut state,
                 &closeout,
                 &[bridge::ImplementationLintRule::Security],
+                &[],
             )
             .expect("seal exhausted repair"),
             bridge::ImplementationLintRepairOutcome::Exhausted,
@@ -659,15 +667,17 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
         bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
     )
     .expect("final repair artifact");
+    let final_findings = bridge::read_implementation_repair_rules(
+        &state_path,
+        &state,
+        bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+    )
+    .expect("read final findings");
     assert_eq!(
-        bridge::read_implementation_repair_rules(
-            &state_path,
-            &state,
-            bridge::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
-        )
-        .expect("read final findings"),
+        final_findings.blocking,
         vec![bridge::ImplementationLintRule::Security]
     );
+    assert!(final_findings.advisory.is_empty());
 
     let foreign = artifact.with_extension("foreign-link");
     fs::hard_link(&artifact, &foreign).expect("create foreign hard link");
@@ -739,4 +749,126 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
         state.terminal_result.as_deref(),
         Some("needs-human:executor_implementation_lint_repair_exhausted")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn implementation_lint_repair_round_trips_both_tiers_and_renders_consider_directives() {
+    let fixture = GitFixture::new("implementation-lint-repair-tiers");
+    git(
+        &fixture.repo,
+        &["checkout", "-b", "feat/autonomous-issue-42"],
+    );
+    let mut state = supervision_state(&fixture);
+    state.phase = BridgePhase::ImplementationComplete;
+    let state_path = fixture.root.join("state/invocation.json");
+    let closeout = fixture.repo.join(".autospec/executor-closeout.md");
+    bridge::prepare_private_closeout_sink(&fixture.repo, &closeout).expect("closeout sink");
+    fs::write(fixture.repo.join("implementation.txt"), "repair me\n").expect("implementation");
+    git(&fixture.repo, &["add", "implementation.txt"]);
+
+    // Advisory-only attempt: COMPLEXITY renders as Consider, never Fix.
+    bridge::prepare_implementation_lint_repair(
+        &state_path,
+        &mut state,
+        &closeout,
+        &[],
+        &[bridge::ImplementationLintRule::Complexity],
+    )
+    .expect("prepare advisory-only repair");
+    let findings = bridge::read_implementation_repair_rules(&state_path, &state, 1)
+        .expect("round-trip advisory artifact");
+    assert!(findings.blocking.is_empty());
+    assert_eq!(
+        findings.advisory,
+        vec![bridge::ImplementationLintRule::Complexity]
+    );
+    let prompt =
+        bridge::implementation_repair_prompt(&state_path, &state).expect("advisory prompt");
+    assert!(
+        prompt.contains("Consider COMPLEXITY: Split functions >50 LOC"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.lines().any(|line| line.starts_with("Fix ")),
+        "{prompt}"
+    );
+
+    // Mixed attempt: blocking renders Fix, advisory renders Consider, and a
+    // rule already seen carries no duplicate directive.
+    state.phase = BridgePhase::ImplementationComplete;
+    git(&fixture.repo, &["add", "implementation.txt"]);
+    bridge::prepare_implementation_lint_repair(
+        &state_path,
+        &mut state,
+        &closeout,
+        &[bridge::ImplementationLintRule::Security],
+        &[
+            bridge::ImplementationLintRule::PrSize,
+            bridge::ImplementationLintRule::Complexity,
+        ],
+    )
+    .expect("prepare mixed repair");
+    let mixed = bridge::read_implementation_repair_rules(&state_path, &state, 2)
+        .expect("round-trip mixed artifact");
+    assert_eq!(
+        mixed.blocking,
+        vec![bridge::ImplementationLintRule::Security]
+    );
+    assert_eq!(
+        mixed.advisory,
+        vec![
+            bridge::ImplementationLintRule::PrSize,
+            bridge::ImplementationLintRule::Complexity,
+        ]
+    );
+    let prompt = bridge::implementation_repair_prompt(&state_path, &state).expect("mixed prompt");
+    assert!(
+        prompt.contains("Fix SECURITY: Remove the flagged pattern"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Consider PR_SIZE: Freeze the completed capped slice"),
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches("Consider COMPLEXITY:").count(),
+        1,
+        "{prompt}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn implementation_lint_repair_reads_legacy_schema_one_artifact_with_empty_advisory_tier() {
+    let fixture = GitFixture::new("implementation-lint-repair-legacy-schema");
+    git(
+        &fixture.repo,
+        &["checkout", "-b", "feat/autonomous-issue-42"],
+    );
+    let state = supervision_state(&fixture);
+    let state_path = fixture.root.join("state/invocation.json");
+    let digest = autospec_core::autonomous::waterfall::sha256_hex(b"legacy staged diff");
+    let body = bridge::legacy_implementation_repair_artifact_body(
+        &state,
+        1,
+        &digest,
+        &[bridge::ImplementationLintRule::Security],
+    );
+    fs::create_dir_all(fixture.root.join("state/implementation-repair"))
+        .expect("artifact directory");
+    let artifact = bridge::implementation_repair_artifact_path(&state_path, &state, 1)
+        .expect("legacy artifact path");
+    fs::write(&artifact, body).expect("legacy artifact");
+    fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600)).expect("private artifact");
+
+    // A schema 1 artifact persisted before #3096 must still read back so an
+    // in-flight repair survives a version bump; its advisory tier is empty.
+    let findings = bridge::read_implementation_repair_rules(&state_path, &state, 1)
+        .expect("read legacy artifact");
+    assert_eq!(
+        findings.blocking,
+        vec![bridge::ImplementationLintRule::Security]
+    );
+    assert!(findings.advisory.is_empty());
 }
