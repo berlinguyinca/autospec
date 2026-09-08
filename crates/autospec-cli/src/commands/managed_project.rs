@@ -17,6 +17,8 @@ mod cli;
 mod github;
 #[path = "managed_project/onboard.rs"]
 mod onboard;
+#[path = "managed_project/portfolio.rs"]
+pub(crate) mod portfolio;
 #[path = "managed_project/project.rs"]
 mod project;
 #[path = "managed_project/store.rs"]

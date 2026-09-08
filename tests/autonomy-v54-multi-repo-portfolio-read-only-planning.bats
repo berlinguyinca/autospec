@@ -1,135 +1,224 @@
 #!/usr/bin/env bats
+# V54 Multi-repo portfolio read-only planning (issue #3431).
+#
+# The gate is the Rust module itself: the schema, digest, scope resolution and
+# zero-mutation proof are exercised by `cargo test -p autospec-cli --bin autospec`
+# (autospec-cli is a binary-only crate, so the harness is `--bin`, not `--lib`),
+# plus static guarantees read straight out of the source: the planning path contains
+# no write call at all, and every stable error code maps to a distinct exit value that
+# the operator document reproduces row for row.
 
-REPO_ROOT="${BATS_TEST_DIRNAME}/.."
-RUN_ID="autonomy-v54-portfolio-planning"
+REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+PORTFOLIO_SRC="crates/autospec-cli/src/commands/managed_project/portfolio.rs"
+PORTFOLIO_DIR="crates/autospec-cli/src/commands/managed_project/portfolio"
+DRY_RUN_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/dry_run.rs"
+MANIFEST_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/manifest.rs"
+FACTS_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/manifest/facts.rs"
+GRAPH_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/manifest/graph.rs"
+MANIFEST_TESTS_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/manifest/tests.rs"
+REJECTION_TESTS_SRC="crates/autospec-cli/src/commands/managed_project/portfolio/manifest/rejections.rs"
+PLAN_DOC="docs/managed-project-portfolio-plan.md"
 
+# Compile the test binary once for the file so each @test below is a lookup, not a build.
+setup_file() {
+  cd "$REPO_ROOT"
+  if [ -z "${SKIP_CARGO_BUILD_FOR_BATS:-}" ]; then
+    cargo build -q -p autospec-cli --tests
+  fi
+}
+
+# Restarted before every @test so each block can assert how many Rust tests it needed.
 setup() {
-  TEST_TMP="$(mktemp -d)"
-  mkdir -p "$TEST_TMP/repo"
-  cp -R "$REPO_ROOT/scripts" "$TEST_TMP/repo/scripts"
-  cp -R "$REPO_ROOT/tests" "$TEST_TMP/repo/tests"
-  cp -R "$REPO_ROOT/docs" "$TEST_TMP/repo/docs" 2>/dev/null || mkdir -p "$TEST_TMP/repo/docs"
-  mkdir -p "$TEST_TMP/repo/.autospec/reports"
-  printf '# Fixture\n' > "$TEST_TMP/repo/README.md"
-  git -C "$TEST_TMP/repo" init -q
-  git -C "$TEST_TMP/repo" config user.email test@example.com
-  git -C "$TEST_TMP/repo" config user.name Test
-  git -C "$TEST_TMP/repo" add README.md scripts tests docs >/dev/null 2>&1
-  git -C "$TEST_TMP/repo" commit -qm init >/dev/null 2>&1 || true
-  git -C "$TEST_TMP/repo" checkout -b autospec/v54-portfolio-planning-test >/dev/null 2>&1
-  bash "$TEST_TMP/repo/scripts/autospec-baseline-validation.sh" --repo-root "$TEST_TMP/repo" >/dev/null
-  for script in \
-    autospec-supervisor-v31-human-approved-draft-pr-update-commit-and-.sh \
-    autospec-supervisor-v32-human-approved-pr-conversation-response-pa.sh \
-    autospec-supervisor-v33-draft-pr-update-transaction-harness-and-re.sh \
-    autospec-supervisor-v34-level-4-issue-publishing-canary.sh \
-    autospec-supervisor-v35-single-issue-to-draft-pr-real-loop-canary.sh \
-    autospec-supervisor-v36-issue-to-pr-recovery-duplicate-and-idempot.sh \
-    autospec-supervisor-v37-backlog-triage-and-prioritization-governan.sh \
-    autospec-supervisor-v38-level-4-multi-issue-queue-simulation.sh \
-    autospec-supervisor-v39-human-approved-level-4-multi-issue-canary.sh \
-    autospec-supervisor-v40-review-driven-low-risk-source-patch-planni.sh \
-    autospec-supervisor-v41-controlled-low-risk-source-disposable-patc.sh \
-    autospec-supervisor-v42-low-risk-source-local-commit-canary.sh \
-    autospec-supervisor-v43-low-risk-source-draft-pr-canary.sh \
-    autospec-supervisor-v44-ci-failure-read-only-diagnostics-and-patch.sh \
-    autospec-supervisor-v45-ci-failure-local-fix-simulation.sh \
-    autospec-supervisor-v46-dependency-update-planning-and-lockfile-sa.sh \
-    autospec-supervisor-v47-single-dependency-update-disposable-proof.sh \
-    autospec-supervisor-v48-single-dependency-update-draft-pr-canary.sh \
-    autospec-supervisor-v49-security-and-privacy-finding-triage-read-o.sh \
-    autospec-supervisor-v50-security-and-privacy-patch-planning-gate.sh \
-    autospec-supervisor-v51-security-and-privacy-disposable-patch-proo.sh \
-    autospec-supervisor-v52-companion-repo-governance-proposal-pr-cana.sh \
-    autospec-supervisor-v53-constitution-baseline-drift-reconciliation.sh \
-    autospec-supervisor-v54-cross-repo-learning-evaluation-harness.sh \
-    autospec-supervisor-v55-control-plane-observability-and-operator-d.sh \
-    autospec-supervisor-v56-visible-foreground-queue-service-readiness.sh \
-    autospec-supervisor-v57-operator-attended-queue-runner-canary.sh \
-    autospec-supervisor-v58-kill-switch-lease-revocation-and-incident-.sh; do
-    bash "$TEST_TMP/repo/scripts/$script" --repo-root "$TEST_TMP/repo" --prepare-only >/dev/null
-  done
+  RUST_TESTS_RAN=0
 }
 
-teardown() {
-  rm -rf "$TEST_TMP"
+# Runs one exact Rust test in the autospec binary and counts it on success.
+#
+# A renamed or deleted test matches nothing and cargo still exits 0, so the pass count
+# is checked here, and the per-block count is asserted at the end of every @test below.
+run_rust() {
+  run bash -c 'cd "$1" && cargo test -q -p autospec-cli --bin autospec -- "$2" -- --exact' \
+    _ "$REPO_ROOT" "$1"
+  if [ "$status" -ne 0 ]; then
+    echo "rust test $1 exited $status:" >&3
+    echo "$output" >&3
+    return 1
+  fi
+  if [[ "$output" != *"1 passed"* ]]; then
+    echo "rust test $1 did not run (renamed or deleted?):" >&3
+    echo "$output" >&3
+    return 1
+  fi
+  RUST_TESTS_RAN=$((RUST_TESTS_RAN + 1))
 }
 
-@test "v54 supervisor writes read-only portfolio planning artifacts" {
-  run bash "$TEST_TMP/repo/scripts/autospec-supervisor-v59-multi-repo-portfolio-read-only-planning.sh" --repo-root "$TEST_TMP/repo" --prepare-only
-  [ "$status" -eq 0 ]
-  for file in contract preflight artifact-index gate audit verifier recovery v54-status; do
-    [ -f "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/$file.json" ]
-    [ -f "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/$file.md" ]
-  done
-  for file in portfolio-inventory candidate-ranking shared-dependency-report shared-rule-report portfolio-queue-plan; do
-    [ -f "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/$file.json" ]
-    [ -f "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/$file.md" ]
-  done
-  python3 - "$TEST_TMP/repo/.autospec/reports/autonomy-v54-status.json" <<'PY'
-import json, sys
-s=json.load(open(sys.argv[1]))
-assert s["status"] == "ready"
-assert s["previous_statuses"] == "ready"
-assert s["phase_goal_satisfied"] is True
-assert s["mode"] == "read_plan_only"
-assert s["portfolio_inventory_written"] is True
-assert s["candidate_ranking_written"] is True
-assert s["shared_dependency_report_written"] is True
-assert s["shared_rule_report_written"] is True
-assert s["portfolio_queue_plan_written"] is True
-assert s["target_repo_writes_attempted"] is False
-for key in ["network_attempted","github_write_attempted","git_push_attempted","pr_update_attempted","issue_publishing_attempted","merge_attempted","approval_attempted","self_approval_attempted","default_branch_push_attempted","force_push_attempted","tag_push_attempted","raw_secret_values_exposed"]:
-    assert s[key] is False, key
-PY
+@test "v54 freezes a portfolio plan whose canonical digest is order-insensitive" {
+  cd "$REPO_ROOT"
+  run_rust commands::managed_project::portfolio::manifest::tests::plan_digest_is_stable_and_order_insensitive
+  run_rust commands::managed_project::portfolio::manifest::tests::freeze_stores_canonical_identity_and_sorted_repositories
+  [ "$RUST_TESTS_RAN" -eq 2 ]
 }
 
-@test "v54 blocks missing v53 evidence" {
-  rm -f "$TEST_TMP/repo/.autospec/reports/autonomy-v53-status.json"
-  run bash "$TEST_TMP/repo/scripts/autospec-autonomous-v54-gate.sh" --repo-root "$TEST_TMP/repo"
-  [ "$status" -ne 0 ]
-  grep -q "blocked_missing_prior_evidence" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
+@test "v54 digest is content-addressed: tampering breaks it, quoting stays canonical" {
+  cd "$REPO_ROOT"
+  run_rust commands::managed_project::portfolio::manifest::tests::plan_digest_covers_revision_capability_and_edges
+  run_rust commands::managed_project::portfolio::manifest::tests::tampering_with_a_frozen_plan_breaks_its_digest
+  run_rust commands::managed_project::portfolio::manifest::tests::canonical_yaml_is_fully_quoted_and_digest_bearing
+  run_rust commands::managed_project::portfolio::manifest::tests::an_undeclared_primary_scope_renders_as_yaml_null
+
+  # The schema and digest namespace constants are the contract downstream issues build
+  # on, so pin them here as well as in Rust.
+  grep -qF 'PORTFOLIO_PLAN_SCHEMA: &str = "autospec.portfolio-plan.v1"' "$MANIFEST_SRC"
+  grep -qF 'DIGEST_NAMESPACE: &[u8] = b"autospec.portfolio-plan.digest.v1"' "$MANIFEST_SRC"
+  [ "$RUST_TESTS_RAN" -eq 4 ]
 }
 
-@test "v54 blocks unsafe default branch" {
-  git -C "$TEST_TMP/repo" checkout -B main >/dev/null 2>&1
-  run bash "$TEST_TMP/repo/scripts/autospec-autonomous-v54-preflight.sh" --repo-root "$TEST_TMP/repo"
-  [ "$status" -ne 0 ]
-  grep -q "blocked_unsafe_branch" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/preflight.json"
+@test "v54 rejects three invalid dependency graphs with three distinct exit codes" {
+  cd "$REPO_ROOT"
+
+  # Case 1: dependency cycle.
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_a_dependency_cycle
+  # Case 2: self dependency.
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_a_self_dependency
+  # Case 3: edge to a reference that is not in the plan.
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_an_edge_pointing_at_nothing_in_the_plan
+
+  # Each case maps to its own exit code, written out per variant.
+  grep -q 'Self::DependencyCycle => 35' "$MANIFEST_SRC"
+  grep -q 'Self::EdgeSelfDependency => 32' "$MANIFEST_SRC"
+  grep -q 'Self::EdgeReferenceMissing => 33' "$MANIFEST_SRC"
+
+  # The graph rules are their own module, and the cycle walk is depth-first with an
+  # explicit in-progress marker rather than a node-count heuristic.
+  grep -q 'fn detect_cycle' "$GRAPH_SRC"
+  grep -q 'const VISITING' "$GRAPH_SRC"
+  [ "$RUST_TESTS_RAN" -eq 3 ]
 }
 
-@test "v54 blocks network GitHub writes merge approval default force and tag requests" {
-  run bash "$TEST_TMP/repo/scripts/autospec-autonomous-v54-gate.sh" --repo-root "$TEST_TMP/repo" --confirm --allow-network --allow-git-push --allow-github-pr --allow-merge --allow-auto-merge --allow-approval --allow-self-approval --allow-default-branch-push --allow-force-push --allow-tag-push
-  [ "$status" -ne 0 ]
-  grep -q "blocked_forbidden_operation:network_not_allowed" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:github_write_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:merge_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:approval_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:default_branch_push_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:force_push_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
-  grep -q "blocked_forbidden_operation:tag_push_requested" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/gate.json"
+@test "v54 refuses duplicate edges, cross-repository local parents and a bad schema" {
+  cd "$REPO_ROOT"
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_the_same_edge_declared_twice
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_a_local_parent_hosted_by_another_repository
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_an_unsupported_schema
+  run_rust commands::managed_project::portfolio::manifest::tests::execution_order_runs_parents_before_dependents
+
+  grep -q 'Self::EdgeDuplicate => 31' "$MANIFEST_SRC"
+  grep -q 'Self::LocalParentCrossRepository => 34' "$MANIFEST_SRC"
+  grep -q 'Self::SchemaUnsupported => 20' "$MANIFEST_SRC"
+
+  # The rejection suite is a child module of the manifest tests, so the fixtures live
+  # in one place; pin the wiring a rename cannot silently drop.
+  grep -q 'mod rejections;' "$MANIFEST_TESTS_SRC"
+  [ -f "$REJECTION_TESTS_SRC" ]
+  [ "$RUST_TESTS_RAN" -eq 4 ]
 }
 
-@test "v54 audit proves no target writes or raw secret exposure" {
-  run bash "$TEST_TMP/repo/scripts/autospec-autonomous-v54-audit.sh" --repo-root "$TEST_TMP/repo"
-  [ "$status" -eq 0 ]
-  python3 - "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/audit.json" <<'PY'
-import json, sys
-a=json.load(open(sys.argv[1]))
-assert a["phase"] == "v54"
-assert a["mode"] == "read_plan_only"
-for key in ["network_attempted","github_write_attempted","git_push_attempted","pr_update_attempted","issue_publishing_attempted","merge_attempted","approval_attempted","self_approval_attempted","default_branch_push_attempted","force_push_attempted","tag_push_attempted","raw_secret_values_exposed"]:
-    assert a[key] is False, key
-assert a["scheduler"] == "absent"
-assert a["daemon"] == "absent"
-assert a["background_runner"] == "absent"
-PY
+@test "v54 capability facts are tri-state with distinct refusal codes" {
+  cd "$REPO_ROOT"
+
+  # Unknown means never probed; unavailable means probed and refused. The two produce
+  # different codes so an operator can tell a stale probe from a missing capability.
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::unknown_and_unavailable_capabilities_are_distinct_refusals
+
+  # 26 and 27, distinct from each other.
+  grep -q 'Self::RepositoryCapabilityUnknown => 26' "$MANIFEST_SRC"
+  grep -q 'Self::RepositoryCapabilityUnavailable => 27' "$MANIFEST_SRC"
+
+  # The three states are exhaustive, so no probe result silently means "fine".
+  grep -q 'Self::Available => "available"' "$FACTS_SRC"
+  grep -q 'Self::Unavailable => "unavailable"' "$FACTS_SRC"
+  grep -q 'Self::Unknown => "unknown"' "$FACTS_SRC"
+  [ "$RUST_TESTS_RAN" -eq 1 ]
 }
 
-@test "v54 status refuses ready if audit artifact is missing" {
-  bash "$TEST_TMP/repo/scripts/autospec-autonomous-v54-contract.sh" --repo-root "$TEST_TMP/repo" >/dev/null
-  rm -f "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/audit.json" "$TEST_TMP/repo/.autospec/reports/autonomous-v54-audit.json"
-  run bash "$TEST_TMP/repo/scripts/autospec-v54-status.sh" --repo-root "$TEST_TMP/repo"
-  [ "$status" -ne 0 ]
-  grep -q "missing_audit_artifact" "$TEST_TMP/repo/.autospec/autonomy/v54/$RUN_ID/v54-status.json"
+@test "v54 refuses a plan with no owner, an unknown owner, or malformed members" {
+  cd "$REPO_ROOT"
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_missing_owner_unknown_owner_and_empty_repository_set
+  run_rust commands::managed_project::portfolio::manifest::tests::rejections::rejects_malformed_or_duplicate_repositories_and_items
+
+  grep -q 'Self::OwnerMissing => 21' "$MANIFEST_SRC"
+  grep -q 'Self::OwnerInvalid => 22' "$MANIFEST_SRC"
+  grep -q 'Self::PortfolioSetEmpty => 23' "$MANIFEST_SRC"
+  grep -q 'Self::RepositoryInvalid => 24' "$MANIFEST_SRC"
+  grep -q 'Self::RepositoryDuplicate => 25' "$MANIFEST_SRC"
+  grep -q 'Self::ItemKeyInvalid => 28' "$MANIFEST_SRC"
+  grep -q 'Self::ItemKeyDuplicate => 29' "$MANIFEST_SRC"
+  grep -q 'Self::ItemRepositoryUndeclared => 30' "$MANIFEST_SRC"
+  [ "$RUST_TESTS_RAN" -eq 2 ]
+}
+
+@test "v54 dry run proves zero durable, remote and filesystem mutations" {
+  cd "$REPO_ROOT"
+
+  run_rust commands::managed_project::portfolio::tests::a_dry_run_certifies_zero_mutations_over_a_real_tree
+  run_rust commands::managed_project::portfolio::tests::an_in_memory_run_has_nothing_to_check
+  run_rust commands::managed_project::portfolio::tests::a_ledger_that_counted_anything_fails_the_zero_check
+
+  # The guarantee is structural: the planning path never issues a write. Only the test
+  # fixtures build a journal tree, and only inside the cfg(test) modules tests.rs and
+  # rejections.rs.
+  run grep -rn "fs::write\|File::create\|fs::remove\|fs::rename\|Command::new\|create_dir" \
+    "$PORTFOLIO_SRC" "$PORTFOLIO_DIR" --include='*.rs' \
+    --exclude='tests.rs' --exclude='rejections.rs'
+  [ "$status" -eq 1 ]
+
+  # The zero-mutation proof lives in its own module and is re-exported flat.
+  grep -q 'pub fn validate_plan_dry_run' "$DRY_RUN_SRC"
+  grep -q 'pub use self::dry_run::' "$PORTFOLIO_SRC"
+
+  # The mutation counters are incremented nowhere outside the test that exercises them.
+  run grep -rn "record_durable()\|record_remote()" \
+    "$PORTFOLIO_SRC" "$PORTFOLIO_DIR" --include='*.rs' \
+    --exclude='tests.rs' --exclude='rejections.rs'
+  [ "$status" -eq 1 ]
+  [ "$RUST_TESTS_RAN" -eq 3 ]
+}
+
+@test "v54 dry run refuses a missing journal, an invalid plan and a mutated tree" {
+  cd "$REPO_ROOT"
+
+  # An absent journal is refused rather than reported as an empty success.
+  run_rust commands::managed_project::portfolio::tests::a_dry_run_refuses_a_journal_that_is_not_there
+
+  # An invalid plan never reaches the witness.
+  run_rust commands::managed_project::portfolio::tests::a_dry_run_rejects_an_invalid_plan_before_reporting
+
+  # The witness is a real witness: created, modified and removed files are all reported.
+  run_rust commands::managed_project::portfolio::tests::the_witness_notices_every_way_a_tree_can_change
+  [ "$RUST_TESTS_RAN" -eq 3 ]
+}
+
+@test "v54 primary scope is derived, declared, or refused - never guessed" {
+  cd "$REPO_ROOT"
+
+  run_rust commands::managed_project::portfolio::tests::one_host_derives_its_product_as_the_primary_scope
+  run_rust commands::managed_project::portfolio::tests::an_explicit_spec_portfolio_selector_beats_derivation
+  run_rust commands::managed_project::portfolio::tests::several_hosts_without_a_declaration_are_ambiguous_not_guessed
+  run_rust commands::managed_project::portfolio::tests::a_declared_product_that_hosts_no_item_is_refused
+  run_rust commands::managed_project::portfolio::tests::a_plan_with_nothing_to_build_declares_no_scope
+
+  grep -q 'Self::PrimaryScopeUndeclared => 40' "$PORTFOLIO_SRC"
+  grep -q 'Self::PrimaryScopeAmbiguous => 41' "$PORTFOLIO_SRC"
+  grep -q 'Self::PrimaryScopeUnknown => 42' "$PORTFOLIO_SRC"
+  [ "$RUST_TESTS_RAN" -eq 5 ]
+}
+
+@test "v54 operator document reproduces the exit code table exactly" {
+  cd "$REPO_ROOT"
+
+  run_rust commands::managed_project::portfolio::tests::the_documented_exit_code_table_matches_the_code_table
+
+  # The document itself must exist, name the schema, and carry all twenty rows, so a
+  # deleted table cannot make the Rust comparison vacuously pass.
+  [ -f "$PLAN_DOC" ]
+  grep -q 'autospec.portfolio-plan.v1' "$PLAN_DOC"
+  rows="$(awk -F'|' '/^\| `[A-Z_]+` \| *[0-9]+ *\|/ { n++ } END { print n + 0 }' "$PLAN_DOC")"
+  [ "$rows" -eq 20 ]
+  [ "$RUST_TESTS_RAN" -eq 1 ]
+}
+
+@test "v54 exit codes stay distinct across both violation families" {
+  cd "$REPO_ROOT"
+  run_rust commands::managed_project::portfolio::tests::every_documented_exit_code_is_distinct
+  [ "$RUST_TESTS_RAN" -eq 1 ]
 }
