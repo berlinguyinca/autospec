@@ -10547,6 +10547,70 @@ fn commit_sandboxed_executor_diff_with_hook_context(
     commit_sandboxed_executor_diff_inner(state, issue_title, issue_body, Some(hook_context))
 }
 
+/// Outcome of the best-effort GitHub re-fetch used to verify staged-spec identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StagedSpecRefetch {
+    /// GitHub was reachable and the remote issue body hash-matched the staged copy.
+    Matched,
+    /// GitHub was unreachable, or its response could not be verified.
+    Unreachable,
+}
+
+impl StagedSpecRefetch {
+    fn status_token(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// Re-fetch the issue body from GitHub to verify staged-spec identity (issue #3634).
+///
+/// Returns `None` whenever GitHub is unreachable or its response cannot be
+/// verified; the caller records that as `StagedSpecRefetch::Unreachable` rather
+/// than trusting the staged copy. A reachable-but-different body is a hard
+/// refusal at the call site: the staged spec must be the issue it declares.
+/// The body is extracted through the same JSON field path the queue uses when
+/// it fetches issues, so a hash comparison is byte-for-byte.
+fn valid_repository_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn refetch_issue_body(repository: &str, issue: u64) -> Option<String> {
+    let mut segments = repository.split('/');
+    let owner = segments.next().unwrap_or_default();
+    let name = segments.next().unwrap_or_default();
+    if segments.next().is_some()
+        || !valid_repository_segment(owner)
+        || !valid_repository_segment(name)
+    {
+        return None;
+    }
+    let adapter = DraftPrAdapter::github_cli();
+    let endpoint = format!("repos/{owner}/{name}/issues/{issue}");
+    let output = Command::new(&adapter.gh)
+        .arg("api")
+        .arg("--method")
+        .arg("GET")
+        .arg(&endpoint)
+        .arg("--jq")
+        .arg(r#"{"body":(.body // "")}"#)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 fn commit_sandboxed_executor_diff_inner(
     state: &PersistedInvocation,
     issue_title: &str,
@@ -10577,9 +10641,27 @@ fn commit_sandboxed_executor_diff_inner(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
+    let staged_sha = sha256_hex(issue_body.as_bytes());
+    let refetch = match refetch_issue_body(&state.identity.repository, state.identity.issue) {
+        Some(remote) if sha256_hex(remote.as_bytes()) == staged_sha => StagedSpecRefetch::Matched,
+        Some(remote) => {
+            let remote_sha = sha256_hex(remote.as_bytes());
+            return Err(format!(
+                "staged spec identity mismatch: issue {} staged sha256 {staged_sha} differs from GitHub sha256 {remote_sha}",
+                state.identity.issue
+            ));
+        }
+        None => StagedSpecRefetch::Unreachable,
+    };
     let hook_bundle = match hook_context {
-        Some(context) => TrustedHookBundle::create_with_context(&binding, issue_body, context)?,
-        None => TrustedHookBundle::create(&binding, issue_body)?,
+        Some(context) => TrustedHookBundle::create_with_context(
+            &binding,
+            state.identity.issue,
+            issue_body,
+            context,
+            refetch,
+        )?,
+        None => TrustedHookBundle::create(&binding, state.identity.issue, issue_body, refetch)?,
     };
     stage_sandboxed_executor_diff(&binding, &hook_bundle.path)?;
     let staged = binding

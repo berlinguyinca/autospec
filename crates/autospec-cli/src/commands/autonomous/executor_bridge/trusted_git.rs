@@ -210,15 +210,22 @@ pub(super) struct TrustedHookBundle {
 
 #[cfg(unix)]
 impl TrustedHookBundle {
-    pub(super) fn create(binding: &TrustedWorktreeGit, issue_body: &str) -> Result<Self, String> {
+    pub(super) fn create(
+        binding: &TrustedWorktreeGit,
+        issue: u64,
+        issue_body: &str,
+        refetch: StagedSpecRefetch,
+    ) -> Result<Self, String> {
         let context = TrustedHookContext::current()?;
-        Self::create_with_context(binding, issue_body, &context)
+        Self::create_with_context(binding, issue, issue_body, &context, refetch)
     }
 
     pub(super) fn create_with_context(
         binding: &TrustedWorktreeGit,
+        issue: u64,
         issue_body: &str,
         context: &TrustedHookContext,
+        refetch: StagedSpecRefetch,
     ) -> Result<Self, String> {
         if binding.active_hooks.is_empty() {
             return Ok(Self {
@@ -260,6 +267,7 @@ impl TrustedHookBundle {
             issue_body.as_bytes(),
             "contained hook issue body",
         )?;
+        stage_staged_spec_provenance(&path, &issue_body_path, issue, issue_body, refetch)?;
         let profile = contained_hook_profile(binding, &path, &codex, &linter, &autospec)?;
         codex.revalidate()?;
         let codex_words = codex.shell_words();
@@ -309,6 +317,76 @@ impl TrustedHookBundle {
     }
 }
 
+/// Stages the provenance sidecar and `status.txt` record for the staged spec
+/// (issue #3634). The staged body is read back from disk and hash-checked
+/// against the dispatched body; the sidecar must declare the dispatched issue
+/// and the staged hash, and the hash is recorded in `status.txt` so that
+/// "which spec did this run see" is answerable from the artifacts.
+#[cfg(unix)]
+fn stage_staged_spec_provenance(
+    bundle: &Path,
+    issue_body_path: &Path,
+    issue: u64,
+    issue_body: &str,
+    refetch: StagedSpecRefetch,
+) -> Result<(), String> {
+    let dispatched_sha = sha256_hex(issue_body.as_bytes());
+    let staged = fs::read(issue_body_path)
+        .map_err(|error| format!("read back staged issue body: {error}"))?;
+    let staged_sha = sha256_hex(&staged);
+    if staged_sha != dispatched_sha {
+        return Err(format!(
+            "staged spec identity mismatch: issue {issue} staged sha256 {staged_sha} does not match dispatched sha256 {dispatched_sha}"
+        ));
+    }
+    let staged_at = unix_now()?;
+    let provenance = format!(
+        "issue={issue}\nstaged_at={staged_at}\nsha256={staged_sha}\nrefetch={}\n",
+        refetch.status_token()
+    );
+    let provenance_path = bundle.join("issue-body.provenance");
+    write_private_create_once(
+        &provenance_path,
+        provenance.as_bytes(),
+        "contained hook issue body provenance",
+    )?;
+    let recorded = fs::read_to_string(&provenance_path)
+        .map_err(|error| format!("read back staged spec provenance: {error}"))?;
+    let recorded_issue = provenance_field(&recorded, "issue")?;
+    if recorded_issue.parse::<u64>() != Ok(issue) {
+        return Err(format!(
+            "staged spec identity mismatch: provenance declares issue {recorded_issue}, dispatched issue {issue}"
+        ));
+    }
+    let recorded_sha = provenance_field(&recorded, "sha256")?;
+    if recorded_sha != staged_sha {
+        return Err(format!(
+            "staged spec identity mismatch: provenance sha256 {recorded_sha} does not match staged sha256 {staged_sha}"
+        ));
+    }
+    let status = format!(
+        "issue={issue}\nsha256={staged_sha}\nstaged_at={staged_at}\nrefetch={}\n",
+        refetch.status_token()
+    );
+    write_private_create_once(
+        &bundle.join("status.txt"),
+        status.as_bytes(),
+        "contained hook spec status",
+    )?;
+    Ok(())
+}
+
+/// Reads a single `key=value` field from the staged-spec provenance sidecar.
+#[cfg(unix)]
+fn provenance_field(recorded: &str, key: &str) -> Result<String, String> {
+    recorded
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("staged spec provenance is missing {key}"))
+}
+
 #[cfg(not(unix))]
 pub(super) struct TrustedHookBundle {
     pub(super) path: PathBuf,
@@ -319,7 +397,12 @@ pub(super) struct TrustedHookContext;
 
 #[cfg(not(unix))]
 impl TrustedHookBundle {
-    pub(super) fn create(binding: &TrustedWorktreeGit, _issue_body: &str) -> Result<Self, String> {
+    pub(super) fn create(
+        binding: &TrustedWorktreeGit,
+        _issue: u64,
+        _issue_body: &str,
+        _refetch: StagedSpecRefetch,
+    ) -> Result<Self, String> {
         if fs::read_dir(&binding.hooks_dir)
             .map_err(|error| format!("inventory unsupported Git hooks: {error}"))?
             .filter_map(Result::ok)
@@ -334,10 +417,12 @@ impl TrustedHookBundle {
 
     pub(super) fn create_with_context(
         binding: &TrustedWorktreeGit,
+        issue: u64,
         issue_body: &str,
         _context: &TrustedHookContext,
+        refetch: StagedSpecRefetch,
     ) -> Result<Self, String> {
-        Self::create(binding, issue_body)
+        Self::create(binding, issue, issue_body, refetch)
     }
 
     pub(super) fn revalidate_launch(&self) -> Result<(), String> {
