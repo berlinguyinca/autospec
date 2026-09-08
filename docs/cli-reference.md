@@ -207,10 +207,14 @@ not a live claim, dependency, pull-request, worker-capacity, or path-conflict de
 `autospec queue ready` follows every GitHub REST page for open `auto-implement` work and active
 claims, counts raw issue-page records before filtering pull requests, and cursor-paginates linked
 pull-request evidence while preserving check snapshots. A malformed or incomplete later evidence
-page blocks selection rather than shortening the scan. Its JSON includes a stable `gate_counts`
+page blocks selection rather than shortening the scan. Two open issues that cite the same
+spec section and state the same goal are one task: the queue keeps the lowest-numbered issue
+ready and blocks its twin with reason `duplicate_issue` and the canonical issue number in
+`duplicate_of`, so a duplicate agent run is dropped with the drop visible instead of
+surfacing later as a merge conflict. Its JSON includes a stable `gate_counts`
 object for discovered, candidate, reviewed,
-blocked, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and selected
-issues. `scan_scope` is `repository` for a full scan and `slice` when
+blocked, duplicate, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and
+selected issues. `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
 whole-queue completion.
 

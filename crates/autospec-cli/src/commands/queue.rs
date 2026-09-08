@@ -984,11 +984,12 @@ fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
 fn gate_counts_json(plan: &ReadyQueuePlan) -> String {
     let counts = &plan.gate_counts;
     format!(
-        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
+        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"duplicates\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
         counts.open,
         counts.candidate,
         counts.reviewed,
         counts.blocked,
+        counts.duplicates,
         counts.dependency_blocked,
         counts.linked_pr_blocked,
         counts.path_conflicted,
@@ -1022,6 +1023,7 @@ const VIEW_FIELD_DISPATCHERS: &[ViewFieldDispatcher] = &[
     append_unmet_dependency_fields,
     append_cycle_dependency_field,
     append_conflicts_with_field,
+    append_duplicate_of_field,
     append_path_field,
     append_parallel_safety_fields,
 ];
@@ -1094,6 +1096,12 @@ fn append_cycle_dependency_field(view: &QueueIssueView, fields: &mut Vec<String>
 fn append_conflicts_with_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(conflicts_with) = view.conflicts_with {
         fields.push(json_field("conflicts_with", conflicts_with.to_string()));
+    }
+}
+
+fn append_duplicate_of_field(view: &QueueIssueView, fields: &mut Vec<String>) {
+    if let Some(duplicate_of) = view.duplicate_of {
+        fields.push(json_field("duplicate_of", duplicate_of.to_string()));
     }
 }
 
