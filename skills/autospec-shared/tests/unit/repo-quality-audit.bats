@@ -7,6 +7,8 @@ fi
 
 load './repo-quality-audit-helpers'
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     setup_repo_quality_audit_fixture
 }
@@ -123,7 +125,8 @@ EOF
     OUT_JSON="$TEST_TMP/locks.json"; OUT_MD="$TEST_TMP/locks.md"
     run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
     [ "$status" -eq 0 ]
-    ! jq -e '.findings[] | select(.file=="src/callback.rs" and .probe=="sync-lock-async-aware")' "$OUT_JSON"
+    run ! jq -e '.findings[] | select(.file=="src/callback.rs" and .probe=="sync-lock-async-aware")' "$OUT_JSON"
+    [ "$status" -ne 0 ]
     jq -e '.findings[] | select(.file=="tests/locks.rs" and .classification=="test-only-async-lock")' "$OUT_JSON"
 }
 
@@ -202,7 +205,8 @@ EOF
     run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
     [ "$status" -eq 0 ]
     [ -f "$GH_LOG" ]
-    ! grep -q 'focused test markers present' "$GH_LOG"
+    run ! grep -q 'focused test markers present' "$GH_LOG"
+    [ "$status" -eq 1 ]
     grep -qF -- "$REPO|issue create" "$GH_LOG"
     grep -qF -- '--label quality-audit --label auto-implement --label autospec:v2-flow' "$GH_LOG"
     jq -e '.issue_links | length >= 2' "$OUT_JSON"
@@ -271,8 +275,10 @@ EOF
     [ "$status" -eq 0 ]
     jq -e '.findings[] | select(.probe=="design-template-guard" and .file=="src/app/components/panel.component.html" and .normalized_path=="src/app/components/panel.component.html" and .normalized_title=="design-template-guard-failure-in-src-app-components-panel-component-html" and (.dedupe_key | contains("|path=src/app/components/panel.component.html|title=design-template-guard-failure-in-src-app-components-panel-component-html")))' "$OUT_JSON"
     jq -e '[.findings[] | select(.probe=="design-template-guard" and (.normalized_path | startswith("external/"))) | .normalized_path] | (length==3 and (unique|length)==3)' "$OUT_JSON"
-    ! jq -e '.findings[] | select(.normalized_path=="src/shared.html")' "$OUT_JSON"
-    ! jq -e '[.findings[] | .file, .title, .dedupe_key] | any(contains("/tmp/"))' "$OUT_JSON"
+    run ! jq -e '.findings[] | select(.normalized_path=="src/shared.html")' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+    run ! jq -e '[.findings[] | .file, .title, .dedupe_key] | any(contains("/tmp/"))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
     ! grep -q '/tmp/' "$GH_LOG"
 }
 
@@ -327,7 +333,8 @@ EOF
     [ "$status" -eq 0 ]
     grep -q 'issue comment 5 --body-file' "$GH_LOG"
     grep -q 'issue reopen 5' "$GH_LOG"
-    ! grep -q 'issue create --title autospec audit: design/template guard failure' "$GH_LOG"
+    run ! grep -q 'issue create --title autospec audit: design/template guard failure' "$GH_LOG"
+    [ "$status" -eq 1 ]
     jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5" and .existing==true and .reopened==true)' "$OUT_JSON"
 }
 
@@ -357,7 +364,8 @@ EOF
     [ "$status" -eq 0 ]
     grep -q 'issue comment 8 --body-file' "$GH_LOG"
     grep -q 'issue reopen 8' "$GH_LOG"
-    ! grep -q 'issue comment 9\|issue reopen 9' "$GH_LOG"
+    run ! grep -q 'issue comment 9\|issue reopen 9' "$GH_LOG"
+    [ "$status" -eq 1 ]
     jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/8" and .existing==true and .reopened==true)' "$OUT_JSON"
 }
 
@@ -394,7 +402,8 @@ EOF
     [ -n "$comment_line" ]
     [ -n "$reopen_line" ]
     [ "$comment_line" -lt "$reopen_line" ]
-    ! grep -q 'issue create --title autospec audit: focused test markers present' "$GH_LOG"
+    run ! grep -q 'issue create --title autospec audit: focused test markers present' "$GH_LOG"
+    [ "$status" -eq 1 ]
     jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5" and .existing==true and .reopened==true)' "$OUT_JSON"
 }
 
@@ -462,8 +471,10 @@ EOF
         OUT_MD="$TEST_TMP/audit-$LOOKUP_MODE.md"
         run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
         [ "$status" -eq 0 ]
-        ! grep -q 'unexpected mutation' "$GH_LOG"
-        ! grep -Eq 'issue (create|comment|reopen)|label create' "$GH_LOG"
+        run ! grep -q 'unexpected mutation' "$GH_LOG"
+        [ "$status" -eq 1 ]
+        run ! grep -Eq 'issue (create|comment|reopen)|label create' "$GH_LOG"
+        [ "$status" -eq 1 ]
         jq -e '.summary.issue_links == 0 and .summary.unfiled_residual_risks > 0' "$OUT_JSON"
     done
 }
@@ -495,8 +506,10 @@ EOF
         run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
         [ "$status" -eq 0 ]
         grep -q 'issue comment 5 --body-file' "$GH_LOG"
-        ! grep -q 'issue create --title autospec audit: focused test markers present' "$GH_LOG"
-        ! jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5")' "$OUT_JSON"
+        run ! grep -q 'issue create --title autospec audit: focused test markers present' "$GH_LOG"
+        [ "$status" -eq 1 ]
+        run ! jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5")' "$OUT_JSON"
+        [ "$status" -ne 0 ]
         jq -e '.residual_risks[] | select(contains("focused test markers present"))' "$OUT_JSON"
     done
 }
