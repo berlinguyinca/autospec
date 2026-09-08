@@ -1509,7 +1509,15 @@ fn print_help() {
 }
 
 #[cfg(test)]
-mod runtime_session_tests {
+mod load_sensitive_runtime_session_tests {
+    //! Load-sensitive suite (issue #3714): every test here spawns a real broker
+    //! process and asserts on process liveness or session cleanup, so it can fail
+    //! under concurrent `cargo test` load even on a healthy `main`. The
+    //! `load_sensitive` token in the test name is the marker for runners: run
+    //! these alone (`cargo test -- load_sensitive`) or exclude them from shared
+    //! runs (`cargo test -- --skip load_sensitive`). Contention can manufacture
+    //! failures but never passes — re-run any red result from a loaded machine in
+    //! isolation before treating it as a regression.
     use super::{
         prepare_runtime_session, reattach_runtime_session, runtime_manifest_snapshot_path,
     };

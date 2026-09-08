@@ -519,8 +519,15 @@ fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
 }
 
 #[cfg(target_os = "linux")]
+// Load-sensitive test (issue #3714): asserts on the liveness of an unrelated
+// process under PID churn, so it can fail under concurrent `cargo test` load
+// even on a healthy `main`. The `load_sensitive` token in the test name is the
+// marker for runners: run these alone (`cargo test -- load_sensitive`) or
+// exclude them from shared runs (`cargo test -- --skip load_sensitive`).
+// Contention can manufacture failures but never passes — re-run any red result
+// from a loaded machine in isolation before treating it as a regression.
 #[test]
-fn autonomous_executor_bridge_cleanup_never_retires_a_live_non_descendant_harness() {
+fn load_sensitive_autonomous_executor_bridge_cleanup_never_retires_a_live_non_descendant_harness() {
     // Break caught: cleanup of a valid supervisor treating an unrelated persisted harness as
     // cleaned and retiring the only durable identity that can quarantine it.
     let fixture = NonDescendantDirectFixture::new("non-descendant-quarantine");
