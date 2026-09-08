@@ -14,6 +14,7 @@ pub mod parent;
 pub mod plan;
 pub mod queue;
 pub mod rag;
+pub mod repair_loop;
 pub mod report;
 pub mod resume;
 pub mod run;
@@ -85,6 +86,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("parent", "Reconcile decomposed parent issue state"),
     ("queue", "Compute the safe GitHub issue queue"),
     (
+        "repair-loop",
+        "Observe repair loops: rate, consecutive-sweep escalation, defect tickets",
+    ),
+    (
         "doctor",
         "Check the Rust core workspace (`doctor code-intel` for LSP health)",
     ),
@@ -130,6 +135,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
             "rag" => rag::run(rest),
+            "repair-loop" => repair_loop::run(rest),
             "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
             "run" => run::run(rest).map_err(CommandFailure::diagnostic),
             "runtime" => runtime::run(rest),

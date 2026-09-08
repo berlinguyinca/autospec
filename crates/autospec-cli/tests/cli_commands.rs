@@ -88,6 +88,7 @@ fn cli_commands_help_lists_required_commands() {
             "claim",
             "parent",
             "queue",
+            "repair-loop",
             "doctor",
             "status",
             "autonomous",
@@ -5817,3 +5818,242 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
 fi
 exit 0
 "#;
+
+fn repair_loop_record_args(
+    state: &std::path::Path,
+    population: &[&str],
+    repaired: &[&str],
+) -> Vec<String> {
+    let mut args = vec![
+        "repair-loop".to_string(),
+        "record".to_string(),
+        "--loop".to_string(),
+        "gw-workers".to_string(),
+        "--state-file".to_string(),
+        state.to_string_lossy().into_owned(),
+    ];
+    for identity in population {
+        args.push("--expected".to_string());
+        args.push((*identity).to_string());
+    }
+    for identity in repaired {
+        args.push("--repaired".to_string());
+        args.push((*identity).to_string());
+    }
+    args
+}
+
+#[test]
+fn repair_loop_record_idle_repaired_and_persistent_exit_codes() {
+    let temp = temp_dir("autospec-repair-loop");
+    let state = temp.join("gw-workers.json");
+    let population = ["w1", "w2", "w3", "w4"];
+
+    // Idle sweep: healthy line, exit 0.
+    let idle = autospec()
+        .args(repair_loop_record_args(&state, &population, &[]))
+        .output()
+        .expect("repair-loop record runs");
+    assert!(
+        idle.status.code() == Some(0),
+        "idle sweep must exit 0: {}",
+        String::from_utf8_lossy(&idle.stdout)
+    );
+    let idle_line = String::from_utf8_lossy(&idle.stdout);
+    assert!(idle_line.contains("0 missing (expected 4)"), "{idle_line}");
+    assert!(idle_line.contains("idle, nothing to repair"), "{idle_line}");
+
+    // One-off repair sweep: status line, exit 1, and a different print than idle.
+    let repaired = autospec()
+        .args(repair_loop_record_args(&state, &population, &population))
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(repaired.status.code(), Some(1));
+    let repaired_line = String::from_utf8_lossy(&repaired.stdout);
+    assert!(
+        repaired_line.contains("4 missing (expected 4)"),
+        "{repaired_line}"
+    );
+    assert!(
+        repaired_line.contains("repaired: w1, w2, w3, w4"),
+        "{repaired_line}"
+    );
+    assert_ne!(idle_line.trim(), repaired_line.trim());
+    assert!(!repaired_line.contains("ALERT"), "{repaired_line}");
+
+    // w1 was already repaired once above; two more consecutive repairs of the
+    // same identity reach the escalation threshold and must ALERT, naming the
+    // consecutive count, which keeps climbing on the next sweep.
+    let second = autospec()
+        .args(repair_loop_record_args(&state, &population, &["w1"]))
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(
+        second.status.code(),
+        Some(1),
+        "streak 2 is below the threshold"
+    );
+
+    let third = autospec()
+        .args(repair_loop_record_args(&state, &population, &["w1"]))
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(third.status.code(), Some(2));
+    let line = String::from_utf8_lossy(&third.stdout);
+    assert!(line.contains("ALERT repair gw-workers"), "{line}");
+    assert!(
+        line.contains("w1 re-registered on 3 consecutive sweeps"),
+        "{line}"
+    );
+    // Three of the four recorded sweeps repaired something; the leading idle
+    // sweep is still inside the rolling window, so the rate is 0.75, not 1.0.
+    assert!(
+        line.contains("repair rate 0.8 over last 4 sweeps"),
+        "{line}"
+    );
+    assert!(line.contains("UNTRACKED DEFECT w1"), "{line}");
+    assert!(line.contains("1 missing (expected 4)"), "{line}");
+
+    let fourth = autospec()
+        .args(repair_loop_record_args(&state, &population, &["w1"]))
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(fourth.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&fourth.stdout)
+            .contains("w1 re-registered on 4 consecutive sweeps"),
+        "the consecutive count must keep climbing"
+    );
+}
+
+#[test]
+fn repair_loop_record_traces_the_persistent_repair_to_its_defect_ticket() {
+    let temp = temp_dir("autospec-repair-loop-ticket");
+    let state = temp.join("gw-workers.json");
+    let population = ["w1", "w2", "w3", "w4"];
+
+    for _ in 0..3 {
+        autospec()
+            .args(repair_loop_record_args(&state, &population, &["w2"]))
+            .output()
+            .expect("repair-loop record runs");
+    }
+
+    let mut args = repair_loop_record_args(&state, &population, &["w2"]);
+    args.push("--ticket".to_string());
+    args.push("w2=inferweave-gateway#60".to_string());
+    let traced = autospec()
+        .args(&args)
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(traced.status.code(), Some(2));
+    let line = String::from_utf8_lossy(&traced.stdout);
+    assert!(
+        line.contains("defect ticket for w2: inferweave-gateway#60"),
+        "{line}"
+    );
+    assert!(!line.contains("UNTRACKED DEFECT w2"), "{line}");
+}
+
+#[test]
+fn repair_loop_status_reports_rate_streaks_and_json() {
+    let temp = temp_dir("autospec-repair-loop-status");
+    let state = temp.join("gw-workers.json");
+    let population = ["w1", "w2"];
+
+    for _ in 0..3 {
+        autospec()
+            .args(repair_loop_record_args(&state, &population, &["w1"]))
+            .output()
+            .expect("repair-loop record runs");
+    }
+
+    let status = autospec()
+        .args([
+            "repair-loop",
+            "status",
+            "--loop",
+            "gw-workers",
+            "--state-file",
+        ])
+        .arg(&state)
+        .output()
+        .expect("repair-loop status runs");
+    assert!(status.status.success());
+    let output = String::from_utf8_lossy(&status.stdout);
+    assert!(output.contains("3 sweeps recorded"), "{output}");
+    assert!(output.contains("repair rate 1.0"), "{output}");
+    assert!(output.contains("streak w1=3 (total 3)"), "{output}");
+
+    let json = autospec()
+        .args([
+            "repair-loop",
+            "status",
+            "--loop",
+            "gw-workers",
+            "--state-file",
+            "--json",
+        ])
+        .arg(&state)
+        .output()
+        .expect("repair-loop status runs");
+    assert!(json.status.success());
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    assert!(stdout.trim_start().starts_with('{'), "{stdout}");
+    assert!(stdout.contains(r#""command":"repair-loop""#), "{stdout}");
+    assert!(stdout.contains(r#""loop":"gw-workers""#), "{stdout}");
+}
+
+#[test]
+fn repair_loop_status_without_a_ledger_reports_absent_state() {
+    let temp = temp_dir("autospec-repair-loop-absent");
+    let state = temp.join("never-recorded.json");
+
+    let plain = autospec()
+        .args([
+            "repair-loop",
+            "status",
+            "--loop",
+            "gw-workers",
+            "--state-file",
+        ])
+        .arg(&state)
+        .output()
+        .expect("repair-loop status runs");
+    assert!(plain.status.success());
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("no ledger recorded yet"));
+
+    let json = autospec()
+        .args([
+            "repair-loop",
+            "status",
+            "--loop",
+            "gw-workers",
+            "--state-file",
+            "--json",
+        ])
+        .arg(&state)
+        .output()
+        .expect("repair-loop status runs");
+    assert!(json.status.success());
+    assert!(String::from_utf8_lossy(&json.stdout).contains(r#""state":"absent""#));
+}
+
+#[test]
+fn repair_loop_rejects_invalid_loop_names() {
+    let temp = temp_dir("autospec-repair-loop-invalid");
+    let output = autospec()
+        .args([
+            "repair-loop",
+            "record",
+            "--loop",
+            "../../etc/evil",
+            "--state-file",
+            temp.join("x.json").to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("repair-loop record runs");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid repair-loop name"), "{stderr}");
+}

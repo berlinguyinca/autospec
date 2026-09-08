@@ -78,6 +78,21 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec showcase --json` | yes | demo stub |
 | `autospec benchmark` | no | documented stub, exits non-zero |
 | `autospec growth-report --json` | yes | local-only metrics stub |
+| `autospec repair-loop record --loop <name> [--expected <id>]... [--repaired <id>]... [--ticket <id=ticket>]... [--state-file <path>]` | no | records one repair sweep; exit 0 idle / 1 repaired / 2 persistent (ALERT) |
+| `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
+
+`autospec repair-loop` observes a self-healing loop so that a repair which keeps
+repairing the same identity reads as an alert, not a status line. `record` feeds one
+sweep into a durable per-loop ledger (JSON under `~/.autospec/repair-loops/` or
+`--state-file`) and prints a verdict line that states the repair **rate** over a
+rolling 5-sweep window, names the **consecutive-sweep count** for any identity repaired
+on 3 or more consecutive sweeps ("`w1 re-registered on 4 consecutive sweeps`"), and
+prints healthy and unhealthy runs differently (`0 missing (expected 0)` versus
+`4 missing` — never the same line). A persistent identity must trace to a defect
+ticket (`--ticket <id=ticket>`); one without a ticket is printed as `UNTRACKED DEFECT`,
+which is the case where the repair is standing in for an unhealed defect nobody is
+reporting. Exit codes make the verdict machine-readable for cron/CI: `0` idle,
+`1` repaired, `2` persistent.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a
