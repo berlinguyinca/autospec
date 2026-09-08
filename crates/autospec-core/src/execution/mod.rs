@@ -1,4 +1,5 @@
 pub mod executor;
+pub mod gate_coverage;
 pub mod patch_pipeline;
 pub mod queue;
 mod queue_parser;
