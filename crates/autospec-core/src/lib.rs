@@ -27,6 +27,7 @@ pub mod evaluation;
 pub mod evidence;
 pub mod execution;
 pub mod explore;
+pub mod failure_signatures;
 pub mod graph;
 pub mod growth;
 pub mod initiative;

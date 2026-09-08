@@ -355,6 +355,25 @@ autospec doctor code-intel --json
 Configured in [`.autospec/code-intelligence.yaml`](.autospec/code-intelligence.yaml); see
 the [code intelligence guide](docs/code-intelligence.md).
 
+### Fleet failure signatures
+
+One run's log answers nothing useful. Counting the same failure across a
+rolling window of runs does:
+
+```bash
+autospec doctor failures                          # top signatures over the last 200 runs
+autospec doctor failures --last 500 --top 20
+autospec doctor failures --runs-dir /srv/autospec/runs --json
+```
+
+A signature is the last meaningful stderr line with paths, numbers, addresses,
+UUIDs and dates masked, so one defect yields one signature however many nodes
+it struck. Counts are reported against the window denominator, and a signature
+above 5% of the window is marked `SYSTEMIC` and exits 1. Runs that produced no
+output, or never wrote a status file, get their own buckets instead of dropping
+out of the arithmetic. See
+[failure signatures](docs/failure-signatures.md).
+
 ## No-Side-Effect Demo
 
 The launch demo shows the shape of an AutoSpec run without creating GitHub issues
@@ -474,6 +493,7 @@ Start here:
 - [`docs/public-launch-checklist.md`](docs/public-launch-checklist.md)
 - [`docs/cli-reference.md`](docs/cli-reference.md)
 - [`docs/code-intelligence.md`](docs/code-intelligence.md)
+- [`docs/failure-signatures.md`](docs/failure-signatures.md)
 - [`SKILLS.md`](SKILLS.md)
 
 ## Contributing
