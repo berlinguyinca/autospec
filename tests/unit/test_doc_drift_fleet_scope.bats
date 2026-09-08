@@ -13,26 +13,43 @@
 #      skills/autospec-fleet/gui/** so fleet-GUI diffs return exit 0/1
 #      (covered) rather than exit 2 (Option a).
 #
-# Each test builds a synthetic diff, runs check-doc-drift.sh against the real
-# docs/ tree, and asserts the expected exit code.
+# Each test builds a synthetic diff, runs check-doc-drift.sh against a docs/
+# corpus that carries the real autospec-doc-scope annotation under test, and
+# asserts the expected exit code.
+#
+# The corpus is a copy of docs/USER_MANUAL.md only: check-doc-drift.sh spawns
+# one node process per scanned doc file, and scanning the full docs/ tree
+# (500+ files, hundreds of node spawns per call, five calls per file) wedged
+# full-suite runs on slow hosts (#3391). All five regressions below turn only
+# on the USER_MANUAL.md annotation (fleet scope coverage, tests/ exclusion,
+# and the still-working exit-2 path), so scanning that one real file keeps the
+# regression live while bounding the run.
+
+# A wedged drift gate must fail loudly instead of blocking the whole suite
+# (#3391). 600s is far above the healthy per-test cost even on slow hosts.
+BATS_TEST_TIMEOUT=600
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     SCAN_MJS="$REPO_ROOT/skills/autospec-shared/scripts/scan-doc-scope.mjs"
     DRIFT_SH="$REPO_ROOT/skills/autospec-shared/scripts/check-doc-drift.sh"
     WORK="$(mktemp -d)"
+    DOCS_MIN="$WORK/docs"
+    mkdir -p "$DOCS_MIN"
+    cp "$REPO_ROOT/docs/USER_MANUAL.md" "$DOCS_MIN/"
 }
 
 teardown() {
     rm -rf "$WORK"
 }
 
-# Helper: run check-doc-drift.sh against the REAL docs/ tree using a diff file.
+# Helper: run check-doc-drift.sh against the minimal real-annotation corpus
+# using a diff file.
 run_drift() {
     local diff_file="$1"
     SCAN_DOC_SCOPE_MJS="$SCAN_MJS" \
     AUTOSPEC_REPO_ROOT="$REPO_ROOT" \
-    AUTOSPEC_DOCS_DIR="$REPO_ROOT/docs" \
+    AUTOSPEC_DOCS_DIR="$DOCS_MIN" \
     run bash "$DRIFT_SH" --diff "$diff_file"
 }
 

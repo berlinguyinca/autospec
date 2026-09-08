@@ -2,6 +2,11 @@
 
 bats_require_minimum_version 1.5.0
 
+# A wedged generation install must fail loudly instead of blocking the whole
+# suite (#3391). The slowest healthy test here measures ~25s, so 180s is a
+# generous ceiling that only a genuine wedge can hit.
+BATS_TEST_TIMEOUT=180
+
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   TEST_ROOT="$(mktemp -d "${BATS_TMPDIR:-/tmp}/runtime-generations.XXXXXX")"
@@ -98,7 +103,9 @@ SH
     "$LAUNCHER" start --repo-dir "$target"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"cannot resolve the installed Autospec source checkout"* ]]
+  # check-target reports the missing receipt as an invalid (status 2) check,
+  # so the launcher fails on the status-2 branch, not the stale (10) branch.
+  [[ "$output" == *"cannot resolve or verify the installed Autospec source checkout"* ]]
   [ ! -e "$AUTOSPEC_TEST_LAUNCH_ARGS" ]
 }
 
@@ -172,8 +179,13 @@ install_launcher_runtime_fixture() {
   export AUTOSPEC_TEST_LAUNCH_ARGS="$TEST_ROOT/launch.args"
 }
 
+# GNU-first stat(1) ordering: on GNU coreutils `stat -f FMT FILE` means
+# "filesystem status" and prints a multi-line filesystem report for FILE to
+# stdout before failing, which poisons the captured value. BSD stat has no
+# `-c`, so it fails cleanly and the `-f` fallback still supplies the value.
+# Mirrors autospec_runtime_stat_mode in scripts/autonomous-runtime-refresh.sh.
 mode_of() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 
 wait_for_file() {
