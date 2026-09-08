@@ -245,6 +245,33 @@ Superseded outcomes and rows missing complete PR, commit, receipt, reviewer,
 reasoning, diversity, or risk attribution are excluded from both discovery and
 promotion samples.
 
+## Evaluator promotion policy
+
+`autospec evaluator init` writes `.autospec/evaluation/policy.json` (the default policy
+when `--policy` is omitted); re-initialization fails. The policy is protected kernel:
+it is never mutable by any agent lane, and every epoch and challenger trial pins its
+digest, so a policy change can never silently re-qualify a past trial. Default:
+
+```json
+{
+  "schema": 1,
+  "epsilon": 50000,
+  "minimum_margin": 10000,
+  "minimum_cases": 40,
+  "require_human_approval_slots": ["architecture", "security_reasoning"]
+}
+```
+
+`epsilon` and `minimum_margin` are parts per million. A challenger is promoted only when its ε-best-belief lower bound exceeds the incumbent's by at least `minimum_margin` on at least `minimum_cases` labeled anchors with no protected-subset regression; slots listed under `require_human_approval_slots` additionally need `autospec evaluator promote --approve --actor <name>`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `schema` | `1` | Schema version; readers reject unsupported major versions. |
+| `epsilon` | `50000` | Confidence ε for the challenger's best-belief lower bound `BB_ε(S, F)` over its successes and failures on the suite. |
+| `minimum_margin` | `10000` | Minimum required difference, in parts per million, between the challenger's and the incumbent's best-belief lower bounds; ties (including anything below this) never promote. |
+| `minimum_cases` | `40` | Minimum paired labeled anchor cases for a conclusive verdict; fewer yields `inconclusive (insufficient_cases)`. |
+| `require_human_approval_slots` | `["architecture", "security_reasoning"]` | Evaluator slots whose promotion additionally requires `Approval::Human` via `autospec evaluator promote --approve --actor <name>`; every other slot promotes on policy alone. |
+
 ## Model tiers & dispatch
 | Var | Default | Effect |
 |---|---|---|
