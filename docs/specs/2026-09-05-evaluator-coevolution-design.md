@@ -66,7 +66,7 @@ Review stays inside issue scope: the counter-team applies these lenses to the fi
 
 ### Placement
 
-One cohesive module, `crates/autospec-core/src/evaluation/`, with a repo-local store at `.autospec/evaluation/`, exposed by two hand-rolled CLI groups `autospec evaluator` and `autospec anchor` registered in `crates/autospec-cli/src/commands/mod.rs` exactly like `explore`. No new crate (the core/CLI direction gate and the pinned-dependency policy stay untouched). Every new `.rs` file stays under 600 lines (file-size ratchet). No `f64` anywhere (the `financial_no_f64` architecture gate scans `crates/**/*.rs` and must not grow past its current 81 occurrences).
+One cohesive module, `crates/autospec-core/src/evaluation/`, with a repo-local store at `.autospec/evaluation/`, exposed by two hand-rolled CLI groups `autospec evaluator` and `autospec anchor` registered in `crates/autospec-cli/src/commands/mod.rs` exactly like `explore`. No new crate (the core/CLI direction gate and the pinned-dependency policy stay untouched). Every new `.rs` file stays under 600 lines (file-size ratchet). No `f64` anywhere in slice files, enforced per file by the acceptance-criteria `grep -rc '\bf64\b'` line. (Phase 5.5 audit, 2026-09-08: #3665 rescoped the `financial_no_f64` gate from a bare-`\bf64\b` count over `crates/**/*.rs` — whose 81-occurrence baseline was already 100 by merge time — to a money-identifier pattern with `threshold: 0`, retiring that ratchet; see the Phase 5.5 audit section.)
 
 ```text
 crates/autospec-core/src/evaluation/
@@ -265,7 +265,7 @@ Rust only; no new `.bats` suites (the registration baseline would fail them). `c
 - **Integration (`crates/autospec-core/tests/`):** `evaluation_statistics.rs` (17 reference pairs ±2 ppm, monotone in S, below the posterior mean, input bounds); `evaluation_registry.rs` (init-once, immutability naming the file, artifact verification, write-once records); `evaluation_qualification.rs` on a 40-case fixture suite (`qualified` for v1→v2 with margin 169 001 ppm and paired counts 6/0; `rejected` for a challenger that accepts two `critical-security` cases; `inconclusive` for an equal-accuracy challenger and for an incomplete verdict file; `insufficient_cases` at 10); `evaluation_transition.rs` (full promotion; policy-approval refusal; **crash matrix**: inject after each of the six steps, reopen, assert one active epoch, one committed promotion, three non-dependent records, events exactly once, second recovery no-op; pin seeds only empty slots).
 - **CLI (`crates/autospec-cli/tests/evaluator_commands.rs`):** the handoff §32 Step F demo end to end (register v1/v2, register suite, pin v1, add records, challenger run, promote refused without approval, promote with approval → epoch-000002, stale list shows exactly the displaced records, history shows all epochs); regressing and tied challengers never promote; `anchor show` defaults to the redacted view (30 of 40 labels visible) and `anchor verify` names a tampered case.
 - **Fixtures** live under `crates/autospec-core/tests/fixtures/evaluation/` (suite v1 with 40 synthetic patches, five recorded-verdict files, definitions, records). Reference statistics are pinned from the independent computation, never from the implementation.
-- **Gates:** `bash scripts/architecture-fitness.sh run --registry .autospec/architecture-fitness.yml` reports `forbidden_f64_occurrences` unchanged; every new `.rs` file ≤ 600 lines; `cargo clippy --workspace --all-targets`; `autospec validate --fast`.
+- **Gates:** `bash scripts/architecture-fitness.sh run --registry .autospec/architecture-fitness.yml` reports `financial_no_f64` green (post-#3665: money-identifier pattern, `threshold: 0`; the "`forbidden_f64_occurrences` unchanged" wording referred to the rescoped bare-f64 ratchet); every new `.rs` file ≤ 600 lines; `cargo clippy --workspace --all-targets`; `autospec validate --fast`.
 
 Mermaid: the two diagrams above cover lifecycle and transaction; no further diagrams apply.
 
@@ -305,6 +305,33 @@ Companion-repo work (constitution clauses 0.7.0; baselines rules registry and fi
 - [ ] `grep -rc '\bf64\b' crates/autospec-core/src/evaluation crates/autospec-cli/src/commands/evaluator crates/autospec-cli/src/commands/evaluator.rs crates/autospec-cli/src/commands/anchor.rs` prints `0` for every file.
 - [ ] No `.rs` file added by this spec exceeds 600 lines (`wc -l`).
 - [ ] `cargo test --workspace --no-fail-fast` and `cargo clippy --workspace --all-targets` pass; `Cargo.lock` package count is unchanged.
+
+## Phase 5.5 audit (issue #3561, 2026-09-08)
+
+Re-ran every acceptance line against the merged tree; fixed integration defects in place (seams, duplicated helpers, unreachable errors, drifted docs) and recorded follow-ups for behaviour gaps.
+
+1. **Blocking: the slice is not merged — the audit ran against an empty slice.** At audit time all 16 children (#3545–#3560) are still open; `crates/autospec-core/src/evaluation/` and `crates/autospec-cli/src/commands/evaluator/` do not exist on `main`, and only two children ever pushed a branch (`fix/issue-3553`, `fix/issue-3554`). The monitor must merge the dependency chain before the slice-level checks can pass.
+2. **Cross-child duplication (defect, follow-up):** `fix/issue-3554` re-scaffolds #3553's modules — its own copies of `evaluation/{mod,digest,error,store/mod,store/io,store/layout}.rs`, divergent from `fix/issue-3553` (`store/mod.rs` 8 vs 109 lines, `store/io.rs` 93 vs 341, `store/layout.rs` 62 vs 231, different `mod.rs` doc headers). Merging both branches as-is collides file-for-file. Follow-up: rebase #3554 onto merged #3553 and drop the scaffolding copies before #3554's PR opens.
+3. **Drifted gate reference (fixed in place):** the "81 `f64` occurrences" ratchet (Placement; Testing → Gates) measured the pre-#3665 bare-`\bf64\b` gate. #3665 (merged 2026-09-07, after this spec) rescoped it to a money-identifier pattern with `threshold: 0`; audit observation: `PASS financial_no_f64 metric=forbidden_f64_occurrences observed=0 threshold=0`. The per-file grep acceptance line is the surviving slice invariant and stays. The plan's Task 14 "`financial_no_f64` observed must still be 81" note carries the same drift (plan file out of this issue's scope; recorded here instead of edited).
+4. **Pre-existing, unrelated to the slice:** the `rust_core_cli_direction` fitness gate is red on `main` at audit time (`observed=3, threshold=0`); `cargo test --workspace --no-fail-fast` fails 44 tests, every one environmental in this sandbox (missing `codex`/`gitleaks`/`semgrep`/`docker` binaries and GitHub auth — `executor_bridge`, `issue_promote_*`, `normalize_*`/`gc_*`, one bats check). None touch evaluation code, which is absent from the tree.
+
+**Acceptance-line → follow-up map** (per the audit issue's tick-or-link rule; no box is ticked because the unmerged tree satisfies none of the behavioural lines):
+
+| Acceptance line | Follow-up |
+|---|---|
+| `register` refuses overwrite (`immutable` + path, exit 2) | #3555 (immutable registry) — open |
+| `epoch current` prints pinned slots + policy digest | #3550 (epochs/records) + #3557 (evaluator CLI) — open |
+| fixture-suite `qualified` / `rejected` / `inconclusive` verdicts | #3551 (qualification + fixtures) + #3559 (challenger CLI) — open |
+| `best_belief=621494` (30/10) and `790495` (36/4) at ε = 0.05 | #3546 (statistic + reference pairs) — open |
+| `promote` fail-closed without `--approve --actor` on `architecture` | #3552 (promotion planning) + #3559 (challenger CLI) — open |
+| approved promotion → `epoch-000002`, exact stale set, `outcome` unchanged | #3556 (transition + crash matrix) + #3559 (challenger CLI) — open |
+| crash matrix over all six `TransitionStep` values | #3556 (transition + crash matrix) — open |
+| `anchor show` redacted default (no `expected_label`, no quarantine) | #3548 (anchor suites) + #3558 (anchor CLI) — open |
+| `anchor verify` names a tampered case, exit 2 | #3548 (anchor suites) + #3558 (anchor CLI) — open |
+| `evaluation_statistics.rs` 17 reference pairs ±2 ppm | #3546 (statistic + reference pairs) — open |
+| per-file `grep -rc '\bf64\b'` prints `0` | vacuously true at audit time (no slice files on `main`); re-verify when the slice lands |
+| no added `.rs` file > 600 lines | vacuously true at audit time (no slice files on `main`); re-verify when the slice lands |
+| workspace tests + clippy green, `Cargo.lock` unchanged | the 44 environmental failures above pre-date this issue; re-verify in a complete environment when the slice lands |
 
 ## Critical risk check
 
