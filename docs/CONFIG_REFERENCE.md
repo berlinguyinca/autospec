@@ -355,6 +355,24 @@ that output automatically yet.
 | `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
 | `AUTOSPEC_ROUTING_PREFIX_TOKENS` | `0` (unknown) | Prefix size this dispatch will stage, tested against each profile's `cache_min_tokens`. `0` fails open and scores exactly as before. |
 
+**The stack gate (per-stack local eligibility, default-deny).** `route-decide.sh` takes
+`--deliverable <kind>` (default `code`) and `--stack <profile-id>`. Non-code
+deliverables (`document`, `latex`, `translation`, `research`, or any other non-`code`
+value) are **never** local-eligible, whatever the ledger says — this half is always on.
+The stack half activates only when a stack is detected: `--stack <id>` explicitly, or
+`.autospec/state/stack-profile.json` (`primary_profile.id`) in the working directory —
+the file *existing* is what activates it, even with an `unknown` or empty id. With no
+flag and no file the gate is dormant and routing is unchanged (no data = no change).
+Once active, a **local** profile (`cost_minute`, no `cost_in`/`cost_out`) is a candidate
+only if the ledger holds a successful outcome (`merged_clean` / `lgtm_first_pass` /
+`retried_ok`) from a local profile **on this exact stack**; an empty ledger, an
+unrecognized stack, or an unreadable ledger denies. Denied locals are stripped; if that
+removes every candidate the baseline wins. `scripts/autospec-detect-stack-profile.sh
+--print-stack` prints the detected id (`unknown` when it cannot tell) for callers to
+record, and `scripts/calibrate-profile.sh` stamps the detected stack into the
+`stack` field of the ledger rows it appends (`routing-ledger.sh` normalizes a missing
+`stack` to `"unknown"` on append and on `--update-outcome`).
+
 **Prompt-cache minimums (`cache_min_tokens`).** A prompt cache only engages above a
 per-model token floor, and the floors differ sharply — Haiku 4.5 needs **4096**
 tokens where Opus 5 needs **512** — which makes the cheapest per-token profile the
