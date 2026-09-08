@@ -3,6 +3,7 @@ pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
 pub mod doctor;
+pub mod evaluator;
 pub mod explore;
 pub mod growth_report;
 pub mod init;
@@ -103,6 +104,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "growth-report",
         "Render local-only launch readiness metrics",
     ),
+    (
+        "evaluator",
+        "Manage the evaluation store (registry, epochs, pin)",
+    ),
 ];
 
 pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
@@ -138,6 +143,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "showcase" => showcase::run(rest).map_err(CommandFailure::diagnostic),
             "benchmark" => benchmark::run(rest).map_err(CommandFailure::diagnostic),
             "growth-report" => growth_report::run(rest).map_err(CommandFailure::diagnostic),
+            "evaluator" => evaluator::run(rest),
             _ => Err(CommandFailure::diagnostic(format!(
                 "unknown autospec command: {command}"
             ))),
