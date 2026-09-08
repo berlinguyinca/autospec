@@ -3,6 +3,9 @@ use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::managed_project::ManagedProjectBinding;
 use serde_json::{json, Value};
 
+#[path = "portfolio/reconcile.rs"]
+pub(super) mod portfolio;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteProject {
     pub node_id: String,
@@ -23,6 +26,35 @@ pub(crate) struct ProjectIdentity {
 }
 
 impl ManagedProjectStore {
+    /// Derive the projected `Autospec delivery` statuses, per-status
+    /// counts, `Last activity`, and portfolio completion for this spec
+    /// portfolio from acknowledged authoritative facts.
+    ///
+    /// Every fact is cross-checked against the frozen recovery capsule
+    /// before derivation, so observed metadata cannot rename, re-role,
+    /// re-edge, or add items. The `autospec portfolio reconcile`
+    /// transaction is the sole writer of the returned projection to
+    /// managed fields and the README recovery block; until it lands this
+    /// entry point is exercised by the table-driven tests in
+    /// `tests/managed_project.rs`.
+    #[allow(dead_code)]
+    pub fn portfolio_status_projection(
+        &self,
+        facts: &[Value],
+    ) -> Result<Value, ManagedProjectError> {
+        let snapshot = self.portfolio_snapshot().ok_or_else(|| {
+            ManagedProjectError::new("status projection requires a spec portfolio store")
+        })?;
+        let capsule_items = snapshot["recovery_capsule"]["items"]
+            .as_array()
+            .ok_or_else(|| ManagedProjectError::new("frozen recovery capsule has no items"))?;
+        let typed = validate_portfolio_facts(capsule_items, facts)?;
+        let reconciliation = portfolio::reconcile(&typed).map_err(|error| {
+            ManagedProjectError::new(format!("portfolio status reconciliation failed: {error}"))
+        })?;
+        Ok(reconciliation.projection_payload())
+    }
+
     pub(super) fn record_created_project(
         &mut self,
         project: &RemoteProject,
@@ -204,4 +236,56 @@ pub(crate) fn project_binding_payload(binding: &ManagedProjectBinding) -> Option
         "url": binding.project_url.as_deref()?,
         "title": binding.project_title.as_deref()?,
     }))
+}
+
+fn array_matches(value: &Value, expected: &[String]) -> bool {
+    value.as_array().is_some_and(|array| {
+        array.len() == expected.len()
+            && array
+                .iter()
+                .zip(expected)
+                .all(|(entry, key)| entry.as_str() == Some(key.as_str()))
+    })
+}
+
+fn validate_portfolio_facts(
+    capsule_items: &[Value],
+    facts: &[Value],
+) -> Result<Vec<portfolio::ItemFacts>, ManagedProjectError> {
+    let typed: Vec<portfolio::ItemFacts> = facts
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ManagedProjectError::new(format!("portfolio status facts are invalid: {error}"))
+        })?;
+    if typed.len() != capsule_items.len() {
+        return Err(ManagedProjectError::new(
+            "portfolio status facts do not cover the frozen recovery capsule",
+        ));
+    }
+    for fact in &typed {
+        let capsule = capsule_items
+            .iter()
+            .find(|item| item["item_key"].as_str() == Some(fact.item_key.as_str()))
+            .ok_or_else(|| {
+                ManagedProjectError::new(format!(
+                    "portfolio status fact names an item outside the frozen recovery capsule: {}",
+                    fact.item_key
+                ))
+            })?;
+        let key_matches = array_matches(&capsule["dependencies"], &fact.dependencies)
+            && array_matches(&capsule["local_parents"], &fact.local_parents);
+        if capsule["repository"].as_str() != Some(fact.repository.as_str())
+            || capsule["role"].as_str() != Some(fact.role.as_str())
+            || capsule["completion_policy"].as_str() != Some(fact.completion_policy.as_str())
+            || !key_matches
+        {
+            return Err(ManagedProjectError::new(format!(
+                "portfolio status fact conflicts with the frozen recovery capsule: {}",
+                fact.item_key
+            )));
+        }
+    }
+    Ok(typed)
 }

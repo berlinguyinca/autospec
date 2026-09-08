@@ -1,5 +1,7 @@
 #[path = "../src/commands/mod.rs"]
 mod commands;
+#[path = "../src/commands/managed_project/portfolio/reconcile.rs"]
+mod portfolio_reconcile;
 
 use autospec_core::managed_project::{
     ItemKey, ManagedProjectIdentity, ManagedProjectNamespace, ManagedProjectPolicy, PortfolioId,
@@ -4301,5 +4303,733 @@ fn managed_project_store_rejects_invalid_role_policy_order_and_cardinality() {
         let fixture = Fixture::new(&format!("portfolio-role-policy-{index}"));
         let mut store = open_portfolio_store(fixture.path());
         assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
+}
+
+mod managed_project_portfolio_status {
+    use super::portfolio_reconcile::{
+        reconcile, CheckState, CompletionPolicy, ItemFacts, ItemRole, ItemStatus,
+        LifecycleObservation, PortfolioStatus, PrState, ReconcileError, ReviewState,
+    };
+    use super::{
+        key, portfolio_item_binding, portfolio_store_identity, portfolio_store_snapshot,
+        ManagedProjectStore,
+    };
+    use serde_json::{json, Value};
+
+    const OBSERVATION_FIELDS: [&str; 12] = [
+        "fresh",
+        "issue_closed",
+        "manually_closed",
+        "quarantined",
+        "terminal_failure",
+        "admitted",
+        "claimed",
+        "pr",
+        "post_merge_checks",
+        "review",
+        "parent_reconciled",
+        "receipt",
+    ];
+
+    fn obs() -> LifecycleObservation {
+        LifecycleObservation {
+            fresh: true,
+            issue_closed: false,
+            manually_closed: false,
+            quarantined: false,
+            terminal_failure: false,
+            admitted: false,
+            claimed: false,
+            pr: PrState::None,
+            post_merge_checks: CheckState::Unknown,
+            review: ReviewState::None,
+            parent_reconciled: false,
+            receipt: false,
+        }
+    }
+
+    fn fact(item_key: &str, observation: LifecycleObservation) -> ItemFacts {
+        ItemFacts {
+            item_key: item_key.to_owned(),
+            repository: item_key
+                .split(|char| char == ':' || char == '/')
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            role: ItemRole::Implementation,
+            completion_policy: CompletionPolicy::MergedPr,
+            local_parents: Vec::new(),
+            dependencies: Vec::new(),
+            last_event_at: None,
+            observation,
+        }
+    }
+
+    fn fact_with_deps(
+        item_key: &str,
+        observation: LifecycleObservation,
+        deps: &[&str],
+    ) -> ItemFacts {
+        let mut item = fact(item_key, observation);
+        item.dependencies = deps.iter().map(|key| key.to_string()).collect();
+        item
+    }
+
+    fn tracker_fact(item_key: &str, observation: LifecycleObservation) -> ItemFacts {
+        let mut item = fact(item_key, observation);
+        item.role = ItemRole::SourceTracker;
+        item.completion_policy = CompletionPolicy::ClosedTracker;
+        item
+    }
+
+    fn prerequisite_fact(item_key: &str, observation: LifecycleObservation) -> ItemFacts {
+        let mut item = fact(item_key, observation);
+        item.role = ItemRole::Prerequisite;
+        item.completion_policy = CompletionPolicy::ExternalPrerequisite;
+        item
+    }
+
+    fn audit_fact(item_key: &str, observation: LifecycleObservation) -> ItemFacts {
+        let mut item = fact(item_key, observation);
+        item.role = ItemRole::Audit;
+        item.completion_policy = CompletionPolicy::AuditReceipt;
+        item
+    }
+
+    fn implementation_done() -> LifecycleObservation {
+        let mut observation = obs();
+        observation.issue_closed = true;
+        observation.pr = PrState::Merged;
+        observation.post_merge_checks = CheckState::Passing;
+        observation
+    }
+
+    fn audit_done() -> LifecycleObservation {
+        let mut observation = obs();
+        observation.issue_closed = true;
+        observation.receipt = true;
+        observation
+    }
+
+    #[test]
+    fn each_authoritative_fact_set_derives_exactly_one_of_the_ten_statuses() {
+        let cases: [(&str, LifecycleObservation, ItemStatus); 10] = [
+            (
+                "repo:unknown",
+                {
+                    let mut observation = obs();
+                    observation.fresh = false;
+                    observation
+                },
+                ItemStatus::Unknown,
+            ),
+            (
+                "repo:failed",
+                {
+                    let mut observation = obs();
+                    observation.terminal_failure = true;
+                    observation
+                },
+                ItemStatus::Failed,
+            ),
+            (
+                "repo:blocked",
+                {
+                    let mut observation = obs();
+                    observation.quarantined = true;
+                    observation
+                },
+                ItemStatus::Blocked,
+            ),
+            ("repo:done", implementation_done(), ItemStatus::Done),
+            (
+                "repo:verifying",
+                {
+                    let mut observation = obs();
+                    observation.issue_closed = true;
+                    observation.pr = PrState::Merged;
+                    observation
+                },
+                ItemStatus::Verifying,
+            ),
+            (
+                "repo:review",
+                {
+                    let mut observation = obs();
+                    observation.review = ReviewState::Active;
+                    observation
+                },
+                ItemStatus::Review,
+            ),
+            (
+                "repo:pr-open",
+                {
+                    let mut observation = obs();
+                    observation.pr = PrState::Open;
+                    observation
+                },
+                ItemStatus::PrOpen,
+            ),
+            (
+                "repo:running",
+                {
+                    let mut observation = obs();
+                    observation.claimed = true;
+                    observation
+                },
+                ItemStatus::Running,
+            ),
+            (
+                "repo:ready",
+                {
+                    let mut observation = obs();
+                    observation.admitted = true;
+                    observation
+                },
+                ItemStatus::Ready,
+            ),
+            ("repo:planned", obs(), ItemStatus::Planned),
+        ];
+        for (item_key, observation, expected) in cases {
+            let reconciliation =
+                reconcile(&[fact(item_key, observation)]).expect("well-formed facts reconcile");
+            assert_eq!(
+                reconciliation.items.get(item_key),
+                Some(&expected),
+                "{item_key} should derive {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_and_readiness_edges_resolve_through_local_parents() {
+        let mut quarantined = obs();
+        quarantined.quarantined = true;
+        let reconciliation = reconcile(&[
+            fact_with_deps("repo:child", obs(), &["repo:parent"]),
+            fact("repo:parent", quarantined),
+        ])
+        .expect("dependency facts reconcile");
+        assert_eq!(
+            reconciliation.items.get("repo:child"),
+            Some(&ItemStatus::Blocked),
+            "a Blocked predecessor blocks the dependent"
+        );
+
+        let admitted = {
+            let mut observation = obs();
+            observation.admitted = true;
+            observation
+        };
+        let mut open = obs();
+        open.pr = PrState::Open;
+        let reconciliation = reconcile(&[
+            fact_with_deps("repo:child", admitted.clone(), &["repo:parent"]),
+            fact("repo:parent", open),
+        ])
+        .expect("admitted dependent behind an open parent reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:child"),
+            Some(&ItemStatus::Planned),
+            "admitted is not Ready while a dependency is unfinished"
+        );
+
+        let reconciliation = reconcile(&[
+            fact_with_deps("repo:child", admitted.clone(), &["repo:parent"]),
+            fact("repo:parent", implementation_done()),
+        ])
+        .expect("dependent with a Done parent reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:child"),
+            Some(&ItemStatus::Ready),
+            "admitted with every dependency Done is Ready"
+        );
+
+        let reconciliation = reconcile(&[fact_with_deps("repo:loop", obs(), &["repo:loop"])])
+            .expect("a dependency cycle still reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:loop"),
+            Some(&ItemStatus::Unknown),
+            "a dependency cycle fails closed as Unknown"
+        );
+    }
+
+    #[test]
+    fn precedence_keeps_failed_and_unknown_above_every_lower_status() {
+        let mut conflicting = obs();
+        conflicting.terminal_failure = true;
+        conflicting.quarantined = true;
+        conflicting.pr = PrState::Merged;
+        conflicting.post_merge_checks = CheckState::Passing;
+        conflicting.issue_closed = true;
+        conflicting.review = ReviewState::Active;
+        let reconciliation = reconcile(&[fact("repo:conflict", conflicting.clone())])
+            .expect("conflicting facts reconcile");
+        assert_eq!(
+            reconciliation.items.get("repo:conflict"),
+            Some(&ItemStatus::Failed),
+            "terminal failure outranks merged, closed, and review facts"
+        );
+
+        let mut stale_failure = conflicting.clone();
+        stale_failure.fresh = false;
+        let reconciliation =
+            reconcile(&[fact("repo:stale", stale_failure)]).expect("stale facts reconcile");
+        assert_eq!(
+            reconciliation.items.get("repo:stale"),
+            Some(&ItemStatus::Unknown),
+            "stale identity facts outrank even terminal failure"
+        );
+
+        let mut ci_failure = obs();
+        ci_failure.pr = PrState::Merged;
+        ci_failure.post_merge_checks = CheckState::Failing;
+        let reconciliation =
+            reconcile(&[fact("repo:ci", ci_failure)]).expect("post-merge CI failure reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:ci"),
+            Some(&ItemStatus::Verifying),
+            "a CI failure alone never makes an active item Failed"
+        );
+    }
+
+    #[test]
+    fn reopen_or_manual_close_moves_a_terminal_item_backward() {
+        let mut reopened = implementation_done();
+        reopened.issue_closed = false;
+        let reconciliation =
+            reconcile(&[fact("repo:reopened", reopened)]).expect("reopened item reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:reopened"),
+            Some(&ItemStatus::Verifying),
+            "a reopened implementation item is no longer Done"
+        );
+
+        let mut manual = implementation_done();
+        manual.manually_closed = true;
+        let reconciliation =
+            reconcile(&[fact("repo:manual", manual)]).expect("manually closed item reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:manual"),
+            Some(&ItemStatus::Verifying),
+            "manual closure is never a success for a merged-pr item"
+        );
+    }
+
+    #[test]
+    fn tracker_is_done_only_when_parent_reconciled_and_children_done() {
+        let mut tracker = obs();
+        tracker.issue_closed = true;
+        tracker.parent_reconciled = true;
+
+        let mut child = obs();
+        child.pr = PrState::Open;
+        let mut child_item = fact("repo:child", child);
+        child_item.local_parents = vec!["repo:tracker".to_owned()];
+        let reconciliation =
+            reconcile(&[tracker_fact("repo:tracker", tracker.clone()), child_item])
+                .expect("tracker with a pending child reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:tracker"),
+            Some(&ItemStatus::Planned),
+            "a closed reconciled tracker still waits on its local child"
+        );
+
+        let mut child_done_item = fact("repo:child", implementation_done());
+        child_done_item.local_parents = vec!["repo:tracker".to_owned()];
+        let reconciliation = reconcile(&[
+            tracker_fact("repo:tracker", tracker.clone()),
+            child_done_item,
+        ])
+        .expect("tracker with a Done child reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:tracker"),
+            Some(&ItemStatus::Done),
+            "closed + parent reconciliation with every local child Done is Done"
+        );
+
+        let mut not_reconciled = tracker;
+        not_reconciled.parent_reconciled = false;
+        let reconciliation = reconcile(&[tracker_fact("repo:tracker", not_reconciled)])
+            .expect("non-reconciled tracker reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:tracker"),
+            Some(&ItemStatus::Planned),
+            "closure alone is not parent reconciliation"
+        );
+    }
+
+    #[test]
+    fn prerequisite_and_audit_items_need_their_receipts() {
+        let mut prerequisite = obs();
+        prerequisite.issue_closed = true;
+        let reconciliation = reconcile(&[prerequisite_fact("repo:prereq", prerequisite)])
+            .expect("prerequisite without receipt reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:prereq"),
+            Some(&ItemStatus::Planned),
+            "a closed prerequisite without a receipt is not Done"
+        );
+
+        let mut received = obs();
+        received.issue_closed = true;
+        received.receipt = true;
+        let reconciliation = reconcile(&[prerequisite_fact("repo:prereq", received)])
+            .expect("receipted prerequisite reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:prereq"),
+            Some(&ItemStatus::Done),
+            "closed + matching external receipt is Done"
+        );
+
+        let reconciliation = reconcile(&[audit_fact("repo:audit", audit_done())])
+            .expect("receipted audit reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:audit"),
+            Some(&ItemStatus::Done),
+            "closed + audit receipt is Done"
+        );
+    }
+
+    #[test]
+    fn portfolio_completes_only_when_all_trackers_prerequisites_and_audit_succeed() {
+        let mut done = obs();
+        done.issue_closed = true;
+        done.parent_reconciled = true;
+        let items = vec![
+            tracker_fact("repo:tracker", done),
+            fact("repo:impl", implementation_done()),
+            prerequisite_fact("repo:prereq", {
+                let mut observation = obs();
+                observation.issue_closed = true;
+                observation.receipt = true;
+                observation
+            }),
+            audit_fact("repo:audit", audit_done()),
+        ];
+        let reconciliation = reconcile(&items).expect("complete portfolio reconciles");
+        assert!(
+            reconciliation.complete,
+            "all four kinds Done completes the portfolio"
+        );
+        assert_eq!(reconciliation.portfolio, PortfolioStatus::Done);
+        assert!(reconciliation.outstanding.is_empty());
+
+        let mut audit_pending = items.clone();
+        audit_pending[3].observation = obs();
+        let reconciliation = reconcile(&audit_pending).expect("audit pending reconciles");
+        assert!(
+            !reconciliation.complete,
+            "an incomplete audit keeps the portfolio open"
+        );
+        assert_eq!(reconciliation.portfolio, PortfolioStatus::Active);
+        assert_eq!(reconciliation.outstanding.len(), 1);
+        assert_eq!(reconciliation.outstanding[0].item_key, "repo:audit");
+        assert_eq!(
+            reconciliation.counts[&ItemStatus::Done],
+            3,
+            "the three successful kinds still count as Done"
+        );
+    }
+
+    #[test]
+    fn blocked_or_failed_items_gate_the_portfolio_status() {
+        let mut quarantined = obs();
+        quarantined.quarantined = true;
+        let mut items = vec![
+            fact("repo:bad", quarantined),
+            fact("repo:good", implementation_done()),
+            audit_fact("repo:audit", audit_done()),
+        ];
+        let reconciliation = reconcile(&items).expect("blocked portfolio reconciles");
+        assert_eq!(
+            reconciliation.portfolio,
+            PortfolioStatus::Blocked,
+            "a Blocked item blocks the whole portfolio"
+        );
+        assert!(!reconciliation.complete);
+        assert_eq!(reconciliation.outstanding.len(), 1);
+
+        let mut failed = obs();
+        failed.terminal_failure = true;
+        items[0].observation = failed;
+        let reconciliation = reconcile(&items).expect("failed portfolio reconciles");
+        assert_eq!(
+            reconciliation.portfolio,
+            PortfolioStatus::Blocked,
+            "a Failed item also stops the portfolio from Done"
+        );
+
+        let reconciliation = reconcile(&[fact_with_deps("repo:child", obs(), &["repo:absent"])])
+            .expect("missing predecessor reconciles");
+        assert_eq!(
+            reconciliation.items.get("repo:child"),
+            Some(&ItemStatus::Blocked),
+            "a dependency that is not a known item fails closed as Blocked"
+        );
+    }
+
+    #[test]
+    fn projection_reports_last_activity_counts_and_outstanding_items() {
+        let mut tracker = obs();
+        tracker.issue_closed = true;
+        tracker.parent_reconciled = true;
+        let mut tracker_item = tracker_fact("repo:tracker", tracker);
+        tracker_item.last_event_at = Some("2026-08-31T14:00:00Z".to_owned());
+
+        let mut implementation_item = fact("repo:impl", implementation_done());
+        implementation_item.last_event_at = Some("2026-08-31T15:00:00Z".to_owned());
+
+        let mut audit_item = audit_fact("repo:audit", audit_done());
+        audit_item.last_event_at = Some("2026-08-31T16:00:00Z".to_owned());
+
+        let mut open = obs();
+        open.pr = PrState::Open;
+        let pending = fact("repo:pending", open);
+
+        let reconciliation = reconcile(&[tracker_item, implementation_item, audit_item, pending])
+            .expect("activity facts reconcile");
+        assert_eq!(
+            reconciliation.last_activity.as_deref(),
+            Some("2026-08-31T16:00:00Z"),
+            "the latest acknowledged authoritative event wins"
+        );
+        let payload = reconciliation.projection_payload();
+        assert_eq!(payload["status"], "Active");
+        assert_eq!(payload["complete"], false);
+        assert_eq!(payload["last_activity"], "2026-08-31T16:00:00Z");
+        assert_eq!(payload["items"]["repo:pending"], "PR Open");
+        let counts = payload["counts"].as_object().expect("counts map");
+        assert_eq!(counts.len(), 10, "all ten delivery values are zero-filled");
+        assert_eq!(counts["Done"], 3);
+        assert_eq!(counts["PR Open"], 1);
+        assert_eq!(counts["Planned"], 0);
+        assert_eq!(payload["outstanding"][0]["item_key"], "repo:pending");
+        assert_eq!(payload["outstanding"][0]["kind"], "implementation");
+        assert_eq!(payload["outstanding"][0]["status"], "PR Open");
+    }
+
+    #[test]
+    fn contradictory_fact_shapes_fail_closed() {
+        let duplicate = reconcile(&[fact("repo:1", obs()), fact("repo:1", obs())])
+            .expect_err("duplicated item keys contradict");
+        assert!(matches!(
+            duplicate,
+            ReconcileError::DuplicateItemKey(key) if key == "repo:1"
+        ));
+
+        let bad_key =
+            reconcile(&[fact("Bad Key", obs())]).expect_err("unsafe item keys contradict");
+        assert!(matches!(
+            bad_key,
+            ReconcileError::InvalidItemKey(key) if key == "Bad Key"
+        ));
+
+        let mut mismatched = fact("repo:1", obs());
+        mismatched.completion_policy = CompletionPolicy::AuditReceipt;
+        assert!(
+            reconcile(&[mismatched]).is_err(),
+            "a role/policy mismatch contradicts the frozen plan"
+        );
+
+        let mut no_repository = fact("repo:1", obs());
+        no_repository.repository.clear();
+        assert!(
+            reconcile(&[no_repository]).is_err(),
+            "an item without a repository contradicts the capsule"
+        );
+
+        assert!(
+            reconcile(&[fact_with_deps("repo:1", obs(), &["not a key"])]).is_err(),
+            "a dependency edge to an unsafe key contradicts"
+        );
+    }
+
+    fn portfolio_facts_from_capsule() -> Vec<Value> {
+        let snapshot = portfolio_store_snapshot();
+        let mut facts = Vec::new();
+        for item in snapshot["recovery_capsule"]["items"]
+            .as_array()
+            .expect("capsule items")
+        {
+            facts.push(json!({
+                "item_key": item["item_key"],
+                "repository": item["repository"],
+                "role": item["role"],
+                "completion_policy": item["completion_policy"],
+                "local_parents": item["local_parents"],
+                "dependencies": item["dependencies"],
+                "last_event_at": null,
+                "observation": {
+                    "fresh": true,
+                    "issue_closed": false,
+                    "manually_closed": false,
+                    "quarantined": false,
+                    "terminal_failure": false,
+                    "admitted": false,
+                    "claimed": false,
+                    "pr": "none",
+                    "post_merge_checks": "unknown",
+                    "review": "none",
+                    "parent_reconciled": false,
+                    "receipt": false,
+                },
+            }));
+        }
+        facts
+    }
+
+    fn with_item(
+        facts: &mut [Value],
+        item_key: &str,
+        mutate: impl Fn(&mut serde_json::Map<String, Value>),
+    ) {
+        let index = facts
+            .iter()
+            .position(|value| value["item_key"] == item_key)
+            .expect("capsule fixture item");
+        let observation = facts[index]["observation"]
+            .as_object_mut()
+            .expect("observation map");
+        for field in OBSERVATION_FIELDS {
+            assert!(observation.contains_key(field), "fixture covers {field}");
+        }
+        mutate(observation);
+    }
+
+    fn with_item_event(facts: &mut [Value], item_key: &str, timestamp: &str) {
+        let index = facts
+            .iter()
+            .position(|value| value["item_key"] == item_key)
+            .expect("capsule fixture item");
+        facts[index]["last_event_at"] = json!(timestamp);
+    }
+
+    fn open_portfolio_store_at(path: &std::path::Path) -> ManagedProjectStore {
+        ManagedProjectStore::open(path, &portfolio_store_identity()).expect("portfolio store")
+    }
+
+    #[test]
+    fn product_store_projection_fails_closed_and_portfolio_store_projects_statuses() {
+        let product_fixture = super::Fixture::new("portfolio-status-product");
+        let product = ManagedProjectStore::open_product(&product_fixture.path(), &key("autospec"))
+            .expect("product store");
+        assert!(
+            product.portfolio_status_projection(&[]).is_err(),
+            "a product store has no frozen portfolio capsule"
+        );
+
+        let fixture = super::Fixture::new("portfolio-status-portfolio");
+        let mut store = open_portfolio_store_at(&fixture.path());
+        store
+            .record_portfolio_snapshot(portfolio_store_snapshot())
+            .expect("record the frozen capsule");
+        store
+            .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 7))
+            .expect("bind the item");
+
+        let mut stale = portfolio_facts_from_capsule();
+        for fact in stale.iter_mut() {
+            fact["observation"]["fresh"] = json!(false);
+        }
+        let payload = store
+            .portfolio_status_projection(&stale)
+            .expect("stale facts still project");
+        assert_eq!(payload["status"], "Active");
+        assert_eq!(payload["complete"], false);
+        assert_eq!(payload["counts"]["Unknown"], 3);
+
+        let mut facts = portfolio_facts_from_capsule();
+        with_item(&mut facts, "source-tracker", |observation| {
+            observation["issue_closed"] = json!(true);
+            observation["parent_reconciled"] = json!(true);
+        });
+        with_item(&mut facts, "issue:portfolio-store", |observation| {
+            observation["issue_closed"] = json!(true);
+            observation["pr"] = json!("merged");
+            observation["post_merge_checks"] = json!("passing");
+        });
+        with_item(&mut facts, "audit:phase-5.5", |observation| {
+            observation["issue_closed"] = json!(true);
+            observation["receipt"] = json!(true);
+        });
+        with_item_event(&mut facts, "audit:phase-5.5", "2026-08-31T14:36:00Z");
+        let payload = store
+            .portfolio_status_projection(&facts)
+            .expect("aligned facts project");
+        assert_eq!(payload["status"], "Done");
+        assert_eq!(payload["complete"], true);
+        assert_eq!(payload["counts"]["Done"], 3);
+        assert_eq!(payload["items"]["source-tracker"], "Done");
+        assert_eq!(payload["items"]["issue:portfolio-store"], "Done");
+        assert_eq!(payload["items"]["audit:phase-5.5"], "Done");
+        assert!(
+            payload["outstanding"]
+                .as_array()
+                .expect("outstanding list")
+                .is_empty(),
+            "a complete portfolio has no outstanding items"
+        );
+        assert_eq!(payload["last_activity"], "2026-08-31T14:36:00Z");
+
+        let mut quarantined = facts;
+        with_item(&mut quarantined, "issue:portfolio-store", |observation| {
+            observation["quarantined"] = json!(true);
+        });
+        let payload = store
+            .portfolio_status_projection(&quarantined)
+            .expect("quarantined facts project");
+        assert_eq!(payload["status"], "Blocked");
+        assert_eq!(payload["items"]["issue:portfolio-store"], "Blocked");
+        assert_eq!(
+            payload["items"]["source-tracker"], "Planned",
+            "a blocked child keeps the tracker from Done"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_facts_that_conflict_with_the_capsule() {
+        let cases: [(&str, fn(&mut Vec<Value>)); 4] = [
+            ("unknown-field", |facts| {
+                for fact in facts.iter_mut() {
+                    fact["observation"]["projection_attempted"] = json!(true);
+                }
+            }),
+            ("conflicting-role", |facts| {
+                for fact in facts.iter_mut() {
+                    if fact["item_key"] == "source-tracker" {
+                        fact["role"] = json!("implementation");
+                    }
+                }
+            }),
+            ("conflicting-dependency", |facts| {
+                for fact in facts.iter_mut() {
+                    if fact["item_key"] == "issue:portfolio-store" {
+                        fact["dependencies"] = json!(["repo:other"]);
+                    }
+                }
+            }),
+            ("missing-item", |facts| {
+                *facts = facts
+                    .iter()
+                    .filter(|fact| fact["item_key"] != "audit:phase-5.5")
+                    .cloned()
+                    .collect();
+            }),
+        ];
+        for (name, mutate) in cases {
+            let fixture = super::Fixture::new(&format!("portfolio-status-reject-{name}"));
+            let mut store = open_portfolio_store_at(&fixture.path());
+            store
+                .record_portfolio_snapshot(portfolio_store_snapshot())
+                .expect("record the frozen capsule");
+            let mut facts = portfolio_facts_from_capsule();
+            mutate(&mut facts);
+            assert!(
+                store.portfolio_status_projection(&facts).is_err(),
+                "{name} must fail closed"
+            );
+        }
     }
 }
