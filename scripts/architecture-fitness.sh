@@ -155,11 +155,45 @@ def repo_files(patterns, exclude_patterns=None):
                     yield rel, path
 
 
+def cfg_test_lines(lines):
+    """1-based line numbers that fall inside a `#[cfg(test)]` module.
+
+    Test modules are not production source: a path string in a fixture is not a
+    dependency. Comments are deliberately NOT skipped -- test_fitness_engine.bats
+    pins a `//` comment in src/leak.rs as observed==1, and a commented-out import
+    is still a statement of intent worth flagging.
+    """
+    inside = set()
+    total = len(lines)
+    i = 0
+    while i < total:
+        if re.match(r"^\s*#\[cfg\(test\)\]\s*$", lines[i]):
+            j = i + 1
+            while j < total and "{" not in lines[j]:
+                j += 1
+            if j >= total:
+                break
+            depth = 0
+            k = j
+            while k < total:
+                depth += lines[k].count("{") - lines[k].count("}")
+                if depth <= 0:
+                    break
+                k += 1
+            for m in range(i, min(k + 1, total)):
+                inside.add(m + 1)
+            i = k + 1
+            continue
+        i += 1
+    return inside
+
+
 def run_forbidden_pattern(ff):
     pattern = re.compile(str(ff.get("pattern", "")))
     threshold = int(ff.get("threshold", 0))
     paths = ff.get("paths") or []
     exclude_paths = ff.get("exclude_paths") or []
+    skip_cfg_test = bool(ff.get("skip_cfg_test", False))
     locations = []
     count = 0
     for rel, path in repo_files(paths, exclude_paths):
@@ -167,7 +201,10 @@ def run_forbidden_pattern(ff):
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError:
             continue
+        skipped = cfg_test_lines(lines) if skip_cfg_test and rel.endswith(".rs") else frozenset()
         for line_no, text in enumerate(lines, 1):
+            if line_no in skipped:
+                continue
             if pattern.search(text):
                 count += 1
                 locations.append({"path": rel, "line": line_no, "excerpt": text.strip()[:160]})

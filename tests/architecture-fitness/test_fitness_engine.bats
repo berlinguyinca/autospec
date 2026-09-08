@@ -55,6 +55,49 @@ setup() {
     rm -rf "$scratch"
 }
 
+@test "core-to-CLI direction ignores #[cfg(test)] modules inside core src" {
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/crates/autospec-core/src"
+    cp "$REGISTRY" "$scratch/registry.yml"
+
+    # A fixture path inside a test module is not a dependency. This exact shape
+    # reddened the gate twice (#3665, #3696) with no layering violation behind it.
+    cat > "$scratch/crates/autospec-core/src/lib.rs" <<'RS'
+pub fn real_code() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture_paths_are_not_dependencies() {
+        let path = "crates/autospec-cli/src/commands/queue.rs";
+        assert!(!path.is_empty());
+    }
+}
+RS
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="rust_core_cli_direction" and .observed==0)' >/dev/null
+
+    # The same string in production source, above the test module, still counts.
+    cat > "$scratch/crates/autospec-core/src/lib.rs" <<'RS'
+use autospec_cli::thing;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture_paths_are_not_dependencies() {
+        let path = "crates/autospec-cli/src/commands/queue.rs";
+        assert!(!path.is_empty());
+    }
+}
+RS
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="rust_core_cli_direction" and .observed==1 and .locations[0].line==1)' >/dev/null
+
+    rm -rf "$scratch"
+}
+
 @test "financial gate matches money-denominated identifiers, not every f64" {
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/crates/autospec-core/src"
