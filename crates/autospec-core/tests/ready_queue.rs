@@ -212,9 +212,73 @@ fn detects_active_and_same_batch_path_conflicts_before_selecting_a_batch() {
     assert_eq!(plan.conflicts[0].issue.number, 501);
     assert_eq!(
         plan.conflicts[0].reason.as_deref(),
-        Some("batch_path_conflict")
+        Some("waits_on_foundation")
     );
     assert_eq!(plan.batch_numbers(), vec![500, 502]);
+}
+
+#[test]
+fn holds_sibling_issues_that_share_a_new_foundation_module_declared_in_files_touched() {
+    // Reproduces the five-siblings incident: each issue is self-contained and
+    // declares the shared foundation module under `## Files touched` (the
+    // issue-quality-contract section), in mixed backtick/dash forms. The
+    // dispatch backstop must serialize them on the foundation path.
+    let input = ready_input(vec![
+        issue(
+            900,
+            "## Files touched\n\ncrates/autospec-core/src/evaluation/mod.rs\ncrates/autospec-core/src/evaluation/digest.rs\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            901,
+            "## Files touched\n\n- `crates/autospec-core/src/evaluation/mod.rs`\n- crates/autospec-core/src/evaluation/statistics.rs\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            902,
+            "## Files touched\n\ncrates/autospec-core/src/spec/parser.rs\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![900, 902]);
+    assert_eq!(plan.conflicts.len(), 1);
+    assert_eq!(plan.conflicts[0].issue.number, 901);
+    assert_eq!(
+        plan.conflicts[0].reason.as_deref(),
+        Some("waits_on_foundation")
+    );
+    assert_eq!(plan.conflicts[0].conflicts_with, Some(900));
+    assert_eq!(
+        plan.conflicts[0].path.as_deref(),
+        Some("crates/autospec-core/src/evaluation/mod.rs")
+    );
+    assert_eq!(plan.batch_numbers(), vec![900, 902]);
+}
+
+#[test]
+fn holds_a_candidate_when_an_active_worker_already_claims_a_files_touched_path() {
+    let mut input = ready_input(vec![issue(
+        910,
+        "## Files touched\n\n- `crates/autospec-core/src/evaluation/mod.rs`\n",
+        &["auto-implement", "safety:reviewed"],
+    )]);
+    input.active.push(issue(
+        909,
+        "## Files touched\n\ncrates/autospec-core/src/evaluation/mod.rs\n",
+        &["in-progress-by-bot"],
+    ));
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert_eq!(plan.conflicts.len(), 1);
+    assert_eq!(plan.conflicts[0].issue.number, 910);
+    assert_eq!(plan.conflicts[0].reason.as_deref(), Some("path_conflict"));
+    assert_eq!(plan.conflicts[0].conflicts_with, Some(909));
+    assert!(plan.batch.is_empty());
 }
 
 #[test]
