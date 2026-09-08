@@ -321,6 +321,7 @@ pub struct QueueIssueView {
     pub cycle_dependencies: Vec<u64>,
     pub non_blocking_refs: Vec<NonBlockingReference>,
     pub conflicts_with: Option<u64>,
+    pub duplicate_of: Option<u64>,
     pub path: Option<String>,
     pub paths: Vec<String>,
     pub serialization_reasons: Vec<String>,
@@ -339,6 +340,7 @@ impl QueueIssueView {
             cycle_dependencies: Vec::new(),
             non_blocking_refs: Vec::new(),
             conflicts_with: None,
+            duplicate_of: None,
             path: None,
             paths: Vec::new(),
             serialization_reasons: Vec::new(),
@@ -361,6 +363,7 @@ pub struct QueueGateCounts {
     pub candidate: usize,
     pub reviewed: usize,
     pub blocked: usize,
+    pub duplicates: usize,
     pub dependency_blocked: usize,
     pub linked_pr_blocked: usize,
     pub path_conflicted: usize,
@@ -423,6 +426,24 @@ pub fn plan_ready_queue_with_trusted_actors(
     let mut ready: Vec<QueueIssueView> = Vec::new();
     let mut blocked: Vec<QueueIssueView> = Vec::new();
     let mut conflicts: Vec<QueueIssueView> = Vec::new();
+    // The lowest-numbered open issue carrying a task signature owns it, across
+    // both queued candidates and active claims, even if the owner is itself
+    // blocked later: dispatching a twin while the same patch is already
+    // in flight is the duplicate agent run this gate exists to prevent.
+    let mut signature_owners: BTreeMap<String, u64> = BTreeMap::new();
+    for issue in candidates.iter().chain(active.iter()) {
+        if issue.closed {
+            continue;
+        }
+        if let Some(signature) = duplicate_signature(issue) {
+            if signature_owners
+                .get(&signature)
+                .is_none_or(|&owner| issue.number < owner)
+            {
+                signature_owners.insert(signature, issue.number);
+            }
+        }
+    }
     let mut candidate_count = 0;
     let mut reviewed_count = 0;
     for issue in candidates {
@@ -449,6 +470,12 @@ pub fn plan_ready_queue_with_trusted_actors(
         }
         if !view.issue.has_label("auto-implement") {
             view.reason = Some("missing_auto_implement".to_string());
+            blocked.push(view);
+            continue;
+        }
+        if let Some(owner) = duplicate_owner(&view.issue, &signature_owners) {
+            view.reason = Some("duplicate_issue".to_string());
+            view.duplicate_of = Some(owner);
             blocked.push(view);
             continue;
         }
@@ -572,6 +599,11 @@ fn queue_gate_counts(
         candidate,
         reviewed,
         blocked: plan.blocked.len(),
+        duplicates: plan
+            .blocked
+            .iter()
+            .filter(|view| view.reason.as_deref() == Some("duplicate_issue"))
+            .count(),
         dependency_blocked: plan
             .blocked
             .iter()
@@ -795,6 +827,102 @@ fn target_tracks_issue(body: &str, dependent: u64) -> bool {
         });
         list_item && at_boundary
     })
+}
+
+/// Two issues that would be satisfied by the same patch are one issue. The
+/// signature binds the normalised `## Goal` sentence to the spec citations in
+/// `## Source spec`; an issue missing either half has no signature, so a
+/// candidate is only dropped against evidence it carries itself.
+fn duplicate_signature(issue: &RemoteIssue) -> Option<String> {
+    let goal = normalize_whitespace(markdown_section(&issue.body, "Goal"));
+    if goal.is_empty() {
+        return None;
+    }
+    let section = markdown_section(&issue.body, "Source spec");
+    let paths = backtick_paths(section);
+    if paths.is_empty() {
+        return None;
+    }
+    let anchors = line_anchors(section);
+    Some(format!(
+        "{goal}\u{1f}{}\u{1f}{}",
+        paths.join("\u{1e}"),
+        anchors.join("\u{1e}")
+    ))
+}
+
+fn duplicate_owner(issue: &RemoteIssue, owners: &BTreeMap<String, u64>) -> Option<u64> {
+    let signature = duplicate_signature(issue)?;
+    let owner = *owners.get(&signature)?;
+    (owner != issue.number).then_some(owner)
+}
+
+fn backtick_paths(section: &str) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(offset) = section[cursor..].find('`') {
+        let start = cursor + offset + 1;
+        let Some(end) = section[start..].find('`') else {
+            break;
+        };
+        let path = section[start..start + end].trim();
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if path.contains('/') && !path.chars().any(char::is_whitespace) {
+            paths.insert(path.to_ascii_lowercase());
+        }
+        cursor = start + end + 1;
+    }
+    paths.into_iter().collect()
+}
+
+fn line_anchors(section: &str) -> Vec<String> {
+    let bytes = section.as_bytes();
+    let mut anchors = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(offset) = section[cursor..].find('L') {
+        let index = cursor + offset;
+        let mut end = index + 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let at_boundary = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+        if at_boundary && end > index + 1 {
+            if let Ok(start) = section[index + 1..end].parse::<u64>() {
+                let mut stop = start;
+                let mut probe = end;
+                if bytes.get(probe) == Some(&b'-') {
+                    probe += 1;
+                    let mut digits_end = probe;
+                    while digits_end < bytes.len() && bytes[digits_end].is_ascii_digit() {
+                        digits_end += 1;
+                    }
+                    if digits_end > probe {
+                        stop = section[probe..digits_end].parse::<u64>().unwrap_or(start);
+                    }
+                }
+                anchors.insert(format!("{start}-{stop}"));
+            }
+        }
+        cursor = end.max(index + 1);
+    }
+    anchors.into_iter().collect()
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            pending_space = false;
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 fn extract_paths(body: &str) -> Vec<String> {

@@ -7,7 +7,8 @@ use autospec_core::coordination::{
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
 
-fn issue(number: u64, body: &str, labels: &[&str]) -> RemoteIssue {
+fn issue(number: u64, body: impl Into<String>, labels: &[&str]) -> RemoteIssue {
+    let body = body.into();
     RemoteIssue::open(
         number,
         format!("issue-{number}"),
@@ -461,10 +462,211 @@ fn deduplicates_issue_numbers_before_planning_and_reports_gate_counts() {
     assert_eq!(plan.gate_counts.candidate, 5);
     assert_eq!(plan.gate_counts.reviewed, 4);
     assert_eq!(plan.gate_counts.blocked, 3);
+    assert_eq!(plan.gate_counts.duplicates, 0);
     assert_eq!(plan.gate_counts.dependency_blocked, 1);
     assert_eq!(plan.gate_counts.linked_pr_blocked, 1);
     assert_eq!(plan.gate_counts.path_conflicted, 1);
     assert_eq!(plan.gate_counts.ready, 1);
     assert_eq!(plan.gate_counts.claimed, 1);
     assert_eq!(plan.gate_counts.selected, 1);
+}
+
+const DUP_SPEC: &str = "docs/specs/2026-08-12-language-selection-axis-design.md";
+
+fn dup_body(goal: &str, anchors: &str, path: &str) -> String {
+    format!(
+        "## Goal\n\n{goal}\n\n## Source spec\n\n`{DUP_SPEC}` {anchors}\n\n## Implementation outline\n\n- edit `{path}`\n"
+    )
+}
+
+#[test]
+fn blocks_the_later_issue_when_spec_citation_and_goal_match() {
+    let input = ready_input(vec![
+        issue(
+            3404,
+            dup_body(
+                "Add  the\nlanguage selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/b.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            3402,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/a.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![3402]);
+    assert_eq!(plan.batch_numbers(), vec![3402]);
+    assert_eq!(plan.blocked.len(), 1);
+    assert_eq!(plan.blocked[0].issue.number, 3404);
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("duplicate_issue"));
+    assert_eq!(plan.blocked[0].duplicate_of, Some(3402));
+    assert_eq!(plan.gate_counts.duplicates, 1);
+}
+
+#[test]
+fn keeps_distinct_goals_that_cite_the_same_spec_section() {
+    let input = ready_input(vec![
+        issue(
+            3402,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/a.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            3404,
+            dup_body(
+                "Render the selected language axis in the issue body.",
+                "L209-224 and L240-241",
+                "src/b.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![3402, 3404]);
+    assert_eq!(plan.batch_numbers(), vec![3402, 3404]);
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.gate_counts.duplicates, 0);
+}
+
+#[test]
+fn keeps_distinct_spec_sections_that_share_a_goal() {
+    let input = ready_input(vec![
+        issue(
+            3402,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/a.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            3404,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L300-310",
+                "src/b.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![3402, 3404]);
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.gate_counts.duplicates, 0);
+}
+
+#[test]
+fn leaves_issues_without_a_spec_citation_undeduplicated() {
+    let body = |path: &str| {
+        format!(
+            "## Goal\n\nAdd the language selection axis to the define skill.\n\n## Implementation outline\n\n- edit `{path}`\n"
+        )
+    };
+    let input = ready_input(vec![
+        issue(
+            3402,
+            body("src/a.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            3404,
+            body("src/b.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![3402, 3404]);
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.gate_counts.duplicates, 0);
+}
+
+#[test]
+fn blocks_the_twin_of_an_already_active_issue() {
+    let mut input = ready_input(vec![issue(
+        3404,
+        dup_body(
+            "Add the language selection axis to the define skill.",
+            "L209-224 and L240-241",
+            "src/b.rs",
+        ),
+        &["auto-implement", "safety:reviewed"],
+    )]);
+    input.active.push(issue(
+        3402,
+        dup_body(
+            "Add the language selection axis to the define skill.",
+            "L209-224 and L240-241",
+            "src/a.rs",
+        ),
+        &["in-progress-by-bot"],
+    ));
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert!(plan.batch.is_empty());
+    assert_eq!(plan.blocked.len(), 1);
+    assert_eq!(plan.blocked[0].issue.number, 3404);
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("duplicate_issue"));
+    assert_eq!(plan.blocked[0].duplicate_of, Some(3402));
+    assert_eq!(plan.gate_counts.duplicates, 1);
+}
+
+#[test]
+fn a_closed_owner_does_not_block_its_open_duplicate() {
+    let closed = RemoteIssue::closed(
+        3402,
+        "issue-3402",
+        format!(
+            "{}{}",
+            SAFETY_REVIEW,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/a.rs",
+            )
+        ),
+        vec!["auto-implement".to_string(), "safety:reviewed".to_string()],
+        "agent",
+    );
+    let input = ready_input(vec![
+        closed,
+        issue(
+            3404,
+            dup_body(
+                "Add the language selection axis to the define skill.",
+                "L209-224 and L240-241",
+                "src/b.rs",
+            ),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![3404]);
+    assert_eq!(plan.batch_numbers(), vec![3404]);
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.gate_counts.duplicates, 0);
 }
