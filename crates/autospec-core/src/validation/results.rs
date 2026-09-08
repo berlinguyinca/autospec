@@ -24,6 +24,17 @@ pub struct CheckResult {
     /// code `0` — byte-identical to a check that ran and passed. This field is what makes
     /// the two distinguishable, so it must never be `Some` alongside a real measurement.
     pub unmeasured: Option<String>,
+    /// Why this check failed, when it failed.
+    ///
+    /// Native checks already return `Err(String)` naming the exact divergence -- the
+    /// file, the expectation, the mismatch. That message was being discarded: only its
+    /// LENGTH reached the result, via `stderr_bytes`. So `validate` could report which
+    /// checks failed and never why, and seven required checks sat red on main for days
+    /// because nobody could see what to fix (#3734).
+    ///
+    /// Distinct from `unmeasured`: that means "no measurement happened", this means
+    /// "a measurement happened and it says this".
+    pub failure: Option<String>,
 }
 
 impl CheckResult {
@@ -48,6 +59,7 @@ impl CheckResult {
             stderr_bytes,
             output_digest: output_digest.into(),
             unmeasured: None,
+            failure: None,
         }
     }
 
@@ -67,7 +79,14 @@ impl CheckResult {
             stderr_bytes: reason.len(),
             output_digest: output_digest(&[], reason.as_bytes()),
             unmeasured: Some(reason),
+            failure: None,
         }
+    }
+
+    /// Attach the reason a check failed, so the report can name it.
+    pub fn with_failure(mut self, message: impl Into<String>) -> Self {
+        self.failure = Some(message.into());
+        self
     }
 
     pub fn is_success(&self) -> bool {

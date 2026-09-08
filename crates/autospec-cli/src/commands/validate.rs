@@ -57,7 +57,12 @@ fn run_direct(options: &ValidationOptions) -> Result<(), String> {
             match &result.unmeasured {
                 Some(reason) => println!("- {}: unknown ({reason})", result.id),
                 None if result.is_success() => println!("- {}: passed", result.id),
-                None => println!("- {}: failed", result.id),
+                // Print WHY, not just that. A bare "failed" is unactionable: it sends
+                // the reader to find a reason the run already had and threw away.
+                None => match &result.failure {
+                    Some(reason) => println!("- {}: failed ({reason})", result.id),
+                    None => println!("- {}: failed (no reason captured)", result.id),
+                },
             }
         }
     }
