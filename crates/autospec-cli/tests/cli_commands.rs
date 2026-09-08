@@ -2529,22 +2529,22 @@ fn autonomous_timeline_reports_forecast_and_planned_steps() {
     let log = write_conductor_log(
         &operator_dir,
         "berlinguyinca_autospec",
-        "{
-  \"ready\": [
-    {\"number\": 1538, \"title\": \"feat: autonomous UX/UI optimization tier\"},
-    {\"number\": 1539, \"title\": \"feat: autonomous accessibility standards tier\"}
+        r#"{
+  "ready": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"},
+    {"number": 1539, "title": "feat: autonomous accessibility standards tier"}
   ],
-  \"blocked\": [
-    {\"number\": 1540, \"title\": \"feat: documentation freshness tier\"}
+  "blocked": [
+    {"number": 1540, "title": "feat: documentation freshness tier"}
   ],
-  \"claimed\": [
-    {\"number\": 1537, \"title\": \"feat: proactive security scanning workstream\"}
+  "claimed": [
+    {"number": 1537, "title": "feat: proactive security scanning workstream"}
   ],
-  \"batch\": [
-    {\"number\": 1538, \"title\": \"feat: autonomous UX/UI optimization tier\"}
+  "batch": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"}
   ]
 }
-",
+"#,
     );
 
     let output = autospec()
@@ -2663,8 +2663,9 @@ fn autonomous_timeline_reports_explicit_startup_timeout_and_retry_events() {
     std::fs::create_dir_all(&drain_state).expect("create drain state directory");
     std::fs::write(
         drain_state.join("drain-session-events.jsonl"),
-        "{\"event\":\"session_start_observed\",\"session_id\":\"child-1850\",\"state\":\"starting\"}\n\
-{\"event\":\"session_start_timeout\",\"session_id\":\"child-1850\",\"state\":\"failed-startup\",\"termination\":\"process_group\",\"retry\":\"scheduled\",\"attempt\":1}\n",
+        r#"{"event":"session_start_observed","session_id":"child-1850","state":"starting"}
+{"event":"session_start_timeout","session_id":"child-1850","state":"failed-startup","termination":"process_group","retry":"scheduled","attempt":1}
+"#,
     )
     .expect("write persisted drain events");
 
@@ -2698,11 +2699,11 @@ fn autonomous_timeline_reports_item_timing() {
     write_conductor_log(
         &operator_dir,
         "berlinguyinca_autospec",
-        "{\"issue\":\"1539\",\"branch\":\"feat/issue-1539-accessibility\",\"step\":\"claimed\",\"ts\":1783440000,\"repo\":\"berlinguyinca/autospec\"}
-{\"issue\":\"1539\",\"branch\":\"feat/issue-1539-accessibility\",\"step\":\"tests_started\",\"ts\":1783441800,\"repo\":\"berlinguyinca/autospec\"}
-{\"issue\":\"1538\",\"branch\":\"feat/issue-1538-ux\",\"step\":\"claimed\",\"ts\":1783430000,\"repo\":\"berlinguyinca/autospec\"}
-{\"issue\":\"1538\",\"branch\":\"feat/issue-1538-ux\",\"step\":\"merged\",\"ts\":1783437200,\"repo\":\"berlinguyinca/autospec\"}
-",
+        r#"{"issue":"1539","branch":"feat/issue-1539-accessibility","step":"claimed","ts":1783440000,"repo":"berlinguyinca/autospec"}
+{"issue":"1539","branch":"feat/issue-1539-accessibility","step":"tests_started","ts":1783441800,"repo":"berlinguyinca/autospec"}
+{"issue":"1538","branch":"feat/issue-1538-ux","step":"claimed","ts":1783430000,"repo":"berlinguyinca/autospec"}
+{"issue":"1538","branch":"feat/issue-1538-ux","step":"merged","ts":1783437200,"repo":"berlinguyinca/autospec"}
+"#,
     );
 
     let output = autospec()
@@ -2736,18 +2737,18 @@ fn autonomous_timeline_reconciles_heartbeat_active_issue() {
     write_conductor_log(
         &operator_dir,
         "berlinguyinca_autospec",
-        "{
-  \"ready\": [
-    {\"number\": 1543, \"title\": \"feat: autonomy guardrails\"},
-    {\"number\": 1544, \"title\": \"feat: immutable verifier\"}
+        r#"{
+  "ready": [
+    {"number": 1543, "title": "feat: autonomy guardrails"},
+    {"number": 1544, "title": "feat: immutable verifier"}
   ],
-  \"blocked\": [],
-  \"claimed\": [],
-  \"batch\": [
-    {\"number\": 1543, \"title\": \"feat: autonomy guardrails\"}
+  "blocked": [],
+  "claimed": [],
+  "batch": [
+    {"number": 1543, "title": "feat: autonomy guardrails"}
   ]
 }
-",
+"#,
     );
     let heartbeat_dir = home
         .join(".autospec")
