@@ -445,7 +445,10 @@ runtime_install_main() {
     mkdir "$BUILD_DIR" || return 2
     chmod 700 "$BUILD_DIR" || return 2
     runtime_write_journal building || return 2
-    CARGO_TARGET_DIR="$BUILD_DIR/target"
+    # Honour a caller-supplied CARGO_TARGET_DIR (e.g. tests that share a stable
+    # target dir with the host so the release build stays incremental, issue #3739);
+    # default to the per-generation build dir otherwise.
+    : "${CARGO_TARGET_DIR:=$BUILD_DIR/target}"
     export CARGO_TARGET_DIR
     (CDPATH='' cd -- "$repo" && cargo build --release -p autospec-cli) || { runtime_install_error build-failed; return 2; }
     built_binary="$CARGO_TARGET_DIR/release/autospec"
