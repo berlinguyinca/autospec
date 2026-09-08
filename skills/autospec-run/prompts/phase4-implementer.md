@@ -241,7 +241,7 @@ Exit 0: continue. Exit 1: log drift, continue (the Phase 4 monitor's reviewer di
 If the `codex` CLI is on PATH, get a second opinion on the diff:
 
 ```bash
-git diff "$BASE_REF"...HEAD | codex exec --prompt "Review this diff for correctness, security, broken tests, and consistency with surrounding code. For each finding, label it must-fix or nice-to-have. Be brief."
+git diff "$BASE_REF"...HEAD | codex exec --prompt "Review this diff for correctness, security, broken tests, and consistency with surrounding code. Does the evidence exercise the thing the requirement names, or something adjacent to it? For each finding, label it must-fix or nice-to-have. Be brief."
 ```
 
 If `codex` is NOT on PATH: skip this step entirely, log a single line `Peer-review: codex not on PATH, skipping` in the eventual PR description, and proceed.
@@ -374,6 +374,14 @@ runnable command), treat it as a missing AC and comment on the issue:
 gh issue comment <ISSUE> --body "Smoke test section is not executable — cannot merge without a runnable smoke command. Needs operator update."
 exit 1
 ```
+
+Before running it, verify the smoke command exercises the exact route, command
+or entry point the user's requirement is about, not an adjacent one. If that
+target cannot fully succeed in the test environment, do NOT substitute an
+adjacent endpoint — choose a discriminator that isolates the property under
+test from the environment's limits (e.g. a status code or message that
+separates "rejected" from "never attempted"), and record in the evidence which
+outcomes count as pass and why.
 
 Extract and run the smoke command:
 

@@ -244,7 +244,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
 > - **Implementation outline** — file paths + function signatures + data flow.
 > - **Tests required** — TDD per AGENTS.md, real services, no DB mocks, 80%+ coverage.
-> - **Acceptance criteria** — checkbox list `[ ]` only, no prose. Each item machine-checkable.
+> - **Acceptance criteria** — checkbox list `[ ]` only, no prose. Each item machine-checkable. Name the exact route, command or entry point the user's sentence is about, not an adjacent one; if it cannot fully succeed in the test environment, do not substitute an adjacent endpoint — choose a discriminator that isolates the property under test from the environment's limits, and say in the criteria which outcomes count as pass and why.
 > - **Verification** — split into a **Primary smoke test (inner loop)** with exactly one fast command, and **Operator/full verification** listing the remaining commands.
 > - **Branch name** — `feat/<slug>`.
 > - **Dependencies** — `Depends on issue #N` lines (parsed by the monitor).

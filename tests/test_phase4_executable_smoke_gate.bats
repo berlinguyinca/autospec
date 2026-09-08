@@ -38,3 +38,53 @@ DEFINE_PROMPT="${BATS_TEST_DIRNAME}/../skills/autospec-define/codex/prompt.md"
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 }
+
+# Issue #3679: acceptance criteria must target the user's own route/command,
+# never an adjacent endpoint; environmental limits need a discriminator.
+DEFINE_SKILL="${BATS_TEST_DIRNAME}/../skills/autospec-define/SKILL.md"
+DECOMPOSER_CONTRACT="${BATS_TEST_DIRNAME}/../skills/autospec-define/prompts/decomposer-contract.md"
+
+@test "autospec-define spec template names the user's own route and bans adjacent-endpoint substitution" {
+    for f in "$DEFINE_SKILL" "$DEFINE_PROMPT" "$DECOMPOSER_CONTRACT"; do
+        run grep -c "the user's sentence is about" "$f"
+        [ "$status" -eq 0 ]
+        [ "$output" -ge 1 ]
+        run grep -c "do not substitute an adjacent endpoint" "$f"
+        [ "$status" -eq 0 ]
+        [ "$output" -ge 1 ]
+        run grep -c "choose a discriminator that isolates the property under test" "$f"
+        [ "$status" -eq 0 ]
+        [ "$output" -ge 1 ]
+    done
+}
+
+@test "autospec-split spec template names the user's own route and bans adjacent-endpoint substitution" {
+    run grep -c "the user's sentence is about" "$SPLIT_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    run grep -c "do not substitute an adjacent endpoint" "$SPLIT_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    run grep -c "choose a discriminator that isolates the property under test" "$SPLIT_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+}
+
+@test "phase4-implementer.md smoke gate verifies the user's own route with a discriminator" {
+    # Patterns are line-anchored: the prompt paragraph is soft-wrapped.
+    run grep -c "the user's requirement is about" "$PHASE4_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    run grep -c "do NOT substitute an" "$PHASE4_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    run grep -c "choose a discriminator that isolates the property under" "$PHASE4_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+}
+
+@test "phase4-implementer.md peer-review asks whether the evidence exercises the named requirement" {
+    run grep -c "Does the evidence exercise the thing the requirement names, or something adjacent to it?" "$PHASE4_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+}
