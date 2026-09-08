@@ -89,6 +89,7 @@ fn cli_commands_help_lists_required_commands() {
             "parent",
             "queue",
             "repair-loop",
+            "dispatch",
             "doctor",
             "status",
             "autonomous",
