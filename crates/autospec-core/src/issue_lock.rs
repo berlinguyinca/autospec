@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! lock: exclusive          # no other issue may be dispatched against this repo
-//! lock: paths: [ "crates/autospec-cli/src/commands/autonomous/**" ]
+//! lock: paths: [ "crates/example-app/src/commands/autonomous/**" ]
 //! ```
 //!
 //! Guarantees this module enforces:
@@ -1150,7 +1150,7 @@ mod tests {
     #[test]
     fn parses_paths_declaration() {
         let body =
-            "lock: paths: [ \"crates/autospec-cli/src/commands/autonomous/**\", \"scripts/x.sh\" ]";
+            "lock: paths: [ \"crates/example-app/src/commands/autonomous/**\", \"scripts/x.sh\" ]";
         let declaration = parse_lock_declaration(body)
             .unwrap()
             .expect("a lock is declared");
@@ -1159,7 +1159,7 @@ mod tests {
             LockDeclaration {
                 scope: LockScope::Paths {
                     paths: vec![
-                        "crates/autospec-cli/src/commands/autonomous/**".to_string(),
+                        "crates/example-app/src/commands/autonomous/**".to_string(),
                         "scripts/x.sh".to_string(),
                     ],
                 },
@@ -1203,8 +1203,8 @@ mod tests {
 
     #[test]
     fn overlapping_path_locks_collide() {
-        let outer = paths(&["crates/autospec-cli/**"]);
-        let inner = paths(&["crates/autospec-cli/src/commands/autonomous/**"]);
+        let outer = paths(&["crates/example-app/**"]);
+        let inner = paths(&["crates/example-app/src/commands/autonomous/**"]);
         let sibling = paths(&["crates/autospec-core/**"]);
         assert!(scopes_collide(&outer.scope, &inner.scope));
         assert!(scopes_collide(&inner.scope, &outer.scope));
@@ -1270,10 +1270,10 @@ mod tests {
     fn disjoint_path_locks_both_admit() {
         let root = temp_root();
         let manager = IssueLockManager::new(&root);
-        let cli = paths(&["crates/autospec-cli/**"]);
+        let app = paths(&["crates/example-app/**"]);
         let core = paths(&["crates/autospec-core/**"]);
         assert_eq!(
-            manager.dispatch(1, Some(&cli), "cli", 100, 3600).unwrap(),
+            manager.dispatch(1, Some(&app), "app", 100, 3600).unwrap(),
             DispatchDecision::Admit
         );
         assert_eq!(
