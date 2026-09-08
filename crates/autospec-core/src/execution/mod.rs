@@ -7,6 +7,7 @@ mod queue_storage;
 pub mod report;
 pub mod result;
 pub mod stage_throughput;
+pub mod timeout_policy;
 pub mod work;
 
 pub use executor::{
