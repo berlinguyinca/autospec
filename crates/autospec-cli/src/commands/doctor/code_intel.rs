@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use autospec_core::code_intel::config::CONFIG_PATH;
 use autospec_core::code_intel::doctor::{report, DoctorReport, HostProbe};
 use autospec_core::code_intel::language::{detect, DetectedLanguage};
-use autospec_core::code_intel::{CodeIntelConfig, WorkspaceRegistry};
+use autospec_core::code_intel::{
+    implementer_gate, planner_gate, reviewer_gate, CodeIntelConfig, Diagnostic, DiagnosticDelta,
+    DiagnosticSet, GateOutcome, ImpactComparison, ImpactSet, Location, Role, Severity,
+    WorkspaceRegistry,
+};
 
 /// Directories never worth walking for language detection. Skipping them keeps
 /// `doctor code-intel` fast on a large checkout and stops vendored trees from
@@ -37,6 +41,119 @@ fn render(report: &DoctorReport, as_json: bool) -> Result<String, String> {
         return report.to_json_string().map_err(|error| error.to_string());
     }
     Ok(report.to_text())
+}
+
+/// Run the mandatory code-intelligence gate for `role` against this worktree.
+///
+/// Role and configuration errors surface as `Err`, which the CLI maps to exit
+/// 2: a gate never runs on a configuration it could not read, and an unknown
+/// role is never defaulted. The CLI carries no semantic evidence of its own,
+/// so the gate is evaluated with none; a mandatory gate with no evidence
+/// fails closed instead of being reported as skipped. The caller renders the
+/// returned outcome and exits with [`gate_exit_code`].
+pub fn run_gate(root: &Path, args: &[String]) -> Result<GateOutcome, String> {
+    let role = role_argument(args)?;
+    let config = load_gate_config(root)?;
+    evaluate(&config, role, None, &[], &[], None, None)
+}
+
+/// 0 when the gate passed, 1 when it failed.
+pub fn gate_exit_code(outcome: &GateOutcome) -> i32 {
+    if outcome.passed {
+        0
+    } else {
+        1
+    }
+}
+
+/// Render a gate outcome. The JSON form is the serialized `GateOutcome`
+/// unchanged so the gate's schema stays the single source of truth.
+pub fn render_gate(outcome: &GateOutcome, as_json: bool) -> String {
+    if as_json {
+        return outcome.to_json_string().unwrap_or_else(|error| {
+            format!("{{\"error\":\"gate outcome not serializable: {error}\"}}")
+        });
+    }
+    let mut text = format!(
+        "code-intel gate {} ({}): {}",
+        outcome.role.as_str(),
+        outcome.gate,
+        if outcome.passed { "passed" } else { "failed" }
+    );
+    if outcome.degraded {
+        text.push_str(" [degraded]");
+    }
+    for finding in &outcome.findings {
+        text.push_str(&format!("\n  - {finding}"));
+    }
+    text
+}
+
+/// Dispatch the parsed role to its gate. `tester` is a valid `Role` but has
+/// no gate; the subcommand supports the three roles `AGENTS.md` calls
+/// mandatory.
+fn evaluate(
+    config: &CodeIntelConfig,
+    role: Role,
+    planner_impact: Option<&ImpactSet>,
+    planned_files: &[String],
+    implemented_files: &[String],
+    reviewer_impact: Option<&ImpactSet>,
+    delta: Option<&DiagnosticDelta>,
+) -> Result<GateOutcome, String> {
+    match role {
+        Role::Planner => Ok(planner_gate(&config.workflow, planner_impact, planned_files)),
+        Role::Implementer => {
+            let comparison = ImpactComparison::between(planned_files, implemented_files);
+            Ok(implementer_gate(&config.workflow, &comparison, delta))
+        }
+        Role::Reviewer => Ok(reviewer_gate(
+            &config.workflow,
+            planner_impact,
+            reviewer_impact,
+            delta,
+        )),
+        Role::Tester => Err(
+            "no code-intelligence gate exists for the tester role (expected planner, implementer or reviewer)"
+                .to_string(),
+        ),
+    }
+}
+
+fn role_argument(args: &[String]) -> Result<Role, String> {
+    let mut value = None;
+    let mut rest = args.iter();
+    while let Some(argument) = rest.next() {
+        if argument == "--role" {
+            value = Some(
+                rest.next()
+                    .ok_or("--role requires planner, implementer or reviewer")?
+                    .clone(),
+            );
+        } else if let Some(suffix) = argument.strip_prefix("--role=") {
+            value = Some(suffix.to_string());
+        }
+    }
+    let Some(raw) = value else {
+        return Err("--role is required: planner, implementer or reviewer".to_string());
+    };
+    Role::parse(&raw).map_err(|_| format!("unknown --role: {raw}"))
+}
+
+/// Load the configuration a gate is evaluated against, failing closed: unlike
+/// the doctor probe, a gate must never run on defaults the operator did not
+/// write, so a missing or unreadable file is an error.
+fn load_gate_config(root: &Path) -> Result<CodeIntelConfig, String> {
+    let path = root.join(CONFIG_PATH);
+    if !path.is_file() {
+        return Err(format!(
+            "missing {}: refusing to run a gate on defaults the operator did not write",
+            path.display()
+        ));
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    CodeIntelConfig::parse(&source).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Read the operator configuration, falling back to documented defaults when the
@@ -259,5 +376,117 @@ mod tests {
 
         assert!(output.contains("\"status\":\"blocked\""));
         assert!(output.contains("agent-lsp-not-installed"));
+    }
+
+    fn gate_args(role: &str) -> Vec<String> {
+        vec!["--role".to_string(), role.to_string()]
+    }
+
+    fn new_error_delta() -> DiagnosticDelta {
+        let baseline = DiagnosticSet::new("issue-421", "abc123", Vec::new());
+        let current = DiagnosticSet::new(
+            "issue-421",
+            "abc123",
+            vec![Diagnostic::new(
+                Location::point("src/gateway.rs", 4, 0),
+                Severity::Error,
+                "type mismatch",
+            )],
+        );
+        DiagnosticDelta::between(&baseline, &current)
+    }
+
+    #[test]
+    fn an_unknown_gate_role_is_rejected_with_a_diagnostic_exit() {
+        let root = temp_root("gate-unknown-role");
+
+        let error = run_gate(&root, &gate_args("bogus")).unwrap_err();
+        let failure = crate::commands::CommandFailure::diagnostic(error);
+
+        assert_eq!(failure.exit_code, 2);
+        assert!(failure.message.contains("unknown --role"));
+    }
+
+    #[test]
+    fn a_missing_config_fails_the_gate_closed_with_a_diagnostic_exit() {
+        let root = temp_root("gate-missing-config");
+
+        let error = run_gate(&root, &gate_args("reviewer")).unwrap_err();
+        let failure = crate::commands::CommandFailure::diagnostic(error);
+
+        assert_eq!(failure.exit_code, 2);
+        assert!(failure.message.contains("missing"));
+    }
+
+    #[test]
+    fn a_malformed_config_fails_the_gate_closed_with_a_diagnostic_exit() {
+        let root = temp_root("gate-malformed-config");
+        write(
+            &root,
+            CONFIG_PATH,
+            "version: 1\nworkflow:\n  block_new_error: false\n",
+        );
+
+        let error = run_gate(&root, &gate_args("planner")).unwrap_err();
+        let failure = crate::commands::CommandFailure::diagnostic(error);
+
+        assert_eq!(failure.exit_code, 2);
+        assert!(failure.message.contains("code-intelligence.yaml"));
+    }
+
+    #[test]
+    fn a_gate_the_config_does_not_require_passes_and_exits_zero() {
+        let root = temp_root("gate-passes");
+        write(
+            &root,
+            CONFIG_PATH,
+            "version: 1\nworkflow:\n  reviewer_independent_analysis: false\n",
+        );
+
+        let outcome = run_gate(&root, &gate_args("reviewer")).unwrap();
+
+        assert!(outcome.passed);
+        assert_eq!(gate_exit_code(&outcome), 0);
+    }
+
+    #[test]
+    fn an_implementer_delta_with_a_new_error_fails_and_exits_one() {
+        let delta = new_error_delta();
+
+        let outcome = evaluate(
+            &CodeIntelConfig::default(),
+            Role::Implementer,
+            None,
+            &[],
+            &[],
+            None,
+            Some(&delta),
+        )
+        .unwrap();
+
+        assert!(!outcome.passed);
+        assert_eq!(gate_exit_code(&outcome), 1);
+        assert!(outcome
+            .findings
+            .iter()
+            .any(|finding| finding.contains("new semantic error")));
+    }
+
+    #[test]
+    fn the_json_gate_output_parses_and_carries_the_passed_key() {
+        let outcome = evaluate(
+            &CodeIntelConfig::default(),
+            Role::Reviewer,
+            None,
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&render_gate(&outcome, true)).unwrap();
+
+        assert!(parsed.get("passed").is_some());
     }
 }
