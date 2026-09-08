@@ -1,8 +1,12 @@
 use std::path::Path;
 
 pub mod code_intel;
+pub mod failures;
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    if args.first().is_some_and(|argument| argument == "failures") {
+        return failures_command(&args[1..]);
+    }
     if args
         .first()
         .is_some_and(|argument| argument == "code-intel")
@@ -35,6 +39,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
         );
     } else {
         println!("AutoSpec doctor: ok");
+    }
+    Ok(())
+}
+
+/// `autospec doctor failures` — repeated failure signatures over a rolling
+/// window of fleet agent runs. The verdict travels in the exit code: 0 when no
+/// signature is systemic, 1 when one is, so a monitor detects a repeated
+/// failure without scraping the table.
+fn failures_command(args: &[String]) -> Result<(), String> {
+    let root = std::env::current_dir()
+        .map_err(|error| format!("could not resolve the current worktree: {error}"))?;
+    let outcome = failures::run(&root, args)?;
+    println!("{}", outcome.rendered);
+    if outcome.systemic {
+        std::process::exit(failures::SYSTEMIC_EXIT_CODE);
     }
     Ok(())
 }
