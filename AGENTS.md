@@ -659,3 +659,24 @@ for the full concurrency model and tuning table.
 implements `assert`, `resolve-branch`, and `create`. See
 `docs/specs/2026-06-03-worktree-guard-design.md` §D1 for the full contract and
 pinned exit codes.
+
+## Repository retirement & cross-cutting invariants
+
+Working software is a specification with no readers and an expiry date. Code
+survives archival; the program (phase order, topology, deferred gaps,
+rationale) does not. Full checklist: [`docs/runbooks/repository-retirement.md`](docs/runbooks/repository-retirement.md).
+
+- **Extract before archiving.** Retiring a repository has a mandatory
+  checklist step: program state, deployment topology, deferred decisions and
+  rationale are relocated to a named home *first*; the archive (a gated
+  destructive action) happens only after.
+- **Specify from a running original.** When a second implementation is
+  planned, the first implementation's design decisions are written down
+  **while the original still runs**, each entry citing the running system as
+  evidence (component, revision, probe/command).
+- **Rationale belongs where the decision is used.** Cross-cutting invariants
+  have a home outside the file that implements them —
+  [`docs/invariants.md`](docs/invariants.md) — and every entry names the
+  components it binds. A new component bound by an invariant is added to that
+  invariant's components-bound list in the same PR that introduces the
+  component.
