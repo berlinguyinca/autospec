@@ -226,8 +226,95 @@ impl ConversionMemo {
     }
 }
 
+/// The build gate a conversion worker must pass before a patch may be
+/// reported green (#3702).
+///
+/// `cargo build` compiles library and binary targets only and skips test
+/// targets. A patch that adds a test file referencing a stale API passes a
+/// plain build gate without the file the agent just wrote ever compiling,
+/// so the runner's `build_rc=0` answered a narrower question than the one
+/// it appeared to answer. The gate therefore builds `--all-targets` —
+/// tests, benches and examples as well as lib and bin — and carries the
+/// exact command line, because a green result must record which gate
+/// produced it: the difference between `cargo build --workspace` and
+/// `cargo build --workspace --all-targets` decides whether the exit code
+/// means anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildGate {
+    /// Exact command line a worker runs; recorded verbatim with any
+    /// outcome it produces.
+    pub command: String,
+}
+
+impl BuildGate {
+    /// The all-targets gate: compiles every target the workspace owns, so
+    /// a gate that skips the patch's own tests is not checking the patch.
+    pub fn all_targets() -> Self {
+        Self {
+            command: "cargo build --workspace --all-targets".to_string(),
+        }
+    }
+}
+
+impl Default for BuildGate {
+    fn default() -> Self {
+        Self::all_targets()
+    }
+}
+
+/// What the build gate plus the test run decided about one patch.
+///
+/// [`GateVerdict::CompileFailure`] is a hard failure distinct from
+/// [`GateVerdict::TestsFailed`]: `cargo test` exits 101 in both cases —
+/// when a test target fails to compile (nothing ran) and when tests
+/// compile but some fail. Because the all-targets build gate has already
+/// compiled the test targets, only it can separate the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateVerdict {
+    /// The gate command exited 0: every target the patch touched compiles.
+    Green,
+    /// A target the patch added or modified does not compile: a hard
+    /// failure, no test ran.
+    CompileFailure,
+    /// The test targets compiled but at least one test failed.
+    TestsFailed,
+}
+
+impl GateVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::CompileFailure => "compile_failure",
+            Self::TestsFailed => "tests_failed",
+        }
+    }
+
+    /// Anything but green blocks the commit-and-push step.
+    pub fn is_failure(&self) -> bool {
+        !matches!(self, Self::Green)
+    }
+}
+
+/// Classify a worker's gate results into a verdict.
+///
+/// `build_rc` is the exit code of the all-targets build gate
+/// ([`BuildGate::all_targets`]) and `test_rc` the exit code of
+/// `cargo test`. A failing build rc means a target the patch touched —
+/// including its own tests — did not compile, and it wins over `test_rc`
+/// unconditionally: with the gate skipped, `cargo test` would fail for the
+/// same reason and look identical to tests running and failing.
+pub fn classify_gate(build_rc: i32, test_rc: i32) -> GateVerdict {
+    if build_rc != 0 {
+        GateVerdict::CompileFailure
+    } else if test_rc != 0 {
+        GateVerdict::TestsFailed
+    } else {
+        GateVerdict::Green
+    }
+}
+
 /// A worker in the conversion pool: one private checkout, one shared
-/// compile cache.
+/// compile cache, one explicit build gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerPlan {
     /// Position in the pool (also the round-robin assignment target).
@@ -240,6 +327,9 @@ pub struct WorkerPlan {
     /// per patch), making most runs incremental. Distinct per worker
     /// because cargo takes an exclusive lock on the target dir.
     pub target_dir: String,
+    /// The exact build gate this worker's results must name, so a
+    /// `build_rc=0` records the command that produced it (#3702).
+    pub build_gate: BuildGate,
 }
 
 /// Plan `count` workers under `root`: worker `i` gets checkout
@@ -259,6 +349,7 @@ pub fn plan_workers(count: usize, root: &str) -> Result<Vec<WorkerPlan>, String>
             index,
             worktree: format!("{root}/worker-{index}"),
             target_dir: format!("{root}/target/worker-{index}"),
+            build_gate: BuildGate::default(),
         })
         .collect())
 }
@@ -514,6 +605,49 @@ mod tests {
         let worktrees: Vec<_> = pool.iter().map(|w| w.worktree.clone()).collect();
         let targets: Vec<_> = pool.iter().map(|w| w.target_dir.clone()).collect();
         assert!(unique(&worktrees) && unique(&targets));
+    }
+
+    #[test]
+    fn build_gate_default_covers_all_targets_and_names_its_command() {
+        // A gate that skips test targets is not checking the patch:
+        // `cargo build` never compiles the test file an agent just wrote.
+        let gate = BuildGate::default();
+        assert_eq!(gate, BuildGate::all_targets());
+        assert_eq!(gate.command, "cargo build --workspace --all-targets");
+    }
+
+    #[test]
+    fn every_worker_plan_carries_the_all_targets_build_gate() {
+        let pool = plan_workers(2, "/scratch/convert").unwrap();
+
+        for worker in &pool {
+            assert_eq!(worker.build_gate, BuildGate::all_targets());
+        }
+    }
+
+    #[test]
+    fn classify_gate_makes_a_broken_test_target_a_hard_failure() {
+        // build_rc is the all-targets gate: nonzero means a target the
+        // patch touched — including its own tests — did not compile.
+        assert_eq!(classify_gate(0, 0), GateVerdict::Green);
+        assert_eq!(classify_gate(1, 0), GateVerdict::CompileFailure);
+        // The observed defect: build_rc=0 came from a gate that skipped
+        // test targets. With the all-targets gate the same situation is
+        // build_rc=1 — a hard failure, not green.
+        assert_eq!(classify_gate(1, 1), GateVerdict::CompileFailure);
+        assert!(classify_gate(1, 0).is_failure());
+        assert!(!classify_gate(0, 0).is_failure());
+    }
+
+    #[test]
+    fn classify_gate_separates_compile_failure_from_tests_that_ran_and_failed() {
+        // Both surface as test_rc=101 today; only the green all-targets
+        // build gate says "the tests compiled, then some failed".
+        assert_eq!(classify_gate(0, 101), GateVerdict::TestsFailed);
+        assert_eq!(GateVerdict::CompileFailure.as_str(), "compile_failure");
+        assert_eq!(GateVerdict::TestsFailed.as_str(), "tests_failed");
+        assert_eq!(GateVerdict::Green.as_str(), "green");
+        assert!(classify_gate(0, 101).is_failure());
     }
 
     #[test]
