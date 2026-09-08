@@ -1082,7 +1082,7 @@ mod tests {
             FindingSeverity::Critical,
             FindingConfidence::High,
             "copy-pasted retry loop in two commands",
-            "crates/autospec-cli/src/commands/queue.rs",
+            "crates/example-app/src/commands/queue.rs",
         );
         let fp = fingerprint_of(&finding);
         let mut ledger = QualityLedger::new(REPO).unwrap();
@@ -1181,7 +1181,7 @@ mod tests {
             FindingSeverity::Critical,
             FindingConfidence::High,
             "oversized orchestrator module",
-            "crates/autospec-cli/src/commands/autonomous.rs",
+            "crates/example-app/src/commands/autonomous.rs",
         );
         finding.existing_issue = Some(111);
         let fp = fingerprint_of(&finding);
@@ -1355,7 +1355,7 @@ mod tests {
             FindingSeverity::High,
             FindingConfidence::Medium,
             "error message leaks internals",
-            "crates/autospec-cli/src/commands/status.rs",
+            "crates/example-app/src/commands/status.rs",
         );
         let fp = fingerprint_of(&finding);
         let mut ledger = QualityLedger::new(REPO).unwrap();
