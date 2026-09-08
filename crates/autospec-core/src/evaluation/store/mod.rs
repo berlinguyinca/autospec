@@ -17,6 +17,7 @@
 //! Interfaces sections).
 
 pub mod io;
+pub mod journal;
 pub mod layout;
 
 use std::fmt;
