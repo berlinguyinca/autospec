@@ -29,6 +29,17 @@ EOF
     chmod +x "$STUBS/codex"
     export PATH="$STUBS:$ORIG_PATH"
 
+    # R9 (issue #3352): the script now refuses to start when a
+    # credential-bearing variable is exported into the process. This host may
+    # legitimately carry one, so strip it so the pre-existing gate behavior
+    # stays testable independent of the ambient environment.
+    for v in $(compgen -e); do
+        case "_${v}_" in
+            *_TOKEN_*|*_SECRET_*|*_PASSWORD_*|*_PASSWD_*|*_CREDENTIAL_*|*_APIKEY_*|*_PRIVATE_*|*_AUTHORIZATION_*|*_KEY_*)
+                unset "$v" ;;
+        esac
+    done
+
     cap_with() {
         jq -n --arg m "$1" --argjson ok "$2" --arg reason "${3:-}" \
             '{accelerator:{usable:($ok), reason:$reason},

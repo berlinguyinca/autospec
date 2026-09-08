@@ -457,12 +457,38 @@ autospec already depends on Codex for peer review.
 | `AUTOSPEC_LOCAL_PROVIDER` | `ollama` | Local provider (`ollama` or `lmstudio`). |
 | `AUTOSPEC_LOCAL_TIMEOUT_SECS` | `600` | Wall-clock ceiling per local dispatch. |
 | `AUTOSPEC_LOCAL_LOCK_DIR` | `~/.autospec/locks` | Lock dir serializing the capacity-1 GPU. |
+| `AUTOSPEC_LOCAL_ENV_ALLOWLIST` | `PATH HOME USER LOGNAME SHELL TERM TZ LANG LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES TMPDIR OLLAMA_HOST` | Space-separated allowlist of exported variables the executor process may see; everything else is dropped before exec. |
 
-It exits **3** — meaning *keep the cloud tier* — when Codex is absent, when Codex does
-not advertise `--oss` (an older build would ignore the flag and silently bill a **paid**
-cloud model, the most expensive possible failure), when the capability probe reports the
-model is not `dispatch_recommended`, or when no wall-clock bound can be applied. Exit
-**4** means the dispatch hit its ceiling, kept distinct from a wrong answer.
+**R9 safety guardrails** (issue #3352): a local dispatch runs with **no ambient
+credentials and no ability to install packages**.
+
+- **Credential refusal.** If any credential-bearing variable (an underscore-separated
+  component named `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `APIKEY`,
+  `PRIVATE`, `AUTHORIZATION`, or `KEY`) is exported into the script's environment, the
+  dispatch is **refused** with exit **3** and the variable names in the error — a
+  refusal, not a warning. A token already in the caller's environment means the caller
+  is misconfigured; silently scrubbing it would hide that.
+- **Allowlist scrub.** The executor process and its children run with only the
+  allowlisted exported variables (`AUTOSPEC_LOCAL_ENV_ALLOWLIST`); everything else is
+  dropped before exec. Allowlist, not blocklist — a blocklist admits every future
+  credential variable by default.
+- **`--cwd` is pinned.** When `--cwd` is given it must be an absolute path inside a git
+  worktree (a subdirectory of the worktree counts; the containing worktree root is
+  resolved by walking up). A relative or non-worktree `--cwd` is refused with exit
+  **3** — the executor cannot be widened outside the issue's worktree.
+- **No package installation.** Every common package manager (`apt`, `apt-get`, `dpkg`,
+  `dnf`, `yum`, `zypper`, `tdnf`, `pacman`, `apk`, `brew`, `nix`, `port`, `opkg`)
+  is shadowed on the executor's `PATH` by a stub that prints a blocker message and
+  exits non-zero. A missing system package is a **blocker comment on the issue** and
+  a non-zero dispatch exit — never something the local dispatch resolves on its own
+  initiative.
+
+It exits **3** — meaning *keep the cloud tier* — when a credential variable is in scope,
+when `--cwd` escapes the worktree, when Codex is absent, when Codex does not advertise
+`--oss` (an older build would ignore the flag and silently bill a **paid** cloud model,
+the most expensive possible failure), when the capability probe reports the model is not
+`dispatch_recommended`, or when no wall-clock bound can be applied. Exit **4** means the
+dispatch hit its ceiling, kept distinct from a wrong answer.
 
 ## Provider-neutral executor dispatch
 `scripts/executor-dispatch.sh --request <file.json>` is the single

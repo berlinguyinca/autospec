@@ -26,6 +26,26 @@
 # Local GPU is capacity-1: two concurrent dispatches to one runtime thrash into
 # swap and both blow their ceiling. A host-scoped lock serializes them.
 #
+# R9 guardrails (safety), all fail-closed:
+#   * No ambient credentials. If a credential-bearing variable (a name whose
+#     underscore-separated components include TOKEN, SECRET, PASSWORD, PASSWD,
+#     CREDENTIAL, APIKEY, PRIVATE, AUTHORIZATION, or KEY) is exported into this
+#     process, the dispatch is REFUSED (exit 3) — a refusal, not a warning. A
+#     token already in the caller's environment means the caller is
+#     misconfigured; a silent scrub would hide that.
+#   * Allowlist scrub. The executor process and its children run with ONLY the
+#     allowlisted exported variables (AUTOSPEC_LOCAL_ENV_ALLOWLIST, default:
+#     PATH HOME USER LOGNAME SHELL TERM TZ LANG LC_* TMPDIR OLLAMA_HOST);
+#     everything else is dropped. Allowlist, not blocklist — a blocklist admits
+#     every future credential variable by default.
+#   * --cwd is pinned. When given, it must be an absolute path inside a git
+#     worktree; the executor cannot be widened to wander outside the issue's
+#     worktree.
+#   * No package installs. Every package manager is shadowed on the executor's
+#     PATH by a stub that exits non-zero with a blocker message. A missing
+#     system package is a blocker comment on the issue, never something the
+#     local dispatch resolves on its own initiative.
+#
 # Usage:
 #   local-dispatch.sh --model <tag> --prompt-file <path>
 #                     [--provider ollama|lmstudio] [--cwd <dir>]
@@ -43,6 +63,10 @@
 #   AUTOSPEC_LOCAL_TIMEOUT_SECS    default ceiling (600)
 #   AUTOSPEC_MODEL_CAPABILITY      probe document path
 #   AUTOSPEC_LOCAL_LOCK_DIR        lock directory (default ~/.autospec/locks)
+#   AUTOSPEC_LOCAL_ENV_ALLOWLIST   space-separated exported-variable allowlist
+#                                  the executor may see (default: PATH HOME USER
+#                                  LOGNAME SHELL TERM TZ LANG LC_ALL LC_CTYPE
+#                                  LC_COLLATE LC_MESSAGES TMPDIR OLLAMA_HOST)
 
 set -u
 
@@ -55,6 +79,7 @@ SKIP_CAP=0
 DRY_RUN=0
 CAPABILITY="${AUTOSPEC_MODEL_CAPABILITY:-$HOME/.autospec/model-capability.json}"
 LOCK_DIR="${AUTOSPEC_LOCAL_LOCK_DIR:-$HOME/.autospec/locks}"
+ENV_ALLOWLIST="${AUTOSPEC_LOCAL_ENV_ALLOWLIST:-PATH HOME USER LOGNAME SHELL TERM TZ LANG LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES TMPDIR OLLAMA_HOST}"
 
 _die() { printf 'local-dispatch: %s\n' "$1" >&2; exit "${2:-1}"; }
 _refuse() { printf 'local-dispatch: %s\n' "$1" >&2; exit 3; }
@@ -84,6 +109,53 @@ esac
 case "$TIMEOUT_SECS" in
     ''|*[!0-9]*) _die "--timeout-secs must be an integer: $TIMEOUT_SECS" ;;
 esac
+
+# ── R9 guardrail: refuse a credential variable in scope (not a warning) ──────
+# Checked against the whole environment, before the allowlist scrub: if the
+# caller exported a token, the caller is misconfigured and the dispatch must not
+# happen at all. The allowlist scrub below is the load-bearing half; this check
+# is the one that turns a leak into a refusal.
+is_credential_name() {
+    case "_$1_" in
+        *_TOKEN_*|*_SECRET_*|*_PASSWORD_*|*_PASSWD_*|*_CREDENTIAL_*|*_APIKEY_*|*_PRIVATE_*|*_AUTHORIZATION_*|*_KEY_*)
+            return 0 ;;
+    esac
+    return 1
+}
+_CRED_FOUND=""
+for _n in $(compgen -e); do
+    if is_credential_name "$_n"; then _CRED_FOUND="$_CRED_FOUND $_n"; fi
+done
+if [ -n "$_CRED_FOUND" ]; then
+    _refuse "credential variable(s) in environment:${_CRED_FOUND}; scrub the caller environment before local dispatch"
+fi
+
+# ── R9 guardrail: --cwd is pinned to the issue's worktree ─────────────────────
+# A relative cwd resolves against whatever directory the caller is in, which is
+# not the issue's worktree; an absolute non-worktree cwd lets the executor
+# operate outside it. Both widen the blast radius, so both are refused. A
+# subdirectory of the worktree is still inside it, so the walk looks for the
+# containing worktree root rather than a .git in the cwd itself.
+_git_root_of() {
+    local d="$1"
+    while [ "$d" != "/" ]; do
+        if [ -e "$d/.git" ]; then printf '%s\n' "$d"; return 0; fi
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+if [ "$WORKDIR" != "." ]; then
+    case "$WORKDIR" in
+        /*) ;;
+        *) _refuse "--cwd must be an absolute path (got: $WORKDIR); the executor is pinned to the issue's worktree" ;;
+    esac
+    if [ ! -d "$WORKDIR" ]; then
+        _refuse "--cwd is not a directory: $WORKDIR"
+    fi
+    if ! _git_root_of "$WORKDIR" >/dev/null; then
+        _refuse "--cwd is not inside a git worktree: $WORKDIR; local dispatch is pinned to the issue's worktree"
+    fi
+fi
 
 # ── precondition 1: an executor that really supports local models ─────────────
 if ! command -v codex >/dev/null 2>&1; then
@@ -141,7 +213,31 @@ fi
 if [ ! -d "$LOCK_DIR" ]; then mkdir -p "$LOCK_DIR"; fi
 LOCK="$LOCK_DIR/local-model.lock"
 
+# R9 guardrails: scrub the environment to the allowlist and shadow every
+# package manager with a refusing stub, so the executor runs with no ambient
+# credentials and no ability to install packages.
+PKG_MANAGERS="apt apt-get dpkg dnf yum zypper tdnf pacman apk brew nix port opkg"
+DENY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/local-dispatch-deny-XXXXXX")"
+trap 'rm -rf "$DENY_DIR"' EXIT
+for _pm in $PKG_MANAGERS; do
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        "printf 'local-dispatch: package installation via $_pm is DENIED. A missing system package is a BLOCKER: record it on the issue and stop; the local dispatch must never install packages on its own initiative.' >&2" \
+        'exit 5' > "$DENY_DIR/$_pm"
+    chmod +x "$DENY_DIR/$_pm"
+done
+
 _run_dispatch() {
+    # Drop every exported variable not on the allowlist; only the allowlist
+    # (plus the deny-stub PATH prefix) reaches the executor and its children.
+    local n
+    for n in $(compgen -e); do
+        case " $ENV_ALLOWLIST " in
+            *" $n "*) : ;;
+            *) unset "$n" ;;
+        esac
+    done
+    PATH="$DENY_DIR:$PATH"
     # shellcheck disable=SC2086
     timeout --preserve-status "$TIMEOUT_SECS" \
         codex $CODEX_ARGS --cd "$WORKDIR" < "$PROMPT_FILE"
