@@ -6,7 +6,7 @@
 //! push), while a growing queue of finished patches waited and the GPU hours
 //! already spent producing them sat idle.
 //!
-//! The fix is four rules, each encoded here as a pure, testable primitive.
+//! The fix is five rules, each encoded here as a pure, testable primitive.
 //! Callers perform the git/cargo I/O with the plans these functions return:
 //!
 //! 1. **N checkouts, N workers.** The lock protects the checkout, not the
@@ -25,6 +25,13 @@
 //!    decision** ([`ConversionMemo`]), not just holds. Identity alone does
 //!    not determine the outcome: the same patch rebased onto a new trunk may
 //!    compile or not, so the base sha is part of the key.
+//! 5. **The run's own `status.txt` triages a patch before anything is
+//!    applied** ([`triage`]): the converter's job is to supply the judgment
+//!    the agent could not make — a comparison against current `main` — not
+//!    to re-derive judgments the agent already made and recorded. A
+//!    `TIMEOUT` is unfinished work to re-dispatch with a larger budget, a
+//!    recorded `fmt_rc=1` is a fact about the patch that needs no re-run,
+//!    and only an all-green or unjudgeable record costs a local gate.
 
 use std::collections::BTreeMap;
 
@@ -262,6 +269,289 @@ pub fn plan_pass<'a>(
     })
 }
 
+// ── Recorded run status triage (#3715) ─────────────────────────────────────
+
+/// The status token a run records in its `status.txt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunStatus {
+    /// The run finished within its budget (`status=OK`).
+    Ok,
+    /// The run was cut off by the time limit (`status=TIMEOUT`).
+    Timeout,
+    /// The run was cut off by the time limit and produced no output at all
+    /// (`status=TIMEOUT-NO-OUTPUT`).
+    TimeoutNoOutput,
+    /// The agent could not compare against main
+    /// (`status=UNKNOWN-NO-BASELINE`).
+    UnknownNoBaseline,
+    /// A token this pass does not recognise; the raw token is preserved so a
+    /// HELD line can surface it verbatim.
+    Unrecognised(String),
+}
+
+impl RunStatus {
+    /// The token exactly as it appears in `status.txt`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ok => "OK",
+            Self::Timeout => "TIMEOUT",
+            Self::TimeoutNoOutput => "TIMEOUT-NO-OUTPUT",
+            Self::UnknownNoBaseline => "UNKNOWN-NO-BASELINE",
+            Self::Unrecognised(token) => token,
+        }
+    }
+
+    fn from_token(token: &str) -> Self {
+        match token {
+            "OK" => Self::Ok,
+            "TIMEOUT" => Self::Timeout,
+            "TIMEOUT-NO-OUTPUT" => Self::TimeoutNoOutput,
+            "UNKNOWN-NO-BASELINE" => Self::UnknownNoBaseline,
+            other => Self::Unrecognised(other.to_string()),
+        }
+    }
+}
+
+/// What a finished run recorded about itself: the `status.txt` that sits
+/// next to the patch, the file count it points at, and the failing tests it
+/// named. The converter reads this before applying anything and lets it
+/// decide what to do with the patch ([`triage`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentRunStatus {
+    /// The `status=` token; `None` when the run recorded no status line.
+    pub status: Option<RunStatus>,
+    /// `build_rc=` exit code of the agent's build.
+    pub build_rc: i32,
+    /// `test_rc=` exit code of the agent's test run.
+    pub test_rc: i32,
+    /// `fmt_rc=` exit code of the agent's format check.
+    pub fmt_rc: i32,
+    /// Entry count of `fmt-files.txt`; 0 when the agent recorded none.
+    pub fmt_files: usize,
+    /// Test names the agent recorded in `failing-tests.txt`.
+    pub failing_tests: Vec<String>,
+}
+
+impl AgentRunStatus {
+    /// Parse the key=value text of a run's `status.txt`.
+    ///
+    /// Recognised lines: `status=<token>`, `build_rc=<n>`, `test_rc=<n>`,
+    /// `fmt_rc=<n>`, and `fmt-files.txt: <n> entries`. Anything else is
+    /// ignored: the agent may grow this file, and the converter must keep
+    /// working. Unparseable values are treated as unrecorded.
+    pub fn parse_status_text(text: &str) -> Self {
+        let mut parsed = Self::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("status=") {
+                let token = value.trim();
+                if !token.is_empty() {
+                    parsed.status = Some(RunStatus::from_token(token));
+                }
+            } else if let Some(value) = line.strip_prefix("build_rc=") {
+                parsed.build_rc = value.trim().parse().unwrap_or(0);
+            } else if let Some(value) = line.strip_prefix("test_rc=") {
+                parsed.test_rc = value.trim().parse().unwrap_or(0);
+            } else if let Some(value) = line.strip_prefix("fmt_rc=") {
+                parsed.fmt_rc = value.trim().parse().unwrap_or(0);
+            } else if let Some(value) = line.strip_prefix("fmt-files.txt:") {
+                parsed.fmt_files = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|count| count.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+        parsed
+    }
+}
+
+/// Parse the contents of `failing-tests.txt`: one test name per line; blank
+/// lines and `#` comments are ignored.
+pub fn parse_failing_tests(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Why a patch must be gated locally instead of trusted from the record or
+/// held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateLocalReason {
+    /// No `status.txt` was recorded; the converter is the only judge.
+    NoRecord,
+    /// `status=UNKNOWN-NO-BASELINE`: the agent could not compare against
+    /// main — exactly the case the converter exists for.
+    UnknownNoBaseline,
+    /// The recorded build failed: a negative about an old base must be
+    /// re-checked against current main.
+    BuildFailed,
+    /// `test_rc != 0` but `failing-tests.txt` is empty: the negative is
+    /// incomplete, so the converter discovers the failures itself.
+    FailuresUnrecorded,
+    /// All green on the agent's base: still gate locally, because a
+    /// recorded pass is a fact about the agent's base, which has usually
+    /// moved.
+    AllGreen,
+}
+
+impl GateLocalReason {
+    /// One-line reason for the pass log explaining why the patch is gated
+    /// locally.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoRecord => "no status.txt recorded by the agent",
+            Self::UnknownNoBaseline => {
+                "status=UNKNOWN-NO-BASELINE: the agent could not compare against main"
+            }
+            Self::BuildFailed => "agent recorded a failed build; re-check against current main",
+            Self::FailuresUnrecorded => {
+                "agent recorded failing tests without naming them; discover locally"
+            }
+            Self::AllGreen => "all green on the agent's base; confirm against current main",
+        }
+    }
+}
+
+/// The action the conversion pass takes on a held patch, decided from the
+/// run's own recorded status **before** anything is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Triage {
+    /// `status=TIMEOUT` or `status=TIMEOUT-NO-OUTPUT`: the patch is
+    /// unfinished work, not a bad patch. Re-dispatch with a larger budget;
+    /// do not gate.
+    Redispatch {
+        /// The recorded status that cut the run off.
+        status: RunStatus,
+    },
+    /// `fmt_rc != 0`: hold as `AGENT-REPORTED-UNFORMATTED`; no local run
+    /// needed.
+    HoldUnformatted { fmt_rc: i32, fmt_files: usize },
+    /// `test_rc != 0` with a populated `failing-tests.txt`: hold naming the
+    /// agent's own failures; re-verify only if the base has moved.
+    HoldFailingTests {
+        test_rc: i32,
+        failing_tests: Vec<String>,
+    },
+    /// Gate locally to supply the judgment the agent could not make — a
+    /// comparison against current main.
+    GateLocal { reason: GateLocalReason },
+}
+
+impl Triage {
+    /// True when the pass must apply the patch and run the local gate.
+    pub fn gates_locally(&self) -> bool {
+        matches!(self, Self::GateLocal { .. })
+    }
+
+    /// The `HELD:` line for holds and re-dispatches: the agent's own
+    /// recorded facts in its own words, with the recorded status surfaced.
+    /// `HELD: agent reported fmt_rc=1 (32 files), status=TIMEOUT` tells a
+    /// reader to re-dispatch; `HELD: cargo fmt --check reports 32
+    /// unformatted files` invites them to wonder whether the agent is
+    /// broken. `None` for gate-local triages — the patch is not held, so the
+    /// pass logs [`GateLocalReason::as_str`] instead.
+    pub fn held_line(&self, recorded: &AgentRunStatus) -> Option<String> {
+        let fact = match self {
+            Self::Redispatch { .. } => fmt_fact(recorded.fmt_rc, recorded.fmt_files),
+            Self::HoldUnformatted { fmt_rc, fmt_files } => fmt_fact(*fmt_rc, *fmt_files),
+            Self::HoldFailingTests {
+                test_rc,
+                failing_tests,
+            } => Some(format!(
+                "test_rc={test_rc} (failing: {})",
+                failing_tests.join(", ")
+            )),
+            Self::GateLocal { .. } => return None,
+        };
+        let mut line = "HELD: agent reported".to_string();
+        if let Some(fact) = fact {
+            line.push(' ');
+            line.push_str(&fact);
+        }
+        if let Some(status) = &recorded.status {
+            line.push_str(&format!(", status={}", status.as_str()));
+        }
+        Some(line)
+    }
+}
+
+fn fmt_fact(fmt_rc: i32, fmt_files: usize) -> Option<String> {
+    if fmt_rc == 0 {
+        return None;
+    }
+    if fmt_files > 0 {
+        Some(format!("fmt_rc={fmt_rc} ({fmt_files} files)"))
+    } else {
+        Some(format!("fmt_rc={fmt_rc}"))
+    }
+}
+
+/// Triage a held patch from the run's own recorded status, before applying
+/// anything.
+///
+/// The pass trusts the agent's negative results — a recorded `fmt_rc=1` is a
+/// fact about the patch and needs no re-run, and a recorded test failure is
+/// held naming the agent's own failures — and verifies its positive
+/// results: a recorded pass is a fact about the agent's base, which has
+/// usually moved, so it still needs local confirmation against current
+/// main.
+///
+/// `recorded` is `None` when the run left no `status.txt`; that is the case
+/// the converter exists for, so it gates locally.
+pub fn triage(recorded: Option<&AgentRunStatus>) -> Triage {
+    let Some(recorded) = recorded else {
+        return Triage::GateLocal {
+            reason: GateLocalReason::NoRecord,
+        };
+    };
+    match &recorded.status {
+        // Unfinished work, not a bad patch: re-dispatch with a larger
+        // budget, do not gate.
+        Some(status) if matches!(status, RunStatus::Timeout | RunStatus::TimeoutNoOutput) => {
+            return Triage::Redispatch {
+                status: status.clone(),
+            };
+        }
+        // The agent could not compare against main: none of its recorded
+        // judgments are trustworthy, so gate locally regardless of the rc
+        // fields.
+        Some(RunStatus::UnknownNoBaseline) => {
+            return Triage::GateLocal {
+                reason: GateLocalReason::UnknownNoBaseline,
+            };
+        }
+        _ => {}
+    }
+    if recorded.fmt_rc != 0 {
+        return Triage::HoldUnformatted {
+            fmt_rc: recorded.fmt_rc,
+            fmt_files: recorded.fmt_files,
+        };
+    }
+    if recorded.test_rc != 0 {
+        if recorded.failing_tests.is_empty() {
+            return Triage::GateLocal {
+                reason: GateLocalReason::FailuresUnrecorded,
+            };
+        }
+        return Triage::HoldFailingTests {
+            test_rc: recorded.test_rc,
+            failing_tests: recorded.failing_tests.clone(),
+        };
+    }
+    if recorded.build_rc != 0 {
+        return Triage::GateLocal {
+            reason: GateLocalReason::BuildFailed,
+        };
+    }
+    Triage::GateLocal {
+        reason: GateLocalReason::AllGreen,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +738,231 @@ mod tests {
         let patches = vec![patch("p1", "base-1", ConversionClass::Candidate)];
         assert!(plan_pass(&patches, 0, "/root", &ConversionMemo::new()).is_err());
         assert!(plan_pass(&patches, 1, "", &ConversionMemo::new()).is_err());
+    }
+
+    // ── Recorded run status triage (#3715) ──
+
+    /// The `status.txt` the issue records from the first observed patch.
+    const TIMEOUT_STATUS_TXT: &str = "\
+        status=TIMEOUT
+        build_rc=0
+        test_rc=101
+        fmt_rc=1
+        fmt-files.txt: 32 entries
+        ";
+
+    fn recorded(text: &str, failing: &[&str]) -> AgentRunStatus {
+        let mut status = AgentRunStatus::parse_status_text(text);
+        status.failing_tests = failing.iter().map(|t| t.to_string()).collect();
+        status
+    }
+
+    #[test]
+    fn parse_status_text_reads_all_recorded_fields() {
+        let parsed = AgentRunStatus::parse_status_text(TIMEOUT_STATUS_TXT);
+        assert_eq!(parsed.status, Some(RunStatus::Timeout));
+        assert_eq!(parsed.build_rc, 0);
+        assert_eq!(parsed.test_rc, 101);
+        assert_eq!(parsed.fmt_rc, 1);
+        assert_eq!(parsed.fmt_files, 32);
+        assert!(parsed.failing_tests.is_empty());
+    }
+
+    #[test]
+    fn parse_status_text_ignores_unknown_lines_and_bad_values() {
+        let parsed = AgentRunStatus::parse_status_text(
+            "notes=whatever\nfmt_rc=not-a-number\nstatus=\nbuild_rc=0\n",
+        );
+        assert_eq!(parsed.status, None);
+        assert_eq!(parsed.build_rc, 0);
+        assert_eq!(parsed.test_rc, 0);
+        assert_eq!(parsed.fmt_rc, 0);
+        assert_eq!(parsed.fmt_files, 0);
+    }
+
+    #[test]
+    fn parse_status_text_keeps_unrecognised_status_tokens() {
+        let parsed = AgentRunStatus::parse_status_text("status=PARTIAL\n");
+        assert_eq!(
+            parsed.status,
+            Some(RunStatus::Unrecognised("PARTIAL".to_string()))
+        );
+        if let Some(RunStatus::Unrecognised(token)) = &parsed.status {
+            assert_eq!(token.as_str(), "PARTIAL");
+        }
+    }
+
+    #[test]
+    fn parse_failing_tests_drops_blank_lines_and_comments() {
+        let tests = parse_failing_tests("# failed\na::first\n\n  b::second  \n");
+        assert_eq!(tests, vec!["a::first", "b::second"]);
+        assert!(parse_failing_tests("").is_empty());
+    }
+
+    #[test]
+    fn triage_timeout_is_redispatch_not_gate() {
+        // The first observed patch: the run was cut off before it could
+        // format, and the timeout wins over the recorded fmt failure.
+        let rec = recorded(TIMEOUT_STATUS_TXT, &[]);
+        let decision = triage(Some(&rec));
+        assert_eq!(
+            decision,
+            Triage::Redispatch {
+                status: RunStatus::Timeout
+            }
+        );
+        assert!(!decision.gates_locally());
+    }
+
+    #[test]
+    fn triage_timeout_no_output_is_redispatch_not_gate() {
+        let rec = recorded("status=TIMEOUT-NO-OUTPUT\n", &[]);
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::Redispatch {
+                status: RunStatus::TimeoutNoOutput
+            }
+        );
+    }
+
+    #[test]
+    fn triage_recorded_fmt_failure_holds_unformatted() {
+        let rec = recorded("status=OK\nfmt_rc=1\nfmt-files.txt: 32 entries\n", &[]);
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::HoldUnformatted {
+                fmt_rc: 1,
+                fmt_files: 32
+            }
+        );
+    }
+
+    #[test]
+    fn triage_recorded_test_failures_hold_naming_them() {
+        let rec = recorded(
+            "status=OK\ntest_rc=101\n",
+            &["alpha::keeps_order", "beta::survives_reload"],
+        );
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::HoldFailingTests {
+                test_rc: 101,
+                failing_tests: vec![
+                    "alpha::keeps_order".to_string(),
+                    "beta::survives_reload".to_string()
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn triage_test_failure_without_names_gates_locally() {
+        let rec = recorded("status=OK\ntest_rc=101\n", &[]);
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::GateLocal {
+                reason: GateLocalReason::FailuresUnrecorded
+            }
+        );
+    }
+
+    #[test]
+    fn triage_unknown_no_baseline_gates_locally_regardless_of_rc() {
+        // The agent could not compare against main, so even a recorded fmt
+        // failure is not trusted: the converter is exactly what this case
+        // exists for.
+        let rec = recorded(
+            "status=UNKNOWN-NO-BASELINE\nfmt_rc=1\nfmt-files.txt: 3 entries\n",
+            &[],
+        );
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::GateLocal {
+                reason: GateLocalReason::UnknownNoBaseline
+            }
+        );
+    }
+
+    #[test]
+    fn triage_recorded_build_failure_gates_locally() {
+        let rec = recorded("status=OK\nbuild_rc=101\n", &[]);
+        assert_eq!(
+            triage(Some(&rec)),
+            Triage::GateLocal {
+                reason: GateLocalReason::BuildFailed
+            }
+        );
+    }
+
+    #[test]
+    fn triage_all_green_gates_locally_to_confirm() {
+        let rec = recorded("status=OK\nbuild_rc=0\ntest_rc=0\nfmt_rc=0\n", &[]);
+        let decision = triage(Some(&rec));
+        assert_eq!(
+            decision,
+            Triage::GateLocal {
+                reason: GateLocalReason::AllGreen
+            }
+        );
+        assert!(decision.gates_locally());
+    }
+
+    #[test]
+    fn triage_missing_status_gates_locally() {
+        assert_eq!(
+            triage(None),
+            Triage::GateLocal {
+                reason: GateLocalReason::NoRecord
+            }
+        );
+    }
+
+    #[test]
+    fn held_line_surfaces_the_agents_own_facts() {
+        // The first observed patch: the line must read the agent's record,
+        // not a local re-run's verdict.
+        let rec = recorded(TIMEOUT_STATUS_TXT, &[]);
+        let decision = triage(Some(&rec));
+        assert_eq!(
+            decision.held_line(&rec).as_deref(),
+            Some("HELD: agent reported fmt_rc=1 (32 files), status=TIMEOUT")
+        );
+    }
+
+    #[test]
+    fn held_line_names_the_agents_own_failures() {
+        let rec = recorded(
+            "status=OK\ntest_rc=101\n",
+            &["alpha::keeps_order", "beta::survives_reload"],
+        );
+        let decision = triage(Some(&rec));
+        assert_eq!(
+            decision.held_line(&rec).as_deref(),
+            Some(
+                "HELD: agent reported test_rc=101 (failing: alpha::keeps_order, \
+                 beta::survives_reload), status=OK"
+            )
+        );
+    }
+
+    #[test]
+    fn held_line_omits_file_count_when_unrecorded() {
+        let rec = recorded("status=OK\nfmt_rc=1\n", &[]);
+        let decision = triage(Some(&rec));
+        assert_eq!(
+            decision.held_line(&rec).as_deref(),
+            Some("HELD: agent reported fmt_rc=1, status=OK")
+        );
+    }
+
+    #[test]
+    fn held_line_is_none_for_gate_local_triages() {
+        let rec = recorded("status=OK\n", &[]);
+        let decision = triage(Some(&rec));
+        assert!(decision.held_line(&rec).is_none());
+        assert_eq!(
+            GateLocalReason::AllGreen.as_str(),
+            "all green on the agent's base; confirm against current main"
+        );
     }
 }
