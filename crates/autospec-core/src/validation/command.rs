@@ -217,6 +217,31 @@ fn captured_result(
         Ok(output) => {
             let stdout = output.stdout;
             let stderr = output.stderr;
+            // Keep a readable snippet of why an external check failed. Previously only
+            // the byte COUNTS survived, so `validate` could name a failing check and
+            // never its reason -- which is how seven required checks stayed red on main
+            // with nobody able to see what to fix (#3734). stderr first, falling back to
+            // stdout, since not every tool writes diagnostics to stderr.
+            let failure = if output.status.code() == Some(0) {
+                None
+            } else {
+                let text = if stderr.iter().any(|b| !b.is_ascii_whitespace()) {
+                    String::from_utf8_lossy(&stderr)
+                } else {
+                    String::from_utf8_lossy(&stdout)
+                };
+                let trimmed: String = text
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.chars().take(400).collect::<String>())
+                }
+            };
             CapturedCheckResult {
                 result: CheckResult {
                     id,
@@ -228,6 +253,7 @@ fn captured_result(
                     stderr_bytes: stderr.len(),
                     output_digest: output_digest(&stdout, &stderr),
                     unmeasured: None,
+                    failure,
                 },
                 stdout,
             }

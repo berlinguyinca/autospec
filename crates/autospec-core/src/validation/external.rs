@@ -6327,6 +6327,10 @@ fn aggregate(id: &str, required: bool, results: Vec<CheckResult>) -> CheckResult
         stderr_bytes: results.iter().map(|result| result.stderr_bytes).sum(),
         output_digest: output_digest(&combined_digests, &[]),
         unmeasured,
+        // A batch's reason is the reason of the sub-check that failed. Without this
+        // the aggregate reports "failed" while the sub-check that knows why is
+        // discarded -- three of the seven checks red on main are batches (#3734).
+        failure: failure.and_then(|result| result.failure.clone()),
     }
 }
 

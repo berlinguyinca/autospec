@@ -102,16 +102,24 @@ impl ValidationRunner {
                 0,
                 output_digest(&[], &[]),
             ),
-            Err(error) => CheckResult::completed(
-                check.id,
-                check.required,
-                1,
-                started.elapsed().as_millis(),
-                0,
-                0,
-                error.len(),
-                output_digest(&[], error.as_bytes()),
-            ),
+            Err(error) => {
+                // Keep the message, not just its length. `error` names the exact
+                // divergence; discarding it is why validate could say a check failed
+                // but never why (#3734).
+                let digest = output_digest(&[], error.as_bytes());
+                let bytes = error.len();
+                CheckResult::completed(
+                    check.id,
+                    check.required,
+                    1,
+                    started.elapsed().as_millis(),
+                    0,
+                    0,
+                    bytes,
+                    digest,
+                )
+                .with_failure(error)
+            }
         }
     }
 }
