@@ -288,7 +288,57 @@ end-to-end skill expecting shipping, not plan-only. Pass the override into
 `/autospec-define` so its gate question highlights `run`.
 
 After `/autospec-define` completes (spec merged, issues filed, gate
-answered), continue to the Phase 3 pre-impl gate below.
+answered), continue to the Phase 3 portfolio admission gate, then the
+Phase 3 pre-impl gate below.
+
+## Phase 3 portfolio admission gate
+
+Phase 3 decomposes into issues only through the typed portfolio transaction.
+One verified primary Project must exist before any issue is admitted; the
+apply transaction is the sole provisioning/materialization entry point —
+there are no separate public record or add commands, and no bare `gh issue
+create` fallback for planned issues.
+
+1. **Freeze the plan (pure validation).** Render the planned YAML manifest —
+   source spec, `project_owner`, target repositories, local parent sets,
+   planned children, audit node, and dependency edges — then run the
+   read-only validation before any remote mutation:
+
+   ```bash
+   "${AUTOSPEC_BIN:-autospec}" portfolio validate --manifest "$MANIFEST"
+   ```
+
+   Validation is pure: manifest lint, safety lint, DAG validation, and
+   per-repository read/write capability probes. A non-zero exit blocks Phase
+   3 — fix the manifest and re-run. A repository that cannot accept issues
+   is a blocking prerequisite, never a silently omitted lane.
+2. **Apply before filing.** The apply transaction then files, in order: the
+   primary umbrella; secondary repository trackers; implementation and
+   prerequisite children; the source-repository audit. Every issue starts as
+   `needs-classify`, never `auto-implement`, and blocked prerequisites keep
+   their blocking label:
+
+   ```bash
+   APPLY_JSON=$("${AUTOSPEC_BIN:-autospec}" portfolio apply --manifest "$MANIFEST") || {
+     printf '%s\n' 'ERROR: primary portfolio provisioning failed; no issue is admitted' >&2
+     exit 1
+   }
+   ```
+3. **JSON handoff.** Parse `APPLY_JSON` with `jq`; hand the verified
+   portfolio ID and canonical Project URL into every child's
+   `## Delivery portfolio` section and into the pre-impl gate below. Pass
+   the plan's `project_owner` through unchanged — never derive or substitute
+   an owner at this step.
+4. **Blocked failure handling.** Any apply failure, parent-record or
+   cross-repository graph persistence failure, or unacknowledged Project
+   projection blocks admission: stop, leave the filed issues unadmitted, and
+   report the exact blocker. Resume with the frozen manifest and its
+   checkpoints; never re-decompose a partially applied plan.
+5. **Final admission ordering.** Only after every body mutation finishes
+   (Phase 3.5 model-fit labels and shared contracts) does final lint and
+   Rust safety admission transition eligible nodes from `needs-classify`
+   to `auto-implement`. The audit stays dependency-blocked until every
+   deliverable is terminal-success.
 
 ## Phase 3 pre-impl gate
 
