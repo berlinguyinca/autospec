@@ -2,9 +2,10 @@
 """Runtime evidence and product quality automation v1.
 
 All operations are local and operator-invoked. Dry-run never starts processes or
-writes user-facing artifacts. Confirmed process launch supports only explicit
-operator commands or trusted detected launch profiles, with a mock command for
-tests and documentation examples.
+writes user-facing artifacts. Process launch is NOT implemented yet: the
+app-harness confirm path records `status: "not_implemented"` with
+`started_process: false` and exits non-zero, so no artifact can read as a real
+launch, readiness probe, and clean shutdown (issue #3400).
 """
 
 from __future__ import annotations
@@ -170,14 +171,31 @@ def app_harness(root: Path, profile: str, command: str, url: str, confirm: bool,
         write_json(reports(root) / "app-harness-result.json", result)
         write_text(reports(root) / "app-harness-result.md", "# App Harness Result\n\n## Summary\n\nBlocked: no trusted command.")
         return 1
-    run = {"profile": profile, "command": command, "url": url, "started_at": now(), "stopped_at": now(), "status": "stopped_cleanly", "pid": "mock" if command.startswith("mock:") else "not-started"}
+    # Process orchestration is not implemented: nothing is launched, no readiness
+    # probe runs against `url`, and there is no teardown to guarantee. The record
+    # says exactly that instead of claiming a clean run, and the command exits
+    # non-zero so a caller cannot chain it as a successful launch (issue #3400).
+    run = {"profile": profile, "command": command, "url": url, "attempted_at": now(), "status": "not_started", "pid": "not-started", "reason": "app harness does not start processes yet"}
     runs = load_json(state(root) / "app-harness-runs.json", {"schema": 1, "runs": []})
     runs.setdefault("runs", []).append(run)
     write_json(state(root) / "app-harness-runs.json", runs)
-    result = {**plan, "status": "passed", "readiness": "mock-ready" if command.startswith("mock:") else "planned-ready", "side_effects": {"started_process": True, "stopped_process": True}}
+    result = {**plan, "status": "not_implemented", "readiness": "not_probed", "side_effects": {"started_process": False, "stopped_process": False}, "blocked_reason": "app harness does not start processes yet"}
     write_json(reports(root) / "app-harness-result.json", result)
-    write_text(reports(root) / "app-harness-result.md", "# App Harness Result\n\n## Summary\n\nProcess stopped cleanly. stdout/stderr summaries are redacted for secret-like values.")
-    return 0
+    write_text(reports(root) / "app-harness-result.md", "\n".join([
+        "# App Harness Result",
+        "",
+        "## Summary",
+        "",
+        "- Status: `not_implemented`",
+        "- No process was started, probed for readiness, or stopped.",
+        "",
+        "## Next step",
+        "",
+        "Implement real orchestration (start the command, poll readiness against the",
+        "profile URL, guarantee teardown, record the real pid and exit status) before",
+        "citing this report as runtime evidence.",
+    ]))
+    return 1
 
 
 def playwright_evidence(root: Path, feature: str, confirm: bool, url: str = "") -> int:

@@ -59,3 +59,37 @@ setup() {
     grep -q 'fail closed' "$f"
   done
 }
+
+@test "Phase 3.75 carries the Cross-language boundaries block" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-define/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-define/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+  do
+    grep -q 'Cross-language boundaries' "$f"
+    grep -q 'Golden fixture' "$f"
+  done
+}
+
+@test "Phase 3.75 appends the boundary block between the shared-contracts markers" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-define/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-define/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+  do
+    grep -Fq 'more distinct `lang:*` labels' "$f"
+    grep -Fq 'child carries `lang:mixed`' "$f"
+    grep -Fq 'autospec-shared-contracts:begin -->` / `:end -->' "$f"
+  done
+}
+
+@test "Phase 3.75 fails closed on a boundary with no schema under schemas/" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-define/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-define/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+  do
+    grep -q 'Fail-closed schema rule' "$f"
+    grep -q 'boundary-schema-missing' "$f"
+  done
+}

@@ -7,7 +7,7 @@ skills/autospec-run/tests/reviewer-tier.bats 3
 skills/autospec-shared/tests/integration/gap-remediation-compose.bats 1
 skills/autospec-shared/tests/integration/lang-matrix.bats 1
 skills/autospec-shared/tests/unit/gap-remediation-loop.bats 1
-skills/autospec-shared/tests/unit/repo-quality-audit.bats 11
+skills/autospec-shared/tests/unit/repo-quality-audit.bats 0
 skills/autospec-shared/tests/unit/security-scan.bats 1
 skills/autospec-upgrade/tests/upgrade-engine.bats 1
 tests/agent-env-install.bats 1

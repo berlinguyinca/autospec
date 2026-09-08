@@ -55,6 +55,61 @@ setup() {
     rm -rf "$scratch"
 }
 
+@test "financial gate matches money-denominated identifiers, not every f64" {
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/crates/autospec-core/src"
+    cp "$REGISTRY" "$scratch/registry.yml"
+
+    # Non-monetary f64 is legitimate and must not breach: capability scores, ratios,
+    # tokens-per-second and normalised routing costs all live beside money in this repo.
+    cat > "$scratch/crates/autospec-core/src/metrics.rs" <<'SRC'
+pub struct Telemetry {
+    pub decode_tokens_per_second: f64,
+    pub concurrency: f64,
+    pub network_cost: f64,
+    pub quality_floor: f64,
+}
+pub fn cache_hit_rate(hits: u64, total: u64) -> f64 {
+    hits as f64 / total as f64
+}
+SRC
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="financial_no_f64" and .observed==0)' >/dev/null
+
+    # A money-denominated field typed f64 is a breach.
+    cat > "$scratch/crates/autospec-core/src/wallet.rs" <<'SRC'
+pub struct Wallet {
+    pub cost_per_1k_millicents: f64,
+}
+SRC
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="financial_no_f64" and .observed==1 and .locations[0].path=="crates/autospec-core/src/wallet.rs")' >/dev/null
+    rm "$scratch/crates/autospec-core/src/wallet.rs"
+
+    # Casting an integer money unit into f64 is a breach too.
+    cat > "$scratch/crates/autospec-core/src/report.rs" <<'SRC'
+pub fn total(price_micros: u64) -> u64 {
+    let scaled = price_micros as f64;
+    scaled as u64
+}
+SRC
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="financial_no_f64" and .observed==1 and .locations[0].path=="crates/autospec-core/src/report.rs")' >/dev/null
+
+    rm -rf "$scratch"
+}
+
+@test "financial and core-to-CLI gates hold on this repository" {
+    run bash "$FITNESS" run --registry "$REGISTRY"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '^PASS financial_no_f64 .* observed=0 threshold=0$'
+    echo "$output" | grep -q '^PASS rust_core_cli_direction .* observed=0 threshold=0$'
+    echo "$output" | grep -q 'failed_gates=0'
+}
+
 @test "breach produces auto-implement issue body with metric and location" {
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/src"
@@ -69,7 +124,7 @@ fitness_functions:
     gate: true
     threshold: 0
     paths:
-      - src/**
+      - src/**/*
     pattern: 'f64'
     metric: forbidden_f64_occurrences
     issue:

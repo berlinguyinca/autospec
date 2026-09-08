@@ -72,8 +72,12 @@ fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() 
         bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect("first prelaunch snapshot");
     let persisted = fs::read_to_string(&state_path).expect("persisted invocation");
+    let invocation: serde_json::Value =
+        serde_json::from_str(&persisted).expect("parse persisted invocation");
     assert!(
-        persisted.contains("\"remote_snapshot_digest\":\""),
+        invocation
+            .get("remote_snapshot_digest")
+            .is_some_and(serde_json::Value::is_string),
         "invocation must bind the snapshot digest"
     );
     state.remote_snapshot_digest = None;
@@ -88,17 +92,17 @@ fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() 
     let error =
         bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect_err("snapshot recapture must fail closed");
-    assert!(
-        error.contains("exists") || error.contains("once"),
-        "{error}"
+    assert_eq!(
+        error,
+        "executor remote snapshot is create-once in Pending phase"
     );
 
     state.identity.worker_id = "foreign-worker".to_string();
     let error = bridge::RemoteMutationSnapshot::load(&state_path, &state)
         .expect_err("full invocation identity mismatch must fail closed");
-    assert!(
-        error.contains("identity") || error.contains("digest"),
-        "{error}"
+    assert_eq!(
+        error,
+        "executor prelaunch remote snapshot digest or identity mismatch"
     );
 }
 
@@ -159,7 +163,10 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     let no_intent =
         bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect_err("same-parent merge without durable intent must fail closed");
-    assert!(no_intent.contains("intent"), "{no_intent}");
+    assert_eq!(
+        no_intent,
+        "executor adopted base merge has no exact durable intent"
+    );
 
     let scope_root = state.identity.worktree.parent().expect("scope root");
     let intent = bridge::BaseDriftIntent {
@@ -186,7 +193,10 @@ fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
     let unowned =
         bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect_err("same-parent merge with an arbitrary tree must fail closed");
-    assert!(unowned.contains("tree"), "{unowned}");
+    assert_eq!(
+        unowned,
+        "executor adopted base merge tree does not match its durable intent"
+    );
     git(&state.identity.worktree, &["reset", "--hard", &merged_head]);
 
     let captured =
@@ -231,10 +241,17 @@ fn autonomous_executor_bridge_snapshot_recovery_rejects_foreign_and_malformed_fi
             bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
                 .expect_err("invalid existing snapshot must not be rebound");
 
-        assert!(
-            error.contains("identity") || error.contains("parse"),
-            "{variant}: {error}"
-        );
+        if variant == "foreign" {
+            assert_eq!(
+                error,
+                "executor prelaunch remote snapshot identity does not match invocation"
+            );
+        } else {
+            assert!(
+                error.starts_with("parse executor prelaunch remote snapshot: "),
+                "{variant}: {error}"
+            );
+        }
         assert!(state.remote_snapshot_digest.is_none());
     }
 }
@@ -250,8 +267,20 @@ fn autonomous_executor_bridge_proof_recovery_preserves_phase_and_artifact_digest
     bridge::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
         .expect("initial proof");
     let persisted = fs::read_to_string(&state_path).expect("persisted proof");
-    assert!(persisted.contains("\"closeout_path\":\""), "{persisted}");
-    assert!(persisted.contains("\"closeout_digest\":\""), "{persisted}");
+    let invocation: serde_json::Value =
+        serde_json::from_str(&persisted).expect("parse persisted proof");
+    assert!(
+        invocation
+            .get("closeout_path")
+            .is_some_and(serde_json::Value::is_string),
+        "{persisted}"
+    );
+    assert!(
+        invocation
+            .get("closeout_digest")
+            .is_some_and(serde_json::Value::is_string),
+        "{persisted}"
+    );
 
     state.phase = BridgePhase::BranchPushed;
     bridge::write_invocation_atomic(&state_path, &state).expect("mutation phase");
@@ -285,7 +314,10 @@ fn autonomous_executor_bridge_rejects_a_forged_closeout_body_at_mutation_boundar
     )
     .expect_err("forged proof body must fail before mutation");
 
-    assert!(error.contains("digest"), "{error}");
+    assert_eq!(
+        &*error,
+        "executor draft transaction Closeout body digest does not match durable proof"
+    );
     let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
     assert_eq!(calls.matches("pr create").count(), 0);
     assert!(git_stdout(
@@ -331,9 +363,9 @@ fn autonomous_executor_bridge_rejects_saturated_pull_request_inventory() {
         bridge::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect_err("saturated PR inventory must fail closed");
 
-    assert!(
-        error.contains("100") || error.contains("saturat"),
-        "{error}"
+    assert_eq!(
+        error,
+        "executor open pull request inventory saturated the 100-row limit"
     );
 }
 
@@ -613,7 +645,13 @@ exit 19
     assert!(state.supervisor.is_none());
     assert!(state.process.is_none());
     let events = fs::read_to_string(event_log).expect("claim loss event");
-    assert!(events.contains("\"event\":\"claim_ownership_lost\""));
+    let saw_claim_loss = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("claim_ownership_lost")
+        });
+    assert!(saw_claim_loss, "{events}");
     let calls = fs::read_to_string(gh_log).expect("claim gh calls");
     assert!(
         calls.matches("issue\ncomment\n42").count() >= 1,
