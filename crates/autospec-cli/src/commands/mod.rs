@@ -2,6 +2,7 @@ pub mod aar;
 pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
+pub mod dispatch;
 pub mod doctor;
 pub mod explore;
 pub mod growth_report;
@@ -90,6 +91,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "Observe repair loops: rate, consecutive-sweep escalation, defect tickets",
     ),
     (
+        "dispatch",
+        "Gate dispatch on queue freshness and per-hop liveness",
+    ),
+    (
         "doctor",
         "Check the Rust core workspace (`doctor code-intel` for LSP health)",
     ),
@@ -129,6 +134,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "claim" => claim::run(rest),
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
+            "dispatch" => dispatch::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "explore" => explore::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),

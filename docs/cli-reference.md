@@ -80,6 +80,10 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec growth-report --json` | yes | local-only metrics stub |
 | `autospec repair-loop record --loop <name> [--expected <id>]... [--repaired <id>]... [--ticket <id=ticket>]... [--state-file <path>]` | no | records one repair sweep; exit 0 idle / 1 repaired / 2 persistent (ALERT) |
 | `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
+| `autospec dispatch check [--queue <path>] [--state-file <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | gate on the queue artifact before dispatching: exit 0 fresh (proceed or genuinely idle) / 1 hold (missing, unstamped, stale, clock rewind) |
+| `autospec dispatch stamp [--by <name>] [--queue <path>] [--state-file <path>] [--at <epoch>]` | no | the producer's call: writes `# refreshed-at:` / `# refreshed-by:` atomically and beats for its own hop |
+| `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
+| `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
 
 `autospec repair-loop` observes a self-healing loop so that a repair which keeps
 repairing the same identity reads as an alert, not a status line. `record` feeds one
@@ -93,6 +97,29 @@ ticket (`--ticket <id=ticket>`); one without a ticket is printed as `UNTRACKED D
 which is the case where the repair is standing in for an unhealed defect nobody is
 reporting. Exit codes make the verdict machine-readable for cron/CI: `0` idle,
 `1` repaired, `2` persistent.
+
+`autospec dispatch` puts a liveness stamp on every hop between filing an issue and
+dispatching an agent, so a queue that stopped being repopulated reads as an error instead
+of as "nothing to do" (#3800). The queue artifact (`~/.autospec/queue.txt`) carries two
+header lines written by its producer — `# refreshed-at: <epoch>` and
+`# refreshed-by: <step>` — and `check` refuses to call an artifact with neither a
+freshness stamp: `QUEUE_MISSING`, `QUEUE_UNSTAMPED`, `STAMP_NOT_REFRESHED` (older than
+`--max-intervals` of the producer's own `--interval`), `CLOCK_REWIND` (a stamp in the
+future). Exit codes are cron-shaped throughout: `0` ok, `1` hold, `2` diagnostic.
+`stamp` is what the refresh script calls after it repopulates the file: it rewrites the
+headers through a temp file and rename, then records a beat for the producing hop, so a
+script cannot refresh the artifact and forget to say so. `beat --step <name>` records
+liveness for the other hops (`file-issue`, `topup`, `dispatch-agent`) into
+`~/.autospec/dispatch-liveness.json`. `status` reports the declared topology — the
+built-in filing-to-dispatch chain unless `--topology` points at a JSON file with a
+`{"steps": [...]}` array, whose `host` is one of `authenticated`, `shared-cluster`,
+`ephemeral-session`, `credential` one of `none`, `gh-token`, and `schedule` either
+`{"scheduled": {"interval_secs": N}}` or `"session-scoped"` — and audits it statically:
+a credential-holding step scheduled on an `ephemeral-session` host, a credential held on
+`shared-cluster` storage, a consumed artifact whose producer only runs from a login
+session, or a step with no log are all reported as `TOPOLOGY DEFECT [CODE]` before a
+single agent is launched. Host names and credential names in a hand-written topology file
+are exactly the strings `status` prints.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a
