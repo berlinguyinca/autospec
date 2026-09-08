@@ -1,0 +1,36 @@
+pi-performance dashboard
+model-family: qwen3.8
+min-samples: 20
+
+live:
+  issue_id: 3327
+  state: running
+  node_id: node-1
+  profile: qwen3.8-27b-q4/rtx4090
+  turns: 12
+  context_tokens: 41200
+  ttft_ms: 850
+  decode_tokens_per_second: 34.5
+  cache_hit_rate: 0.83
+  tool_ms: 95400
+  test_ms: 61200
+  repair_count: 1
+  queue_ms: 2400
+
+history:
+  samples: 79
+  p50_ms: 69000
+  p90_ms: 97000
+  p95_ms: 101000
+  successful_issues_per_hour: 3.29
+  median_time_to_passing_ms: 64000
+
+advice:
+  source: benchmark
+  model-family: qwen3.8
+  profile: qwen3.8-27b-q4/rtx4090
+  rationale:
+    claude-sonnet-5/provider-api: model_family claude is not the locked family qwen3.8; excluded
+    qwen3.8-27b-bf16/dual-turing: eligible (lower bound 0.87, cost 0 micros, wall 92000 ms)
+    qwen3.8-27b-q4/rtx4090: eligible (lower bound 0.86, cost 0 micros, wall 71500 ms)
+    selected qwen3.8-27b-q4/rtx4090: cheapest eligible profile under locked family qwen3.8

@@ -21,6 +21,7 @@
 pub mod capsule;
 pub mod classify;
 pub mod context;
+pub mod dashboard;
 pub mod escalation;
 pub mod guards;
 pub mod inferweave;
@@ -41,6 +42,11 @@ pub use classify::{
 pub use context::{
     check_context_fit, context_policy_for, CacheFriendlyPrompt, ContextPolicy, ContextSegment,
     PromptBlock, RetrievalStrategy,
+};
+pub use dashboard::{
+    advise, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource, HistorySummary,
+    IssueSample, LiveWorkItem, ProfileSample, RoutingAdvice, DEFAULT_LOCKED_MODEL_FAMILY,
+    DEFAULT_MIN_SAMPLES, LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
 };
 pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,

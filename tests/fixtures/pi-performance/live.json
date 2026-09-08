@@ -1,0 +1,15 @@
+{
+  "issue_id": "3327",
+  "state": "running",
+  "node_id": "node-1",
+  "profile": "qwen3.8-27b-q4/rtx4090",
+  "turns": 12,
+  "context_tokens": 41200,
+  "ttft_ms": 850,
+  "decode_tokens_per_second": 34.5,
+  "cache_hit_rate": 0.83,
+  "tool_ms": 95400,
+  "test_ms": 61200,
+  "repair_count": 1,
+  "queue_ms": 2400
+}
