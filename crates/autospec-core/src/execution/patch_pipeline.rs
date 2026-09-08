@@ -174,9 +174,10 @@ impl ConversionMemo {
 pub struct WorkerPlan {
     /// Position in the pool (also the round-robin assignment target).
     pub index: usize,
-    /// Private checkout for this worker. The worktree lock from #3608
-    /// protects this path, not the operation: N checkouts admit N
-    /// concurrent converters.
+    /// Private checkout for this worker. The exclusive worktree lock
+    /// from #3608 ([`super::worktree_lock::WorktreeLock`]) protects this
+    /// path, not the operation: N checkouts admit N concurrent
+    /// converters.
     pub worktree: String,
     /// `CARGO_TARGET_DIR` shared by every patch this worker processes (not
     /// per patch), making most runs incremental. Distinct per worker

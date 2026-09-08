@@ -7,6 +7,7 @@ mod queue_storage;
 pub mod report;
 pub mod result;
 pub mod work;
+pub mod worktree_lock;
 
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
