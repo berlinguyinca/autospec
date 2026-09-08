@@ -38,9 +38,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
     // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code
     // intelligence (#3483); +2: suites the ratchet caught (#3485); +1: lint (#3497);
-    // +2: the loud-failure verification gates (#3535).
-    assert_eq!(calls.len(), 159);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 154); // a call no gate repeats
+    // +2: the loud-failure verification gates (#3535); +1: pipeline-verdict
+    // ratchet (#3716).
+    assert_eq!(calls.len(), 160);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 155); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -69,14 +70,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 170); // +1: #3483; +2: #3485; +1: #3497; +2: #3535
+    assert_eq!(frozen_catalog_ids().len(), 171); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 170);
+    assert_eq!(ids.len(), 171);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -704,6 +705,11 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         (
             "check_verify_produced_work",
             "tests/unit/test_verify_produced_work.bats",
+        ),
+        // Registered by #3716: the pipeline-tail verdict ratchet.
+        (
+            "check_pipeline_verdict_ratchet",
+            "tests/lint/test_pipeline_verdict_checker.bats",
         ),
     ] {
         assert_eq!(

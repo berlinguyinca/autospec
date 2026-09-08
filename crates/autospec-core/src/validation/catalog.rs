@@ -139,6 +139,9 @@ impl ValidationCheck {
             "check_bats_negation_ratchet" => {
                 bats_suite("tests/lint/test_bats_negation_checker.bats")
             }
+            "check_pipeline_verdict_ratchet" => {
+                bats_suite("tests/lint/test_pipeline_verdict_checker.bats")
+            }
             "check_code_intelligence_contract" => {
                 bats_suite("tests/code-intel/code-intelligence.bats")
             }
