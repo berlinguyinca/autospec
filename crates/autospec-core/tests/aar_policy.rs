@@ -1,11 +1,17 @@
 //! AAR spec sections 18 and 19: policy assembly, versioning and explanations.
 
-use autospec_core::aar::classify::{ClassificationInput, Complexity, Risk, TaskClass};
+use autospec_core::aar::classify::{
+    classify, ClassificationInput, Complexity, Risk, TaskClass, TaskClassification,
+};
 use autospec_core::aar::inferweave::LatencyPriority;
-use autospec_core::aar::policy::{decide, role_capabilities, PolicyConfig, POLICY_SCHEMA_VERSION};
-use autospec_core::aar::profile::ModelProfileRegistry;
+use autospec_core::aar::policy::{
+    decide, decide_for_classification, role_capabilities, PolicyConfig, POLICY_SCHEMA_VERSION,
+};
+use autospec_core::aar::profile::{
+    CapabilityScores, ModelProfile, ModelProfileRegistry, ProfileObservations,
+};
 use autospec_core::aar::reasoning::{ReasoningBudget, ReasoningLimits};
-use autospec_core::aar::topology::AgentRole;
+use autospec_core::aar::topology::{AgentRole, SeparationPolicy};
 
 fn config() -> PolicyConfig {
     PolicyConfig {
@@ -292,4 +298,259 @@ fn every_role_declares_the_capabilities_it_needs() {
             role.as_str()
         );
     }
+}
+
+fn profile(
+    model_id: &str,
+    quantization: &str,
+    scores: CapabilityScores,
+    context_window: u64,
+) -> ModelProfile {
+    ModelProfile {
+        model_id: model_id.to_string(),
+        model_version: "1".to_string(),
+        quantization: quantization.to_string(),
+        backend: "vllm".to_string(),
+        hardware_class: "rtx4090".to_string(),
+        model_class: "coding-local".to_string(),
+        provider: "inferweave".to_string(),
+        context_window,
+        supports_vision: false,
+        supports_web: false,
+        max_concurrent_sessions: 3,
+        cost_per_1k_prompt_micros: 0,
+        cost_per_1k_output_micros: 0,
+        is_local: true,
+        scores,
+        observations: ProfileObservations::default(),
+        profile_version: 1,
+    }
+}
+
+/// A Low-risk bugfix: exactly the two-role topology (implementer, reviewer).
+fn low_bugfix() -> TaskClassification {
+    let mut classification = classify(
+        &ClassificationInput::new(
+            "Fix the flaky lease renewal test",
+            "It fails under load. Reproduce with the fixture.",
+        )
+        .with_paths(["crates/autospec-core/src/claim/lease.rs"]),
+    );
+    classification.complexity = Complexity::Low;
+    classification.risk = Risk::Low;
+    classification.task_class = TaskClass::Bugfix;
+    classification
+}
+
+fn registry_config(profiles: Vec<ModelProfile>) -> PolicyConfig {
+    PolicyConfig {
+        registry: ModelProfileRegistry::new("test-v1", profiles),
+        minimum_capability_score: 0.4,
+        ..PolicyConfig::default()
+    }
+}
+
+/// One RoleAssignment per topology role: the producer takes the best coding
+/// instance, the reviewer is pinned to a different instance, and the two
+/// sessions are distinct (a shared session would be a shared context).
+#[test]
+fn a_two_role_decision_pins_producer_and_reviewer_to_different_instances() {
+    let strong_coder = profile(
+        "alpha",
+        "q4_k_m",
+        CapabilityScores {
+            coding: 0.95,
+            tool_use: 0.95,
+            review: 0.4,
+            repository_reasoning: 0.5,
+            ..CapabilityScores::uniform(0.5)
+        },
+        32_768,
+    );
+    let strong_reviewer = profile(
+        "beta",
+        "bf16",
+        CapabilityScores {
+            coding: 0.5,
+            tool_use: 0.5,
+            review: 0.95,
+            repository_reasoning: 0.9,
+            ..CapabilityScores::uniform(0.5)
+        },
+        32_768,
+    );
+    let coder_key = strong_coder.key();
+    let reviewer_key = strong_reviewer.key();
+
+    let decision = decide_for_classification(
+        low_bugfix(),
+        &registry_config(vec![strong_coder, strong_reviewer]),
+    )
+    .expect("two profiles can hold the two roles");
+
+    assert_eq!(decision.assignments.len(), 2, "one assignment per role");
+    let by_role = |role: AgentRole| {
+        decision
+            .assignments
+            .iter()
+            .find(|assignment| assignment.role == role)
+            .expect("every topology role is assigned")
+    };
+    let implementer = by_role(AgentRole::Implementer);
+    let reviewer = by_role(AgentRole::Reviewer);
+
+    assert_eq!(
+        implementer.model_key, coder_key,
+        "producer takes the best coder"
+    );
+    assert_eq!(
+        reviewer.model_key, reviewer_key,
+        "reviewer takes a different instance"
+    );
+    assert_eq!(implementer.model_class, "coding-local");
+    assert_ne!(
+        implementer.session_id, reviewer.session_id,
+        "sessions must not share"
+    );
+    assert!(
+        implementer.session_id.starts_with("aar-"),
+        "{}",
+        implementer.session_id
+    );
+    assert!(implementer.session_id.ends_with("-implementer"));
+    assert!(reviewer.session_id.ends_with("-reviewer"));
+}
+
+/// A reviewer cannot sit on the producer's own instance: with exactly one
+/// eligible profile the decision is an error naming both roles.
+#[test]
+fn a_two_role_decision_with_one_eligible_profile_is_an_error_naming_both_roles() {
+    let only = profile(
+        "alpha",
+        "q4_k_m",
+        CapabilityScores {
+            coding: 0.95,
+            tool_use: 0.95,
+            review: 0.9,
+            repository_reasoning: 0.9,
+            ..CapabilityScores::uniform(0.5)
+        },
+        32_768,
+    );
+    let key = only.key();
+
+    let error = decide_for_classification(low_bugfix(), &registry_config(vec![only]))
+        .expect_err("one profile cannot both implement and review");
+
+    assert!(error.contains("reviewer"), "{error}");
+    assert!(error.contains("implementer"), "{error}");
+    assert!(error.contains(&key), "{error}");
+}
+
+/// Trivial work stays single-agent and still gets its one assignment.
+#[test]
+fn a_single_agent_decision_gets_exactly_one_assignment() {
+    let only = profile("alpha", "q4_k_m", CapabilityScores::uniform(0.8), 32_768);
+    let key = only.key();
+    let mut classification = low_bugfix();
+    classification.complexity = Complexity::Trivial;
+
+    let decision = decide_for_classification(classification, &registry_config(vec![only]))
+        .expect("a single eligible profile routes trivial work");
+
+    assert_eq!(decision.assignments.len(), 1, "single-agent topology");
+    assert_eq!(decision.assignments[0].role, AgentRole::Implementer);
+    assert_eq!(decision.assignments[0].model_key, key);
+    assert!(decision.assignments[0].session_id.ends_with("-implementer"));
+}
+
+/// A reviewer judges the structured handoff, never the producer's working
+/// context: when only the big window fits the producer's projected context,
+/// the smaller instance is still eligible for the review and separation
+/// holds instead of erroring.
+#[test]
+fn a_large_task_keeps_separation_when_only_the_big_window_fits_the_producer() {
+    let paths: Vec<String> = (0..14)
+        .map(|index| format!("crates/autospec-core/src/feature/part_{index}.rs"))
+        .collect();
+    let decision = decide(
+        &ClassificationInput::new("Implement the report export surface", "Add the exporter.")
+            .with_paths(paths),
+        &config(),
+    )
+    .expect("the review does not need the producer's projected context");
+
+    assert!(decision.policy.complexity >= Complexity::High);
+    let by_role = |role: AgentRole| {
+        decision
+            .assignments
+            .iter()
+            .find(|assignment| assignment.role == role)
+            .expect("role must be assigned")
+    };
+    let implementer = by_role(AgentRole::Implementer);
+    let reviewer = by_role(AgentRole::Reviewer);
+
+    assert!(
+        implementer.model_key.contains("q4_k_m"),
+        "{}",
+        implementer.model_key
+    );
+    assert!(
+        reviewer.model_key.contains("bf16"),
+        "{}",
+        reviewer.model_key
+    );
+    assert_ne!(implementer.model_key, reviewer.model_key);
+}
+
+/// When the separation policy forbids planner/reviewer sharing and both end
+/// up on the only planning-grade instance, the decision is rejected rather
+/// than silently weakened.
+#[test]
+fn a_planner_and_reviewer_forced_onto_one_instance_are_rejected_when_sharing_is_disabled() {
+    let coder = profile(
+        "alpha",
+        "q4_k_m",
+        CapabilityScores {
+            coding: 0.95,
+            tool_use: 0.95,
+            planning: 0.05,
+            review: 0.4,
+            repository_reasoning: 0.5,
+            ..CapabilityScores::uniform(0.5)
+        },
+        32_768,
+    );
+    let planner = profile(
+        "beta",
+        "bf16",
+        CapabilityScores {
+            coding: 0.5,
+            tool_use: 0.5,
+            planning: 1.0,
+            review: 0.95,
+            repository_reasoning: 0.9,
+            ..CapabilityScores::uniform(0.5)
+        },
+        32_768,
+    );
+    let config = PolicyConfig {
+        registry: ModelProfileRegistry::new("test-v1", vec![coder, planner]),
+        minimum_capability_score: 0.4,
+        projected_context_growth: 0,
+        separation: SeparationPolicy {
+            allow_planner_reviewer_sharing: false,
+        },
+        ..PolicyConfig::default()
+    };
+    let mut classification = low_bugfix();
+    classification.complexity = Complexity::High;
+
+    let error = decide_for_classification(classification, &config)
+        .expect_err("planner and reviewer share the only planning-grade instance");
+
+    assert!(error.contains("planner"), "{error}");
+    assert!(error.contains("reviewer"), "{error}");
+    assert!(error.contains("sharing is disabled"), "{error}");
 }
