@@ -30,6 +30,12 @@
 #     escalated       true when the dispatch pulled in a stronger advisor/tier
 #     outcome         pending | merged_clean | lgtm_first_pass | retried_ok |
 #                     escalated | qa_failed | reverted | abandoned
+#     stack           OPTIONAL. The detected stack-profile id this dispatch ran
+#                     on (autospec-detect-stack-profile.sh). When present it
+#                     must be a non-empty string; when absent, --append and
+#                     --update-outcome normalize it to "unknown" so every row at
+#                     rest carries the field. route-decide.sh reads this as the
+#                     per-stack local-eligibility evidence (the stack gate).
 #
 # Append-only audit trail: --update-outcome appends a NEW copy of the record with
 # an updated outcome/reason/ts rather than rewriting history. Readers (--show /
@@ -157,6 +163,15 @@ _validate_object() {
         printf 'invalid cell_reasoning: %s\n' "$_cr"
         return 1
     fi
+    # stack is optional at rest (legacy rows predate it) but, when present, it
+    # must be a non-empty string: a null or numeric stack would silently fail
+    # every per-stack evidence query as if the row were from another stack.
+    if printf '%s' "$_obj" | jq -e 'has("stack")' >/dev/null 2>&1; then
+        if ! printf '%s' "$_obj" | jq -e '.stack | (type=="string") and (length>0)' >/dev/null 2>&1; then
+            printf 'stack must be a non-empty string when present\n'
+            return 1
+        fi
+    fi
     _validate_counters "$_obj"
 }
 
@@ -205,7 +220,9 @@ case "$MODE" in
         fi
         _dir="$(dirname "$LEDGER")"
         if [ ! -d "$_dir" ]; then mkdir -p "$_dir"; fi
-        printf '%s\n' "$(printf '%s' "$ARG1" | jq -c '.')" >> "$LEDGER"
+        # Normalize the optional stack field on the way in so the invariant
+        # "every row at rest carries stack" holds for --show readers.
+        printf '%s\n' "$(printf '%s' "$ARG1" | jq -c 'if has("stack") then . else . + {stack: "unknown"} end')" >> "$LEDGER"
         exit 0
         ;;
 
@@ -221,10 +238,13 @@ case "$MODE" in
             _die "--update-outcome: dispatch_id not found: $ARG1"
         fi
         # Append a NEW record rather than rewriting: the ledger is an audit trail.
+        # A pre-stack legacy row is normalized the same way --append normalizes,
+        # so the "every row carries stack" invariant survives outcome updates too.
         printf '%s' "$_prev" | jq -c \
             --arg oc "$ARG2" --arg rs "$ARG3" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '.outcome=$oc | .ts=$ts | (if $rs != "" then .reason=$rs else . end)' >> "$LEDGER"
+            '.outcome=$oc | .ts=$ts | (if $rs != "" then .reason=$rs else . end)
+             | (if has("stack") then . else . + {stack: "unknown"} end)' >> "$LEDGER"
         exit 0
         ;;
 

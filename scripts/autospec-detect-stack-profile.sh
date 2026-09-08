@@ -15,14 +15,31 @@
 # set -eu means a failure here fails the command instead of leaving a half-formed
 # profile.
 #
-# Usage: autospec-detect-stack-profile.sh [--repo-root <dir>]
+# --print-stack prints the detected primary profile id (primary_profile.id,
+# "unknown" when the detector could not tell) to stdout and nothing else, so a
+# caller can capture the stack for the routing ledger without parsing the JSON.
+# Without --print-stack the script prints nothing, exactly as before.
+#
+# Usage: autospec-detect-stack-profile.sh [--repo-root <dir>] [--print-stack]
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-python3 "$SCRIPT_DIR/autospec-autonomy-v2-lib.py" --command detect-stack "$@"
+PRINT_STACK=0
+REPO_ROOT="."
+REPO_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --print-stack) PRINT_STACK=1; shift ;;
+        --repo-root) REPO_ROOT="${2:-.}"; shift 2 ;;
+        *) REPO_ARGS+=("$1"); shift ;;
+    esac
+done
+python3 "$SCRIPT_DIR/autospec-autonomy-v2-lib.py" --command detect-stack \
+    --repo-root "$REPO_ROOT" ${REPO_ARGS[@]+"${REPO_ARGS[@]}"}
 # The detector owns the one exclusion list; PYTHONPATH lets this walker import it
 # instead of keeping a second copy that can drift.
 export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 - "$@" <<'PY'
+python3 - --repo-root "$REPO_ROOT" <<'PY'
 import argparse
 import json
 from pathlib import Path
@@ -120,3 +137,24 @@ ids = {p.get("id") for p in profile.get("profiles", []) if isinstance(p, dict)}
 profile["ui_capabilities"] = ui_capabilities(repo_root, ids)
 profile_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+# The enrichment rewrite above is the last writer of the profile, so this reads
+# the final state. "unknown" (never a guess of a different stack) when the id
+# is absent or the file is malformed: the caller then denies, it does not route.
+if [ "$PRINT_STACK" -eq 1 ]; then
+    python3 - "$REPO_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).resolve() / ".autospec/state/stack-profile.json"
+try:
+    data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    primary = data.get("primary_profile")
+    if isinstance(primary, dict):
+        print(str(primary.get("id") or "unknown"))
+    else:
+        print("unknown")
+except (ValueError, OSError):
+    print("unknown")
+PY
+fi
