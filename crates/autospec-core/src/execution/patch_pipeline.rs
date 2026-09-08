@@ -43,10 +43,12 @@
 //!    base — and is honored only while its base is still the tip. A `HELD`
 //!    computed against an old base is a hypothesis, not a decision:
 //!    [`plan_pass`] refuses to report it as a memo hit.
-//! 8. **Newest first.** Within each cost class the most recently produced
-//!    patch goes first ([`order_by_cost`]): it sits on the youngest base, is
-//!    the one most likely to apply, and converting it promptly stops the
-//!    base moving under it.
+//! 8. **Impact first, then newest.** Within each cost class the patch that
+//!    unblocks the most downstream issues goes first ([`order_by_cost`]): it
+//!    is the highest-leverage work and converting it promptly unblocks the
+//!    most dependents (#3799). Ties on impact fall back to newest-first:
+//!    the most recently produced patch sits on the youngest base and is the
+//!    one most likely to apply.
 
 use std::collections::BTreeMap;
 
@@ -100,6 +102,10 @@ pub struct Patch {
     /// Monotonic production stamp (e.g. file mtime seconds); higher is
     /// newer. Drives newest-first ordering and mid-pass absorption.
     pub produced_at: u64,
+    /// Number of downstream issues this patch unblocks. The frontier loop
+    /// publishes this value; missing entries default to 0, which degrades
+    /// ordering to recency-only (today's behaviour).
+    pub unblocks: usize,
 }
 
 impl Patch {
@@ -110,6 +116,7 @@ impl Patch {
         base_sha: impl Into<String>,
         class: ConversionClass,
         produced_at: u64,
+        unblocks: usize,
     ) -> Result<Self, String> {
         let identity = identity.into();
         let base_sha = base_sha.into();
@@ -124,6 +131,7 @@ impl Patch {
             base_sha,
             class,
             produced_at,
+            unblocks,
         })
     }
 
@@ -135,21 +143,94 @@ impl Patch {
     }
 }
 
-/// Order a pass by cost, then by recency: every terminal (cheap) patch
-/// before every candidate (expensive) patch, and within each cost class the
-/// most recently produced patch first. The newest patch sits on the youngest
-/// base, so it is the one most likely to apply — and converting it promptly
-/// stops the base moving under it (#3698). The sort is stable, so patches
-/// tied on recency keep their queue order and two passes over the same queue
-/// agree.
+/// Order a pass by cost, then by downstream impact, then by recency: every
+/// terminal (cheap) patch before every candidate (expensive) patch, and
+/// within each cost class the highest-impact patch first (most downstream
+/// issues unblocked), with recency as tiebreak. A patch that unblocks many
+/// issues is the highest-leverage work: converting it promptly unblocks the
+/// most downstream dependents (#3799). Patches tied on impact fall back to
+/// newest-first, which keeps the previous behaviour when no impact data is
+/// present (all unblocks = 0). The sort is stable, so patches tied on all
+/// keys keep their queue order and two passes over the same queue agree.
 pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
     let mut ordered: Vec<&Patch> = patches.iter().collect();
     ordered.sort_by(|a, b| {
         a.class
             .cmp(&b.class)
+            .then(b.unblocks.cmp(&a.unblocks))
             .then(b.produced_at.cmp(&a.produced_at))
     });
     ordered
+}
+
+/// Produce a one-line ordering summary for the top candidates in the pass.
+///
+/// Shows the leading `top_n` patches with their unblock counts so an inert
+/// or degenerate impact key is visible in the log rather than only
+/// discoverable by measuring it. Also reports the number of distinct
+/// unblocks values across all candidates, mirroring the "recency key has N
+/// distinct values" diagnostic that caught the degenerate-mtime bug (#3791).
+pub fn order_summary(ordered: &[&Patch], top_n: usize) -> String {
+    if ordered.is_empty() {
+        return "phase 1 ordered: 0 candidates".to_string();
+    }
+    let distinct_unblocks = ordered
+        .iter()
+        .map(|p| p.unblocks)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let top: Vec<String> = ordered
+        .iter()
+        .take(top_n)
+        .map(|p| format!("{}(unblocks:{})", p.identity, p.unblocks))
+        .collect();
+    format!(
+        "phase 1 ordered: {} first, then impact desc, then newest first — {} leads {} candidates (impact key has {} distinct values)",
+        match ordered[0].class {
+            ConversionClass::ExistingPr => "ExistingPr",
+            ConversionClass::ClosedIssue => "ClosedIssue",
+            ConversionClass::MemoizedHold => "MemoizedHold",
+            ConversionClass::NoNetChange => "NoNetChange",
+            ConversionClass::Candidate => "Candidate",
+        },
+        top.join(", "),
+        ordered.len(),
+        distinct_unblocks,
+    )
+}
+
+/// Read an `issue<TAB>unblocks` file produced by the frontier loop.
+///
+/// Each non-blank, non-comment line must be `issue_number<TAB>count`.
+/// Returns a map from issue identity string to unblock count. Missing
+/// entries (issues not in the file) default to 0 at the caller, which
+/// degrades ordering to recency-only.
+pub fn read_unblock_counts(path: &str) -> std::io::Result<BTreeMap<String, usize>> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(parse_unblock_counts(&content))
+}
+
+/// Parse the content of an `issue<TAB>unblocks` file into a map.
+///
+/// Exposed for testing without filesystem I/O.
+pub fn parse_unblock_counts(content: &str) -> BTreeMap<String, usize> {
+    let mut map = BTreeMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let key = parts.next().unwrap_or("").to_string();
+        let value = parts
+            .next()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if !key.is_empty() {
+            map.insert(key, value);
+        }
+    }
+    map
 }
 
 /// Merge patches observed by a mid-pass re-scan into the running queue
@@ -293,10 +374,10 @@ pub struct ConversionSchedule<'a> {
 }
 
 /// Plan one pass over the queue against the **current** trunk tip: order
-/// the queue by cost then recency, size the pool, assign round-robin, and
-/// flag memo hits and stale bases. An empty queue plans an empty pool —
-/// there is nothing to convert, and zero workers is the only sane pool for
-/// zero work.
+/// the queue by cost, then impact, then recency; size the pool; assign
+/// round-robin; and flag memo hits and stale bases. An empty queue plans
+/// an empty pool — there is nothing to convert, and zero workers is the
+/// only sane pool for zero work.
 ///
 /// `current_tip` is the tip of `origin/main` fetched immediately before this
 /// plan: the pass re-reads the world before each candidate, so a snapshot
@@ -351,7 +432,17 @@ mod tests {
     }
 
     fn patch_at(identity: &str, base_sha: &str, class: ConversionClass, produced_at: u64) -> Patch {
-        Patch::new(identity, base_sha, class, produced_at).unwrap()
+        Patch::new(identity, base_sha, class, produced_at, 0).unwrap()
+    }
+
+    fn patch_unblocks(
+        identity: &str,
+        base_sha: &str,
+        class: ConversionClass,
+        produced_at: u64,
+        unblocks: usize,
+    ) -> Patch {
+        Patch::new(identity, base_sha, class, produced_at, unblocks).unwrap()
     }
 
     #[test]
@@ -391,6 +482,127 @@ mod tests {
             .map(|p| p.identity.as_str())
             .collect();
         assert_eq!(identities, vec!["recent", "just-now", "morning"]);
+    }
+
+    #[test]
+    fn order_by_cost_prefers_higher_unblocks_within_a_class() {
+        // A patch that unblocks 79 downstream issues must be converted
+        // before an unrelated newer patch that unblocks 0 (#3799).
+        let patches = vec![
+            patch_unblocks("newer-no-impact", "s1", ConversionClass::Candidate, 900, 0),
+            patch_unblocks(
+                "older-high-impact",
+                "s2",
+                ConversionClass::Candidate,
+                100,
+                79,
+            ),
+            patch_unblocks("mid", "s3", ConversionClass::Candidate, 500, 5),
+        ];
+
+        let identities: Vec<_> = order_by_cost(&patches)
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            vec!["older-high-impact", "mid", "newer-no-impact"]
+        );
+    }
+
+    #[test]
+    fn order_by_cost_defaults_zero_unblocks_degrades_to_mtime() {
+        // With no impact data (all unblocks = 0), ordering is unchanged
+        // from today: newest first within a class.
+        let patches = vec![
+            patch_unblocks("old", "s1", ConversionClass::Candidate, 100, 0),
+            patch_unblocks("new", "s2", ConversionClass::Candidate, 300, 0),
+            patch_unblocks("mid", "s3", ConversionClass::Candidate, 200, 0),
+        ];
+
+        let identities: Vec<_> = order_by_cost(&patches)
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(identities, vec!["new", "mid", "old"]);
+    }
+
+    #[test]
+    fn order_by_cost_ties_on_unblocks_use_mtime() {
+        // Two patches with equal impact: the newer one goes first.
+        let patches = vec![
+            patch_unblocks("a", "s1", ConversionClass::Candidate, 100, 10),
+            patch_unblocks("b", "s2", ConversionClass::Candidate, 200, 10),
+        ];
+
+        let identities: Vec<_> = order_by_cost(&patches)
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(identities, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn order_summary_shows_top_candidates_with_unblock_counts() {
+        let patches = vec![
+            patch_unblocks("#46", "s1", ConversionClass::Candidate, 100, 79),
+            patch_unblocks("#47", "s2", ConversionClass::Candidate, 200, 3),
+            patch_unblocks("#99", "s3", ConversionClass::Candidate, 300, 0),
+        ];
+        let ordered = order_by_cost(&patches);
+        let summary = order_summary(&ordered, 3);
+
+        assert!(summary.contains("#46(unblocks:79)"), "got: {summary}");
+        assert!(summary.contains("#47(unblocks:3)"), "got: {summary}");
+        assert!(summary.contains("#99(unblocks:0)"), "got: {summary}");
+        assert!(summary.contains("3 candidates"), "got: {summary}");
+        assert!(
+            summary.contains("impact key has 3 distinct values"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn order_summary_reports_single_distinct_when_all_zero() {
+        let patches = vec![
+            patch_at("a", "s1", ConversionClass::Candidate, 100),
+            patch_at("b", "s2", ConversionClass::Candidate, 200),
+        ];
+        let ordered = order_by_cost(&patches);
+        let summary = order_summary(&ordered, 5);
+
+        assert!(
+            summary.contains("impact key has 1 distinct values"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn order_summary_empty_queue() {
+        let summary = order_summary(&[], 5);
+        assert_eq!(summary, "phase 1 ordered: 0 candidates");
+    }
+
+    #[test]
+    fn parse_unblock_counts_parses_tab_separated_content() {
+        let content = "# comment line\n46\t79\n47\t3\n\n99\t0\n";
+        let counts = parse_unblock_counts(content);
+        assert_eq!(counts.get("46"), Some(&79));
+        assert_eq!(counts.get("47"), Some(&3));
+        assert_eq!(counts.get("99"), Some(&0));
+        assert_eq!(counts.len(), 3);
+    }
+
+    #[test]
+    fn parse_unblock_counts_ignores_malformed_lines() {
+        let content = "46\t79\nbad-line-no-tab\n50\t\n";
+        let counts = parse_unblock_counts(content);
+        assert_eq!(counts.get("46"), Some(&79));
+        // "bad-line-no-tab" has no tab so value defaults to 0, but it is
+        // still a valid key entry.
+        assert_eq!(counts.get("bad-line-no-tab"), Some(&0));
+        // "50" with empty value defaults to 0.
+        assert_eq!(counts.get("50"), Some(&0));
     }
 
     #[test]
@@ -478,9 +690,9 @@ mod tests {
 
     #[test]
     fn patch_rejects_empty_identity_and_base_sha() {
-        assert!(Patch::new("", "sha", ConversionClass::Candidate, 1).is_err());
-        assert!(Patch::new("id", "  ", ConversionClass::Candidate, 1).is_err());
-        assert!(Patch::new("id", "sha", ConversionClass::Candidate, 1).is_ok());
+        assert!(Patch::new("", "sha", ConversionClass::Candidate, 1, 0).is_err());
+        assert!(Patch::new("id", "  ", ConversionClass::Candidate, 1, 0).is_err());
+        assert!(Patch::new("id", "sha", ConversionClass::Candidate, 1, 0).is_ok());
     }
 
     #[test]
@@ -624,10 +836,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_pass_orders_candidates_newest_first() {
+    fn plan_pass_orders_candidates_by_impact_then_newest_first() {
         let patches = vec![
-            patch_at("morning", "base-a", ConversionClass::Candidate, 100),
-            patch_at("just-now", "base-b", ConversionClass::Candidate, 300),
+            patch_unblocks("morning", "base-a", ConversionClass::Candidate, 100, 0),
+            patch_unblocks("just-now", "base-b", ConversionClass::Candidate, 300, 0),
+            patch_unblocks("high-impact", "base-c", ConversionClass::Candidate, 50, 79),
         ];
 
         let schedule = plan_pass(&patches, 2, "/root", &ConversionMemo::new(), "base-b").unwrap();
@@ -636,7 +849,8 @@ mod tests {
             .iter()
             .map(|a| a.patch.identity.as_str())
             .collect();
-        assert_eq!(identities, vec!["just-now", "morning"]);
+        // high-impact leads (79 unblocks), then just-now (newer of the zeros).
+        assert_eq!(identities, vec!["high-impact", "just-now", "morning"]);
     }
 
     #[test]
