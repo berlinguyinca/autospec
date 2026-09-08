@@ -37,6 +37,7 @@ pub mod lint;
 pub mod managed_project;
 pub mod rag;
 pub mod repair_loop;
+pub mod reservation_budget;
 pub mod resources;
 pub mod runtime_env;
 pub mod runtime_policy;

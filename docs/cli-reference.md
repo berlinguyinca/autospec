@@ -15,7 +15,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec aar rules` | no | prints the harness working rules injected into every agent session |
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec doctor code-intel [--json]` | yes | code intelligence backend, language-server and fallback health ([docs](code-intelligence.md)) |
-| `autospec doctor failures [--runs-dir <dir>] [--last <n>] [--threshold-percent <n>] [--top <k>] [--json]` | yes | failure signatures over a rolling window of fleet agent runs: counts against the window denominator, `SYSTEMIC` above the repetition threshold (exit `1`), `<no output>` / `<no status file>` counted as their own buckets ([docs](failure-signatures.md)) |
+| `autospec doctor failures [--runs-dir <dir>] [--last <n>] [--threshold-percent <n>] [--top <k>] [--json]` | yes | failure signatures over a rolling window of fleet agent runs: counts against the window denominator, `SYSTEMIC` above the repetition threshold (exit `1`), `<no output>` / `<no status file>` / `<timeout, no output>` counted as their own buckets ([docs](failure-signatures.md)) |
+| `autospec doctor reservation --walltime <secs\|MM:SS\|HH:MM:SS> [--budget <secs>] [--json]` | yes | agent budget versus a Slurm reservation's walltime: derives the budget (walltime minus overhead) and refuses a budget that does not fit (exit `1`); a timed-out run's building patch is preserved ([docs](failure-signatures.md)) |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
 | `autospec initiative init --id INIT-YYYY-NNNN --slug <slug> [--spec <path>] [--root <dir>]` | yes | creates the Initiative artifact registry and its first audit event; refuses an existing Initiative |
