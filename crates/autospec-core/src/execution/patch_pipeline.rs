@@ -49,6 +49,17 @@
 //!    most dependents (#3799). Ties on impact fall back to newest-first:
 //!    the most recently produced patch sits on the youngest base and is the
 //!    one most likely to apply.
+//! 9. **The worklist is a moving quantity** ([`Worklist`]). A pass that
+//!    enumerates its inputs once at startup and then works for hours
+//!    presents a snapshot as a queue: the newest work — precisely the work
+//!    most likely to matter — is invisible until the next run, and the
+//!    summary stays "accurate" the whole time because a patch that was
+//!    never enumerated cannot be reported as missing. The worklist
+//!    re-scans on a candidate-count timer ([`Worklist::rescan_due`]),
+//!    absorbs mid-run arrivals into the remaining queue or explicitly names
+//!    them as deferred ([`Worklist::absorb`], [`Worklist::defer`]), and
+//!    reports considered / arrived / deferred so the summary adds up to
+//!    what was on disk at the end of the run, not the start (#3801).
 
 use std::collections::BTreeMap;
 
@@ -154,13 +165,22 @@ impl Patch {
 /// keys keep their queue order and two passes over the same queue agree.
 pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
     let mut ordered: Vec<&Patch> = patches.iter().collect();
-    ordered.sort_by(|a, b| {
-        a.class
-            .cmp(&b.class)
-            .then(b.unblocks.cmp(&a.unblocks))
-            .then(b.produced_at.cmp(&a.produced_at))
-    });
+    ordered.sort_by(|a, b| cost_then_impact(a, b));
     ordered
+}
+
+/// The pass's ordering key, as a comparator.
+///
+/// Named rather than inlined because the worklist re-sorts the *remaining*
+/// queue after absorbing mid-run arrivals (#3801), and it must use the same
+/// key the initial ordering used. Two orderings of one queue that disagree
+/// would make an arrival's position depend on when it showed up rather than
+/// on what it is.
+fn cost_then_impact(a: &Patch, b: &Patch) -> std::cmp::Ordering {
+    a.class
+        .cmp(&b.class)
+        .then(b.unblocks.cmp(&a.unblocks))
+        .then(b.produced_at.cmp(&a.produced_at))
 }
 
 /// Produce a one-line ordering summary for the top candidates in the pass.
@@ -234,20 +254,221 @@ pub fn parse_unblock_counts(content: &str) -> BTreeMap<String, usize> {
 }
 
 /// Merge patches observed by a mid-pass re-scan into the running queue
-/// (#3698). A converter that runs for hours must see work produced during
-/// those hours; the caller re-plans the pass after absorbing.
+/// (#3698, #3801). A converter that runs for hours must see work produced
+/// during those hours; the caller re-plans the pass after absorbing.
 ///
 /// Identity is the dedup key. When an identity already exists, the entry
 /// with the higher `produced_at` wins; on a tie the freshly observed entry
-/// wins, because a re-scan is the newer observation of the same patch. The
-/// queue's existing order is untouched — ordering is the planner's job.
-pub fn absorb_new(queue: &mut Vec<Patch>, fresh: impl IntoIterator<Item = Patch>) {
+/// wins, because a re-scan is the newer observation of the same patch.
+///
+/// The queue is re-sorted after the merge (stable, cost-then-recency):
+/// ordering is only meaningful over the current population, and a list
+/// ordered once at startup degrades into arrival order for everything that
+/// comes later (#3801). Returns the number of newly arrived identities — a
+/// re-observation of a known patch is not an arrival.
+pub fn absorb_new(queue: &mut Vec<Patch>, fresh: impl IntoIterator<Item = Patch>) -> usize {
+    let mut arrived = 0;
     for observed in fresh {
         match queue.iter_mut().find(|p| p.identity == observed.identity) {
             Some(existing) if existing.produced_at > observed.produced_at => {}
             Some(existing) => *existing = observed,
-            None => queue.push(observed),
+            None => {
+                queue.push(observed);
+                arrived += 1;
+            }
         }
+    }
+    let mut ordered = std::mem::take(queue);
+    ordered.sort_by(|a, b| cost_then_impact(a, b));
+    *queue = ordered;
+    arrived
+}
+
+/// The run summary of a [`Worklist`]: the worklist reported as a moving
+/// quantity (#3801).
+///
+/// "141 candidates" stated once and never revised is the defect this
+/// replaces: an arrival was not merely depriorised, it was unrepresented, and
+/// no log line was wrong. The counts add up to what was on disk at the
+/// **end** of the run, not the start:
+///
+/// ```text
+/// on_disk    = initial + arrived + deferred
+/// considered + remaining + deferred = on_disk
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorklistSummary {
+    /// The stamp at which the worklist was frozen (enumerated).
+    pub frozen_at: u64,
+    /// Patches on disk at the freeze: the startup enumeration.
+    pub initial: usize,
+    /// New identities absorbed into the running queue mid-run.
+    pub arrived: usize,
+    /// Patches the run has converted, or decided cheaply.
+    pub considered: usize,
+    /// Patches still in the remaining queue.
+    pub remaining: usize,
+    /// Patches explicitly named as deferred to the next run.
+    pub deferred: usize,
+    /// Patches on disk at the end of the run: `initial + arrived + deferred`.
+    pub on_disk: usize,
+}
+
+/// A live view of the conversion pass's worklist: the queue as a moving
+/// quantity, not a startup snapshot (#3801).
+///
+/// A pass that enumerates its inputs once and then works through them for
+/// hours presents a snapshot as a queue. Two consequences: work arriving
+/// mid-run is invisible until the next run (and it is precisely the newest
+/// work, which is the work most likely to matter), and every ordering
+/// decision was made against a population that no longer exists. This type
+/// owns the bookkeeping a live worklist needs; the caller performs the I/O:
+///
+/// - re-scan on a candidate-count timer, not wall-clock time
+///   ([`Worklist::rescan_due`]): lengthening the per-candidate work (e.g. a
+///   mandatory validate) cannot silently enlarge the set of work a run
+///   cannot see, because arrivals are counted either way;
+/// - absorb mid-run arrivals into the remaining queue
+///   ([`Worklist::absorb`]), which re-sorts it, or name them as explicitly
+///   deferred to the next run ([`Worklist::defer`]) — never unrepresented;
+/// - report the freeze window and the moving counts
+///   ([`Worklist::summary`], [`Worklist::summary_line`]) so the summary
+///   adds up to what was on disk at the end of the run, not the start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worklist {
+    remaining: Vec<Patch>,
+    deferred: Vec<Patch>,
+    frozen_at: u64,
+    initial: usize,
+    considered: usize,
+    arrived: usize,
+    considered_since_rescan: usize,
+}
+
+impl Worklist {
+    /// Freeze the worklist: adopt the enumeration taken at `frozen_at` (the
+    /// same monotonic stamp space as [`Patch::produced_at`]) and start it in
+    /// execution order.
+    pub fn new(patches: impl IntoIterator<Item = Patch>, frozen_at: u64) -> Self {
+        let mut remaining: Vec<Patch> = patches.into_iter().collect();
+        remaining.sort_by(|a, b| cost_then_impact(a, b));
+        let initial = remaining.len();
+        Self {
+            remaining,
+            deferred: Vec::new(),
+            frozen_at,
+            initial,
+            considered: 0,
+            arrived: 0,
+            considered_since_rescan: 0,
+        }
+    }
+
+    /// The stamp at which this worklist was frozen (its startup
+    /// enumeration).
+    pub fn frozen_at(&self) -> u64 {
+        self.frozen_at
+    }
+
+    /// The remaining queue in execution order: next to convert first.
+    pub fn remaining(&self) -> &[Patch] {
+        &self.remaining
+    }
+
+    /// The patches explicitly named as deferred to the next run.
+    pub fn deferred(&self) -> &[Patch] {
+        &self.deferred
+    }
+
+    /// Take the next patch in execution order for conversion and count it
+    /// as considered.
+    pub fn take_next(&mut self) -> Option<Patch> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        let next = self.remaining.remove(0);
+        self.considered += 1;
+        self.considered_since_rescan += 1;
+        Some(next)
+    }
+
+    /// Whether a re-scan of shared storage is due: `every_n` candidates have
+    /// been considered since the last re-scan. `every_n == 1` re-scans
+    /// before each candidate; `every_n == 0` means always due.
+    ///
+    /// The timer counts candidates, not wall-clock time. Lengthening the
+    /// per-candidate cost (e.g. a mandatory validate) lengthens the window
+    /// in seconds, but no longer silently: whatever the window misses is
+    /// still named in [`Worklist::summary_line`], and the summary adds up
+    /// to what was on disk at the end of the run (#3801).
+    pub fn rescan_due(&self, every_n: usize) -> bool {
+        if every_n == 0 {
+            return true;
+        }
+        self.considered_since_rescan >= every_n
+    }
+
+    /// Absorb patches observed by a mid-run re-scan: merge into the
+    /// remaining queue (identity-deduped, fresher observation wins),
+    /// re-sort the queue, count new arrivals, and reset the re-scan timer.
+    /// Returns the number of newly arrived identities.
+    pub fn absorb(&mut self, fresh: impl IntoIterator<Item = Patch>) -> usize {
+        let arrived = absorb_new(&mut self.remaining, fresh);
+        self.arrived += arrived;
+        self.considered_since_rescan = 0;
+        arrived
+    }
+
+    /// Name a patch as explicitly deferred to the next run instead of
+    /// converting it in this one. A patch that is still in the remaining
+    /// queue is going to be converted in this run, and the same patch may
+    /// only be deferred once: both are bookkeeping errors.
+    pub fn defer(&mut self, patch: Patch) -> Result<(), String> {
+        if self.remaining.iter().any(|p| p.identity == patch.identity) {
+            return Err(format!(
+                "refusing to defer {}: already in the remaining worklist",
+                patch.identity
+            ));
+        }
+        if self.deferred.iter().any(|p| p.identity == patch.identity) {
+            return Err(format!(
+                "refusing to defer {}: already named as deferred",
+                patch.identity
+            ));
+        }
+        self.deferred.push(patch);
+        Ok(())
+    }
+
+    /// The run summary: the counts add up to what was on disk at the end of
+    /// the run, not the start (see [`WorklistSummary`]).
+    pub fn summary(&self) -> WorklistSummary {
+        let on_disk = self.initial + self.arrived + self.deferred.len();
+        WorklistSummary {
+            frozen_at: self.frozen_at,
+            initial: self.initial,
+            arrived: self.arrived,
+            considered: self.considered,
+            remaining: self.remaining.len(),
+            deferred: self.deferred.len(),
+            on_disk,
+        }
+    }
+
+    /// The freeze window and the moving counts as one log line, e.g. `worklist
+    /// frozen at 1022; 2 patches arrived since freeze; 84 considered, 51
+    /// remaining, 2 deferred to the next run [iw-49, iw-50]`.
+    pub fn summary_line(&self) -> String {
+        let s = self.summary();
+        let mut line = format!(
+            "worklist frozen at {}; {} patches arrived since freeze; {} considered, {} remaining, {} deferred to the next run",
+            s.frozen_at, s.arrived, s.considered, s.remaining, s.deferred
+        );
+        if !self.deferred.is_empty() {
+            let names: Vec<&str> = self.deferred.iter().map(|p| p.identity.as_str()).collect();
+            line.push_str(&format!(" [{}]", names.join(", ")));
+        }
+        line
     }
 }
 
@@ -627,14 +848,15 @@ mod tests {
 
     #[test]
     fn absorb_new_adds_new_identities_and_dedups_by_recency() {
-        // Nine patches produced mid-pass must not stay invisible: a
-        // re-scan merges them into the running queue, deduped by identity.
+        // Patches produced mid-pass must not stay invisible: a re-scan
+        // merges them into the running queue, deduped by identity, and
+        // re-sorts the remaining queue (#3801).
         let mut queue = vec![
             patch_at("p1", "base-1", ConversionClass::Candidate, 100),
             patch_at("p2", "base-1", ConversionClass::MemoizedHold, 200),
         ];
 
-        absorb_new(
+        let arrived = absorb_new(
             &mut queue,
             vec![
                 // New identity: appended.
@@ -647,6 +869,9 @@ mod tests {
             ],
         );
 
+        // Only p3 is a new arrival; p1 and p2 are re-observations.
+        assert_eq!(arrived, 1);
+        // All three are candidates now: newest first.
         assert_eq!(
             queue
                 .iter()
@@ -658,10 +883,39 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                ("p1", "base-1", ConversionClass::Candidate, 100),
-                ("p2", "base-2", ConversionClass::Candidate, 250),
                 ("p3", "base-2", ConversionClass::Candidate, 300),
+                ("p2", "base-2", ConversionClass::Candidate, 250),
+                ("p1", "base-1", ConversionClass::Candidate, 100),
             ]
+        );
+    }
+
+    #[test]
+    fn absorb_new_resorts_the_remaining_queue_by_cost_then_impact() {
+        // A list ordered once at startup degrades into arrival order for
+        // everything that comes later (#3801): the late terminal class jumps
+        // ahead of both candidates even though its stamp is older than the
+        // newest candidate — cost dominates recency.
+        let mut queue = vec![
+            patch_at("old-candidate", "s1", ConversionClass::Candidate, 100),
+            patch_at("new-candidate", "s2", ConversionClass::Candidate, 300),
+        ];
+
+        let arrived = absorb_new(
+            &mut queue,
+            vec![patch_at(
+                "late-terminal",
+                "s3",
+                ConversionClass::NoNetChange,
+                150,
+            )],
+        );
+
+        assert_eq!(arrived, 1);
+        let identities: Vec<_> = queue.iter().map(|p| p.identity.as_str()).collect();
+        assert_eq!(
+            identities,
+            vec!["late-terminal", "new-candidate", "old-candidate"]
         );
     }
 
@@ -671,11 +925,13 @@ mod tests {
         // fresh entry wins.
         let mut queue = vec![patch_at("p1", "base-1", ConversionClass::Candidate, 100)];
 
-        absorb_new(
+        let arrived = absorb_new(
             &mut queue,
             vec![patch_at("p1", "base-2", ConversionClass::ExistingPr, 100)],
         );
 
+        // A re-observation of a known identity is not an arrival.
+        assert_eq!(arrived, 0);
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].base_sha, "base-2");
         assert_eq!(queue[0].class, ConversionClass::ExistingPr);
@@ -887,5 +1143,155 @@ mod tests {
         let patches = vec![patch("p1", "base-1", ConversionClass::Candidate)];
         let error = plan_pass(&patches, 1, "/root", &ConversionMemo::new(), "  ").unwrap_err();
         assert!(error.contains("current tip"));
+    }
+
+    #[test]
+    fn worklist_mid_run_arrival_is_converted_by_the_same_run() {
+        // Acceptance (#3801): a patch written to shared storage during a run
+        // is converted by that run, or explicitly named as deferred.
+        let mut wl = Worklist::new(
+            vec![patch_at("iw-45", "base-a", ConversionClass::Candidate, 100)],
+            1000,
+        );
+
+        let next = wl.take_next().unwrap();
+        assert_eq!(next.identity, "iw-45");
+
+        // iw-47 finished on the cluster mid-run; the re-scan finds it and
+        // the same run absorbs and converts it.
+        let arrived = wl.absorb(vec![patch_at(
+            "iw-47",
+            "base-b",
+            ConversionClass::Candidate,
+            1100,
+        )]);
+        assert_eq!(arrived, 1);
+
+        let next = wl.take_next().unwrap();
+        assert_eq!(next.identity, "iw-47");
+
+        let s = wl.summary();
+        assert_eq!(s.initial, 1);
+        assert_eq!(s.arrived, 1);
+        assert_eq!(s.considered, 2);
+        assert_eq!(s.remaining, 0);
+        assert_eq!(s.deferred, 0);
+        assert_eq!(s.on_disk, 2);
+    }
+
+    #[test]
+    fn worklist_summary_adds_up_to_end_of_run_not_start() {
+        // "141 candidates" stated once and never revised: the summary's
+        // counts must add up to what was on disk at the *end* of the run.
+        let mut wl = Worklist::new(
+            vec![
+                patch_at("a", "s", ConversionClass::Candidate, 100),
+                patch_at("b", "s", ConversionClass::ClosedIssue, 50),
+                patch_at("c", "s", ConversionClass::Candidate, 200),
+            ],
+            1000,
+        );
+        // Execution order: b (terminal first), then c, then a.
+        assert_eq!(wl.remaining()[0].identity, "b");
+
+        wl.take_next().unwrap();
+        wl.take_next().unwrap();
+        assert!(wl.rescan_due(2));
+
+        // A re-scan: one new arrival, one re-observation of a queued patch.
+        let arrived = wl.absorb(vec![
+            patch_at("d", "s", ConversionClass::Candidate, 300),
+            patch_at("a", "s", ConversionClass::Candidate, 100),
+        ]);
+        assert_eq!(arrived, 1);
+        assert!(!wl.rescan_due(2));
+
+        // A patch the run will not convert is named, not unrepresented.
+        wl.defer(patch_at("e", "s", ConversionClass::Candidate, 310))
+            .unwrap();
+
+        let s = wl.summary();
+        assert_eq!(s.initial, 3);
+        assert_eq!(s.arrived, 1);
+        assert_eq!(s.considered, 2);
+        assert_eq!(s.remaining, 2);
+        assert_eq!(s.deferred, 1);
+        assert_eq!(s.on_disk, 5);
+        // The counts add up to what was on disk at the end of the run.
+        assert_eq!(s.considered + s.remaining + s.deferred, s.on_disk);
+
+        let line = wl.summary_line();
+        assert!(line.starts_with("worklist frozen at 1000; "), "{}", line);
+        assert!(line.contains("1 patches arrived since freeze"), "{}", line);
+        assert!(
+            line.contains("2 considered, 2 remaining, 1 deferred to the next run [e]"),
+            "{}",
+            line
+        );
+    }
+
+    #[test]
+    fn rescan_due_counts_candidates_not_wall_clock() {
+        let mut wl = Worklist::new(
+            vec![
+                patch_at("a", "s", ConversionClass::Candidate, 1),
+                patch_at("b", "s", ConversionClass::Candidate, 2),
+                patch_at("c", "s", ConversionClass::Candidate, 3),
+            ],
+            1000,
+        );
+
+        // Every candidate: not due before the first take, due right after.
+        assert!(!wl.rescan_due(1));
+        wl.take_next().unwrap();
+        assert!(wl.rescan_due(1));
+
+        // The timer resets on absorb; every two candidates, due after two.
+        wl.absorb(Vec::new());
+        assert!(!wl.rescan_due(2));
+        wl.take_next().unwrap();
+        assert!(!wl.rescan_due(2));
+        wl.take_next().unwrap();
+        assert!(wl.rescan_due(2));
+
+        // Zero means always due.
+        let empty = Worklist::new(Vec::<Patch>::new(), 1000);
+        assert!(empty.rescan_due(0));
+    }
+
+    #[test]
+    fn defer_rejects_queued_and_duplicate_patches() {
+        let mut wl = Worklist::new(
+            vec![patch_at("queued", "s", ConversionClass::Candidate, 1)],
+            1000,
+        );
+
+        let err = wl
+            .defer(patch_at("queued", "s", ConversionClass::Candidate, 1))
+            .unwrap_err();
+        assert!(err.contains("already in the remaining worklist"), "{}", err);
+
+        wl.defer(patch_at("later", "s", ConversionClass::Candidate, 2))
+            .unwrap();
+        let err = wl
+            .defer(patch_at("later", "s", ConversionClass::Candidate, 2))
+            .unwrap_err();
+        assert!(err.contains("already named as deferred"), "{}", err);
+    }
+
+    #[test]
+    fn worklist_starts_in_execution_order() {
+        let wl = Worklist::new(
+            vec![
+                patch_at("old", "s", ConversionClass::Candidate, 100),
+                patch_at("terminal", "s", ConversionClass::NoNetChange, 90),
+                patch_at("new", "s", ConversionClass::Candidate, 200),
+            ],
+            1000,
+        );
+
+        let identities: Vec<_> = wl.remaining().iter().map(|p| p.identity.as_str()).collect();
+        assert_eq!(identities, vec!["terminal", "new", "old"]);
+        assert_eq!(wl.frozen_at(), 1000);
     }
 }
