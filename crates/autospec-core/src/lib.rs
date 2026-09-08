@@ -23,6 +23,7 @@ pub mod code_intel;
 pub mod context;
 pub mod coordination;
 pub mod error;
+pub mod evaluation;
 pub mod evidence;
 pub mod execution;
 pub mod explore;
