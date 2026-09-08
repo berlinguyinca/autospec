@@ -1,0 +1,31 @@
+# Pipeline-tail verdicts that predate the ratchet (issue #3716).
+# Format: <path> <count>. Regenerate with scripts/lint-pipeline-verdict.sh --seed.
+# A count may only shrink; a new site in any file is a blocking finding.
+install.sh 1
+scripts/assemble-impl-prompt.sh 2
+scripts/autonomous-control-channel.sh 1
+scripts/autonomous-persona-synth.sh 1
+scripts/autonomous-premerge-gate.sh 1
+scripts/autonomous-priority-match.sh 1
+scripts/autonomous-runtime-refresh.sh 2
+scripts/autonomous-usage-governor.sh 1
+scripts/autospec-autonomous-run-drain.sh 2
+scripts/autospec-control-plane.sh 3
+scripts/autospec-runtime-install.sh 1
+scripts/autospec-supervisor-install.sh 1
+scripts/autospec-write-run-summary.sh 1
+scripts/check-negative-path-pairs.sh 1
+scripts/classify-model-fit.sh 3
+scripts/explore-research-cycle.sh 1
+scripts/explore-research/codebase-signals.sh 1
+scripts/explore-research/dogfooding.sh 1
+scripts/explore-research/quality-resilience.sh 4
+scripts/explore-research/self-leverage.sh 1
+scripts/explore-research/style-normalization.sh 2
+scripts/lib/autospec-loop.sh 3
+scripts/lint-implementation.sh 2
+scripts/lint-issue.sh 9
+scripts/project-board-resolve.sh 1
+scripts/qa-finding-to-issue.sh 1
+scripts/refine-prompt.sh 1
+scripts/usage-observe.sh 1
