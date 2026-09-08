@@ -6,6 +6,10 @@ TEST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 TEST_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 TEST_HOME="$(mktemp -d -t autospec-install-path.XXXXXX)"
 TEMP_SCRIPTS_DIR="$(mktemp -d -t autospec-ephemeral-scripts.XXXXXX)"
+# The isolated HOME verifies install *paths*; compilation does not need isolation.
+# Share a stable target dir with the host (like CARGO_HOME/RUSTUP_HOME above) so
+# `cargo build --release` stays incremental across runs (issue #3739).
+TEST_TARGET_DIR="${AUTOSPEC_TEST_TARGET_DIR:-${TMPDIR:-/tmp}/autospec-install-test-target}"
 cleanup() {
     find "$TEST_HOME" -type d -exec chmod u+w {} + 2>/dev/null || true
     rm -rf "$TEST_HOME" "$TEMP_SCRIPTS_DIR"
@@ -15,6 +19,7 @@ trap cleanup EXIT INT TERM
 HOME="$TEST_HOME" \
 CARGO_HOME="$TEST_CARGO_HOME" \
 RUSTUP_HOME="$TEST_RUSTUP_HOME" \
+CARGO_TARGET_DIR="$TEST_TARGET_DIR" \
 AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -158,6 +163,7 @@ chmod +x "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
 HOME="$TEST_HOME" \
 CARGO_HOME="$TEST_CARGO_HOME" \
 RUSTUP_HOME="$TEST_RUSTUP_HOME" \
+CARGO_TARGET_DIR="$TEST_TARGET_DIR" \
 AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -197,6 +203,7 @@ grep -q '"running":false' /tmp/autospec-autonomous-status-healed.json || {
 HOME="$TEST_HOME" \
 CARGO_HOME="$TEST_CARGO_HOME" \
 RUSTUP_HOME="$TEST_RUSTUP_HOME" \
+CARGO_TARGET_DIR="$TEST_TARGET_DIR" \
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
 AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
 AUTOSPEC_SKIP_SUPERPOWERS=1 \
