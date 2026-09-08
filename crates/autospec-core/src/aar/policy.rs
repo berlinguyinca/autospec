@@ -22,10 +22,22 @@ use super::reasoning::{
     select_reasoning, ReasoningContext, ReasoningHistory, ReasoningLimits, ReasoningSelection,
     SamplingProfile, SamplingRegistry,
 };
-use super::topology::{select_topology, AgentTopology, SeparationPolicy};
+use super::topology::{
+    enforce_separation, select_topology, AgentRole, AgentTopology, RoleAssignment, SeparationPolicy,
+};
 
 /// Bumped whenever a persisted policy field changes meaning.
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
+
+/// Free context an independent reviewer needs to judge a change.
+///
+/// A reviewer consumes the structured handoff -- summaries and artifacts,
+/// never the producer's transcript or working workspace -- so its floor is
+/// the review baseline, not the producer's projected working context. Asking
+/// a reviewer for the producer's floor would disqualify smaller instances
+/// that are fully adequate for a review and are the only second instance a
+/// large task can be independent on.
+pub const REVIEW_CONTEXT_FLOOR: u64 = 8_000;
 
 /// The optimized execution policy for one unit of work (spec section 19).
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +172,10 @@ pub struct PolicyDecision {
     pub classification: TaskClassification,
     pub policy: ExecutionPolicy,
     pub resolution: ProfileResolution,
+    /// One model instance per topology role, each resolved with the role's
+    /// own capabilities on top of the task's, with `enforce_separation`
+    /// verified on the result before the decision was returned.
+    pub assignments: Vec<RoleAssignment>,
     pub capability_request: CapabilityRequest,
     pub rationale: Vec<String>,
 }
@@ -385,6 +401,45 @@ pub fn decide_for_classification(
         )),
     }
 
+    // One model instance per topology role. Each role is resolved with its
+    // own capabilities on top of the task's, and producers are bound before
+    // independent reviewers so a reviewer can be pinned to a different
+    // instance. A decision that cannot hold separation of duties is an
+    // error, never a silent downgrade onto the producer's own model.
+    let decision_id = decision_id(&classification);
+    let role_resolutions: Vec<(AgentRole, ProfileResolution)> = topology
+        .roles
+        .iter()
+        .map(|role| {
+            (
+                *role,
+                config
+                    .registry
+                    .resolve(&role_requirements(&model_requirements, *role)),
+            )
+        })
+        .collect();
+    let assignments = assign_roles(&role_resolutions, &decision_id)?;
+    let separation = enforce_separation(&assignments, &config.separation);
+    if !separation.satisfied {
+        return Err(format!(
+            "separation of duties cannot hold: {}",
+            separation.violations.join("; ")
+        ));
+    }
+    if !assignments.is_empty() {
+        rationale.push(format!(
+            "role assignments: {}",
+            assignments
+                .iter()
+                .map(|assignment| {
+                    format!("{}={}", assignment.role.as_str(), assignment.model_key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     let reasoning_context = ReasoningContext {
         low_confidence: classification.needs_tie_breaker(config.tie_breaker_threshold),
         ..ReasoningContext::default()
@@ -444,6 +499,7 @@ pub fn decide_for_classification(
         classification,
         policy,
         resolution,
+        assignments,
         capability_request,
         rationale,
     })
@@ -486,4 +542,120 @@ pub fn role_capabilities(role: super::topology::AgentRole) -> Vec<Capability> {
         AgentRole::SecurityReviewer => vec![Capability::Review, Capability::RepositoryReasoning],
         AgentRole::PerformanceReviewer => vec![Capability::Review, Capability::Debugging],
     }
+}
+
+/// The task's requirements plus the capabilities one role adds on top.
+///
+/// Independent reviewers are resolved against [`REVIEW_CONTEXT_FLOOR`] rather
+/// than the producer's projected context: a review is judged from the
+/// handoff, and demanding the producer's window would filter out the very
+/// second instance that keeps the review independent on large tasks.
+fn role_requirements(base: &ModelRequirements, role: AgentRole) -> ModelRequirements {
+    let mut capabilities = base.required_capabilities.clone();
+    for capability in role_capabilities(role) {
+        if !capabilities.contains(&capability) {
+            capabilities.push(capability);
+        }
+    }
+    let minimum_context_free = if role.is_independent_reviewer() {
+        REVIEW_CONTEXT_FLOOR
+    } else {
+        base.minimum_context_free
+    };
+    ModelRequirements {
+        required_capabilities: capabilities,
+        minimum_context_free,
+        ..base.clone()
+    }
+}
+
+/// Stable identity for one decision; role session ids derive from it so two
+/// roles of one decision never share a session (a shared session is a shared
+/// context).
+fn decision_id(classification: &TaskClassification) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    classification.task_class.as_str().hash(&mut hasher);
+    classification.complexity.as_str().hash(&mut hasher);
+    classification.risk.as_str().hash(&mut hasher);
+    classification.evidence.hash(&mut hasher);
+    format!("aar-{:016x}", hasher.finish())
+}
+
+/// Bind every resolvable role to a concrete model instance.
+///
+/// Producers take the best profile eligible for their role; independent
+/// reviewers take the best profile that is not already a producer's, because
+/// a review from the producer's own instance is not independent. Roles with
+/// no eligible profile are left unbound: when nothing at all is eligible the
+/// decision stays Ok and the escalation path applies (the unroutable case),
+/// but a reviewer that cannot get a second instance while a producer holds
+/// the only one is an error naming both roles.
+fn assign_roles(
+    resolutions: &[(AgentRole, ProfileResolution)],
+    decision_id: &str,
+) -> Result<Vec<RoleAssignment>, String> {
+    let mut assignments = Vec::new();
+    let mut producer_keys: Vec<(AgentRole, String)> = Vec::new();
+
+    // Two passes so every producer is bound before any reviewer chooses.
+    for pass in 0..2 {
+        for (role, resolution) in resolutions {
+            if pass == 0 && role.is_independent_reviewer() {
+                continue;
+            }
+            if pass == 1 && !role.is_independent_reviewer() {
+                continue;
+            }
+            let key = if role.is_independent_reviewer() {
+                resolution
+                    .matches
+                    .iter()
+                    .find(|entry| {
+                        !producer_keys
+                            .iter()
+                            .any(|(_, held)| held == &entry.profile.key())
+                    })
+                    .map(|entry| entry.profile.key())
+            } else {
+                resolution.matches.first().map(|entry| entry.profile.key())
+            };
+            match key {
+                Some(key) => {
+                    let model_class = resolution
+                        .matches
+                        .iter()
+                        .find(|entry| entry.profile.key() == key)
+                        .map(|entry| entry.profile.model_class.clone())
+                        .unwrap_or_default();
+                    if role.is_producer() {
+                        producer_keys.push((*role, key.clone()));
+                    }
+                    assignments.push(RoleAssignment::new(
+                        *role,
+                        key,
+                        model_class,
+                        format!("{decision_id}-{}", role.as_str()),
+                    ));
+                }
+                None => {
+                    if role.is_independent_reviewer() && !producer_keys.is_empty() {
+                        let held = producer_keys
+                            .iter()
+                            .map(|(producer, key)| format!("{} holds {key}", producer.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(format!(
+                            "no second eligible profile for {}: {}",
+                            role.as_str(),
+                            held
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assignments.sort_by(|a, b| a.role.cmp(&b.role));
+    Ok(assignments)
 }
