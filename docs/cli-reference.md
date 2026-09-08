@@ -58,14 +58,66 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec rag policy [--role ROLE] [--json]` | yes | prints per-role source ordering, context ceiling, sufficiency threshold, and whether the role must verify independently |
 | `autospec rag sources [--role ROLE] [--external] [--json]` | yes | reports, per source, the administrator's availability setting and whether that role and task may actually reach it |
 | `autospec rag route --task TASK [--context N] [--node id:reasoning:free_context:speed:seats]... [--json]` | yes | explains one InferWeave routing decision: required context including margin, the selected node, and why each other node was rejected |
+| `autospec evaluator init [--policy <file.json>]` | yes | writes `.autospec/evaluation/policy.json` (the default policy when omitted), `epoch-000000`, and `current.json`; re-init fails |
+| `autospec evaluator register --file <definition.json>` | yes | validates a definition, writes immutable `evaluators/<slot>/v<N>.json`, and prints the definition digest |
+| `autospec evaluator list` | yes | `slot@version kind digest[..16] created_at`, one per line |
+| `autospec evaluator show <slot@version>` | yes | pretty JSON plus digest |
+| `autospec evaluator pin <slot@version> --actor <name>` | yes | seeds an empty slot and creates the next epoch |
+| `autospec evaluator epoch current` | yes | epoch id, started_at, policy digest, one line per slot |
+| `autospec evaluator epoch history` | yes | every epoch oldest-first with its promotion id |
+| `autospec evaluator challenger run --incumbent <slot@v> --challenger <slot@v> --suite <suite-id@v> --incumbent-verdicts <file.json> --challenger-verdicts <file.json>` | yes | pairs verdicts, qualifies against the promotion policy, writes `trials/<id>.json`, and prints the report and trial id |
+| `autospec evaluator challenger inspect <trial-id>` | yes | pretty JSON of the trial |
+| `autospec evaluator promote <trial-id> [--approve --actor <name>]` | yes | `Approval::Human` with `--approve --actor`, else `Approval::Policy`; fail closed on missing qualification or approval |
+| `autospec evaluator record add --file <record.json>` | yes | write-once evaluation record |
+| `autospec evaluator record list [--active \| --stale]` | yes | `id evaluator epoch outcome status`, one per line |
+| `autospec anchor register --file <suite.json>` | yes | validates the suite, verifies artifact digests, writes it once, and appends the journal |
+| `autospec anchor list` | yes | `id@version slot cases digest[..16]` |
+| `autospec anchor show <suite-id@version> [--role operator\|qualification\|mutation]` | yes | default `mutation` (protected-holdout labels redacted) |
+| `autospec anchor verify <suite-id@version>` | yes | recomputes artifact digests; exit 2 naming mismatched cases |
 | `autospec showcase --json` | yes | demo stub |
 | `autospec benchmark` | no | documented stub, exits non-zero |
 | `autospec growth-report --json` | yes | local-only metrics stub |
+| `autospec evaluator init [--policy <policy.json>] [--json]` | yes | initialize the store: write-once policy, genesis epoch, atomic current pointer |
+| `autospec evaluator register --file <definition.json> [--json]` | yes | register an immutable evaluator definition (`evaluators/<slot>/v<N>.json`) |
+| `autospec evaluator list [--json]` | yes | list every registered evaluator, sorted by slot then version |
+| `autospec evaluator show <slot@version> [--json]` | yes | show one registered definition plus its recomputed digest |
+| `autospec evaluator pin <slot@version> --actor <name> [--json]` | yes | seed an empty slot at a registered version into the next epoch with a committed human-approved promotion |
+| `autospec evaluator epoch <current\|history> [--json]` | yes | show the active epoch or the full epoch history with promotion ids |
+
+`autospec evaluator` manages the local evaluation store under `.autospec/evaluation`
+(root override: `--root <dir>`). `init` writes the write-once promotion policy (a
+`--policy <policy.json>` file or the built-in default), the genesis epoch, and the atomic
+`current.json` pointer; re-running `init` fails. `register` writes an immutable
+definition document with `O_CREAT|O_EXCL` and rejects a re-register of the same
+`slot@version`. `pin` seeds only empty slots at a registered version, commits a human
+approval (`--actor`) as a promotion event, and bumps the epoch; `epoch current` and
+`epoch history` resolve the active epoch through the atomic pointer and list every epoch
+with its promotion id. Every failure is fail-closed and names the offending path or
+invariant; nothing in this command group talks to a remote.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a
 routing rejection without running a retrieval or reaching a knowledge source. Retrieval itself
 is a library API (`autospec_core::rag::RetrievalCoordinator`), not yet a command.
+
+`autospec evaluator` and `autospec anchor` are the CLI surface for versioned evaluators and
+frozen epochs ([architecture note](architecture.md#evaluator-epochs)). Every subcommand
+accepts `--root <path>` (default `.`) and `--json`; diagnostics exit `2` as
+`<kind>: <message>` where kind is one of `invariant`, `immutable`, `integrity`, `io`,
+`parse`, `fail-closed`, or `access-denied`. Evaluator definitions, anchor suites, epochs,
+trials, and records are write-once: a second write is an `immutable` failure naming the
+path. State lives repo-local under `.autospec/evaluation/`, and the active epoch is the
+single atomic pointer `current.json`. A challenger is promoted only at an explicit epoch
+boundary, only when it qualifies on a labeled anchor suite under the policy at
+`.autospec/evaluation/policy.json`, and only with `--approve --actor <name>` for slots
+listed in `require_human_approval_slots`. `challenger run` prints, in order, the trial id,
+one `incumbent:` and one `challenger:` line with `successes= failures= best_belief=`,
+`margin_ppm: <n>  challenger_only_correct=<b> incumbent_only_correct=<c>`, one
+`subset <name>:` line per required subset, then
+`verdict: qualified | rejected (<reasons>) | inconclusive (<reasons>)`. `anchor show`
+defaults to the redacted `mutation` role: protected-holdout cases carry no `expected_label`
+and quarantine cases are dropped. See the [configuration reference](CONFIG_REFERENCE.md#evaluator-promotion-policy)
+for the policy fields.
 
 `autospec plan` only reads and parses Markdown from one generated package. It does not
 execute validation, calculate an execution order, or report persisted lifecycle state.

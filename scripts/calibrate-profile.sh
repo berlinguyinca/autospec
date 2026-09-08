@@ -229,6 +229,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+# ── the stack these rows are evidence FOR ────────────────────────────────────
+# The ledger rows below feed the per-stack local-eligibility gate in
+# route-decide.sh, so they must record the stack of the checkout being
+# calibrated (the tree the gate and replays actually run in), not a guess.
+# Detection failure (non-git dir, no python3) lands on "unknown": a row from an
+# unknown stack satisfies no gate query, so nothing can be miscredited.
+STACK="$(bash "$SCRIPT_DIR/autospec-detect-stack-profile.sh" --repo-root . --print-stack 2>/dev/null || printf 'unknown')"
+case "$STACK" in
+    ''|*[!a-zA-Z0-9_.-]*) STACK="unknown" ;;
+esac
+
 # ── replay ────────────────────────────────────────────────────────────────────
 attempted=0
 passed=0
@@ -265,12 +276,12 @@ for _issue in $ISSUES; do
     # real dispatch of that issue.
     if [ -f "$SCRIPT_DIR/routing-ledger.sh" ]; then
         _rec="$(jq -nc --arg id "calib-$PROFILE-$VERDICT_ROLE-$FP-$_issue" --arg p "$PROFILE" --arg m "$MODEL" \
-            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg oc "$_outcome" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg oc "$_outcome" --arg st "$STACK" \
             --argjson issue "$_issue" --argjson ms "$_elapsed_ms" \
             '{dispatch_id:$id, ts:$ts, dispatch_kind:"implementer", profile:$p, model:$m,
               harness:"codex-oss", issue:$issue, cell_ctx:"32k", cell_reasoning:"shallow",
               input_tokens:0, output_tokens:0, cached_tokens:0, wall_clock_ms:$ms,
-              retries:0, escalated:false, outcome:$oc, reason:"calibration replay"}')"
+              retries:0, escalated:false, outcome:$oc, reason:"calibration replay", stack:$st}')"
         bash "$SCRIPT_DIR/routing-ledger.sh" --append "$_rec" >/dev/null 2>&1 || true
     fi
     rm -rf "$_wt"

@@ -49,6 +49,21 @@
 #                   [--kind <dispatch_kind>] [--print-profile] [--print-effort]
 #                   [--explain]
 #                   [--profiles-file <path>] [--stats-file <path>]
+#                   [--stack <profile-id>] [--deliverable <kind>]
+#
+# Per-stack local eligibility (the "stack gate", default-deny):
+#   * --deliverable <kind> (default "code"): non-code deliverables (document,
+#     latex, translation, research, or any other non-"code" value) are NEVER
+#     local-eligible, no matter what the ledger says. This half is always on.
+#   * --stack <profile-id>: the detected stack (autospec-detect-stack-profile.sh
+#     --print-stack). When omitted, the id is read from
+#     .autospec/state/stack-profile.json (primary_profile.id) in the working
+#     directory. When neither a flag nor that file exists the stack-evidence
+#     half is DORMANT — no data = no change (parity). When a stack IS detected,
+#     a local profile (cost_minute, no cost_in/cost_out) is only a candidate if
+#     the routing ledger holds a successful outcome (merged_clean /
+#     lgtm_first_pass / retried_ok) from a local profile on this exact stack.
+#     Unrecognized stacks, an empty id, and an empty ledger all deny.
 #
 # Exit codes:
 #   0  a model id (or profile name) was printed
@@ -82,6 +97,9 @@ PROFILES_FILE="${AUTOSPEC_MODEL_PROFILES:-$HOME/.autospec/model-profiles.yml}"
 STATS_FILE=""
 POLICY="${AUTOSPEC_ROUTING_POLICY:-auto}"
 EXPLORE_PCT="${AUTOSPEC_ROUTING_EXPLORE_PCT:-0}"
+STACK=""
+STACK_SOURCE=""
+DELIVERABLE="code"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -90,12 +108,25 @@ while [ $# -gt 0 ]; do
         --kind)          KIND="${2:-}"; shift 2 ;;
         --profiles-file) PROFILES_FILE="${2:-}"; shift 2 ;;
         --stats-file)    STATS_FILE="${2:-}"; shift 2 ;;
+        --stack)         STACK="${2:-}"; STACK_SOURCE="flag"; shift 2 ;;
+        --deliverable)   DELIVERABLE="${2:-}"; shift 2 ;;
         --print-profile) PRINT_PROFILE=1; shift ;;
         --print-effort)  PRINT_EFFORT=1; shift ;;
         --explain)       EXPLAIN=1; shift ;;
         *) _die "unknown option: $1" ;;
     esac
 done
+
+# When --stack is not given, the detected stack comes from the last
+# autospec-detect-stack-profile.sh run in the working tree. The FILE EXISTING is
+# what activates the stack-evidence half of the gate; a file with an empty or
+# "unknown" id activates it AND denies — the detector ran and could not tell us
+# what this is, so local evidence from some other stack proves nothing here.
+STACK_FILE=".autospec/state/stack-profile.json"
+if [ -z "$STACK_SOURCE" ] && [ -f "$STACK_FILE" ]; then
+    STACK_SOURCE="file"
+    STACK="$(jq -r '.primary_profile.id // empty' "$STACK_FILE" 2>/dev/null || printf '')"
+fi
 
 _log() { if [ "$EXPLAIN" -eq 1 ]; then printf 'route-decide: %s\n' "$1" >&2; fi }
 
@@ -205,7 +236,10 @@ PROFILE_ROWS=""
 if [ -f "$PROFILES_FILE" ]; then
     PROFILE_ROWS="$(awk '
         function lead_ws(s) { match(s, /^ */); return RLENGTH }
-        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md "\t" ef }
+        # 6th field: 1 when the profile is LOCAL — billed per minute of machine
+        # time (cost_minute) rather than per token (cost_in/cost_out). That is
+        # the notion of "a local profile" the stack gate applies.
+        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md "\t" ef "\t" ((cm && !ci && !co) ? 1 : 0) }
         {
             line = $0
             sub(/[[:space:]]*#.*$/, "", line)
@@ -214,7 +248,7 @@ if [ -f "$PROFILES_FILE" ]; then
             if (cur != "" && i <= blocki) { flush(); cur = "" }
             if (key ~ /^[^:]+:[[:space:]]*$/) {
                 name = key; sub(/:[[:space:]]*$/, "", name)
-                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = ""; ef = "" }
+                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = ""; ef = ""; cm = 0; ci = 0; co = 0 }
                 next
             }
             if (cur == "") next
@@ -223,6 +257,9 @@ if [ -f "$PROFILES_FILE" ]; then
             if (key ~ /^reasoning:/) rs = v
             if (key ~ /^model:/) { gsub(/["\047]/, "", v); md = v }
             if (key ~ /^effort:/) { gsub(/["\047]/, "", v); ef = v }
+            if (key ~ /^cost_minute:/) cm = 1
+            if (key ~ /^cost_in:/) ci = 1
+            if (key ~ /^cost_out:/) co = 1
         }
         END { flush() }
     ' "$PROFILES_FILE")"
@@ -233,21 +270,92 @@ if [ -n "$PROFILE_ROWS" ]; then
     _old_ifs="$IFS"
     IFS='
 '
+    local_candidates=""
     for _row in $_rows; do
         _p="$(printf '%s' "$_row" | cut -f1)"
         _pc="$(printf '%s' "$_row" | cut -f2)"
         _pr="$(printf '%s' "$_row" | cut -f3)"
+        _pl="$(printf '%s' "$_row" | cut -f6)"
         _pco="$(_ord_ctx "$_pc")"; _pro="$(_ord_rsn "$_pr")"
         if [ "$_pco" -ge "$need_ctx" ] 2>/dev/null && [ "$_pro" -ge "$need_rsn" ] 2>/dev/null; then
             if [ -z "$candidates" ]; then candidates="$_p"; else candidates="$candidates,$_p"; fi
+            if [ "$_pl" = "1" ]; then
+                if [ -z "$local_candidates" ]; then local_candidates="$_p"; else local_candidates="$local_candidates,$_p"; fi
+            fi
         fi
     done
     IFS="$_old_ifs"
 fi
 
+_in_csv() {
+    # _in_csv <needle> <comma-separated-list> — profile names never contain commas.
+    case ",$2," in
+        *,"$1",*) return 0 ;;
+    esac
+    return 1
+}
+
 if [ -z "$candidates" ]; then
     _log "no profile fits ctx>=$_cell_ctx reasoning>=$_cell_reasoning -> baseline $baseline_profile"
     _emit_baseline
+fi
+
+# ── the stack gate (default-deny) ─────────────────────────────────────────────
+# Two independent refusals, in priority order:
+#   1. deliverable — non-code deliverables are never local-eligible. This half
+#      is ALWAYS active: a document or a research report does not get cheaper
+#      because this host happens to have an earned local model.
+#   2. stack evidence — active only when a stack was detected (--stack flag or
+#      a stack-profile.json in the working tree; the file EXISTING is what
+#      activates it, even with an "unknown" or empty id). A local profile needs
+#      a successful ledger outcome from a local profile on this exact stack.
+#      Empty ledger, unknown stack, unreadable ledger: deny. Fail closed.
+# When the gate denies, local candidates are stripped; if nothing is left the
+# baseline wins — the gate only ever REMOVES options, so parity on a host with
+# no data is preserved by construction.
+# Prints the deny reason (empty string = local profiles stay eligible).
+_stack_gate_deny_reason() {
+    if [ "$DELIVERABLE" != "code" ]; then
+        printf "non-code deliverable '%s' is never local-eligible" "$DELIVERABLE"
+        return 0
+    fi
+    if [ -z "$STACK_SOURCE" ]; then return 0; fi
+    if [ -z "$STACK" ] || [ "$STACK" = "unknown" ]; then
+        printf "unrecognized stack (stack='%s') -> local profiles denied (default deny)" "${STACK:-}"
+        return 0
+    fi
+    local rows evidence
+    rows="$(bash "$SCRIPT_DIR/routing-ledger.sh" --show --json 2>/dev/null || printf '')"
+    if [ -z "$rows" ] || [ "$rows" = "null" ]; then
+        printf "ledger unreadable for stack '%s' -> local profiles denied (default deny)" "$STACK"
+        return 0
+    fi
+    evidence="$(printf '%s' "$rows" | jq -r --arg s "$STACK" --arg locals "$local_candidates" '
+        ($locals | split(",")) as $L
+        | [.[] | select(.stack == $s
+                        and ((.profile as $p | $L | index($p)) != null)
+                        and (.outcome == "merged_clean" or .outcome == "lgtm_first_pass" or .outcome == "retried_ok"))]
+        | length > 0' 2>/dev/null || printf 'false')"
+    if [ "$evidence" = "true" ]; then return 0; fi
+    printf "no local success evidence on stack '%s' -> local profiles denied (default deny)" "$STACK"
+}
+
+if [ -n "$local_candidates" ]; then
+    _deny_reason="$( _stack_gate_deny_reason )"
+    if [ -n "$_deny_reason" ]; then
+        _log "stack-gate: $_deny_reason"
+        _kept=""
+        for _c in $(printf '%s' "$candidates" | tr ',' ' '); do
+            if ! _in_csv "$_c" "$local_candidates"; then
+                if [ -z "$_kept" ]; then _kept="$_c"; else _kept="$_kept,$_c"; fi
+            fi
+        done
+        candidates="$_kept"
+        if [ -z "$candidates" ]; then
+            _log "stack-gate: every candidate was local -> baseline $baseline_profile"
+            _emit_baseline
+        fi
+    fi
 fi
 
 # ── score and decide ──────────────────────────────────────────────────────────

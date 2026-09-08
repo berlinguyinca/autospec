@@ -55,6 +55,27 @@ The first core primitives are deliberately read-only. Spec metadata parsing conv
 
 Agent integration is represented as a contract layer, not as hidden automation. The Rust core normalizes task/result fields, renders handoff prompts, and blocks destructive instructions in safe mode before any runner-specific invocation. Codex, Claude, and Fable prompt templates share the same required result fields.
 
+### Evaluator epochs
+
+`crates/autospec-core/src/evaluation/` owns versioned evaluators, frozen epochs, and
+controlled promotion, exposed by the `autospec evaluator` and `autospec anchor` command
+groups. What is immutable: evaluator definitions, anchor suites (labels and artifact
+digests included), epochs, challenger trials, and evaluation records are all write-once
+(`create_new`); a second write is an `immutable` failure naming the path, and replacing an
+evaluator at an epoch boundary marks its judgments `stale_for_active_ranking` instead of
+deleting them. The promotion policy, qualification rules, transition algorithm, holdout
+access rule, and the CLI's approval requirement are protected kernel — an ordinary
+spec/PR with human review, never mutable by any agent lane.
+
+Where state lives: repo-local under `.autospec/evaluation/` — JSON documents plus a
+hash-chained `events.jsonl` journal with a checkpoint file. The journal is the system of
+record per ADR 0001 D3; a database is a later optional projection, and none is used. The
+active epoch is the single atomic pointer `current.json`. See
+[ADR 0002](decisions/0002-evaluator-coevolution-integration-strategy.md) for the
+integration strategy and
+[the design spec](specs/2026-09-05-evaluator-coevolution-design.md) for the full
+interface and promotion semantics.
+
 ## Code Intelligence Gateway
 
 Semantic navigation is an AutoSpec-owned layer, not direct agent access to language
