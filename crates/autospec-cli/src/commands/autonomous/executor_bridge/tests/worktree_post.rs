@@ -86,19 +86,22 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
     let mut mismatched = state.clone();
     mismatched.head_oid = Some("a".repeat(40));
     write_invocation_atomic(&state_path, &mismatched).expect("persist mismatched head");
-    assert!(recover_invocation(&state_path, &mismatched.identity)
-        .expect_err("mismatched durable head must fail")
-        .contains("head"));
+    assert_eq!(
+        recover_invocation(&state_path, &mismatched.identity)
+            .expect_err("mismatched durable head must fail"),
+        "executor post-CI recovery local branch head mismatch"
+    );
 
     write_invocation_atomic(&state_path, &state).expect("restore exact state");
     git(&fixture.repo, &["branch", "-D", &worktree.branch]);
-    assert!(recover_invocation(&state_path, &state.identity)
-        .expect_err("missing branch must fail")
-        .contains("branch"));
+    let base_key = format!("branch.{}.autospecBaseOid", worktree.branch);
+    assert_eq!(
+        recover_invocation(&state_path, &state.identity).expect_err("missing branch must fail"),
+        format!("executor post-CI recovery branch identity mismatch for {base_key}")
+    );
     git(&fixture.repo, &["branch", &worktree.branch, &head]);
     bridge::record_worktree_creation_identity(&fixture.repo, &worktree.branch, &base)
         .expect("restore branch identity");
-    let base_key = format!("branch.{}.autospecBaseOid", worktree.branch);
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     git(
         &fixture.repo,
@@ -109,9 +112,11 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
             &format!("{}:{branch_ref}", base.base_oid),
         ],
     );
-    assert!(recover_invocation(&state_path, &state.identity)
-        .expect_err("diverged remote head must fail")
-        .contains("remote branch head mismatch"));
+    assert_eq!(
+        recover_invocation(&state_path, &state.identity)
+            .expect_err("diverged remote head must fail"),
+        "executor post-CI recovery remote branch head mismatch"
+    );
     git(
         &fixture.repo,
         &["push", "--force", "origin", &format!("{head}:{branch_ref}")],
@@ -125,18 +130,22 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
     unrelated_base.identity.base_oid = unrelated.clone();
     write_invocation_atomic(&state_path, &unrelated_base).expect("persist unrelated base");
     git(&fixture.repo, &["config", &base_key, &unrelated]);
-    assert!(recover_invocation(&state_path, &unrelated_base.identity)
-        .expect_err("unrelated base ancestry must fail")
-        .contains("does not descend"));
+    assert_eq!(
+        recover_invocation(&state_path, &unrelated_base.identity)
+            .expect_err("unrelated base ancestry must fail"),
+        "executor post-CI recovery head does not descend from its base"
+    );
     git(&fixture.repo, &["config", &base_key, &base.base_oid]);
     write_invocation_atomic(&state_path, &state).expect("restore exact base");
 
     let mut foreign = state.clone();
     foreign.identity.worktree = foreign.identity.worktree.with_file_name("issue-999");
     write_invocation_atomic(&state_path, &foreign).expect("persist foreign path");
-    assert!(recover_invocation(&state_path, &foreign.identity)
-        .expect_err("foreign recovery path must fail")
-        .contains("deterministic private scope"));
+    assert_eq!(
+        recover_invocation(&state_path, &foreign.identity)
+            .expect_err("foreign recovery path must fail"),
+        "executor zero-effect worktree is outside its deterministic private scope"
+    );
     write_invocation_atomic(&state_path, &state).expect("restore exact path");
 
     #[cfg(unix)]
@@ -145,18 +154,20 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
         let foreign = fixture.root.join("foreign");
         fs::create_dir(&foreign).expect("create foreign directory");
         symlink(&foreign, &worktree.path).expect("install worktree symlink");
-        assert!(recover_invocation(&state_path, &state.identity)
-            .expect_err("symlink replacement must fail")
-            .contains("symlink"));
+        let reason = recover_invocation(&state_path, &state.identity)
+            .expect_err("symlink replacement must fail");
+        assert_eq!(
+            reason.strip_prefix("executor path contains a symlink: "),
+            Some(worktree.path.to_str().expect("worktree path"))
+        );
         fs::remove_file(&worktree.path).expect("remove worktree symlink");
     }
 
     bridge::POST_CI_RECREATE_FAILPOINT.store(1, Ordering::SeqCst);
-    let interrupted = recover_invocation(&state_path, &state.identity)
-        .expect_err("crash after durable worktree recreation");
-    assert!(
-        interrupted.contains("after worktree recreation"),
-        "{interrupted}"
+    assert_eq!(
+        recover_invocation(&state_path, &state.identity)
+            .expect_err("crash after durable worktree recreation"),
+        "injected executor post-CI crash after worktree recreation"
     );
     let complete = bridge::cleanup_record_path(&state_path, "worktree-recreate-complete");
     assert!(!complete.exists());
@@ -181,9 +192,10 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
     assert!(complete.is_file());
 
     fs::write(worktree.path.join("foreign.txt"), "dirty\n").expect("dirty replacement");
-    assert!(recover_invocation(&state_path, &state.identity)
-        .expect_err("dirty replacement must fail")
-        .contains("not clean"));
+    assert_eq!(
+        recover_invocation(&state_path, &state.identity).expect_err("dirty replacement must fail"),
+        "recovery worktree is not clean"
+    );
     fs::remove_file(worktree.path.join("foreign.txt")).expect("remove dirty file");
     assert_eq!(
         recover_invocation(&state_path, &state.identity)
@@ -359,7 +371,10 @@ fn autonomous_executor_bridge_atomic_write_preserves_destination_links() {
         symlink(&target, &state).expect("invocation destination symlink");
         let error = write_invocation_atomic(&state, &invocation)
             .expect_err("destination symlink must fail closed");
-        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(
+            error.strip_prefix("executor path contains a symlink: "),
+            Some(state.to_str().expect("state path"))
+        );
         assert!(fs::symlink_metadata(&state)
             .expect("destination symlink remains")
             .file_type()
@@ -440,9 +455,9 @@ fn autonomous_executor_bridge_recovery_rejects_replaced_foreign_repository() {
     let error = recover_invocation(&state_path, &identity)
         .expect_err("foreign replacement must not be recovered");
 
-    assert!(
-        error.contains("registered") || error.contains("repository"),
-        "{error}"
+    assert_eq!(
+        error,
+        "recovery worktree is not registered with persisted repository"
     );
     let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
 }
