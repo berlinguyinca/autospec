@@ -5,6 +5,11 @@ All notable changes to autospec are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`).
 
+This file is **generated, not hand-edited**: individual changes land as per-issue
+fragments under [`changelog.d/`](changelog.d/) and are folded in by
+`scripts/build-changelog.sh` at release time. See
+[`changelog.d/README.md`](changelog.d/README.md) for the fragment convention.
+
 ## [Unreleased]
 
 ### Added

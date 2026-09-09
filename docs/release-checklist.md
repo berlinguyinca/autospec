@@ -10,7 +10,8 @@ Use this before tagging or announcing an AutoSpec release.
 - [ ] README quickstart still works from a fresh clone.
 - [ ] `examples/hello-autospec/` demo is readable without private context.
 - [ ] `cargo run --bin autospec -- showcase --demo examples/hello-autospec --json` emits local-only JSON.
-- [ ] `CHANGELOG.md` has a current release entry.
+- [ ] `bash scripts/build-changelog.sh` has folded every `changelog.d/` fragment into
+  `CHANGELOG.md` (and `changelog.d/` is empty — `README.md` aside).
 - [ ] `ROADMAP.md` names the next likely release focus.
 - [ ] `SECURITY.md` and `SAFETY.md` are present.
 - [ ] Launch posts under `marketing/` match the current README.

@@ -183,6 +183,7 @@ a broken migration replay.
 2. Run the project's lint/format command. Fix or `git stash` any unrelated noise — do not include unrelated cleanups in this PR.
 3. Verify the diff matches the issue's scope. If you ended up touching more than the issue called for, either split the extra work into a separate issue or revert it from this branch.
 4. Commit message follows the repo's existing style (see recent `git log --oneline`).
+5. Record the change in the changelog **as a fragment, not by editing `CHANGELOG.md`**. If the target repo has a `changelog.d/` directory, write one new fragment named `<issue-number>-<short-slug>.md` — a self-contained Keep-a-Changelog block (a category heading plus a bullet, e.g. `### Added`) — and commit it. Do NOT hand-edit `CHANGELOG.md`: fragments are folded in by `scripts/build-changelog.sh` at release time (see `changelog.d/README.md`), and one new file per issue is what keeps concurrent agents from conflicting. If the repo has no `changelog.d/`, follow its existing changelog convention.
 
 ### Epistemic gates (verify before finishing — issue #3718)
 
