@@ -714,10 +714,19 @@ pub fn parse_task_records(text: &str) -> (Vec<TaskRecord>, Vec<String>) {
             ));
             continue;
         }
+        // A blank authority column states the same thing as no column at all: the
+        // task ran under nobody's authority. It is bucketed as UNDETERMINED so it
+        // stays visible in the report — a row named "" reads as a data glitch, and
+        // the warning that names its set renders as "spec set  whose currency…".
+        let authority = if fields[1].trim().is_empty() {
+            UNDETERMINED.to_string()
+        } else {
+            fields[1].to_string()
+        };
         match TaskOutcome::parse(fields[2]) {
             Some(outcome) => records.push(TaskRecord {
                 task: fields[0].to_string(),
-                authority: fields[1].to_string(),
+                authority,
                 outcome,
             }),
             None => problems.push(format!(
@@ -1182,6 +1191,24 @@ Authority-Over: control-plane
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("unknown outcome"));
         assert_eq!(render_task_records(&records).lines().count(), 2);
+    }
+
+    #[test]
+    fn a_blank_authority_column_is_undetermined_not_an_empty_name() {
+        let set = SpecSet::from_sources(&[("v2.md", V2_PROGRAM)]);
+        let (records, problems) = parse_task_records("7\t\tmerged\n");
+        assert!(problems.is_empty(), "got {:?}", problems);
+        assert_eq!(records[0].authority, UNDETERMINED);
+        let report = throughput(&records, &set);
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.rows[0].authority, UNDETERMINED);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("no determined spec authority")));
+        // The undeclared-set warning must never render a blank set name.
+        assert!(!report.warnings.iter().any(|w| w.contains("spec set  ")));
+        assert_eq!(report.undirected_merges(), 1);
     }
 
     #[test]

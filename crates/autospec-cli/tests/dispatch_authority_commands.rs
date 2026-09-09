@@ -196,6 +196,25 @@ fn throughput_is_reported_by_authority() {
     assert!(out.contains("no determined spec authority"), "{out}");
 }
 
+/// A task row whose authority column is blank is the undetermined bucket, not a
+/// row with an empty name: the table and its warning must both name it.
+#[test]
+fn blank_task_authority_reports_under_undetermined() {
+    let h = Harness::new("dispatch-authority-blank-authority");
+    h.write("v2.md", V2_PROGRAM);
+    let tasks = h.tasks("1\tinferweave/v2\tmerged\n2\t\tmerged\n");
+    let output = h.gate(&["--tasks", &tasks]);
+    let out = stdout(&output);
+    assert!(
+        out.contains("undetermined"),
+        "blank column did not bucket as undetermined:\n{out}"
+    );
+    assert!(
+        !out.contains("spec set  whose"),
+        "warning rendered a blank spec set name:\n{out}"
+    );
+}
+
 /// A malformed record is reported instead of being dropped: a dropped row is a
 /// silently wrong merge count.
 #[test]
