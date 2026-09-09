@@ -1,0 +1,48 @@
+# Gate-scope mapping (#3928): the file types a patch can change, and the
+# gates that read each one.
+#
+# A gate set is scoped to a language. A verdict may be reported as a pass
+# only when every changed path is read by at least one gate that ran; a
+# path no entry claims is UNVERIFIED, never green.
+#
+# Entry order is priority: the first entry whose criteria all match a path
+# claims it. An entry's criteria are ANDed: an entry with both a path
+# prefix and extensions claims only paths that satisfy both.
+
+version: 1
+
+scopes:
+  - type: Rust
+    match:
+      extensions: [rs]
+    gates:
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo test --workspace
+
+  - type: web
+    match:
+      path_prefix: apps/web/
+    gates:
+      - npm run lint
+      - npm run typecheck
+      - npm test
+
+  - type: shell script
+    match:
+      extensions: [sh, bash]
+    gates:
+      - bash -n
+
+  - type: bats
+    match:
+      extensions: [bats]
+    gates:
+      - bats
+
+  - type: workflow
+    match:
+      path_prefix: .github/
+      extensions: [yml, yaml]
+    gates:
+      - workflow parse
