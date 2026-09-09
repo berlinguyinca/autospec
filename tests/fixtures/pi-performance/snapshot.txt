@@ -16,6 +16,10 @@ live:
   test_ms: 61200
   repair_count: 1
   queue_ms: 2400
+  started_ms: 1785542400000
+  last_heartbeat_ms: 1785545400000
+  liveness: progressing
+  elapsed_ratio: 51.61
 
 history:
   samples: 79
@@ -24,6 +28,7 @@ history:
   p95_ms: 101000
   successful_issues_per_hour: 3.29
   median_time_to_passing_ms: 64000
+  mean_ms: 63936
 
 advice:
   source: benchmark

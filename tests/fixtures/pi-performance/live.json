@@ -11,5 +11,7 @@
   "tool_ms": 95400,
   "test_ms": 61200,
   "repair_count": 1,
-  "queue_ms": 2400
+  "queue_ms": 2400,
+  "started_ms": 1785542400000,
+  "last_heartbeat_ms": 1785545400000
 }

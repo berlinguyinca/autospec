@@ -3,7 +3,8 @@
 # scripts/pi-performance-dashboard.sh (issue #3327).
 #
 # Replays a fixed ledger and snapshots the dashboard plus the routing advice.
-# Deterministic fixtures only: no clock, no network, no model calls.
+# Deterministic fixtures only: no clock, no network, no model calls. The
+# liveness lines (issue #3723) are pinned with a fixed --now epoch.
 
 setup() {
     script="${BATS_TEST_DIRNAME}/../scripts/pi-performance-dashboard.sh"
@@ -36,7 +37,10 @@ teardown() {
 }
 
 @test "replays the fixed ledger and matches the snapshot" {
-    run bash "$script" --ledger "$fixture/ledger.jsonl" --live "$fixture/live.json"
+    # --now is fixed so the liveness/elapsed lines are reproducible:
+    # 1785545700 = 2026-08-01T00:55:00Z, exactly 5 minutes after the
+    # fixture's last heartbeat (the threshold edge = still progress).
+    run bash "$script" --ledger "$fixture/ledger.jsonl" --live "$fixture/live.json" --now 1785545700
     [ "$status" -eq 0 ]
     diff -u "$fixture/snapshot.txt" <(printf '%s\n' "$output")
 }
@@ -45,7 +49,7 @@ teardown() {
     bash "$script" --ledger "$fixture/ledger.jsonl" --live "$fixture/live.json" > "$tmp/dash.txt"
     [ $? -eq 0 ]
     found=0
-    for field in state node_id profile turns context_tokens ttft_ms decode_tokens_per_second cache_hit_rate tool_ms test_ms repair_count queue_ms; do
+    for field in state node_id profile turns context_tokens ttft_ms decode_tokens_per_second cache_hit_rate tool_ms test_ms repair_count queue_ms started_ms last_heartbeat_ms; do
         if grep -q "^  ${field}:" "$tmp/dash.txt"; then
             found=$((found + 1))
         else
@@ -65,6 +69,8 @@ teardown() {
     grep -q "^  p50_ms: 3000$" "$tmp/dash.txt"
     grep -q "^  p90_ms: 5000$" "$tmp/dash.txt"
     grep -q "^  p95_ms: 5000$" "$tmp/dash.txt"
+    # issue #3723: the expected duration (mean) next to the percentiles.
+    grep -q "^  mean_ms: 3000$" "$tmp/dash.txt"
 }
 
 @test "AC3: fewer than 20 configured samples preserve static profile selection" {
@@ -110,8 +116,40 @@ teardown() {
 
 @test "live record with an out-of-range cache_hit_rate is rejected" {
     printf '{"issue_id":"1","ts":"t","model_family":"qwen3.8","profile":"p","duration_ms":5,"succeeded":true}\n' > "$tmp/ok.jsonl"
-    printf '{"issue_id":"1","state":"running","node_id":"n","profile":"p","turns":1,"context_tokens":1,"ttft_ms":1,"decode_tokens_per_second":1,"cache_hit_rate":1.5,"tool_ms":1,"test_ms":1,"repair_count":0,"queue_ms":1}\n' > "$tmp/badlive.json"
+    printf '{"issue_id":"1","state":"running","node_id":"n","profile":"p","turns":1,"context_tokens":1,"ttft_ms":1,"decode_tokens_per_second":1,"cache_hit_rate":1.5,"tool_ms":1,"test_ms":1,"repair_count":0,"queue_ms":1,"started_ms":1,"last_heartbeat_ms":1}\n' > "$tmp/badlive.json"
     run bash "$script" --ledger "$tmp/ok.jsonl" --live "$tmp/badlive.json"
     [ "$status" -ne 0 ]
     [[ "$output" == *"cache_hit_rate"* ]]
+}
+
+@test "AC5: stalled run is reported as no output for N minutes (issue #3723)" {
+    # now 1785600000 (epoch s) minus the fixture heartbeat 1785545400000 ms
+    # is 54,600,000 ms of silence = 910 minutes, far past the 5-minute bar.
+    bash "$script" --ledger "$fixture/ledger.jsonl" --live "$fixture/live.json" --now 1785600000 > "$tmp/dash.txt"
+    [ $? -eq 0 ]
+    grep -q "^  liveness: no output for 910 minutes$" "$tmp/dash.txt"
+}
+
+@test "AC6: silence exactly at the threshold still reports progress (issue #3723)" {
+    # now 1785545700 is exactly 300,000 ms (5 minutes) after the fixture
+    # heartbeat: the edge is progress, and elapsed time is a multiple of the
+    # ledger mean (3,300,000 / 63,936 = 51.61).
+    bash "$script" --ledger "$fixture/ledger.jsonl" --live "$fixture/live.json" --now 1785545700 > "$tmp/dash.txt"
+    [ $? -eq 0 ]
+    grep -q "^  liveness: progressing$" "$tmp/dash.txt"
+    grep -q "^  elapsed_ratio: 51.61$" "$tmp/dash.txt"
+}
+
+@test "live record missing started_ms is rejected" {
+    printf '{"issue_id":"1","ts":"t","model_family":"qwen3.8","profile":"p","duration_ms":5,"succeeded":true}\n' > "$tmp/ok.jsonl"
+    jq 'del(.started_ms)' "$fixture/live.json" > "$tmp/badlive.json"
+    run bash "$script" --ledger "$tmp/ok.jsonl" --live "$tmp/badlive.json"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"started_ms"* ]]
+}
+
+@test "non-integer --now is a usage error" {
+    run bash "$script" --ledger "$fixture/ledger.jsonl" --now now
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"positive epoch-seconds integer"* ]]
 }
