@@ -1,0 +1,138 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "09-reviewer-rejection",
+  "events": [
+    {
+      "event_id": "evt-synth-09-0001",
+      "session_id": "synth-09",
+      "timestamp": 1788951600,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-09-0002",
+      "session_id": "synth-09",
+      "timestamp": 1788951605,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Add a batch upsert path to the store"
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0003",
+      "session_id": "synth-09",
+      "timestamp": 1788951900,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/store.rs",
+        "summary": "batch upsert"
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0004",
+      "session_id": "synth-09",
+      "timestamp": 1788951910,
+      "event_type": "pull_request_opened",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "number": 209
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0005",
+      "session_id": "synth-09",
+      "timestamp": 1788952020,
+      "event_type": "pull_request_reviewed",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "comments": 2,
+        "decision": "changes_requested",
+        "number": 209
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0006",
+      "session_id": "synth-09",
+      "timestamp": 1788952025,
+      "event_type": "review_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "comments": "missing idempotency key; error path swallows context",
+        "decision": "changes_requested",
+        "number": 209
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0007",
+      "session_id": "synth-09",
+      "timestamp": 1788952140,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/store.rs",
+        "summary": "add idempotency key and error context"
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0008",
+      "session_id": "synth-09",
+      "timestamp": 1788952160,
+      "event_type": "pull_request_reviewed",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "comments": 0,
+        "decision": "approved",
+        "number": 209
+      }
+    },
+    {
+      "event_id": "evt-synth-09-0009",
+      "session_id": "synth-09",
+      "timestamp": 1788952180,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

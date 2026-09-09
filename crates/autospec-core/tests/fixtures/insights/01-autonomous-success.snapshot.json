@@ -1,0 +1,151 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "01-autonomous-success",
+  "events": [
+    {
+      "event_id": "evt-synth-01-0001",
+      "session_id": "synth-01",
+      "timestamp": 1788890400,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-01-0002",
+      "session_id": "synth-01",
+      "timestamp": 1788890405,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Implement exponential backoff in crates/demo/src/retry.rs for issue 101"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0003",
+      "session_id": "synth-01",
+      "timestamp": 1788890409,
+      "event_type": "tool_call",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 1240,
+        "output": 96
+      },
+      "payload": {
+        "input": "cargo test -p demo",
+        "tool": "shell"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0004",
+      "session_id": "synth-01",
+      "timestamp": 1788890414,
+      "event_type": "tool_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "ok": false,
+        "summary": "baseline: retry tests absent",
+        "tool": "shell"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0005",
+      "session_id": "synth-01",
+      "timestamp": 1788890418,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/retry.rs",
+        "summary": "add backoff loop"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0006",
+      "session_id": "synth-01",
+      "timestamp": 1788890422,
+      "event_type": "test_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "suite": "demo::retry"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0007",
+      "session_id": "synth-01",
+      "timestamp": 1788890431,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 2100,
+        "output": 150
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 12,
+        "suite": "demo::retry"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0008",
+      "session_id": "synth-01",
+      "timestamp": 1788890435,
+      "event_type": "git_commit",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "message": "feat: exponential backoff",
+        "sha": "synth0001"
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0009",
+      "session_id": "synth-01",
+      "timestamp": 1788890440,
+      "event_type": "pull_request_opened",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "number": 201
+      }
+    },
+    {
+      "event_id": "evt-synth-01-0010",
+      "session_id": "synth-01",
+      "timestamp": 1788890450,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

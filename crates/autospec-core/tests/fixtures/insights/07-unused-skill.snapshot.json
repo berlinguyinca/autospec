@@ -1,0 +1,123 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "07-unused-skill",
+  "events": [
+    {
+      "event_id": "evt-synth-07-0001",
+      "session_id": "synth-07",
+      "timestamp": 1788944400,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-07-0002",
+      "session_id": "synth-07",
+      "timestamp": 1788944404,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Refactor the pagination helper"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0003",
+      "session_id": "synth-07",
+      "timestamp": 1788944409,
+      "event_type": "tool_call",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "record quality history",
+        "tool": "skill:autospec-quality"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0004",
+      "session_id": "synth-07",
+      "timestamp": 1788944412,
+      "event_type": "tool_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "ok": true,
+        "summary": "skill loaded",
+        "tool": "skill:autospec-quality"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0005",
+      "session_id": "synth-07",
+      "timestamp": 1788944420,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/paging.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0006",
+      "session_id": "synth-07",
+      "timestamp": 1788944426,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/paging.rs",
+        "summary": "split the helper"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0007",
+      "session_id": "synth-07",
+      "timestamp": 1788944432,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 3100,
+        "output": 260
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 7,
+        "suite": "demo::paging"
+      }
+    },
+    {
+      "event_id": "evt-synth-07-0008",
+      "session_id": "synth-07",
+      "timestamp": 1788944440,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "note": "invoked skill was never applied to the diff",
+        "outcome": "success"
+      }
+    }
+  ]
+}

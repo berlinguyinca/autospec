@@ -1,0 +1,166 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "02-repeated-corrections",
+  "events": [
+    {
+      "event_id": "evt-synth-02-0001",
+      "session_id": "synth-02",
+      "timestamp": 1788894000,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-02-0002",
+      "session_id": "synth-02",
+      "timestamp": 1788894004,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Add a cache to the lookup service"
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0003",
+      "session_id": "synth-02",
+      "timestamp": 1788894009,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/cache_v1.rs",
+        "summary": "new cache module"
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0004",
+      "session_id": "synth-02",
+      "timestamp": 1788894015,
+      "event_type": "user_intervention",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "category": "architecture",
+        "text": "Use the existing service; don't create another abstraction."
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0005",
+      "session_id": "synth-02",
+      "timestamp": 1788894020,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/cache_v2.rs",
+        "summary": "second abstraction"
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0006",
+      "session_id": "synth-02",
+      "timestamp": 1788894026,
+      "event_type": "user_intervention",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "category": "architecture",
+        "text": "Stop adding getters and setters; reuse lookup_service."
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0007",
+      "session_id": "synth-02",
+      "timestamp": 1788894033,
+      "event_type": "assistant_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Reverting to the existing service and wiring a small in-process memo."
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0008",
+      "session_id": "synth-02",
+      "timestamp": 1788894039,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/lookup.rs",
+        "summary": "memoize inside the existing service"
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0009",
+      "session_id": "synth-02",
+      "timestamp": 1788894045,
+      "event_type": "user_intervention",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "category": "scope",
+        "text": "That is enough; do not touch other files."
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0010",
+      "session_id": "synth-02",
+      "timestamp": 1788894052,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 3400,
+        "output": 210
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 8,
+        "suite": "demo::lookup"
+      }
+    },
+    {
+      "event_id": "evt-synth-02-0011",
+      "session_id": "synth-02",
+      "timestamp": 1788894060,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

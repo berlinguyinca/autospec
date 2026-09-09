@@ -1,0 +1,166 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "04-context-exhaustion",
+  "events": [
+    {
+      "event_id": "evt-synth-04-0001",
+      "session_id": "synth-04",
+      "timestamp": 1788901200,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-04-0002",
+      "session_id": "synth-04",
+      "timestamp": 1788901205,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Migrate the config loader to TOML"
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0003",
+      "session_id": "synth-04",
+      "timestamp": 1788901500,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 18400,
+        "output": 900
+      },
+      "payload": {
+        "path": "crates/demo/src/config.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0004",
+      "session_id": "synth-04",
+      "timestamp": 1788901800,
+      "event_type": "context_limit_warning",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "limit_tokens": 32768,
+        "used_tokens": 24000
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0005",
+      "session_id": "synth-04",
+      "timestamp": 1788901920,
+      "event_type": "context_compaction",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 26200,
+        "output": 1500
+      },
+      "payload": {
+        "after_tokens": 9100,
+        "before_tokens": 26200
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0006",
+      "session_id": "synth-04",
+      "timestamp": 1788902400,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 15300,
+        "output": 700
+      },
+      "payload": {
+        "path": "crates/demo/src/config_test.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0007",
+      "session_id": "synth-04",
+      "timestamp": 1788902880,
+      "event_type": "context_limit_warning",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "limit_tokens": 32768,
+        "used_tokens": 28900
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0008",
+      "session_id": "synth-04",
+      "timestamp": 1788903000,
+      "event_type": "context_compaction",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 30100,
+        "output": 1700
+      },
+      "payload": {
+        "after_tokens": 8400,
+        "before_tokens": 30100
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0009",
+      "session_id": "synth-04",
+      "timestamp": 1788903600,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/config.rs",
+        "summary": "TOML loader"
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0010",
+      "session_id": "synth-04",
+      "timestamp": 1788903900,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 12000,
+        "output": 900
+      },
+      "payload": {
+        "failed": 1,
+        "passed": 10,
+        "suite": "demo::config"
+      }
+    },
+    {
+      "event_id": "evt-synth-04-0011",
+      "session_id": "synth-04",
+      "timestamp": 1788904200,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "note": "second compaction lost the failing-case detail",
+        "outcome": "partial"
+      }
+    }
+  ]
+}

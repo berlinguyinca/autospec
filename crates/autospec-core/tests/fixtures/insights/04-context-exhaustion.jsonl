@@ -1,0 +1,11 @@
+{"ts":"2026-09-08T21:00:00Z","type":"session_started","session_id":"synth-04","model":"synth-32b"}
+{"ts":"2026-09-08T21:00:05Z","type":"user_message","text":"Migrate the config loader to TOML"}
+{"ts":"2026-09-08T21:05:00Z","type":"file_read","path":"crates/demo/src/config.rs","tokens":{"input":18400,"output":900}}
+{"ts":"2026-09-08T21:10:00Z","type":"context_limit_warning","used_tokens":24000,"limit_tokens":32768}
+{"ts":"2026-09-08T21:12:00Z","type":"context_compaction","before_tokens":26200,"after_tokens":9100,"tokens":{"input":26200,"output":1500}}
+{"ts":"2026-09-08T21:20:00Z","type":"file_read","path":"crates/demo/src/config_test.rs","tokens":{"input":15300,"output":700}}
+{"ts":"2026-09-08T21:28:00Z","type":"context_limit_warning","used_tokens":28900,"limit_tokens":32768}
+{"ts":"2026-09-08T21:30:00Z","type":"context_compaction","before_tokens":30100,"after_tokens":8400,"tokens":{"input":30100,"output":1700}}
+{"ts":"2026-09-08T21:40:00Z","type":"file_patch","path":"crates/demo/src/config.rs","summary":"TOML loader"}
+{"ts":"2026-09-08T21:45:00Z","type":"test_result","suite":"demo::config","passed":10,"failed":1,"tokens":{"input":12000,"output":900}}
+{"ts":"2026-09-08T21:50:00Z","type":"session_finished","outcome":"partial","note":"second compaction lost the failing-case detail"}

@@ -1,0 +1,166 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "06-over-abstraction",
+  "events": [
+    {
+      "event_id": "evt-synth-06-0001",
+      "session_id": "synth-06",
+      "timestamp": 1788908400,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-06-0002",
+      "session_id": "synth-06",
+      "timestamp": 1788908404,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Add JSON export to the report command"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0003",
+      "session_id": "synth-06",
+      "timestamp": 1788908410,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/export_strategy.rs",
+        "summary": "trait ExportStrategy"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0004",
+      "session_id": "synth-06",
+      "timestamp": 1788908416,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/json_strategy.rs",
+        "summary": "JsonStrategy impl"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0005",
+      "session_id": "synth-06",
+      "timestamp": 1788908422,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/export_registry.rs",
+        "summary": "strategy registry"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0006",
+      "session_id": "synth-06",
+      "timestamp": 1788908428,
+      "event_type": "file_write",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/export_factory.rs",
+        "summary": "builder and factory"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0007",
+      "session_id": "synth-06",
+      "timestamp": 1788908434,
+      "event_type": "user_intervention",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "category": "architecture",
+        "text": "Don't create another abstraction; a single function is enough."
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0008",
+      "session_id": "synth-06",
+      "timestamp": 1788908440,
+      "event_type": "assistant_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Collapsing the four files into one export_report function."
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0009",
+      "session_id": "synth-06",
+      "timestamp": 1788908446,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/report.rs",
+        "summary": "inline JSON export"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0010",
+      "session_id": "synth-06",
+      "timestamp": 1788908452,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 5200,
+        "output": 310
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 5,
+        "suite": "demo::report"
+      }
+    },
+    {
+      "event_id": "evt-synth-06-0011",
+      "session_id": "synth-06",
+      "timestamp": 1788908460,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

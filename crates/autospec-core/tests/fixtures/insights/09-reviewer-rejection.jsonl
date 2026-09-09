@@ -1,0 +1,9 @@
+{"ts":"2026-09-09T11:00:00Z","type":"session_started","session_id":"synth-09","model":"synth-32b"}
+{"ts":"2026-09-09T11:00:05Z","type":"user_message","text":"Add a batch upsert path to the store"}
+{"ts":"2026-09-09T11:05:00Z","type":"file_patch","path":"crates/demo/src/store.rs","summary":"batch upsert"}
+{"ts":"2026-09-09T11:05:10Z","type":"pull_request_opened","number":209}
+{"ts":"2026-09-09T11:07:00Z","type":"pull_request_reviewed","number":209,"decision":"changes_requested","comments":2}
+{"ts":"2026-09-09T11:07:05Z","type":"review_result","number":209,"decision":"changes_requested","comments":"missing idempotency key; error path swallows context"}
+{"ts":"2026-09-09T11:09:00Z","type":"file_patch","path":"crates/demo/src/store.rs","summary":"add idempotency key and error context"}
+{"ts":"2026-09-09T11:09:20Z","type":"pull_request_reviewed","number":209,"decision":"approved","comments":0}
+{"ts":"2026-09-09T11:09:40Z","type":"session_finished","outcome":"success"}
