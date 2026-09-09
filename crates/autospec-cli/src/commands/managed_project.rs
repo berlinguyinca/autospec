@@ -24,10 +24,10 @@ mod project;
 #[path = "managed_project/store.rs"]
 mod store;
 
-pub use cli::run;
 #[cfg(test)]
 pub(crate) use cli::run_with_transport;
 pub(crate) use cli::{bound_project_url, managed_state_root};
+pub use cli::{run, run_portfolio};
 #[cfg(test)]
 pub use github::verify_managed_marker;
 pub use github::{

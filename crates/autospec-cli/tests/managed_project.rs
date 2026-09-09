@@ -10,6 +10,9 @@ use autospec_core::managed_project::{
     RepositoryRecord,
 };
 use commands::autonomous::accountability::github::{GithubCommand, GithubFailure, GithubTransport};
+use commands::managed_project::portfolio::manifest::{
+    PlanCompletionPolicy, PlanDraft, PlanItem, PlanItemRole, PortfolioPlan, RepositoryFacts,
+};
 use commands::managed_project::{
     active_dependency_graph, journal_issue_projection, onboard_repositories, reconcile_issue,
     resolve_or_create_project, retry_pending_projections, run_with_transport, tracked_issue_urls,
@@ -23,7 +26,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -4390,5 +4393,630 @@ fn managed_project_store_rejects_invalid_role_policy_order_and_cardinality() {
         let fixture = Fixture::new(&format!("portfolio-role-policy-{index}"));
         let mut store = open_portfolio_store(fixture.path());
         assert!(store.record_portfolio_snapshot(snapshot).is_err());
+    }
+}
+
+// ── `autospec portfolio validate|apply|reconcile` CLI ─────────────────────────────
+
+fn portfolio_cli_plan() -> PortfolioPlan {
+    let source = portfolio_source_identity();
+    let repositories = vec![RepositoryFacts::available(
+        "berlinguyinca/autospec",
+        "0123456789abcdef0123456789abcdef01234567",
+    )];
+    let items = vec![
+        PlanItem::new(
+            "source-tracker",
+            "berlinguyinca/autospec",
+            PlanItemRole::SourceTracker,
+            PlanCompletionPolicy::SelfClosing,
+            &[],
+            &[],
+        )
+        .unwrap(),
+        PlanItem::new(
+            "issue:portfolio-store",
+            "berlinguyinca/autospec",
+            PlanItemRole::Implementation,
+            PlanCompletionPolicy::SelfClosing,
+            &[],
+            &["source-tracker"],
+        )
+        .unwrap(),
+        PlanItem::new(
+            "audit:phase-5.5",
+            "berlinguyinca/autospec",
+            PlanItemRole::Audit,
+            PlanCompletionPolicy::PortfolioGate,
+            &["issue:portfolio-store"],
+            &["source-tracker"],
+        )
+        .unwrap(),
+    ];
+    PortfolioPlan::freeze(PlanDraft::new(
+        Some(source),
+        Some("berlinguyinca"),
+        repositories,
+        items,
+    ))
+    .unwrap()
+}
+
+fn portfolio_cli_write_manifest(fixture: &Fixture, contents: &str) -> String {
+    let path = fixture.path().join("portfolio-plan.yml");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(fixture.path()).unwrap();
+    fs::write(&path, contents).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn portfolio_cli(args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+    command.arg("portfolio");
+    for argument in args {
+        command.arg(argument);
+    }
+    command.output().unwrap()
+}
+
+fn portfolio_report(output: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .last()
+        .expect("portfolio stdout ends with a JSON line");
+    serde_json::from_str(line).expect("portfolio JSON line parses")
+}
+
+fn assert_stable_portfolio_fields(report: &serde_json::Value, command: &str, result: &str) {
+    let expected: Vec<&str> = vec![
+        "capabilities",
+        "command",
+        "diagnostics",
+        "dry_run",
+        "dry_run_mutations",
+        "issue_urls",
+        "item_count",
+        "pending_operations",
+        "pending_projections",
+        "plan_digest",
+        "portfolio_id",
+        "primary_scope",
+        "project",
+        "project_owner",
+        "repository_count",
+        "result",
+    ];
+    let mut keys: Vec<String> = report.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys.iter().map(String::as_str).collect::<Vec<_>>(),
+        expected,
+        "portfolio JSON field set must be stable"
+    );
+    assert_eq!(report["command"], command);
+    assert_eq!(report["result"], result);
+    for field in [
+        "pending_operations",
+        "pending_projections",
+        "item_count",
+        "repository_count",
+    ] {
+        assert!(report[field].is_u64(), "{field} must be a number");
+    }
+    assert!(report["diagnostics"].is_array());
+    assert!(report["issue_urls"].is_array());
+    assert!(report["dry_run"].is_boolean());
+}
+
+fn portfolio_snapshot_with_plan_digest(plan_digest: &str) -> serde_json::Value {
+    let mut snapshot = portfolio_store_snapshot();
+    snapshot["plan_digest"] = serde_json::Value::from(plan_digest);
+    snapshot["recovery_capsule"]["plan_digest"] = serde_json::Value::from(plan_digest);
+    snapshot
+}
+
+#[test]
+fn portfolio_cli_help_is_available_for_every_entry_point() {
+    for args in [
+        Vec::<&str>::new(),
+        vec!["--help"],
+        vec!["validate", "--help"],
+        vec!["apply", "-h"],
+    ] {
+        let output = portfolio_cli(&args);
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("autospec portfolio validate --manifest PATH"));
+        assert!(stdout.contains("autospec portfolio apply --manifest PATH"));
+        assert!(stdout.contains("autospec portfolio reconcile --manifest PATH"));
+        assert!(stdout.contains("complete"));
+        assert!(stdout.contains("blocked"));
+        assert!(stdout.contains("degraded"));
+    }
+}
+
+#[test]
+fn portfolio_validate_complete_reports_stable_json() {
+    let fixture = Fixture::new("portfolio-validate-complete");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let output = portfolio_cli(&["validate", "--manifest", &manifest]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "validate", "complete");
+    assert_eq!(report["portfolio_id"], plan.portfolio_id().as_str());
+    assert_eq!(report["project_owner"], "berlinguyinca");
+    assert_eq!(report["plan_digest"], plan.plan_digest());
+    assert_eq!(report["primary_scope"], "product:berlinguyinca");
+    assert_eq!(report["item_count"], 3);
+    assert_eq!(report["repository_count"], 1);
+    assert_eq!(
+        report["capabilities"]["berlinguyinca/autospec"],
+        "available"
+    );
+    assert_eq!(report["project"], serde_json::Value::Null);
+    assert_eq!(report["issue_urls"], serde_json::json!([]));
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+    assert_eq!(report["dry_run"], false);
+    assert_eq!(report["dry_run_mutations"], serde_json::Value::Null);
+    // No URL line: the JSON line is the entire stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().count(), 1);
+}
+
+#[test]
+fn portfolio_validate_dry_run_certifies_zero_mutations() {
+    let fixture = Fixture::new("portfolio-validate-dry-run");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_snapshot_with_plan_digest(plan.plan_digest()))
+        .unwrap();
+    drop(store);
+    let state_dir = fixture.path().to_str().unwrap().to_owned();
+    let before = (
+        fs::read(fixture.portfolio_state_path("portfolio.json")).unwrap(),
+        fs::read(fixture.portfolio_state_path("events.jsonl")).unwrap(),
+    );
+    let output = portfolio_cli(&[
+        "validate",
+        "--manifest",
+        &manifest,
+        "--dry-run",
+        "--state-dir",
+        &state_dir,
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "validate", "complete");
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["dry_run_mutations"], 0);
+    let after = (
+        fs::read(fixture.portfolio_state_path("portfolio.json")).unwrap(),
+        fs::read(fixture.portfolio_state_path("events.jsonl")).unwrap(),
+    );
+    assert_eq!(before.0, after.0, "dry-run must not mutate portfolio.json");
+    assert_eq!(
+        before.1, after.1,
+        "dry-run must not mutate the event journal"
+    );
+}
+
+#[test]
+fn portfolio_validate_blocks_tampered_manifests() {
+    let fixture = Fixture::new("portfolio-validate-tampered");
+    let plan = portfolio_cli_plan();
+
+    // A frozen field edited in place: the recomputed digest no longer matches.
+    let tampered = plan.canonical_yaml().replace(
+        "project_owner: \"berlinguyinca\"",
+        "project_owner: \"somebody\"",
+    );
+    let manifest = portfolio_cli_write_manifest(&fixture, &tampered);
+    let output = portfolio_cli(&["validate", "--manifest", &manifest]);
+    assert_eq!(output.status.code(), Some(36));
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "validate", "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "DIGEST_MISMATCH");
+
+    let bad_schema = plan.canonical_yaml().replace(
+        "schema: \"autospec.portfolio-plan.v1\"",
+        "schema: \"autospec.portfolio-plan.v2\"",
+    );
+    let manifest = portfolio_cli_write_manifest(&fixture, &bad_schema);
+    let output = portfolio_cli(&["validate", "--manifest", &manifest]);
+    assert_eq!(output.status.code(), Some(20));
+    let report = portfolio_report(&output);
+    assert_eq!(report["diagnostics"][0]["code"], "SCHEMA_UNSUPPORTED");
+}
+
+#[test]
+fn portfolio_cli_rejects_duplicate_flags() {
+    let fixture = Fixture::new("portfolio-duplicate-flags");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let cases = [
+        (
+            vec!["validate", "--manifest", &manifest, "--manifest", &manifest],
+            "duplicate --manifest",
+        ),
+        (
+            vec![
+                "validate",
+                "--manifest",
+                &manifest,
+                "--dry-run",
+                "--dry-run",
+            ],
+            "duplicate --dry-run",
+        ),
+        (
+            vec![
+                "validate",
+                "--manifest",
+                &manifest,
+                "--project-owner",
+                "berlinguyinca",
+                "--project-owner",
+                "berlinguyinca",
+            ],
+            "duplicate --project-owner",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = portfolio_cli(&args);
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
+}
+
+#[test]
+fn portfolio_cli_requires_transaction_flags() {
+    let fixture = Fixture::new("portfolio-required-flags");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let state_dir = fixture.path().join("state");
+
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("portfolio apply requires --portfolio"),
+        "stderr: {stderr}"
+    );
+
+    let output = portfolio_cli(&[
+        "reconcile",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--dry-run is not valid for portfolio reconcile"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn portfolio_apply_blocks_before_any_issue_without_project_binding() {
+    let fixture = Fixture::new("portfolio-apply-no-binding");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let state_dir = fixture.path().join("state");
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "apply", "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "NO_PROJECT_BINDING");
+    // No URL may precede a blocked result: the JSON line is the entire stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().count(), 1);
+}
+
+#[test]
+fn portfolio_apply_dry_run_never_creates_state() {
+    let fixture = Fixture::new("portfolio-apply-dry-run");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let state_dir = fixture.path().join("never-created");
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "apply", "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "NO_PROJECT_BINDING");
+    assert!(
+        !state_dir.exists(),
+        "--dry-run must not create the state directory"
+    );
+}
+
+#[test]
+fn portfolio_apply_complete_prints_project_url_before_issue_urls() {
+    let fixture = Fixture::new("portfolio-apply-complete");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_snapshot_with_plan_digest(plan.plan_digest()))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("issue:portfolio-store", 101))
+        .unwrap();
+    drop(store);
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        fixture.path().to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4);
+    // The Project URL is the first URL and comes before every issue URL.
+    assert_eq!(
+        lines[0],
+        "https://github.com/orgs/berlinguyinca/projects/42"
+    );
+    assert_eq!(
+        lines[1],
+        "https://github.com/berlinguyinca/autospec/issues/100"
+    );
+    assert_eq!(
+        lines[2],
+        "https://github.com/berlinguyinca/autospec/issues/101"
+    );
+    let report: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    assert_stable_portfolio_fields(&report, "apply", "complete");
+    assert_eq!(
+        report["project"]["url"],
+        "https://github.com/orgs/berlinguyinca/projects/42"
+    );
+    assert_eq!(report["project"]["owner"], "berlinguyinca");
+    assert_eq!(
+        report["issue_urls"],
+        serde_json::json!([
+            "https://github.com/berlinguyinca/autospec/issues/100",
+            "https://github.com/berlinguyinca/autospec/issues/101"
+        ])
+    );
+    assert_eq!(report["pending_operations"], 0);
+    assert_eq!(report["pending_projections"], 0);
+}
+
+#[test]
+fn portfolio_reconcile_degraded_reports_pending_operations() {
+    let fixture = Fixture::new("portfolio-reconcile-degraded");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_snapshot_with_plan_digest(plan.plan_digest()))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    store
+        .transition_portfolio_operation(
+            "item:add:issue:portfolio-store",
+            "intent",
+            serde_json::json!({"field": "Status"}),
+        )
+        .unwrap();
+    drop(store);
+    let output = portfolio_cli(&[
+        "reconcile",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        fixture.path().to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "reconcile", "degraded");
+    assert_eq!(report["pending_operations"], 1);
+}
+
+#[test]
+fn portfolio_explicit_owner_is_preserved_and_never_falls_back() {
+    let fixture = Fixture::new("portfolio-owner");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let mut store = open_portfolio_store(fixture.path());
+    store
+        .record_portfolio_snapshot(portfolio_snapshot_with_plan_digest(plan.plan_digest()))
+        .unwrap();
+    store
+        .record_portfolio_item_binding(portfolio_item_binding("source-tracker", 100))
+        .unwrap();
+    drop(store);
+    let state_dir = fixture.path().to_str().unwrap().to_owned();
+
+    // A matching explicit owner is carried through (case-insensitively) into the result.
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        &state_dir,
+        "--project-owner",
+        "Berlinguyinca",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = portfolio_report(&output);
+    assert_eq!(report["result"], "complete");
+    assert_eq!(report["project_owner"], "berlinguyinca");
+
+    // A mismatching explicit owner blocks; it never falls back to the plan owner.
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        &state_dir,
+        "--project-owner",
+        "somebody-else",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "apply", "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "PROJECT_OWNER_MISMATCH");
+
+    // A provisioned owner diverging from the frozen plan blocks even with no flag.
+    let diverged_fixture = Fixture::new("portfolio-owner-diverged");
+    let mut diverged = portfolio_snapshot_with_plan_digest(plan.plan_digest());
+    diverged["owner"] = serde_json::Value::from("somebody-else");
+    let mut store = open_portfolio_store(diverged_fixture.path());
+    store.record_portfolio_snapshot(diverged).unwrap();
+    drop(store);
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        plan.portfolio_id().as_str(),
+        "--state-dir",
+        diverged_fixture.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_eq!(report["result"], "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "PROJECT_OWNER_MISMATCH");
+}
+
+#[test]
+fn portfolio_apply_rejects_divergent_portfolio_identity() {
+    let fixture = Fixture::new("portfolio-id-mismatch");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let state_dir = fixture.path().join("state");
+
+    let other = "f".repeat(64);
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        &other,
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_stable_portfolio_fields(&report, "apply", "blocked");
+    assert_eq!(report["diagnostics"][0]["code"], "PORTFOLIO_ID_MISMATCH");
+
+    let output = portfolio_cli(&[
+        "apply",
+        "--manifest",
+        &manifest,
+        "--portfolio",
+        "not-a-digest",
+        "--state-dir",
+        state_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let report = portfolio_report(&output);
+    assert_eq!(report["diagnostics"][0]["code"], "PORTFOLIO_ID_INVALID");
+}
+
+#[test]
+fn portfolio_transactions_block_when_state_plan_digest_diverges() {
+    let fixture = Fixture::new("portfolio-digest-divergence");
+    let plan = portfolio_cli_plan();
+    let manifest = portfolio_cli_write_manifest(&fixture, &plan.canonical_yaml());
+    let mut store = open_portfolio_store(fixture.path());
+    // Provisioned under the fixture's canonical 64×'a' digest, not this plan's.
+    store
+        .record_portfolio_snapshot(portfolio_store_snapshot())
+        .unwrap();
+    drop(store);
+    let state_dir = fixture.path().to_str().unwrap().to_owned();
+    for command in ["apply", "reconcile"] {
+        let output = portfolio_cli(&[
+            command,
+            "--manifest",
+            &manifest,
+            "--portfolio",
+            plan.portfolio_id().as_str(),
+            "--state-dir",
+            &state_dir,
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+        let report = portfolio_report(&output);
+        assert_stable_portfolio_fields(&report, command, "blocked");
+        assert_eq!(report["diagnostics"][0]["code"], "PLAN_DIGEST_MISMATCH");
     }
 }
