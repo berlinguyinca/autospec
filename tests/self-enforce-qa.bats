@@ -15,12 +15,20 @@ REAL_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 # exit-0 stub. The lint step is what actually decides the bad/good verdict here;
 # validate.sh on a synthetic diff only added latency, not signal.
 _fast_repo_root() {
-  local d
+  local d extra
   d="$(mktemp -d -t self-enforce-root-XXXXXX)"
-  mkdir -p "$d/scripts"
+  mkdir -p "$d/scripts" "$d/bin"
   cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/autospec validate"
-  chmod +x "$d/autospec validate"
+  # every sibling the lint step resolves from REPO_ROOT
+  for extra in lint-path-classifiers.sh lint-restore-visibility.sh; do
+    if [ -f "$REAL_REPO_ROOT/scripts/$extra" ]; then
+      cp "$REAL_REPO_ROOT/scripts/$extra" "$d/scripts/$extra"
+    fi
+  done
+  # step 2 invokes `autospec validate`; stub it on PATH (the sandbox and some
+  # CI images do not install the binary)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/bin/autospec"
+  chmod +x "$d/bin/autospec"
   printf '%s' "$d"
 }
 
@@ -86,7 +94,7 @@ index 0000000..abc1234
 +echo "done"
 EOF
   export REPO_ROOT="$(_fast_repo_root)"
-  run "$SCRIPT" --diff-file "$diff_file"
+  run env PATH="${REPO_ROOT}/bin:$PATH" "$SCRIPT" --diff-file "$diff_file"
   rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -ne 0 ]
 }
@@ -106,7 +114,7 @@ index 0000000..abc1234
 +echo "done"
 EOF
   export REPO_ROOT="$(_fast_repo_root)"
-  run "$SCRIPT" --diff-file "$diff_file"
+  run env PATH="${REPO_ROOT}/bin:$PATH" "$SCRIPT" --diff-file "$diff_file"
   rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -qiE "SECURITY|no-verify|finding|violation|blocked"
@@ -127,7 +135,7 @@ index 0000000..def5678
 +echo "hello world"
 EOF
   export REPO_ROOT="$(_fast_repo_root)"
-  run "$SCRIPT" --diff-file "$diff_file"
+  run env PATH="${REPO_ROOT}/bin:$PATH" "$SCRIPT" --diff-file "$diff_file"
   rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -eq 0 ]
 }
@@ -148,6 +156,80 @@ EOF
   run env SELF_ENFORCE_SKIP_TOKEN="[skip self-enforce]" \
     "$SCRIPT" --diff-file "$diff_file" --pr-body "[skip self-enforce]"
   rm -f "$diff_file"
+  [ "$status" -eq 0 ]
+}
+
+# Step 3 (issue #3878): the QA chain also runs the whole-tree restore-
+# visibility ratchet, so an unobserved mtime-preserving restore site in the
+# working tree blocks the PR even when the diff itself is clean.
+_rv_repo_root() {
+  local d extra
+  d="$(mktemp -d -t self-enforce-rv-XXXXXX)"
+  mkdir -p "$d/scripts" "$d/tests" "$d/bin"
+  # copy the lint step and every sibling it resolves, so the QA chain gets
+  # past steps 1-2 and only the tree scan decides the verdict here
+  cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
+  for extra in lint-path-classifiers.sh lint-restore-visibility.sh; do
+    if [ -f "$REAL_REPO_ROOT/scripts/$extra" ]; then
+      cp "$REAL_REPO_ROOT/scripts/$extra" "$d/scripts/$extra"
+    fi
+  done
+  # step 2 invokes `autospec validate`; stub it on PATH (the sandbox and some
+  # CI images do not install the binary)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/bin/autospec"
+  chmod +x "$d/bin/autospec"
+  printf '%s' "$d"
+}
+
+clean_diff_file() {
+  local diff_file
+  diff_file=$(mktemp -t self-enforce-rv-diff-XXXXXX.diff)
+  cat > "$diff_file" <<'EOF'
+diff --git a/good-script.sh b/good-script.sh
+new file mode 100755
+index 0000000..def5678
+--- /dev/null
++++ b/good-script.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/env bash
++set -eu
++echo "hello world"
+EOF
+  printf '%s' "$diff_file"
+}
+
+@test "QA chain blocks on an unobserved mtime-preserving restore site in the tree" {
+  local d diff_file
+  d="$(_rv_repo_root)"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -eu' \
+    'cp "$f" "$f.bak"' \
+    'mv -f "$f.bak" "$f"' \
+    'cargo build' > "$d/tests/rv.sh"
+  diff_file="$(clean_diff_file)"
+  export REPO_ROOT="$d"
+  run env PATH="$d/bin:$PATH" "$SCRIPT" --diff-file "$diff_file"
+  rm -rf "$d"; rm -f "$diff_file"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"STALE_RESTORE"* ]]
+  [[ "$output" == *"tests/rv.sh"* ]]
+}
+
+@test "QA chain passes when the tree restore site is touch-observed" {
+  local d diff_file
+  d="$(_rv_repo_root)"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -eu' \
+    'cp "$f" "$f.bak"' \
+    'mv -f "$f.bak" "$f"' \
+    'touch "$f"' \
+    'cargo build' > "$d/tests/rv.sh"
+  diff_file="$(clean_diff_file)"
+  export REPO_ROOT="$d"
+  run env PATH="$d/bin:$PATH" "$SCRIPT" --diff-file "$diff_file"
+  rm -rf "$d"; rm -f "$diff_file"
   [ "$status" -eq 0 ]
 }
 
