@@ -301,3 +301,107 @@ report_has() {
         fail "verify-gate.sh uses a bash-only construct"
     fi
 }
+
+# --- baseline-relative mode: pre-existing failures do not block ------------
+#
+# The invariant: a gate verdict is baseline-relative. A failure counts against
+# a change only if the same gate passes on the unmodified base. A gate that
+# fails identically on the base reports "pre-existing", not "failed", and does
+# not block. This is what lets a clean, unrelated patch through a workspace
+# that already carries a lint failure.
+
+# make_baseline_report <dir> <lane>... — write a minimal report.json where the
+# named lanes have status "fail" and all others have status "pass".
+make_baseline_report() {
+    local dir="$1"; shift
+    local lanes=""
+    local first=1
+    for l in "$@"; do
+        [ "$first" -eq 1 ] || lanes="$lanes,"
+        first=0
+        lanes="${lanes}{\"lane\":\"${l}\",\"status\":\"fail\",\"exit_code\":1,\"result_lines\":1,\"failed_lines\":1}"
+    done
+    printf '{"schema":1,"status":"FAIL","total":1,"passed":0,"failed":1,"pre_existing":0,"unknown":0,"lanes":[%s]}\n' "$lanes" >"$dir/baseline.json"
+}
+
+@test "a pre-existing failure does not block a clean, unrelated patch" {
+    # The base has a failing lint lane. The patch does not touch the linted
+    # code, so lint still fails — but it is pre-existing and must not block.
+    lane lint 'exit 1' '[0-9]+ problems'
+    lane build 'printf "1 built\n"' '[0-9]+ built'
+
+    make_baseline_report "$TEST_TMP" lint
+
+    run run_gate --baseline "$TEST_TMP/baseline.json"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "PASS"
+    echo "$output" | grep -q "pre-existing"
+    report_has '"pre_existing":1'
+    report_has '"failed":0'
+    if echo "$output" | grep -q "FAIL"; then
+        fail "a pre-existing failure was reported as a new failure: $output"
+    fi
+}
+
+@test "a new failure still blocks even when other failures are pre-existing" {
+    # The base has a failing lint lane. The patch introduces a NEW failure in
+    # the test lane. The lint failure is pre-existing (does not block), but
+    # the test failure is new (must block).
+    lane lint 'exit 1' '[0-9]+ problems'
+    lane tests 'printf "3 passed\n1 FAILED\n"' '[0-9]+'
+
+    make_baseline_report "$TEST_TMP" lint
+
+    run run_gate --baseline "$TEST_TMP/baseline.json"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "FAIL"
+    report_has '"pre_existing":1'
+    report_has '"failed":1'
+}
+
+@test "without --baseline, a failing lane still blocks" {
+    # Without a baseline, there is no pre-existing context: every failure is
+    # new and blocks. This is the default behavior preserved for backward
+    # compatibility.
+    lane lint 'exit 1' '[0-9]+ problems'
+    run run_gate
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "FAIL"
+    report_has '"failed":1'
+    report_has '"pre_existing":0'
+}
+
+@test "a lane that passes in the current run is not pre-existing" {
+    # The base had a failure, but the patch fixed it. The lane now passes,
+    # so it is simply "pass" — not "pre_existing".
+    lane lint 'printf "0 problems\n"' '[0-9]+ problems'
+
+    make_baseline_report "$TEST_TMP" lint
+
+    run run_gate --baseline "$TEST_TMP/baseline.json"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "PASS"
+    report_has '"passed":1'
+    report_has '"pre_existing":0'
+    report_has '"failed":0'
+}
+
+@test "a missing baseline file is a usage error" {
+    lane build 'printf "ok\n"' 'ok'
+    run run_gate --baseline "$TEST_TMP/does-not-exist.json"
+    [ "$status" -eq 64 ]
+}
+
+@test "baseline report with no matching lane does not suppress the failure" {
+    # The baseline has a different lane failing. The current failure is in a
+    # lane that passed in the baseline, so it is a new failure and must block.
+    lane tests 'exit 1' '[0-9]+ tests'
+
+    make_baseline_report "$TEST_TMP" lint
+
+    run run_gate --baseline "$TEST_TMP/baseline.json"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "FAIL"
+    report_has '"failed":1'
+    report_has '"pre_existing":0'
+}

@@ -48,7 +48,7 @@ usage() {
     cat <<'EOF'
 Usage:
   verify-gate.sh [--repo-root <dir>] [--report <file>] [--require-tool <tool>]...
-                 [--fail-regex <ERE>] <manifest>
+                 [--fail-regex <ERE>] [--baseline <file>] <manifest>
 
 Manifest: one lane per line, tab-separated:
 
@@ -70,6 +70,13 @@ Status record (one per lane, plus the aggregate):
 
   {"lane":"<name>","status":"pass|fail|unknown","exit_code":<int>|"unknown",
    "result_lines":<int>|"unknown","failed_lines":<int>|"unknown"}
+
+Baseline-relative mode (--baseline <file>):
+
+  <file> is a report.json from a prior verify-gate run on the unmodified base.
+  A lane that fails in the current run but also failed in the baseline is
+  reported "pre_existing" and does not block. Only new failures (fail in
+  current, pass in baseline) count against the change.
 
 Final stdout line (parse this, not the exit code alone):
 
@@ -121,6 +128,7 @@ REPORT=""
 MANIFEST=""
 REQUIRED_TOOLS=""
 FAIL_REGEX='FAIL|fail|ERROR|error'
+BASELINE=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -144,6 +152,11 @@ while [ "$#" -gt 0 ]; do
             FAIL_REGEX="$2"
             shift 2
             ;;
+        --baseline)
+            [ "$#" -ge 2 ] || die_usage "--baseline requires a value"
+            BASELINE="$2"
+            shift 2
+            ;;
         -h | --help)
             usage
             exit 0
@@ -160,6 +173,9 @@ done
 [ -n "$MANIFEST" ] || die_usage "a manifest is required"
 [ -f "$MANIFEST" ] || die_usage "manifest does not exist: $MANIFEST"
 [ -d "$REPO_ROOT" ] || die_usage "--repo-root does not exist: $REPO_ROOT"
+if [ -n "$BASELINE" ]; then
+    [ -f "$BASELINE" ] || die_usage "baseline report does not exist: $BASELINE"
+fi
 cd "$REPO_ROOT"
 
 write_report() {
@@ -268,6 +284,7 @@ total=0
 passed=0
 failed=0
 unknown=0
+pre_existing=0
 
 run_lane() {
     lane_name="$1"
@@ -376,20 +393,60 @@ record_measured_lane() {
     record_lane "$lane_name" pass "$lane_code" "$lane_results" "$lane_failed"
 }
 
+# baseline_lane_failed <name>
+#
+# Returns 0 if the named lane had status "fail" in the baseline report.
+baseline_lane_failed() {
+    [ -n "$BASELINE" ] || return 1
+    LANE_BASELINE_NAME="$1"
+    export LANE_BASELINE_NAME
+    awk '
+        BEGIN {
+            name = ENVIRON["LANE_BASELINE_NAME"]
+            found = 0
+        }
+        {
+            n = split($0, parts, "\"lane\":\"")
+            for (i = 2; i <= n; i++) {
+                lname = parts[i]
+                sub(/".*/, "", lname)
+                if (lname != name) continue
+                if (match(parts[i], /\"status\":\"[a-z_]+\"/)) {
+                    status = substr(parts[i], RSTART, RLENGTH)
+                    sub(/\"status\":\"/, "", status)
+                    sub(/\"$/, "", status)
+                    if (status == "fail") { found = 1; exit }
+                }
+                break
+            }
+        }
+        END { exit (found ? 0 : 1) }
+    ' "$BASELINE" 2>/dev/null
+}
+
 # record_lane <name> <status> <exit> <result_lines> <failed_lines>
 #
 # `unknown` in the exit slot means the lane never ran. The counters are only
 # touched here, so a lane cannot be counted twice or land in no bucket.
 record_lane() {
     name="$1"
-    printf '%s' "$2" >"$WORK/$name.status"
+    status="$2"
+
+    # Baseline-relative: a lane that failed in the current run but also failed
+    # in the baseline is "pre_existing" — it does not block the change.
+    if [ "$status" = "fail" ] && baseline_lane_failed "$name"; then
+        status="pre_existing"
+    fi
+
+    printf '%s' "$status" >"$WORK/$name.status"
     printf '%s' "$3" >"$WORK/$name.exit"
     printf '%s' "$4" >"$WORK/$name.results"
     printf '%s' "$5" >"$WORK/$name.failed"
 
-    case "$2" in
+    case "$status" in
         pass) passed=$((passed + 1)) ;;
         fail) failed=$((failed + 1)) ;;
+        pre_existing) pre_existing=$((pre_existing + 1)) ;;
         *) unknown=$((unknown + 1)) ;;
     esac
 }
@@ -428,13 +485,16 @@ done <"$WORK/lanes.tsv"
 if [ "$total" -eq 0 ]; then
     # An empty manifest verified nothing, and a gate with nothing to say is not
     # a gate that passed.
-    printf '{"schema":1,"status":"UNKNOWN","rule":"empty-manifest","total":0,"passed":0,"failed":0,"unknown":"unknown","lanes":[]}\n' \
+    printf '{"schema":1,"status":"UNKNOWN","rule":"empty-manifest","total":0,"passed":0,"failed":0,"pre_existing":0,"unknown":"unknown","lanes":[]}\n' \
         >"$WORK/report.json"
     write_report
     printf 'verify-gate: UNKNOWN (0 lanes, 0 failed, 0 unknown)\n'
     exit 2
 fi
 
+# Baseline-relative: only non-pre-existing failures block. Pre-existing
+# failures (also present on the unmodified base) are reported but do not
+# prevent a clean, unrelated patch from passing.
 if [ "$failed" -gt 0 ]; then
     overall='FAIL'
     exit_code=1
@@ -447,8 +507,8 @@ else
 fi
 
 {
-    printf '{"schema":1,"status":"%s","total":%d,"passed":%d,"failed":%d,"unknown":%d,"lanes":[' \
-        "$overall" "$total" "$passed" "$failed" "$unknown"
+    printf '{"schema":1,"status":"%s","total":%d,"passed":%d,"failed":%d,"pre_existing":%d,"unknown":%d,"lanes":[' \
+        "$overall" "$total" "$passed" "$failed" "$pre_existing" "$unknown"
     first=1
     while IFS="$(printf '\t')" read -r lane_name lane_command lane_result_re; do
         [ -n "$lane_name" ] || continue
@@ -467,6 +527,11 @@ fi
 write_report
 
 # Last line on purpose, so a caller can `tail -1` rather than parse the run.
-printf 'verify-gate: %s (%d lanes, %d failed, %d unknown)\n' \
-    "$overall" "$total" "$failed" "$unknown"
+if [ "$pre_existing" -gt 0 ]; then
+    printf 'verify-gate: %s (%d lanes, %d failed, %d pre-existing, %d unknown)\n' \
+        "$overall" "$total" "$failed" "$pre_existing" "$unknown"
+else
+    printf 'verify-gate: %s (%d lanes, %d failed, %d unknown)\n' \
+        "$overall" "$total" "$failed" "$unknown"
+fi
 exit "$exit_code"
