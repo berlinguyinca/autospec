@@ -34,6 +34,7 @@ pub enum IssueQualityRule {
     AcProse,
     AcSubjective,
     AcTooLong,
+    AcProhibitionOnly,
     SmokeNotFenced,
     SmokePlaceholder,
     SmokeMultiLine,
@@ -58,6 +59,7 @@ impl IssueQualityRule {
             Self::AcProse => "AC_PROSE",
             Self::AcSubjective => "AC_SUBJECTIVE",
             Self::AcTooLong => "AC_TOO_LONG",
+            Self::AcProhibitionOnly => "AC_PROHIBITION_ONLY",
             Self::SmokeNotFenced => "SMOKE_NOT_FENCED",
             Self::SmokePlaceholder => "SMOKE_PLACEHOLDER",
             Self::SmokeMultiLine => "SMOKE_MULTI_LINE",
@@ -284,7 +286,66 @@ fn check_acceptance_criteria(document: &IssueDocument<'_>, findings: &mut Vec<Is
                 ),
             ));
         }
+
+        if let Some(finding) = prohibition_only_finding(line_number, line, item_body) {
+            findings.push(finding);
+        }
     }
+}
+
+fn prohibition_only_finding(
+    line_number: usize,
+    line: &str,
+    item_body: &str,
+) -> Option<IssueLintFinding> {
+    if has_prohibition(item_body) && !has_concrete_backtick_span(item_body) {
+        Some(IssueLintFinding::new(
+            IssueQualityRule::AcProhibitionOnly,
+            format!(
+                "AC item {line_number} is prohibition-only; name a check that runs, a type that constrains, or a helper that call sites must go through: {}",
+                first_chars(line, 60),
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Prohibition phrases that mark an acceptance criterion built around a rule
+/// rather than a mechanism (issue #3780).
+const AC_PROHIBITION_PHRASES: &[&str] = &[
+    "never",
+    "do not",
+    "does not",
+    "did not",
+    "don't",
+    "doesn't",
+    "didn't",
+    "must not",
+    "shall not",
+    "cannot",
+    "can't",
+];
+
+fn has_prohibition(text: &str) -> bool {
+    first_word_match(text, AC_PROHIBITION_PHRASES).is_some()
+}
+
+/// True when a backtick span names something concrete — the check, type, or
+/// helper a prohibition-only criterion must point at to be implementable.
+fn has_concrete_backtick_span(text: &str) -> bool {
+    let mut remainder = text;
+    while let Some(open) = remainder.find('`') {
+        let after_open = &remainder[open + 1..];
+        let Some(close) = after_open.find('`') else {
+            return false;
+        };
+        if after_open[..close].bytes().any(is_path_character) {
+            return true;
+        }
+        remainder = &after_open[close + 1..];
+    }
+    false
 }
 
 fn check_primary_smoke(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
