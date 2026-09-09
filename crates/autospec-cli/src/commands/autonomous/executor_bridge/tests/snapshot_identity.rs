@@ -512,6 +512,13 @@ fn autonomous_executor_bridge_pre_exec_window_allows_only_same_birth_launcher_im
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_supervision_adopts_adapter_exec_replacement() {
+    // This test launches a real supervised harness (an adapter that execs into
+    // sleep), so it must order itself against every other launch: without the
+    // environment guard it ran concurrently with the whole supervision family,
+    // including the integration binary's real-bridge E2E tests, and rotated
+    // failures out of the group (#3857). The guard also carries the
+    // cross-binary family lock.
+    let _environment = test_environment();
     // Break caught: supervision aborted on the adapter's same-PID exec replacement because the
     // recorded identity named the launched adapter, not the supervised harness executable.
     let fixture = GitFixture::new("supervise-adapter-exec");
