@@ -1,3 +1,4 @@
+pub mod dependency_gate;
 pub mod executor;
 pub mod patch_pipeline;
 pub mod queue;
