@@ -1,0 +1,5 @@
+# Reviewed process-matcher exceptions (one repo-relative path per line).
+#
+# Entries are repo-relative paths, exactly as printed in a
+# PROCESS_MATCHER finding. `#` lines and blank lines are ignored.
+tests/fixtures/lint-process-matchers/allowlisted.sh

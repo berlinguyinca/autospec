@@ -65,12 +65,14 @@ EXPLORE_CHILD_PIDS=""
 
 # A harness may detach this script into a new session. Keep a tiny owner
 # watcher so force-restarting the autonomous drain cannot orphan research work.
+# The wait is pid-based and lifetime-bound (deadline 0: it ends only when
+# the parent dies) — never a command-line pattern match, which could match
+# the watcher's own argv (issue #3938).
 EXPLORE_PARENT_WATCHDOG=""
 if [ -n "${AUTOSPEC_EXPLORE_PARENT_PID:-}" ] && [ "${AUTOSPEC_EXPLORE_PARENT_PID}" != "$$" ]; then
     (
-        while kill -0 "$AUTOSPEC_EXPLORE_PARENT_PID" 2>/dev/null; do
-            sleep 15
-        done
+        . "$SCRIPT_DIR/lib/autospec-process-wait.sh"
+        autospec_wait_pid "$AUTOSPEC_EXPLORE_PARENT_PID" 0 "parent pid ${AUTOSPEC_EXPLORE_PARENT_PID}" || true
         kill -TERM "$$" 2>/dev/null || true
     ) &
     EXPLORE_PARENT_WATCHDOG="$!"
