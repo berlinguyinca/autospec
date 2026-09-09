@@ -13,8 +13,10 @@
 
 pub mod config;
 pub mod correlate;
+pub mod events;
 pub mod models;
 pub mod proposals;
+pub mod summarize;
 
 pub use models::{
     model_performance, recommend, ModelPerformance, RecommendationConfidence,
