@@ -634,6 +634,168 @@ fn blocks_the_twin_of_an_already_active_issue() {
 }
 
 #[test]
+fn keeps_both_candidates_ready_when_they_share_a_conflict_domain() {
+    // Spec §27.6: a conflict domain is scheduling metadata, not a readiness
+    // edge. Two issues that name the same conflict domain must both stay
+    // ready (and both make the batch) when their write paths differ.
+    let body = |path: &str| {
+        format!(
+            "## Concurrency\n\nParallel safe: yes\n\n### Conflict domains\n- `router-http`\n\n## Implementation outline\n\n- edit `{path}`\n"
+        )
+    };
+    let input = ready_input(vec![
+        issue(
+            910,
+            body("crates/router/src/http.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            911,
+            body("crates/router/src/grpc.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![910, 911]);
+    assert_eq!(plan.batch_numbers(), vec![910, 911]);
+    assert!(plan.blocked.is_empty(), "no issue may be blocked");
+    assert!(
+        plan.conflicts.is_empty(),
+        "a shared conflict domain is not a path conflict"
+    );
+    for view in &plan.ready {
+        assert!(view.unmet_dependencies.is_empty());
+        assert!(view.conflicts_with.is_none());
+    }
+}
+
+#[test]
+fn keeps_both_candidates_ready_when_they_share_a_write_surface() {
+    // Spec §27.6: shared write surfaces declared in the Concurrency section
+    // are metadata; they only become a conflict when the same file also
+    // appears in both Implementation outlines.
+    let body = |path: &str| {
+        format!(
+            "## Concurrency\n\nParallel safe: yes\n\n### Exclusive write ownership\n- `{path}`\n\n### Shared write surfaces\n- `crates/core/src/lib.rs`\n\n## Implementation outline\n\n- edit `{path}`\n"
+        )
+    };
+    let input = ready_input(vec![
+        issue(
+            912,
+            body("crates/core/src/a.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            913,
+            body("crates/core/src/b.rs"),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![912, 913]);
+    assert_eq!(plan.batch_numbers(), vec![912, 913]);
+    assert!(plan.blocked.is_empty());
+    assert!(plan.conflicts.is_empty());
+}
+
+#[test]
+fn withholds_the_dependent_of_a_hard_dependency_edge() {
+    // Spec §27.6: only the `## Dependencies` heading creates readiness edges.
+    // `Depends on issue #A` against an open issue must withhold the
+    // dependent while the dependency itself stays ready.
+    let input = ready_input(vec![
+        issue(
+            920,
+            "## Implementation outline\n\n- edit `src/parent.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            921,
+            "## Dependencies\n\nDepends on issue #920\n\n## Implementation outline\n\n- edit `src/child.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![920]);
+    assert_eq!(plan.batch_numbers(), vec![920]);
+    assert_eq!(plan.blocked.len(), 1);
+    assert_eq!(plan.blocked[0].issue.number, 921);
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("blocked_dependencies")
+    );
+    assert_eq!(plan.blocked[0].unmet_dependencies, vec![920]);
+    assert!(plan.blocked[0].non_blocking_refs.is_empty());
+    assert!(plan.conflicts.is_empty());
+}
+
+#[test]
+fn treats_expected_parallel_peers_as_informative_only() {
+    // Spec §27.6: `### Expected parallel peers` is informative only and must
+    // not become authoritative scheduling state, even when the peers name
+    // each other.
+    let body = |path: &str, peer: u64| {
+        format!(
+            "## Concurrency\n\nParallel safe: yes\n\n### Expected parallel peers\n- issue #{peer}\n\n## Implementation outline\n\n- edit `{path}`\n"
+        )
+    };
+    let input = ready_input(vec![
+        issue(
+            930,
+            body("src/peer_a.rs", 931),
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            931,
+            body("src/peer_b.rs", 930),
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![930, 931]);
+    assert_eq!(plan.batch_numbers(), vec![930, 931]);
+    assert!(plan.blocked.is_empty());
+    assert!(plan.conflicts.is_empty());
+    for view in &plan.ready {
+        assert!(view.unmet_dependencies.is_empty());
+    }
+}
+
+#[test]
+fn ignores_dependency_mentions_outside_the_dependencies_heading() {
+    // Spec §27.6 + security review: a crafted body must not smuggle a
+    // readiness edge in from prose or the Concurrency section.
+    let input = ready_input(vec![
+        issue(
+            940,
+            "## Concurrency\n\nParallel safe: yes\n\n### Conflict domains\n- `router-http` (depends on issue #999)\n\n## Implementation outline\n\n- edit `src/router.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            941,
+            "## Concurrency\n\nParallel safe: yes\n\n### Shared write surfaces\n- `crates/core/src/lib.rs` (depends on issue #999)\n\n## Implementation outline\n\n- edit `src/core.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![940, 941]);
+    assert!(plan.blocked.is_empty());
+    for view in &plan.ready {
+        assert!(view.unmet_dependencies.is_empty());
+    }
+}
+
+#[test]
 fn a_closed_owner_does_not_block_its_open_duplicate() {
     let closed = RemoteIssue::closed(
         3402,
