@@ -43,6 +43,16 @@ pub(crate) fn run_with_transport<T: GithubTransport>(
     if command == "active-edges" && board.managed_policy().is_none() {
         return Ok(json!([]));
     }
+    // An unconfigured board is an optional subsystem, not a failure: `resolve`
+    // doubles as the cheap preflight probe and `sync` degrades to SKIPPED so a
+    // fresh clone or worktree (where the gitignored operator config is absent)
+    // never hard-fails a mandatory pipeline step.
+    if (command == "resolve" || command == "sync") && board.managed_policy().is_none() {
+        return Ok(json!({
+            "outcome": "skipped",
+            "reason": "project board not configured",
+        }));
+    }
     let policy = board
         .managed_policy()
         .cloned()
@@ -711,9 +721,23 @@ fn load_project_board_config(
     repo_dir: &Path,
 ) -> Result<autospec_core::autonomous::config::ProjectBoardConfig, ManagedProjectError> {
     let path = repo_dir.join(".autospec/autonomous.yml");
-    let source = fs::read_to_string(&path).map_err(|error| {
-        ManagedProjectError::new(format!("cannot read {}: {error}", path.display()))
-    })?;
+    // `.autospec/autonomous.yml` is operator-local and gitignored, so it never
+    // reaches a fresh clone, worktree, or CI runner. Absence means "board not
+    // configured"; only a genuine read error is a failure.
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AutonomousConfig::parse("")
+                .map_err(ManagedProjectError::new)?
+                .project_board);
+        }
+        Err(error) => {
+            return Err(ManagedProjectError::new(format!(
+                "cannot read {}: {error}",
+                path.display()
+            )));
+        }
+    };
     Ok(AutonomousConfig::parse(&source)
         .map_err(ManagedProjectError::new)?
         .project_board)
