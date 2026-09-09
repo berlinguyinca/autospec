@@ -94,13 +94,28 @@ fn validate_summary(value: String, field: &str) -> Result<String, Accountability
     Ok(sanitized)
 }
 
+/// PEM (RFC 7468) boundary markers are `-----BEGIN <label>-----` or
+/// `-----END <label>-----`. `sanitize_text` tokenizes on whitespace, so a
+/// label containing spaces spans several tokens; the boundary is identified
+/// structurally as the five-dash delimiter followed by the exact keyword at
+/// token start, then token end or the space separating the label.
+fn is_pem_boundary(lower: &str, keyword: &str) -> bool {
+    let Some(rest) = lower.strip_prefix("-----") else {
+        return false;
+    };
+    let Some(after) = rest.strip_prefix(keyword) else {
+        return false;
+    };
+    after.is_empty() || after.starts_with(' ')
+}
+
 fn sanitize_text(value: &str, limit: usize) -> String {
     let mut output = String::with_capacity(value.len().min(limit));
     let mut redact_next = false;
     let mut pem_block = false;
     for token in value.split_whitespace() {
         let lower = token.to_ascii_lowercase();
-        if lower.contains("-----begin") {
+        if is_pem_boundary(&lower, "begin") {
             pem_block = true;
         }
         let credential_assignment = [
@@ -132,8 +147,8 @@ fn sanitize_text(value: &str, limit: usize) -> String {
             || lower == "private"
             || lower == "key"
             || lower.contains("private") && lower.contains("key")
-            || lower.contains("-----begin")
-            || lower.contains("-----end")
+            || is_pem_boundary(&lower, "begin")
+            || is_pem_boundary(&lower, "end")
             || (token.starts_with("AKIA") && token.len() >= 20)
             || token.starts_with('/')
             || token.starts_with('~')
