@@ -9,6 +9,7 @@ pub mod explore;
 pub mod growth_report;
 pub mod init;
 pub mod initiative;
+pub mod insights;
 pub mod issue;
 pub mod lint;
 pub mod managed_project;
@@ -131,6 +132,15 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "aar" => aar::run(rest),
             "initiative" => initiative::run(rest),
             "issue" => issue::run(rest),
+            "insights" => insights::run(rest)
+                .map(|code| {
+                    if code == 0 {
+                        Ok(())
+                    } else {
+                        Err(CommandFailure::status(String::new(), code))
+                    }
+                })
+                .unwrap_or_else(|message| Err(CommandFailure::diagnostic(message))),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),
             "parent" => parent::run(rest),
