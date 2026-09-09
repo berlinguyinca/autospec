@@ -8,8 +8,9 @@ use crate::spec::is_valid_spec_id;
 use crate::state::json::{JsonParser, JsonValue};
 
 use super::queue::{
-    is_valid_run_id, ExecutionQueue, FailureKind, QueueEntry, QueueValidationResult,
-    AGENT_RESULTS_QUEUE_SCHEMA, LEGACY_QUEUE_SCHEMA, QUEUE_SCHEMA,
+    is_spec_sha256, is_valid_run_id, ExecutionQueue, FailureKind, QueueEntry,
+    QueueValidationResult, SpecDigest, AGENT_RESULTS_QUEUE_SCHEMA, LEGACY_QUEUE_SCHEMA,
+    QUEUE_SCHEMA, REVISION_QUEUE_SCHEMA,
 };
 use super::queue_parser::parse_entry;
 
@@ -244,11 +245,12 @@ fn parse_queue(value: &str) -> Result<ExecutionQueue, String> {
     let schema = take(&mut object, "schema", "queue")?.into_number("schema")?;
     if !matches!(
         schema,
-        LEGACY_QUEUE_SCHEMA | AGENT_RESULTS_QUEUE_SCHEMA | QUEUE_SCHEMA
+        LEGACY_QUEUE_SCHEMA | AGENT_RESULTS_QUEUE_SCHEMA | REVISION_QUEUE_SCHEMA | QUEUE_SCHEMA
     ) {
         return Err(format!("unsupported queue schema: {schema}"));
     }
-    if schema == QUEUE_SCHEMA {
+    let has_revision = schema >= REVISION_QUEUE_SCHEMA;
+    if has_revision {
         require_keys(
             &object,
             &["run_id", "updated_at", "revision", "entries"],
@@ -259,7 +261,7 @@ fn parse_queue(value: &str) -> Result<ExecutionQueue, String> {
     }
     let run_id = take(&mut object, "run_id", "queue")?.into_string("run_id")?;
     let updated_at = take(&mut object, "updated_at", "queue")?.into_number("updated_at")?;
-    let revision = if schema == QUEUE_SCHEMA {
+    let revision = if has_revision {
         take(&mut object, "revision", "queue")?.into_number("revision")?
     } else {
         0
@@ -308,6 +310,16 @@ pub(super) fn validate_queue(queue: &ExecutionQueue) -> Result<(), String> {
                 entry.spec_id
             ));
         }
+        if entry
+            .spec_digest
+            .as_ref()
+            .is_some_and(|digest| !is_spec_sha256(&digest.sha256))
+        {
+            return Err(format!(
+                "queue entry {} has an invalid spec digest",
+                entry.spec_id
+            ));
+        }
     }
     Ok(())
 }
@@ -330,7 +342,7 @@ pub(super) fn queue_json(queue: &ExecutionQueue) -> Result<String, String> {
 
 fn entry_json(entry: &QueueEntry) -> String {
     format!(
-        "{{\"spec_id\":\"{}\",\"status\":\"{}\",\"attempts\":{},\"failure_kind\":{},\"blocker\":{},\"started_at\":{},\"updated_at\":{},\"validation\":{},\"agent_result_ids\":{}}}",
+        "{{\"spec_id\":\"{}\",\"status\":\"{}\",\"attempts\":{},\"failure_kind\":{},\"blocker\":{},\"started_at\":{},\"updated_at\":{},\"validation\":{},\"agent_result_ids\":{},\"spec_digest\":{}}}",
         escape(&entry.spec_id),
         entry.status.as_str(),
         entry.attempts,
@@ -339,7 +351,8 @@ fn entry_json(entry: &QueueEntry) -> String {
         optional_number_json(entry.started_at),
         entry.updated_at,
         optional_validation_json(&entry.validation),
-        string_array_json(&entry.agent_result_ids)
+        string_array_json(&entry.agent_result_ids),
+        optional_spec_digest_json(&entry.spec_digest)
     )
 }
 
@@ -371,6 +384,18 @@ fn optional_text(value: &Option<String>) -> String {
 fn optional_number_json(value: Option<u64>) -> String {
     value
         .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_spec_digest_json(value: &Option<SpecDigest>) -> String {
+    value
+        .as_ref()
+        .map(|value| {
+            format!(
+                "{{\"bytes\":{},\"sha256\":\"{}\"}}",
+                value.bytes, value.sha256
+            )
+        })
         .unwrap_or_else(|| "null".to_string())
 }
 

@@ -1,7 +1,13 @@
+use sha2::{Digest, Sha256};
+
 use super::queue_storage::now;
 use super::result::{AgentOutcome, IngestedAgentResult};
 
-pub(super) const QUEUE_SCHEMA: u64 = 3;
+/// 4 adds the dispatch-time spec digest to each entry (#3939); 3 the
+/// document-level revision; 2 the agent-result references; 1 the pre-result
+/// layout.
+pub(super) const QUEUE_SCHEMA: u64 = 4;
+pub(super) const REVISION_QUEUE_SCHEMA: u64 = 3;
 pub(super) const AGENT_RESULTS_QUEUE_SCHEMA: u64 = 2;
 pub(super) const LEGACY_QUEUE_SCHEMA: u64 = 1;
 
@@ -144,6 +150,53 @@ pub struct QueueEntry {
     pub updated_at: u64,
     pub validation: Option<QueueValidationResult>,
     pub agent_result_ids: Vec<String>,
+    /// Size and content hash of the staged spec captured at dispatch
+    /// (#3939). `None` on entries created before #3939 or for spec ids
+    /// scheduled without a staged input.
+    pub spec_digest: Option<SpecDigest>,
+}
+
+/// Size and content hash of a staged spec, captured at dispatch (#3939).
+///
+/// A run record that only names a spec id points at a file whose path is
+/// derived from a mutable issue number: the file is re-staged when the issue
+/// is edited, rewritten on re-dispatch, and carries whatever guidance
+/// currently applies. A later reader therefore sees the spec's *current*
+/// state, not the one the agent was dispatched with. The dispatch captures
+/// the exact staged text here, so the record — not the file — is the source
+/// of truth for what guidance the agent received: cross-run analysis reads
+/// these fields alone, the staged file verifies against the hash, and the
+/// hash itself is the version of the guidance/prompt block that dispatch
+/// contained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecDigest {
+    /// Staged spec text length in bytes at dispatch.
+    pub bytes: u64,
+    /// Lowercase hex SHA-256 of the staged spec bytes at dispatch.
+    pub sha256: String,
+}
+
+impl SpecDigest {
+    /// Digest of `input` as staged.
+    pub fn from_bytes(input: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(input);
+        Self {
+            bytes: u64::try_from(input.len()).expect("slice length fits u64"),
+            sha256: hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        }
+    }
+}
+
+pub(super) fn is_spec_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +289,7 @@ impl ExecutionQueue {
                     updated_at: timestamp,
                     validation: None,
                     agent_result_ids: Vec::new(),
+                    spec_digest: None,
                 })
                 .collect(),
         }
@@ -243,6 +297,13 @@ impl ExecutionQueue {
 
     pub fn entry(&self, spec_id: &str) -> Option<&QueueEntry> {
         self.entries.iter().find(|entry| entry.spec_id == spec_id)
+    }
+
+    /// The dispatch-time digest of a spec's staged input, if the run record
+    /// captured one (#3939).
+    pub fn spec_digest(&self, spec_id: &str) -> Option<&SpecDigest> {
+        self.entry(spec_id)
+            .and_then(|entry| entry.spec_digest.as_ref())
     }
 
     pub fn next_incomplete(&self) -> Option<&QueueEntry> {

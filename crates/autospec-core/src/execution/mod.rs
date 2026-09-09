@@ -25,8 +25,9 @@ pub use executor::{
 };
 pub use queue::{
     ExecutionQueue, FailureKind, OneShotIssueSelector, QueueEntry, QueueResultApplication,
-    QueueStatus, QueueValidationResult, QueueValidationStatus,
+    QueueStatus, QueueValidationResult, QueueValidationStatus, SpecDigest,
 };
+pub use queue_runtime::StagedSpecCheck;
 pub use result::{AgentOutcome, IngestedAgentResult};
 pub use test_diff::{
     diff_test_failures, resolve_reverification, DiffVerdict, FlakyQuarantine,

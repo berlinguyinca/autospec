@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use autospec_core::agent::AgentResult;
 use autospec_core::execution::{
     AgentOutcome, ExecutionQueue, FailureKind, IngestedAgentResult, OneShotIssueSelector,
-    QueueResultApplication, QueueStatus, QueueValidationResult, QueueValidationStatus,
+    QueueResultApplication, QueueStatus, QueueValidationResult, QueueValidationStatus, SpecDigest,
+    StagedSpecCheck,
 };
 
 #[test]
@@ -664,9 +665,10 @@ fn execution_queue_reads_legacy_documents_and_upgrades_them_on_save() {
 
     queue.save(root.path()).expect("legacy queue upgrades");
     let upgraded = fs::read_to_string(directory.join("queue.json")).expect("upgraded queue");
-    assert!(upgraded.contains("\"schema\":3"));
+    assert!(upgraded.contains("\"schema\":4"));
     assert!(upgraded.contains("\"revision\":1"));
     assert!(upgraded.contains("\"agent_result_ids\":[]"));
+    assert!(upgraded.contains("\"spec_digest\":null"));
 }
 
 #[test]
@@ -912,4 +914,189 @@ fn create_if_absent_staged_fails_closed_when_an_input_is_unreadable() {
 
     // Fail-closed: no queue, no partial staging — nothing to clean up.
     assert!(!root.path().join(".autospec").exists());
+}
+
+#[test]
+fn spec_digest_survives_post_run_spec_edits() {
+    // Acceptance, exercised against a populated case (#3939): a run record
+    // that names a spec must report the size and content hash captured at
+    // dispatch, and that report must survive the spec file being edited
+    // after the run — the record, not the file, is the source of truth for
+    // the guidance the agent was dispatched with.
+    let root = TempProjectRoot::new();
+    let input = root.path().join("input");
+    fs::create_dir_all(&input).expect("input directory is created");
+    fs::write(input.join("v99-first.md"), "# spec one\n").expect("spec source is written");
+
+    let queue = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-digest",
+        &[("v99-first".to_string(), input.join("v99-first.md"))],
+    )
+    .expect("staged queue is created");
+
+    // Dispatch captured the exact staged bytes: size and hash.
+    let original = queue
+        .spec_digest("v99-first")
+        .cloned()
+        .expect("dispatch captured the spec digest");
+    assert_eq!(original, SpecDigest::from_bytes(b"# spec one\n"));
+    assert_eq!(original.bytes, 11);
+    assert_eq!(original.sha256.len(), 64);
+
+    // The run record on disk carries the digest, not just the in-memory one.
+    let record = fs::read_to_string(root.path().join(".autospec/runs/run-digest/queue.json"))
+        .expect("run record is read");
+    assert!(
+        record.contains(&format!(
+            "\"spec_digest\":{{\"bytes\":11,\"sha256\":\"{}\"}}",
+            original.sha256
+        )),
+        "record names the digest: {record}"
+    );
+
+    // Post-run, the spec source — the mutable file the record's spec id
+    // points back at — is edited.
+    fs::write(
+        input.join("v99-first.md"),
+        "# spec one\n## later guidance\n",
+    )
+    .expect("spec source is edited after the run");
+
+    // The record still reports the dispatch-time size and hash.
+    let reloaded = ExecutionQueue::load_named(root.path(), "run-digest")
+        .expect("queue loads")
+        .expect("queue exists");
+    assert_eq!(
+        reloaded.spec_digest("v99-first").cloned(),
+        Some(original.clone())
+    );
+
+    // The per-run staged file still verifies against the recorded hash.
+    assert_eq!(
+        ExecutionQueue::check_staged_spec(root.path(), "run-digest", "v99-first").expect("check"),
+        StagedSpecCheck::Matches
+    );
+
+    // A staged file that drifts is reported Drifted with both digests, so a
+    // reader can say exactly what changed.
+    let staged = root
+        .path()
+        .join(".autospec/runs/run-digest/specs/v99-first.md");
+    fs::write(&staged, "# spec one\n## edited after the run\n")
+        .expect("staged file is tampered with");
+    assert_eq!(
+        ExecutionQueue::check_staged_spec(root.path(), "run-digest", "v99-first").expect("check"),
+        StagedSpecCheck::Drifted {
+            recorded: original,
+            actual: SpecDigest::from_bytes(b"# spec one\n## edited after the run\n"),
+        }
+    );
+}
+
+#[test]
+fn spec_digest_is_content_addressed_and_optional_when_not_staged() {
+    let root = TempProjectRoot::new();
+    let input = root.path().join("input");
+    fs::create_dir_all(&input).expect("input directory is created");
+    let content = "# shared guidance block\n";
+    fs::write(input.join("v99-first.md"), content).expect("first spec is written");
+    fs::write(input.join("v99-second.md"), content).expect("second spec is written");
+
+    let first = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-a",
+        &[("v99-first".to_string(), input.join("v99-first.md"))],
+    )
+    .expect("first run is created");
+    let second = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-b",
+        &[("v99-second".to_string(), input.join("v99-second.md"))],
+    )
+    .expect("second run is created");
+
+    // Same guidance content in two runs is the same version.
+    let digest_a = first
+        .spec_digest("v99-first")
+        .cloned()
+        .expect("digest captured");
+    let digest_b = second
+        .spec_digest("v99-second")
+        .cloned()
+        .expect("digest captured");
+    assert_eq!(digest_a, digest_b);
+
+    // Different content is a different version.
+    fs::write(
+        input.join("v99-third.md"),
+        "# shared guidance block\nextra\n",
+    )
+    .expect("third spec is written");
+    let third = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-c",
+        &[("v99-third".to_string(), input.join("v99-third.md"))],
+    )
+    .expect("third run is created");
+    assert_ne!(
+        third
+            .spec_digest("v99-third")
+            .cloned()
+            .expect("digest captured"),
+        digest_a
+    );
+
+    // A run scheduled without staged inputs records no digest, and the check
+    // says exactly that rather than pretending.
+    let bare =
+        ExecutionQueue::create_if_absent(root.path(), "run-bare", vec!["v99-first".to_string()])
+            .expect("bare queue is created");
+    assert_eq!(bare.spec_digest("v99-first"), None);
+    assert_eq!(
+        ExecutionQueue::check_staged_spec(root.path(), "run-bare", "v99-first").expect("check"),
+        StagedSpecCheck::NotRecorded
+    );
+
+    // A recorded digest whose staged file was deleted is Missing, not a
+    // silent match.
+    let staged = root.path().join(".autospec/runs/run-a/specs/v99-first.md");
+    fs::remove_file(&staged).expect("staged file is removed");
+    assert_eq!(
+        ExecutionQueue::check_staged_spec(root.path(), "run-a", "v99-first").expect("check"),
+        StagedSpecCheck::Missing
+    );
+}
+
+#[test]
+fn pre_digest_queue_documents_load_without_a_spec_digest() {
+    // A queue written before the digest existed (schema 3, no spec_digest
+    // key) still loads: entries parse with no recorded digest, and a later
+    // save rewrites the document at the current schema with an explicit null.
+    let root = TempProjectRoot::new();
+    let run_directory = root.path().join(".autospec/runs/run-legacy");
+    fs::create_dir_all(&run_directory).expect("run directory is created");
+    fs::write(
+        run_directory.join("queue.json"),
+        r#"{"schema":3,"run_id":"run-legacy","updated_at":100,"revision":2,"entries":[{"spec_id":"v99-first","status":"pending","attempts":0,"failure_kind":null,"blocker":null,"started_at":null,"updated_at":100,"validation":null,"agent_result_ids":[]}]}"#,
+    )
+    .expect("legacy queue document is written");
+
+    let mut queue = ExecutionQueue::load_named(root.path(), "run-legacy")
+        .expect("legacy queue loads")
+        .expect("queue exists");
+    assert_eq!(queue.spec_digest("v99-first"), None);
+
+    queue
+        .save(root.path())
+        .expect("queue is saved at the current schema");
+    let record = fs::read_to_string(run_directory.join("queue.json")).expect("record is read");
+    assert!(
+        record.contains("\"schema\":4"),
+        "rewritten at schema 4: {record}"
+    );
+    assert!(
+        record.contains("\"spec_digest\":null"),
+        "absent digest is explicit, not guessed: {record}"
+    );
 }

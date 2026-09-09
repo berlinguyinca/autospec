@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::queue::{ExecutionQueue, QueueIngestionReceipt, QueueStatus};
+use super::queue::{ExecutionQueue, QueueIngestionReceipt, QueueStatus, SpecDigest};
 use super::queue_storage::{
     load_with_recovery, now, save_if_current, validate_queue, QueueLock, QueuePaths,
 };
@@ -71,6 +71,12 @@ impl ExecutionQueue {
             .collect::<Result<_, _>>()?;
         let spec_ids = staged.iter().map(|(spec_id, _)| spec_id.clone()).collect();
         let mut queue = Self::new_at(run_id, spec_ids, timestamp);
+        // Capture the dispatch-time digest of the exact text being staged, so
+        // the run record reports the guidance this run was dispatched with
+        // even after the spec file is edited (#3939).
+        for (entry, (_, content)) in queue.entries.iter_mut().zip(&staged) {
+            entry.spec_digest = Some(SpecDigest::from_bytes(content.as_bytes()));
+        }
         validate_queue(&queue)?;
         let paths = QueuePaths::new(root.as_ref(), &queue.run_id)?;
         let _lock = QueueLock::acquire(&paths)?;
@@ -233,4 +239,58 @@ fn stage_spec_inputs(paths: &QueuePaths, staged: &[(String, String)]) -> Result<
         })?;
     }
     Ok(())
+}
+
+/// Verifying a staged spec file against the digest its run record captured at
+/// dispatch (#3939).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedSpecCheck {
+    /// The staged file's size and content hash match the record.
+    Matches,
+    /// The staged file no longer matches what the agent was dispatched with.
+    Drifted {
+        recorded: SpecDigest,
+        actual: SpecDigest,
+    },
+    /// The run record captured no digest: created before #3939, or the spec
+    /// was scheduled without a staged input.
+    NotRecorded,
+    /// The run record captured a digest but the staged file is gone.
+    Missing,
+}
+
+impl ExecutionQueue {
+    /// Verify the run's staged spec file against the digest the run record
+    /// captured at dispatch (#3939).
+    pub fn check_staged_spec(
+        root: impl AsRef<Path>,
+        run_id: &str,
+        spec_id: &str,
+    ) -> Result<StagedSpecCheck, String> {
+        let queue = Self::load_named(root.as_ref(), run_id)?
+            .ok_or_else(|| format!("queue does not exist for run: {run_id}"))?;
+        let Some(recorded) = queue.spec_digest(spec_id).cloned() else {
+            return Ok(StagedSpecCheck::NotRecorded);
+        };
+        let paths = QueuePaths::new(root.as_ref(), run_id)?;
+        let staged_path = paths.directory.join("specs").join(format!("{spec_id}.md"));
+        let content = match fs::read(&staged_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(StagedSpecCheck::Missing);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to read staged spec input {}: {error}",
+                    staged_path.display()
+                ))
+            }
+        };
+        let actual = SpecDigest::from_bytes(&content);
+        if actual == recorded {
+            Ok(StagedSpecCheck::Matches)
+        } else {
+            Ok(StagedSpecCheck::Drifted { recorded, actual })
+        }
+    }
 }
