@@ -13,7 +13,8 @@
 //! and AS-AEO-001 Epic 2 can both add migrations to the shared database
 //! without colliding (D7). Application state is tracked per subsystem in the
 //! shared `autospec_migrations` table; version ranges: `resources` owns
-//! `1xxxxxx`, `core` owns `2xxxxxx`.
+//! `1xxxxxx`, `core` owns `2xxxxxx`, `insights` owns the development range
+//! `3xxxxxx` (3000001-3999999).
 
 use std::path::Path;
 
@@ -170,6 +171,9 @@ pub async fn open_shared_db_default() -> Result<AnyPool, AutospecError> {
 pub const SUBSYSTEM_RESOURCES: &str = "resources";
 /// Migration subsystem owned by the AS-AEO-001 persistence layer (Epic 2).
 pub const SUBSYSTEM_CORE: &str = "core";
+/// Migration subsystem owned by the continuous improvement engine (insights),
+/// development range 3xxxxxx (3000001-3999999).
+pub const SUBSYSTEM_INSIGHTS: &str = "insights";
 
 /// One embedded, subsystem-namespaced migration (D7).
 #[derive(Debug)]
@@ -191,12 +195,19 @@ const CORE_MIGRATIONS: [EmbeddedMigration; 1] = [EmbeddedMigration {
     sql: include_str!("../../migrations/core/2000001_init.sql"),
 }];
 
+const INSIGHTS_MIGRATIONS: [EmbeddedMigration; 1] = [EmbeddedMigration {
+    version: 3000001,
+    description: "init",
+    sql: include_str!("../../migrations/insights/3000001_init.sql"),
+}];
+
 fn migrations_for_subsystem(
     subsystem: &str,
 ) -> Result<&'static [EmbeddedMigration], AutospecError> {
     match subsystem {
         SUBSYSTEM_RESOURCES => Ok(&RESOURCES_MIGRATIONS),
         SUBSYSTEM_CORE => Ok(&CORE_MIGRATIONS),
+        SUBSYSTEM_INSIGHTS => Ok(&INSIGHTS_MIGRATIONS),
         other => Err(AutospecError::validation(format!(
             "unknown migration subsystem {other:?}"
         ))),
@@ -471,5 +482,130 @@ mod tests {
             migrations_for_subsystem("bench").unwrap_err(),
             AutospecError::Validation { .. }
         ));
+    }
+
+    /// The 16 core tables of spec §34 (continuous improvement engine).
+    const INSIGHTS_TABLES: [&str; 16] = [
+        "sessions",
+        "session_events",
+        "session_summaries",
+        "user_interventions",
+        "tool_invocations",
+        "model_invocations",
+        "git_events",
+        "ci_events",
+        "review_findings",
+        "quality_findings",
+        "patterns",
+        "finding_evidence",
+        "improvement_proposals",
+        "proposal_evaluations",
+        "configuration_versions",
+        "post_change_measurements",
+    ];
+
+    #[test]
+    fn insights_migrations_for_subsystem_returns_one_embedded_item() {
+        let migrations = migrations_for_subsystem(SUBSYSTEM_INSIGHTS)
+            .expect("insights must be a registered migration subsystem");
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].version, 3000001);
+    }
+
+    #[test]
+    fn insights_migrations_versions_stay_inside_the_development_range() {
+        let migrations = migrations_for_subsystem(SUBSYSTEM_INSIGHTS).unwrap();
+        assert!(!migrations.is_empty());
+        for migration in migrations {
+            assert!(
+                (3000001..=3999999).contains(&migration.version),
+                "insights version {} left the development range 3000001-3999999",
+                migration.version
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn insights_migrations_create_sixteen_tables_on_sqlite() {
+        let dir = fresh_tmp_dir();
+        let url = format!("sqlite://{}/autospec.db", dir.display());
+        let pool = open_shared_db(&url).await.unwrap();
+        apply_subsystem_migrations(&pool, SUBSYSTEM_INSIGHTS)
+            .await
+            .expect("insights migrations must apply on SQLite");
+        for table in INSIGHTS_TABLES {
+            let count = scalar_i64(
+                &pool,
+                &format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                ),
+            )
+            .await;
+            assert_eq!(count, 1, "table {table} is missing from SQLite");
+        }
+    }
+
+    #[tokio::test]
+    async fn insights_migrations_double_apply_inserts_exactly_one_row() {
+        let dir = fresh_tmp_dir();
+        let url = format!("sqlite://{}/autospec.db", dir.display());
+        let pool = open_shared_db(&url).await.unwrap();
+        apply_subsystem_migrations(&pool, SUBSYSTEM_INSIGHTS)
+            .await
+            .unwrap();
+        apply_subsystem_migrations(&pool, SUBSYSTEM_INSIGHTS)
+            .await
+            .expect("second apply must be a no-op, not a collision");
+        assert_eq!(
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*) FROM autospec_migrations WHERE subsystem = 'insights'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn insights_migrations_apply_on_postgres_16() {
+        let Ok(url) = std::env::var("AUTOSPEC_TEST_DB_URL") else {
+            eprintln!(
+                "SKIP insights_migrations_apply_on_postgres_16: \
+                 AUTOSPEC_TEST_DB_URL is not set"
+            );
+            return;
+        };
+        let pool = open_shared_db(&url)
+            .await
+            .expect("AUTOSPEC_TEST_DB_URL must point at a reachable PostgreSQL 16");
+        apply_subsystem_migrations(&pool, SUBSYSTEM_INSIGHTS)
+            .await
+            .expect("insights migrations must apply on PostgreSQL 16");
+        apply_subsystem_migrations(&pool, SUBSYSTEM_INSIGHTS)
+            .await
+            .expect("double-apply must be idempotent on PostgreSQL 16");
+        assert_eq!(
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*) FROM autospec_migrations WHERE subsystem = 'insights'"
+            )
+            .await,
+            1,
+            "double-apply must leave exactly 1 autospec_migrations row"
+        );
+        let list = INSIGHTS_TABLES
+            .iter()
+            .map(|table| format!("'{table}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count = scalar_i64(
+            &pool,
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = 'public' AND table_name IN ({list})"
+            ),
+        )
+        .await;
+        assert_eq!(count, 16, "all 16 §34 tables must exist on PostgreSQL 16");
     }
 }
