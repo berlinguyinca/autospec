@@ -31,6 +31,7 @@ pub mod evidence;
 pub mod execution;
 pub mod explore;
 pub mod failure_signatures;
+pub mod fleet_dispatch;
 pub mod gate_provenance;
 pub mod graph;
 pub mod growth;

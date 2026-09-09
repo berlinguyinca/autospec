@@ -88,6 +88,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec dispatch stamp [--by <name>] [--queue <path>] [--state-file <path>] [--at <epoch>]` | no | the producer's call: writes `# refreshed-at:` / `# refreshed-by:` atomically and beats for its own hop |
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
+| `autospec dispatch runs --runs <path> [--out <path>] [--duration-floor <secs>] [--quote-bytes <n>] [--fault-threshold <n>] [--json]` | yes | classify a dispatch batch (#3918): each run is `OK` / `NO-OUTPUT` / `INFRA-FAIL` (auth, endpoint, context — never consumes an attempt) / `LAUNCH-FAIL` (under the duration floor regardless of transcript); writes the `agent-status.tsv` record (transcripts at or below the quote threshold ride along verbatim), prints the batch summary plus a `FLEET-FAULT` line for any repeated identical failure and `SUBFLEET-IDLE` lines for sub-fleets with zero agents but open eligible work; exit 0 / 1 fleet fault |
 
 `autospec repair-loop` observes a self-healing loop so that a repair which keeps
 repairing the same identity reads as an alert, not a status line. `record` feeds one
