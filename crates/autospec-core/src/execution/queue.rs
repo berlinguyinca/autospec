@@ -14,6 +14,12 @@ pub enum QueueStatus {
     Blocked,
     Deferred,
     Superseded,
+    /// Dispatched but never started: the runner could not read its input
+    /// spec. Terminal and never re-dispatched, and deliberately distinct from
+    /// `Failed` (which ran and produced nothing) so the re-dispatch loop can
+    /// tell "never attempted" from "attempted, found nothing" instead of
+    /// silently spinning on the same missing input.
+    NoSpec,
 }
 
 impl QueueStatus {
@@ -26,6 +32,7 @@ impl QueueStatus {
             Self::Blocked => "blocked",
             Self::Deferred => "deferred",
             Self::Superseded => "superseded",
+            Self::NoSpec => "no-spec",
         }
     }
 
@@ -38,6 +45,7 @@ impl QueueStatus {
             "blocked" => Ok(Self::Blocked),
             "deferred" => Ok(Self::Deferred),
             "superseded" => Ok(Self::Superseded),
+            "no-spec" => Ok(Self::NoSpec),
             _ => Err(format!("unknown queue status: {value}")),
         }
     }
@@ -188,6 +196,7 @@ impl OneShotIssueSelector {
                 | QueueStatus::Blocked
                 | QueueStatus::Deferred
                 | QueueStatus::Superseded
+                | QueueStatus::NoSpec
         ) {
             self.consumed = true;
             return Ok(true);
@@ -348,6 +357,7 @@ impl ExecutionQueue {
                 | QueueStatus::Blocked
                 | QueueStatus::Deferred
                 | QueueStatus::Superseded
+                | QueueStatus::NoSpec
         ) {
             return Err(format!(
                 "cannot apply a new result to terminal queue entry: {}",
@@ -395,6 +405,24 @@ impl ExecutionQueue {
                         .join("; "),
                 );
             }
+            // The run never attempted the spec, so this is not an attempt:
+            // attempts stays at 0 and the entry parks in the terminal NoSpec
+            // state instead of re-dispatching, so the loop cannot spin on the
+            // missing input.
+            AgentOutcome::NoSpec => {
+                entry.status = QueueStatus::NoSpec;
+                entry.failure_kind = None;
+                entry.blocker = Some(
+                    result
+                        .agent_result
+                        .blockers
+                        .iter()
+                        .map(|blocker| blocker.trim())
+                        .filter(|blocker| !blocker.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
         }
         entry.agent_result_ids.push(result.result_id.clone());
         entry.updated_at = timestamp;
@@ -415,13 +443,14 @@ impl ExecutionQueue {
 
     pub fn final_report_markdown(&self) -> String {
         format!(
-            "# AutoSpec Run Report\n\nRun: {}\n\npassed: {}\nfailed: {}\nblocked: {}\ndeferred: {}\nsuperseded: {}\n",
+            "# AutoSpec Run Report\n\nRun: {}\n\npassed: {}\nfailed: {}\nblocked: {}\ndeferred: {}\nsuperseded: {}\nno-spec: {}\n",
             self.run_id,
             self.count(QueueStatus::Passed),
             self.count(QueueStatus::Failed),
             self.count(QueueStatus::Blocked),
             self.count(QueueStatus::Deferred),
-            self.count(QueueStatus::Superseded)
+            self.count(QueueStatus::Superseded),
+            self.count(QueueStatus::NoSpec)
         )
     }
 

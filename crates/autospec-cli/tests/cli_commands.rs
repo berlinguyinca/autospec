@@ -6191,3 +6191,189 @@ fn repair_loop_rejects_invalid_loop_names() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid repair-loop name"), "{stderr}");
 }
+
+#[test]
+fn run_stages_spec_input_as_part_of_dispatch() {
+    let root = temp_dir("autospec-run-stage-spec");
+    let input = root.join("input");
+    std::fs::create_dir_all(&input).expect("input directory is created");
+    std::fs::write(input.join("v99-first.md"), "# staged spec\n").expect("spec source is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-stage",
+            "--spec",
+            "v99-first",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("bare create still works");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let staged = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-staged",
+            "--spec",
+            &format!("v99-first={}", input.join("v99-first.md").to_string_lossy()),
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("staged create starts");
+    let stdout = String::from_utf8_lossy(&staged.stdout);
+
+    assert!(
+        staged.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    assert!(stdout.contains("\"mode\":\"create\""));
+    assert!(stdout.contains("\"status\":\"created\""));
+    // The same action that scheduled the run wrote its input.
+    assert!(root
+        .join(".autospec/runs/run-cli-staged/queue.json")
+        .exists());
+    let staged_input = root.join(".autospec/runs/run-cli-staged/specs/v99-first.md");
+    assert!(staged_input.exists());
+    assert_eq!(
+        std::fs::read_to_string(&staged_input).expect("staged input is readable"),
+        "# staged spec\n"
+    );
+}
+
+#[test]
+fn run_rejects_mixed_spec_staging_and_missing_staged_inputs() {
+    let root = temp_dir("autospec-run-stage-invalid");
+    let input = root.join("input");
+    std::fs::create_dir_all(&input).expect("input directory is created");
+    std::fs::write(input.join("v99-first.md"), "# staged spec\n").expect("spec source is written");
+
+    let mixed = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-mixed",
+            "--spec",
+            "v99-first",
+            "--spec",
+            &format!(
+                "v99-second={}",
+                input.join("v99-first.md").to_string_lossy()
+            ),
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("mixed staging starts");
+    assert!(!mixed.status.success());
+    assert!(String::from_utf8_lossy(&mixed.stderr)
+        .contains("must either all carry a source path (id=path) or none"));
+
+    let missing = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-missing-input",
+            "--spec",
+            &format!(
+                "v99-first={}",
+                input.join("does-not-exist.md").to_string_lossy()
+            ),
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("missing staged input starts");
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("cannot stage spec input"), "{stderr}");
+    assert!(stderr.contains("run not scheduled"), "{stderr}");
+    // Fail-closed: nothing was scheduled, nothing to clean up.
+    assert!(!root.join(".autospec").exists());
+}
+
+#[test]
+fn run_ingests_a_no_spec_outcome_and_parks_the_entry() {
+    let root = temp_dir("autospec-run-no-spec");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-no-spec",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"dispatched but never started\",\"files_changed\":[],\"validation\":\"n/a\",\"blockers\":[\"spec input missing\"],\"handoff\":\"stage the spec input as part of dispatch\"}",
+    )
+    .expect("agent result fixture is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-no-spec",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-1",
+            "--outcome",
+            "no-spec",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("no-spec ingestion starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"outcome\":\"no-spec\""));
+    let queue = std::fs::read_to_string(root.join(".autospec/runs/run-cli-no-spec/queue.json"))
+        .expect("updated queue is readable");
+    assert!(queue.contains("\"status\":\"no-spec\""));
+    assert!(queue.contains("\"attempts\":0"));
+    assert!(queue.contains("spec input missing"));
+
+    // A failure kind is only valid for --outcome failed.
+    let rejected = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-no-spec",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-2",
+            "--outcome",
+            "no-spec",
+            "--failure-kind",
+            "agent",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("no-spec with failure kind starts");
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("--failure-kind is valid only for --outcome failed"));
+}

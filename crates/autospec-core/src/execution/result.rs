@@ -14,8 +14,15 @@ const AGENT_RESULT_SCHEMA: u64 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentOutcome {
     Passed,
-    Failed { failure_kind: FailureKind },
+    Failed {
+        failure_kind: FailureKind,
+    },
     Blocked,
+    /// The run was dispatched but never started: the runner could not read its
+    /// input spec. Distinct from `Failed` (which ran and produced nothing) so
+    /// re-dispatch loops can tell "never attempted" from "attempted, found
+    /// nothing".
+    NoSpec,
 }
 
 impl AgentOutcome {
@@ -24,13 +31,14 @@ impl AgentOutcome {
             Self::Passed => "passed",
             Self::Failed { .. } => "failed",
             Self::Blocked => "blocked",
+            Self::NoSpec => "no-spec",
         }
     }
 
     fn to_json(&self) -> String {
         let failure_kind = match self {
             Self::Failed { failure_kind } => format!("\"{}\"", failure_kind.as_str()),
-            Self::Passed | Self::Blocked => "null".to_string(),
+            Self::Passed | Self::Blocked | Self::NoSpec => "null".to_string(),
         };
         format!(
             "{{\"status\":\"{}\",\"failure_kind\":{failure_kind}}}",
@@ -54,6 +62,10 @@ impl AgentOutcome {
             "blocked" => {
                 require_null(failure_kind, "failure_kind")?;
                 Ok(Self::Blocked)
+            }
+            "no-spec" => {
+                require_null(failure_kind, "failure_kind")?;
+                Ok(Self::NoSpec)
             }
             _ => Err(format!("unknown agent outcome: {status}")),
         }
@@ -428,14 +440,19 @@ fn validate_result(result: &IngestedAgentResult) -> Result<(), String> {
         {
             Err("passed or failed agent results require a validation summary".to_string())
         }
-        AgentOutcome::Blocked
+        AgentOutcome::Blocked | AgentOutcome::NoSpec
             if !result
                 .agent_result
                 .blockers
                 .iter()
                 .any(|blocker| !blocker.trim().is_empty()) =>
         {
-            Err("blocked agent results require at least one blocker".to_string())
+            Err(match result.outcome {
+                AgentOutcome::NoSpec => {
+                    "no-spec agent results require at least one blocker".to_string()
+                }
+                _ => "blocked agent results require at least one blocker".to_string(),
+            })
         }
         _ => Ok(()),
     }
