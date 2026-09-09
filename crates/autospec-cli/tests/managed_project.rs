@@ -1344,6 +1344,95 @@ fn active_edges_returns_empty_for_an_external_project_board() {
 }
 
 #[test]
+fn sync_without_a_configured_board_is_skipped_without_state() {
+    let fixture = Fixture::new("sync-board-not-configured");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    let args = vec![
+        "sync".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--issue-url".to_owned(),
+        "https://github.com/berlinguyinca/autospec/issues/45".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(
+        outcome,
+        serde_json::json!({
+            "outcome": "skipped",
+            "reason": "project board not configured",
+        })
+    );
+    assert!(github.calls.is_empty());
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
+fn resolve_with_a_generated_config_lacking_project_board_is_skipped() {
+    let fixture = Fixture::new("resolve-board-not-configured");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    fs::create_dir_all(repository_path.join(".autospec")).unwrap();
+    fs::write(
+        repository_path.join(".autospec/autonomous.yml"),
+        "# generated_by: autospec-sweep\n",
+    )
+    .unwrap();
+    let args = vec![
+        "resolve".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let outcome = run_with_transport(&args, &mut github).unwrap();
+
+    assert_eq!(
+        outcome,
+        serde_json::json!({
+            "outcome": "skipped",
+            "reason": "project board not configured",
+        })
+    );
+    assert!(github.calls.is_empty());
+    assert!(!repository_path.join(".autospec/state").exists());
+}
+
+#[test]
+fn onboard_without_a_managed_board_still_fails_closed() {
+    let fixture = Fixture::new("onboard-board-not-configured");
+    let repository_path = fixture.path().join("checkout");
+    initialize_repository(
+        &repository_path,
+        "https://github.com/berlinguyinca/autospec.git",
+    );
+    let args = vec![
+        "onboard".to_owned(),
+        "--repo-dir".to_owned(),
+        repository_path.display().to_string(),
+        "--repo".to_owned(),
+        "berlinguyinca/created".to_owned(),
+    ];
+    let mut github = ScriptedGithub::default();
+
+    let error = run_with_transport(&args, &mut github).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("project_board.mode must be managed"));
+    assert!(github.calls.is_empty());
+}
+
+#[test]
 fn active_edges_rejects_a_board_other_than_the_managed_binding() {
     let fixture = Fixture::new("active-edges-board-mismatch");
     let repository_path = initialize_managed_repository(&fixture, "checkout");
