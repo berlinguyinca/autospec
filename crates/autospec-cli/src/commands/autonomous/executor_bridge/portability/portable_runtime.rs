@@ -6,15 +6,19 @@ mod portable_output;
 #[cfg(not(target_os = "linux"))]
 use portable_output::PortableOutputReaders;
 
+// Thread-scoped since #3951: a process-global consume-once switch collides with parallel
+// `cargo test` threads the same way the executor_bridge root failpoints did.
 #[cfg(all(test, not(target_os = "linux")))]
-static PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT: std::cell::Cell<bool> =
+        std::cell::Cell::new(false);
+}
 
 #[cfg(all(test, not(target_os = "linux")))]
 pub(in crate::commands::autonomous::executor_bridge) fn set_portable_after_cleanup_proof_failpoint(
     enabled: bool,
 ) {
-    PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.store(enabled, Ordering::SeqCst);
+    PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.with(|fp| fp.set(enabled));
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -309,7 +313,7 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
     let mut readers = PortableOutputReaders::open(&sinks)?;
     let owner = owned.identity();
     #[cfg(test)]
-    LAST_SPAWN_HARNESS.store(owner.pid, Ordering::SeqCst);
+    LAST_SPAWN_HARNESS.with(|fp| fp.store(owner.pid));
     let owner_document = owner.document(&state.identity.invocation_id, &argv_digest(&harness.args));
     let journal = fail_launch_at("journal-write").and_then(|()| {
         write_private_create_once(
@@ -408,7 +412,7 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
     )?;
     append_executor_event(event_log, state, "child_cleanup_complete", None)?;
     #[cfg(test)]
-    if PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.swap(false, Ordering::SeqCst) {
+    if PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.with(|fp| fp.swap(false)) {
         return Err("injected portable failure after cleanup proof".to_string());
     }
 

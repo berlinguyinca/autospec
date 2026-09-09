@@ -26,14 +26,16 @@ pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(in super::super) use crate::commands::PROCESS_ENVIRONMENT as TEST_ENVIRONMENT;
 
-/// Restore every injected-fault switch to the value it was declared with.
+/// Restore every injected-fault switch on this thread to the value it was declared with.
 ///
-/// The defaults are read off the declarations rather than assumed to be zero:
+/// The failpoints are `thread_local!` (issue #3951): each libtest thread gets its own
+/// cells, so this reset only ever touches the state the current test armed. The defaults
+/// are read off the declarations rather than assumed to be zero:
 /// CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER starts at 2, so storing 0 into it would quietly
 /// change behaviour instead of restoring it. The two *_SEQUENCE counters are deliberately
 /// absent — they are not failpoints and tests do not own them.
 fn reset_failpoints() {
-    for switch in [
+    let zeroed = [
         &bridge::BASE_DRIFT_FAILPOINT,
         &bridge::EMPTY_RETRY_BASE_FAILPOINT,
         &bridge::RUNTIME_CLOSE_FAILPOINT,
@@ -45,20 +47,21 @@ fn reset_failpoints() {
         &bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT,
         &bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT,
         &bridge::IMPLEMENTATION_COMMIT_FAILPOINT,
-        &bridge::NPM_MANIFEST_OPEN_FAILPOINT,
         &bridge::PARENT_CAPTURE_FAILPOINT,
         &bridge::PARENT_REAP_FAILPOINT,
         &bridge::RAW_READ_INTERRUPTED_ONCE,
-    ] {
-        switch.store(0, Ordering::SeqCst);
+    ];
+    for switch in zeroed {
+        switch.with(|fp| fp.store(0));
     }
     let none = bridge::LaunchFailpoint::None as u8;
-    bridge::LAUNCH_FAILPOINT.store(none, Ordering::SeqCst);
-    bridge::CLEANUP_FAILPOINT.store(none, Ordering::SeqCst);
-    bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
-    bridge::LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
+    bridge::LAUNCH_FAILPOINT.with(|fp| fp.store(none));
+    bridge::CLEANUP_FAILPOINT.with(|fp| fp.store(none));
+    bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(0));
+    bridge::LAST_SPAWN_HARNESS.with(|fp| fp.store(0));
     #[cfg(target_os = "linux")]
-    bridge::CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.store(2, Ordering::SeqCst);
+    bridge::CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.with(|fp| fp.store(2));
+    bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow_mut().clear());
 }
 
 /// Orders the tests that arm process-wide failpoints, and disarms them on the way out.
@@ -85,9 +88,11 @@ pub(super) struct TestEnvironment {
 /// Arming lives here and nowhere else.
 ///
 /// Reaching any of these requires a value that owns the mutex guard, so a test cannot arm a
-/// process-wide fault without first ordering itself against every other test that launches.
+/// launch-family fault without first ordering itself against every other test that launches.
 /// That was previously a convention, and eight tests did not follow it (#2989) — one of them
-/// hung the whole suite. A convention that eight tests break is not a convention.
+/// hung the whole suite. A convention that eight tests break is not a convention. The
+/// launch-family failpoints themselves are thread-scoped since #3951; the mutex still orders
+/// the process-wide effects those tests exercise (env, subreaper state, git remotes).
 impl TestEnvironment {
     pub(super) fn launch(&self, failpoint: bridge::LaunchFailpoint) {
         bridge::set_launch_failpoint(failpoint);
@@ -121,8 +126,8 @@ pub(super) fn test_environment() -> TestEnvironment {
     let guard = TEST_ENVIRONMENT
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    // Scrub inside the guard: these are process-wide, so the same lock that orders failpoint
-    // arming has to order this too, and Drop restores them on unwind like the failpoints.
+    // Scrub inside the guard: these are process-wide, so the same lock that orders the
+    // launch-family tests has to order this too, and Drop restores them on unwind.
     // The family lock is taken under the mutex as well: every launch test in this
     // binary is mutually exclusive with the real-bridge E2E tests in the integration
     // binary, which take the same file from real_bridge_e2e_lock() (#3857).
@@ -246,7 +251,8 @@ impl Drop for DirectCrashFixtureCleanup {
 /// Reap a fixture child, giving up after `limit` instead of blocking forever.
 ///
 /// A bare `waitpid(pid, None)` waits without bound, and the PID reaching it comes from
-/// LAST_SPAWN_SUPERVISOR — a process-global that any spawning test overwrites. Wait on a PID
+/// LAST_SPAWN_SUPERVISOR — a thread-local (since #3951) that any spawning test on this
+/// thread overwrites. Wait on a PID
 /// that is not ours and the call never returns; do it while holding TEST_ENVIRONMENT and the
 /// whole suite queues behind it until the harness is killed. That is the shape of #2981.
 ///

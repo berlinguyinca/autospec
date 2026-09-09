@@ -630,6 +630,22 @@ changes control flow (a gate, a dependency, a retry policy) must be in the
 observed set — `[verified]` with `runtime` proof in the Closeout report —
 while reasoned claims are `[assumed]` and never gate a decision.
 
+## Test-failpoint scope lint
+
+`scripts/lint-cfg-test-statics.sh` rejects new process-global mutable test
+state in the `executor_bridge` tree (issue #3951): a `#[cfg(test)] static`
+declared with `Atomic*`, `Mutex<T>` (T ≠ `()`), `Cell`, `RefCell`,
+`UnsafeCell`, `OnceCell`, or `RwLock` is a finding, because parallel
+`cargo test` threads collide on consume-once state. `thread_local!` statics,
+`Mutex<()>` unit locks, and constants are exempt; each exemption and waiver
+prints an `INFO:CFG_TEST_STATIC:...` audit line. Exit code = finding count
+(capped at 64). Waiver: `linter:allow-CFG_TEST_STATIC <reason>` on the static
+line or the line immediately before it — a bare marker is rejected.
+Default scope is `crates/autospec-cli/src/commands/autonomous/executor_bridge*`;
+explicit `.rs` files or directories can be passed as arguments. Bats:
+`tests/lint-cfg-test-statics.bats`. Not yet wired into
+`lint-implementation.sh` (follow-up).
+
 ## Memory management scripts
 
 Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`

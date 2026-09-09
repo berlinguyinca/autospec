@@ -31,7 +31,7 @@ fn autonomous_executor_bridge_prunable_zero_effect_branch_resumes_both_crash_bou
                 &format!("branch.{}.autospecBaseOid", worktree.branch),
             ],
         );
-        bridge::PRUNABLE_RECLAIM_FAILPOINT.store(boundary, Ordering::SeqCst);
+        bridge::PRUNABLE_RECLAIM_FAILPOINT.with(|fp| fp.store(boundary));
         let interrupted = bridge::provision_issue_worktree_for_claim(
             &fixture.repo,
             &scope,

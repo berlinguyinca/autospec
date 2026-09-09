@@ -307,7 +307,7 @@ fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair()
     let scope_root = state.identity.worktree.parent().expect("scope root");
     fs::remove_dir(scope_root).expect("remove empty executor scope");
 
-    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.store(1));
     let first = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("scope parent sync must fail after recreation");
     assert!(
@@ -320,7 +320,7 @@ fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair()
         "repair must not start before the recreated scope is durable"
     );
 
-    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.store(1));
     let retry = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("restart must retry parent sync for the existing scope");
     assert!(
@@ -348,13 +348,13 @@ fn autonomous_executor_bridge_hardens_root_only_after_zero_effect_marker() {
     let scope_root = state.identity.worktree.parent().expect("scope root");
     fs::remove_dir(scope_root).expect("remove empty executor scope");
 
-    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.store(1));
     assert!(
         bridge::recoverable_zero_effect_completion_for_state(&state_path, &state)
             .expect("read-only missing-scope classification")
     );
     assert_eq!(
-        bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.load(Ordering::SeqCst),
+        bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.load()),
         1,
         "classification must not harden or otherwise mutate the executor root"
     );
@@ -451,7 +451,7 @@ fn autonomous_executor_bridge_provisioning_hardens_root_before_scope_creation() 
         .expect("canonical executor root")
         .join(bridge::safe_scope(&repository_scope).expect("safe scope"));
 
-    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.store(1));
     match bridge::provision_issue_worktree(&fixture.repo, &repository_scope, 42, &base) {
         Err(error) => assert!(error.contains("harden executor worktree root"), "{error}"),
         Ok(worktree) => {

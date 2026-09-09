@@ -163,7 +163,7 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
         fs::remove_file(&worktree.path).expect("remove worktree symlink");
     }
 
-    bridge::POST_CI_RECREATE_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::POST_CI_RECREATE_FAILPOINT.with(|fp| fp.store(1));
     assert_eq!(
         recover_invocation(&state_path, &state.identity)
             .expect_err("crash after durable worktree recreation"),

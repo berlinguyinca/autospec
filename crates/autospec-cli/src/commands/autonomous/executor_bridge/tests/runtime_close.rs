@@ -42,7 +42,7 @@ fn autonomous_executor_bridge_runtime_close_recovers_after_receipt_gap() {
     let state_path = fixture.root.join("state/invocation.json");
     bridge::write_invocation_atomic(&state_path, &state).expect("runtime state");
 
-    bridge::RUNTIME_CLOSE_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::RUNTIME_CLOSE_FAILPOINT.with(|fp| fp.store(1));
     let error = bridge::finalize_failed_executor(
         &state_path,
         &mut state,

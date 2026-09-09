@@ -39,6 +39,7 @@ mod dispatcher_temporary;
 #[cfg(unix)]
 mod draft_release;
 mod explore_pin_staleness;
+mod failpoint_scope;
 mod full_suite;
 mod generation_input;
 mod harness_death;

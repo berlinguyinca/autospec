@@ -130,7 +130,7 @@ fn portable_supervision_failures_cleanup_before_retiring_owner_journal() {
             MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
                 .expect("capture supervision snapshot");
         set_launch_failpoint(failpoint);
-        LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
+        LAST_SPAWN_HARNESS.with(|fp| fp.store(0));
         let error = supervise_validated_harness_with_claim_renewal(
             &state_path,
             &event_log,
@@ -149,7 +149,7 @@ fn portable_supervision_failures_cleanup_before_retiring_owner_journal() {
             error.contains("injected"),
             "unexpected {name} error: {error}"
         );
-        let spawned_pid = LAST_SPAWN_HARNESS.load(Ordering::SeqCst);
+        let spawned_pid = LAST_SPAWN_HARNESS.with(|fp| fp.load());
         assert_ne!(spawned_pid, 0, "{name} did not launch the real child");
         assert!(
             process_birth_identity(spawned_pid)
