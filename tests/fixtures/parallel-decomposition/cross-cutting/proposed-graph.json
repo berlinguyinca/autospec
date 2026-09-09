@@ -1,0 +1,32 @@
+{
+  "spec": "cross-cutting",
+  "edge_semantics": "hard_edges entries are [from, to]: to hard-depends on from",
+  "nodes": [
+    {"id": "3001", "title": "shared API contract", "body": "issues/3001-api-contract.md"},
+    {"id": "3002", "title": "shared error taxonomy", "body": "issues/3002-error-taxonomy.md"},
+    {"id": "3003", "title": "structured logging facade", "body": "issues/3003-logging-facade.md"},
+    {"id": "3004", "title": "bounded metrics exporter", "body": "issues/3004-metrics-exporter.md"},
+    {"id": "3005", "title": "environment feature flags", "body": "issues/3005-feature-flags.md"},
+    {"id": "3006", "title": "exponential-backoff retry", "body": "issues/3006-retry-policy.md"},
+    {"id": "3007", "title": "blocking-call timeout", "body": "issues/3007-timeout-policy.md"},
+    {"id": "3008", "title": "token-bucket rate limiter", "body": "issues/3008-rate-limiter.md"},
+    {"id": "3009", "title": "deployment config schema", "body": "issues/3009-config-schema.md"},
+    {"id": "3010", "title": "generated API reference", "body": "issues/3010-docs-generation.md"},
+    {"id": "3011", "title": "contract conformance tests", "body": "issues/3011-conformance.md"},
+    {"id": "3012", "title": "error mapping tests", "body": "issues/3012-error-mapping-tests.md"},
+    {"id": "3013", "title": "logging format tests", "body": "issues/3013-logging-tests.md"},
+    {"id": "3014", "title": "metrics cardinality tests", "body": "issues/3014-metrics-tests.md"},
+    {"id": "3015", "title": "policy composition tests", "body": "issues/3015-policy-integration.md"},
+    {"id": "3016", "title": "config conformance tests", "body": "issues/3016-config-conformance.md"}
+  ],
+  "hard_edges": [
+    ["3001", "3011"],
+    ["3002", "3012"],
+    ["3003", "3013"],
+    ["3004", "3014"],
+    ["3006", "3015"],
+    ["3007", "3015"],
+    ["3009", "3016"],
+    ["3011", "3016"]
+  ]
+}

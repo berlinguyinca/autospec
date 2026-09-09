@@ -1,0 +1,16 @@
+{
+  "spec": "cyclic",
+  "edge_semantics": "hard_edges entries are [from, to]: to hard-depends on from",
+  "nodes": [
+    {"id": "9001", "title": "alpha checksum", "body": "issues/9001-alpha.md"},
+    {"id": "9002", "title": "beta derivation", "body": "issues/9002-beta.md"},
+    {"id": "9003", "title": "gamma derivation", "body": "issues/9003-gamma.md"},
+    {"id": "9004", "title": "delta derivation", "body": "issues/9004-delta.md"}
+  ],
+  "hard_edges": [
+    ["9001", "9002"],
+    ["9002", "9003"],
+    ["9003", "9004"],
+    ["9004", "9001"]
+  ]
+}

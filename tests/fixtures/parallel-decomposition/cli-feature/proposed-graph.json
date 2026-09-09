@@ -1,0 +1,23 @@
+{
+  "spec": "cli-feature",
+  "edge_semantics": "hard_edges entries are [from, to]: to hard-depends on from",
+  "nodes": [
+    {"id": "1001", "title": "config parse module", "body": "issues/1001-config-parse.md"},
+    {"id": "1002", "title": "subcommand dispatch table", "body": "issues/1002-dispatch-table.md"},
+    {"id": "1003", "title": "stdout output rendering", "body": "issues/1003-output-render.md"},
+    {"id": "1004", "title": "exit-code error mapping", "body": "issues/1004-error-mapping.md"},
+    {"id": "1005", "title": "usage text", "body": "issues/1005-usage-text.md"},
+    {"id": "1006", "title": "entrypoint wiring", "body": "issues/1006-entrypoint.md"},
+    {"id": "1007", "title": "config wiring", "body": "issues/1007-config-wiring.md"},
+    {"id": "1008", "title": "argument validation", "body": "issues/1008-arg-validation.md"},
+    {"id": "1009", "title": "output snapshot tests", "body": "issues/1009-output-snapshots.md"},
+    {"id": "1010", "title": "help coverage tests", "body": "issues/1010-help-coverage.md"}
+  ],
+  "hard_edges": [
+    ["1001", "1007"],
+    ["1002", "1007"],
+    ["1002", "1008"],
+    ["1003", "1009"],
+    ["1005", "1010"]
+  ]
+}

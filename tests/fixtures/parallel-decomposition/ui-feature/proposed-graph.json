@@ -1,0 +1,25 @@
+{
+  "spec": "ui-feature",
+  "edge_semantics": "hard_edges entries are [from, to]: to hard-depends on from",
+  "nodes": [
+    {"id": "2001", "title": "view model", "body": "issues/2001-view-model.md"},
+    {"id": "2002", "title": "key-event routing", "body": "issues/2002-event-route.md"},
+    {"id": "2003", "title": "screen state store", "body": "issues/2003-screen-store.md"},
+    {"id": "2004", "title": "theme tokens", "body": "issues/2004-theme-tokens.md"},
+    {"id": "2005", "title": "focus order policy", "body": "issues/2005-focus-policy.md"},
+    {"id": "2006", "title": "widget layout metrics", "body": "issues/2006-layout-metrics.md"},
+    {"id": "2007", "title": "accessibility annotations", "body": "issues/2007-a11y-annotations.md"},
+    {"id": "2008", "title": "JSON session persistence", "body": "issues/2008-session-persist.md"},
+    {"id": "2009", "title": "terminal render loop", "body": "issues/2009-render-loop.md"},
+    {"id": "2010", "title": "session persistence on exit", "body": "issues/2010-session-exit.md"},
+    {"id": "2011", "title": "theme render tests", "body": "issues/2011-theme-tests.md"},
+    {"id": "2012", "title": "persistence round-trip tests", "body": "issues/2012-persist-roundtrip.md"}
+  ],
+  "hard_edges": [
+    ["2001", "2009"],
+    ["2002", "2010"],
+    ["2003", "2010"],
+    ["2004", "2011"],
+    ["2008", "2012"]
+  ]
+}
