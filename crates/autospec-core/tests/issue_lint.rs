@@ -779,3 +779,230 @@ fn issue_lint_preserves_the_shell_rule_order_for_multiple_findings() {
         ]
     );
 }
+
+fn dag_test_body(dependencies: &str, metadata: Option<&str>) -> String {
+    let base = valid_issue_body(
+        "Add `lint_issue_body` DAG fixtures.",
+        "- [ ] `cargo test -p autospec-core --test issue_lint` passes.",
+        "cargo test -p autospec-core --test issue_lint",
+    );
+    let body = replace_once(
+        base,
+        "## Dependencies\nnone",
+        &format!("## Dependencies\n{dependencies}"),
+    );
+    match metadata {
+        Some(block) => format!("{body}\n```text\n{block}\n```\n"),
+        None => body,
+    }
+}
+
+#[test]
+fn issue_lint_warns_as_dag_001_for_reason_code_free_dependency() {
+    let body = dag_test_body("Depends on issue #42", None);
+
+    assert_findings(
+        &body,
+        &[(
+            "AS-DAG-001",
+            "dependency is unjustified: no reason code and no artifact named",
+        )],
+    );
+}
+
+#[test]
+fn issue_lint_warns_as_dag_001_per_dependency_edge() {
+    let body = dag_test_body("Depends on issue #42\nDepends on issue #43", None);
+
+    assert_findings(
+        &body,
+        &[
+            (
+                "AS-DAG-001",
+                "dependency is unjustified: no reason code and no artifact named",
+            ),
+            (
+                "AS-DAG-001",
+                "dependency is unjustified: no reason code and no artifact named",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn issue_lint_silent_when_dependency_has_recognized_reason_code() {
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some(
+            "autospec:\n  dependencies:\n    hard:\n      - issue: 42\n        reason_code: consumes-new-interface",
+        ),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_silent_when_dependency_names_an_artifact() {
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some(
+            "autospec:\n  dependencies:\n    hard:\n      - issue: 42\n        artifact: crates/autospec-core/src/lib.rs",
+        ),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_warns_as_dag_001_for_unrecognized_reason_code() {
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some(
+            "autospec:\n  dependencies:\n    hard:\n      - issue: 42\n        reason_code: bogus",
+        ),
+    );
+
+    assert_findings(
+        &body,
+        &[(
+            "AS-DAG-001",
+            "dependency is unjustified: reason code 'bogus' is not a recognized code and no artifact is named",
+        )],
+    );
+}
+
+#[test]
+fn issue_lint_warns_as_dag_009_when_metadata_disagrees_with_markdown() {
+    let body = dag_test_body(
+        "Depends on issue #123",
+        Some("autospec:\n  dependencies:\n    hard:\n      - issue: 456\n        artifact: crates/autospec-core/src/lib.rs"),
+    );
+
+    assert_findings(
+        &body,
+        &[
+            (
+                "AS-DAG-001",
+                "dependency is unjustified: no reason code and no artifact named",
+            ),
+            (
+                "AS-DAG-009",
+                "machine metadata declares {456} but the Markdown dependency section declares {123}",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn issue_lint_warns_as_dag_009_when_metadata_declares_extra_dependency() {
+    let body = dag_test_body(
+        "Depends on issue #123",
+        Some(
+            "autospec:\n  dependencies:\n    hard:\n      - issue: 123\n        reason_code: consumes-new-type\n      - issue: 456\n        artifact: crates/autospec-core/src/lib.rs",
+        ),
+    );
+
+    assert_findings(
+        &body,
+        &[(
+            "AS-DAG-009",
+            "machine metadata declares {123, 456} but the Markdown dependency section declares {123}",
+        )],
+    );
+}
+
+#[test]
+fn issue_lint_silent_when_metadata_matches_markdown_dependencies() {
+    let body = dag_test_body(
+        "Depends on issue #123",
+        Some("autospec:\n  dependencies:\n    hard:\n      - issue: 123\n        artifact: crates/autospec-core/src/lint/mod.rs"),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_silent_for_legacy_dependencies_none_body() {
+    let body = valid_issue_body(
+        "Add `lint_issue_body` DAG fixtures.",
+        "- [ ] `cargo test -p autospec-core --test issue_lint` passes.",
+        "cargo test -p autospec-core --test issue_lint",
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_silent_for_body_without_dependencies_section() {
+    let body = valid_issue_body(
+        "Add `lint_issue_body` DAG fixtures.",
+        "- [ ] `cargo test -p autospec-core --test issue_lint` passes.",
+        "cargo test -p autospec-core --test issue_lint",
+    );
+    let body = replace_once(body, "## Dependencies\nnone\n\n", "");
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_dag_findings_are_warning_severity_not_blocking() {
+    let body = dag_test_body("Depends on issue #42", None);
+    let findings = lint_issue_body(&body);
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].rule_id(), "AS-DAG-001");
+    assert!(!findings[0].is_blocking());
+    assert_eq!(
+        findings[0].severity,
+        autospec_core::lint::IssueLintSeverity::Warning
+    );
+}
+
+#[test]
+fn issue_lint_blocking_findings_keep_blocking_severity() {
+    let body = valid_issue_body(
+        "improve the issue body.",
+        "- [ ] `cargo test -p autospec-core --test issue_lint` passes.",
+        "cargo test -p autospec-core --test issue_lint",
+    );
+    let findings = lint_issue_body(&body);
+
+    assert!(!findings.is_empty());
+    assert!(findings.iter().all(|finding| finding.is_blocking()));
+}
+
+#[test]
+fn issue_lint_accepts_quoted_metadata_scalars() {
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some(
+            "autospec:\n  dependencies:\n    hard:\n      - issue: \"42\"\n        reason_code: 'consumes-new-interface'",
+        ),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_finds_metadata_block_after_the_smoke_block() {
+    // The body built by dag_test_body already contains the bash smoke fence;
+    // the autospec block appended after it must still be discovered.
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some("autospec:\n  dependencies:\n    hard:\n      - issue: 42\n        artifact: crates/autospec-core/src/lib.rs"),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_tolerates_comments_and_blank_lines_inside_metadata_block() {
+    let body = dag_test_body(
+        "Depends on issue #42",
+        Some(
+            "autospec:\n  # machine metadata (spec section 15)\n  dependencies:\n    hard:\n\n      - issue: 42\n        artifact: crates/autospec-core/src/lib.rs",
+        ),
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
