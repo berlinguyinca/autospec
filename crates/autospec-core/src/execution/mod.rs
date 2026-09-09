@@ -5,6 +5,7 @@ pub mod queue;
 mod queue_parser;
 mod queue_runtime;
 mod queue_storage;
+pub mod relocation;
 pub mod report;
 pub mod result;
 pub mod stage_throughput;
