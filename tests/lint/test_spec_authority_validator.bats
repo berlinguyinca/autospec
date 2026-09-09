@@ -27,6 +27,9 @@ setup() {
         "${REPO_ROOT}/crates/autospec-cli/src/commands/dispatch.rs" \
         "${FAKE}/crates/autospec-cli/src/commands/"
     cp "${REPO_ROOT}/docs/cli-reference.md" "${REPO_ROOT}/docs/invariants.md" "${FAKE}/docs/"
+    cp "${REPO_ROOT}/AGENTS.md" "${FAKE}/"
+    mkdir -p "${FAKE}/scripts"
+    cp "${REPO_ROOT}/scripts/self-enforce-qa.sh" "${FAKE}/scripts/"
 }
 
 teardown() {
@@ -81,6 +84,24 @@ fake_run() {
     fake_run
     [ "$status" -ne 0 ]
     [[ "$output" == *"pub fn parse_task_records"* ]]
+}
+
+# These two assert on one fixed string inside a multi-finding report. `grep -q` is
+# used instead of the `[[ "$output" == *...* ]]` glob form that the tests above use:
+# as the final statement of a bats test body that glob form reported failure on
+# output verified to contain the substring, and a flaky ratchet is worse than none.
+@test "a ratchet nothing invokes is a finding" {
+    sed -i '/validate-spec-authority.sh/d' "${FAKE}/scripts/self-enforce-qa.sh"
+    fake_run
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "the ratchet runs in the QA chain"
+}
+
+@test "an invariant with no rationale section in AGENTS.md is a finding" {
+    sed -i '/## Spec-authority dispatch gate/d' "${FAKE}/AGENTS.md"
+    fake_run
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "rationale lives in AGENTS.md"
 }
 
 @test "help documents the finding codes and the exit contract" {

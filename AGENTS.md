@@ -505,6 +505,37 @@ embedding ships the corrupted value as if it had been rebuilt (issue #3878).
   restore) is for restores that genuinely do not feed a build and requires a
   reason — a bare marker is rejected.
 
+## Spec-authority dispatch gate
+
+"Which spec set governs this component, and is that document still in force?" is
+answered deterministically before any dispatch (issue #3947). A fleet merged forty
+times against a charter a newer program had already superseded because nobody had
+to name the governing document to ship against it.
+
+- Currency markers are header key-values in a spec document: `Spec-Set:`,
+  `Spec-Version:`, `Supersedes:`, `Superseded-By:`, `Decision-Record:`,
+  `Authority-Over:` (comma-separated components). A document with none of them is
+  `Unknown` — **never** current — and lands in the `undetermined` authority.
+- `autospec dispatch authority [--spec-dir D | --spec-file F] [--component C]…
+  [--tasks TSV] [--json]` is the gate. Exit **0** allows, **1** refuses, **2** is an
+  input error. Refusal codes: `CURRENCY_MISSING`, `SPEC_SUPERSEDED`,
+  `AUTHORITY_CONFLICT`, `VERSION_MISSING`.
+- A component claimed by two spec sets both in force is `AUTHORITY_CONFLICT`: the
+  tool reports both authorities and stops. It never picks a winner — choosing a
+  program is a human decision, and the expensive failure is a confident wrong one.
+- Conflicts exclude superseded authorities. Their claims lost, so counting them
+  buries the genuine conflict under every historical document.
+- Task throughput is attributed per authority, never aggregated across programs;
+  a task naming no authority is reported under `undetermined` with a warning
+  instead of being dropped, and any merge not aimed at a `Current` authority is
+  reported as undirected.
+- A finding names the paths it applies to, capped at 6 with a `(+N more)` tail.
+  A refusal whose stated reason is false, or whose path list is the whole tree,
+  sends the operator to fix the wrong thing.
+- The ratchet is `scripts/validate-spec-authority.sh` (Step 4 of
+  `scripts/self-enforce-qa.sh`; `tests/lint/test_spec_authority_validator.bats`
+  pins that it fails when the gate is unwired, undocumented, or made non-public).
+
 ## Closeout report contract
 
 Every `auto-implement` agent ends an issue by emitting a **Closeout report** —

@@ -111,6 +111,13 @@ fi
 require_pattern docs/invariants.md "spec authority" "the invariant has an entry in docs/invariants.md"
 require_pattern docs/invariants.md "#3947" "the invariant is traced to its issue"
 
+# Cross-cutting invariants keep their rationale outside the file that implements
+# them, and a ratchet that nothing invokes enforces nothing. Both are losable in
+# silence, so they are pinned here.
+require_pattern AGENTS.md "## Spec-authority dispatch gate" "the invariant's rationale lives in AGENTS.md"
+require_pattern AGENTS.md "AUTHORITY_CONFLICT" "AGENTS.md states that a conflict is reported, never resolved"
+require_pattern scripts/self-enforce-qa.sh "validate-spec-authority.sh" "the ratchet runs in the QA chain"
+
 # ── 3. behavior probes ───────────────────────────────────────────────────────
 if [ -z "$binary" ]; then
     if [ -n "${AUTOSPEC_BIN:-}" ]; then

@@ -149,6 +149,22 @@ else
   printf 'WARN: lint-restore-visibility.sh not found at %s — skipping restore-visibility step\n' "$RV_SCRIPT" >&2
 fi
 
+# Step 4: spec-authority ratchet (issue #3947: the dispatch gate must stay
+# wired, documented, and its refusal codes must keep meaning what they say)
+SA_SCRIPT="$REPO_ROOT/scripts/validate-spec-authority.sh"
+if [ -f "$SA_SCRIPT" ]; then
+  sa_out=""
+  sa_exit=0
+  sa_out=$(bash "$SA_SCRIPT" --root "$REPO_ROOT" 2>&1) || sa_exit=$?
+  if [ "$sa_exit" -ne 0 ]; then
+    BLOCKING=$((BLOCKING + 1))
+    FINDINGS="${FINDINGS}${sa_out}
+"
+  fi
+else
+  printf 'WARN: validate-spec-authority.sh not found at %s — skipping spec-authority step\n' "$SA_SCRIPT" >&2
+fi
+
 # ── emit summary ──────────────────────────────────────────────────────────────
 
 if [ "$BLOCKING" -gt 0 ]; then
