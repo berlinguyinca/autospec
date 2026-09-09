@@ -125,6 +125,25 @@ the dispatch gate: when the queue is fresh but empty *and* the admitted set is n
 dispatcher holds with `ADMITTED_NOT_SCHEDULABLE` (naming the refresh step that must
 repopulate the queue) instead of claiming idleness — an idle dispatcher over eligible,
 unfiled work is a fault, not silence.
+A fifth concern lives in the same chain, because it was born in it (#3961): two
+independent symptoms both landed in the same dispatch-queue file and collided on
+dispatch, and nothing at filing time compared them. Issues are filed by symptom and
+implemented by file, so the comparison happens on the *file*, not the subject. Each
+issue records its predicted write surface — the paths or modules its fix expects to
+touch, read from the `## Files touched` section of its body — and filing checks that
+surface mechanically against every open issue's, reporting each shared entry as
+`WRITE-SURFACE OVERLAP` with the sibling named at filing time, because the fix there is
+one sentence and after dispatch it costs a GPU run plus a merge a supervisor should not
+be doing in someone else's interface. The same surfaces are the dispatcher's input to
+serialisation: issues plan into concurrency waves, an issue joins the first wave its
+surface is free in, and an issue with no declared surface takes a wave to itself — an
+undeclared surface cannot be proven disjoint, so it never rides with neighbours. When a
+sibling merges while an issue is still in flight, the re-staged spec carries a
+`SIBLING LANDED` note naming what merged, what it introduced, and where, with the
+instruction to extend rather than re-implement, because the re-dispatched agent's base
+snapshot is the world before the sibling. The primitives are pure in
+`autospec_core::dispatch_pipeline` (`IssueWriteSurface`, `FilingOverlapCheck`,
+`DispatchWaves`, `SiblingLanding`).
 `stamp` is what the refresh script calls after it repopulates the file: it rewrites the
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records

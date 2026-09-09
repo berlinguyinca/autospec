@@ -35,6 +35,28 @@
 //!    holds credentials is the durable one or an agent session that dies, and
 //!    forbids a credential ever landing on cluster-shared storage.
 //!
+//! A fifth concern lives in the same files, because it was born in them
+//! (#3961): two issues filed hours apart from independent symptoms both
+//! landed in the same dispatch-queue file and collided on dispatch, and
+//! nothing at filing time compared them. Issues are filed by symptom and
+//! implemented by file, so the comparison has to happen on the *file*, not
+//! the subject:
+//!
+//! * **An issue records its predicted write surface** ([`IssueWriteSurface`])
+//!   — the paths or modules its fix expects to touch, read from the issue
+//!   body's `## Files touched` section.
+//! * **Filing checks that surface against every open issue**
+//!   ([`FilingOverlapCheck`]) and reports the shared entries, because the
+//!   fix at filing time is one sentence — "related to #N; both touch the
+//!   dispatch queue; serialise" — and after dispatch it costs a GPU run.
+//! * **Overlapping issues are serialised, not run in parallel**
+//!   ([`DispatchWaves`]): an issue joins the first wave its surface is free
+//!   in; an issue with no declared surface joins no wave but its own.
+//! * **A sibling that merges in flight is named on re-stage**
+//!   ([`SiblingLanding`]): the re-staged spec says what landed and where,
+//!   and instructs the agent to extend rather than re-implement, because its
+//!   base snapshot is the world before the sibling.
+//!
 //! Everything here is pure and testable: no I/O, no clock, no subprocess. The
 //! caller supplies `now` and the artifact it read; [`DispatchPipeline`] decides.
 
@@ -820,6 +842,303 @@ impl SchedulingReconciliation {
     }
 }
 
+/// The predicted write surface of one issue: the paths or modules its fix
+/// is expected to touch, recorded at filing time (#3961).
+///
+/// Issues are filed by symptom, so two genuinely independent symptoms can
+/// still name the same file — "produced patches hold their slot" and
+/// "filing does not schedule" share no keywords worth searching, but both
+/// touched the dispatch-queue file. A declared surface is what makes the
+/// comparison mechanical at filing time, and it is the input the dispatcher
+/// needs to serialise overlapping work instead of running it in parallel and
+/// holding the loser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWriteSurface {
+    /// The issue that declares this surface.
+    pub issue: u64,
+    /// Normalised entries: trimmed, empty entries dropped, de-duplicated,
+    /// sorted. A trailing `/` marks a directory and covers every path
+    /// beneath it; anything else matches exactly.
+    pub paths: BTreeSet<String>,
+}
+
+/// One entry of a write surface declared as a directory (`trailing /`).
+fn is_directory_entry(entry: &str) -> bool {
+    entry.ends_with('/')
+}
+
+/// Whether `candidate` lies strictly beneath the directory `entry` declares.
+fn beneath(entry: &str, candidate: &str) -> bool {
+    let Some(dir) = entry.strip_suffix('/') else {
+        return false;
+    };
+    candidate.starts_with(dir) && candidate.len() > dir.len()
+}
+
+impl IssueWriteSurface {
+    pub fn new(issue: u64, paths: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self {
+            issue,
+            paths: normalise_names(paths),
+        }
+    }
+
+    /// Record the surface declared in the issue body's `## Files touched`
+    /// section, the issue-quality contract's one-path-per-line grammar.
+    /// `None` when the section is absent or declares no safe repo-relative
+    /// path — an undeclared surface is preserved as undeclared, never
+    /// guessed at.
+    pub fn from_body(issue: u64, body: &str) -> Option<Self> {
+        let mut in_section = false;
+        let mut paths = BTreeSet::new();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("## ") {
+                in_section = trimmed.trim_end() == "## Files touched";
+                continue;
+            }
+            if !in_section || trimmed.is_empty() {
+                continue;
+            }
+            let entry = trimmed
+                .trim_start_matches('-')
+                .trim()
+                .trim_matches('`')
+                .trim();
+            if entry.is_empty()
+                || entry.starts_with('/')
+                || entry.contains(' ')
+                || entry
+                    .split('/')
+                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+            {
+                continue;
+            }
+            paths.insert(entry.to_string());
+        }
+        (!paths.is_empty()).then_some(Self { issue, paths })
+    }
+
+    /// The entries both surfaces claim for the same file or directory, sorted.
+    /// Empty when the two issues can merge without a conflict. When one side
+    /// declares a directory covering a path the other declares, the broader
+    /// declaration is the shared entry named.
+    pub fn shared_entries(&self, other: &IssueWriteSurface) -> Vec<String> {
+        let mut shared = BTreeSet::new();
+        for a in &self.paths {
+            for b in &other.paths {
+                let entry = if a == b || (is_directory_entry(a) && beneath(a, b)) {
+                    Some(a)
+                } else if is_directory_entry(b) && beneath(b, a) {
+                    Some(b)
+                } else {
+                    None
+                };
+                if let Some(entry) = entry {
+                    shared.insert(entry.clone());
+                }
+            }
+        }
+        shared.into_iter().collect()
+    }
+
+    /// Whether the two issues write the same file or directory.
+    pub fn overlaps_with(&self, other: &IssueWriteSurface) -> bool {
+        !self.shared_entries(other).is_empty()
+    }
+}
+
+/// One overlap found by [`FilingOverlapCheck`]: which open issue, and which
+/// surface entries collide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceOverlap {
+    pub issue: u64,
+    pub shared: Vec<String>,
+}
+
+/// The result of checking a newly filed issue's predicted write surface
+/// against the open issues' surfaces (#3961, invariant 1).
+///
+/// The habit this replaces is searching the backlog for the same *topic*;
+/// that would not catch two independent symptoms sharing a file. The check
+/// is mechanical: every open surface is compared against the new one, and
+/// every shared entry is reported at filing time — the moment the fix is one
+/// sentence rather than a GPU run plus a design-level merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilingOverlapCheck {
+    /// The issue being filed.
+    pub issue: u64,
+    /// Open issues that share at least one surface entry, with the shared
+    /// entries named.
+    pub overlaps: Vec<SurfaceOverlap>,
+}
+
+impl FilingOverlapCheck {
+    /// Check `candidate` against the open issues' surfaces. The candidate's
+    /// own surface, if it appears in `open`, is excluded.
+    pub fn check(candidate: &IssueWriteSurface, open: &[IssueWriteSurface]) -> Self {
+        let overlaps = open
+            .iter()
+            .filter(|other| other.issue != candidate.issue)
+            .filter_map(|other| {
+                let shared = candidate.shared_entries(other);
+                (!shared.is_empty()).then_some(SurfaceOverlap {
+                    issue: other.issue,
+                    shared,
+                })
+            })
+            .collect();
+        Self {
+            issue: candidate.issue,
+            overlaps,
+        }
+    }
+
+    /// No open issue shares a surface entry: the issue can be filed without a
+    /// serialisation note.
+    pub fn clean(&self) -> bool {
+        self.overlaps.is_empty()
+    }
+
+    /// The lines the filer sees at filing time: one per overlap, naming the
+    /// sibling and the shared entries, plus the serialise-or-merge instruction.
+    pub fn lines(&self) -> Vec<String> {
+        if self.overlaps.is_empty() {
+            return vec![format!(
+                "WRITE-SURFACE clean: #{} declares a surface no open issue shares",
+                self.issue
+            )];
+        }
+        self.overlaps
+            .iter()
+            .map(|overlap| {
+                format!(
+                    "WRITE-SURFACE OVERLAP: #{} shares {} with open issue #{} — serialise or merge, and name the sibling on the later issue",
+                    self.issue,
+                    overlap.shared.join(", "),
+                    overlap.issue
+                )
+            })
+            .collect()
+    }
+}
+
+/// The dispatcher's concurrency plan for the queue's entries (#3961,
+/// invariant 3).
+///
+/// Every wave is a set of issues whose declared surfaces are pairwise
+/// disjoint, so the waves may run in parallel; within and across waves an
+/// issue runs no sooner than the first wave its surface is free. Two issues
+/// that share a write surface therefore never run concurrently: serialising
+/// costs latency, colliding costs a dispatch plus a merge a supervisor should
+/// not be doing in someone else's interface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchWaves {
+    pub waves: Vec<Vec<u64>>,
+}
+
+impl DispatchWaves {
+    /// Plan `entries` (in queue order) into waves using `surfaces`.
+    ///
+    /// An issue with no declared surface cannot be proven disjoint from
+    /// anything, so it takes a wave to itself rather than riding with
+    /// neighbours whose conflict it would silently cause.
+    pub fn plan(entries: impl IntoIterator<Item = u64>, surfaces: &[IssueWriteSurface]) -> Self {
+        let declared: BTreeMap<u64, &IssueWriteSurface> = surfaces
+            .iter()
+            .map(|surface| (surface.issue, surface))
+            .collect();
+        let disjoint = |candidate: &IssueWriteSurface, member: u64| match declared.get(&member) {
+            Some(other) => !candidate.overlaps_with(other),
+            // A wave member with no declared surface cannot be proven
+            // disjoint, so it overlaps everything by default.
+            None => false,
+        };
+        let mut waves: Vec<Vec<u64>> = Vec::new();
+        for entry in entries {
+            let wave = match declared.get(&entry) {
+                Some(candidate) => waves
+                    .iter()
+                    .position(|wave| wave.iter().all(|member| disjoint(candidate, *member)))
+                    .unwrap_or(waves.len()),
+                None => waves.len(),
+            };
+            if waves.len() == wave {
+                waves.push(Vec::new());
+            }
+            waves[wave].push(entry);
+        }
+        Self { waves }
+    }
+
+    /// The entries that run in the same wave as `entry`: the set the
+    /// dispatcher may launch concurrently with it.
+    pub fn concurrent_with(&self, entry: u64) -> Vec<u64> {
+        self.waves
+            .iter()
+            .find(|wave| wave.contains(&entry))
+            .map(|wave| {
+                wave.iter()
+                    .copied()
+                    .filter(|member| *member != entry)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What a merged sibling left behind, recorded when the sibling lands while
+/// the issue is still in flight (#3961, invariant 4).
+///
+/// The re-dispatched agent's base snapshot is the world before the sibling,
+/// so without a note it re-derives the same conflict — parallel types for the
+/// same subsystem, the same `use` list and doc-table rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingLanding {
+    /// The sibling that merged.
+    pub issue: u64,
+    /// What it introduced (types, subcommands, failure codes), named.
+    pub introduced: BTreeSet<String>,
+    /// The files it changed: where the re-stage extends rather than
+    /// re-implements.
+    pub touched: BTreeSet<String>,
+}
+
+/// Trim, drop empties, de-duplicate and sort a list of names or paths.
+fn normalise_names(items: impl IntoIterator<Item = impl AsRef<str>>) -> BTreeSet<String> {
+    items
+        .into_iter()
+        .map(|item| item.as_ref().trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+impl SiblingLanding {
+    pub fn new(
+        issue: u64,
+        introduced: impl IntoIterator<Item = impl AsRef<str>>,
+        touched: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        Self {
+            issue,
+            introduced: normalise_names(introduced),
+            touched: normalise_names(touched),
+        }
+    }
+
+    /// The re-stage note appended to the spec the agent reads: what landed,
+    /// where, and the instruction to extend rather than re-implement.
+    pub fn note(&self, target: u64) -> String {
+        format!(
+            "SIBLING LANDED while #{} was in flight: #{} merged, introducing {} in {}. Extend what it added — do not re-implement it or shadow it with parallel types.",
+            target,
+            self.issue,
+            self.introduced.iter().cloned().collect::<Vec<_>>().join(", "),
+            self.touched.iter().cloned().collect::<Vec<_>>().join(", ")
+        )
+    }
+}
+
 /// What a consumer may conclude from the artifact it just read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1094,5 +1413,280 @@ impl DispatchPipeline {
             hops: self.hop_statuses(now),
             topology_violations: self.topology.audit(),
         }
+    }
+}
+
+// ── Write-surface overlap (#3961) ───────────────────────────────────────────
+
+#[cfg(test)]
+mod write_surface_tests {
+    use super::*;
+
+    fn body_with_files(files: &[&str]) -> String {
+        let mut body = String::from("## Goal\nFile the fix.\n\n## Files touched\n");
+        for file in files {
+            body.push_str(&format!("- `{file}`\n"));
+        }
+        body.push_str("\n## Acceptance criteria\n- [ ] done\n");
+        body
+    }
+
+    #[test]
+    fn surface_normalizes_trims_dedupes_and_sorts() {
+        let surface = IssueWriteSurface::new(
+            3927,
+            [
+                " crates/autospec-core/src/dispatch_pipeline.rs ",
+                "docs/cli-reference.md",
+                "docs/cli-reference.md",
+                "  ",
+                "crates/autospec-core/src/queue.rs",
+            ],
+        );
+        assert_eq!(surface.paths, {
+            let mut set = BTreeSet::new();
+            set.insert("crates/autospec-core/src/dispatch_pipeline.rs".to_string());
+            set.insert("crates/autospec-core/src/queue.rs".to_string());
+            set.insert("docs/cli-reference.md".to_string());
+            set
+        });
+    }
+
+    #[test]
+    fn directory_entry_matches_descendants_not_siblings() {
+        let directory = IssueWriteSurface::new(1, ["crates/autospec-core/src/"]);
+        let descendant = IssueWriteSurface::new(2, ["crates/autospec-core/src/queue.rs"]);
+        let sibling = IssueWriteSurface::new(3, ["crates/autospec-cli/src/main.rs"]);
+        let crammed = IssueWriteSurface::new(4, ["crates/autospec-core-src/"]);
+
+        assert!(directory.overlaps_with(&descendant));
+        assert!(descendant.overlaps_with(&directory));
+        assert!(!directory.overlaps_with(&sibling));
+        // A near-miss prefix (`-src/` vs `src/`) is a different directory.
+        assert!(!directory.overlaps_with(&crammed));
+        assert_eq!(
+            directory.shared_entries(&descendant),
+            vec!["crates/autospec-core/src/"]
+        );
+    }
+
+    #[test]
+    fn from_body_records_the_files_touched_section() {
+        let body = body_with_files(&[
+            "crates/autospec-core/src/dispatch_pipeline.rs",
+            "docs/cli-reference.md",
+        ]);
+        let surface = IssueWriteSurface::from_body(3961, &body).expect("section present");
+        assert_eq!(surface.issue, 3961);
+        assert_eq!(surface.paths.len(), 2);
+        assert!(surface
+            .paths
+            .contains("crates/autospec-core/src/dispatch_pipeline.rs"));
+    }
+
+    #[test]
+    fn from_body_rejects_unsafe_paths_and_missing_sections() {
+        let absolute = body_with_files(&["/etc/passwd"]);
+        let dotdot = body_with_files(&["crates/../secrets"]);
+        let prose = body_with_files(&["the dispatch queue file"]);
+        assert!(IssueWriteSurface::from_body(1, &absolute).is_none());
+        assert!(IssueWriteSurface::from_body(1, &dotdot).is_none());
+        assert!(IssueWriteSurface::from_body(1, &prose).is_none());
+        // No section, no surface: preserved as undeclared, never guessed at.
+        assert!(IssueWriteSurface::from_body(1, "## Goal\nNo surface section here.\n").is_none());
+    }
+
+    #[test]
+    fn filing_check_reports_overlap_naming_the_sibling_and_the_file() {
+        // The #3911/#3793 shape: two issues with disjoint subjects that both
+        // declare the dispatch-queue file.
+        let new_issue = IssueWriteSurface::from_body(
+            3961,
+            &body_with_files(&["crates/autospec-core/src/dispatch_pipeline.rs"]),
+        )
+        .unwrap();
+        let open = vec![
+            IssueWriteSurface::from_body(
+                3927,
+                &body_with_files(&["crates/autospec-core/src/dispatch_pipeline.rs"]),
+            )
+            .unwrap(),
+            IssueWriteSurface::from_body(
+                3911,
+                &body_with_files(&["crates/autospec-core/src/queue.rs"]),
+            )
+            .unwrap(),
+        ];
+
+        let check = FilingOverlapCheck::check(&new_issue, &open);
+        assert!(!check.clean());
+        assert_eq!(
+            check.overlaps,
+            vec![SurfaceOverlap {
+                issue: 3927,
+                shared: vec!["crates/autospec-core/src/dispatch_pipeline.rs".to_string()],
+            }]
+        );
+        let line = &check.lines()[0];
+        assert!(line.contains("WRITE-SURFACE OVERLAP"));
+        assert!(line.contains("#3927"), "{line}");
+        assert!(line.contains("dispatch_pipeline.rs"), "{line}");
+        assert!(line.contains("serialise"), "{line}");
+    }
+
+    #[test]
+    fn filing_check_excludes_the_candidate_itself_and_reports_clean() {
+        let surface = IssueWriteSurface::from_body(
+            12,
+            &body_with_files(&["crates/autospec-core/src/queue.rs"]),
+        )
+        .unwrap();
+        let open = vec![surface.clone(), surface.clone()];
+
+        assert!(FilingOverlapCheck::check(&surface, &open).clean());
+        let lines = FilingOverlapCheck::check(&surface, &open).lines();
+        assert_eq!(
+            lines,
+            vec!["WRITE-SURFACE clean: #12 declares a surface no open issue shares"]
+        );
+    }
+
+    #[test]
+    fn planner_serialises_issues_sharing_a_surface() {
+        // Two issues declaring the same file must never share a wave.
+        let surfaces = vec![
+            IssueWriteSurface::new(10, ["crates/autospec-core/src/queue.rs"]),
+            IssueWriteSurface::new(11, ["crates/autospec-core/src/queue.rs"]),
+        ];
+        let plan = DispatchWaves::plan([10, 11], &surfaces);
+
+        assert_eq!(plan.waves, vec![vec![10], vec![11]]);
+        assert!(
+            plan.concurrent_with(10).is_empty(),
+            "#11 shares #10's file and must not run alongside it"
+        );
+    }
+
+    #[test]
+    fn planner_runs_disjoint_surfaces_in_one_wave() {
+        let surfaces = vec![
+            IssueWriteSurface::new(10, ["crates/autospec-core/src/queue.rs"]),
+            IssueWriteSurface::new(11, ["docs/cli-reference.md"]),
+        ];
+        let plan = DispatchWaves::plan([10, 11], &surfaces);
+
+        assert_eq!(plan.waves, vec![vec![10, 11]]);
+        assert_eq!(plan.concurrent_with(10), vec![11]);
+    }
+
+    #[test]
+    fn planner_lets_a_third_issue_join_the_earliest_free_wave() {
+        let surfaces = vec![
+            IssueWriteSurface::new(10, ["a.rs"]),
+            IssueWriteSurface::new(11, ["a.rs"]),
+            IssueWriteSurface::new(12, ["b.rs"]),
+        ];
+        // 12 is disjoint from 10 as well, so it joins the first wave rather
+        // than waiting behind 11 for no reason.
+        let plan = DispatchWaves::plan([10, 11, 12], &surfaces);
+
+        assert_eq!(plan.waves, vec![vec![10, 12], vec![11]]);
+    }
+
+    #[test]
+    fn planner_serialises_undeclared_surfaces_into_their_own_wave() {
+        // No declared surface is not a clean surface: it cannot be proven
+        // disjoint, so it rides alone.
+        let surfaces = vec![IssueWriteSurface::new(10, ["a.rs"])];
+        let plan = DispatchWaves::plan([10, 11, 12], &surfaces);
+
+        assert_eq!(plan.waves, vec![vec![10], vec![11], vec![12]]);
+    }
+
+    #[test]
+    fn sibling_landing_note_names_what_landed_and_instructs_to_extend() {
+        let landing = SiblingLanding::new(
+            3927,
+            [
+                "FailureCode::AdmittedNotSchedulable",
+                "autospec dispatch reconcile",
+            ],
+            [
+                "crates/autospec-core/src/dispatch_pipeline.rs",
+                "docs/cli-reference.md",
+            ],
+        );
+        let note = landing.note(3911);
+
+        assert!(note.contains("#3911"), "{note}");
+        assert!(note.contains("#3927"), "{note}");
+        assert!(
+            note.contains("FailureCode::AdmittedNotSchedulable"),
+            "{note}"
+        );
+        assert!(note.contains("dispatch_pipeline.rs"), "{note}");
+        assert!(note.contains("Extend"), "{note}");
+        assert!(note.contains("do not re-implement"), "{note}");
+    }
+
+    #[test]
+    fn populated_case_two_issues_one_file_are_overlapping_and_serialised() {
+        // The populated case from #3793: the queue already holds 242 entries,
+        // two of them — #123 and #237 — declare the same file, and a third
+        // issue (#243) is being filed against that file now. The filing check
+        // reports both siblings, and the plan never places the same-file
+        // issues in one wave while the disjoint issues run in parallel.
+        let queue: Vec<u64> = (1..=242).collect();
+        let same_file = "crates/autospec-core/src/dispatch_pipeline.rs";
+        let mut surfaces: Vec<IssueWriteSurface> = (1..=242)
+            .map(|n| IssueWriteSurface::new(n, [format!("crates/autospec-core/src/mod-{n}.rs")]))
+            .collect();
+        surfaces[122] = IssueWriteSurface::new(123, [same_file]);
+        surfaces[236] = IssueWriteSurface::new(237, [same_file]);
+
+        let filing = IssueWriteSurface::new(243, [same_file]);
+        let check = FilingOverlapCheck::check(&filing, &surfaces);
+        assert_eq!(
+            check.overlaps,
+            vec![
+                SurfaceOverlap {
+                    issue: 123,
+                    shared: vec![same_file.to_string()],
+                },
+                SurfaceOverlap {
+                    issue: 237,
+                    shared: vec![same_file.to_string()],
+                },
+            ]
+        );
+        assert_eq!(check.lines().len(), 2);
+
+        let plan = DispatchWaves::plan(queue.iter().copied(), &surfaces);
+        let wave_of = |entry: u64| plan.waves.iter().position(|wave| wave.contains(&entry));
+        assert_eq!(wave_of(123), Some(0));
+        assert!(
+            wave_of(237) > Some(0),
+            "#237 shares #123's file and must land in a later wave"
+        );
+        assert!(!plan.waves[0].contains(&237));
+        // The disjoint issues still ride wave zero: serialising the same-file
+        // pair must not serialise the whole queue.
+        assert!(plan.waves[0].contains(&1));
+        assert!(plan.waves[0].contains(&242));
+        // And the newly filed issue overlaps both siblings, so wherever it
+        // plans it shares no wave with either of them.
+        let extended = std::iter::once(243).chain(queue.iter().copied());
+        let surfaces = std::iter::once(&filing)
+            .chain(surfaces.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let replan = DispatchWaves::plan(extended, &surfaces);
+        let wave_243 = replan
+            .waves
+            .iter()
+            .position(|wave| wave.contains(&243))
+            .expect("#243 is planned");
+        assert!(!replan.waves[wave_243].contains(&123));
+        assert!(!replan.waves[wave_243].contains(&237));
     }
 }
