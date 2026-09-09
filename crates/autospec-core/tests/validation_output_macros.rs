@@ -1,14 +1,19 @@
 use autospec_core::validation::output_macros::validate;
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static FIXTURES_BUILT: AtomicU64 = AtomicU64::new(0);
 
 fn fixture(manifest: &str, source: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "autospec-output-{}",
+        "autospec-output-{}-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        std::process::id(),
+        FIXTURES_BUILT.fetch_add(1, Ordering::Relaxed)
     ));
     let crate_dir = root.join("crates/sample/src");
     fs::create_dir_all(&crate_dir).unwrap();
@@ -55,4 +60,32 @@ fn allow_annotation_clears_mixed_target_finding() {
         "pub fn run() { println!(\"x\"); } // autospec:allow-output\n",
     );
     assert!(validate(&root).is_ok());
+}
+
+#[test]
+fn findings_name_paths_relative_to_the_validation_root() {
+    let root = fixture(
+        "[package]\nname=\"sample\"\n[lib]\n",
+        "pub fn run() { println!(\"x\"); }\n",
+    );
+    let error = validate(&root).unwrap_err();
+    assert!(
+        error.contains("file=crates/sample/src/lib.rs"),
+        "the reason must name the path relative to the validation root: {error}"
+    );
+    assert!(
+        !error.contains(&format!("file={}", root.display())),
+        "an absolute worktree path must not leak into the reason: {error}"
+    );
+}
+
+#[test]
+fn the_same_tree_validated_in_two_directories_yields_identical_reasons() {
+    // The reason bytes must not depend on where the tree lives, so a gate comparing
+    // results from two checkouts sees the same set of failing checks (#3802).
+    let manifest = "[package]\nname=\"sample\"\n[lib]\n";
+    let source = "pub fn run() { println!(\"x\"); }\n";
+    let first = validate(&fixture(manifest, source)).unwrap_err();
+    let second = validate(&fixture(manifest, source)).unwrap_err();
+    assert_eq!(first, second);
 }

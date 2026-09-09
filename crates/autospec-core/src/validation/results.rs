@@ -105,11 +105,39 @@ impl CheckResult {
         !self.is_success() && !self.is_unmeasured()
     }
 
+    /// The per-check verdict, classified exactly the way the aggregate classifies it.
+    ///
+    /// Machine consumers of the execution report read this field instead of re-deriving
+    /// a verdict from `exit_code` and `unmeasured` — so adding, removing, or rewording a
+    /// check's reason text can never change their verdict (#3802).
+    pub fn status(&self) -> ValidationStatus {
+        if self.is_unmeasured() {
+            ValidationStatus::Unknown
+        } else if self.is_success() {
+            ValidationStatus::Passed
+        } else {
+            ValidationStatus::Failed
+        }
+    }
+
+    /// The reason behind a non-pass verdict: the failure message for a failure, the
+    /// unmeasured message for an unknown, `None` for a pass.
+    ///
+    /// The two sources are mutually exclusive by construction, so the order of the `or`
+    /// is immaterial; the failure is listed first because it is the stronger statement
+    /// ("a measurement happened and it says this").
+    pub fn reason(&self) -> Option<&str> {
+        self.failure.as_deref().or(self.unmeasured.as_deref())
+    }
+
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{VALIDATION_EXECUTION_SCHEMA},\"id\":\"{}\",\"required\":{},\"exit_code\":{},\"elapsed_ms\":{},\"spawn_count\":{},\"stdout_bytes\":{},\"stderr_bytes\":{},\"output_digest\":\"{}\",\"unmeasured\":{}}}",
+            "{{\"schema\":{VALIDATION_EXECUTION_SCHEMA},\"id\":\"{}\",\"name\":\"{}\",\"status\":\"{}\",\"required\":{},\"reason\":{},\"exit_code\":{},\"elapsed_ms\":{},\"spawn_count\":{},\"stdout_bytes\":{},\"stderr_bytes\":{},\"output_digest\":\"{}\",\"unmeasured\":{}}}",
             escape(&self.id),
+            escape(&self.id),
+            self.status().as_str(),
             self.required,
+            option_string(self.reason()),
             option_number(self.exit_code),
             self.elapsed_ms,
             self.spawn_count,

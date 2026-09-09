@@ -30,7 +30,7 @@ pub fn validate(root: &Path) -> Result<(), String> {
             (false, true) => "binary",
             (false, false) => continue,
         };
-        scan_sources(&path.join("src"), target_kind, &mut findings)?;
+        scan_sources(&path.join("src"), target_kind, root, &mut findings)?;
     }
     if findings.is_empty() {
         Ok(())
@@ -39,7 +39,12 @@ pub fn validate(root: &Path) -> Result<(), String> {
     }
 }
 
-fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> Result<(), String> {
+fn scan_sources(
+    path: &Path,
+    target_kind: &str,
+    root: &Path,
+    findings: &mut Vec<String>,
+) -> Result<(), String> {
     if !path.is_dir() {
         return Ok(());
     }
@@ -47,9 +52,14 @@ fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> R
         let entry = entry.map_err(|e| e.to_string())?;
         let file = entry.path();
         if file.is_dir() {
-            scan_sources(&file, target_kind, findings)?;
+            scan_sources(&file, target_kind, root, findings)?;
         } else if file.extension().and_then(|x| x.to_str()) == Some("rs") {
             let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+            // Name the path relative to the validation root: the reason doubles as a
+            // comparison key for machine consumers, and an absolute path would embed the
+            // worktree location, so the same tree validated from two directories would
+            // produce different bytes (#3802).
+            let display = file.strip_prefix(root).unwrap_or(&file);
             for (line_no, line) in text.lines().enumerate() {
                 if !(line.contains("println!(") || line.contains("eprintln!(")) // autospec:allow-output
                     || line.contains("autospec:allow-output")
@@ -66,7 +76,7 @@ fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> R
                 };
                 findings.push(format!(
                     "output-macro: target_kind={target_kind} file={} line={} remediation={remediation}",
-                    file.display(), line_no + 1
+                    display.display(), line_no + 1
                 ));
             }
         }

@@ -88,6 +88,46 @@ fn completed_result_serializes_execution_metadata() {
 }
 
 #[test]
+fn execution_record_exposes_name_status_and_reason_as_structured_fields() {
+    // The conversion gate must read a check's identity and verdict from these fields,
+    // never from the rendered `- name: failed (reason)` line (#3802).
+    let failed = CheckResult::completed("check_lockstep", true, 1, 12, 1, 0, 4, "digest")
+        .with_failure("mismatch at skills/autospec/SKILL.md:12");
+    let json = failed.to_json();
+    assert!(json.contains("\"name\":\"check_lockstep\""), "{json}");
+    assert!(json.contains("\"status\":\"failed\""), "{json}");
+    assert!(
+        json.contains("\"reason\":\"mismatch at skills/autospec/SKILL.md:12\""),
+        "{json}"
+    );
+
+    let passed = CheckResult::completed("check_lockstep", true, 0, 12, 1, 4, 0, "digest");
+    let json = passed.to_json();
+    assert!(json.contains("\"status\":\"passed\""), "{json}");
+    assert!(json.contains("\"reason\":null"), "{json}");
+
+    let unknown = CheckResult::unmeasured("check_dogfood", true, "tool dogfood not found");
+    let json = unknown.to_json();
+    assert!(json.contains("\"status\":\"unknown\""), "{json}");
+    assert!(
+        json.contains("\"reason\":\"tool dogfood not found\""),
+        "{json}"
+    );
+}
+
+#[test]
+fn rewording_the_reason_text_does_not_change_the_verdict() {
+    // AC1: the verdict is a function of the measurement, not of the prose.
+    let a = CheckResult::completed("check_x", true, 1, 0, 0, 0, 1, "d").with_failure("old wording");
+    let b = CheckResult::completed("check_x", true, 1, 0, 0, 0, 1, "d").with_failure("new wording");
+    let no_reason = CheckResult::completed("check_x", true, 1, 0, 0, 0, 1, "d");
+
+    assert_eq!(a.status(), b.status());
+    assert_eq!(b.status(), no_reason.status());
+    assert_eq!(a.status(), ValidationStatus::Failed);
+}
+
+#[test]
 fn execution_report_aggregates_required_failures_as_schema_two() {
     let report = ValidationExecutionReport::new(vec![
         CheckResult::completed("lockstep", true, 0, 12, 1, 4, 0, "passed"),
