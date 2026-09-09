@@ -1,0 +1,4 @@
+# Positive fixture: bare network-reachability claim in a workflow file.
+# The registry is always reachable from the runner.
+steps:
+  - run: echo ok
