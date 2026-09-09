@@ -130,6 +130,13 @@ jobs:
         # ran, and `Validate repository` / `Build` below had not executed in CI for as long.
         run: cargo test --workspace --no-fail-fast
 
+      - name: Catalog count parity
+        # The catalog size is a literal in three test files across two crates.
+        # Bumping some and not others breaks main and then falsely holds every
+        # subsequent check-adding patch. Twice in one day (#3891/#3892 held
+        # seven patches, #3902 held three). Cheap, so it runs before validate.
+        run: bash scripts/check-catalog-count-parity.sh
+
       - name: Validate repository
         run: cargo run -p autospec-cli -- validate
 
