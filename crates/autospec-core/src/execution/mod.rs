@@ -11,6 +11,7 @@ pub mod result;
 pub mod stage_throughput;
 pub mod test_diff;
 pub mod work;
+pub mod yaml_config;
 
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
