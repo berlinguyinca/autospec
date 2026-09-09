@@ -96,7 +96,7 @@ pub use memory::{MemoryCandidate, MemoryTier, MemoryWritePolicy};
 pub use metrics::RetrievalMetrics;
 pub use policy::{AgentRole, PolicySet, RetrievalPolicy};
 pub use query::{PlannedQuery, QueryPlanner};
-pub use routing::{select_node, ModelCapabilities, NodeCandidate, RagModelTask};
+pub use routing::{select_node, ModelCapabilities, NodeCandidate, RagModelTask, SeatLedger};
 pub use scope::{PathState, RetrievalScope};
 pub use score::Score;
 pub use source::{

@@ -36,7 +36,7 @@ its effective policy.
 | `cache` | 25, 41.4 | Revision-aware cache and invalidation |
 | `trace` | 35, 54 | Per-iteration retrieval traces |
 | `metrics` | 37, 38 | Counters derived from traces |
-| `routing` | 23, 24 | Capability declaration, context-aware node selection |
+| `routing` | 23, 24 | Capability declaration, context-aware node selection; free seats rank candidates rather than rejecting them, so a fully saturated pool still yields a `saturated_fallback` selection, and the run-scoped `SeatLedger` spreads consecutive dispatches across the pool |
 | `memory` | 16, 17 | Memory tiers and the seven-check write gate |
 | `config` | 51 | The `agentic_rag:` block |
 | `coordinator` | 6, 32, 33, 40 | The agentic loop itself |
@@ -136,9 +136,35 @@ clock gets the structural budgets and no time limit at all. `rag_retrieval_loop`
 pins both halves — the limit firing when a clock is supplied, and not firing when
 one is not.
 
+### 3.6 A fully saturated pool still gets a worker (issue #3754)
+
+Treating `available_seats == 0` as a hard filter made the selector *partial*:
+a pool in which every node was busy returned `selected: None` and the dispatch
+stalled under exactly the load it was meant to absorb. Free seats are therefore
+a **ranking tier**, not a filter: candidates are still hard-filtered on
+reasoning class, coding, structured output and free context, but among the
+survivors the node with the most effective free seats (reported seats minus
+this run's in-flight dispatches, in signed arithmetic) wins, and only then do
+the section 24 packing rules — tightest context fit, speed, id — break ties.
+`RoutingDecision::saturated_fallback` tells the caller the chosen node had no
+free seat at decision time and should be queued behind it.
+
+De-concentration is the caller's business, and the caller-held `SeatLedger`
+keeps the module pure: each `SeatLedger::select` records the choice as an
+in-flight seat, so the next call in the run ranks that node lower and
+consecutive dispatches spread across the pool instead of converging on one
+worker — even when the pool reports zero free seats everywhere and only the
+ledger's own counts distinguish the workers. `SeatLedger::release` gives a seat
+back when a dispatch finishes.
+
+`rag_routing_config` pins all four halves: a saturated pool still returns a
+worker; free seats outrank a tighter fit; consecutive ledger dispatches on
+identical one-seat nodes — and on an all-zero pool — land on distinct workers;
+and a release makes the node rankable again.
+
 ## 4. Evidence that it works
 
-Ten integration suites, the CLI surface, and the module unit tests — 162 tests,
+Ten integration suites, the CLI surface, and the module unit tests — 167 tests,
 all deterministic and side-effect-free. They hold no files, no environment and no
 shared state, so they neither require nor benefit from serialized execution:
 
@@ -151,7 +177,7 @@ shared state, so they neither require nor benefit from serialized execution:
 | `rag_cache_worktree` | 25, 31, 46, 47, 55.5, 55.6 | 11 |
 | `rag_injection` | 29, 55.7 | 9 |
 | `rag_policy_context` | 7, 18, 19, 20, 22 | 16 |
-| `rag_routing_config` | 16, 17, 23, 24, 31, 51 | 23 |
+| `rag_routing_config` | 16, 17, 23, 24, 31, 51 | 28 |
 | `rag_trace_query` | 13, 35, 37, 41 | 14 |
 | `rag_benchmark` | 56, 57.15 | 6 |
 | `rag_commands` (CLI) | — | 16 |
@@ -210,5 +236,5 @@ Against section 57:
 | 11 | Revision-aware cache | Done — `RetrievalCache`, tested for invalidation |
 | 12 | Traces persisted | Partial — traces produced, no durable store |
 | 13 | Dashboard | Not started |
-| 14 | InferWeave routes RAG subtasks | Partial — `select_node` decides, no dispatch |
+| 14 | InferWeave routes RAG subtasks | Partial — `select_node` decides, no dispatch; the selector is total (a saturated pool still returns a worker, flagged `saturated_fallback`) and `SeatLedger` de-concentrates consecutive dispatches in one run |
 | 15 | Beats fixed top-K | Done — `rag_benchmark` |
