@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
+use crate::coordination::capabilities::{unmet_capabilities, CapabilityState};
 use crate::coordination::dispatch_eligibility::{is_dispatch_eligible, DispatchEligibilityPolicy};
+use crate::coordination::review_routing::{review_routing, ReviewRouting};
 use crate::state::json::{JsonParser, JsonValue};
 
 mod labels;
@@ -296,6 +298,12 @@ pub struct ReadyQueueInput {
     pub dependencies: BTreeMap<u64, RemoteIssue>,
     pub pull_requests: PullRequestEvidence,
     pub policy: QueuePolicy,
+    /// Observed capability states keyed by capability name. A capability
+    /// with no observation fails closed: the planner treats it as unmet.
+    pub capabilities: BTreeMap<String, CapabilityState>,
+    /// Consecutive zero-output run count per issue number. Issues at the
+    /// review-routing threshold are held for review instead of re-dispatch.
+    pub no_output_streaks: BTreeMap<u64, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +335,11 @@ pub struct QueueIssueView {
     pub paths: Vec<String>,
     pub serialization_reasons: Vec<String>,
     pub parallel_safe: Option<bool>,
+    /// Declared capabilities the issue lists that are not satisfied.
+    pub blocked_capabilities: Vec<String>,
+    /// Set when the view is held for review after consecutive zero-output
+    /// runs.
+    pub zero_output_streak: Option<usize>,
 }
 
 impl QueueIssueView {
@@ -346,6 +359,8 @@ impl QueueIssueView {
             paths: Vec::new(),
             serialization_reasons: Vec::new(),
             parallel_safe: None,
+            blocked_capabilities: Vec::new(),
+            zero_output_streak: None,
         }
     }
 }
@@ -371,6 +386,8 @@ pub struct QueueGateCounts {
     pub ready: usize,
     pub claimed: usize,
     pub selected: usize,
+    pub capability_blocked: usize,
+    pub zero_output_review: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,6 +526,17 @@ pub fn plan_ready_queue_with_trusted_actors(
             LinkedPr::None => {}
         }
 
+        // World-state gate before the issue-graph gate: a task whose
+        // declared capabilities are not satisfied cannot make progress no
+        // matter how its issue dependencies line up.
+        let blocked_capabilities = unmet_capabilities(&view.issue.body, &input.capabilities);
+        if !blocked_capabilities.is_empty() {
+            view.reason = Some("blocked_capabilities".to_string());
+            view.blocked_capabilities = blocked_capabilities;
+            blocked.push(view);
+            continue;
+        }
+
         let (unmet_dependencies, cycle_dependencies, non_blocking_refs) =
             evaluate_dependencies(&view.issue, &known, &input.policy);
         if !unmet_dependencies.is_empty() {
@@ -550,6 +578,18 @@ pub fn plan_ready_queue_with_trusted_actors(
             view.path = Some(path);
             conflicts.push(view);
             continue;
+        }
+        // A second consecutive zero-output run means re-dispatch is burning
+        // compute on an impossible run; hold the issue for review instead.
+        if let Some(zero_output_streak) = input.no_output_streaks.get(&view.issue.number) {
+            if let ReviewRouting::Review { zero_output_streak } =
+                review_routing(*zero_output_streak)
+            {
+                view.reason = Some("zero_output_review".to_string());
+                view.zero_output_streak = Some(zero_output_streak);
+                blocked.push(view);
+                continue;
+            }
         }
         view.serialization_reasons = serialization_reasons(&view.issue);
         view.parallel_safe = Some(view.serialization_reasons.is_empty());
@@ -633,6 +673,16 @@ fn queue_gate_counts(
         ready: plan.ready.len(),
         claimed: plan.claimed.len(),
         selected: plan.batch.len(),
+        capability_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| view.reason.as_deref() == Some("blocked_capabilities"))
+            .count(),
+        zero_output_review: plan
+            .blocked
+            .iter()
+            .filter(|view| view.reason.as_deref() == Some("zero_output_review"))
+            .count(),
     }
 }
 
@@ -1000,7 +1050,7 @@ fn markdown_section<'a>(body: &'a str, name: &str) -> &'a str {
     markdown_sections(body, &[name])
 }
 
-fn markdown_sections<'a>(body: &'a str, names: &[&str]) -> &'a str {
+pub(crate) fn markdown_sections<'a>(body: &'a str, names: &[&str]) -> &'a str {
     let mut start = None;
     let mut offset = 0;
     for line in body.split_inclusive('\n') {

@@ -510,6 +510,35 @@ already-registered `tests/unit/test_lint_implementation.bats` (catalog owner
   + linearity) blocking instead of advisory.
 - `AUTOSPEC_STACK_DEFAULT_BRANCH` — default-branch name for `stack-guard.sh`
   (else `gh repo view`).
+- `AUTOSPEC_CAPABILITIES_FILE` — path to the capability probe config for the
+  `queue ready` frontier (default `.autospec/capabilities.json` in the current
+  directory). See ## Capability prerequisites and zero-output review routing
+  below.
+- `AUTOSPEC_ZERO_OUTPUT_STATE_FILE` — path to the per-issue zero-output streak
+  state for review routing (default `~/.autospec/state/zero-output-streaks.json`).
+
+## Capability prerequisites and zero-output review routing
+
+The ready-queue frontier models world-state prerequisites, not just
+issue→issue dependencies (issue #3908):
+
+- An issue body may declare capability prerequisites in a `## Requires`
+  section — one capability name per `- ` item (charset `[A-Za-z0-9._:/-]+`,
+  e.g. `- gateway:running`). A task with any unmet prerequisite is blocked in
+  the queue with a hold message naming every missing capability (the
+  `capability_blocked` gate count); it is never dispatched.
+- Capability state is probed by the CLI, not the core. Probe commands live in
+  `.autospec/capabilities.json` (override with `$AUTOSPEC_CAPABILITIES_FILE`);
+  exit 0 = satisfied. Undeclared, unprobed, or failing capabilities are
+  fail-closed (unmet), so a task is re-admitted automatically the moment its
+  probes start passing — no re-labeling.
+- Zero-output runs are tracked per issue in local state (override the file
+  with `$AUTOSPEC_ZERO_OUTPUT_STATE_FILE`). After two consecutive zero-output
+  completions the next offer routes the task to review instead of re-dispatch:
+  the issue is blocked with reason `zero_output_review` (the
+  `zero_output_review` gate count) and `queue ready` applies the
+  `autospec:needs-human` label to it. Any successful completion clears the
+  streak.
 
 ## Restore-visibility contract
 

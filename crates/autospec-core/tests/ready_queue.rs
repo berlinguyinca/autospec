@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use autospec_core::coordination::{
-    parse_remote_pull_request_page_json, plan_ready_queue, PullRequestEvidence, QueuePolicy,
-    ReadyQueueInput, RemoteIssue, RemotePullRequest, RemotePullRequestCheck,
+    parse_remote_pull_request_page_json, plan_ready_queue, CapabilityState, PullRequestEvidence,
+    QueuePolicy, ReadyQueueInput, RemoteIssue, RemotePullRequest, RemotePullRequestCheck,
 };
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
@@ -19,12 +19,22 @@ fn issue(number: u64, body: impl Into<String>, labels: &[&str]) -> RemoteIssue {
 }
 
 fn ready_input(candidates: Vec<RemoteIssue>) -> ReadyQueueInput {
+    ready_input_with(candidates, BTreeMap::new(), BTreeMap::new())
+}
+
+fn ready_input_with(
+    candidates: Vec<RemoteIssue>,
+    capabilities: BTreeMap<String, CapabilityState>,
+    no_output_streaks: BTreeMap<u64, usize>,
+) -> ReadyQueueInput {
     ReadyQueueInput {
         candidates,
         active: Vec::new(),
         dependencies: BTreeMap::new(),
         pull_requests: PullRequestEvidence::Available(Vec::new()),
         policy: QueuePolicy::new(3, 0),
+        capabilities,
+        no_output_streaks,
     }
 }
 
@@ -895,4 +905,238 @@ fn a_closed_owner_does_not_block_its_open_duplicate() {
     assert_eq!(plan.batch_numbers(), vec![3404]);
     assert!(plan.blocked.is_empty());
     assert_eq!(plan.gate_counts.duplicates, 0);
+}
+
+const CAPABILITY_LABELS: &[&str] = &["auto-implement", "safety:reviewed"];
+
+fn requires_body(capabilities: &[&str]) -> String {
+    let list = capabilities
+        .iter()
+        .map(|capability| format!("- {capability}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("## Goal\nDo the thing.\n\n## Requires\n{list}\n")
+}
+
+#[test]
+fn unmet_capability_blocks_the_issue_and_names_it() {
+    let input = ready_input_with(
+        vec![issue(
+            1000,
+            requires_body(&["gateway:up"]),
+            CAPABILITY_LABELS,
+        )],
+        BTreeMap::from([("gateway:up".to_string(), CapabilityState::Unmet)]),
+        BTreeMap::new(),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert_eq!(plan.blocked.len(), 1);
+    let blocked = &plan.blocked[0];
+    assert_eq!(blocked.issue.number, 1000);
+    assert_eq!(blocked.reason.as_deref(), Some("blocked_capabilities"));
+    assert_eq!(blocked.blocked_capabilities, vec!["gateway:up".to_string()]);
+    assert_eq!(plan.gate_counts.capability_blocked, 1);
+}
+
+#[test]
+fn satisfied_capability_re_admits_the_same_issue() {
+    let issue = issue(1000, requires_body(&["gateway:up"]), CAPABILITY_LABELS);
+    let blocked_input = ready_input_with(
+        vec![issue.clone()],
+        BTreeMap::from([("gateway:up".to_string(), CapabilityState::Unmet)]),
+        BTreeMap::new(),
+    );
+    let admitted_input = ready_input_with(
+        vec![issue],
+        BTreeMap::from([("gateway:up".to_string(), CapabilityState::Satisfied)]),
+        BTreeMap::new(),
+    );
+
+    assert!(plan_ready_queue(&blocked_input).ready.is_empty());
+    assert_eq!(
+        plan_ready_queue(&admitted_input).ready_numbers(),
+        vec![1000]
+    );
+}
+
+#[test]
+fn capability_with_no_observation_fails_closed() {
+    let input = ready_input_with(
+        vec![issue(
+            1000,
+            requires_body(&["db:populated"]),
+            CAPABILITY_LABELS,
+        )],
+        BTreeMap::new(),
+        BTreeMap::new(),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("blocked_capabilities")
+    );
+    assert_eq!(
+        plan.blocked[0].blocked_capabilities,
+        vec!["db:populated".to_string()]
+    );
+}
+
+#[test]
+fn unmet_capabilities_are_sorted_for_deterministic_holds() {
+    let input = ready_input_with(
+        vec![issue(
+            1000,
+            requires_body(&["zeta:up", "alpha:up"]),
+            CAPABILITY_LABELS,
+        )],
+        BTreeMap::new(),
+        BTreeMap::new(),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(
+        plan.blocked[0].blocked_capabilities,
+        vec!["alpha:up".to_string(), "zeta:up".to_string()]
+    );
+}
+
+#[test]
+fn single_zero_output_run_still_redispatches() {
+    let input = ready_input_with(
+        vec![issue(2000, "## Goal\nDo the thing.\n", CAPABILITY_LABELS)],
+        BTreeMap::new(),
+        BTreeMap::from([(2000, 1)]),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![2000]);
+    assert!(plan.blocked.is_empty());
+    assert!(plan.ready[0].zero_output_streak.is_none());
+    assert_eq!(plan.gate_counts.zero_output_review, 0);
+}
+
+#[test]
+fn two_consecutive_zero_output_runs_route_the_issue_to_review() {
+    let input = ready_input_with(
+        vec![issue(2000, "## Goal\nDo the thing.\n", CAPABILITY_LABELS)],
+        BTreeMap::new(),
+        BTreeMap::from([(2000, 2)]),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert!(plan.ready.is_empty());
+    assert_eq!(plan.blocked.len(), 1);
+    let blocked = &plan.blocked[0];
+    assert_eq!(blocked.issue.number, 2000);
+    assert_eq!(blocked.reason.as_deref(), Some("zero_output_review"));
+    assert_eq!(blocked.zero_output_streak, Some(2));
+    assert_eq!(plan.gate_counts.zero_output_review, 1);
+}
+
+#[test]
+fn longer_zero_output_streaks_stay_routed_to_review() {
+    let input = ready_input_with(
+        vec![issue(2000, "## Goal\nDo the thing.\n", CAPABILITY_LABELS)],
+        BTreeMap::new(),
+        BTreeMap::from([(2000, 5)]),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("zero_output_review")
+    );
+    assert_eq!(plan.blocked[0].zero_output_streak, Some(5));
+}
+
+#[test]
+fn populated_frontier_offers_only_work_whose_prerequisites_hold() {
+    // #3793-shaped frontier: several open auto-implement issues whose issue
+    // dependencies are all closed, but which declare world-state
+    // prerequisites. Only the task whose capability is actually satisfied
+    // may be offered.
+    let gateway_issue = issue(
+        3793,
+        "## Goal\nDo the thing.\n\n## Dependencies\n\nDepends on #3790\n\n## Requires\n\n- gateway:up\n",
+        CAPABILITY_LABELS,
+    );
+    let database_issue = issue(3794, requires_body(&["db:populated"]), CAPABILITY_LABELS);
+    let plain_issue = issue(3795, "## Goal\nDo the thing.\n", CAPABILITY_LABELS);
+    let zeroed_issue = issue(3796, "## Goal\nDo the thing.\n", CAPABILITY_LABELS);
+
+    let mut input = ready_input_with(
+        vec![gateway_issue, database_issue, plain_issue, zeroed_issue],
+        BTreeMap::from([
+            ("gateway:up".to_string(), CapabilityState::Satisfied),
+            ("db:populated".to_string(), CapabilityState::Unmet),
+        ]),
+        BTreeMap::from([(3796, 2)]),
+    );
+    let mut closed_dependency = RemoteIssue::open(3790, "upstream", "", Vec::new(), "agent");
+    closed_dependency.closed = true;
+    input.dependencies.insert(3790, closed_dependency);
+
+    let plan = plan_ready_queue(&input);
+
+    // The satisfied-capability issue (with a closed dep) and the plain
+    // issue are the only offers.
+    assert_eq!(plan.ready_numbers(), vec![3793, 3795]);
+    // The unmet-capability issue and the twice-zero-output issue are held.
+    let blocked_by_reason: BTreeMap<u64, String> = plan
+        .blocked
+        .iter()
+        .map(|view| {
+            (
+                view.issue.number,
+                view.reason.clone().unwrap_or_else(|| "<none>".to_string()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        blocked_by_reason.get(&3794).map(String::as_str),
+        Some("blocked_capabilities")
+    );
+    assert_eq!(
+        blocked_by_reason.get(&3796).map(String::as_str),
+        Some("zero_output_review")
+    );
+    assert_eq!(plan.gate_counts.capability_blocked, 1);
+    assert_eq!(plan.gate_counts.zero_output_review, 1);
+    assert_eq!(plan.gate_counts.ready, 2);
+}
+
+#[test]
+fn hold_view_names_the_missing_capability_for_the_hold_message() {
+    let input = ready_input_with(
+        vec![issue(
+            4000,
+            requires_body(&["gateway:up", "db:populated"]),
+            CAPABILITY_LABELS,
+        )],
+        BTreeMap::from([("gateway:up".to_string(), CapabilityState::Satisfied)]),
+        BTreeMap::new(),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    // gateway:up is satisfied; only db:populated remains, and it is the
+    // name a hold message must surface.
+    assert_eq!(
+        plan.blocked[0].blocked_capabilities,
+        vec!["db:populated".to_string()]
+    );
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("blocked_capabilities")
+    );
 }

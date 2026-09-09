@@ -85,6 +85,8 @@ fn tier1_queue_admission_accepts_literal_autospec_run_token_in_issue_body() {
         dependencies: BTreeMap::new(),
         pull_requests: PullRequestEvidence::Available(Vec::new()),
         policy: QueuePolicy::new(1, 0),
+        capabilities: BTreeMap::new(),
+        no_output_streaks: BTreeMap::new(),
     };
 
     let plan = plan_ready_queue(&input);
