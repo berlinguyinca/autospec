@@ -20,6 +20,7 @@ pub mod queue;
 pub mod rag;
 pub mod repair_loop;
 pub mod report;
+pub mod resources;
 pub mod resume;
 pub mod run;
 pub mod runtime;
@@ -102,6 +103,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "Gate dispatch on queue freshness and per-hop liveness",
     ),
     (
+        "resources",
+        "List and show resource ledger rows (read-only)",
+    ),
+    (
         "doctor",
         "Check the Rust core workspace (`doctor code-intel` for LSP health)",
     ),
@@ -152,6 +157,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
             "dispatch" => dispatch::run(rest),
+            "resources" => resources::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "explore" => explore::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),

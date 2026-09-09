@@ -15,9 +15,11 @@
 
 pub mod db;
 pub mod docker;
+pub mod ledger;
 pub mod model;
 pub mod process;
 
 pub use docker::observe_docker;
+pub use ledger::ResourceLedger;
 pub use model::{ManagedResource, ObservedResource, OwnershipClass, ResourceState, ResourceType};
 pub use process::observe_processes;
