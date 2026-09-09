@@ -355,7 +355,10 @@ empty mapping, so a typo cannot masquerade as "nothing found".
 
 The emitted fragment carries no prices, and `routing-cost.sh` refuses a profile
 with no cost keys. Add `cost_minute:` (USD-equivalent per GPU-minute) — and
-optionally `max_wall_clock_ms:` — before a local profile can be routed to.
+optionally `max_wall_clock_ms:` — before a local profile can be routed to. On the
+trivial `ctx:32k` + `reasoning:shallow` cell a local profile additionally needs a
+measured latency win over the baseline to clear the triviality floor (see
+[Evidence-based model routing](#evidence-based-model-routing)).
 
 ## Evidence-based model routing
 `scripts/routing-ledger.sh` records what each dispatch cost and how it turned out;
@@ -482,8 +485,23 @@ Two properties are deliberate and worth relying on:
 - **Cheap per token is not cheap per merged PR.** A local model that fails often and
   escalates costs *more* than one dispatch of a reliable cheaper-tier cloud model. Cost
   is scored as
-  `unit × (1 + E[retries]) × cache_penalty + P(escalate)×advisor + P(fail)×fallback`,
-  and unproven profiles shrink toward **pessimistic** priors so no-data never looks cheap.
+  `unit × (1 + E[retries]) × cache_penalty + P(escalate)×advisor + P(fail)×fallback
+  + cost_minute × (mean_wall_clock_ms / 60000)` — the last term prices a local
+  profile's **measured** wall clock at its per-GPU-minute rate, so a slow local model
+  cannot appear cheap on tokens alone. Cloud profiles have no `cost_minute`, so the
+  term is zero for them, and with no ledger rows the term is zero for everyone: the
+  "no data means no change" invariant holds byte-for-byte.
+
+**Triviality floor.** Below a triviality floor a local dispatch is not worth the
+ceiling: on the `ctx:32k` + `reasoning:shallow` cell, a local profile is ineligible
+unless the ledger shows a **measured** latency win over the baseline profile in that
+cell (both sides measured, local strictly faster). With no data the floor holds and
+the cell stays on the baseline tier; exploration (`AUTOSPEC_ROUTING_EXPLORE_PCT`)
+still probes the cell, because exploration is how the win gets measured. The floor is
+checked in `routing-cost.sh`, which therefore takes the baseline profile via
+`--baseline <profile>` (passed by `route-decide.sh`; absent or unmeasured baseline
+means no provable win, so the floor holds). Every candidate carries `is_local`,
+`latency_win`, and `trivial_floor` fields in the JSON output for inspection.
 
 Profiles carry their own prices in `model-profiles.yml`: `cost_in`/`cost_out` (USD per
 Mtok) for cloud, `cost_minute` for local. A profile with no cost keys is never chosen
