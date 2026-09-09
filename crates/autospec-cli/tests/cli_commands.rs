@@ -91,6 +91,7 @@ fn cli_commands_help_lists_required_commands() {
             "queue",
             "repair-loop",
             "dispatch",
+            "resources",
             "doctor",
             "status",
             "autonomous",
