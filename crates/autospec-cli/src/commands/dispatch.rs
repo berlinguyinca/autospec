@@ -10,6 +10,10 @@
 //! - `beat` — record liveness for any other hop (file, top-up, dispatch).
 //! - `status` — topology, credential-hosted steps, per-hop liveness, verdict.
 //!   Exit 0 healthy, 1 any hop failed.
+//! - `authority` — the pre-dispatch gate on the spec set (#3947): reads the spec
+//!   documents a run would implement against and refuses (exit 1) a superseded
+//!   set, a set with no currency marker, and a component two sets both claim.
+//!   `--tasks` reports merge volume per authority rather than as one number.
 //! - `guard` — the pre-dispatch gate against unconverted output (#3764):
 //!   the dispatch path destroys the issue's output directory, so before it
 //!   does, the guard verifies the directory holds no unconverted patch. A
@@ -64,6 +68,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "freshness",
         "Gate on the staged spec matching the live issue revision (#3864)",
     ),
+    (
+        "authority",
+        "Gate on the spec set in force before dispatching against it (#3947)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -79,6 +87,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "guard" => guard(rest),
         "stage" => super::dispatch_spec::stage(rest),
         "freshness" => super::dispatch_spec::freshness(rest),
+        "authority" => super::dispatch_authority::run(rest),
         "stamp" => stamp(rest),
         "beat" => beat(rest),
         "status" => status(rest),

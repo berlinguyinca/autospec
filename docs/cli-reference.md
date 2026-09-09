@@ -84,6 +84,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec dispatch guard --issue <N> [--out-dir <path>] [--patch-name <name>] [--dry-run] [--json]` | yes | pre-dispatch gate on the issue's output directory (#3764): exit 0 no unconverted patch (stale output removed) / 1 hold (patch present, or a check that cannot answer); `--dry-run` reports without touching the directory |
 | `autospec dispatch stage --issue <N> [--repo OWNER/REPO] [--issue-json <path>] [--comments-json <path>] [--body-file <path>] [--title <t>] [--source-updated-at <ts>] [--body-updated-at <ts>] [--out <path>] [--staged-at <epoch>] [--container-runtime <path>] [--database <value>] [--registry <value>] [--no-probe] [--json]` | no | write the spec a worker reads: issue body, the discussion filed since the last body edit, and a generated execution-environment block, headed by the source `updatedAt` it was staged from (#3864); defaults to `~/.autospec/dispatch/specs/<N>.md`, exit 2 on unusable input |
 | `autospec dispatch freshness --issue <N> [--staged <path>] [--live-updated-at <ts> \| --live-json <path> \| --repo OWNER/REPO] [--json]` | yes | gate a dispatch on the staged spec's revision (#3864): exit 0 current / 1 held — `STALE` (re-stage, the message names the command) or `REFUSED` (no staged spec, no recorded revision, or the live issue cannot be read: freshness that cannot be verified is never verified) |
+| `autospec dispatch authority [--spec-dir <dir> \| --spec-file <path>] [--component <name>] [--tasks <path>] [--json]` | yes | gate on the spec set in force (#3947): exit 0 current authority / 1 refused — `CURRENCY_MISSING` (a document declares no `Spec-Set`/`Spec-Version`), `VERSION_MISSING`, `SPEC_SUPERSEDED` (a `Superseded-By:` pointer is present), `AUTHORITY_CONFLICT` (two sets in force claim one component), `AUTHORITY_AMBIGUOUS` (no unique current authority for `--component`) / 2 unusable input. `--spec-dir` and `--component` are repeatable; with no source given, `docs/specs` is read. `--tasks` reads `task<TAB>authority<TAB>outcome` records and prints throughput per authority, warning on merges that derive from no determined authority |
 | `autospec dispatch stamp [--by <name>] [--queue <path>] [--state-file <path>] [--at <epoch>]` | no | the producer's call: writes `# refreshed-at:` / `# refreshed-by:` atomically and beats for its own hop |
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
@@ -154,6 +155,27 @@ staged spec, a spec staged before revision headers existed, or a live issue the 
 cannot read. Freshness that cannot be verified is never verified, so a `gh` that returns
 "not authenticated" on an unauthenticated cluster holds the dispatch instead of dispatching
 yesterday's read.
+
+`autospec dispatch authority` is the gate on the spec set itself (#3947). `stage` and
+`freshness` verify that a spec matches the issue it was staged from; neither can answer
+which *program* is current. A fleet that implemented a v2 architecture while the clean-slate
+charter for the same components sat unread in the tree merged forty times without noticing,
+because "which spec governs this component" was never a question any pipeline asked. The
+gate reads the spec documents (`--spec-dir` / `--spec-file`, defaulting to `docs/specs`) and
+requires a currency marker per `Spec-Set:` group: `Spec-Version:`/`Supersedes:` for a
+current set, `Superseded-By:` for a superseded one. A document declaring neither is
+`CURRENCY_MISSING` and refuses the dispatch — absence is reported, never defaulted to
+current — and so is a superseded set (`SPEC_SUPERSEDED`, naming its successor) or a
+component two sets in force both claim (`AUTHORITY_CONFLICT`, naming both authorities and
+the documents). A conflict is a hard error for a human: the command reports it and stops,
+and does not choose which program wins. `--component <name>` narrows the gate to the
+components a run actually intends to touch, so a disputed area of the problem space does
+not hold unrelated work. `--tasks <path>` reads `task<TAB>authority<TAB>outcome` records —
+the authority a task was planned against, not merely the branch it merged into — and prints
+merges, opens, failures and totals **per authority**, never one aggregate number: forty
+merges aimed at a superseded architecture are the most expensive kind of success. A task
+that names no authority is counted under `undetermined` and warned about rather than
+dropped, because a dropped row is a silently wrong merge count.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a

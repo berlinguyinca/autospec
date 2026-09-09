@@ -3,6 +3,7 @@ pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
 pub mod dispatch;
+pub mod dispatch_authority;
 pub mod dispatch_spec;
 pub mod doctor;
 pub mod explore;
