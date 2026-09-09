@@ -1072,6 +1072,231 @@ fn format_age(seconds: u64) -> String {
     parts.join(" ")
 }
 
+// ============================================================================
+// Branch hermeticity (#3915)
+// ============================================================================
+
+/// A hermetic build of one conversion branch (#3915).
+///
+/// Two independent silent git defects made one helper land two patches in
+/// one loop: `git checkout <branch>` carries staged changes across the
+/// switch (when the staged paths do not conflict with the target, git moves
+/// cleanly with exit 0 and the staged patch just comes along and ends up
+/// committed onto the wrong branch), and a hard reset to `origin/main`
+/// rewinds the branch you are *standing on*, not the branch you are about
+/// to build. The plan encodes the fix: build every branch hermetically from
+/// the base — `git checkout -B <branch> <base>` first, then clean, then
+/// apply — never resetting while standing on the previous branch, and never
+/// switching branches with a staged or dirty index. A build step that
+/// inherits state from the previous iteration is not reproducible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchBuild {
+    branch: String,
+    base: String,
+}
+
+impl BranchBuild {
+    /// Plans the hermetic build of `branch` from `base`. Both must be
+    /// named: a build that cannot state what it is building and where from
+    /// does not perform the hermeticity promise.
+    pub fn new(branch: &str, base: &str) -> Result<Self, String> {
+        if branch.trim().is_empty() || base.trim().is_empty() {
+            return Err(
+                "a branch build must name the branch and the base sha it is built from".to_string(),
+            );
+        }
+        Ok(Self {
+            branch: branch.to_string(),
+            base: base.to_string(),
+        })
+    }
+
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The setup steps, in the order the caller must execute them, before
+    /// applying the patch. The order is the contract: `checkout -B` onto
+    /// the base comes first, so the reset and clean run while standing on
+    /// the *new* branch — a hard reset rewinds the branch you are standing
+    /// on, and resetting before the checkout would rewind the
+    /// branch the previous iteration just committed (#3915). The base is a
+    /// sha, not a moving ref: `origin/main` can move between the fetch and
+    /// the checkout, a sha cannot.
+    ///
+    /// The caller must run [`assert_clean_checkout`] before executing any
+    /// of these steps: a switch with a staged or dirty index would carry
+    /// the previous iteration's state onto this branch with exit 0.
+    pub fn setup_steps(&self) -> Vec<String> {
+        vec![
+            format!("git checkout -B {} {}", self.branch, self.base),
+            format!("git reset --hard {}", self.base), // linter:allow-SECURITY the plan's own step string: a hermetic build must hard-reset onto the base sha, not a moving ref
+            "git clean -fdx".to_string(),
+        ]
+    }
+
+    /// The gate that must pass before this branch is pushed: the branch's
+    /// contents asserted against the source patch's file list (see
+    /// [`assert_branch_matches_patch`]). `actual` is the file list the diff
+    /// between the base and the branch reports (one path per line).
+    pub fn pre_push_assert(
+        &self,
+        patch_identity: &str,
+        declared: &[String],
+        actual: &[String],
+    ) -> Result<(), String> {
+        assert_branch_matches_patch(patch_identity, self.base(), self.branch(), declared, actual)
+    }
+}
+
+/// Refuses to build a branch while the checkout has staged, dirty, or
+/// untracked state (#3915).
+///
+/// `git checkout <branch>` moves cleanly when the staged paths do not
+/// conflict with the target — exit 0 — and the staged patch just comes
+/// along and ends up committed onto the wrong branch. The caller observes
+/// the checkout with `git status --porcelain` and passes every entry; any
+/// entry blocks the switch. An untracked file is carried across the switch
+/// the way a staged path is, so "clean" means empty, not "nothing staged".
+/// A build step that inherits state from the previous iteration is not
+/// reproducible.
+pub fn assert_clean_checkout(worktree: &str, status: &[String]) -> Result<(), String> {
+    let dirty: Vec<&String> = status
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to switch branches in {worktree}: {} staged/dirty/untracked entr{} before the build (first: `{}`); `git checkout` would carry them onto the target branch with exit 0 — clean the checkout first",
+        dirty.len(),
+        if dirty.len() == 1 { "y" } else { "ies" },
+        dirty[0].as_str()
+    ))
+}
+
+/// Asserts the branch's contents against the source patch's file list,
+/// before anything is pushed (#3915).
+///
+/// `declared` is the file list the patch declares, `actual` is the list of
+/// paths the diff between the base and the branch reports — what the branch
+/// actually changed. A mismatch is a hard error, never a warning: the title, body,
+/// gate table, and issue reference are all assembled from the loop
+/// variable, and when the contents do not match they describe a different
+/// tree than the one under review — a coherent, internally consistent,
+/// entirely wrong document (#3915). Comparison is order-independent (a
+/// patch's file list is not a diff's ordering), but the sets must match
+/// exactly: a superset is as wrong as a subset.
+pub fn assert_branch_matches_patch(
+    patch_identity: &str,
+    base: &str,
+    branch: &str,
+    declared: &[String],
+    actual: &[String],
+) -> Result<(), String> {
+    let declared: std::collections::BTreeSet<&str> = declared.iter().map(String::as_str).collect();
+    let actual: std::collections::BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    if declared == actual {
+        return Ok(());
+    }
+    let missing: Vec<&str> = declared.difference(&actual).copied().collect();
+    let extra: Vec<&str> = actual.difference(&declared).copied().collect();
+    Err(format!(
+        "branch contents mismatch: {patch_identity} declares {} file(s) but the diff between {base} and {branch} shows {} — the branch does not contain this patch; refusing to push (missing from branch: [{}]; in branch but not declared: [{}])",
+        declared.len(),
+        actual.len(),
+        missing.join(", "),
+        extra.join(", ")
+    ))
+}
+
+/// A build that produced no commits failed, and the failure is reported by
+/// the *builder*, not later by the PR API as an opaque "No commits between
+/// main and <branch>" (#3915).
+///
+/// `ahead` is the commit count the build measured with `git rev-list
+/// --count <base>..<branch>` after the commit step. Zero means the commit
+/// never happened — typically because the branch was silently rewound —
+/// and the error names the patch: a failure that does not name its input
+/// reports a consequence, not a cause, and the operator cannot tell which
+/// of the N patches in the queue produced it.
+pub fn require_commit(
+    patch_identity: &str,
+    base: &str,
+    branch: &str,
+    ahead: u64,
+) -> Result<(), String> {
+    if ahead == 0 {
+        return Err(format!(
+            "build failed for {patch_identity}: branch {branch} is ahead of {base} by 0 commits — the patch produced no commit, and no PR is opened for an empty diff"
+        ));
+    }
+    Ok(())
+}
+
+/// Gate evidence bound to the tree it actually ran against (#3915).
+///
+/// The gate's numbers were real and the evidence was true — what was
+/// missing was the binding between the evidence and the artifact:
+/// "2090 passed" is not evidence unless it states *what* was tested. The
+/// caller records the commit sha the gate ran against, and
+/// [`GateEvidence::publish`] refuses to bind evidence to a different tree
+/// than the one being proposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateEvidence {
+    /// The commit sha the gate actually ran against (observed, not
+    /// assumed).
+    pub ran_against: String,
+    /// The gate's verdict.
+    pub verdict: GateVerdict,
+    /// The gate's own summary line, e.g. "2090 passed".
+    pub summary: String,
+}
+
+impl GateEvidence {
+    /// Records evidence. The sha must be named: a result that does not name
+    /// the tree it tested cannot be published.
+    pub fn record(
+        ran_against: &str,
+        verdict: GateVerdict,
+        summary: impl Into<String>,
+    ) -> Result<Self, String> {
+        if ran_against.trim().is_empty() {
+            return Err(
+                "gate evidence must name the commit sha it ran against: a result that does not name its tree is not evidence".to_string(),
+            );
+        }
+        Ok(Self {
+            ran_against: ran_against.to_string(),
+            verdict,
+            summary: summary.into(),
+        })
+    }
+
+    /// Binds the evidence to the branch being proposed. Refuses on sha
+    /// mismatch — the gate ran against a different tree than the one under
+    /// review, and publishing it would render a coherent, internally
+    /// consistent, entirely wrong document (#3915). On success, returns
+    /// the evidence line the PR body should carry.
+    pub fn publish(self, branch: &str, branch_tip: &str) -> Result<String, String> {
+        if self.ran_against != branch_tip {
+            return Err(format!(
+                "refusing to publish gate evidence for {branch}: the gate ran against {} but the branch tip is {} — the evidence describes a different tree than the one under review",
+                self.ran_against, branch_tip
+            ));
+        }
+        Ok(format!(
+            "{} (gate ran against {} on {})",
+            self.summary, self.ran_against, branch
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2091,5 +2316,239 @@ mod tests {
         assert_eq!(format_age(90), "1m 30s");
         assert_eq!(format_age(9_900), "2h 45m 0s");
         assert_eq!(format_age(93_784), "1d 2h 3m 4s");
+    }
+
+    #[test]
+    fn branch_build_checks_out_onto_the_base_before_it_resets() {
+        // A hard reset rewinds the branch you are standing on: the checkout
+        // must come first, so the reset runs while standing on the new
+        // branch, never the previous one (#3915).
+        let build = BranchBuild::new("conv/issue-3888", "785447cf").unwrap();
+        let steps = build.setup_steps();
+        assert_eq!(
+            steps,
+            vec![
+                "git checkout -B conv/issue-3888 785447cf".to_string(),
+                "git reset --hard 785447cf".to_string(), // linter:allow-SECURITY test fixture: the plan's expected step string, not an executed command
+                "git clean -fdx".to_string(),
+            ]
+        );
+        let reset_prefix = "git reset --hard"; // linter:allow-SECURITY test fixture: the plan's expected step prefix, not an executed command
+        assert!(steps[0].starts_with("git checkout -B"));
+        assert!(steps[1].starts_with(reset_prefix));
+        // The base is a sha, not a moving ref: origin/main can move
+        // between the fetch and the checkout, a sha cannot.
+        assert!(!steps.iter().any(|s| s.contains("origin/")));
+
+        // Both operands must be named.
+        assert!(BranchBuild::new("", "sha").is_err());
+        assert!(BranchBuild::new("branch", "  ").is_err());
+    }
+
+    #[test]
+    fn assert_clean_checkout_blocks_staged_dirty_and_untracked() {
+        // Empty: hermetic, the switch is allowed.
+        assert!(assert_clean_checkout("/scratch/convert/worker-0", &[]).is_ok());
+        assert!(assert_clean_checkout("/scratch/convert/worker-0", &["   ".to_string()]).is_ok());
+
+        // Staged (the observed defect): the previous iteration's patch is
+        // in the index; the switch would carry it onto the target branch
+        // with exit 0.
+        let err = assert_clean_checkout(
+            "/scratch/convert/worker-0",
+            &["M  crates/autospec-core/src/lint.rs".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.contains("/scratch/convert/worker-0"), "{err}");
+        assert!(err.contains("staged"), "{err}");
+        assert!(err.contains("crates/autospec-core/src/lint.rs"), "{err}");
+
+        // Dirty and untracked block just the same: an untracked file rides
+        // the switch the way a staged path does.
+        assert!(assert_clean_checkout("/w", &[" M file.rs".to_string()]).is_err());
+        assert!(assert_clean_checkout("/w", &["?? untracked.txt".to_string()]).is_err());
+    }
+
+    #[test]
+    fn assert_branch_matches_patch_passes_on_identical_file_sets() {
+        // Order-independent: a patch's file list is not a diff's ordering.
+        let declared = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let actual = vec!["b.rs".to_string(), "a.rs".to_string()];
+        assert!(assert_branch_matches_patch(
+            "#3870",
+            "785447cf",
+            "conv/issue-3870",
+            &declared,
+            &actual
+        )
+        .is_ok());
+        // Both empty: no net change, which is a classification
+        // (NoNetChange), not a contents mismatch.
+        assert!(
+            assert_branch_matches_patch("#3870", "785447cf", "conv/issue-3870", &[], &[]).is_ok()
+        );
+    }
+
+    #[test]
+    fn assert_branch_matches_patch_hard_fails_on_any_mismatch_and_names_the_operands() {
+        let declared = vec!["a.rs".to_string(), "b.rs".to_string()];
+
+        // A superset: the branch carries files the patch never declared.
+        let extra = vec![
+            "a.rs".to_string(),
+            "b.rs".to_string(),
+            "images/env-block.sh".to_string(),
+        ];
+        let err =
+            assert_branch_matches_patch("#3888", "785447cf", "conv/issue-3888", &declared, &extra)
+                .unwrap_err();
+        assert!(err.contains("#3888"), "{err}");
+        assert!(err.contains("785447cf"), "{err}");
+        assert!(err.contains("conv/issue-3888"), "{err}");
+        assert!(err.contains("images/env-block.sh"), "{err}");
+        assert!(err.contains("refusing to push"), "{err}");
+
+        // A subset: the branch is missing files the patch declared.
+        let missing = vec!["a.rs".to_string()];
+        let err = assert_branch_matches_patch(
+            "#3888",
+            "785447cf",
+            "conv/issue-3888",
+            &declared,
+            &missing,
+        )
+        .unwrap_err();
+        assert!(err.contains("b.rs"), "{err}");
+
+        // A disjoint set: the branch is a different patch entirely.
+        let other = vec!["x.rs".to_string(), "y.rs".to_string()];
+        assert!(assert_branch_matches_patch(
+            "#3888",
+            "785447cf",
+            "conv/issue-3888",
+            &declared,
+            &other
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn require_commit_fails_ahead_zero_and_names_the_patch() {
+        // A build that produced a commit is fine.
+        assert!(require_commit("#3870", "785447cf", "conv/issue-3870", 1).is_ok());
+        // ahead=0 fails at the builder, with the patch named — the
+        // failure cannot surface later as an opaque "No commits between
+        // main and <branch>" from the PR API.
+        let err = require_commit("#3870", "785447cf", "conv/issue-3870", 0).unwrap_err();
+        assert!(err.contains("#3870"), "{err}");
+        assert!(err.contains("0 commits"), "{err}");
+        assert!(err.contains("build failed"), "{err}");
+    }
+
+    #[test]
+    fn gate_evidence_is_bound_to_the_tree_it_ran_against() {
+        // Recording: an unnamed tree is not evidence.
+        assert!(GateEvidence::record("", GateVerdict::Green, "2090 passed").is_err());
+
+        let evidence = GateEvidence::record("263368c7", GateVerdict::Green, "2090 passed").unwrap();
+        // The evidence line the PR body carries names the tree.
+        let line = evidence
+            .clone()
+            .publish("conv/issue-3870", "263368c7")
+            .unwrap();
+        assert!(line.contains("2090 passed"), "{line}");
+        assert!(line.contains("263368c7"), "{line}");
+        assert!(line.contains("conv/issue-3870"), "{line}");
+
+        // Refuse on mismatch: the gate ran against one tree, the branch
+        // under review is a different one (#3915).
+        let err = evidence.publish("conv/issue-3870", "785447cf").unwrap_err();
+        assert!(err.contains("263368c7"), "{err}");
+        assert!(err.contains("785447cf"), "{err}");
+        assert!(err.contains("conv/issue-3870"), "{err}");
+    }
+
+    #[test]
+    fn a_two_patch_run_with_the_second_patch_pre_staged_fails_rather_than_mislabels() {
+        // Acceptance (#3793, exercised against the populated case): two
+        // verified patches land in one helper loop, and the second patch
+        // is staged before the first is committed. The run must fail —
+        // and must not open a PR whose title, body, and gate table
+        // describe one patch while its contents are the other (#3915).
+        let base = "785447cf";
+        let files_3870: Vec<String> = (1..=13).map(|i| format!("lint-3870-{i:02}.rs")).collect();
+        let files_3888: Vec<String> = vec![
+            "images/env-block-a.sh".to_string(),
+            "images/env-block-b.sh".to_string(),
+        ];
+
+        // The shared checkout: the staged index as porcelain entries, and
+        // the branches as their file contents — what
+        // `git diff --name-only <base> <branch>` would show after the
+        // commit step.
+        let mut staged: Vec<String> = Vec::new();
+        let mut branches: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut failure: Option<String> = None;
+
+        let patches = [("#3870", &files_3870), ("#3888", &files_3888)];
+
+        'run: for (index, (identity, files)) in patches.iter().enumerate() {
+            let branch = format!("conv/issue-{identity}");
+            let build = BranchBuild::new(&branch, base).unwrap();
+
+            // Invariant: never switch branches with a staged or dirty
+            // index. On iteration two this is where the first
+            // iteration's uncommitted state would be caught.
+            if let Err(err) = assert_clean_checkout("/scratch/convert/worker-0", &staged) {
+                failure = Some(err);
+                break;
+            }
+
+            // Setup: checkout -B onto the base, then clean — simulated by
+            // the state the steps leave behind.
+            let _ = build.setup_steps();
+            staged.clear();
+
+            // Apply the patch: it lands in the index.
+            staged.extend(files.iter().map(|f| format!("M  {f}")));
+
+            // The defect under test (#3793): the second patch is staged
+            // before the first is committed.
+            if index == 0 {
+                staged.extend(files_3888.iter().map(|f| format!("M  {f}")));
+            }
+
+            // Commit: everything staged lands on the branch, so the
+            // branch now holds both patches' files. A commit happened,
+            // so ahead=1; the rewind defect (ahead=0) is covered by
+            // require_commit_fails_ahead_zero_and_names_the_patch.
+            let committed: Vec<String> = staged
+                .iter()
+                .map(|line| line.trim_start_matches("M  ").to_string())
+                .collect();
+            branches.insert(branch.clone(), committed.clone());
+            staged.clear();
+            require_commit(identity, base, &branch, 1).unwrap();
+
+            // Invariant: contents asserted against the patch's file list
+            // before push.
+            if let Err(err) = build.pre_push_assert(identity, files, &committed) {
+                failure = Some(err);
+                break 'run;
+            }
+        }
+
+        // The run failed instead of mislabeling: patch #3870's branch
+        // contains #3888's files, so the contents assert refused the push
+        // and named the patch.
+        let failure = failure.expect("the pre-staged second patch must fail the run");
+        assert!(failure.contains("#3870"), "{failure}");
+        assert!(failure.contains("images/env-block-a.sh"), "{failure}");
+        let landed = &branches["conv/issue-#3870"];
+        assert_eq!(landed.len(), files_3870.len() + files_3888.len());
+        assert!(landed.iter().any(|f| f == "images/env-block-a.sh"));
+        // The second branch was never built: the loop stopped at the
+        // first failure rather than pushing a mislabeled PR.
+        assert!(!branches.contains_key("conv/issue-#3888"));
     }
 }
