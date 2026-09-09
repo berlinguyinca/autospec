@@ -11,8 +11,8 @@
 use autospec_core::dispatch_pipeline::{
     CredentialRequirement, DispatchOutcome, DispatchPipeline, FailureCode, FreshnessPolicy,
     HostKind, LivenessLedger, LivenessVerdict, PipelineStep, PipelineTopology, QueueFile,
-    StepSchedule, TopologyViolation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS,
-    QUEUE_ARTIFACT,
+    SchedulingReconciliation, StepSchedule, TopologyViolation, DEFAULT_INTERVAL_SECS,
+    DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -547,4 +547,157 @@ fn freshness_policy_refuses_a_zero_interval_or_tolerance() {
     assert!(FreshnessPolicy::new(0, 3).is_none());
     assert!(FreshnessPolicy::new(600, 0).is_none());
     assert!(FreshnessPolicy::new(600, 3).is_some());
+}
+
+// ── Admission reconciliation (#3927) ───────────────────────────────────────
+
+#[test]
+fn reconciliation_is_clean_when_every_admitted_issue_is_in_the_queue() {
+    // Every admitted issue is schedulable; the one queue entry that is no
+    // longer admitted is reported as stale, not as a defect.
+    let recon = SchedulingReconciliation::new([10, 20, 30], [10, 20, 30, 40]);
+
+    assert_eq!(recon.admitted_not_schedulable_count(), 0);
+    assert!(!recon.is_defect());
+    assert_eq!(recon.schedulable, vec![10, 20, 30]);
+    assert_eq!(recon.schedulable_not_admitted, vec![40]);
+    assert!(recon.line().contains("clean"));
+    assert!(recon.line().contains("40"));
+}
+
+#[test]
+fn reconciliation_names_the_admitted_issues_not_in_the_queue_as_a_defect() {
+    // Two admitted issues sit outside the queue: the count is 2, naming both in
+    // ascending order, and the reverse-direction stale entry is still reported.
+    let recon = SchedulingReconciliation::new([7, 9, 21], [21, 30]);
+
+    assert_eq!(recon.admitted_not_schedulable, vec![7, 9]);
+    assert_eq!(recon.admitted_not_schedulable_count(), 2);
+    assert!(recon.is_defect());
+    assert_eq!(recon.schedulable, vec![21]);
+    assert_eq!(recon.schedulable_not_admitted, vec![30]);
+    let line = recon.line();
+    assert!(line.contains("DEFECT"));
+    assert!(line.contains("2 admitted issue"));
+    assert!(line.contains("7, 9"));
+}
+
+#[test]
+fn reconciliation_deduplicates_and_orders_both_sides() {
+    let recon = SchedulingReconciliation::new([5, 5, 3], [3, 3, 5, 5]);
+    assert_eq!(recon.admitted_not_schedulable, Vec::<u64>::new());
+    assert!(!recon.is_defect());
+    assert_eq!(recon.schedulable, vec![3, 5]);
+}
+
+#[test]
+fn idle_dispatcher_with_no_admitted_work_stays_idle() {
+    let pipeline = pipeline(PipelineTopology::reference());
+    let outcome = pipeline.authorize_queue_with_admission(
+        Some(&queue(Some(NOW - 30), &[])),
+        Vec::<u64>::new(),
+        NOW,
+    );
+
+    assert_eq!(outcome, DispatchOutcome::Idle { age_secs: 30 });
+    assert!(!outcome.held());
+    assert!(outcome.line().contains("no new issues were filed"));
+}
+
+#[test]
+fn idle_dispatcher_with_admitted_work_is_a_fault_not_silence() {
+    let pipeline = pipeline(PipelineTopology::reference());
+    // Free capacity (a fresh, empty queue) while two admitted issues sit outside
+    // it: the dispatcher must hold, naming the refresh step, not claim idle.
+    let outcome =
+        pipeline.authorize_queue_with_admission(Some(&queue(Some(NOW - 30), &[])), [41, 57], NOW);
+
+    let DispatchOutcome::Hold { failure } = &outcome else {
+        panic!("free capacity over filed work must hold, got {outcome:?}");
+    };
+    assert_eq!(failure.code, FailureCode::AdmittedNotSchedulable);
+    assert_eq!(failure.step, "refresh-queue");
+    assert_eq!(failure.artifact.as_deref(), Some(QUEUE_ARTIFACT));
+    assert!(failure.message.contains("41, 57"));
+    assert!(!failure.message.contains("no new issues were filed"));
+}
+
+#[test]
+fn a_proceeding_queue_is_untouched_by_admission_reconciliation() {
+    let pipeline = pipeline(PipelineTopology::reference());
+    // The queue already has work, so the dispatcher proceeds regardless; the
+    // admitted-but-unschedulable issue remains the reconciliation's business.
+    let outcome =
+        pipeline.authorize_queue_with_admission(Some(&queue(Some(NOW - 30), &[8])), [9], NOW);
+
+    assert_eq!(
+        outcome,
+        DispatchOutcome::Proceed {
+            entries: 1,
+            age_secs: 30
+        }
+    );
+}
+
+#[test]
+fn a_stale_queue_stays_stale_regardless_of_admission() {
+    let pipeline = pipeline(PipelineTopology::reference());
+    // A 4-interval-old empty queue is a staleness fault before admission is
+    // even consulted.
+    let outcome =
+        pipeline.authorize_queue_with_admission(Some(&queue(Some(NOW - 2_400), &[])), [41], NOW);
+
+    let DispatchOutcome::Hold { failure } = &outcome else {
+        panic!("a stale queue must hold, got {outcome:?}");
+    };
+    assert_eq!(failure.code, FailureCode::StampNotRefreshed);
+}
+
+// ── The populated case (#3927) ──────────────────────────────────────────────
+
+#[test]
+fn populated_case_names_the_admitted_issues_missing_from_a_populated_queue() {
+    // The populated case from #3927: a queue with 242 entries and six admitted
+    // issues the refresher never staged. The reconciliation flags exactly six,
+    // and the dispatcher — with work to do — still proceeds.
+    let queue_numbers: Vec<u64> = (1..=242).collect();
+    let admitted: Vec<u64> = (243..=248).collect();
+    let recon =
+        SchedulingReconciliation::new(admitted.iter().copied(), queue_numbers.iter().copied());
+
+    assert_eq!(recon.admitted_not_schedulable_count(), 6);
+    assert_eq!(recon.admitted_not_schedulable, admitted);
+    assert!(recon.is_defect());
+    assert!(recon.line().contains("6 admitted issue"));
+
+    let pipeline = pipeline(PipelineTopology::reference());
+    let populated = queue(Some(NOW - 30), &queue_numbers);
+    let outcome =
+        pipeline.authorize_queue_with_admission(Some(&populated), admitted.iter().copied(), NOW);
+    assert_eq!(
+        outcome,
+        DispatchOutcome::Proceed {
+            entries: 242,
+            age_secs: 30
+        }
+    );
+}
+
+#[test]
+fn populated_case_reports_a_fault_when_the_queue_is_empty() {
+    // The same six admitted issues, but the queue is empty: now the dispatcher
+    // itself must report the fault instead of idling silently.
+    let pipeline = pipeline(PipelineTopology::reference());
+    let outcome = pipeline.authorize_queue_with_admission(
+        Some(&queue(Some(NOW - 30), &[])),
+        (243..=248).collect::<Vec<u64>>(),
+        NOW,
+    );
+
+    let DispatchOutcome::Hold { failure } = &outcome else {
+        panic!("an empty queue over admitted work must hold, got {outcome:?}");
+    };
+    assert_eq!(failure.code, FailureCode::AdmittedNotSchedulable);
+    assert_eq!(failure.step, "refresh-queue");
+    assert!(failure.message.contains("243, 244, 245, 246, 247, 248"));
 }

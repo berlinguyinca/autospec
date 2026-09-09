@@ -89,6 +89,9 @@ pub enum FailureCode {
     UnknownProducer,
     /// A step has no log, so its failure would be silent.
     StepHasNoLog,
+    /// An admitted issue (open, carrying the eligibility label) is not in the
+    /// queue, so filed work will never run while the dispatcher idles over it.
+    AdmittedNotSchedulable,
 }
 
 impl FailureCode {
@@ -106,6 +109,7 @@ impl FailureCode {
             Self::ProducerHostNotDurable => "PRODUCER_HOST_NOT_DURABLE",
             Self::UnknownProducer => "UNKNOWN_PRODUCER",
             Self::StepHasNoLog => "STEP_HAS_NO_LOG",
+            Self::AdmittedNotSchedulable => "ADMITTED_NOT_SCHEDULABLE",
         }
     }
 }
@@ -733,6 +737,89 @@ impl QueueFile {
     }
 }
 
+/// A reconciliation between the *admitted* issues and the *schedulable* ones
+/// (the queue's entries).
+///
+/// The admitted set — the open issues carrying the eligibility label — is
+/// authoritative: the label is the contract, and an open labelled issue is
+/// schedulable with no second, hand-maintained step. The queue is a derived
+/// copy of that set. When the copy lags the tracker, an admitted issue that is
+/// not in the queue is *admitted-but-unschedulable*: filed work that will never
+/// run, invisible because the queue looks like a complete, fresh artifact.
+///
+/// This reconciliation names that divergence. The count of
+/// admitted-but-unschedulable issues is the defect: zero is the expected answer,
+/// and any other number is a failure. The reverse direction (queue entries that
+/// are no longer admitted — closed or label removed) is reported for cleanup
+/// but is not the defect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulingReconciliation {
+    /// Admitted but not in the queue: filed work that will never run. The
+    /// count of these is the defect (nonzero is a failure).
+    pub admitted_not_schedulable: Vec<u64>,
+    /// In the queue but no longer admitted (closed or label removed): stale
+    /// entries to clean up. Reported, not the defect.
+    pub schedulable_not_admitted: Vec<u64>,
+    /// Admitted and in the queue: the work that will actually run.
+    pub schedulable: Vec<u64>,
+}
+
+fn join_numbers(numbers: &[u64]) -> String {
+    numbers
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl SchedulingReconciliation {
+    /// Reconcile the admitted set against the schedulable set (the queue's
+    /// issue numbers). Both are deduplicated and reported in ascending order.
+    pub fn new(
+        admitted: impl IntoIterator<Item = u64>,
+        schedulable: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        let admitted: BTreeSet<u64> = admitted.into_iter().collect();
+        let schedulable: BTreeSet<u64> = schedulable.into_iter().collect();
+        Self {
+            admitted_not_schedulable: admitted.difference(&schedulable).copied().collect(),
+            schedulable_not_admitted: schedulable.difference(&admitted).copied().collect(),
+            schedulable: admitted.intersection(&schedulable).copied().collect(),
+        }
+    }
+
+    /// The defect count: admitted issues that are not schedulable. Zero is the
+    /// expected answer; any other number is a failure.
+    pub fn admitted_not_schedulable_count(&self) -> usize {
+        self.admitted_not_schedulable.len()
+    }
+
+    /// Zero is the expected answer, any other number is a defect.
+    pub fn is_defect(&self) -> bool {
+        !self.admitted_not_schedulable.is_empty()
+    }
+
+    /// The one-line report, shaped for the periodic reconciliation and dispatch
+    /// logs. It states the count and names the issues.
+    pub fn line(&self) -> String {
+        if self.is_defect() {
+            let numbers = join_numbers(&self.admitted_not_schedulable);
+            return format!(
+                "RECONCILE DEFECT: {} admitted issue(s) are not schedulable: {}; the queue lags the tracker — refresh-queue must repopulate it",
+                self.admitted_not_schedulable_count(),
+                numbers
+            );
+        }
+        if self.schedulable_not_admitted.is_empty() {
+            return "RECONCILE clean: every admitted issue is schedulable".to_string();
+        }
+        let count = self.schedulable_not_admitted.len();
+        let noun = if count == 1 { "entry" } else { "entries" };
+        let stale = join_numbers(&self.schedulable_not_admitted);
+        format!("RECONCILE clean with {count} stale queue {noun} to clean up: {stale}")
+    }
+}
+
 /// What a consumer may conclude from the artifact it just read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -925,6 +1012,62 @@ impl DispatchPipeline {
                 message,
             },
         }
+    }
+
+    /// The dispatcher's verdict when it also knows the *admitted* set — the
+    /// open issues carrying the eligibility label, which the label makes
+    /// schedulable with no second, hand-maintained step.
+    ///
+    /// A fresh, empty queue reads as [`DispatchOutcome::Idle`]: "no new issues
+    /// were filed." That sentence is a lie while admitted issues sit outside
+    /// the queue — the dispatcher then holds free capacity over work that was
+    /// filed and labelled, and the idleness is silent rather than a reported
+    /// fault. An idle dispatcher with admitted-but-unschedulable work is a
+    /// fault, not a quiet state: free capacity and eligible issues should be
+    /// loud.
+    ///
+    /// This layers [`SchedulingReconciliation`] on [`Self::authorize_queue`]: a
+    /// fresh-empty queue (free capacity) with admitted-but-unschedulable issues
+    /// is a [`DispatchOutcome::Hold`] naming the refresh step, not an [`Idle`].
+    /// A queue that is already non-empty (proceeding) or already held is left
+    /// as-is — the reconciliation remains the general defect detector either
+    /// way.
+    pub fn authorize_queue_with_admission(
+        &self,
+        queue: Option<&QueueFile>,
+        admitted: impl IntoIterator<Item = u64>,
+        now: u64,
+    ) -> DispatchOutcome {
+        let base = self.authorize_queue(queue, now);
+        if !matches!(base, DispatchOutcome::Idle { .. }) {
+            return base;
+        }
+        let reconciliation = SchedulingReconciliation::new(
+            admitted,
+            queue.map(|queue| queue.entries.clone()).unwrap_or_default(),
+        );
+        if !reconciliation.is_defect() {
+            return base;
+        }
+        let step = self
+            .queue_producer()
+            .map(|step| step.name.clone())
+            .unwrap_or_else(|| "refresh-queue".to_string());
+        let numbers: Vec<String> = reconciliation
+            .admitted_not_schedulable
+            .iter()
+            .map(u64::to_string)
+            .collect();
+        Self::hold(
+            FailureCode::AdmittedNotSchedulable,
+            step.clone(),
+            format!(
+                "{} admitted issue(s) are not in the queue: {}; free capacity over filed work — the queue lags the tracker and {} must repopulate it",
+                reconciliation.admitted_not_schedulable_count(),
+                numbers.join(", "),
+                step
+            ),
+        )
     }
 
     /// Invariant 3: one line per hop, filing through dispatch.

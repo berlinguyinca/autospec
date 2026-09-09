@@ -80,7 +80,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec growth-report --json` | yes | local-only metrics stub |
 | `autospec repair-loop record --loop <name> [--expected <id>]... [--repaired <id>]... [--ticket <id=ticket>]... [--state-file <path>]` | no | records one repair sweep; exit 0 idle / 1 repaired / 2 persistent (ALERT) |
 | `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
-| `autospec dispatch check [--queue <path>] [--state-file <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | gate on the queue artifact before dispatching: exit 0 fresh (proceed or genuinely idle) / 1 hold (missing, unstamped, stale, clock rewind) |
+| `autospec dispatch check [--queue <path>] [--state-file <path>] [--topology <path>] [--admitted-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | gate on the queue artifact before dispatching: exit 0 fresh (proceed or genuinely idle) / 1 hold (missing, unstamped, stale, clock rewind); with `--admitted-file`, an idle queue over admitted work holds as `ADMITTED_NOT_SCHEDULABLE` instead of reading idle (#3927) |
+| `autospec dispatch reconcile --admitted-file <path> [--queue <path>] [--json]` | no | the admission reconciliation (#3927): report the count of admitted-but-unschedulable issues; exit 0 zero (the expected answer) / 1 nonzero (a defect — the queue lags the tracker) |
 | `autospec dispatch guard --issue <N> [--out-dir <path>] [--patch-name <name>] [--dry-run] [--json]` | yes | pre-dispatch gate on the issue's output directory (#3764): exit 0 no unconverted patch (stale output removed) / 1 hold (patch present, or a check that cannot answer); `--dry-run` reports without touching the directory |
 | `autospec dispatch stage --issue <N> [--repo OWNER/REPO] [--issue-json <path>] [--comments-json <path>] [--body-file <path>] [--title <t>] [--source-updated-at <ts>] [--body-updated-at <ts>] [--out <path>] [--staged-at <epoch>] [--container-runtime <path>] [--database <value>] [--registry <value>] [--no-probe] [--json]` | no | write the spec a worker reads: issue body, the discussion filed since the last body edit, and a generated execution-environment block, headed by the source `updatedAt` it was staged from (#3864); defaults to `~/.autospec/dispatch/specs/<N>.md`, exit 2 on unusable input |
 | `autospec dispatch freshness --issue <N> [--staged <path>] [--live-updated-at <ts> \| --live-json <path> \| --repo OWNER/REPO] [--json]` | yes | gate a dispatch on the staged spec's revision (#3864): exit 0 current / 1 held — `STALE` (re-stage, the message names the command) or `REFUSED` (no staged spec, no recorded revision, or the live issue cannot be read: freshness that cannot be verified is never verified) |
@@ -109,6 +110,19 @@ header lines written by its producer — `# refreshed-at: <epoch>` and
 freshness stamp: `QUEUE_MISSING`, `QUEUE_UNSTAMPED`, `STAMP_NOT_REFRESHED` (older than
 `--max-intervals` of the producer's own `--interval`), `CLOCK_REWIND` (a stamp in the
 future). Exit codes are cron-shaped throughout: `0` ok, `1` hold, `2` diagnostic.
+The queue is a *derived* copy of the tracker's label set, and the label set is
+authoritative (#3927): an issue labelled dispatchable is admitted, and nothing else
+gates it — there is no manual staging step between the label and schedulability.
+`reconcile --admitted-file <path> --queue <path>` is the periodic check that the two
+still agree: it reports the *count* of admitted-but-unschedulable issues (admitted by
+the tracker but missing from the queue), and zero is the only expected answer — any
+other number is a failure, because it is filed, label-bearing work the scheduler will
+never reach. A queue entry the tracker no longer admits is reported as stale (clean up
+the queue), never as the defect. `check --admitted-file <path>` folds the same set into
+the dispatch gate: when the queue is fresh but empty *and* the admitted set is not, the
+dispatcher holds with `ADMITTED_NOT_SCHEDULABLE` (naming the refresh step that must
+repopulate the queue) instead of claiming idleness — an idle dispatcher over eligible,
+unfiled work is a fault, not silence.
 `stamp` is what the refresh script calls after it repopulates the file: it rewrites the
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records

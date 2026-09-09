@@ -102,7 +102,7 @@ fn beat_all_scheduled_hops(harness: &Harness) {
 }
 
 #[test]
-fn dispatch_help_lists_the_five_subcommands() {
+fn dispatch_help_lists_the_subcommands() {
     let output = run(&[
         "dispatch".to_string(),
         "--help".to_string(),
@@ -111,7 +111,7 @@ fn dispatch_help_lists_the_five_subcommands() {
 
     assert_eq!(output.status.code(), Some(0));
     let help = stdout(&output);
-    for subcommand in ["check", "guard", "stamp", "beat", "status"] {
+    for subcommand in ["check", "reconcile", "guard", "stamp", "beat", "status"] {
         assert!(help.contains(subcommand), "{help}");
     }
     assert!(help.contains("EXIT CODES"), "{help}");
@@ -126,7 +126,7 @@ fn unknown_subcommand_is_a_diagnostic_not_a_verdict() {
     let message = stderr(&output);
     assert!(message.contains("unknown dispatch subcommand"), "{message}");
     assert!(
-        message.contains("check, guard, stamp, beat, status"),
+        message.contains("check, reconcile, guard, stamp, beat, status, stage, freshness"),
         "{message}"
     );
 }
@@ -688,4 +688,176 @@ fn assert_0600_or_owner_readable(path: &Path) {
     let metadata = std::fs::metadata(path).expect("metadata");
     let mode = metadata.permissions().mode();
     assert!(mode & 0o400 != 0, "owner must be able to read {path:?}");
+}
+
+// ── #3927: the admission reconciliation ────────────────────────────────
+//
+// The label set is authoritative; the queue is a derived copy. These pin the
+// CLI surface that keeps the two honest: `reconcile` reports the count of
+// admitted-but-unschedulable issues (zero is the expected answer, nonzero a
+// failure), and `check --admitted-file` turns an idle queue over filed work
+// into a named fault instead of a silent idle.
+
+fn write_admitted(harness: &Harness, text: &str) -> String {
+    let path = harness.temp.join("admitted.txt");
+    std::fs::write(&path, text).expect("admitted written");
+    path.display().to_string()
+}
+
+#[test]
+fn reconcile_clean_exits_zero() {
+    let harness = Harness::new("autospec-dispatch-reconcile-clean");
+    harness.write_queue(&stamped(0, &["10", "11", "12"]));
+    let admitted = write_admitted(&harness, "10\n11\n12\n");
+
+    let output = harness.dispatch(&["reconcile", "--admitted-file", &admitted]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("RECONCILE clean"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn reconcile_defect_exits_one_and_names_the_missing_issues() {
+    let harness = Harness::new("autospec-dispatch-reconcile-defect");
+    harness.write_queue(&stamped(0, &["10", "11", "12"]));
+    let admitted = write_admitted(&harness, "10\n11\n12\n99\n100\n");
+
+    let output = harness.dispatch(&["reconcile", "--admitted-file", &admitted]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("RECONCILE DEFECT"), "{out}");
+    assert!(out.contains("99"), "{out}");
+    assert!(out.contains("100"), "{out}");
+}
+
+#[test]
+fn reconcile_missing_admitted_file_is_a_diagnostic_not_a_verdict() {
+    let harness = Harness::new("autospec-dispatch-reconcile-missing");
+    harness.write_queue(&stamped(0, &["10"]));
+    let absent = harness.temp.join("absent.txt");
+
+    let output = harness.dispatch(&[
+        "reconcile",
+        "--admitted-file",
+        &absent.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("cannot read admitted file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn reconcile_reports_stale_queue_entries_without_failing() {
+    let harness = Harness::new("autospec-dispatch-reconcile-stale");
+    harness.write_queue(&stamped(0, &["10", "11", "42"]));
+    // 42 is in the queue but no longer admitted: stale, reported, not the defect.
+    let admitted = write_admitted(&harness, "10\n11\n");
+
+    let output = harness.dispatch(&["reconcile", "--admitted-file", &admitted]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("RECONCILE clean with 1 stale"), "{out}");
+    assert!(out.contains("42"), "{out}");
+}
+
+#[test]
+fn check_with_admitted_file_holds_an_idle_queue_over_filed_work() {
+    let harness = Harness::new("autospec-dispatch-check-admitted-idle");
+    harness.write_queue(&stamped(0, &[])); // fresh, empty, stamped
+    let admitted = write_admitted(&harness, "99\n100\n");
+
+    let output = harness.dispatch(&[
+        "check",
+        "--admitted-file",
+        &admitted,
+        "--now",
+        &NOW.to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("ADMITTED_NOT_SCHEDULABLE"), "{out}");
+    assert!(out.contains("99"), "{out}");
+}
+
+#[test]
+fn check_with_admitted_file_proceeds_when_the_queue_is_populated() {
+    let harness = Harness::new("autospec-dispatch-check-admitted-populated");
+    harness.write_queue(&stamped(0, &["10", "11"]));
+    let admitted = write_admitted(&harness, "10\n11\n");
+
+    let output = harness.dispatch(&[
+        "check",
+        "--admitted-file",
+        &admitted,
+        "--now",
+        &NOW.to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("DISPATCH queue ready"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_without_admitted_file_still_reads_an_empty_queue_as_idle() {
+    let harness = Harness::new("autospec-dispatch-check-no-admitted");
+    harness.write_queue(&stamped(0, &[]));
+
+    let output = harness.dispatch(&["check", "--now", &NOW.to_string()]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("DISPATCH queue idle"),
+        "{}",
+        stdout(&output)
+    );
 }
