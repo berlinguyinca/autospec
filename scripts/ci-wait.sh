@@ -95,7 +95,9 @@ while true; do
 
     total="$(printf "%s" "$rollup" | jq "length" 2>/dev/null || printf "0")"
     bad="$(printf "%s" "$rollup" | jq "[.[] | select(.conclusion==\"FAILURE\" or .conclusion==\"CANCELLED\" or .conclusion==\"TIMED_OUT\" or .conclusion==\"ACTION_REQUIRED\")] | length" 2>/dev/null || printf "0")"
-    pending="$(printf "%s" "$rollup" | jq "[.[] | select(.conclusion == null and .status != \"COMPLETED\")] | length" 2>/dev/null || printf "0")"
+    # gh reports in-progress checks with conclusion "" (not null), so pending
+    # must key off status alone: any check not COMPLETED is still running.
+    pending="$(printf "%s" "$rollup" | jq "[.[] | select(.status != \"COMPLETED\")] | length" 2>/dev/null || printf "0")"
 
     if [ "$bad" -gt 0 ]; then
         write_signal "fail" "$rollup"
