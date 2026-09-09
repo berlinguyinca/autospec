@@ -439,7 +439,7 @@ fn autonomous_executor_bridge_resolves_full_suite_in_authoritative_order() {
         vec![
             "cargo fmt --check",
             "cargo clippy --all-targets -- -D warnings",
-            "cargo test --all-targets",
+            "cargo test --all-targets --no-fail-fast",
             "cargo build --all-targets",
         ]
     );

@@ -5246,7 +5246,7 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
             [
                 "cargo fmt --check",
                 "cargo clippy --all-targets -- -D warnings",
-                "cargo test --all-targets",
+                "cargo test --all-targets --no-fail-fast",
                 "cargo build --all-targets",
             ]
             .into_iter()

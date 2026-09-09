@@ -383,6 +383,7 @@ impl Evidence {
             "--all-targets",
             "--release",
             "--workspace",
+            "--no-fail-fast",
         ];
         if !EXECUTABLES.contains(&executable) {
             return Err(AccountabilityError::new(
