@@ -23,6 +23,7 @@ pub mod claim;
 pub mod code_intel;
 pub mod context;
 pub mod coordination;
+pub mod cost;
 pub mod dispatch_guard;
 pub mod dispatch_pipeline;
 pub mod error;

@@ -2,6 +2,7 @@ pub mod aar;
 pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
+pub mod cost;
 pub mod dispatch;
 pub mod dispatch_spec;
 pub mod doctor;
@@ -86,6 +87,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("initiative", "Inspect cross-repository initiatives"),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
+    (
+        "cost",
+        "Account GPU-hours by terminal status: runs, share, rework, defect cost, threshold flags",
+    ),
     ("parent", "Reconcile decomposed parent issue state"),
     ("queue", "Compute the safe GitHub issue queue"),
     (
@@ -143,6 +148,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
                 .unwrap_or_else(|message| Err(CommandFailure::diagnostic(message))),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),
+            "cost" => cost::run(rest).map_err(CommandFailure::diagnostic),
             "parent" => parent::run(rest),
             "queue" => queue::run(rest),
             "dispatch" => dispatch::run(rest),
