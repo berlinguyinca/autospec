@@ -44,6 +44,7 @@ pub mod integration;
 pub mod issue_lock;
 pub mod lint;
 pub mod managed_project;
+pub mod observation;
 pub mod planning;
 pub mod rag;
 pub mod repair_loop;
