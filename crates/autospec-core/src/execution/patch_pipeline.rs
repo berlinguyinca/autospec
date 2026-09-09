@@ -72,6 +72,15 @@
 //!     memoized: memoizing a non-evaluation would make one run's setup
 //!     failure a permanent verdict against the patch, and a gate that did
 //!     not run neither satisfies nor refutes an acceptance criterion.
+//! 11. **An open PR is work in progress, and the opener owns it**
+//!     ([`PrLedger`]). "Opened a PR" is not a terminal state: the pass
+//!     that opens a PR is responsible for landing it, so every run
+//!     summary reports the PRs the pass's family previously opened that
+//!     are still open, with age, alongside converted/held/skipped — a
+//!     number that only goes up is the alarm. And a `Mergeable ->
+//!     Conflicting` transition is surfaced in the pass that observes it:
+//!     that is the moment the cheap fix expired, and decay measured by
+//!     age alone is invisible until it is terminal (#3899).
 
 use std::collections::BTreeMap;
 
@@ -730,6 +739,246 @@ pub fn memo_gate_report(memo: &ConversionMemo, patch: &Patch, current_tip: &str)
             recorded, patch.class, patch.identity, patch.base_sha
         )),
     }
+}
+
+/// The platform's `mergeable` state for an open pull request.
+///
+/// GitHub reports `MERGEABLE`, `CONFLICTING`, or `UNKNOWN` while it is
+/// still computing. Only the first two are verdicts; the transition
+/// between them — mergeable to conflicting — is the moment the cheap fix
+/// expired (#3899).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mergeable {
+    /// `MERGEABLE`: the PR can still be merged as-is or rebased cheaply.
+    Mergeable,
+    /// `CONFLICTING`: `main` has moved under the PR; the cheap fix
+    /// (merge now, rebase later) has expired.
+    Conflicting,
+    /// `UNKNOWN`: the platform has not computed the state yet. Not a
+    /// verdict: it must neither fire an alarm nor overwrite the last
+    /// decisive observation.
+    Unknown,
+}
+
+impl Mergeable {
+    /// The platform's spelling, for summary lines and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mergeable => "MERGEABLE",
+            Self::Conflicting => "CONFLICTING",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// One pull request the conversion pass's family opened, still tracked.
+///
+/// "Opened a PR" is not a terminal state (#3899): a PR that was mergeable
+/// when opened becomes unmergeable as `main` moves under it, and the
+/// cost is superlinear in the latency (day 0: merge, day 1: rebase, day 3:
+/// regenerate). Tracking it across passes is what makes that decay
+/// visible before it is terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPr {
+    /// Stable PR identity (e.g. `"#3899"` or the PR URL). Must be
+    /// non-empty.
+    pub identity: String,
+    /// The stamp at which the pass opened the PR (the same monotonic
+    /// stamp space as [`Patch::produced_at`]). Age is always measured
+    /// from the first opening, not the last sighting.
+    pub opened_at: u64,
+    /// The last decisive observation of the PR's `mergeable` state. A
+    /// freshly opened PR against the current tip starts `Mergeable`.
+    pub last_mergeable: Mergeable,
+    /// The stamp of the last decisive observation.
+    pub observed_at: u64,
+}
+
+/// The ledger of PRs the conversion pass's family opened that are still
+/// open (#3899).
+///
+/// Conversion produces PRs and nothing consumed them: every individual PR
+/// looked fine, so the queue was invisible. The ledger restores the two
+/// things that were missing —
+///
+/// 1. **A line item.** [`PrLedger::summary_line`] reports the
+///    previously-opened PRs still open, with age, for every run summary,
+///    alongside converted/held/skipped. A number that only goes up is the
+///    alarm.
+/// 2. **An alarm on the transition, not on age alone.**
+///    [`PrLedger::observe`] returns a report when a PR goes
+///    `Mergeable -> Conflicting` — the moment the cheap fix expired — so
+///    the pass that observes it surfaces it, in the same pass.
+///
+/// The caller performs the GitHub I/O: it records a PR when the pass
+/// opens it, observes the current `mergeable` state each pass, and
+/// settles a PR when it merges or is closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrLedger {
+    prs: BTreeMap<String, OpenPr>,
+}
+
+impl PrLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.prs.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.prs.len()
+    }
+
+    /// The pass opened (or took ownership of) this PR at `stamp`.
+    ///
+    /// A PR opens against the current tip and is therefore mergeable at
+    /// the moment of opening: the initial decisive observation is
+    /// `Mergeable` at the opening stamp. Re-recording a known PR keeps the
+    /// **original** `opened_at` — age is measured from the first opening,
+    /// not the last sighting, or a PR re-seen every pass would stay age 0
+    /// forever.
+    pub fn record_opened(&mut self, identity: &str, opened_at: u64) -> Result<(), String> {
+        if identity.trim().is_empty() {
+            return Err("PR identity must not be empty".to_string());
+        }
+        let identity = identity.to_string();
+        if let Some(existing) = self.prs.get_mut(&identity) {
+            // A re-observation of an opening, not a new one: the age clock
+            // does not reset.
+            existing.opened_at = existing.opened_at.min(opened_at);
+            return Ok(());
+        }
+        self.prs.insert(
+            identity.clone(),
+            OpenPr {
+                identity,
+                opened_at,
+                last_mergeable: Mergeable::Mergeable,
+                observed_at: opened_at,
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a fresh observation of the PR's `mergeable` state at `stamp`.
+    ///
+    /// Returns `Some(report)` exactly when the observation records a
+    /// `Mergeable -> Conflicting` transition — the moment the cheap fix
+    /// expired — naming the PR and both operands of the comparison, so
+    /// the pass surfaces it **in this pass** rather than waiting for a
+    /// rebase to fail (#3899). Repeated `Conflicting` observations are
+    /// not re-reported: the alarm is on the transition, not on the state,
+    /// so a PR that has already been surfaced is not alarmed at every
+    /// pass. An `Unknown` observation is not a verdict: it leaves the
+    /// entry unchanged, so a later `Conflicting` still fires against the
+    /// last decisive state.
+    pub fn observe(
+        &mut self,
+        identity: &str,
+        state: Mergeable,
+        stamp: u64,
+    ) -> Result<Option<String>, String> {
+        if identity.trim().is_empty() {
+            return Err("PR identity must not be empty".to_string());
+        }
+        let pr = self
+            .prs
+            .get_mut(identity)
+            .ok_or_else(|| format!("refusing to observe {identity}: not in the ledger; a PR the pass did not open is not one it tracks"))?;
+        if state == Mergeable::Unknown {
+            return Ok(None);
+        }
+        let transitioned =
+            pr.last_mergeable == Mergeable::Mergeable && state == Mergeable::Conflicting;
+        let report = if transitioned {
+            Some(format!(
+                "mergeability transition: {identity} went {} -> {} at stamp {} (opened at {}, age {})",
+                Mergeable::Mergeable.as_str(),
+                Mergeable::Conflicting.as_str(),
+                stamp,
+                pr.opened_at,
+                format_age(stamp.saturating_sub(pr.opened_at)),
+            ))
+        } else {
+            None
+        };
+        pr.last_mergeable = state;
+        pr.observed_at = stamp;
+        Ok(report)
+    }
+
+    /// The PR has settled: merged or closed. Remove it from the ledger and
+    /// return the last decisive state it was tracked in, if it was tracked
+    /// at all. A settled PR is no longer work in progress and must stop
+    /// being counted in the summary.
+    pub fn settle(&mut self, identity: &str) -> Option<Mergeable> {
+        self.prs.remove(identity).map(|pr| pr.last_mergeable)
+    }
+
+    /// The PRs still open, with their age at `now`, oldest first: the
+    /// alarm is the PR that has been open the longest. Ages saturate at
+    /// zero if `now` ever lands before an opening stamp.
+    pub fn open_with_age(&self, now: u64) -> Vec<(String, u64, Mergeable)> {
+        let mut open: Vec<(String, u64, Mergeable)> = self
+            .prs
+            .values()
+            .map(|pr| {
+                (
+                    pr.identity.clone(),
+                    now.saturating_sub(pr.opened_at),
+                    pr.last_mergeable,
+                )
+            })
+            .collect();
+        open.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        open
+    }
+
+    /// The run-summary line: the previously-opened PRs still open, with
+    /// age, for every pass — "no line item" was the reason the queue was
+    /// invisible (#3899). e.g. `2 previously opened PRs still open: #31
+    /// (age 2h 45m 0s, MERGEABLE), #28 (age 1d 0h 0m 0s, CONFLICTING)`.
+    pub fn summary_line(&self, now: u64) -> String {
+        let open = self.open_with_age(now);
+        if open.is_empty() {
+            return "no previously opened PRs still open".to_string();
+        }
+        let parts: Vec<String> = open
+            .iter()
+            .map(|(id, age, state)| format!("{id} (age {}, {})", format_age(*age), state.as_str()))
+            .collect();
+        format!(
+            "{} previously opened PR{} still open: {}",
+            open.len(),
+            if open.len() == 1 { "" } else { "s" },
+            parts.join(", ")
+        )
+    }
+}
+
+/// Render an age in seconds as `Nd Nh Nm Ns`, omitting leading zero units
+/// (but always keeping seconds), e.g. `0s`, `90m 5s`, `2h 45m 0s`,
+/// `1d 2h 3m 4s`. Deterministic, so summary lines are stable and
+/// diffable across runs.
+fn format_age(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let secs = seconds % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if days > 0 || hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if days > 0 || hours > 0 || minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    parts.push(format!("{secs}s"));
+    parts.join(" ")
 }
 
 #[cfg(test)]
@@ -1531,5 +1780,182 @@ mod tests {
             "got: {held_summary}"
         );
         assert_ne!(died_summary, held_summary);
+    }
+
+    #[test]
+    fn pr_ledger_record_opened_rejects_empty_identity() {
+        let mut ledger = PrLedger::new();
+        assert!(ledger.record_opened("", 100).is_err());
+        assert!(ledger.record_opened("   ", 100).is_err());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn pr_ledger_re_recording_keeps_the_original_opening_stamp() {
+        // A PR re-seen every pass must not reset its age clock: age is
+        // measured from the first opening, not the last sighting.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#31", 100).unwrap();
+        ledger.record_opened("#31", 9000).unwrap();
+
+        let open = ledger.open_with_age(10_000);
+        assert_eq!(open, vec![("#31".to_string(), 9_900, Mergeable::Mergeable)]);
+        assert_eq!(ledger.len(), 1);
+    }
+
+    #[test]
+    fn pr_ledger_observe_surfaces_mergeable_to_conflicting_in_one_pass() {
+        // Acceptance: a PR whose mergeable transitions to CONFLICTING is
+        // surfaced within one pass — the pass that observes it, not some
+        // later age threshold (#3899).
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+
+        // Same pass or a later one: still fine.
+        assert_eq!(ledger.observe("#28", Mergeable::Mergeable, 2_000), Ok(None));
+
+        // main moved under it: the transition fires, and the report names
+        // the PR and both operands of the comparison.
+        let report = ledger
+            .observe("#28", Mergeable::Conflicting, 87_400)
+            .unwrap()
+            .unwrap();
+        assert!(report.contains("#28"), "{report}");
+        assert!(report.contains("MERGEABLE"), "{report}");
+        assert!(report.contains("CONFLICTING"), "{report}");
+        assert!(report.contains("87400"), "{report}");
+        assert!(report.contains("1d 0h 0m 0s"), "{report}");
+    }
+
+    #[test]
+    fn pr_ledger_alarm_is_on_the_transition_not_the_state() {
+        // A PR already surfaced stays alarming in the summary but is not
+        // re-reported at every pass: repeated Conflicting observations are
+        // not transitions.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+        assert!(ledger
+            .observe("#28", Mergeable::Conflicting, 2_000)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            ledger.observe("#28", Mergeable::Conflicting, 3_000),
+            Ok(None)
+        );
+        assert_eq!(
+            ledger.observe("#28", Mergeable::Conflicting, 4_000),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn pr_ledger_unknown_is_not_a_verdict() {
+        // While the platform is still computing, the observation must
+        // neither fire an alarm nor overwrite the last decisive state: a
+        // later Conflicting still fires against Mergeable.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+        assert_eq!(ledger.observe("#28", Mergeable::Unknown, 2_000), Ok(None));
+        assert!(ledger
+            .observe("#28", Mergeable::Conflicting, 3_000)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn pr_ledger_rebase_back_to_mergeable_arms_the_next_transition() {
+        // A rebase that restores mergeability clears the conflicting
+        // state; if main moves under it again, the transition fires
+        // again.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+        assert!(ledger
+            .observe("#28", Mergeable::Conflicting, 2_000)
+            .unwrap()
+            .is_some());
+        assert_eq!(ledger.observe("#28", Mergeable::Mergeable, 3_000), Ok(None));
+        assert!(ledger
+            .observe("#28", Mergeable::Conflicting, 4_000)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn pr_ledger_observe_rejects_a_pr_it_does_not_track() {
+        // Observing a PR the pass did not open would make the ledger track
+        // other people's queue: refuse.
+        let mut ledger = PrLedger::new();
+        let err = ledger.observe("#999", Mergeable::Mergeable, 1).unwrap_err();
+        assert!(err.contains("#999"), "{err}");
+        assert!(err.contains("not in the ledger"), "{err}");
+        assert!(ledger.observe("  ", Mergeable::Mergeable, 1).is_err());
+    }
+
+    #[test]
+    fn pr_ledger_settle_stops_counting_the_pr() {
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+        assert_eq!(ledger.settle("#28"), Some(Mergeable::Mergeable));
+        assert!(ledger.is_empty());
+        assert_eq!(ledger.settle("#28"), None);
+        assert_eq!(
+            ledger.summary_line(10_000),
+            "no previously opened PRs still open"
+        );
+    }
+
+    #[test]
+    fn open_pr_older_than_one_pass_appears_in_the_next_summary() {
+        // Acceptance, exercised against a populated case (#3793): a PR
+        // opened by an earlier pass still open now must appear in this
+        // pass's summary, with age — the line item that was missing
+        // (#3899).
+        let mut ledger = PrLedger::new();
+
+        // Pass one: opens a PR and (as today) moves on.
+        ledger.record_opened("#28", 1_000).unwrap();
+
+        // Pass two, later: the PR was observed mergeable in between, and
+        // is still open. It must show up in the summary with its age.
+        ledger.observe("#28", Mergeable::Mergeable, 10_000).unwrap();
+        let line = ledger.summary_line(10_000);
+        assert!(line.contains("#28"), "{line}");
+        assert!(line.contains("age 2h 30m 0s"), "{line}");
+        assert!(line.contains("MERGEABLE"), "{line}");
+        assert!(line.starts_with("1 previously opened PR "), "{line}");
+    }
+
+    #[test]
+    fn summary_line_reports_all_open_prs_oldest_first() {
+        // A number that only goes up is the alarm: with several PRs open
+        // the summary names each with its age, oldest first.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#28", 1_000).unwrap();
+        ledger.record_opened("#31", 8_000).unwrap();
+        ledger
+            .observe("#28", Mergeable::Conflicting, 9_000)
+            .unwrap();
+
+        let line = ledger.summary_line(10_000);
+        // #28 (age 9000s) is older than #31 (age 2000s): it comes first.
+        assert!(
+            line.starts_with("2 previously opened PRs still open:"),
+            "{line}"
+        );
+        assert!(
+            line.find("#28").unwrap() < line.find("#31").unwrap(),
+            "{line}"
+        );
+        assert!(line.contains("#28 (age 2h 30m 0s, CONFLICTING)"), "{line}");
+        assert!(line.contains("#31 (age 33m 20s, MERGEABLE)"), "{line}");
+    }
+
+    #[test]
+    fn format_age_renders_units_and_omits_leading_zeros() {
+        assert_eq!(format_age(0), "0s");
+        assert_eq!(format_age(59), "59s");
+        assert_eq!(format_age(90), "1m 30s");
+        assert_eq!(format_age(9_900), "2h 45m 0s");
+        assert_eq!(format_age(93_784), "1d 2h 3m 4s");
     }
 }
