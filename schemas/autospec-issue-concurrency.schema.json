@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-issue-concurrency.schema.json",
+  "title": "AutoSpec Issue Concurrency Metadata",
+  "description": "Machine-readable issue metadata block per docs/specs/2026-09-08-parallel-decomposition-fleet-saturation.md §15. Mirrors autospec_core::graph::metadata (Ownership, OwnedSurface, ConcurrencyMetadata, DependencyReason) field for field.",
+  "type": "object",
+  "required": ["autospec"],
+  "properties": {
+    "autospec": {
+      "type": "object",
+      "required": ["concurrency", "ownership"],
+      "properties": {
+        "concurrency": {
+          "type": "object",
+          "required": ["parallel_safe", "conflict_domains"],
+          "properties": {
+            "parallel_safe": {
+              "type": "boolean"
+            },
+            "conflict_domains": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "dependencies": {
+          "type": "object",
+          "required": ["hard"],
+          "properties": {
+            "hard": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["issue", "reason_code"],
+                "properties": {
+                  "issue": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$"
+                  },
+                  "reason_code": {
+                    "type": "string",
+                    "enum": [
+                      "consumes-new-interface",
+                      "consumes-new-type",
+                      "consumes-new-schema",
+                      "consumes-migration",
+                      "consumes-generated-artifact",
+                      "requires-structural-migration",
+                      "requires-new-protocol",
+                      "verification-requires-predecessor",
+                      "external-prerequisite"
+                    ]
+                  },
+                  "artifact": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "ownership": {
+          "type": "object",
+          "required": ["exclusive", "shared_read", "shared_write"],
+          "properties": {
+            "exclusive": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ownedSurface"
+              }
+            },
+            "shared_read": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ownedSurface"
+              }
+            },
+            "shared_write": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ownedSurface"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ownedSurface": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^((?!(\\.\\.)(/|$))[^/]+)(/(?!(\\.\\.)(/|$))[^/]+)*$"
+        },
+        "symbols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
