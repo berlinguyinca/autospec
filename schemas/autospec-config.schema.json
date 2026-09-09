@@ -227,6 +227,32 @@
           }
         }
       }
+    },
+    "planning": {
+      "type": "object",
+      "properties": {
+        "parallelism": {
+          "type": "object",
+          "properties": {
+            "target_agents": { "type": "integer", "minimum": 10, "maximum": 100 },
+            "min_supported_agents": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "max_supported_agents": { "type": "integer", "minimum": 10, "maximum": 200 },
+            "target_initial_width_ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "optimization_retry_threshold": { "type": "integer", "minimum": 1 },
+            "max_optimization_retries": { "type": "integer", "minimum": 0 },
+            "max_dependency_fan_in_before_warning": { "type": "integer", "minimum": 1 },
+            "shared_write_hotspot_threshold": { "type": "integer", "minimum": 1 },
+            "require_dependency_justification": { "type": "boolean" },
+            "size_split_implies_dependency": { "type": "boolean" },
+            "parent_relationship_implies_dependency": { "type": "boolean" },
+            "conflict_risk_implies_dependency": { "type": "boolean" }
+          }
+        }
+      }
     }
   },
   "$defs": {
