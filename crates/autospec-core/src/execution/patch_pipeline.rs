@@ -72,8 +72,19 @@
 //!     memoized: memoizing a non-evaluation would make one run's setup
 //!     failure a permanent verdict against the patch, and a gate that did
 //!     not run neither satisfies nor refutes an acceptance criterion.
+//! 11. **A skipped gate is not a passed gate, and a status may not hide one.**
+//!     The rule above governs this pass's own outcome; this one governs the
+//!     status a patch arrives *with*. Ordering takes the set of identities whose
+//!     verification status enumerates every check it declared, and never infers
+//!     that set. Within a cost class, work whose enumeration is complete
+//!     converts first; work whose gates were skipped — or whose status could
+//!     not produce an enumeration at all — waits, because a fixture has to be
+//!     started and run before it is as cheap as its status looks
+//!     ([`order_by_cost_evidenced`], [`Worklist::with_verified`]). With no
+//!     evidence recorded the ordering degrades to cost, impact, recency, which
+//!     is the previous behaviour (#3786).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -216,8 +227,30 @@ impl Patch {
 /// present (all unblocks = 0). The sort is stable, so patches tied on all
 /// keys keep their queue order and two passes over the same queue agree.
 pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
+    order_by_cost_evidenced(patches, &BTreeSet::new())
+}
+
+/// Order a pass by cost, then by verification evidence, then impact, then
+/// recency.
+///
+/// `verified` holds the identities whose verification status enumerates a
+/// complete set of checks — every gate ran, nothing was skipped
+/// ([`crate::execution::verification::VerificationRecord::fully_verified`]).
+/// Those convert first inside each cost class: their gates are already green,
+/// so conversion is the cheap terminal step it claims to be. A patch whose status
+/// carries a skip — or which has no record at all — is not that cheap: its
+/// database gate has to be provisioned and run first, so it goes after the work
+/// that does not need one (#3786).
+///
+/// Skipping is therefore *distinct* from passing at the point where it costs
+/// something. Nothing here upgrades a missing record into evidence: unknown is
+/// ranked with unverified, never above it.
+pub fn order_by_cost_evidenced<'a>(
+    patches: &'a [Patch],
+    verified: &BTreeSet<String>,
+) -> Vec<&'a Patch> {
     let mut ordered: Vec<&Patch> = patches.iter().collect();
-    ordered.sort_by(|a, b| cost_then_impact(a, b));
+    ordered.sort_by(|a, b| cost_evidence_impact(a, b, verified));
     ordered
 }
 
@@ -228,11 +261,18 @@ pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
 /// key the initial ordering used. Two orderings of one queue that disagree
 /// would make an arrival's position depend on when it showed up rather than
 /// on what it is.
-fn cost_then_impact(a: &Patch, b: &Patch) -> std::cmp::Ordering {
+fn cost_evidence_impact(a: &Patch, b: &Patch, verified: &BTreeSet<String>) -> std::cmp::Ordering {
     a.class
         .cmp(&b.class)
+        .then(evidence_rank(a, verified).cmp(&evidence_rank(b, verified)))
         .then(b.unblocks.cmp(&a.unblocks))
         .then(b.produced_at.cmp(&a.produced_at))
+}
+
+/// How far a patch sits from being convertible as-is: 0 when its verification
+/// enumeration is complete, 1 when a gate was skipped or nothing was recorded.
+fn evidence_rank(patch: &Patch, verified: &BTreeSet<String>) -> u8 {
+    u8::from(!verified.contains(&patch.identity))
 }
 
 /// Produce a one-line ordering summary for the top candidates in the pass.
@@ -332,9 +372,31 @@ pub fn absorb_new(queue: &mut Vec<Patch>, fresh: impl IntoIterator<Item = Patch>
         }
     }
     let mut ordered = std::mem::take(queue);
-    ordered.sort_by(|a, b| cost_then_impact(a, b));
+    // Evidence-blind: this free function has no verification records, so it
+    // sorts by cost, impact, recency. A [`Worklist`] re-sorts with its evidence
+    // tier after calling this (#3786).
+    ordered.sort_by(|a, b| cost_evidence_impact(a, b, &BTreeSet::new()));
     *queue = ordered;
     arrived
+}
+
+/// Reduce verification records to the identities a pass may rank as verified.
+///
+/// The only question asked of each record is
+/// [`crate::execution::verification::VerificationRecord::fully_verified`], so a
+/// caller cannot rank a patch from a status it eyeballed. A record whose status
+/// carries a skip, or which declares a fixture it never started, is left out
+/// (#3786).
+pub fn verified_identities<'a, I, K>(records: I) -> BTreeSet<String>
+where
+    I: IntoIterator<Item = (K, &'a crate::execution::verification::VerificationRecord)>,
+    K: AsRef<str>,
+{
+    records
+        .into_iter()
+        .filter(|(_, record)| record.fully_verified())
+        .map(|(identity, _)| identity.as_ref().to_string())
+        .collect()
 }
 
 /// The run summary of a [`Worklist`]: the worklist reported as a moving
@@ -396,6 +458,11 @@ pub struct Worklist {
     considered: usize,
     arrived: usize,
     considered_since_rescan: usize,
+    /// Identities whose verification status enumerates a complete set of checks
+    /// ([`crate::execution::verification::VerificationRecord::fully_verified`]).
+    /// Absent means *no complete enumeration*, which ranks a patch with the
+    /// skipped and the unrecorded and never above them (#3786).
+    verified: BTreeSet<String>,
 }
 
 impl Worklist {
@@ -404,7 +471,7 @@ impl Worklist {
     /// execution order.
     pub fn new(patches: impl IntoIterator<Item = Patch>, frozen_at: u64) -> Self {
         let mut remaining: Vec<Patch> = patches.into_iter().collect();
-        remaining.sort_by(|a, b| cost_then_impact(a, b));
+        remaining.sort_by(|a, b| cost_evidence_impact(a, b, &BTreeSet::new()));
         let initial = remaining.len();
         Self {
             remaining,
@@ -414,7 +481,46 @@ impl Worklist {
             considered: 0,
             arrived: 0,
             considered_since_rescan: 0,
+            verified: BTreeSet::new(),
         }
+    }
+
+    /// Adopt the identities whose verification enumeration is complete, and
+    /// re-sort the remaining queue around them.
+    ///
+    /// The caller derives the set; the worklist never decides for itself that a
+    /// status counted ([`verified_identities`] derives it from
+    /// [`crate::execution::verification::VerificationRecord`]s). A status
+    /// carrying a skip must not be handed to this: erasing that distinction is
+    /// the defect this exists to stop (#3786).
+    pub fn with_verified(mut self, verified: impl IntoIterator<Item = String>) -> Self {
+        self.verified = verified.into_iter().collect();
+        self.resort();
+        self
+    }
+
+    /// Record one patch as fully verified and move it up the remaining queue.
+    /// Returns false when it was already recorded.
+    pub fn mark_verified(&mut self, identity: &str) -> bool {
+        let newly = self.verified.insert(identity.to_string());
+        self.resort();
+        newly
+    }
+
+    /// Whether a patch is carried as fully verified.
+    pub fn is_verified(&self, identity: &str) -> bool {
+        self.verified.contains(identity)
+    }
+
+    /// Put the remaining queue back into pass order, evidence tier included.
+    ///
+    /// Shares [`cost_evidence_impact`] with the startup ordering so an arrival's
+    /// position depends on what it is rather than on when it showed up (#3801),
+    /// and so a patch recorded as verified after the freeze moves up by the same
+    /// rule that ordered the startup enumeration.
+    fn resort(&mut self) {
+        self.remaining
+            .sort_by(|a, b| cost_evidence_impact(a, b, &self.verified));
     }
 
     /// The stamp at which this worklist was frozen (its startup
@@ -467,6 +573,10 @@ impl Worklist {
     /// Returns the number of newly arrived identities.
     pub fn absorb(&mut self, fresh: impl IntoIterator<Item = Patch>) -> usize {
         let arrived = absorb_new(&mut self.remaining, fresh);
+        // [`absorb_new`] sorts without evidence (it knows no records); the
+        // worklist does, and re-sorts so an arrival does not jump ahead of work
+        // whose gates are already green (#3786).
+        self.resort();
         self.arrived += arrived;
         self.considered_since_rescan = 0;
         arrived
@@ -735,6 +845,22 @@ pub fn memo_gate_report(memo: &ConversionMemo, patch: &Patch, current_tip: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::verification::{
+        CheckOutcome, FixtureClass, SkipReason, VerificationRecord,
+    };
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// The remaining queue as identities, in the order the run would take it.
+    fn order_of(worklist: &Worklist) -> Vec<String> {
+        worklist
+            .remaining()
+            .iter()
+            .map(|patch| patch.identity.clone())
+            .collect()
+    }
 
     fn patch(identity: &str, base_sha: &str, class: ConversionClass) -> Patch {
         patch_at(identity, base_sha, class, 1)
@@ -774,6 +900,178 @@ mod tests {
                 ConversionClass::Candidate,
             ]
         );
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn evidence_ranks_a_verified_patch_ahead_within_a_cost_class() {
+        // The newer patch is not yet verified; the older one has every gate
+        // green. Evidence outranks recency inside a class (#3786).
+        let patches = vec![
+            patch_at("newer-unverified", "s1", ConversionClass::Candidate, 900),
+            patch_at("older-verified", "s2", ConversionClass::Candidate, 100),
+        ];
+
+        let identities: Vec<_> = order_by_cost_evidenced(&patches, &set(&["older-verified"]))
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(identities, vec!["older-verified", "newer-unverified"]);
+    }
+
+    #[test]
+    fn evidence_leaves_an_unranked_patch_with_the_unverified() {
+        // A name absent from the set is not "verified by default": it ranks
+        // with the skipped work, never above it (#3786).
+        let patches = vec![
+            patch_at("no-record", "s1", ConversionClass::Candidate, 900),
+            patch_at("skipped-gate", "s2", ConversionClass::Candidate, 800),
+        ];
+
+        let identities: Vec<_> = order_by_cost_evidenced(&patches, &set(&[]))
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(identities, vec!["no-record", "skipped-gate"]);
+    }
+
+    #[test]
+    fn evidence_never_lifts_a_candidate_over_a_cheap_conversion() {
+        // A verified `Candidate` still costs a conversion: the terminal-class
+        // patch that was never verified goes first (#3786).
+        let patches = vec![
+            patch_at("candidate-verified", "s1", ConversionClass::Candidate, 900),
+            patch_at("pr-unverified", "s2", ConversionClass::ExistingPr, 100),
+        ];
+
+        let identities: Vec<_> = order_by_cost_evidenced(&patches, &set(&["candidate-verified"]))
+            .iter()
+            .map(|p| p.identity.as_str())
+            .collect();
+        assert_eq!(identities, vec!["pr-unverified", "candidate-verified"]);
+    }
+
+    #[test]
+    fn evidence_keeps_impact_ordering_inside_the_verified_tier() {
+        let patches = vec![
+            patch_unblocks(
+                "verified-low-impact",
+                "s1",
+                ConversionClass::Candidate,
+                900,
+                0,
+            ),
+            patch_unblocks(
+                "verified-high-impact",
+                "s2",
+                ConversionClass::Candidate,
+                100,
+                40,
+            ),
+            patch_unblocks(
+                "unverified-huge-impact",
+                "s3",
+                ConversionClass::Candidate,
+                800,
+                79,
+            ),
+        ];
+
+        let identities: Vec<_> = order_by_cost_evidenced(
+            &patches,
+            &set(&["verified-low-impact", "verified-high-impact"]),
+        )
+        .iter()
+        .map(|p| p.identity.as_str())
+        .collect();
+        assert_eq!(
+            identities,
+            vec![
+                "verified-high-impact",
+                "verified-low-impact",
+                "unverified-huge-impact"
+            ]
+        );
+    }
+
+    #[test]
+    fn worklist_holds_verified_work_at_the_front_across_an_absorb() {
+        // The evidence tier is part of the one total order, so a patch recorded
+        // as verified after the freeze moves up, and a fresh unverified arrival
+        // cannot cut ahead of it (#3786, #3861).
+        let mut wl = Worklist::new(
+            vec![
+                patch_at("fresh-of-run", "s1", ConversionClass::Candidate, 900),
+                patch_at("queued-verified", "s2", ConversionClass::Candidate, 100),
+            ],
+            1_000,
+        )
+        .with_verified(["queued-verified".to_string()]);
+        assert_eq!(order_of(&wl), vec!["queued-verified", "fresh-of-run"]);
+
+        wl.absorb([patch_at(
+            "just-landed",
+            "s3",
+            ConversionClass::Candidate,
+            2_000,
+        )]);
+        assert_eq!(
+            order_of(&wl),
+            vec!["queued-verified", "just-landed", "fresh-of-run"]
+        );
+        assert!(wl.is_verified("queued-verified"));
+        assert!(!wl.is_verified("just-landed"));
+    }
+
+    #[test]
+    fn marking_verified_after_the_freeze_reorderes_the_remaining_queue() {
+        let mut wl = Worklist::new(
+            vec![
+                patch_at("a", "s1", ConversionClass::Candidate, 900),
+                patch_at("b", "s2", ConversionClass::Candidate, 800),
+            ],
+            1_000,
+        );
+        assert_eq!(order_of(&wl), vec!["a", "b"]);
+        assert!(wl.mark_verified("b"));
+        assert_eq!(order_of(&wl), vec!["b", "a"]);
+        // Re-marking is not an error and does not change the order.
+        assert!(!wl.mark_verified("b"));
+        assert_eq!(order_of(&wl), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn verified_identities_admits_only_a_complete_enumeration() {
+        let passed = VerificationRecord::new(
+            "clean",
+            paths(&["src/main.rs"]),
+            vec![
+                CheckOutcome::passed("cargo_fmt"),
+                CheckOutcome::passed("cargo_clippy"),
+                CheckOutcome::passed("cargo_test"),
+            ],
+        )
+        .unwrap();
+        let skipped = VerificationRecord::new(
+            "db-skipped",
+            paths(&["db/migrations/0001_init.sql"]),
+            vec![
+                CheckOutcome::passed("cargo_fmt"),
+                CheckOutcome::passed("cargo_clippy"),
+                CheckOutcome::passed("cargo_test"),
+                CheckOutcome::skipped(
+                    "db_integration",
+                    SkipReason::FixtureUnavailable(FixtureClass::Postgres),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let ranked = verified_identities(vec![("clean", &passed), ("db-skipped", &skipped)]);
+        assert_eq!(ranked, set(&["clean"]));
     }
 
     #[test]
