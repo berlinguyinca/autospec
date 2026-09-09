@@ -18,6 +18,13 @@
 //! registry reachability — so a run that starts without a runtime it assumed can
 //! be explained from the spec instead of from the node's history.
 //!
+//! Staging also names the gate set the patch will be graded against, when the
+//! caller knows it: each `--gate NAME=COMMAND` flag becomes an acceptance
+//! criterion in the staged spec (issue #3925). The grade then enforces exactly
+//! the commands the spec carries — a run graded against a weaker set is not a
+//! run this spec asked for — and a gate that was never run is named in the
+//! verdict instead of counted as clean.
+//!
 //! Input problems (unreadable JSON, an issue payload with no `updatedAt`, a
 //! malformed `--repo`) are the staging host's fault and exit 2 as a diagnostic.
 //! Verdicts that hold or refuse a dispatch exit 1.
@@ -28,6 +35,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use autospec_core::grading::{Gate, GateSet};
 use autospec_core::staged_spec::{
     authorize, format_timestamp, issue_endpoint, parse_timestamp, EnvironmentProbe, IssueComment,
     IssueSnapshot, ProbeState, KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY,
@@ -44,14 +52,17 @@ const CONTAINER_RUNTIMES: &[&str] = &["apptainer", "singularity", "docker", "pod
 /// The tool that reads the live revision when the caller does not supply it.
 const GH: &str = "gh";
 
-/// `autospec dispatch stage --issue N [--issue-json F] [--comments-json F] [--out F]`
+/// `autospec dispatch stage --issue N [--issue-json F] [--comments-json F] [--out F]
+/// [--gate NAME=COMMAND]...`
 ///
 /// Writes `<n>.md`: revision headers, the execution-environment block, the
-/// discussion since the last body edit, and the verbatim body.
+/// discussion since the last body edit, the verbatim body, and — when `--gate`
+/// flags were passed — the gate set the patch is graded against (#3925).
 pub fn stage(args: &[String]) -> Result<(), CommandFailure> {
     let issue = issue_arg(args, "stage")?;
     let out = staged_path(args, "--out", issue)?;
-    let snapshot = snapshot_from_args(args, issue)?;
+    let mut snapshot = snapshot_from_args(args, issue)?;
+    snapshot.gates = parse_gates(opt_strings(args, "--gate")?)?;
     let environment = probe_environment(args)?;
     let staged_at = match opt_string(args, "--staged-at")? {
         Some(raw) => parse_timestamp(&raw).ok_or_else(|| {
@@ -87,6 +98,7 @@ pub fn stage(args: &[String]) -> Result<(), CommandFailure> {
                 "source_updated_at": snapshot.source_updated_at,
                 "comments_included": included,
                 "comments_total": snapshot.comments.len(),
+                "gates": snapshot.gates.len(),
                 "bytes": text.len(),
             }))
             .map_err(|error| CommandFailure::diagnostic(format!("serialise: {error}")))?
@@ -330,6 +342,8 @@ fn snapshot_from_args(args: &[String], issue: u64) -> Result<IssueSnapshot, Comm
                     )?,
                     body_updated_at: timestamp_flag(args, "--body-updated-at")?,
                     comments: Vec::new(),
+                    // The caller's `--gate` flags are merged in by `stage`.
+                    gates: Vec::new(),
                 }
             }
         },
@@ -383,6 +397,8 @@ fn snapshot_from_payload(
         source_updated_at,
         body_updated_at: json_timestamp(payload, "body_updated_at"),
         comments: comments_from_value(payload, source)?,
+        // The caller's `--gate` flags are merged in by `stage`.
+        gates: Vec::new(),
     })
 }
 
@@ -423,6 +439,51 @@ fn gh_api_json(endpoint: &str) -> Result<serde_json::Value, CommandFailure> {
     serde_json::from_str(&text).map_err(|error| {
         CommandFailure::diagnostic(format!("{GH} api {endpoint} is not JSON: {error}"))
     })
+}
+
+/// Every value of a repeatable flag, in the order the flags appeared.
+/// `opt_string` stops at the first occurrence; `--gate` may appear once per
+/// gate in the set the patch is graded against.
+fn opt_strings(args: &[String], flag: &str) -> Result<Vec<String>, CommandFailure> {
+    let mut values = Vec::new();
+    let mut index = 0;
+    while let Some(position) = args[index..].iter().position(|arg| arg == flag) {
+        let flag_index = index + position;
+        let value = args
+            .get(flag_index + 1)
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(format!("dispatch stage: {flag} needs a value"))
+            })?
+            .clone();
+        values.push(value);
+        index = flag_index + 2;
+    }
+    Ok(values)
+}
+
+/// The `--gate NAME=COMMAND` flags, validated as one gate set. The set is data
+/// the grade enforces exactly (#3925): a malformed or duplicated entry is a
+/// staging-host fault (exit 2), not a silently weaker set.
+fn parse_gates(raw: Vec<String>) -> Result<Vec<Gate>, CommandFailure> {
+    // No `--gate` flags: the spec names no gates and renders no gate section.
+    // (An empty set is a `GateSet` error, because grading against nothing
+    // passes everything; staging without gates is a different thing.)
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut gates = Vec::with_capacity(raw.len());
+    for value in &raw {
+        let (name, command) = value.split_once('=').ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "dispatch stage: --gate {value:?} is not NAME=COMMAND; the staged spec names \
+                 the gate set the patch is graded against"
+            ))
+        })?;
+        gates.push(Gate::new(name.to_string(), command.to_string()));
+    }
+    GateSet::new(gates)
+        .map(|set| set.gates().to_vec())
+        .map_err(CommandFailure::diagnostic)
 }
 
 /// A timestamp flag that accepts epoch seconds or RFC 3339, distinguishing

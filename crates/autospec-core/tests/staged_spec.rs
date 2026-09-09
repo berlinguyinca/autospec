@@ -11,6 +11,7 @@
 //! Every verdict has both a positive and a negative case, because the
 //! fail-closed half is the half that costs the dispatcher a run.
 
+use autospec_core::grading::{staged_gates, GateSet, GATES_SECTION};
 use autospec_core::staged_spec::{
     authorize, format_timestamp, parse_timestamp, staged_at, staged_source_updated_at,
     DispatchVerdict, EnvironmentProbe, IssueComment, IssueSnapshot, ProbeState, RefuseReason,
@@ -53,6 +54,7 @@ fn snapshot() -> IssueSnapshot {
                 "The merge host stages; the worker's gh is unauthenticated.",
             ),
         ],
+        gates: Vec::new(),
     }
 }
 
@@ -202,6 +204,59 @@ fn a_quoted_header_in_the_body_cannot_forge_the_staged_revision() {
     // under `## Issue body` and are ignored by the reader.
     assert_eq!(staged_source_updated_at(&text), Some(SOURCE_UPDATED_AT));
     assert_eq!(staged_at(&text), Some(STAGED_AT));
+}
+
+// ---------------------------------------------------------- gate set --
+
+#[test]
+fn the_staged_spec_carries_the_gate_set_the_patch_is_graded_against() {
+    let set = GateSet::rust_workspace();
+    let mut source = snapshot();
+    source.gates = set.gates().to_vec();
+
+    let text = source.stage(&environment(), STAGED_AT);
+
+    assert!(text.contains(GATES_SECTION), "{text}");
+    // The gate set is the last section: the acceptance criteria the worker
+    // satisfies come before the gates the result is graded against.
+    assert!(
+        text.rfind(GATES_SECTION).expect("gate section")
+            > text.find(BODY_SECTION).expect("body section"),
+        "{text}"
+    );
+    for gate in set.gates() {
+        assert!(text.contains(&format!("- [ ] {}", gate.command)), "{text}");
+    }
+    // And it reads back as the same commands, in the same order: the spec
+    // names the gate set the grade enforces, not a weaker one.
+    assert_eq!(staged_gates(&text), Some(set.commands()));
+}
+
+#[test]
+fn a_snapshot_with_no_gates_stages_no_gate_section() {
+    let text = staged();
+
+    assert!(!text.contains(GATES_SECTION), "{text}");
+    assert_eq!(staged_gates(&text), None);
+}
+
+#[test]
+fn a_snapshot_document_without_a_gates_field_reads_back_with_none() {
+    // A pre-#3925 snapshot document: no `gates` key at all. The field defaults
+    // to empty rather than failing, so older serialized snapshots stay
+    // readable.
+    let json = r#"{
+        "number": 50,
+        "title": "Run the batch on the cluster",
+        "body": "Dispatch the batch.",
+        "source_updated_at": 1756999000,
+        "body_updated_at": 1756998000,
+        "comments": []
+    }"#;
+    let source: IssueSnapshot = serde_json::from_str(json).expect("deserializes");
+
+    assert!(source.gates.is_empty());
+    assert_eq!(staged_gates(&source.stage(&environment(), STAGED_AT)), None);
 }
 
 // ------------------------------------------------------------- freshness --

@@ -29,10 +29,19 @@
 //!    absent fails slowly and misleadingly, so the spec names what is present,
 //!    what is absent, and what was never probed.
 //!
+//! A fifth concern, the same drift from the grading side (#3925): when the
+//! caller knows the gate set the patch will be graded against, the staged
+//! spec carries it as acceptance criteria ([`IssueSnapshot::gates`],
+//! rendered from [`crate::grading`]). The spec a worker reads names the same
+//! gate commands that decide whether the patch lands, so a run graded
+//! against a weaker set is not one this spec asked for. A spec that names
+//! no gates renders no gate section.
+//!
 //! Everything here is pure and testable: no I/O, no clock, no subprocess. The
 //! caller fetches the issue, probes its own host, and calls
 //! [`IssueSnapshot::stage`] when staging and [`authorize`] when dispatching.
 
+use crate::grading::Gate;
 use serde::{Deserialize, Serialize};
 
 /// Header recording the source issue number.
@@ -107,6 +116,12 @@ pub struct IssueSnapshot {
     pub body_updated_at: Option<u64>,
     /// Every comment on the source issue, in any order.
     pub comments: Vec<IssueComment>,
+    /// The gate set the patch is graded against, in gate-set order
+    /// (#3925). Empty when the caller does not name one: the spec then
+    /// carries no gate section and [`crate::grading::staged_gates`] reads
+    /// it back as absent.
+    #[serde(default)]
+    pub gates: Vec<Gate>,
 }
 
 impl IssueSnapshot {
@@ -129,7 +144,10 @@ impl IssueSnapshot {
     }
 
     /// Render the staged spec: revision headers, then the execution
-    /// environment, then the discussion, then the body verbatim.
+    /// environment, then the discussion, then the body verbatim, and — when
+    /// the snapshot names a gate set — the gate section last, so the
+    /// acceptance criteria a worker satisfies and the gates that grade the
+    /// result are one document (#3925).
     pub fn stage(&self, environment: &EnvironmentProbe, staged_at: u64) -> String {
         let discussion = self.comments_since_body_edit();
         let mut out = String::new();
@@ -187,6 +205,10 @@ impl IssueSnapshot {
         out.push('\n');
         out.push_str(self.body.trim_end());
         out.push('\n');
+        if !self.gates.is_empty() {
+            out.push('\n');
+            out.push_str(&crate::grading::gate_section(&self.gates));
+        }
         out
     }
 }
