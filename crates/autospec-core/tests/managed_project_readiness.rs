@@ -38,6 +38,8 @@ fn ready_input(candidates: Vec<RemoteIssue>) -> ReadyQueueInput {
         dependencies: BTreeMap::new(),
         pull_requests: PullRequestEvidence::Available(Vec::new()),
         policy: QueuePolicy::new(3, 0),
+        capabilities: BTreeMap::new(),
+        no_output_streaks: BTreeMap::new(),
     }
 }
 

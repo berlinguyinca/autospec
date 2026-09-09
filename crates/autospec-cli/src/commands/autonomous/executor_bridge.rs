@@ -1492,6 +1492,10 @@ fn run_executor_bridge_with_codex_probe_observed(
         {
             capture_work_before_zero_effect(&request.state_path, &state)?;
             prepare_zero_effect_retry(&request.state_path, &state, runtime.take())?;
+            crate::commands::queue::zero_output_streaks::record_zero_output(
+                &state.identity.repository,
+                state.identity.issue,
+            );
             return finalize_bridge_failure(
                 request,
                 &mut state,
@@ -8778,6 +8782,10 @@ pub(crate) fn originate_and_accept_executor_result(
             "executor result publication receipt",
         )?;
         persist_accepted_executor_result(state_path, state, &evidence)?;
+        crate::commands::queue::zero_output_streaks::clear(
+            &state.identity.repository,
+            state.identity.issue,
+        );
         return Ok(evidence);
     }
     let success = ExecutorSuccessBinding {
@@ -8818,6 +8826,10 @@ pub(crate) fn originate_and_accept_executor_result(
         "executor result publication receipt",
     )?;
     persist_accepted_executor_result(state_path, state, &evidence)?;
+    crate::commands::queue::zero_output_streaks::clear(
+        &state.identity.repository,
+        state.identity.issue,
+    );
     Ok(evidence)
 }
 

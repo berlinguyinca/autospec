@@ -23,9 +23,14 @@ use super::lint::{
 use super::CommandFailure;
 
 mod accountability;
+mod capabilities;
 mod issue_writes;
+pub(crate) mod zero_output_streaks;
 use accountability::{is_accountability_issue, reviewable_issue_with_recheck, RecheckScope};
-use issue_writes::{add_issue_label, remove_issue_label, update_issue_body};
+use capabilities::observe_capabilities;
+use issue_writes::{
+    add_issue_label, ensure_needs_human_label, remove_issue_label, update_issue_body,
+};
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -497,9 +502,41 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
     let repo = options.repo.map_or_else(infer_repo, Ok)?;
     let batch_size = options.batch_size.unwrap_or_else(default_batch_size);
     let plan = ready_plan_for(&repo, batch_size)?;
+    route_zero_output_reviews(&repo, &plan);
     let constrained = !only_issues().is_empty();
     println!("{}", plan_json(&plan, constrained));
     Ok(())
+}
+
+/// Routes issues the frontier held for consecutive zero-output runs to human
+/// review.
+///
+/// Once an issue's runs have completed without producing artifacts twice in
+/// a row, re-dispatching would only burn the same time again. The frontier
+/// has already stopped offering it; applying the `autospec:needs-human`
+/// label makes the hold durable and actionable until a human intervenes.
+///
+/// Best-effort by design: a label write failure must never break plan
+/// output, so failures are reported on stderr and the run continues.
+fn route_zero_output_reviews(repo: &str, plan: &ReadyQueuePlan) {
+    let review_issues: Vec<u64> = plan
+        .blocked
+        .iter()
+        .filter(|view| view.reason.as_deref() == Some("zero_output_review"))
+        .map(|view| view.issue.number)
+        .collect();
+    if review_issues.is_empty() {
+        return;
+    }
+    if let Err(error) = ensure_needs_human_label(repo) {
+        eprintln!("could not ensure autospec:needs-human label in {repo}: {error}");
+        return;
+    }
+    for number in review_issues {
+        if let Err(error) = add_issue_label(repo, number, "autospec:needs-human") {
+            eprintln!("could not route issue #{number} to review: {error}");
+        }
+    }
 }
 
 pub(crate) fn ready_plan_for(
@@ -539,6 +576,8 @@ pub(crate) fn ready_plan_for(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
+    let capabilities = observe_capabilities(&candidates);
+    let no_output_streaks = zero_output_streaks::load(repo);
     Ok(plan_ready_queue_with_trusted_actors(
         &ReadyQueueInput {
             candidates,
@@ -546,6 +585,8 @@ pub(crate) fn ready_plan_for(
             dependencies,
             pull_requests,
             policy,
+            capabilities,
+            no_output_streaks,
         },
         &trusted_actors,
     ))
@@ -984,7 +1025,7 @@ fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
 fn gate_counts_json(plan: &ReadyQueuePlan) -> String {
     let counts = &plan.gate_counts;
     format!(
-        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"duplicates\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
+        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"duplicates\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"capability_blocked\":{},\"zero_output_review\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
         counts.open,
         counts.candidate,
         counts.reviewed,
@@ -993,6 +1034,8 @@ fn gate_counts_json(plan: &ReadyQueuePlan) -> String {
         counts.dependency_blocked,
         counts.linked_pr_blocked,
         counts.path_conflicted,
+        counts.capability_blocked,
+        counts.zero_output_review,
         counts.ready,
         counts.claimed,
         counts.selected,
@@ -1026,6 +1069,8 @@ const VIEW_FIELD_DISPATCHERS: &[ViewFieldDispatcher] = &[
     append_duplicate_of_field,
     append_path_field,
     append_parallel_safety_fields,
+    append_blocked_capabilities_field,
+    append_zero_output_streak_field,
 ];
 
 fn view_json(view: &QueueIssueView) -> String {
@@ -1108,6 +1153,21 @@ fn append_duplicate_of_field(view: &QueueIssueView, fields: &mut Vec<String>) {
 fn append_path_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(path) = &view.path {
         fields.push(json_field("path", json_string(path)));
+    }
+}
+
+fn append_blocked_capabilities_field(view: &QueueIssueView, fields: &mut Vec<String>) {
+    if !view.blocked_capabilities.is_empty() {
+        fields.push(json_field(
+            "blocked_capabilities",
+            strings_json(&view.blocked_capabilities),
+        ));
+    }
+}
+
+fn append_zero_output_streak_field(view: &QueueIssueView, fields: &mut Vec<String>) {
+    if let Some(streak) = view.zero_output_streak {
+        fields.push(json_field("zero_output_streak", streak.to_string()));
     }
 }
 

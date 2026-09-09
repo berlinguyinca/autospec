@@ -147,6 +147,8 @@ fn promoted_payload_is_eligible(
             dependencies: BTreeMap::new(),
             pull_requests: PullRequestEvidence::Available(Vec::new()),
             policy: QueuePolicy::new(1, 0),
+            capabilities: std::collections::BTreeMap::new(),
+            no_output_streaks: std::collections::BTreeMap::new(),
         },
         trusted_actors,
     );
