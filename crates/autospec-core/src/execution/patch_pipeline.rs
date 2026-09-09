@@ -81,6 +81,17 @@
 //!     Conflicting` transition is surfaced in the pass that observes it:
 //!     that is the moment the cheap fix expired, and decay measured by
 //!     age alone is invisible until it is terminal (#3899).
+//! 12. **An outcome is derived from verified steps, not from the
+//!     commands the pass intended to run** ([`decide_publication`],
+//!     [`PublicationLog`]). The four publish steps — commit, push, PR
+//!     creation, PR merge — each record their exit status *and their
+//!     captured output* ([`VerifiedStep`]); a step that fails before a
+//!     PR can exist is a `HELD` that quotes the step's own output, not
+//!     a `CONVERTED`; `CONVERTED` is refused without a PR number the
+//!     remote confirmed; the converted counter is derived from recorded
+//!     outcomes, never incremented beside a claim; and the pass
+//!     reconciles its converted claims against what the remote shows
+//!     before it finishes ([`reconcile_converted`]) (#3972).
 
 use std::collections::BTreeMap;
 
@@ -1295,6 +1306,339 @@ impl GateEvidence {
             self.summary, self.ran_against, branch
         ))
     }
+}
+
+/// The publish steps in the order the pass runs them after the hermetic
+/// build has passed its gate (#3972).
+///
+/// Each step is a separate process with a separate failure mode: `git
+/// commit` can produce nothing, `git push` can be refused by the remote,
+/// `gh pr create` can fail on an API error, and `gh pr merge` can meet a
+/// conflict. Running the four as one gesture — then announcing the
+/// outcome — is exactly how the pass reported `CONVERTED` for a patch
+/// whose PR never existed (#3972).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PublishStep {
+    /// `git commit` on the conversion branch.
+    Commit,
+    /// `git push` of the conversion branch to the remote.
+    Push,
+    /// `gh pr create` for the conversion branch.
+    PrCreate,
+    /// `gh pr merge` of the opened PR.
+    PrMerge,
+}
+
+impl PublishStep {
+    /// All steps, in run order.
+    pub const ALL: [Self; 4] = [Self::Commit, Self::Push, Self::PrCreate, Self::PrMerge];
+
+    /// The command the step runs, for log lines and errors.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Commit => "git commit",
+            Self::Push => "git push",
+            Self::PrCreate => "gh pr create",
+            Self::PrMerge => "gh pr merge",
+        }
+    }
+
+    /// Whether this step's failure turns the patch into a hold.
+    ///
+    /// Commit, push, and PR creation: when one of them fails, the PR
+    /// does not exist, and claiming it is reporting a success that was
+    /// not verified. A merge failure is different: the PR exists and is
+    /// open, "merge deferred" is the honest description of that state,
+    /// and the ledger keeps owning the PR (rule 11).
+    pub fn failure_holds(self) -> bool {
+        !matches!(self, Self::PrMerge)
+    }
+}
+
+/// One executed publish step with its result verified and its output
+/// captured (#3972).
+///
+/// The two fields the old pass lost: the exit status, which was
+/// discarded, and the output, which was piped away. A failure with no
+/// captured output has nothing to quote — the hold line states the
+/// consequence instead of the cause, and the operator has to re-run the
+/// command to find out why it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStep {
+    step: PublishStep,
+    exit: i32,
+    output: String,
+}
+
+impl VerifiedStep {
+    /// Record one step. The output must have been captured — both
+    /// streams, to a file, read back — and refusing to record an empty
+    /// capture is what makes "discarded the output" a loud error
+    /// instead of a silent habit (#3972).
+    pub fn record(step: PublishStep, exit: i32, output: &str) -> Result<Self, String> {
+        if output.trim().is_empty() {
+            return Err(format!(
+                "refusing to record {}: the step's output capture is empty — capture both streams to a file and read it back before recording; a failure with no captured output is a failure with no cause",
+                step.as_str()
+            ));
+        }
+        Ok(Self {
+            step,
+            exit,
+            output: output.to_string(),
+        })
+    }
+
+    /// The step this result is for.
+    pub fn step(&self) -> PublishStep {
+        self.step
+    }
+
+    /// The exit status the caller observed.
+    pub fn exit(&self) -> i32 {
+        self.exit
+    }
+
+    /// The captured output, quoted in the hold line when the step
+    /// failed.
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    /// Whether the step's exit status is zero.
+    pub fn ok(&self) -> bool {
+        self.exit == 0
+    }
+}
+
+/// What the pass may report for one patch, derived only from the
+/// verified steps and the PR the remote confirmed (#3972).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    /// The PR exists and its number is the one `gh pr create` reported.
+    /// `merged` is true only when the merge step was recorded with exit
+    /// zero.
+    Converted {
+        /// The PR number the remote confirmed, e.g. `#42`.
+        pr: String,
+        /// Whether the merge step was verified.
+        merged: bool,
+    },
+    /// A step failed before the PR could exist. The hold names the step
+    /// and quotes its captured output: the cause, not the consequence.
+    Held {
+        /// The step that failed.
+        step: PublishStep,
+        /// The step's captured output, quoted in the claim line.
+        output: String,
+    },
+}
+
+impl PublicationOutcome {
+    /// The line the pass may print for this outcome. Every token in the
+    /// line is derived from a verified field: the PR number is the one
+    /// the remote reported, and the quoted text is the one the failed
+    /// step printed.
+    pub fn claim_line(&self, patch_identity: &str) -> String {
+        match self {
+            Self::Converted { pr, merged: true } => {
+                format!("CONVERTED (PR {pr} merged): {patch_identity}")
+            }
+            Self::Converted { pr, merged: false } => {
+                format!("CONVERTED (PR {pr} open, merge deferred): {patch_identity}")
+            }
+            Self::Held { step, output } => {
+                format!("HELD at {}: {patch_identity}: {output}", step.as_str())
+            }
+        }
+    }
+}
+
+/// Derive one patch's outcome from its verified steps. This is the
+/// function the pass calls before printing any outcome line: the line
+/// is assembled from what the remote confirmed, not from the intent to
+/// run four commands (#3972).
+///
+/// `steps` are the steps the pass actually ran, in run order. A step
+/// that fails stops the run, so a failure may only appear as the last
+/// recorded step. `verified_pr` is the PR number extracted from the
+/// remote's own response (`gh pr create` prints the URL); a `Converted`
+/// outcome is refused without it — a pass that cannot point at a PR
+/// number cannot claim a PR.
+pub fn decide_publication(
+    patch_identity: &str,
+    steps: &[VerifiedStep],
+    verified_pr: Option<&str>,
+) -> Result<PublicationOutcome, String> {
+    let expected = PublishStep::ALL;
+    if steps.is_empty() {
+        return Err(format!(
+            "{patch_identity}: no publish steps recorded — a pass cannot report an outcome for steps it never ran"
+        ));
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if step.step() != expected[index] {
+            return Err(format!(
+                "{patch_identity}: publish step {index} is {} but the pass runs {} there — steps must be recorded in run order, each exactly once",
+                step.step().as_str(),
+                expected[index].as_str()
+            ));
+        }
+    }
+    for step in steps.iter().take(steps.len().saturating_sub(1)) {
+        if !step.ok() {
+            return Err(format!(
+                "{patch_identity}: {} failed but later steps were recorded — a failed step stops the run; re-run the pass instead of reporting past the failure",
+                step.step().as_str()
+            ));
+        }
+    }
+    let last = steps.last().expect("checked non-empty above");
+    if !last.ok() && last.step().failure_holds() {
+        return Ok(PublicationOutcome::Held {
+            step: last.step(),
+            output: last.output().to_string(),
+        });
+    }
+    if steps.len() < expected.len() && last.ok() {
+        return Err(format!(
+            "{patch_identity}: the pass stopped after {} without a recorded failure — a run that stops early must record why it stopped",
+            last.step().as_str()
+        ));
+    }
+    let pr = match verified_pr {
+        Some(pr) if !pr.trim().is_empty() => pr.trim().to_string(),
+        _ => {
+            return Err(format!(
+                "{patch_identity}: refusing to report CONVERTED without a PR number the remote confirmed — the counter counts verified PRs, not commands the pass intended to run"
+            ))
+        }
+    };
+    Ok(PublicationOutcome::Converted {
+        pr,
+        merged: last.ok(),
+    })
+}
+
+/// The run's publication record: one outcome per patch, with counters
+/// derived from the outcomes rather than incremented beside them
+/// (#3972).
+///
+/// A counter the driver bumps while printing the line can disagree with
+/// the line — the bump and the claim are two gestures. Deriving the
+/// count from the recorded outcomes makes them one: a patch the pass
+/// did not record as converted does not enter the total.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublicationLog {
+    outcomes: Vec<(String, PublicationOutcome)>,
+}
+
+impl PublicationLog {
+    /// An empty run record.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one patch's outcome. Each identity is recorded once: a
+    /// second record for the same patch means the pass re-ran the
+    /// publish without retiring the first claim, and silently taking
+    /// either one is a guess.
+    pub fn record(&mut self, identity: &str, outcome: PublicationOutcome) -> Result<(), String> {
+        if identity.trim().is_empty() {
+            return Err("a publication outcome must name the patch it is about".to_string());
+        }
+        if self.outcomes.iter().any(|(id, _)| id == identity) {
+            return Err(format!(
+                "{identity}: already recorded — a patch has one publication outcome per pass; retire the first claim before re-recording"
+            ));
+        }
+        self.outcomes.push((identity.to_string(), outcome));
+        Ok(())
+    }
+
+    /// The number of patches with a verified PR. Derived from the
+    /// outcomes; never incremented by the driver (#3972).
+    pub fn converted_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, PublicationOutcome::Converted { .. }))
+            .count()
+    }
+
+    /// The number of patches held at a failed step.
+    pub fn held_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, PublicationOutcome::Held { .. }))
+            .count()
+    }
+
+    /// The claim line for one patch, if it was recorded.
+    pub fn claim_line(&self, identity: &str) -> Option<String> {
+        self.outcomes
+            .iter()
+            .find(|(id, _)| id == identity)
+            .map(|(_, o)| o.claim_line(identity))
+    }
+
+    /// Every claim line, in record order — the block the pass prints.
+    pub fn claim_lines(&self) -> Vec<String> {
+        self.outcomes
+            .iter()
+            .map(|(id, o)| o.claim_line(id))
+            .collect()
+    }
+}
+
+/// Reconcile the run's converted claims against what the remote
+/// actually shows (#3972).
+///
+/// `observed` is what the pass re-reads from the remote after the run
+/// (`gh pr list`): (patch identity, PR number) pairs. Every patch the
+/// log claims as converted must appear there under the same PR number
+/// the run recorded. The check runs at the end of the pass, not at the
+/// start of the next one: a claim with no PR behind it is a lie the
+/// pass is about to hand to the operator, and the handoff is where the
+/// damage happens.
+pub fn reconcile_converted(
+    log: &PublicationLog,
+    observed: &[(&str, &str)],
+) -> Result<String, String> {
+    let mut missing: Vec<&str> = Vec::new();
+    let mut mismatched: Vec<String> = Vec::new();
+    for (identity, outcome) in log.outcomes.iter() {
+        if let PublicationOutcome::Converted { pr, .. } = outcome {
+            match observed.iter().find(|(id, _)| *id == identity.as_str()) {
+                None => missing.push(identity),
+                Some((_, number)) if number.trim() != pr.trim() => {
+                    mismatched.push(format!("{identity}: recorded {pr}, remote shows {number}"))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if !missing.is_empty() || !mismatched.is_empty() {
+        let mut parts = Vec::new();
+        if !missing.is_empty() {
+            parts.push(format!(
+                "reported converted but no PR observed for: [{}]",
+                missing.join(", ")
+            ));
+        }
+        if !mismatched.is_empty() {
+            parts.push(format!(
+                "PR number disagrees with the remote: [{}]",
+                mismatched.join("; ")
+            ));
+        }
+        return Err(format!("reconciliation failed: {}", parts.join("; ")));
+    }
+    let count = log.converted_count();
+    Ok(format!(
+        "reconciled: {} converted claim{} all backed by an observed PR",
+        count,
+        if count == 1 { "" } else { "s" }
+    ))
 }
 
 #[cfg(test)]
@@ -2550,5 +2894,219 @@ mod tests {
         // The second branch was never built: the loop stopped at the
         // first failure rather than pushing a mislabeled PR.
         assert!(!branches.contains_key("conv/issue-#3888"));
+    }
+
+    // ---- #3972: verified publication outcomes ----
+
+    fn green_steps(patch: &str, pr: &str) -> Vec<VerifiedStep> {
+        vec![
+            VerifiedStep::record(
+                PublishStep::Commit,
+                0,
+                &format!("[conv/issue-{patch}] fix: the change"),
+            )
+            .unwrap(),
+            VerifiedStep::record(
+                PublishStep::Push,
+                0,
+                &format!("To github.com:owner/repo.git  {pr} -> conv/issue-{patch}"),
+            )
+            .unwrap(),
+            VerifiedStep::record(
+                PublishStep::PrCreate,
+                0,
+                &format!("https://github.com/owner/repo/pull/{pr}"),
+            )
+            .unwrap(),
+            VerifiedStep::record(PublishStep::PrMerge, 0, &format!("Merged PR #{pr}")).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn verified_step_refuses_an_empty_capture() {
+        // A step's output must be captured, not discarded: an empty
+        // capture means a failure has nothing to quote (#3972).
+        let err = VerifiedStep::record(PublishStep::PrCreate, 1, "").unwrap_err();
+        assert!(err.contains("gh pr create"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+        assert!(VerifiedStep::record(PublishStep::Push, 0, "   \n").is_err());
+        let step = VerifiedStep::record(PublishStep::Commit, 1, "nothing to commit").unwrap();
+        assert_eq!(step.step(), PublishStep::Commit);
+        assert_eq!(step.exit(), 1);
+        assert!(!step.ok());
+        assert_eq!(step.output(), "nothing to commit");
+    }
+
+    #[test]
+    fn a_failed_pr_create_is_held_not_converted_and_the_counter_agrees() {
+        // Acceptance, exercised against a populated case (#3793 / #3972):
+        // a run where `gh pr create` is forced to fail must report HELD —
+        // quoting the tool's own error — and must not increment the
+        // converted counter.
+        let mut log = PublicationLog::new();
+
+        // Patch A: all four steps verified, the remote confirmed the
+        // number, the merge landed.
+        let a = green_steps("41", "42");
+        let outcome_a = decide_publication("#41", &a, Some("#42")).unwrap();
+        assert_eq!(
+            outcome_a.claim_line("#41"),
+            "CONVERTED (PR #42 merged): #41"
+        );
+        log.record("#41", outcome_a).unwrap();
+
+        // Patch B: the PR opened but the merge was deferred — the PR
+        // exists, so this is a converted claim with the merge pending.
+        let mut b = green_steps("42", "43");
+        b[3] = VerifiedStep::record(
+            PublishStep::PrMerge,
+            1,
+            "PR #43 is not mergeable: status checks are still pending",
+        )
+        .unwrap();
+        let outcome_b = decide_publication("#42", &b, Some("#43")).unwrap();
+        assert_eq!(
+            outcome_b.claim_line("#42"),
+            "CONVERTED (PR #43 open, merge deferred): #42"
+        );
+        log.record("#42", outcome_b).unwrap();
+
+        // Patch C: the defect under test. The old pass piped this to
+        // /dev/null and printed CONVERTED anyway.
+        let mut c = green_steps("43", "44");
+        c[2] = VerifiedStep::record(
+            PublishStep::PrCreate,
+            1,
+            "GraphQL: no commits between main and conv/issue-#43",
+        )
+        .unwrap();
+        // The run stopped at the failure: the merge was never run.
+        c.pop();
+        let outcome_c = decide_publication("#43", &c, None).unwrap();
+        match &outcome_c {
+            PublicationOutcome::Held { step, output } => {
+                assert_eq!(*step, PublishStep::PrCreate);
+                assert_eq!(
+                    output,
+                    "GraphQL: no commits between main and conv/issue-#43"
+                );
+            }
+            other => panic!("expected Held, got {other:?}"),
+        }
+        let line_c = outcome_c.claim_line("#43");
+        assert!(line_c.starts_with("HELD at gh pr create: #43:"), "{line_c}");
+        assert!(
+            line_c.contains("GraphQL: no commits between main and conv/issue-#43"),
+            "{line_c}"
+        );
+        log.record("#43", outcome_c).unwrap();
+
+        // The counter is derived from verified outcomes: two converted,
+        // one held — the failed PR create did not enter the total.
+        assert_eq!(log.converted_count(), 2);
+        assert_eq!(log.held_count(), 1);
+        assert_eq!(
+            log.claim_lines(),
+            vec![
+                "CONVERTED (PR #42 merged): #41",
+                "CONVERTED (PR #43 open, merge deferred): #42",
+                "HELD at gh pr create: #43: GraphQL: no commits between main and conv/issue-#43",
+            ]
+        );
+        // A patch cannot be re-recorded over its first claim.
+        let err = log
+            .record(
+                "#43",
+                PublicationOutcome::Held {
+                    step: PublishStep::PrCreate,
+                    output: "x".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("already recorded"), "{err}");
+    }
+
+    #[test]
+    fn converted_is_refused_without_a_verified_pr() {
+        // A green run that cannot point at a PR number the remote
+        // confirmed is not a converted run (#3972).
+        let steps = green_steps("41", "42");
+        let err = decide_publication("#41", &steps, None).unwrap_err();
+        assert!(
+            err.contains("without a PR number the remote confirmed"),
+            "{err}"
+        );
+        let err = decide_publication("#41", &steps, Some("  ")).unwrap_err();
+        assert!(
+            err.contains("without a PR number the remote confirmed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn decide_refuses_missing_out_of_order_and_past_failure_steps() {
+        // Outcomes are derived from the steps actually run, in run
+        // order: nothing may be skipped, reordered, or reported past a
+        // failure (#3972).
+        let steps = green_steps("41", "42");
+        assert!(decide_publication("#41", &[], Some("#42")).is_err());
+
+        let mut reordered = steps.clone();
+        reordered.swap(0, 1);
+        let err = decide_publication("#41", &reordered, Some("#42")).unwrap_err();
+        assert!(err.contains("run order"), "{err}");
+
+        let mut pushed_after_commit_failure = steps.clone();
+        pushed_after_commit_failure[0] =
+            VerifiedStep::record(PublishStep::Commit, 1, "nothing to commit").unwrap();
+        let err = decide_publication("#41", &pushed_after_commit_failure, None).unwrap_err();
+        assert!(
+            err.contains("failed but later steps were recorded"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_stops_early_without_a_failure_is_refused() {
+        // Stopping after a green step is not "merge deferred" — the
+        // deferral has to be the recorded result of the merge step
+        // itself (#3972).
+        let steps = green_steps("41", "42");
+        let early = &steps[..3];
+        let err = decide_publication("#41", early, Some("#42")).unwrap_err();
+        assert!(err.contains("stopped after gh pr create"), "{err}");
+    }
+
+    #[test]
+    fn reconcile_catches_a_converted_claim_with_no_pr() {
+        // The end-of-pass assertion: every converted claim must have a
+        // PR behind it, under the number the run recorded (#3972).
+        let mut log = PublicationLog::new();
+        log.record(
+            "#41",
+            decide_publication("#41", &green_steps("41", "42"), Some("#42")).unwrap(),
+        )
+        .unwrap();
+        let mut deferred = green_steps("42", "43");
+        deferred[3] = VerifiedStep::record(PublishStep::PrMerge, 1, "checks pending").unwrap();
+        log.record(
+            "#42",
+            decide_publication("#42", &deferred, Some("#43")).unwrap(),
+        )
+        .unwrap();
+
+        let ok = reconcile_converted(&log, &[("#41", "#42"), ("#42", "#43")]).unwrap();
+        assert!(ok.contains("2 converted claims"), "{ok}");
+
+        // The remote shows no PR for #42: the claim has nothing behind
+        // it and the reconciliation names it.
+        let err = reconcile_converted(&log, &[("#41", "#42")]).unwrap_err();
+        assert!(err.contains("no PR observed"), "{err}");
+        assert!(err.contains("#42"), "{err}");
+
+        // The remote shows a different number: the recorded claim and
+        // the remote disagree.
+        let err = reconcile_converted(&log, &[("#41", "#99"), ("#42", "#43")]).unwrap_err();
+        assert!(err.contains("#41: recorded #42, remote shows #99"), "{err}");
     }
 }
