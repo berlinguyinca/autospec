@@ -73,14 +73,15 @@
 //!     failure a permanent verdict against the patch, and a gate that did
 //!     not run neither satisfies nor refutes an acceptance criterion.
 //! 11. **An open PR is work in progress, and the opener owns it**
-//!     ([`PrLedger`]). "Opened a PR" is not a terminal state: the pass
-//!     that opens a PR is responsible for landing it, so every run
-//!     summary reports the PRs the pass's family previously opened that
-//!     are still open, with age, alongside converted/held/skipped — a
-//!     number that only goes up is the alarm. And a `Mergeable ->
-//!     Conflicting` transition is surfaced in the pass that observes it:
-//!     that is the moment the cheap fix expired, and decay measured by
-//!     age alone is invisible until it is terminal (#3899).
+//!     ([`PrLedger`], [`run_summary`]). "Opened a PR" is not a terminal
+//!     state: the pass that opens a PR is responsible for landing it, so
+//!     every run summary reports the PRs the pass's family previously
+//!     opened that are still open, with age, alongside converted/held/
+//!     skipped — a number that only goes up is the alarm. And a
+//!     `Mergeable -> Conflicting` transition is surfaced in the pass
+//!     that observes it: that is the moment the cheap fix expired, and
+//!     decay measured by age alone is invisible until it is terminal
+//!     (#3899).
 //! 12. **An outcome is derived from verified steps, not from the
 //!     commands the pass intended to run** ([`decide_publication`],
 //!     [`PublicationLog`]). The four publish steps — commit, push, PR
@@ -1641,6 +1642,49 @@ pub fn reconcile_converted(
     ))
 }
 
+// ---- #3899: the pass run summary ----
+
+/// The run summary of one conversion pass (#3899).
+///
+/// The block the pass prints at the end of *every* pass, derived only
+/// from what the pass recorded — never from what it intended:
+///
+/// 1. The converted/held counts, derived from the recorded outcomes
+///    (rule 12, #3972), followed by the per-patch claim lines in
+///    recorded order.
+/// 2. One line per mergeability transition this pass observed, in
+///    observation order. The caller collects the reports its
+///    [`PrLedger::observe`] calls returned during this pass and passes
+///    them in; a fresh pass passes a fresh list. The `Mergeable ->
+///    Conflicting` alarm is therefore surfaced in exactly one summary —
+///    the pass that observed it, which is the moment the cheap fix
+///    expired (rule 11, #3899) — and re-aging the PR in later passes
+///    shows up in the line item, not as a repeated alarm.
+/// 3. The line item: the previously opened PRs still open, with age
+///    (rule 11, #3899). A pass that converted and held nothing prints
+///    it too — a number that only goes up is the alarm, and a pass
+///    that printed nothing is the pass that hid it.
+///
+/// Deterministic, so the block is stable across runs and diff-able:
+/// the same recorded outcomes, observations, and ledger state produce
+/// the same summary at the same stamp.
+pub fn run_summary(
+    log: &PublicationLog,
+    ledger: &PrLedger,
+    transitions: &[String],
+    now: u64,
+) -> String {
+    let mut lines = vec![format!(
+        "converted: {}, held: {}",
+        log.converted_count(),
+        log.held_count()
+    )];
+    lines.extend(log.claim_lines());
+    lines.extend(transitions.iter().cloned());
+    lines.push(ledger.summary_line(now));
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3108,5 +3152,123 @@ mod tests {
         // the remote disagree.
         let err = reconcile_converted(&log, &[("#41", "#99"), ("#42", "#43")]).unwrap_err();
         assert!(err.contains("#41: recorded #42, remote shows #99"), "{err}");
+    }
+
+    // ---- #3899: the pass run summary ----
+
+    #[test]
+    fn run_summary_reports_open_prs_with_age_alongside_converted_and_held() {
+        // Acceptance (#3899, exercised against the populated case):
+        // the previous pass opened PR #43 and deferred its merge; this
+        // pass converts one patch, holds another, and observes the
+        // still-open PR. The run summary must report the open PR with
+        // age alongside the converted/held claims.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#43", 1_000).unwrap();
+
+        let mut log = PublicationLog::new();
+        // This pass: patch #41 converts, PR #42 merged.
+        log.record(
+            "#41",
+            decide_publication("#41", &green_steps("41", "42"), Some("#42")).unwrap(),
+        )
+        .unwrap();
+        // Patch #44 held at gh pr create: the old pass piped this to
+        // /dev/null and printed CONVERTED anyway (#3972).
+        let mut held = green_steps("44", "45");
+        held[2] = VerifiedStep::record(
+            PublishStep::PrCreate,
+            1,
+            "GraphQL: no commits between main and conv/issue-#44",
+        )
+        .unwrap();
+        held.pop();
+        log.record("#44", decide_publication("#44", &held, None).unwrap())
+            .unwrap();
+
+        // The pass observed the open PR this pass: still mergeable, so
+        // no transition is reported.
+        assert_eq!(ledger.observe("#43", Mergeable::Mergeable, 9_000), Ok(None));
+
+        let summary = run_summary(&log, &ledger, &[], 10_000);
+        assert!(summary.contains("converted: 1, held: 1"), "{summary}");
+        assert!(
+            summary.contains("CONVERTED (PR #42 merged): #41"),
+            "{summary}"
+        );
+        assert!(summary.contains("HELD at gh pr create: #44:"), "{summary}");
+        assert!(
+            summary.contains("1 previously opened PR still open: #43 (age 2h 30m 0s, MERGEABLE)"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn run_summary_surfaces_a_conflicting_transition_in_the_pass_that_observed_it() {
+        // Acceptance (#3899): a PR whose mergeability transitioned to
+        // CONFLICTING is surfaced in the pass that observes it — the
+        // transition line is part of that pass's run summary, and the
+        // next pass reports the PR as CONFLICTING without re-reporting
+        // the transition.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#43", 1_000).unwrap();
+        assert_eq!(ledger.observe("#43", Mergeable::Mergeable, 9_000), Ok(None));
+
+        // This pass observes the transition.
+        let report = ledger
+            .observe("#43", Mergeable::Conflicting, 10_000)
+            .unwrap()
+            .expect("the decisive transition must be reported");
+
+        let summary = run_summary(
+            &PublicationLog::new(),
+            &ledger,
+            std::slice::from_ref(&report),
+            10_000,
+        );
+        assert!(summary.contains(&report), "{summary}");
+        assert!(
+            summary.contains("went MERGEABLE -> CONFLICTING"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("1 previously opened PR still open: #43 (age 2h 30m 0s, CONFLICTING)"),
+            "{summary}"
+        );
+
+        // The next pass: a fresh transition list — the alarm is
+        // surfaced once, in the pass that observed it; the line item
+        // carries the state and the age keeps growing.
+        let next = run_summary(&PublicationLog::new(), &ledger, &[], 20_000);
+        assert!(!next.contains("mergeability transition"), "{next}");
+        assert!(
+            next.contains("1 previously opened PR still open: #43 (age 5h 16m 40s, CONFLICTING)"),
+            "{next}"
+        );
+    }
+
+    #[test]
+    fn run_summary_prints_the_line_item_on_an_idle_pass() {
+        // Acceptance (#3899): the line item appears in *every* run
+        // summary — a pass that converted and held nothing still
+        // reports the previously opened PRs still open, with age. The
+        // block is deterministic, so it is stable across runs and
+        // diff-able; pin the exact shape.
+        let mut ledger = PrLedger::new();
+        ledger.record_opened("#43", 1_000).unwrap();
+
+        let summary = run_summary(&PublicationLog::new(), &ledger, &[], 10_000);
+        assert_eq!(
+            summary,
+            "converted: 0, held: 0\n1 previously opened PR still open: #43 (age 2h 30m 0s, MERGEABLE)"
+        );
+
+        // An empty pass with an empty ledger prints the same shape
+        // with the fallback line: the summary is printed, not omitted.
+        let summary = run_summary(&PublicationLog::new(), &PrLedger::new(), &[], 10_000);
+        assert_eq!(
+            summary,
+            "converted: 0, held: 0\nno previously opened PRs still open"
+        );
     }
 }
