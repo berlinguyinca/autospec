@@ -32,6 +32,7 @@ pub mod failure_signatures;
 pub mod graph;
 pub mod growth;
 pub mod initiative;
+pub mod insights;
 pub mod integration;
 pub mod issue_lock;
 pub mod lint;

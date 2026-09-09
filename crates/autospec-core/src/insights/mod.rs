@@ -1,0 +1,12 @@
+//! Continuous Improvement Engine subsystem.
+//!
+//! Spec: `docs/specs/2026-09-08-continuous-improvement-engine.md`.
+//!
+//! The engine is a loop over session telemetry: ingest raw harness sessions
+//! (§6), normalize them into one typed event model (§7), summarize, detect
+//! patterns, propose improvements, evaluate them, and verify them after
+//! deployment. This module owns the ingestion contract and the normalized
+//! record every later stage reads; storage, enrichment, redaction and the CLI
+//! surfaces live in their own issues.
+
+pub mod events;
