@@ -34,6 +34,15 @@ teardown() {
     rm -rf "$TMP"
 }
 
+# Stop a live-owner stand-in (a `sleep` child) without masking a test failure:
+# the kill itself may fail if the child already exited, which is not a defect.
+_stop_stood_in_owner() {
+    if kill -0 "$1" 2>/dev/null; then
+        kill "$1" 2>/dev/null
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Regression: the defect itself
 # ---------------------------------------------------------------------------
@@ -156,4 +165,161 @@ EOS
     [ "$status" -eq 0 ]
     [ "$(cat "$victim")" = "original spec content" ]
     [ ! -x "$victim" ]
+}
+
+# ---------------------------------------------------------------------------
+# Issue #3937 — lock liveness, honest diagnostics, staleness surfacing, doctor
+# ---------------------------------------------------------------------------
+
+# Shim curl: records that it was invoked, serves a new sha, and installs a
+# no-op bootstrap so the run completes inside the sandbox.
+_shim_curl_succeeding() {
+    cat > "$SHIMDIR/curl" <<'SHIM'
+#!/usr/bin/env bash
+: > "${CURL_MARKER:?}/curl-invoked"
+for arg in "$@"; do
+    case "$arg" in
+        *commits/main*) printf '{"sha":"newsha77"}\n'; exit 0 ;;
+    esac
+done
+printf '#!/usr/bin/env bash\nexit 0\n'
+SHIM
+    chmod +x "$SHIMDIR/curl"
+}
+
+_shim_curl_failing() {
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+}
+
+@test "stale lock with a dead owner PID is reclaimed and the update proceeds" {
+    lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    printf '%s\n' "999999" > "$lock/owner.pid"
+    printf '%s\n' "$(date -u +%s)" > "$lock/owner.epoch"
+    _shim_curl_succeeding
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "reclaiming stale lock"
+    [ -f "$SANDBOX_HOME/curl-invoked" ]
+    # The script truncates the remote sha to 7 characters.
+    [ "$(cat "$SANDBOX_HOME/.autospec/installed-version")" = "newsha7" ]
+    [ ! -d "$lock" ]
+}
+
+@test "legacy lock with no owner record is reclaimed by age and says so" {
+    lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    # An 18-day-old bare lock directory: exactly the #3937 incident.
+    older="$(date -u -d '18 days ago' +'%Y%m%d%H%M' 2>/dev/null \
+        || date -u -v-18d +'%Y%m%d%H%M')"
+    touch -t "$older" "$lock"
+    _shim_curl_failing
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "reclaiming stale lock"
+    echo "$output" | grep -q "no owner recorded"
+    echo "$output" | grep -Eq "age [0-9]+s"
+    [ ! -d "$lock" ]
+}
+
+@test "lock held by a live PID is honored, with the observed age and owner" {
+    lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    sleep 30 &
+    live_pid=$!
+    printf '%s\n' "$live_pid" > "$lock/owner.pid"
+    printf '%s\n' "$(( $(date -u +%s) - 12 ))" > "$lock/owner.epoch"
+    _shim_curl_succeeding
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        bash "$SCRIPT" autospec-run
+    _stop_stood_in_owner "$live_pid"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "concurrent update in progress: owner pid $live_pid is live"
+    echo "$output" | grep -Eq "lock age [0-9]+s"
+    [ ! -e "$SANDBOX_HOME/curl-invoked" ]
+    [ -d "$lock" ]
+}
+
+@test "version drift between installed-version and remote-version is surfaced" {
+    mkdir -p "$SANDBOX_HOME/.autospec"
+    printf 'oldsha1\n' > "$SANDBOX_HOME/.autospec/installed-version"
+    printf 'newsha2\n' > "$SANDBOX_HOME/.autospec/remote-version"
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    _shim_curl_failing
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "self-update drift: installed oldsha1 is behind remote newsha2"
+    [ -s "$SANDBOX_HOME/.autospec/self-update-health.json" ]
+    run jq -e '.reason | contains("version-drift")' "$SANDBOX_HOME/.autospec/self-update-health.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "throttle stamp older than the alarm threshold fails loudly" {
+    mkdir -p "$SANDBOX_HOME/.autospec"
+    older="$(date -u -d '4 days ago' +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -v-4d +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s\n' "$older" > "$SANDBOX_HOME/.autospec/last-update-check"
+    _shim_curl_failing
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" \
+        AUTOSPEC_SELF_UPDATE_STALE_ALARM_SECS=86400 bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -Eq "self-update has not completed for [0-9]+h"
+    [ -s "$SANDBOX_HOME/.autospec/self-update-health.json" ]
+    run jq -e '.reason | contains("throttle-stamp-stale")' "$SANDBOX_HOME/.autospec/self-update-health.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "doctor reports a healthy install and exits 0" {
+    mkdir -p "$SANDBOX_HOME/.autospec"
+    printf 'abc1234\n' > "$SANDBOX_HOME/.autospec/installed-version"
+    printf 'abc1234\n' > "$SANDBOX_HOME/.autospec/remote-version"
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    _shim_curl_succeeding
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        bash "$SCRIPT" --doctor
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "lock: absent"
+    echo "$output" | grep -q "throttle: ok"
+    echo "$output" | grep -q "version: ok installed abc1234 == remote abc1234"
+    echo "$output" | grep -q "last failure: none"
+    [ ! -e "$SANDBOX_HOME/curl-invoked" ]
+}
+
+@test "doctor reports lock age, owner and drift, exits 1, and clears the stale lock" {
+    lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    printf '%s\n' "999999" > "$lock/owner.pid"
+    printf '%s\n' "$(( $(date -u +%s) - 7200 ))" > "$lock/owner.epoch"
+    printf 'oldsha1\n' > "$SANDBOX_HOME/.autospec/installed-version"
+    printf 'newsha2\n' > "$SANDBOX_HOME/.autospec/remote-version"
+    _shim_curl_succeeding
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        bash "$SCRIPT" --doctor
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "lock: STALE"
+    echo "$output" | grep -q "owner pid 999999 is not a live process"
+    echo "$output" | grep -Eq "age [0-9]+s, threshold [0-9]+s"
+    echo "$output" | grep -q "version: DRIFT installed oldsha1 != remote newsha2"
+    [ -d "$lock" ]
+
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        bash "$SCRIPT" --clear-stale-lock
+    echo "$output" | grep -q "lock: cleared"
+    [ ! -d "$lock" ]
+    [ ! -e "$SANDBOX_HOME/curl-invoked" ]
+}
+
+@test "doctor runs even when AUTOSPEC_NO_SELF_UPDATE=1 opts out the preflight" {
+    mkdir -p "$SANDBOX_HOME/.autospec"
+    printf 'abc1234\n' > "$SANDBOX_HOME/.autospec/installed-version"
+    printf 'abc1234\n' > "$SANDBOX_HOME/.autospec/remote-version"
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    _shim_curl_succeeding
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" CURL_MARKER="$SANDBOX_HOME" \
+        AUTOSPEC_NO_SELF_UPDATE=1 bash "$SCRIPT" --doctor
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "throttle: ok"
+    [ ! -e "$SANDBOX_HOME/curl-invoked" ]
 }

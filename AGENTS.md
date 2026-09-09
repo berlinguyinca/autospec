@@ -184,6 +184,22 @@ resolves and invokes that script, and is mirrored byte-identically (modulo `SKIL
 across all multi-harness skill trios. `autospec validate` (`check_startup_preflight`)
 enforces byte-identity.
 
+**The lock carries liveness (issue #3937).** `mkdir` alone is not a lock. A run killed between
+creating and releasing `$HOME/.autospec/.update.lock.d` left every later preflight unable to
+acquire it, and the WARN blamed a "concurrent update" that did not exist — self-update was
+silently off for days. The lock now records `owner.pid` and `owner.epoch`, and a lock whose owner
+is not a live process, or that is older than `AUTOSPEC_SELF_UPDATE_LOCK_STALE_SECS` (default
+1800s), is reclaimed with a WARN naming its age and owner. Contention is reported only when the
+owner is actually alive.
+
+**Degradation is surfaced, not left to a silent stderr.** Version drift (`installed-version` !=
+`remote-version`) and a `last-update-check` older than `AUTOSPEC_SELF_UPDATE_STALE_ALARM_SECS`
+(default 259200s) each print a WARN and are recorded to `~/.autospec/self-update-health.json`.
+`bash scripts/autospec-startup-self-update.sh --doctor` reports lock age/owner, throttle-stamp
+age, drift and the last failure offline, exits 1 when anything is degraded, and accepts
+`--clear-stale-lock` to remove a lock with no live owner. `--doctor` runs even under
+`AUTOSPEC_NO_SELF_UPDATE=1`, because it is an explicit operator command rather than automation.
+
 **Never inline shell that assigns a positional parameter into an injected skill block.**
 A harness substitutes `$1` inside a *rendered* skill body at load time, so `target="$1"`
 becomes the caller's slash-command argument (issue #3177). `check_startup_preflight`

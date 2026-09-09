@@ -41,6 +41,39 @@ Shell that lives in a `.sh` file is never rendered by a harness, so its position
 positional. `StructuralValidator::validate_startup_preflight` now rejects any `="$1"` / `="$2"`
 assignment in the block and asserts the behavioral contract against the extracted script.
 
+## 2026-09-09 lock-liveness amendment (issue #3937)
+
+`mkdir` is a mutual-exclusion primitive, not a liveness primitive. On an operator machine the
+startup preflight had been silently disabled for days: a run killed between `mkdir
+~/.autospec/.update.lock.d` and its cleanup left the directory behind, every later preflight took
+the `mkdir` failure branch, and the WARN it printed — "concurrent update in progress" — described
+a run that did not exist. Nothing distinguished "another skill is updating right now" from "the
+lock was leaked months ago", and the daily throttle stamp froze at the last successful check,
+which then *suppressed* the very probe that would have reported the lock.
+
+Five invariants now hold, all in `scripts/autospec-startup-self-update.sh`:
+
+1. **The lock carries liveness.** A held lock contains `owner.pid` and `owner.epoch`. A failed
+   `mkdir` is only contention when `owner.pid` is a live process (`kill -0`); otherwise, or once
+   the lock exceeds `AUTOSPEC_SELF_UPDATE_LOCK_STALE_SECS` (default 1800s), the lock is reclaimed
+   with a WARN naming its age, since-timestamp and owner, then re-acquired. A legacy lock with no
+   owner files falls back to directory mtime, so already-leaked locks heal on the next run.
+2. **Contention is named honestly.** The skip message reports the observed owner PID and lock age
+   instead of asserting concurrency it did not observe.
+3. **Version drift is surfaced.** When `installed-version` and `remote-version` differ, the
+   preflight warns on stderr with both SHAs and the last successful check, because a known-newer
+   remote with an unchanged install means the install step failed or never ran.
+4. **Silence is loud past a threshold.** When `last-update-check` is older than
+   `AUTOSPEC_SELF_UPDATE_STALE_ALARM_SECS` (default 259200s = 3 intervals) the preflight warns
+   that self-update has not completed. An unparseable stamp is treated as *due*, never as *recent*.
+5. **Health is inspectable out of band.** Each degraded outcome appends to
+   `~/.autospec/self-update-health.json` (0600, atomic), and
+   `autospec-startup-self-update.sh --doctor` prints lock state/age/owner, throttle age, version
+   drift, the last failure record and the degradation record without touching the network. It
+   exits 1 when anything is degraded, accepts `--clear-stale-lock` to remove a lock that has no
+   live owner, and runs even under `AUTOSPEC_NO_SELF_UPDATE=1`: an explicit operator command is
+   not the automation the opt-out declines. The normal preflight path still always exits 0.
+
 ## 1. Goals
 
 When the user invokes any autospec skill (`/autospec`, `/autospec-define`,
@@ -166,6 +199,12 @@ Cross-skill races (e.g. `/autospec-listen` and `/autospec` running at once) are 
 atomically creating `~/.autospec/.update.lock.d`, which is portable to macOS. If the lock directory
 already exists, the loser fails open with a one-line WARN.
 
+Per the 2026-09-09 amendment, the directory is stamped with `owner.pid` and `owner.epoch` on
+acquisition, and a `mkdir` failure is classified before it is reported: live owner under
+`AUTOSPEC_SELF_UPDATE_LOCK_STALE_SECS` is real contention, anything else is a leaked lock and is
+reclaimed. Cleanup removes the owner files and then the directory (`rmdir` alone would fail once
+the lock held contents).
+
 ### 3.6 Spec-PR auto-merge authority
 
 Per user directive 2026-05-01, the autospec pipeline must run end-to-end
@@ -200,7 +239,10 @@ delivery train.
 | `~/.autospec/last-update-check`           | `<ISO-8601 UTC>\n`        | successful check only   | preflight rate limit    |
 | `~/.autospec/last-update-failure.json`    | failure evidence JSON     | failed installer        | start + status          |
 | `~/.autospec/self-update.log{,.1}`        | bounded diagnostic text   | installer attempt       | operator                |
-| `~/.autospec/.update.lock.d`              | directory lock            | preflight                | preflight               |
+| `~/.autospec/.update.lock.d`              | directory lock            | preflight                 | preflight               |
+| `~/.autospec/.update.lock.d/owner.pid`    | `<pid>\n`                 | lock acquirer             | staleness check, doctor |
+| `~/.autospec/.update.lock.d/owner.epoch`  | `<epoch seconds>\n`       | lock acquirer             | staleness check, doctor |
+| `~/.autospec/self-update-health.json`     | degradation evidence JSON | drift / stale stamp / stale-lock reclaim | doctor + operator |
 
 All state is user-local (`$HOME`-rooted), zero-byte safe (missing →
 "first run"), and survives across sessions.

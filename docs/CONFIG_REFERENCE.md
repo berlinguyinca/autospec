@@ -552,7 +552,9 @@ exit 12 rather than silently reaching a cloud harness.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_NO_AUTOMERGE_SPEC` | `0` | Set to `1` to skip admin auto-merge for spec PRs; the skill pauses for a manual merge before continuing. |
-| `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. |
+| `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. `autospec-startup-self-update.sh --doctor` still runs: it is an explicit operator command, not automation. |
+| `AUTOSPEC_SELF_UPDATE_LOCK_STALE_SECS` | `1800` | Age past which `~/.autospec/.update.lock.d` is reclaimed by the next preflight as leaked. A lock whose `owner.pid` is not a live process is reclaimed at any age; only a live owner under this threshold counts as real contention. |
+| `AUTOSPEC_SELF_UPDATE_STALE_ALARM_SECS` | `259200` | Age of `~/.autospec/last-update-check` past which the preflight warns that self-update has not completed and records the condition to `~/.autospec/self-update-health.json`. |
 | `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. It is not consumed by Rust mainline health; `main_health.ignore_checks` does not alter premerge or auto-merge behavior. |
 
 ### Merge-time CI gate

@@ -32,6 +32,15 @@ teardown() {
     rm -rf "${SHIMDIR:-}"
 }
 
+# Stop a live-owner stand-in (a `sleep` child) without masking a test failure:
+# the kill itself may fail if the child already exited, which is not a defect.
+_stop_stood_in_owner() {
+    if kill -0 "$1" 2>/dev/null; then
+        kill "$1" 2>/dev/null
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -194,7 +203,9 @@ CURLSHIM
     [ "$(cat "$HOME/.autospec/installed-version")" = "oldsha1" ]
     [ "$(cat "$HOME/.autospec/remote-version")" = "newsha9" ]
     [ -s "$HOME/.autospec/self-update.log" ]
-    [ "$(stat -f '%Lp' "$HOME/.autospec/self-update.log" 2>/dev/null || stat -c '%a' "$HOME/.autospec/self-update.log")" = "600" ]
+    # GNU stat first: BSD-only `stat -f '%Lp'` prints a filesystem dump on GNU
+    # coreutils instead of failing, so the fallback never ran on Linux.
+    [ "$(stat -c '%a' "$HOME/.autospec/self-update.log" 2>/dev/null || stat -f '%Lp' "$HOME/.autospec/self-update.log")" = "600" ]
     grep -q "compile error: cfg mismatch" "$HOME/.autospec/self-update.log"
     [ -s "$HOME/.autospec/last-update-failure.json" ]
     run jq -e '
@@ -367,15 +378,36 @@ CURLSHIM
 # Scenario 7 — Lock contention: lock dir already held → WARN, exit 0
 # ---------------------------------------------------------------------------
 
-@test "lock contention: WARN logged, exit 0" {
+@test "lock held by a live owner: WARN logged, exit 0, no network" {
     mkdir -p "$HOME/.autospec/.update.lock.d"   # simulate lock already held
-    # Shim curl to fail loudly if invoked — should never get past the lock.
+    sleep 30 &
+    live_pid=$!
+    printf '%s\n' "$live_pid" > "$HOME/.autospec/.update.lock.d/owner.pid"
+    printf '%s\n' "$(( $(date -u +%s) - 5 ))" > "$HOME/.autospec/.update.lock.d/owner.epoch"
+    # Shim curl to fail loudly if invoked — should never get past a live lock.
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    _stop_stood_in_owner "$live_pid"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+    echo "$output" | grep -q "owner pid $live_pid is live"
+    ! echo "$output" | grep -q "UNEXPECTED"
+}
+
+@test "lock with no live owner is reclaimed instead of disabling self-update" {
+    # Issue #3937: a lock leaked by a killed run used to disable self-update
+    # forever, reporting a concurrent run that did not exist.
+    mkdir -p "$HOME/.autospec/.update.lock.d"
+    printf '%s\n' "999999" > "$HOME/.autospec/.update.lock.d/owner.pid"
+    printf '%s\n' "$(( $(date -u +%s) - 3600 ))" > "$HOME/.autospec/.update.lock.d/owner.epoch"
     printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
     chmod +x "$SHIMDIR/curl"
     _run_block_shimmed
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q "WARN:"
-    ! echo "$output" | grep -q "UNEXPECTED"
+    echo "$output" | grep -q "reclaiming stale lock"
+    echo "$output" | grep -q "WARN: self-update skipped (network)"
+    [ ! -d "$HOME/.autospec/.update.lock.d" ]
 }
 
 # ---------------------------------------------------------------------------
