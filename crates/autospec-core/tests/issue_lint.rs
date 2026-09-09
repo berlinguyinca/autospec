@@ -232,6 +232,88 @@ fn issue_lint_reports_ac_too_long_with_the_shell_message() {
 }
 
 #[test]
+fn issue_lint_reports_prohibition_only_acceptance_criteria() {
+    for criterion in [
+        "- [ ] The parser never panics on malformed input.",
+        "- [ ] Agents must not commit in the primary checkout.",
+        "- [ ] The tool shall not write outside the worktree.",
+        "- [ ] The renderer cannot render without a frame.",
+        "- [ ] The output does not leak secrets.",
+        "- [ ] Never emit `!!`.",
+    ] {
+        let body = valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            criterion,
+            "cargo test issue_lint",
+        );
+        let message = format!(
+            "AC item 1 is prohibition-only; name a check that runs, a type that constrains, or a helper that call sites must go through: {criterion}"
+        );
+
+        assert_eq!(
+            findings(&body),
+            vec![("AC_PROHIBITION_ONLY".to_string(), message)],
+            "criterion {criterion:?} must fail issue quality"
+        );
+    }
+}
+
+#[test]
+fn issue_lint_accepts_a_prohibition_that_names_a_mechanism() {
+    for criterion in [
+        "- [ ] `cargo test --workspace` never skips a failing binary.",
+        "- [ ] `parse_declared_path` does not accept absolute paths.",
+        "- [ ] The `AUTOSPEC_NO_GUARDIAN` env var must not be required.",
+    ] {
+        let body = valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            criterion,
+            "cargo test issue_lint",
+        );
+
+        assert!(
+            lint_issue_body(&body).is_empty(),
+            "criterion {criterion:?} must pass issue quality"
+        );
+    }
+}
+
+#[test]
+fn issue_lint_does_not_treat_an_embedded_prohibition_word_as_a_prohibition() {
+    let body = valid_issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        "- [ ] The nevermore suite runs end to end.",
+        "cargo test issue_lint",
+    );
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+#[test]
+fn issue_lint_reports_subjective_and_prohibition_only_in_item_order() {
+    let criterion = "- [ ] The output looks clean and never leaks secrets.";
+    let body = valid_issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        criterion,
+        "cargo test issue_lint",
+    );
+
+    assert_findings(
+        &body,
+        &[
+            (
+                "AC_SUBJECTIVE",
+                "AC item 1 contains subjective word 'looks': - [ ] The output looks clean and never leaks secrets.",
+            ),
+            (
+                "AC_PROHIBITION_ONLY",
+                "AC item 1 is prohibition-only; name a check that runs, a type that constrains, or a helper that call sites must go through: - [ ] The output looks clean and never leaks secrets.",
+            ),
+        ],
+    );
+}
+
+#[test]
 fn issue_lint_reports_empty_acceptance_criteria_with_the_shell_message() {
     let body = valid_issue_body(
         "Add `lint_issue_body` parity fixtures.",

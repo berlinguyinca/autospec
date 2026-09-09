@@ -130,6 +130,28 @@ fn lint_issue_file_reports_text_findings_to_stderr() {
 }
 
 #[test]
+fn lint_issue_reports_prohibition_only_acceptance_criteria() {
+    let body = issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        "- [ ] The parser never panics on malformed input.",
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-prohibition", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "AC_PROHIBITION_ONLY: AC item 1 is prohibition-only; name a check that runs, a type that constrains, or a helper that call sites must go through: - [ ] The parser never panics on malformed input.\n"
+    );
+}
+
+#[test]
 fn lint_issue_json_writes_ordered_findings_to_stdout() {
     let body = issue_body(
         "improve the issue should be clear.",
