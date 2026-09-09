@@ -16,6 +16,12 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// The cross-binary supervision family lock. Declared here rather than in
+/// tests.rs so the new file sits next to the other test-support files this
+/// guard already owns; the `#[path]` keeps it beside them.
+#[path = "supervision_family_lock.rs"]
+pub(super) mod supervision_family_lock;
+
 pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(in super::super) use crate::commands::PROCESS_ENVIRONMENT as TEST_ENVIRONMENT;
@@ -69,6 +75,11 @@ fn reset_failpoints() {
 pub(super) struct TestEnvironment {
     _guard: std::sync::MutexGuard<'static, ()>,
     restore_harness_env: super::support_harness_env::HarnessEnvRestore,
+    /// Cross-binary half of the family lock: the in-process mutex above orders
+    /// the tests in this binary, but the supervision family also spans the
+    /// integration test binary, and only the filesystem lock excludes it
+    /// (#3857). Released by the field's Drop on unwind like the rest.
+    _family_lock: Option<supervision_family_lock::SupervisionFamilyLock>,
 }
 
 /// Arming lives here and nowhere else.
@@ -112,9 +123,13 @@ pub(super) fn test_environment() -> TestEnvironment {
         .unwrap_or_else(|poison| poison.into_inner());
     // Scrub inside the guard: these are process-wide, so the same lock that orders failpoint
     // arming has to order this too, and Drop restores them on unwind like the failpoints.
+    // The family lock is taken under the mutex as well: every launch test in this
+    // binary is mutually exclusive with the real-bridge E2E tests in the integration
+    // binary, which take the same file from real_bridge_e2e_lock() (#3857).
     TestEnvironment {
         _guard: guard,
         restore_harness_env: super::support_harness_env::scrub(),
+        _family_lock: supervision_family_lock::acquire(),
     }
 }
 
