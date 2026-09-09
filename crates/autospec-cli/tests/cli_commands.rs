@@ -102,6 +102,7 @@ fn cli_commands_help_lists_required_commands() {
             "report",
             "showcase",
             "benchmark",
+            "graph",
             "growth-report",
         ]
     );

@@ -5,6 +5,7 @@ pub mod claim;
 pub mod dispatch;
 pub mod doctor;
 pub mod explore;
+pub mod graph;
 pub mod growth_report;
 pub mod init;
 pub mod initiative;
@@ -110,6 +111,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("showcase", "Render a local demo showcase"),
     ("benchmark", "Run local benchmark checks"),
     (
+        "graph",
+        "Compare dependency-graph metrics before/after concurrency optimization",
+    ),
+    (
         "growth-report",
         "Render local-only launch readiness metrics",
     ),
@@ -149,6 +154,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "report" => report::run(rest).map_err(CommandFailure::diagnostic),
             "showcase" => showcase::run(rest).map_err(CommandFailure::diagnostic),
             "benchmark" => benchmark::run(rest).map_err(CommandFailure::diagnostic),
+            "graph" => graph::run(rest),
             "growth-report" => growth_report::run(rest).map_err(CommandFailure::diagnostic),
             _ => Err(CommandFailure::diagnostic(format!(
                 "unknown autospec command: {command}"
@@ -169,6 +175,6 @@ fn not_implemented(command: &str) -> Result<(), String> {
     Err(format!("autospec {command} is not yet implemented"))
 }
 
-fn is_json(args: &[String]) -> bool {
+pub(crate) fn is_json(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--json")
 }

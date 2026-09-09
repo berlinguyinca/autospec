@@ -38,6 +38,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env gc [--repo <path>] [--mode <mode>]` | no | removes only stale resources whose generation and ownership labels are proven; ambiguity fails closed with a recovery command |
 | `autospec runtime env normalize-compose --repo <path> --check\|--apply [--fingerprint SHA256]` | yes | plans or transactionally applies a manifest-v2 Compose migration without a second YAML transformer |
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
+| `autospec graph compare --before <metrics.json> --after <metrics.json> [--json]` | yes | before/after diff of one concurrency optimization pass (`GraphMetrics` JSON: `issue_count`, `hard_edge_count`, `critical_path_length`); prints the section 25 concurrency-review summary and exits `1` when the after-graph critical path grew (retry rejected) |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template]` | yes | validates the canonical GitHub issue, records review with owned labels without editing its body, and verifies authoritative re-reads |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
