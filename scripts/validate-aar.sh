@@ -35,7 +35,7 @@ require_grep() {
 
 # Spec sections 3-15: one module per responsibility.
 for module in \
-  classify/mod.rs classify/rubric.rs context.rs escalation.rs guards.rs \
+  classify/mod.rs classify/rubric.rs context.rs dispatch_fit.rs escalation.rs guards.rs \
   inferweave.rs memory.rs mod.rs outcome.rs pi.rs policy.rs profile.rs \
   reasoning.rs telemetry.rs topology.rs; do
   require_file "$CORE/$module"
@@ -43,7 +43,7 @@ done
 
 # Spec section 21: the required test coverage.
 for suite in \
-  aar_classification.rs aar_context_memory.rs aar_e2e_scenarios.rs \
+  aar_classification.rs aar_context_memory.rs aar_dispatch_fit.rs aar_e2e_scenarios.rs \
   aar_escalation.rs aar_guards.rs aar_inferweave.rs aar_pi_adapter.rs \
   aar_policy.rs aar_profiles.rs aar_reasoning.rs aar_telemetry_outcome.rs \
   aar_topology.rs; do
@@ -79,6 +79,11 @@ require_grep 'pub fn enforce_separation' "$CORE/topology.rs" \
 require_grep 'preserves_separation_after_fallback' "$CORE/escalation.rs" \
   "escalation must re-check separation of duties on every fallback"
 
+# Issue #3694: a fleet with no slot large enough must hold the issue rather
+# than dispatch it truncated.
+require_grep 'pub const NO_ENDPOINT_LARGE_ENOUGH' "$CORE/dispatch_fit.rs" \
+  "a fleet with no fitting slot must hold the issue, not dispatch truncated"
+
 # Spec section 12: free context is a hard filter, not a score contribution.
 require_grep 'free_context_tokens < required_free' "$CORE/inferweave.rs" \
   "insufficient free context must reject a node outright"
@@ -96,9 +101,10 @@ if [ "${AAR_SKIP_CARGO:-0}" != "1" ]; then
   # Single-threaded on purpose: the CLI suite writes into worktrees, and this
   # gate must not depend on the order two cases happen to interleave in.
   if ! cargo test -p autospec-core --test aar_classification --test aar_context_memory \
-    --test aar_e2e_scenarios --test aar_escalation --test aar_guards --test aar_inferweave \
-    --test aar_pi_adapter --test aar_policy --test aar_profiles --test aar_reasoning \
-    --test aar_telemetry_outcome --test aar_topology -- --test-threads=1 >/dev/null 2>&1; then
+    --test aar_dispatch_fit --test aar_e2e_scenarios --test aar_escalation \
+    --test aar_guards --test aar_inferweave --test aar_pi_adapter --test aar_policy \
+    --test aar_profiles --test aar_reasoning --test aar_telemetry_outcome \
+    --test aar_topology -- --test-threads=1 >/dev/null 2>&1; then
     fail "cargo test for the autospec-core aar suites failed"
   fi
   if ! cargo test -p autospec-cli --test aar_commands -- --test-threads=1 >/dev/null 2>&1; then
