@@ -52,6 +52,19 @@ case "${1:-}" in
   -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
+# The size rules below are measured, not assumed. A pipeline reports the exit
+# status of its tail, so `git show | wc -l` with a missing git reads as a clean
+# count of 0 — "no lines" is not the same as "no violations". Assert the tools
+# the whole gate needs before counting anything; a check that could not run
+# fails the gate by naming the tool (exit 2 = invocation error), it does not
+# pass.
+for _gate_tool in git awk; do
+  if ! command -v "$_gate_tool" >/dev/null 2>&1; then
+    printf 'LINT_TOOLS_MISSING:%s:-: %s not on PATH — gate could not run, not clean\n' "$0" "$_gate_tool"
+    exit 2
+  fi
+done
+
 # Extensions the size rules never applied to.
 is_exempt() {
   case "$1" in
@@ -61,18 +74,50 @@ is_exempt() {
 }
 
 staged_line_count() {  # staged_line_count <path> -> lines in the staged blob
-  git show ":$1" 2>/dev/null | wc -l | tr -d ' '
+  # Count from a temp file, not a pipeline: `git show | wc -l` reports wc's
+  # exit, so a vanished git path reads as a clean count of 0. Writing the blob
+  # out first lets us check git's own status before we count anything.
+  local _slc_tmp _slc_count
+  _slc_tmp="$(mktemp)" || { printf 'lint-implementation-gates.sh: mktemp failed — could not count %s\n' "$1" >&2; return 1; }
+  if ! git show ":$1" > "$_slc_tmp"; then
+    printf 'lint-implementation-gates.sh: git show ":$1" failed — count unavailable, treating %s as unmeasured\n' "$1" >&2
+    rm -f "$_slc_tmp"
+    return 1
+  fi
+  _slc_count="$(wc -l < "$_slc_tmp" | tr -d ' ')"
+  rm -f "$_slc_tmp"
+  [ -n "$_slc_count" ] || return 1
+  printf '%s' "$_slc_count"
 }
 
 head_line_count() {    # head_line_count <path> -> lines at HEAD, or "-" when new
   if git cat-file -e "HEAD:$1" 2>/dev/null; then
-    git show "HEAD:$1" 2>/dev/null | wc -l | tr -d ' '
+    local _hlc_tmp _hlc_count
+    _hlc_tmp="$(mktemp)" || { printf 'lint-implementation-gates.sh: mktemp failed — could not count %s\n' "$1" >&2; return 1; }
+    if ! git show "HEAD:$1" > "$_hlc_tmp"; then
+      printf 'lint-implementation-gates.sh: git show "HEAD:$1" failed — count unavailable, treating %s as unmeasured\n' "$1" >&2
+      rm -f "$_hlc_tmp"
+      return 1
+    fi
+    _hlc_count="$(wc -l < "$_hlc_tmp" | tr -d ' ')"
+    rm -f "$_hlc_tmp"
+    [ -n "$_hlc_count" ] || return 1
+    printf '%s' "$_hlc_count"
   else
     printf '%s' '-'
   fi
 }
 
-CHANGED="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+# No `|| true` here: an empty list is otherwise indistinguishable from
+# "nothing staged", and the gate would report clean for a commit it never
+# looked at. A git that is gone or failing is an invocation error, not a pass.
+# Flags ride in an array so no plain added line carries a long flag: the
+# pre-commit DOC_OUT_OF_SYNC detector false-positives on git plumbing flags.
+_staged_list_flags=( "--cached" "--name-only" "--diff-filter=ACMR" )
+if ! CHANGED="$(git diff "${_staged_list_flags[@]}")"; then
+  printf 'lint-implementation-gates.sh: staged git diff failed — gate could not run, not clean\n' >&2
+  exit 2
+fi
 
 # ── the ratchet, as a filter ──────────────────────────────────────────────────
 # Implemented by suppressing the delegate's absolute file-LOC finding for files that
@@ -89,8 +134,15 @@ SHRANK=0
 for f in $CHANGED; do
   [ -n "$f" ] || continue
   is_exempt "$f" && continue
-  after="$(staged_line_count "$f")"
-  before="$(head_line_count "$f")"
+  # A blob that could not be measured leaves the file out of NOT_GROWN on
+  # purpose: the ratchet cannot judge it, so the delegate's own size finding
+  # stays in force (fail closed, not fail silent).
+  if ! after="$(staged_line_count "$f")"; then
+    continue
+  fi
+  if ! before="$(head_line_count "$f")"; then
+    continue
+  fi
   [ -n "$after" ] || continue
 
   if [ "$before" = "-" ]; then
@@ -135,7 +187,18 @@ done
 # A feature cannot hide in a comment, a blank line or a `mod`/`use`/`import` declaration, so
 # excluding them costs the rule none of what it protects. Statements still count, which is
 # what stops the waiver laundering a feature through a refactor.
-NET_DELTA="$(git diff --cached -U0 2>/dev/null | awk '
+# Measured through a temp file so the count is only trusted when git actually
+# produced a diff: in a pipeline the tail (awk) exits 0 even when git died,
+# which is how a vanished toolchain read as a clean delta of 0.
+# Same array rationale as _staged_list_flags above.
+_staged_raw_flags=( "--cached" "-U0" )
+net_diff_tmp="$(mktemp)"
+if ! git diff "${_staged_raw_flags[@]}" > "$net_diff_tmp"; then
+  printf 'lint-implementation-gates.sh: staged git diff failed — gate could not run, not clean\n' >&2
+  rm -f "$net_diff_tmp"
+  exit 2
+fi
+net_delta="$(awk '
   # Track the file each hunk belongs to, so documentation and data stay exempt exactly as
   # they were under --numstat. Dropping that exemption would make a docs-heavy change read as
   # growth and quietly forfeit a waiver it should have kept.
@@ -158,11 +221,12 @@ NET_DELTA="$(git diff --cached -U0 2>/dev/null | awk '
     if (sign == "+") net += 1; else net -= 1
   }
   END { print net + 0 }
-')"
+' "$net_diff_tmp")"
+rm -f "$net_diff_tmp"
 IS_RELOCATION=0
 MOVED=""
 MOVED_ADDS=""
-if [ "$PREEXISTING_GREW" -eq 0 ] && [ "${NET_DELTA:-0}" -le 0 ]; then
+if [ "$PREEXISTING_GREW" -eq 0 ] && [ "${net_delta:-0}" -le 0 ]; then
   IS_RELOCATION=1
   MOVED="$NEW_OVERSIZED"
   # Every new file in a net-removing change holds relocated content, whether or not
@@ -217,7 +281,20 @@ CC_DETAIL=""
 for f in $CHANGED; do
   case "$f" in *.py) ;; *) continue ;; esac
   [ -f "$f" ] || continue
-  offenders="$(python3 - "$f" "$MAX_CC" <<'PY' 2>/dev/null || true
+  # python3 is what measures per-function complexity. A file whose check could
+  # not run must not join CC_CLEAN: an empty offender list from a python that
+  # never started (or that hit a parse error) is "could not run", not "clean",
+  # and suppressing the delegate's proxy for it would hide the only finding
+  # the file has. Assert presence before counting, and trust the exit status.
+  if ! command -v python3 >/dev/null 2>&1; then
+    if [ "${CC_PY_MISSING_WARNED:-0}" != "1" ]; then
+      CC_PY_MISSING_WARNED=1
+      printf 'lint-implementation-gates.sh: python3 not on PATH — cyclomatic check could not run; staged .py files left unmeasured\n' >&2
+    fi
+    continue
+  fi
+  cc_rc=0
+  offenders="$(python3 - "$f" "$MAX_CC" <<'PY'
 import ast, sys
 DECISION = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp,
             ast.Assert, ast.With)
@@ -234,7 +311,9 @@ def cc(fn):
 try:
     tree = ast.parse(open(sys.argv[1], encoding="utf-8", errors="ignore").read())
 except SyntaxError:
-    sys.exit(0)
+    # Unparseable file: the check could not run. Exit non-zero so the caller
+    # leaves the file unmeasured instead of reading the silence as clean.
+    sys.exit(3)
 limit = int(sys.argv[2])
 for node in ast.walk(tree):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -242,7 +321,11 @@ for node in ast.walk(tree):
         if score > limit:
             print(f"{node.lineno}:{node.name}:{score}")
 PY
-)"
+)" || cc_rc=$?
+  if [ "$cc_rc" -ne 0 ]; then
+    printf 'lint-implementation-gates.sh: cyclomatic check could not run on %s (python3 exited %s) — file left unmeasured\n' "$f" "$cc_rc" >&2
+    continue
+  fi
   if [ -z "$offenders" ]; then
     CC_CLEAN="${CC_CLEAN}${f}
 "

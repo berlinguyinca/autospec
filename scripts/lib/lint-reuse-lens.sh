@@ -95,7 +95,11 @@ EOF
 
 # ── §3.x NEW_ABSTRACTION_SINGLE_CALLER detector ───────────────────────────────
 # Net-new file matching *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
-# with ≤1 external call site found by rg in the tree. Fail-open: rg error → silent.
+# with ≤1 external call site found by rg in the tree. Fail-open on tool failure,
+# but never silently: an rg that errored or a count pipeline that could not run
+# emits a one-shot REUSE_LENS_COULD_NOT_RUN notice and skips the finding, so
+# "could not run" stays distinguishable from a clean run whose count is ≤1.
+# (A clean run with a zero count IS a real result and still gets reported.)
 
 detect_new_abstraction_single_caller() {
     if ! _reuse_lens_rg_available; then
@@ -128,21 +132,46 @@ detect_new_abstraction_single_caller() {
         # For new files with no line reference, check the file if it exists
         # Count external callers (files referencing this stem, excluding itself).
         # rg exits 0=matches found, 1=no matches, 2+=error.
-        # Treat exit ≥2 as tooling error → fail-open (skip, no finding).
-        local _nasc_rg_out _nasc_rg_status=0
+        # Treat exit ≥2 as tooling error → fail-open (skip, no finding), but
+        # name the tool and the captured stderr in a one-shot notice instead of
+        # suppressing both: a silent skip reads as "no reuse problems".
+        local _nasc_rg_out _nasc_rg_status=0 _nasc_rg_err
         _nasc_rg_out="$(mktemp -t lint-nasc-rg.XXXXXX)"
-        rg --fixed-strings "$_nasc_stem" -l . > "$_nasc_rg_out" 2>/dev/null \
+        _nasc_rg_err="$(mktemp -t lint-nasc-rg-err.XXXXXX)"
+        rg -F "$_nasc_stem" -l . > "$_nasc_rg_out" 2>"$_nasc_rg_err" \
             || _nasc_rg_status=$?
         if [ "$_nasc_rg_status" -ge 2 ]; then
-            rm -f "$_nasc_rg_out"
+            if [ "${_REUSE_LENS_COULD_NOT_RUN_EMITTED:-0}" != "1" ]; then
+                _REUSE_LENS_COULD_NOT_RUN_EMITTED=1
+                emit_info REUSE_LENS_COULD_NOT_RUN "$_nasc_file" "-" \
+                    "ripgrep exited ${_nasc_rg_status} while counting callers; reuse lens could not run for this file (fail-open, no finding). stderr: $(head -1 "$_nasc_rg_err")"
+            fi
+            rm -f "$_nasc_rg_out" "$_nasc_rg_err"
             continue
         fi
-        local _nasc_count=0
+        rm -f "$_nasc_rg_err"
+        # Count external callers. The tail (wc) always exits 0, so the pipeline
+        # status proves nothing: instead, capture the pipeline's stderr — empty
+        # stderr is the observable that sed/grep actually ran. A non-empty
+        # stderr means the count could not run; fail-open with a one-shot
+        # notice rather than emitting a finding on a garbage count. (grep -vF
+        # exiting 1 is NOT an error: it is the legitimate "0 external callers"
+        # result and leaves stderr empty.)
+        local _nasc_count _nasc_cnt_err
+        _nasc_cnt_err="$(mktemp -t lint-nasc-cnt-err.XXXXXX)"
         _nasc_count="$(sed 's|^\./||' "$_nasc_rg_out" \
             | grep -vF "$_nasc_file" \
-            | wc -l | tr -d ' ')"
+            | wc -l | tr -d ' ')" 2>"$_nasc_cnt_err"
         rm -f "$_nasc_rg_out"
-        if [ "${_nasc_count:-0}" -le 1 ]; then
+        if [ -s "$_nasc_cnt_err" ]; then
+            if [ "${_REUSE_LENS_COULD_NOT_RUN_EMITTED:-0}" != "1" ]; then
+                _REUSE_LENS_COULD_NOT_RUN_EMITTED=1
+                emit_info REUSE_LENS_COULD_NOT_RUN "$_nasc_file" "-" \
+                    "caller-count pipeline could not run; reuse lens skipped the count (fail-open, no finding). stderr: $(head -1 "$_nasc_cnt_err")"
+            fi
+        fi
+        rm -f "$_nasc_cnt_err"
+        if [ -n "$_nasc_count" ] && [ "${_nasc_count:-0}" -le 1 ] 2>/dev/null; then
             emit_capped "NEW_ABSTRACTION_SINGLE_CALLER" "$_nasc_file" "-" \
                 "new abstraction '${_nasc_stem}' has ${_nasc_count} external caller(s) — consider inlining if single-use"
         fi
