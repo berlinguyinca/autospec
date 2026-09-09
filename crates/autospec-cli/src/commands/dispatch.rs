@@ -56,6 +56,14 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "status",
         "Print topology, credential hosts, hop liveness, verdict",
     ),
+    (
+        "stage",
+        "Stage an issue and its comments as the dispatch spec (#3864)",
+    ),
+    (
+        "freshness",
+        "Gate on the staged spec matching the live issue revision (#3864)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -69,6 +77,8 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         }
         "check" => check(rest),
         "guard" => guard(rest),
+        "stage" => super::dispatch_spec::stage(rest),
+        "freshness" => super::dispatch_spec::freshness(rest),
         "stamp" => stamp(rest),
         "beat" => beat(rest),
         "status" => status(rest),
@@ -97,7 +107,25 @@ fn print_help() {
         "    --topology <PATH>     Topology JSON (default: built-in filing-to-dispatch chain)"
     );
     println!("    --step <NAME>         Hop the beat is for (required for beat)");
-    println!("    --issue <N>           Issue the guard checks (required for guard)");
+    println!(
+        "    --issue <N>           Issue the guard, stage, or freshness command checks (required)"
+    );
+    println!("    --issue-json <PATH>   stage: `gh api` issue payload (body, updatedAt, comments)");
+    println!("    --comments-json <PATH> stage: `gh api .../comments` payload merged into the discussion");
+    println!("    --body-file <PATH>    stage: verbatim body when no --issue-json is given");
+    println!("    --source-updated-at <T> stage: live issue updatedAt (epoch or RFC 3339)");
+    println!("    --out <PATH>          stage: staged spec to write (default $HOME/.autospec/dispatch/specs/<N>.md)");
+    println!("    --staged <PATH>       freshness: staged spec to check (same default)");
+    println!(
+        "    --live-updated-at <T> freshness: the live issue updatedAt, when the caller read it"
+    );
+    println!("    --live-json <PATH>    freshness: issue payload to read updatedAt from");
+    println!("    --repo <OWNER/NAME>   stage: read issue + comments live via `gh api` (else $AUTOSPEC_REPO)");
+    println!("                          freshness: repository to query with `gh api`");
+    println!("    --container-runtime <P> stage: runtime path, or 'absent' / 'not probed'");
+    println!("    --database <VALUE>    stage: database availability, or 'absent' / 'not probed'");
+    println!("    --registry <VALUE>    stage: registry reachability (never probed unless given)");
+    println!("    --no-probe            stage: declare every environment fact as not probed");
     println!("    --out-dir <PATH>      Runner output root (default $HOME/.autospec/dispatch/out)");
     println!("    --patch-name <NAME>   Patch file under issue-<N> (default changes.patch)");
     println!("    --dry-run             guard: report the decision without touching the directory");
@@ -221,11 +249,11 @@ fn check_unconverted_patch(patch_path: &Path) -> CheckReport {
 
 /// Issue numbers name a path component (`issue-<N>`); keep them numeric so
 /// they cannot traverse.
-fn validate_issue_number(issue: &str) -> Result<(), CommandFailure> {
+pub(crate) fn validate_issue_number(issue: &str) -> Result<u64, CommandFailure> {
     match issue.parse::<u64>() {
-        Ok(n) if n > 0 => Ok(()),
+        Ok(n) if n > 0 => Ok(n),
         _ => Err(CommandFailure::diagnostic(format!(
-            "guard --issue must be a positive integer, got '{issue}'"
+            "dispatch --issue must be a positive integer, got '{issue}'"
         ))),
     }
 }
@@ -317,7 +345,7 @@ fn status(args: &[String]) -> Result<(), CommandFailure> {
 
 /// Exit 0 when the answer may be acted on, 1 when a liveness failure names the
 /// hop that stopped moving.
-fn verdict_exit(failed: bool) -> Result<(), CommandFailure> {
+pub(crate) fn verdict_exit(failed: bool) -> Result<(), CommandFailure> {
     if failed {
         return Err(CommandFailure::status(String::new(), HOLD_EXIT));
     }
@@ -372,7 +400,7 @@ fn read_queue(path: &Path) -> Result<Option<QueueFile>, CommandFailure> {
 
 /// Write via a sibling temp file and rename, so a consumer never observes a
 /// half-written artifact.
-fn write_atomic(path: &Path, text: &str) -> Result<(), CommandFailure> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), CommandFailure> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             CommandFailure::diagnostic(format!("cannot create {}: {error}", parent.display()))
@@ -441,7 +469,7 @@ fn topology_path(args: &[String]) -> Result<Option<PathBuf>, CommandFailure> {
     Ok(opt_string(args, "--topology")?.map(PathBuf::from))
 }
 
-fn autospec_home() -> Result<PathBuf, CommandFailure> {
+pub(crate) fn autospec_home() -> Result<PathBuf, CommandFailure> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| {
@@ -450,7 +478,7 @@ fn autospec_home() -> Result<PathBuf, CommandFailure> {
     Ok(PathBuf::from(home).join(".autospec"))
 }
 
-fn now_epoch() -> Result<u64, CommandFailure> {
+pub(crate) fn now_epoch() -> Result<u64, CommandFailure> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -483,7 +511,7 @@ fn validate_step_name(name: &str) -> Result<(), CommandFailure> {
     }
 }
 
-fn opt_string(args: &[String], flag: &str) -> Result<Option<String>, CommandFailure> {
+pub(crate) fn opt_string(args: &[String], flag: &str) -> Result<Option<String>, CommandFailure> {
     opt_raw(args, flag).map(|value| value.map(str::to_string))
 }
 

@@ -82,6 +82,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
 | `autospec dispatch check [--queue <path>] [--state-file <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | gate on the queue artifact before dispatching: exit 0 fresh (proceed or genuinely idle) / 1 hold (missing, unstamped, stale, clock rewind) |
 | `autospec dispatch guard --issue <N> [--out-dir <path>] [--patch-name <name>] [--dry-run] [--json]` | yes | pre-dispatch gate on the issue's output directory (#3764): exit 0 no unconverted patch (stale output removed) / 1 hold (patch present, or a check that cannot answer); `--dry-run` reports without touching the directory |
+| `autospec dispatch stage --issue <N> [--repo OWNER/REPO] [--issue-json <path>] [--comments-json <path>] [--body-file <path>] [--title <t>] [--source-updated-at <ts>] [--body-updated-at <ts>] [--out <path>] [--staged-at <epoch>] [--container-runtime <path>] [--database <value>] [--registry <value>] [--no-probe] [--json]` | no | write the spec a worker reads: issue body, the discussion filed since the last body edit, and a generated execution-environment block, headed by the source `updatedAt` it was staged from (#3864); defaults to `~/.autospec/dispatch/specs/<N>.md`, exit 2 on unusable input |
+| `autospec dispatch freshness --issue <N> [--staged <path>] [--live-updated-at <ts> \| --live-json <path> \| --repo OWNER/REPO] [--json]` | yes | gate a dispatch on the staged spec's revision (#3864): exit 0 current / 1 held — `STALE` (re-stage, the message names the command) or `REFUSED` (no staged spec, no recorded revision, or the live issue cannot be read: freshness that cannot be verified is never verified) |
 | `autospec dispatch stamp [--by <name>] [--queue <path>] [--state-file <path>] [--at <epoch>]` | no | the producer's call: writes `# refreshed-at:` / `# refreshed-by:` atomically and beats for its own hop |
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
@@ -129,6 +131,29 @@ a credential-holding step scheduled on an `ephemeral-session` host, a credential
 session, or a step with no log are all reported as `TOPOLOGY DEFECT [CODE]` before a
 single agent is launched. Host names and credential names in a hand-written topology file
 are exactly the strings `status` prints.
+
+`autospec dispatch stage` and `dispatch freshness` are the staged-spec gate (#3864). Staging
+happens on the merge host, which holds the `gh` token; the cluster that runs the agent does
+not, so a spec staged there is the only copy the worker will ever read — and a comment filed
+an hour later is simply absent from it. `stage --issue <N>` writes that copy from the issue
+payload plus the issue comments (`--issue-json`, `--comments-json`, or `--repo OWNER/REPO`,
+which calls `gh api` on the staging host for the issue and, unless a
+`--comments-json` file already supplies them, its comments — a discussion read that fails
+there is a staging failure, never a spec that looks complete). Its leading header block records
+`# source-updated-at:`, `# staged-at:` and `# comments-included: <kept> of <total>`. Only
+comments after the last body edit are pulled in; when the payload carries no body-edit time
+every comment is included and the spec says so, because including a comment the worker did
+not need costs a paragraph and omitting one it needed costs the run. The `## Execution
+environment` block states the container runtime, database and registry the staging host
+probed and what was absent, so a worker told to `docker run` on a cluster that only has
+Apptainer sees that before it fails. `freshness --issue <N>` is the gate: it compares the
+recorded revision against the live one (`--live-updated-at`, `--live-json`, or `--repo`), and
+prints one `STAGED-SPEC issue <N> current|STALE|REFUSED:` line. `STALE` is recoverable — the
+line names the re-stage command to run. `REFUSED` is the case that used to be silent: no
+staged spec, a spec staged before revision headers existed, or a live issue the cluster
+cannot read. Freshness that cannot be verified is never verified, so a `gh` that returns
+"not authenticated" on an unauthenticated cluster holds the dispatch instead of dispatching
+yesterday's read.
 
 `autospec rag` is read-only and performs no retrieval. It reports what the Agentic RAG
 subsystem's configuration and policy *would* do, so an operator can check a role budget or a
