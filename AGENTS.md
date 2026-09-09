@@ -385,6 +385,8 @@ the LGTM reviewer is dispatched. The enforcer is `scripts/lint-implementation.sh
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`, `skills/*/prompts/*.md`, `skills/*/references/*.md` — matched at any depth, so a subproject's own `README.md` or `docs/` counts). Markdown and `*.diff` are never scanned for the surface itself: prose describes a flag, it does not introduce one. `CHANGELOG.md` earns no credit, or every commit would satisfy the rule; LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
 | `BATS_SUITE_UNREGISTERED` | det | pre-commit path scan | staged `.bats` file added under `tests/unit/` or `tests/lint/` whose quoted path appears in neither `crates/autospec-core/src/validation/catalog.rs` nor `BATS_REGISTRATION_BASELINE` in `crates/autospec-core/src/validation/external/bats_registration_baseline.rs`; suites at `tests/` root are exempt — the authoritative scan is `run_bats_suite_registration` at conversion (#3919) |
+| `COMMAND_NOT_REGISTERED` | det | pre-commit staged-diff scan | a new command name introduced to the `COMMANDS` table or the dispatch match in `crates/autospec-cli/src/commands/mod.rs` (new = staged name set minus base name set) whose remaining registration sites — the `COMMANDS` table entry, the dispatch match arm, or the `\`autospec <name> ...\`` row in `docs/cli-reference.md` — are not also staged in the same commit; the finding names every unvisited site with file:line and the value to add (#3964, repro #3793) |
+| `CATALOG_ENTRY_INCOMPLETE` | det | pre-commit staged-diff scan | a new catalog check id (new = staged id set minus base id set) that is only half-registered: present in `STANDARD_CHECK_IDS` (`crates/autospec-core/src/validation/catalog/catalog_ids.rs`) without a match arm in `ValidationCheck::catalog_entry` (`crates/autospec-core/src/validation/catalog.rs`, dead code), or present as a match arm without the id (runtime panic, #3964) |
 
 ### Corrective directive map
 
@@ -407,6 +409,8 @@ retry prompt as cumulative context.
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 | `BATS_SUITE_UNREGISTERED` | "Register the new bats suite as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs; suites at tests/ root need no registration." |
+| `COMMAND_NOT_REGISTERED` | "Visit every registration site the finding names for the new command: the COMMANDS table entry and the dispatch match arm in crates/autospec-cli/src/commands/mod.rs, plus the \`autospec <name> ...\` row in docs/cli-reference.md — all in this commit." |
+| `CATALOG_ENTRY_INCOMPLETE` | "Keep the two catalog sites in lockstep: the id must appear in STANDARD_CHECK_IDS (crates/autospec-core/src/validation/catalog/catalog_ids.rs) and have a match arm in ValidationCheck::catalog_entry (crates/autospec-core/src/validation/catalog.rs) — add the missing one in this commit." |
 
 ### Enforcement
 

@@ -65,6 +65,17 @@ RULE_IDs enforced (deterministic detectors):
                     BATS_REGISTRATION_BASELINE in
                     crates/autospec-core/src/validation/external/bats_registration_baseline.rs.
                     Suites at tests/ root need no registration (#3919).
+  COMMAND_NOT_REGISTERED  (pre-commit mode only) A new CLI command name appears in
+                    the COMMANDS table or the dispatch match arm in
+                    crates/autospec-cli/src/commands/mod.rs without every
+                    registration site visited: the table entry, the dispatch arm,
+                    and the docs/cli-reference.md row. The finding names every
+                    unvisited site with file:line and the exact value to add (#3964).
+  CATALOG_ENTRY_INCOMPLETE  (pre-commit mode only) A new validation catalog id has
+                    only one of its two lockstep sites: listed in STANDARD_CHECK_IDS
+                    without a match arm in ValidationCheck::catalog_entry (runtime
+                    panic), or a match arm without the list entry (dead code). The
+                    finding names the missing site with file:line and the id (#3964).
   VACUOUS_GREP_INVERSE_OR_TRUE  grep -qv ... || true — always passes; assertion is a no-op.
   VACUOUS_OR_TRUE               || true at end of any test assertion line — masks failures.
   VACUOUS_TAUTOLOGY             expect(true).toBe(true), assert(1===1), assert True, xit(...).
@@ -1221,6 +1232,206 @@ detect_bats_suite_registration() {
     done <<< "$added"
 }
 
+# ── COMMAND_NOT_REGISTERED / CATALOG_ENTRY_INCOMPLETE detectors (#3964) ─────
+# Adding an autospec CLI subcommand or a validation catalog entry requires
+# updating several hand-maintained sites, and #3793 (autospec cost) silently
+# missed the fourth one. These gates cross-reference the *staged tree*, not
+# diff hunks, so "forgot the site" and "touched the site but the edit does
+# not parse" surface as the same diagnostic naming every unvisited site with
+# file:line and the exact value to add. Pre-commit mode only; inert outside
+# the autospec repository (the site files are the marker).
+
+CLI_COMMANDS_MOD="crates/autospec-cli/src/commands/mod.rs"
+CLI_REFERENCE_DOC="docs/cli-reference.md"
+CATALOG_IDS_RS="crates/autospec-core/src/validation/catalog/catalog_ids.rs"
+CATALOG_RS="crates/autospec-core/src/validation/catalog.rs"
+
+# (Site-file contents are read inline per call as `git show :<path>` with a
+# `HEAD:<path>` fallback: an untouched site file must still be cross-
+# referenced when a sibling site changed, and HEAD is empty before the first
+# commit, which makes every pre-existing command "visited".)
+
+# _command_table_names — command names from the COMMANDS table, handling both
+# the single-line ("name", "...") and multi-line ( "name", "..." ) entry shapes.
+_command_table_names() {
+    awk '
+        in_table && /^[[:space:]]*\];/ { in_table = 0; next }
+        !in_table && index($0, "const COMMANDS:") { in_table = 1; next }
+        in_table {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line ~ /^\(/) {
+                rest = substr(line, 2)
+                sub(/^[[:space:]]+/, "", rest)
+                if (rest ~ /^"/) {
+                    name = rest
+                    sub(/^"/, "", name)
+                    sub(/".*/, "", name)
+                    if (name != "") print name
+                    pending = 0
+                } else {
+                    pending = 1
+                }
+            } else if (pending && line ~ /^"/) {
+                name = line
+                sub(/^"/, "", name)
+                sub(/".*/, "", name)
+                if (name != "") print name
+                pending = 0
+            }
+        }
+    '
+}
+
+# _dispatch_command_names — command names from `match command.as_str()` arms.
+_dispatch_command_names() {
+    sed -n 's/^[[:space:]]*"\([a-z][a-z0-9-]*\)" =>.*/\1/p'
+}
+
+# _standard_check_ids — id literals from the STANDARD_CHECK_IDS array.
+_standard_check_ids() {
+    awk '
+        in_region && /^[[:space:]]*\];/ { in_region = 0; next }
+        !in_region && index($0, "STANDARD_CHECK_IDS") { in_region = 1; next }
+        in_region && match($0, /"[A-Za-z0-9_]+"/) {
+            print substr($0, RSTART + 1, RLENGTH - 2)
+        }
+    '
+}
+
+# _catalog_entry_arms — id literals from the catalog_entry match.
+_catalog_entry_arms() {
+    awk '
+        in_region && /^    \}/ { in_region = 0; next }
+        !in_region && index($0, "fn catalog_entry(") { in_region = 1; next }
+        in_region && index($0, "=>") > 0 {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line ~ /^"[A-Za-z0-9_]+"/) {
+                id = line
+                sub(/^"/, "", id)
+                sub(/".*/, "", id)
+                print id
+            }
+        }
+    '
+}
+
+# detect_command_registration — RULE_ID COMMAND_NOT_REGISTERED.
+#
+# A command is "new" when its name appears in the staged COMMANDS table or
+# dispatch match but in neither in HEAD. Every new command must have all
+# three sites: the table entry, the dispatch arm, and a docs/cli-reference.md
+# row. One finding per new command, at the first unvisited site, naming every
+# unvisited site (file:line) and the value to add. No escape hatch: a missing
+# registration site is never a false positive.
+detect_command_registration() {
+    [ "$PRE_COMMIT" -eq 1 ] || return 0
+    [ -f "$CLI_COMMANDS_MOD" ] || return 0
+
+    local staged_mod base_mod staged_doc
+    staged_mod="$(git show ":$CLI_COMMANDS_MOD" 2>/dev/null || git show "HEAD:$CLI_COMMANDS_MOD" 2>/dev/null)"
+    [ -n "$staged_mod" ] || return 0
+    base_mod="$(git show "HEAD:$CLI_COMMANDS_MOD" 2>/dev/null)"
+    staged_doc="$(git show ":$CLI_REFERENCE_DOC" 2>/dev/null || git show "HEAD:$CLI_REFERENCE_DOC" 2>/dev/null)"
+
+    local staged_table staged_dispatch base_table base_dispatch
+    staged_table="$(printf '%s\n' "$staged_mod" | _command_table_names | sort -u)"
+    staged_dispatch="$(printf '%s\n' "$staged_mod" | _dispatch_command_names | sort -u)"
+    base_table="$(printf '%s\n' "$base_mod" | _command_table_names | sort -u)"
+    base_dispatch="$(printf '%s\n' "$base_mod" | _dispatch_command_names | sort -u)"
+
+    local new_names
+    new_names="$(comm -23 \
+        <(printf '%s\n%s\n' "$staged_table" "$staged_dispatch" | sort -u) \
+        <(printf '%s\n%s\n' "$base_table" "$base_dispatch" | sort -u))"
+    [ -n "$new_names" ] || return 0
+
+    local name table_line dispatch_line doc_line
+    table_line="$(printf '%s\n' "$staged_mod" | grep -n 'const COMMANDS:' | head -n 1 | cut -d: -f1)"
+    table_line="${table_line:-0}"
+    dispatch_line="$(printf '%s\n' "$staged_mod" | grep -n 'match command.as_str()' | head -n 1 | cut -d: -f1)"
+    dispatch_line="${dispatch_line:-0}"
+    doc_line="$(printf '%s\n' "$staged_doc" | grep -n '^| `autospec' | tail -n 1 | cut -d: -f1)"
+    doc_line="${doc_line:-1}"
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        local in_table=0 in_dispatch=0 in_doc=0 evidence=""
+        printf '%s\n' "$staged_table" | grep -qxF "$name" && in_table=1
+        printf '%s\n' "$staged_dispatch" | grep -qxF "$name" && in_dispatch=1
+        [ -n "$staged_doc" ] && printf '%s\n' "$staged_doc" | grep -qF "\`autospec $name" && in_doc=1
+        [ "$in_table" -eq 1 ] && evidence="${evidence:+$evidence, }the COMMANDS table"
+        [ "$in_dispatch" -eq 1 ] && evidence="${evidence:+$evidence, }the dispatch match arm"
+
+        local unvisited="" site_path="$CLI_COMMANDS_MOD" site_line="$table_line"
+        if [ "$in_table" -eq 0 ]; then
+            unvisited="$unvisited $site_path:$site_line (add the COMMANDS table entry (\"$name\", \"<description>\"))"
+        elif [ "$in_dispatch" -eq 0 ]; then
+            site_path="$CLI_COMMANDS_MOD"; site_line="$dispatch_line"
+            unvisited="$unvisited $site_path:$site_line (add the dispatch arm \"$name\" =>)"
+        else
+            site_path="$CLI_REFERENCE_DOC"; site_line="$doc_line"
+        fi
+        [ "$in_dispatch" -eq 0 ] && unvisited="$unvisited $CLI_COMMANDS_MOD:$dispatch_line (add the dispatch arm \"$name\" =>)"
+        [ "$in_doc" -eq 0 ] && unvisited="$unvisited $CLI_REFERENCE_DOC:$doc_line (add the | \`autospec $name ...\` | row)"
+        [ -n "$unvisited" ] || continue
+
+        emit_capped COMMAND_NOT_REGISTERED "$site_path" "$site_line" \
+            "new command '$name' (added to ${evidence:-this commit}) leaves unvisited registration sites:$unvisited — visit every named site in this commit (#3964)"
+    done <<< "$new_names"
+}
+
+# detect_catalog_entry_completeness — RULE_ID CATALOG_ENTRY_INCOMPLETE.
+#
+# A catalog id has exactly two lockstep sites: the STANDARD_CHECK_IDS list in
+# catalog_ids.rs and the match arm in catalog.rs. An id without an arm is
+# dead code (the standard catalog never instantiates it); an arm without the
+# id panics at runtime (catalog_entry has `unknown => panic!`). One finding
+# per incomplete entry, at the missing site, naming the id.
+detect_catalog_entry_completeness() {
+    [ "$PRE_COMMIT" -eq 1 ] || return 0
+    [ -f "$CATALOG_IDS_RS" ] || return 0
+
+    local staged_ids base_ids staged_cat base_cat
+    staged_ids="$(git show ":$CATALOG_IDS_RS" 2>/dev/null || git show "HEAD:$CATALOG_IDS_RS" 2>/dev/null)"
+    [ -n "$staged_ids" ] || return 0
+    base_ids="$(git show "HEAD:$CATALOG_IDS_RS" 2>/dev/null)"
+    staged_cat="$(git show ":$CATALOG_RS" 2>/dev/null || git show "HEAD:$CATALOG_RS" 2>/dev/null)"
+    base_cat="$(git show "HEAD:$CATALOG_RS" 2>/dev/null)"
+
+    local staged_list base_list staged_arms base_arms new_ids
+    staged_list="$(printf '%s\n' "$staged_ids" | _standard_check_ids | sort -u)"
+    base_list="$(printf '%s\n' "$base_ids" | _standard_check_ids | sort -u)"
+    staged_arms="$(printf '%s\n' "$staged_cat" | _catalog_entry_arms | sort -u)"
+    base_arms="$(printf '%s\n' "$base_cat" | _catalog_entry_arms | sort -u)"
+
+    new_ids="$(comm -23 \
+        <(printf '%s\n%s\n' "$staged_list" "$staged_arms" | sort -u) \
+        <(printf '%s\n%s\n' "$base_list" "$base_arms" | sort -u))"
+    [ -n "$new_ids" ] || return 0
+
+    local ids_line entry_line id in_list in_arms
+    ids_line="$(printf '%s\n' "$staged_ids" | grep -n 'STANDARD_CHECK_IDS' | head -n 1 | cut -d: -f1)"
+    ids_line="${ids_line:-0}"
+    entry_line="$(printf '%s\n' "$staged_cat" | grep -n 'fn catalog_entry(' | head -n 1 | cut -d: -f1)"
+    entry_line="${entry_line:-0}"
+
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        in_list=0; in_arms=0
+        printf '%s\n' "$staged_list" | grep -qxF "$id" && in_list=1
+        printf '%s\n' "$staged_arms" | grep -qxF "$id" && in_arms=1
+        if [ "$in_arms" -eq 1 ] && [ "$in_list" -eq 0 ]; then
+            emit_capped CATALOG_ENTRY_INCOMPLETE "$CATALOG_IDS_RS" "$ids_line" \
+                "catalog entry '$id' has a match arm in $CATALOG_RS but is absent from STANDARD_CHECK_IDS — the standard catalog never instantiates it (dead arm); add \"$id\" to the list in $CATALOG_IDS_RS (#3964)"
+        elif [ "$in_list" -eq 1 ] && [ "$in_arms" -eq 0 ]; then
+            emit_capped CATALOG_ENTRY_INCOMPLETE "$CATALOG_RS" "$entry_line" \
+                "catalog id '$id' is listed in STANDARD_CHECK_IDS but has no match arm in ValidationCheck::catalog_entry — standard() panics at runtime; add the \"$id\" => arm in $CATALOG_RS (#3964)"
+        fi
+    done <<< "$new_ids"
+}
+
 # ── §3.1 VACUOUS_* detectors ─────────────────────────────────────────────────
 # Detects 8 vacuous-test patterns where assertions always pass regardless of behavior.
 # Active when --vacuous-assertions or --pre-commit flag is set.
@@ -1672,6 +1883,8 @@ rule_directive() {
         NEW_DEP_UNJUSTIFIED) printf "Add a '# why: <reason>' comment in the same diff hunk justifying this new dependency." ;;
         NEW_ABSTRACTION_SINGLE_CALLER) printf 'Inline this abstraction — with only one caller, the named wrapper adds indirection without value.' ;;
         BATS_SUITE_UNREGISTERED) printf 'Register the new bats suite as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs; suites at tests/ root need no registration.' ;;
+        COMMAND_NOT_REGISTERED) printf 'Visit every registration site the finding names for the new command: the COMMANDS table entry and the dispatch match arm in crates/autospec-cli/src/commands/mod.rs, plus the | `autospec <name> ...` | row in docs/cli-reference.md — all in this commit.' ;;
+        CATALOG_ENTRY_INCOMPLETE) printf 'Keep the two catalog sites in lockstep: the id must appear in STANDARD_CHECK_IDS (crates/autospec-core/src/validation/catalog/catalog_ids.rs) and have a match arm in ValidationCheck::catalog_entry (crates/autospec-core/src/validation/catalog.rs) — add the missing one in this commit.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -1697,6 +1910,8 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_mock_db
         detect_doc_out_of_sync
         detect_bats_suite_registration
+        detect_command_registration
+        detect_catalog_entry_completeness
         if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
             detect_vacuous_assertions
         fi
@@ -1740,6 +1955,8 @@ else
     detect_mock_db
     detect_doc_out_of_sync
     detect_bats_suite_registration
+    detect_command_registration
+    detect_catalog_entry_completeness
     if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
         detect_vacuous_assertions
     fi
