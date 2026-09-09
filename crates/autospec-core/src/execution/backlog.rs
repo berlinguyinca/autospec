@@ -1,0 +1,362 @@
+//! The conversion backlog metric, with issue identity from authoritative fields (#3924).
+//!
+//! The backlog metric answers "which issues still need a PR". The original
+//! implementation derived issue identity from branch-name shape by taking the
+//! trailing digits, so every branch with a suffix (`conv/3845-fix2`,
+//! `conv/3870-fix`) silently produced no match and its issue was counted as
+//! not yet converted — including five issues merged within the previous hour.
+//! The reported backlog was 220 against a true 215.
+//!
+//! The invariants this module enforces:
+//!
+//! 1. **Issue identity comes from an authoritative field, never from a
+//!    name.** [`PrRecord::authoritative_issue`] uses the platform's linked
+//!    issue first, then a `Closes #N` / `Fixes #N` / `Refs #N` trailer.
+//!    Branch names are a human convenience only.
+//! 2. **Every derived metric ships with a known-answer check.**
+//!    [`known_answer_check`] asserts that issues known to be merged do not
+//!    appear in the outstanding set, and fails loudly when they do. A metric
+//!    that has never been run against a case whose answer is known is not yet
+//!    a measurement (#3793).
+//! 3. **A name-matching heuristic reports what it failed to match.**
+//!    [`NameExtraction::unmatched_branches`] keeps the non-matching branch
+//!    names visible instead of discarding them silently.
+//! 4. **Counts that drive dispatch are reconcilable.**
+//!    [`BacklogReport::summary_line`] prints `patches on disk`, `issues open`,
+//!    `issues with a PR` and `convertible` together, and
+//!    [`BacklogReport::discrepancies`] reports — rather than absorbs — any
+//!    drift between the authoritative backlog and the name heuristic.
+
+use std::collections::BTreeSet;
+
+/// Conventional branch-name markers after which an issue number may appear.
+/// An *anchored* marker, not a trailing-digit grab: this is the extraction
+/// that reproduced the true figure (194 issues with a branch), where
+/// `[0-9]+$` missed every suffixed branch and `[0-9]{4}` matched any 4-digit
+/// run anywhere (334 against a true 194).
+const BRANCH_ISSUE_MARKERS: [&str; 3] = ["issue-", "conv/", "fix/"];
+
+/// Keywords that link a PR/commit to an issue in free text, per GitHub's
+/// closing-keyword set plus `Refs` for non-closing association.
+const LINK_TRAILER_KEYWORDS: [&str; 3] = ["Closes", "Fixes", "Refs"];
+
+/// Extract an issue number from a branch name by convention.
+///
+/// **This is a heuristic, not an identifier** (#3924): branch names drift
+/// the moment anyone adds a suffix or a retry marker. Use
+/// [`PrRecord::authoritative_issue`] for association; use this only where a
+/// name must be read (audits, diagnostics), and report non-matches via
+/// [`extract_issue_numbers_from_branches`].
+///
+/// A match requires a marker from [`BRANCH_ISSUE_MARKERS`] followed by a run
+/// of 3–5 ASCII digits terminated by end-of-name or a non-digit. The length
+/// bound rejects unrelated digit runs (`conv/20260909-rerun` → `None`); the
+/// anchor rejects digits that are not after a marker
+/// (`chore/8080-sweep` → `None`).
+///
+/// ```text
+/// fix/issue-3685        -> Some(3685)
+/// conv/3845-fix2        -> Some(3845)   (suffix tolerated)
+/// conv/3870-fix         -> Some(3870)
+/// conv/20260909-rerun   -> None         (8-digit run is a date, not an issue)
+/// chore/8080-sweep      -> None         (no marker)
+/// ```
+pub fn issue_number_from_branch(branch: &str) -> Option<u64> {
+    for idx in branch.char_indices().map(|(i, _)| i) {
+        let tail = &branch[idx..];
+        for marker in BRANCH_ISSUE_MARKERS {
+            let Some(after) = tail.strip_prefix(marker) else {
+                continue;
+            };
+            let digit_end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            let digits = &after[..digit_end];
+            if (3..=5).contains(&digits.len()) {
+                return digits.parse().ok();
+            }
+            // Too short, or a run longer than 5 digits (a date, a port):
+            // not an issue number. Keep scanning for a later marker.
+        }
+    }
+    None
+}
+
+/// Parse a `Closes #N` / `Fixes #N` / `Refs #N` trailer from a PR body or
+/// commit message. The keyword must start a line (trailer semantics, not a
+/// mid-sentence mention); the first matching trailer wins. Keywords are
+/// matched case-insensitively.
+pub fn issue_number_from_trailer(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let line = line.trim_start();
+        for keyword in LINK_TRAILER_KEYWORDS {
+            let matched =
+                line.len() >= keyword.len() && line[..keyword.len()].eq_ignore_ascii_case(keyword);
+            if !matched {
+                continue;
+            }
+            let rest = line[keyword.len()..].trim_start();
+            let Some(after_hash) = rest.strip_prefix('#') else {
+                continue;
+            };
+            let digit_end = after_hash
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after_hash.len());
+            if digit_end > 0 {
+                return after_hash[..digit_end].parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// The state of a pull request as far as the backlog metric cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    /// Still open: the issue has work in flight.
+    Open,
+    /// Merged: the issue's work has landed; it must never appear as
+    /// outstanding (#3924's known-answer case).
+    Merged,
+    /// Closed without merging: the PR does not associate the issue with
+    /// delivered work, so the issue stays outstanding.
+    Closed,
+}
+
+/// One pull request, as the backlog metric sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRecord {
+    /// The head branch name. A human convenience: it is audited
+    /// ([`extract_issue_numbers_from_branches`]) but never used for issue
+    /// association (#3924 invariant 1).
+    pub head_branch: String,
+    /// The platform's linked issue number, when the platform reports one.
+    /// The most authoritative field available.
+    pub linked_issue: Option<u64>,
+    /// PR body / commit message, scanned for `Closes #N` / `Fixes #N` /
+    /// `Refs #N` trailers when no linked issue is reported.
+    pub description: String,
+    /// Whether the PR is open, merged, or closed-unmerged.
+    pub state: PrState,
+}
+
+impl PrRecord {
+    /// The issue this PR authoritatively belongs to: the platform's linked
+    /// issue first, then a closing/refs trailer. **Never the branch name.**
+    pub fn authoritative_issue(&self) -> Option<u64> {
+        self.linked_issue
+            .or_else(|| issue_number_from_trailer(&self.description))
+    }
+}
+
+/// Result of running the name-based extraction over branch names: the match
+/// count *and* the names that produced no issue number (#3924 invariant 3 —
+/// the original extraction discarded non-matches silently, which is exactly
+/// what hid the defect).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NameExtraction {
+    /// Branch names that yielded an issue number.
+    pub matched: usize,
+    /// Branch names that yielded nothing, verbatim, for the report.
+    pub unmatched_branches: Vec<String>,
+    /// The issue numbers found, for cross-checking against authoritative
+    /// identity. Private: read it through [`NameExtraction::matched_numbers`].
+    matched_numbers: BTreeSet<u64>,
+}
+
+impl NameExtraction {
+    /// How many branch names produced no issue number.
+    pub fn unmatched_count(&self) -> usize {
+        self.unmatched_branches.len()
+    }
+
+    /// The issue numbers the heuristic found across all matched names.
+    /// Diagnostic only — association uses
+    /// [`PrRecord::authoritative_issue`].
+    pub fn matched_numbers(&self) -> &BTreeSet<u64> {
+        &self.matched_numbers
+    }
+}
+
+/// Run [`issue_number_from_branch`] over a set of branch names, keeping the
+/// non-matches visible instead of dropping them silently.
+pub fn extract_issue_numbers_from_branches<'a>(
+    branches: impl IntoIterator<Item = &'a str>,
+) -> NameExtraction {
+    let mut extraction = NameExtraction::default();
+    for name in branches {
+        match issue_number_from_branch(name) {
+            Some(number) => {
+                extraction.matched += 1;
+                extraction.matched_numbers.insert(number);
+            }
+            None => extraction.unmatched_branches.push(name.to_string()),
+        }
+    }
+    extraction
+}
+
+/// Inputs to one backlog computation.
+#[derive(Debug, Clone, Default)]
+pub struct BacklogSnapshot {
+    /// Issue numbers currently open.
+    pub open_issues: BTreeSet<u64>,
+    /// Issue numbers that have a patch on disk awaiting conversion.
+    pub patched_issues: BTreeSet<u64>,
+    /// Every PR in scope, open or settled.
+    pub prs: Vec<PrRecord>,
+    /// Known-answer set (#3924 invariant 2 / #3793): issues whose true state
+    /// is known to the caller — e.g. merged in the current session. They
+    /// must not appear in the outstanding set.
+    pub known_merged: BTreeSet<u64>,
+}
+
+/// The computed backlog, with its reconciliation and audit output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogReport {
+    /// Open, patched issues with no open-or-merged PR: the convertible
+    /// backlog. Derived from authoritative issue identity only.
+    pub outstanding: BTreeSet<u64>,
+    /// Issue numbers with an open or merged PR, per authoritative fields.
+    pub issues_with_pr: BTreeSet<u64>,
+    /// Patches on disk at snapshot time.
+    pub patches_on_disk: usize,
+    /// Open issues at snapshot time.
+    pub issues_open: usize,
+    /// What the name heuristic would have produced, kept as a cross-check
+    /// only; never used for dispatch.
+    pub heuristic_outstanding: BTreeSet<u64>,
+    /// The branch-name audit: matched count and the unmatched names.
+    pub branch_audit: NameExtraction,
+}
+
+impl BacklogReport {
+    /// The number that drives dispatch: convertible patches still owed.
+    pub fn convertible(&self) -> usize {
+        self.outstanding.len()
+    }
+
+    /// One line with every dispatch-relevant count, so the sums can be
+    /// checked by eye (#3924 invariant 4):
+    /// `backlog: convertible 215 (patches on disk 409, issues open 372, issues with a PR 194)`.
+    pub fn summary_line(&self) -> String {
+        format!(
+            "backlog: convertible {} (patches on disk {}, issues open {}, issues with a PR {})",
+            self.convertible(),
+            self.patches_on_disk,
+            self.issues_open,
+            self.issues_with_pr.len()
+        )
+    }
+
+    /// Every way this report's derivations disagree, reported rather than
+    /// absorbed (#3924 invariant 4), plus the name heuristic's non-match
+    /// count (invariant 3). An empty vector means nothing drifted.
+    pub fn discrepancies(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        if !self.branch_audit.unmatched_branches.is_empty() {
+            found.push(format!(
+                "{} branch name(s) produced no issue number: {}",
+                self.branch_audit.unmatched_count(),
+                self.branch_audit.unmatched_branches.join(", ")
+            ));
+        }
+        if self.outstanding != self.heuristic_outstanding {
+            let heuristic_only: Vec<String> = self
+                .heuristic_outstanding
+                .difference(&self.outstanding)
+                .map(|n| n.to_string())
+                .collect();
+            let authoritative_only: Vec<String> = self
+                .outstanding
+                .difference(&self.heuristic_outstanding)
+                .map(|n| n.to_string())
+                .collect();
+            found.push(format!(
+                "name heuristic disagrees with authoritative identity: heuristic {} vs authoritative {} outstanding (heuristic-only: [{}], authoritative-only: [{}])",
+                self.heuristic_outstanding.len(),
+                self.outstanding.len(),
+                heuristic_only.join(", "),
+                authoritative_only.join(", ")
+            ));
+        }
+        found
+    }
+}
+
+/// The known-answer assertion (#3924 invariant 2): issues the caller *knows*
+/// are merged must not appear in an outstanding set. Fails loudly — with
+/// every offending issue named — because a metric contradicting a known
+/// fact must stop the pipeline, not print a plausible number.
+///
+/// `compute_backlog` applies this to its authoritative result; run it
+/// against any other derivation (a new extraction, a cached set) before
+/// trusting that derivation (#3793).
+pub fn known_answer_check(
+    outstanding: &BTreeSet<u64>,
+    known_merged: &BTreeSet<u64>,
+) -> Result<(), String> {
+    let violations: Vec<String> = known_merged
+        .intersection(outstanding)
+        .map(|n| n.to_string())
+        .collect();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "known-answer check failed: issue(s) {} are known merged but appear in the outstanding backlog [{}]; identity was not taken from an authoritative field (#3924)",
+        violations.join(", "),
+        violations.join(", ")
+    ))
+}
+
+/// Compute the conversion backlog from authoritative issue identity.
+///
+/// An issue is outstanding when it is open, has a patch on disk, and has no
+/// open or merged PR associated by [`PrRecord::authoritative_issue`].
+/// Closed-unmerged PRs do not associate: the work did not land, so the
+/// issue stays on the list.
+///
+/// The branch-name heuristic runs alongside — as an audit and a
+/// cross-check, never as the source of truth — and the authoritative
+/// result is gated by [`known_answer_check`] before it is returned: a
+/// snapshot in which a known-merged issue looks outstanding is an error,
+/// not a number.
+pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, String> {
+    let issues_with_pr: BTreeSet<u64> = snapshot
+        .prs
+        .iter()
+        .filter(|pr| pr.state != PrState::Closed)
+        .filter_map(|pr| pr.authoritative_issue())
+        .collect();
+    let open_patched: BTreeSet<u64> = snapshot
+        .open_issues
+        .intersection(&snapshot.patched_issues)
+        .copied()
+        .collect();
+    let outstanding: BTreeSet<u64> = open_patched.difference(&issues_with_pr).copied().collect();
+    known_answer_check(&outstanding, &snapshot.known_merged)?;
+
+    // The audit covers every branch name, whatever the PR state: it is a
+    // statement about the names, while association above is a statement
+    // about delivered work.
+    let branch_audit =
+        extract_issue_numbers_from_branches(snapshot.prs.iter().map(|pr| pr.head_branch.as_str()));
+    let heuristic_outstanding: BTreeSet<u64> = open_patched
+        .difference(branch_audit.matched_numbers())
+        .copied()
+        .collect();
+
+    Ok(BacklogReport {
+        outstanding,
+        issues_with_pr,
+        patches_on_disk: snapshot.patched_issues.len(),
+        issues_open: snapshot.open_issues.len(),
+        heuristic_outstanding,
+        branch_audit,
+    })
+}
+
+#[cfg(test)]
+#[path = "backlog_tests.rs"]
+mod tests;
