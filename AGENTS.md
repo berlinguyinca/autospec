@@ -8,6 +8,7 @@
 - **Never amend** committed PRs; create a new commit instead.
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
 - **Validation and tests**: run the Rust test suite with `cargo test --workspace --no-fail-fast`. Without `--no-fail-fast` cargo stops at the first failing test binary, so one failure hides every later binary -- that masked six failures on `main`. Also run the shell validation scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
+- **Build gate compiles all targets** (#3702): a gate whose green exit code is read as "this code compiles" must compile everything the patch touched, i.e. `cargo build --workspace --all-targets` (or an equivalent that compiles test targets, such as `cargo test --no-run`). Plain `cargo build` skips test targets, so its `rc=0` is about a different program than the one under review. A patch's own test file failing to compile is a hard failure, distinct from "tests ran and some failed" -- both surface as `test_rc=101`. Record the exact gate command with the result it produced.
 
 ## Runtime resource isolation
 
