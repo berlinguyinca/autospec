@@ -39,9 +39,10 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     // +9: orphaned-suite ratchet and suites it caught (#3360); +1: code
     // intelligence (#3483); +2: suites the ratchet caught (#3485); +1: lint (#3497);
     // +2: the loud-failure verification gates (#3535); +1: pipeline-verdict
-    // ratchet (#3716); +1: restore-visibility ratchet (#3878).
-    assert_eq!(calls.len(), 161);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 156); // a call no gate repeats
+    // ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: the
+    // generated-artifact consumer-drift ratchet (#3893).
+    assert_eq!(calls.len(), 162);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 157); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -70,14 +71,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 172); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716
+    assert_eq!(frozen_catalog_ids().len(), 173); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716; +1: #3893
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 172);
+    assert_eq!(ids.len(), 173);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
@@ -715,6 +716,11 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         (
             "check_restore_visibility_ratchet",
             "tests/lint/test_restore_visibility_checker.bats",
+        ),
+        // Registered by #3893: the generated-artifact consumer-drift ratchet.
+        (
+            "check_generated_artifact_integrity",
+            "tests/lint/test_generated_artifact_integrity_checker.bats",
         ),
     ] {
         assert_eq!(
