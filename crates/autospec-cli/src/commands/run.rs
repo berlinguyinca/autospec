@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use autospec_core::agent::AgentResult;
 use autospec_core::execution::{
     AgentOutcome, ExecutionQueue, FailureKind, IngestedAgentResult, QueueResultApplication,
+    QueueStatus,
 };
 
 const DEFAULT_RETRY_LIMIT: u32 = 3;
@@ -27,13 +28,16 @@ struct Options {
     outcome: Option<String>,
     failure_kind: Option<String>,
     retry_limit: u32,
+    dry_run: bool,
     json: bool,
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let options = parse_options(args)?;
     match options.mode {
+        Mode::Create if options.dry_run => create_dry_run(&options),
         Mode::Create => create_queue(&options),
+        Mode::Ingest(ref input) if options.dry_run => ingest_dry_run(&options, input),
         Mode::Ingest(ref input) => ingest_result(&options, input),
     }
 }
@@ -190,11 +194,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut outcome = None;
     let mut failure_kind = None;
     let mut retry_limit = DEFAULT_RETRY_LIMIT;
+    let mut dry_run = false;
     let mut json = false;
     let mut index = 0;
 
     while index < args.len() {
         match args[index].as_str() {
+            "--dry-run" => dry_run = true,
             "--json" => json = true,
             "--run" => run_id = Some(required_value(args, &mut index, "--run")?),
             "--spec" => specs.push(required_value(args, &mut index, "--spec")?),
@@ -232,6 +238,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         outcome,
         failure_kind,
         retry_limit,
+        dry_run,
         json,
     })
 }
@@ -306,4 +313,344 @@ fn escape_json(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn create_dry_run(options: &Options) -> Result<(), String> {
+    if options.result_id.is_some() || options.outcome.is_some() || options.failure_kind.is_some() {
+        return Err("autospec run result options require --ingest <agent-result.json>".to_string());
+    }
+    if options.retry_limit != DEFAULT_RETRY_LIMIT {
+        return Err("autospec run --retry-limit requires --ingest <agent-result.json>".to_string());
+    }
+    ExecutionQueue::validate_plan(&options.run_id, &options.specs)?;
+    let decision = if run_directory(Path::new("."), &options.run_id).exists() {
+        dry_run_refuse(format!("queue already exists for run: {}", options.run_id))
+    } else {
+        DryRunDecision {
+            decision: "create",
+            application: None,
+            status: None,
+            reason: format!(
+                "run {} has no local state yet; {} spec(s) would be queued",
+                options.run_id,
+                options.specs.len()
+            ),
+        }
+    };
+    print_dry_run(options, "create", None, None, None, &decision);
+    Ok(())
+}
+
+fn ingest_dry_run(options: &Options, input: &PathBuf) -> Result<(), String> {
+    let result_id = options
+        .result_id
+        .as_deref()
+        .ok_or_else(|| "autospec run --ingest requires --result-id <id>".to_string())?;
+    let outcome = parse_outcome(options)?;
+    if options.specs.len() != 1 {
+        return Err("autospec run --ingest requires exactly one --spec <id>".to_string());
+    }
+    let agent_result = fs::read_to_string(input)
+        .map_err(|error| format!("failed to read agent result {}: {error}", input.display()))?;
+    let agent_result = AgentResult::from_json(&agent_result)?;
+    let ingested = IngestedAgentResult::new(
+        options.run_id.clone(),
+        options.specs[0].clone(),
+        result_id,
+        outcome,
+        agent_result,
+    )?;
+    let decision = ingest_dry_run_decision(&ingested, options.retry_limit);
+    print_dry_run(
+        options,
+        "ingest",
+        Some(&ingested.spec_id),
+        Some(&ingested.result_id),
+        Some(ingested.outcome.as_str()),
+        &decision,
+    );
+    Ok(())
+}
+
+fn ingest_dry_run_decision(ingested: &IngestedAgentResult, retry_limit: u32) -> DryRunDecision {
+    let queue = match inspect_queue(Path::new("."), &ingested.run_id) {
+        InspectedQueue::Loaded(queue) => queue,
+        InspectedQueue::Absent => {
+            return dry_run_refuse(format!("queue does not exist for run: {}", ingested.run_id));
+        }
+        InspectedQueue::Ambiguous(error) => return dry_run_refuse(error),
+    };
+    let entry = match queue.entry(&ingested.spec_id) {
+        Some(entry) => entry,
+        None => {
+            return dry_run_refuse(format!("unknown queue spec: {}", ingested.spec_id));
+        }
+    };
+    let already = entry
+        .agent_result_ids
+        .iter()
+        .any(|id| id == &ingested.result_id);
+    if !already
+        && matches!(
+            entry.status,
+            QueueStatus::Passed
+                | QueueStatus::Blocked
+                | QueueStatus::Deferred
+                | QueueStatus::Superseded
+        )
+    {
+        return dry_run_refuse(format!(
+            "cannot apply a new result to terminal queue entry: {}",
+            ingested.spec_id
+        ));
+    }
+    if let Err(error) = result_file_collision(ingested) {
+        return dry_run_refuse(error);
+    }
+    if already {
+        return DryRunDecision {
+            decision: "record",
+            application: Some("already-applied"),
+            status: Some(entry.status.as_str()),
+            reason: format!(
+                "result {} is already recorded for {}",
+                ingested.result_id, ingested.spec_id
+            ),
+        };
+    }
+    let status = predicted_status(&ingested.outcome, entry.attempts, retry_limit);
+    DryRunDecision {
+        decision: "record",
+        application: Some("applied"),
+        status: Some(status),
+        reason: format!(
+            "result {} would be applied to {} as {}",
+            ingested.result_id, ingested.spec_id, status
+        ),
+    }
+}
+
+fn predicted_status(outcome: &AgentOutcome, attempts: u32, retry_limit: u32) -> &'static str {
+    match outcome {
+        AgentOutcome::Passed => "passed",
+        AgentOutcome::Failed { .. } => {
+            if attempts + 1 > retry_limit {
+                "blocked"
+            } else {
+                "failed"
+            }
+        }
+        AgentOutcome::Blocked => "blocked",
+    }
+}
+
+struct DryRunDecision {
+    decision: &'static str,
+    application: Option<&'static str>,
+    status: Option<&'static str>,
+    reason: String,
+}
+
+fn dry_run_refuse(reason: String) -> DryRunDecision {
+    DryRunDecision {
+        decision: "refuse",
+        application: None,
+        status: None,
+        reason,
+    }
+}
+
+fn print_dry_run(
+    options: &Options,
+    mode: &str,
+    spec_id: Option<&str>,
+    result_id: Option<&str>,
+    outcome: Option<&str>,
+    decision: &DryRunDecision,
+) {
+    if options.json {
+        println!(
+            "{{\"command\":\"run\",\"mode\":\"{mode}\",\"dry_run\":true,\"run_id\":\"{}\",\"spec_id\":{},\"result_id\":{},\"outcome\":{},\"decision\":\"{}\",\"application\":{},\"status\":{},\"reason\":\"{}\"}}",
+            escape_json(&options.run_id),
+            optional_json_field(spec_id),
+            optional_json_field(result_id),
+            optional_json_field(outcome),
+            decision.decision,
+            optional_json_field(decision.application),
+            optional_json_field(decision.status),
+            escape_json(&decision.reason),
+        );
+        return;
+    }
+    let subject = if mode == "ingest" {
+        format!(
+            "{} result {} for {} in local run {}",
+            decision.decision,
+            result_id.expect("ingest dry-run decisions carry a result id"),
+            spec_id.expect("ingest dry-run decisions carry a spec id"),
+            options.run_id,
+        )
+    } else if decision.decision == "create" {
+        format!("create local run {}", options.run_id)
+    } else {
+        format!("refuse to create local run {}", options.run_id)
+    };
+    println!(
+        "AutoSpec dry-run: would {subject} ({}); no state was written and no agent or validation command was executed",
+        decision.reason
+    );
+}
+
+fn optional_json_field(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", escape_json(value)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+enum InspectedQueue {
+    Loaded(ExecutionQueue),
+    Absent,
+    Ambiguous(String),
+}
+
+fn inspect_queue(root: &Path, run_id: &str) -> InspectedQueue {
+    let directory = run_directory(root, run_id);
+    let primary = directory.join("queue.json");
+    let temporary = directory.join("queue.json.tmp");
+    let primary_doc = match read_queue_document(&primary, run_id) {
+        QueueDocument::Valid(queue) => return InspectedQueue::Loaded(queue),
+        file => file,
+    };
+    match (primary_doc, read_queue_document(&temporary, run_id)) {
+        (QueueDocument::Missing, QueueDocument::Missing) => InspectedQueue::Absent,
+        (QueueDocument::Operational(error), _) => InspectedQueue::Ambiguous(error),
+        (QueueDocument::Missing, QueueDocument::Valid(queue)) => InspectedQueue::Loaded(queue),
+        (QueueDocument::Invalid(_), QueueDocument::Valid(queue)) => InspectedQueue::Loaded(queue),
+        (QueueDocument::Missing, QueueDocument::Invalid(error))
+        | (QueueDocument::Invalid(_), QueueDocument::Invalid(error)) => {
+            InspectedQueue::Ambiguous(format!(
+                "invalid queue recovery file {}: {error}",
+                temporary.display()
+            ))
+        }
+        (QueueDocument::Invalid(error), QueueDocument::Missing) => {
+            InspectedQueue::Ambiguous(format!("invalid queue file {}: {error}", primary.display()))
+        }
+        (QueueDocument::Missing, QueueDocument::Operational(error))
+        | (QueueDocument::Invalid(_), QueueDocument::Operational(error)) => {
+            InspectedQueue::Ambiguous(error)
+        }
+        (QueueDocument::Valid(_), _) => unreachable!("valid queues return before recovery"),
+    }
+}
+
+enum QueueDocument {
+    Missing,
+    Valid(ExecutionQueue),
+    Invalid(String),
+    Operational(String),
+}
+
+fn read_queue_document(path: &Path, run_id: &str) -> QueueDocument {
+    match fs::read_to_string(path) {
+        Ok(value) => match ExecutionQueue::from_json(&value) {
+            Ok(queue) if queue.run_id == run_id => QueueDocument::Valid(queue),
+            Ok(_) => QueueDocument::Invalid(format!(
+                "queue document run id does not match path: {run_id}"
+            )),
+            Err(error) => QueueDocument::Invalid(error),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => QueueDocument::Missing,
+        Err(error) => QueueDocument::Operational(format!(
+            "failed to read queue file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+enum ResultDocument {
+    Missing,
+    Stored(IngestedAgentResult),
+    Invalid(String),
+    Operational(String),
+}
+
+fn read_result_document(path: &Path, expected: &IngestedAgentResult) -> ResultDocument {
+    match fs::read_to_string(path) {
+        Ok(value) => match IngestedAgentResult::from_json(&value) {
+            Ok(result)
+                if result.run_id == expected.run_id
+                    && result.spec_id == expected.spec_id
+                    && result.result_id == expected.result_id =>
+            {
+                ResultDocument::Stored(result)
+            }
+            Ok(_) => ResultDocument::Invalid(format!(
+                "agent result binding does not match path: {}/{}/{}",
+                expected.run_id, expected.spec_id, expected.result_id
+            )),
+            Err(error) => ResultDocument::Invalid(error),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ResultDocument::Missing,
+        Err(error) => ResultDocument::Operational(format!(
+            "failed to read agent result {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn result_file_collision(ingested: &IngestedAgentResult) -> Result<(), String> {
+    let directory = run_directory(Path::new("."), &ingested.run_id)
+        .join("agent-results")
+        .join(&ingested.spec_id);
+    let primary = directory.join(format!("{}.json", ingested.result_id));
+    let temporary = directory.join(format!("{}.json.tmp", ingested.result_id));
+    let primary_doc = read_result_document(&primary, ingested);
+    if let ResultDocument::Stored(stored) = &primary_doc {
+        return same_result_identity(stored, ingested);
+    }
+    let temporary_doc = read_result_document(&temporary, ingested);
+    if let ResultDocument::Stored(stored) = &temporary_doc {
+        return same_result_identity(stored, ingested);
+    }
+    match (&primary_doc, &temporary_doc) {
+        (&ResultDocument::Stored(_), _) | (_, &ResultDocument::Stored(_)) => {
+            unreachable!("stored documents return before pairing")
+        }
+        (ResultDocument::Missing, ResultDocument::Missing) => Ok(()),
+        (ResultDocument::Operational(error), _)
+        | (ResultDocument::Missing, ResultDocument::Operational(error))
+        | (ResultDocument::Invalid(_), ResultDocument::Operational(error)) => Err(error.clone()),
+        (ResultDocument::Invalid(error), ResultDocument::Missing) => Err(format!(
+            "invalid agent result {}: {error}",
+            primary.display()
+        )),
+        (ResultDocument::Missing, ResultDocument::Invalid(_)) => Err(format!(
+            "agent result recovery file {} is invalid; a dry run will not settle the recovery",
+            temporary.display()
+        )),
+        (ResultDocument::Invalid(_), ResultDocument::Invalid(error)) => Err(format!(
+            "invalid agent result recovery file {}: {error}",
+            temporary.display()
+        )),
+    }
+}
+
+fn same_result_identity(
+    stored: &IngestedAgentResult,
+    ingested: &IngestedAgentResult,
+) -> Result<(), String> {
+    if stored.run_id == ingested.run_id
+        && stored.spec_id == ingested.spec_id
+        && stored.result_id == ingested.result_id
+        && stored.outcome == ingested.outcome
+        && stored.agent_result == ingested.agent_result
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "agent result id {} already exists with different content",
+            ingested.result_id
+        ))
+    }
 }

@@ -51,8 +51,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | runs one native foreground cycle when invoked directly; a child launched by `start` inherits lifecycle ownership and repeats cycles |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
-| `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
-| `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
+| `autospec run --run <id> --spec <id>... [--dry-run] [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
+| `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--dry-run] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
 | `autospec report --json` | yes | local release summary from persisted spec state |
 | `autospec rag config [--set KEY=VALUE] [--json]` | yes | renders the effective `agentic_rag:` configuration and rejects an invalid one (a revision-blind cache, an unknown key) |
@@ -133,8 +133,12 @@ strict `schemas/autospec-agent-result.schema.json` document plus an explicit out
 result ID; `failed` also requires `--failure-kind` (`validation`, `environment`, `agent`,
 `dependency`, or `safety`). Results are retained append-only below
 `.autospec/runs/<run-id>/agent-results/<spec-id>/<result-id>.json`, so a retry can safely
-replay the same result ID without consuming another queue attempt. `resume` only reports the
-current queue position. Use `/autospec-run` for the existing agent-execution workflow.
+replay the same result ID without consuming another queue attempt. `--dry-run` previews the
+operation with zero writes: it reports `create`, `record`, or `refuse` (with the reason a
+live run would use) for either mode, never acquires the queue lock, never creates or
+mutates `queue.json`, and never persists a result file; an ambiguous local state is
+reported as `refuse` rather than guessed. `resume` only reports the current queue
+position. Use `/autospec-run` for the existing agent-execution workflow.
 
 For the v1 runtime-manifest grammar, state behavior, child-command semantics, and cleanup
 procedure, see [Agent runtime manifests](runbooks/agent-runtime-manifest.md).

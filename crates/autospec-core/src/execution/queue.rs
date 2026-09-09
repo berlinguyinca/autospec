@@ -1,5 +1,6 @@
 use super::queue_storage::now;
 use super::result::{AgentOutcome, IngestedAgentResult};
+use crate::spec::is_valid_spec_id;
 
 pub(super) const QUEUE_SCHEMA: u64 = 3;
 pub(super) const AGENT_RESULTS_QUEUE_SCHEMA: u64 = 2;
@@ -232,6 +233,32 @@ impl ExecutionQueue {
         }
     }
 
+    /// Parses a queue document without touching the filesystem or acquiring
+    /// locks. Dry-run callers use this to report the decision the real run
+    /// would make from a read-only view of the state.
+    pub fn from_json(document: &str) -> Result<Self, String> {
+        super::queue_storage::parse_queue(document)
+    }
+
+    /// Validates a create plan (run id plus spec ids) without any I/O, so
+    /// dry-run callers report the same validation verdict as
+    /// [`ExecutionQueue::create_if_absent`].
+    pub fn validate_plan(run_id: &str, spec_ids: &[String]) -> Result<(), String> {
+        if !is_valid_run_id(run_id) {
+            return Err(format!("invalid run id: {run_id}"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for spec_id in spec_ids {
+            if !is_valid_spec_id(spec_id) {
+                return Err(format!("invalid queue spec id: {spec_id}"));
+            }
+            if !seen.insert(spec_id.as_str()) {
+                return Err(format!("duplicate queue spec id: {spec_id}"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn entry(&self, spec_id: &str) -> Option<&QueueEntry> {
         self.entries.iter().find(|entry| entry.spec_id == spec_id)
     }
@@ -461,4 +488,48 @@ pub(crate) fn is_valid_run_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_plan_accepts_a_well_formed_plan_without_touching_the_filesystem() {
+        assert!(ExecutionQueue::validate_plan("run-1", &["v1-foo".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn validate_plan_rejects_invalid_run_ids() {
+        assert!(ExecutionQueue::validate_plan("", &[]).is_err());
+        assert!(ExecutionQueue::validate_plan("../run", &[]).is_err());
+        assert!(ExecutionQueue::validate_plan("run/1", &[]).is_err());
+    }
+
+    #[test]
+    fn validate_plan_rejects_invalid_or_duplicate_spec_ids() {
+        assert!(ExecutionQueue::validate_plan("run-1", &["v1../spec".to_string()]).is_err());
+        assert!(ExecutionQueue::validate_plan(
+            "run-1",
+            &["v1-foo".to_string(), "v1-foo".to_string()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn from_json_round_trips_a_queue_document_without_any_filesystem_access() {
+        let queue = ExecutionQueue::new_at("run-1", vec!["v1-foo".to_string()], 7);
+        let document = crate::execution::queue_storage::queue_json(&queue).expect("queue json");
+        let parsed = ExecutionQueue::from_json(&document).expect("parsed queue");
+        assert_eq!(parsed, queue);
+    }
+
+    #[test]
+    fn from_json_rejects_a_document_for_a_different_run() {
+        let queue = ExecutionQueue::new_at("other-run", vec![], 0);
+        let document = crate::execution::queue_storage::queue_json(&queue).expect("queue json");
+        let parsed = ExecutionQueue::from_json(&document).expect("parsed queue");
+        assert_eq!(parsed.run_id, "other-run");
+        assert!(ExecutionQueue::from_json("not json").is_err());
+    }
 }

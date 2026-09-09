@@ -161,6 +161,121 @@ pub fn gate_dispatch(
     }
 }
 
+/// What a patch-presence check found in a worktree scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatchPresence {
+    /// No unconverted patch: the scope is clean and a dispatch would
+    /// start from the recorded base.
+    Absent,
+    /// An unconverted patch is present. Dispatching now would overwrite
+    /// or orphan it before the conversion pass can turn it into a PR, so
+    /// the dispatch must wait (or the patch must be converted first).
+    Present {
+        /// Stable identity of the patch (its content hash or path),
+        /// carried through to the verdict so the report can name the
+        /// exact patch it protects.
+        identity: String,
+    },
+}
+
+/// Checks a worktree scope for an unconverted patch.
+///
+/// The probe must distinguish "checked, nothing there" (`Absent`) from
+/// "could not check" (`Err`). A check that cannot answer — a path that
+/// does not resolve, a remote that is unreachable, a read that failed —
+/// must surface as an error and must never be reported as `Absent`.
+/// The gate fails closed: an ambiguous observation blocks the dispatch
+/// the same way a patch does, because a dispatch that overwrites
+/// unconverted work destroys it.
+pub trait PatchPresenceProbe {
+    /// Observe the unconverted-patch state of `scope`.
+    fn observe(&self, scope: &WorktreeScope) -> Result<PatchPresence, String>;
+}
+
+/// The verdict of the unconverted-patch gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatchPresenceVerdict {
+    /// No unconverted patch; the scope is safe to dispatch.
+    Clear,
+    /// An unconverted patch blocks the dispatch.
+    Blocked {
+        /// The patch identity the probe reported.
+        identity: String,
+    },
+}
+
+impl PatchPresenceVerdict {
+    /// Whether the dispatch must not proceed.
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+}
+
+/// Gate a scope on unconverted patches, failing closed.
+///
+/// Only `Absent` clears the gate; `Present` blocks with the patch
+/// identity. A probe error is an ambiguous check and fails closed the
+/// same way: the error propagates and no verdict is produced. There is
+/// no path by which an unchecked scope is reported as `Clear`.
+pub fn gate_patch_presence(
+    probe: &dyn PatchPresenceProbe,
+    scope: &WorktreeScope,
+) -> Result<PatchPresenceVerdict, String> {
+    match probe.observe(scope)? {
+        PatchPresence::Absent => Ok(PatchPresenceVerdict::Clear),
+        PatchPresence::Present { identity } => Ok(PatchPresenceVerdict::Blocked { identity }),
+    }
+}
+
+/// The dispatcher's pre-dispatch guard: both the base-freshness and the
+/// unconverted-patch checks must clear before a dispatch may proceed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchGateVerdict {
+    /// Both checks are clear; the dispatch may proceed.
+    Proceed,
+    /// One or both checks block; the reasons are reported verbatim so
+    /// an operator can see exactly what holds the dispatch back.
+    Blocked { reasons: Vec<String> },
+}
+
+impl DispatchGateVerdict {
+    /// Whether the dispatch must not proceed.
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+}
+
+/// Run the dispatcher's pre-dispatch guard against `scope`.
+///
+/// Every probe error fails closed: an ambiguous check is an error, not
+/// a pass. A `Proceed` verdict is produced only when both checks
+/// answered clearly, and only that verdict may release a dispatch.
+pub fn gate_release(
+    freshness: &dyn BaseFreshnessProbe,
+    patch_presence: &dyn PatchPresenceProbe,
+    scope: &WorktreeScope,
+    policy: &FreshnessPolicy,
+) -> Result<DispatchGateVerdict, String> {
+    let mut reasons = Vec::new();
+    if let FreshnessVerdict::Stale { behind, max_behind } = gate_dispatch(freshness, scope, policy)?
+    {
+        reasons.push(format!(
+            "stale base: {behind} commits behind the target, the policy allows {max_behind}"
+        ));
+    }
+    if let PatchPresenceVerdict::Blocked { identity } = gate_patch_presence(patch_presence, scope)?
+    {
+        reasons.push(format!(
+            "unconverted patch {identity} is present in the scope"
+        ));
+    }
+    if reasons.is_empty() {
+        Ok(DispatchGateVerdict::Proceed)
+    } else {
+        Ok(DispatchGateVerdict::Blocked { reasons })
+    }
+}
+
 /// Which of the three different problems a merge conflict actually is.
 ///
 /// The three causes look identical at merge time but have three different
@@ -599,6 +714,156 @@ mod tests {
         let error = gate_dispatch(&probe, &scope, &FreshnessPolicy::default())
             .expect_err("no distance is not a fresh base");
 
+        assert!(error.contains("probe failed"), "{error}");
+    }
+
+    /// A fixed patch-presence probe for tests: it returns a recorded
+    /// observation, or fails the way an unreachable remote would.
+    struct FixedPatchProbe(Result<PatchPresence, String>);
+
+    impl PatchPresenceProbe for FixedPatchProbe {
+        fn observe(&self, _scope: &WorktreeScope) -> Result<PatchPresence, String> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn an_absent_patch_clears_the_gate() {
+        let probe = FixedPatchProbe(Ok(PatchPresence::Absent));
+
+        let verdict = gate_patch_presence(&probe, &scope("TASK-0017")).expect("probe answered");
+
+        assert_eq!(verdict, PatchPresenceVerdict::Clear);
+        assert!(!verdict.is_blocked());
+    }
+
+    #[test]
+    fn a_present_unconverted_patch_blocks_the_dispatch() {
+        let probe = FixedPatchProbe(Ok(PatchPresence::Present {
+            identity: "out/TASK-0017/changes.patch".to_string(),
+        }));
+
+        let verdict = gate_patch_presence(&probe, &scope("TASK-0017")).expect("probe answered");
+
+        assert!(verdict.is_blocked());
+        assert_eq!(
+            verdict,
+            PatchPresenceVerdict::Blocked {
+                identity: "out/TASK-0017/changes.patch".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_gate_against_an_unanswered_patch_check_is_an_error_not_a_clear() {
+        // The incident: the patch check went through an SSH alias that
+        // did not resolve on the cluster. The old guard treated the
+        // failure as "no patch there" and dispatched anyway, destroying
+        // the unconverted work. An ambiguous check must fail closed.
+        let probe = FixedPatchProbe(Err("ssh: Could not resolve hostname hive".to_string()));
+
+        let error = gate_patch_presence(&probe, &scope("TASK-0017"))
+            .expect_err("an unanswered check is not a clear scope");
+
+        assert!(error.contains("Could not resolve hostname hive"), "{error}");
+    }
+
+    #[test]
+    fn the_release_gate_proceeds_only_when_both_checks_clear() {
+        let freshness = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            0,
+        )]));
+        let patches = FixedPatchProbe(Ok(PatchPresence::Absent));
+
+        let verdict = gate_release(
+            &freshness,
+            &patches,
+            &scope("TASK-0017"),
+            &FreshnessPolicy::default(),
+        )
+        .expect("both probes answered");
+
+        assert_eq!(verdict, DispatchGateVerdict::Proceed);
+        assert!(!verdict.is_blocked());
+    }
+
+    #[test]
+    fn the_release_gate_blocks_on_an_unconverted_patch_even_with_a_fresh_base() {
+        let freshness = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            0,
+        )]));
+        let patches = FixedPatchProbe(Ok(PatchPresence::Present {
+            identity: "9f86d0 patch sha".to_string(),
+        }));
+
+        let verdict = gate_release(
+            &freshness,
+            &patches,
+            &scope("TASK-0017"),
+            &FreshnessPolicy::default(),
+        )
+        .expect("both probes answered");
+
+        assert!(verdict.is_blocked());
+        match verdict {
+            DispatchGateVerdict::Blocked { reasons } => {
+                assert_eq!(reasons.len(), 1, "{reasons:?}");
+                assert!(reasons[0].contains("9f86d0 patch sha"), "{reasons:?}");
+            }
+            other => panic!("expected a blocked verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_release_gate_reports_both_reasons_when_both_checks_block() {
+        let freshness = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            25,
+        )]));
+        let patches = FixedPatchProbe(Ok(PatchPresence::Present {
+            identity: "out/TASK-0017/changes.patch".to_string(),
+        }));
+
+        let verdict = gate_release(
+            &freshness,
+            &patches,
+            &scope("TASK-0017"),
+            &FreshnessPolicy::default(),
+        )
+        .expect("both probes answered");
+
+        assert!(verdict.is_blocked());
+        match verdict {
+            DispatchGateVerdict::Blocked { reasons } => {
+                assert_eq!(reasons.len(), 2, "{reasons:?}");
+                assert!(reasons[0].contains("stale base"), "{reasons:?}");
+                assert!(reasons[1].contains("unconverted patch"), "{reasons:?}");
+            }
+            other => panic!("expected a blocked verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_release_gate_fails_closed_when_either_check_is_ambiguous() {
+        let scope = scope("TASK-0017");
+        let fresh = TableProbe(std::collections::BTreeMap::from([(
+            ("d0621f87".to_string(), "main".to_string()),
+            0,
+        )]));
+
+        // The freshness probe answers; the patch check cannot.
+        let patches = FixedPatchProbe(Err("connection timed out".to_string()));
+        let error = gate_release(&fresh, &patches, &scope, &FreshnessPolicy::default())
+            .expect_err("an ambiguous patch check is not a pass");
+        assert!(error.contains("connection timed out"), "{error}");
+
+        // The patch probe answers; the freshness check cannot.
+        let unknown = TableProbe(std::collections::BTreeMap::new());
+        let patches = FixedPatchProbe(Ok(PatchPresence::Absent));
+        let error = gate_release(&unknown, &patches, &scope, &FreshnessPolicy::default())
+            .expect_err("an ambiguous freshness check is not a pass");
         assert!(error.contains("probe failed"), "{error}");
     }
 

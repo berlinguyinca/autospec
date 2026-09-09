@@ -239,7 +239,7 @@ fn sync_directory(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn parse_queue(value: &str) -> Result<ExecutionQueue, String> {
+pub(super) fn parse_queue(value: &str) -> Result<ExecutionQueue, String> {
     let mut object = JsonParser::new(value).parse()?.into_object("queue")?;
     let schema = take(&mut object, "schema", "queue")?.into_number("schema")?;
     if !matches!(

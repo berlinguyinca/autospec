@@ -6057,3 +6057,232 @@ fn repair_loop_rejects_invalid_loop_names() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid repair-loop name"), "{stderr}");
 }
+
+#[test]
+fn run_dry_run_create_reports_would_create_without_writing_state() {
+    let root = temp_dir("autospec-run-dry-create");
+    let output = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-dry-create",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--dry-run",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("dry-run create starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"run\""), "{stdout}");
+    assert!(stdout.contains("\"mode\":\"create\""), "{stdout}");
+    assert!(stdout.contains("\"dry_run\":true"), "{stdout}");
+    assert!(stdout.contains("\"decision\":\"create\""), "{stdout}");
+    assert!(
+        !root.join(".autospec").exists(),
+        "dry run must not write state"
+    );
+}
+
+#[test]
+fn run_dry_run_create_refuses_when_run_already_exists() {
+    let root = temp_dir("autospec-run-dry-existing");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-dry-existing",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+
+    let output = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-dry-existing",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--dry-run",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("dry-run create starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"decision\":\"refuse\""), "{stdout}");
+    assert!(stdout.contains("queue already exists for run"), "{stdout}");
+}
+
+#[test]
+fn run_dry_run_ingest_reports_would_record_without_writing_state() {
+    let root = temp_dir("autospec-run-dry-ingest");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-dry-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"implemented\",\"files_changed\":[],\"validation\":\"cargo test --workspace: exit 0\",\"blockers\":[],\"handoff\":\"ready\"}",
+    )
+    .expect("agent result fixture is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-dry-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-1",
+            "--outcome",
+            "passed",
+            "--dry-run",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("dry-run ingest starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"dry_run\":true"), "{stdout}");
+    assert!(stdout.contains("\"decision\":\"record\""), "{stdout}");
+    assert!(stdout.contains("\"application\":\"applied\""), "{stdout}");
+    assert!(stdout.contains("\"status\":\"passed\""), "{stdout}");
+    assert!(
+        !root
+            .join(".autospec/runs/run-cli-dry-ingest/agent-results")
+            .exists(),
+        "dry run must not persist the result file"
+    );
+    let queue = std::fs::read_to_string(root.join(".autospec/runs/run-cli-dry-ingest/queue.json"))
+        .expect("queue exists from create");
+    assert!(
+        !queue.contains("result-1"),
+        "dry run must not touch the queue"
+    );
+}
+
+#[test]
+fn run_dry_run_ingest_refuses_when_run_has_no_queue() {
+    let root = temp_dir("autospec-run-dry-no-queue");
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"implemented\",\"files_changed\":[],\"validation\":\"cargo test --workspace: exit 0\",\"blockers\":[],\"handoff\":\"ready\"}",
+    )
+    .expect("agent result fixture is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-dry-missing",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-1",
+            "--outcome",
+            "passed",
+            "--dry-run",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("dry-run ingest starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"decision\":\"refuse\""), "{stdout}");
+    assert!(stdout.contains("queue does not exist for run"), "{stdout}");
+}
+
+#[test]
+fn run_dry_run_ingest_reports_already_applied_for_repeated_result() {
+    let root = temp_dir("autospec-run-dry-repeat");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-dry-repeat",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"implemented\",\"files_changed\":[],\"validation\":\"cargo test --workspace: exit 0\",\"blockers\":[],\"handoff\":\"ready\"}",
+    )
+    .expect("agent result fixture is written");
+    let ingest_args = [
+        "run",
+        "--ingest",
+        input.to_str().unwrap(),
+        "--run",
+        "run-cli-dry-repeat",
+        "--spec",
+        "v67-agent-integration-contracts",
+        "--result-id",
+        "result-1",
+        "--outcome",
+        "passed",
+    ];
+    let live = autospec()
+        .args(ingest_args)
+        .current_dir(&root)
+        .output()
+        .expect("live ingest starts");
+    assert!(live.status.success());
+
+    let output = autospec()
+        .args(ingest_args)
+        .arg("--dry-run")
+        .arg("--json")
+        .current_dir(&root)
+        .output()
+        .expect("dry-run repeat ingest starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"decision\":\"record\""), "{stdout}");
+    assert!(
+        stdout.contains("\"application\":\"already-applied\""),
+        "{stdout}"
+    );
+}
