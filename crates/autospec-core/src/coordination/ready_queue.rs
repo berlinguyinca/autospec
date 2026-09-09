@@ -543,7 +543,9 @@ pub fn plan_ready_queue_with_trusted_actors(
                 .map(|ready| (ready.issue.number, ready.paths.clone()))
                 .collect::<Vec<_>>(),
         ) {
-            view.reason = Some("batch_path_conflict".to_string());
+            // Sibling issues naming a not-yet-existing shared module are not
+            // independent: dispatch one and hold the rest on the foundation.
+            view.reason = Some("waits_on_foundation".to_string());
             view.conflicts_with = Some(number);
             view.path = Some(path);
             conflicts.push(view);
@@ -930,8 +932,13 @@ fn normalize_whitespace(text: &str) -> String {
 }
 
 fn extract_paths(body: &str) -> Vec<String> {
-    let section = markdown_section(body, "Implementation outline");
     let mut paths = BTreeSet::new();
+    collect_backticked_paths(markdown_section(body, "Implementation outline"), &mut paths);
+    collect_files_touched_paths(markdown_section(body, "Files touched"), &mut paths);
+    paths.into_iter().collect()
+}
+
+fn collect_backticked_paths(section: &str, paths: &mut BTreeSet<String>) {
     let mut cursor = 0;
     while let Some(start) = section[cursor..].find('`') {
         let start = cursor + start + 1;
@@ -939,12 +946,32 @@ fn extract_paths(body: &str) -> Vec<String> {
             break;
         };
         let path = &section[start..start + end];
-        if path.contains('/') && !path.chars().any(char::is_whitespace) {
+        if is_path_token(path) {
             paths.insert(path.to_string());
         }
         cursor = start + end + 1;
     }
-    paths.into_iter().collect()
+}
+
+/// The `## Files touched` contract declares exactly one safe repo-relative
+/// path per non-blank line, optionally wrapped in backticks and preceded by
+/// `- `. Shared foundation modules usually live in this section, so the
+/// dispatch backstop must read it as well as the implementation outline.
+fn collect_files_touched_paths(section: &str, paths: &mut BTreeSet<String>) {
+    for line in section.lines() {
+        let mut token = line.trim();
+        if let Some(rest) = token.strip_prefix(['-', '*']) {
+            token = rest.trim();
+        }
+        let token = token.trim_matches('`').trim();
+        if is_path_token(token) {
+            paths.insert(token.to_string());
+        }
+    }
+}
+
+fn is_path_token(token: &str) -> bool {
+    token.contains('/') && !token.chars().any(char::is_whitespace)
 }
 
 fn first_path_conflict(
