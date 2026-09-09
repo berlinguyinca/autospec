@@ -1,4 +1,4 @@
-// claim tests: heartbeat / startup — 4 cases.
+// claim tests: heartbeat / startup — 10 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
@@ -548,4 +548,89 @@ fn retryable_release_requires_exact_heartbeat_evidence() {
     }
     std::fs::remove_dir_all(root).unwrap();
     result.expect_err("missing issue evidence must keep terminal preparation retryable");
+}
+
+// A 0700 private tree under the fixture root holding one 0600 issue record at
+// <root>/heartbeats/<repo-progress-key>/42.json, plus the matching identity.
+#[cfg(target_os = "linux")]
+fn heartbeat_record_fixture(
+    label: &str,
+    record: &[u8],
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    claim::ClaimMutationIdentity<'static>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (root, _) = startup_heartbeat_fixture(label);
+    let heartbeat_root = root.join("heartbeats");
+    let repo_key = crate::commands::autonomous::drain::repository_progress_key("owner/repo");
+    let repo_dir = heartbeat_root.join(&repo_key);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    for dir in [&heartbeat_root, &repo_dir] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let record_path = repo_dir.join("42.json");
+    std::fs::write(&record_path, record).unwrap();
+    std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    (
+        root,
+        record_path,
+        claim::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_startup_heartbeat_record_is_discarded_as_absent_evidence() {
+    let _guard = lock_heartbeat_env();
+    // Written before the post-upgrade schema: no nonce, host, boot_id, or
+    // process_start. It is absent evidence, not a fatal conflict (#3008).
+    let legacy = b"{\"repo\":\"owner/repo\",\"issue\":\"42\",\"worker_id\":\"worker-a\",\"branch\":\"feat/worker\",\"pr\":\"\",\"claim_id\":\"claim-a\",\"step\":\"claimed\",\"ts\":100,\"ttl_seconds\":300,\"pid\":4242}\n";
+    let (root, record, identity) = heartbeat_record_fixture("released-legacy", legacy);
+    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+    std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", root.join("heartbeats"));
+    let result = claim::retire_released_startup_heartbeat(identity);
+    assert!(
+        !record.exists(),
+        "a discarded legacy record must not survive terminal preparation"
+    );
+    match previous {
+        Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+        None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    result.expect("a legacy record is absent evidence, not a fatal conflict");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn malformed_startup_heartbeat_record_still_fails_closed_and_names_the_file() {
+    let _guard = lock_heartbeat_env();
+    let (root, record, identity) = heartbeat_record_fixture("released-malformed", b"not json\n");
+    let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+    std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", root.join("heartbeats"));
+    let error = claim::retire_released_startup_heartbeat(identity)
+        .expect_err("a malformed record must still fail closed");
+    assert!(
+        record.exists(),
+        "a malformed record must be preserved for inspection"
+    );
+    match previous {
+        Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+        None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        error.message.contains("o5_owner_r4_repo") && error.message.contains("42.json"),
+        "the fatal diagnostic must name the offending file: {}",
+        error.message
+    );
 }

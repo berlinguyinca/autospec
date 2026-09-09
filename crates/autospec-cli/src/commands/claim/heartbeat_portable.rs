@@ -1,6 +1,6 @@
 use super::{
-    heartbeat_root, heartbeat_session_key, parse_startup_heartbeat, ClaimMutationIdentity,
-    StartupHeartbeatEvidence,
+    heartbeat_root, heartbeat_session_key, parse_startup_heartbeat, startup_heartbeat_shape,
+    ClaimMutationIdentity, StartupHeartbeatEvidence, StartupHeartbeatShape,
 };
 use crate::commands::autonomous::drain::repository_progress_key;
 use crate::commands::CommandFailure;
