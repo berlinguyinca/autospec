@@ -1935,15 +1935,17 @@ fn runner_fails_a_bats_suite_that_no_validate_check_invokes() {
     // The message text is not carried on CheckResult, only its length and digest,
     // so this pins the exact rendered string rather than merely "non-empty".
     let expected = "tests/unit/orphan.bats: bats suite invoked by no validate check; \
-register it in crates/autospec-core/src/validation or, if it is genuinely not a \
-suite, say so in bats_registration_baseline.rs";
+register it as a typed ExternalCheck::BatsSuite owner in \
+crates/autospec-core/src/validation/catalog.rs or, if it is genuinely not a suite, \
+add its path to BATS_REGISTRATION_BASELINE in \
+crates/autospec-core/src/validation/external/bats_registration_baseline.rs";
     assert_eq!(
         report.results[0].stderr_bytes,
         expected.len(),
         "the failure must name the orphaned suite and how to resolve it"
     );
     assert_eq!(
-        report.results[0].output_digest, "d3696501143320ff",
+        report.results[0].output_digest, "e22e17bf25a3d526",
         "the digest must bind the exact failure message, not only its length"
     );
 }
@@ -2014,7 +2016,11 @@ fn every_unbaselined_bats_suite_in_this_repository_is_registered() {
         report.results[0].exit_code,
         Some(0),
         "a bats suite under tests/unit or tests/lint is invoked by no validate check; \
-         register it, or add it to BATS_REGISTRATION_BASELINE if it is not a suite"
+         register it as a typed ExternalCheck::BatsSuite owner in \
+         crates/autospec-core/src/validation/catalog.rs, or add its path to \
+         BATS_REGISTRATION_BASELINE in \
+         crates/autospec-core/src/validation/external/bats_registration_baseline.rs \
+         (suites at tests/ root need no registration)"
     );
 }
 

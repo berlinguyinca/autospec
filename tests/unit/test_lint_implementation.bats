@@ -867,3 +867,129 @@ _vac_diff() {
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "VACUOUS_GREP_INVERSE_OR_TRUE"
 }
+
+# ── BATS_SUITE_UNREGISTERED (#3919) ──────────────────────────────────────────
+# An unregistered suite under tests/unit or tests/lint must fail the agent's
+# own pre-commit gate before it can be held at conversion.
+
+# bats_reg_repo REPO [CATALOG_BODY] [BASELINE_BODY] — scratch git repo shaped
+# like the autospec repository: the validation-source marker plus a committed
+# (possibly empty) catalog and baseline. Default bodies register nothing.
+bats_reg_repo() {
+    local repo="$1"
+    local catalog_body="${2:-// no catalog registrations}"
+    local baseline_body="$3"
+    [ -n "$baseline_body" ] || baseline_body='pub const BATS_REGISTRATION_BASELINE: &[&str] = &[];'
+    mkdir -p "$repo/crates/autospec-core/src/validation/external" "$repo/tests/unit"
+    printf '%s\n' "$catalog_body" \
+        > "$repo/crates/autospec-core/src/validation/catalog.rs"
+    printf '%s\n' "$baseline_body" \
+        > "$repo/crates/autospec-core/src/validation/external/bats_registration_baseline.rs"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m "init"
+}
+
+# bats_suite_file REPO PATH — a minimal real suite body (written via printf so
+# bats does not scan these heredoc @test lines).
+bats_suite_file() {
+    printf '#!/usr/bin/env bats\n@test "new suite" {\n  run true\n  [ "$status" -eq 0 ]\n}\n' \
+        > "$1/$2"
+}
+
+@test "bats-suite registration: unregistered tests/unit suite fails --pre-commit" {
+    local repo="$PR_SIZE_TMP/bats-reg-fail"
+    bats_reg_repo "$repo"
+    bats_suite_file "$repo" tests/unit/test_new_suite.bats
+    git -C "$repo" add tests/unit/test_new_suite.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "BATS_SUITE_UNREGISTERED:tests/unit/test_new_suite.bats"
+    echo "$output" | grep -q "crates/autospec-core/src/validation/catalog.rs"
+    echo "$output" | grep -q "BATS_REGISTRATION_BASELINE"
+}
+
+@test "bats-suite registration: catalog-registered tests/unit suite passes" {
+    local repo="$PR_SIZE_TMP/bats-reg-catalog"
+    bats_reg_repo "$repo" 'const REG: &str = bats_suite("tests/unit/test_new_suite.bats");'
+    bats_suite_file "$repo" tests/unit/test_new_suite.bats
+    git -C "$repo" add tests/unit/test_new_suite.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}
+
+@test "bats-suite registration: BATS_REGISTRATION_BASELINE entry also satisfies the gate" {
+    local repo="$PR_SIZE_TMP/bats-reg-baseline"
+    bats_reg_repo "$repo" \
+        '// no catalog owner' \
+        'pub const BATS_REGISTRATION_BASELINE: &[&str] = &["tests/unit/test_new_suite.bats"];'
+    bats_suite_file "$repo" tests/unit/test_new_suite.bats
+    git -C "$repo" add tests/unit/test_new_suite.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}
+
+@test "bats-suite registration: registration staged in the same commit passes" {
+    local repo="$PR_SIZE_TMP/bats-reg-samecommit"
+    bats_reg_repo "$repo"
+    bats_suite_file "$repo" tests/unit/test_new_suite.bats
+    printf 'const REG: &str = bats_suite("tests/unit/test_new_suite.bats");\n' \
+        >> "$repo/crates/autospec-core/src/validation/catalog.rs"
+    git -C "$repo" add tests/unit/test_new_suite.bats \
+        crates/autospec-core/src/validation/catalog.rs
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}
+
+@test "bats-suite registration: unregistered tests/lint suite also fails" {
+    local repo="$PR_SIZE_TMP/bats-reg-lint"
+    bats_reg_repo "$repo"
+    mkdir -p "$repo/tests/lint"
+    bats_suite_file "$repo" tests/lint/test_new_lint.bats
+    git -C "$repo" add tests/lint/test_new_lint.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "BATS_SUITE_UNREGISTERED:tests/lint/test_new_lint.bats"
+}
+
+@test "bats-suite registration: suite at tests/ root needs no registration" {
+    local repo="$PR_SIZE_TMP/bats-reg-root"
+    bats_reg_repo "$repo"
+    bats_suite_file "$repo" tests/test_root_suite.bats
+    git -C "$repo" add tests/test_root_suite.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}
+
+@test "bats-suite registration: inert outside the autospec repository" {
+    local repo="$PR_SIZE_TMP/bats-reg-foreign"
+    mkdir -p "$repo/tests/unit"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" commit -q --allow-empty -m "init"
+    bats_suite_file "$repo" tests/unit/test_foreign.bats
+    git -C "$repo" add tests/unit/test_foreign.bats
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}

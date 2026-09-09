@@ -151,6 +151,7 @@ Children are written assuming the implementer is a 32B-class local model with **
 - Acceptance criteria are checkbox-only so the model can self-verify line-by-line.
 - One **Primary smoke test** runs in the inner loop; the heavier verification list runs once at the end.
 - If the work fans out across many tables/packages, split it. Two 3 KB children chained by `Depends on` beat one 7 KB child a 32B model garbles at 60k tokens of working context.
+- If the child adds a Bats suite under `tests/unit/` or `tests/lint/`, the spec must name its registration in **Files touched**: either the typed catalog owner in `crates/autospec-core/src/validation/catalog.rs` (preferred) or `BATS_REGISTRATION_BASELINE` in `crates/autospec-core/src/validation/external/bats_registration_baseline.rs` (shrink-only; orphaned suites). Registration goes in the **same commit** as the suite, or conversion fails on the unregistered suite (see AGENTS.md → *Bats suite registration*). Suites at the root of `tests/` need no registration.
 
 Capture the umbrella + child issue numbers.
 

@@ -376,6 +376,7 @@ the LGTM reviewer is dispatched. The enforcer is `scripts/lint-implementation.sh
 | `REPEATED_STRUCTURE_AS_CODE` | LLM | semantic | ≥5 branches in the same function/method sharing identical structural shape (same return-tuple/case-class/struct-literal shape, same predicate signature, same side-effect line). Language-agnostic — Python if/elif, Java/Scala switch/match, Rust match arms, Go switch cases, JS if/else |
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`, `skills/*/prompts/*.md`, `skills/*/references/*.md` — matched at any depth, so a subproject's own `README.md` or `docs/` counts). Markdown and `*.diff` are never scanned for the surface itself: prose describes a flag, it does not introduce one. `CHANGELOG.md` earns no credit, or every commit would satisfy the rule; LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
+| `BATS_SUITE_UNREGISTERED` | det | pre-commit path scan | staged `.bats` file added under `tests/unit/` or `tests/lint/` whose quoted path appears in neither `crates/autospec-core/src/validation/catalog.rs` nor `BATS_REGISTRATION_BASELINE` in `crates/autospec-core/src/validation/external/bats_registration_baseline.rs`; suites at `tests/` root are exempt — the authoritative scan is `run_bats_suite_registration` at conversion (#3919) |
 
 ### Corrective directive map
 
@@ -397,6 +398,7 @@ retry prompt as cumulative context.
 | `REPEATED_STRUCTURE_AS_CODE` | "Extract the N branches into a table + single dispatcher loop. In Python use a list of tuples or dict; in Java/Scala use a `Map`/sealed-trait registry; in Rust use a `&[(predicate, value)]` slice; in Go use a `[]struct{...}` table. Each new entry should be one row, not a ~10-line block." |
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
+| `BATS_SUITE_UNREGISTERED` | "Register the new bats suite as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs; suites at tests/ root need no registration." |
 
 ### Enforcement
 
@@ -456,6 +458,29 @@ Rules:
 - Skips apply only to the specific PR derived from this issue; they do NOT cascade
   to other issues.
 
+### Bats suite registration (`tests/unit/` and `tests/lint/` are the exception, not the rule)
+
+Bats suites at the **root of `tests/` need no registration** — ~170 of them run
+unregistered, and that is the convention. Suites under `tests/unit/` or `tests/lint/`
+are the exception: `run_bats_suite_registration`
+(`crates/autospec-core/src/validation/external.rs`) scans those two directories and
+**fails conversion** on any suite owned by no typed `ExternalCheck::BatsSuite` check in
+`crates/autospec-core/src/validation/catalog.rs` and absent from
+`BATS_REGISTRATION_BASELINE` (`crates/autospec-core/src/validation/external/bats_registration_baseline.rs`).
+A held patch here is a lost patch, not a warning — this is how two of eighteen
+agent patches died in issue #3919.
+
+- **Register in the same commit that adds the suite**, as a typed catalog owner
+  (`bats_suite("tests/unit/<name>.bats")` under a named `validate` check). Baseline
+  entries are for genuinely orphaned suites and the list is shrink-only — do not
+  grow it for new work.
+- The pre-commit gate surfaces the same rule early:
+  `scripts/lint-implementation.sh --pre-commit` emits `BATS_SUITE_UNREGISTERED` for a
+  staged suite whose quoted path is in neither file, so the fix lands before
+  conversion instead of at it.
+- If a child issue's scope is a `tests/unit/` or `tests/lint/` suite, its spec must
+  name the registration (catalog check or baseline) in `## Files touched`.
+
 ### Per-layer stack guard (`scripts/stack-guard.sh`)
 
 `PR_SIZE` above is measured on the whole accumulated diff. `scripts/stack-guard.sh`
@@ -471,6 +496,10 @@ head branch of another open PR (no orphan target branches).
   `STACK_GUARD_STRICT` repository variable to `1` to make it blocking.
 - `AUTOSPEC_STACK_DEFAULT_BRANCH` overrides the default-branch name (else `gh repo view`).
 - Tests: `tests/stack-guard.bats`.
+
+The bats suite that pins the `BATS_SUITE_UNREGISTERED` pre-commit gate lives in the
+already-registered `tests/unit/test_lint_implementation.bats` (catalog owner
+`bats_suite_lint_implementation`, check `lint_implementation_gates`).
 
 ### Env-var contract
 

@@ -751,8 +751,13 @@ const SUITE_SCAN_DIRECTORIES: &[&str] = &["tests/unit", "tests/lint"];
 /// The repository marker used to distinguish autospec itself from target repos.
 const VALIDATION_SOURCE_DIRECTORY: &str = "crates/autospec-core/src/validation";
 
+/// Where a suite becomes owned: a typed `ExternalCheck::BatsSuite` owner in the
+/// validation catalog.
+const CATALOG_SOURCE_FILE: &str = "crates/autospec-core/src/validation/catalog.rs";
+
 /// The frozen inventory of suites intentionally not owned by a validation check.
-const BASELINE_SOURCE_FILE: &str = "bats_registration_baseline.rs";
+const BASELINE_SOURCE_FILE: &str =
+    "crates/autospec-core/src/validation/external/bats_registration_baseline.rs";
 
 /// Fails when a Bats suite under [`SUITE_SCAN_DIRECTORIES`] is invoked by nothing.
 ///
@@ -822,8 +827,9 @@ fn run_bats_suite_registration(id: &str, required: bool, root: &Path) -> CheckRe
         id,
         required,
         &format!(
-            "{}: bats suite invoked by no validate check; register it in {VALIDATION_SOURCE_DIRECTORY} \
-             or, if it is genuinely not a suite, say so in {BASELINE_SOURCE_FILE}",
+            "{}: bats suite invoked by no validate check; register it as a typed \
+             ExternalCheck::BatsSuite owner in {CATALOG_SOURCE_FILE} or, if it is genuinely \
+             not a suite, add its path to BATS_REGISTRATION_BASELINE in {BASELINE_SOURCE_FILE}",
             unregistered.join(", ")
         ),
     )
