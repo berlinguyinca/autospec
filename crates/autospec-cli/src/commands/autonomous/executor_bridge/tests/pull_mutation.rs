@@ -109,6 +109,12 @@ fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() 
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_snapshot_admits_exact_adopted_base_merge() {
+    // #3794: capture_and_persist resolves the adopted-base tree with
+    // `git merge-tree --write-tree`, which landed in git 2.38. An older git is a
+    // capability gap, not a test failure: unrunnable, never failed.
+    if !super::support_tools::git_supports_merge_tree_write_tree() {
+        return;
+    }
     let (fixture, mut state, state_path, _) =
         zero_effect_classifier_fixture("snapshot-adopted-base-merge", false, false);
     let recorded_base = state.identity.base_oid.clone();

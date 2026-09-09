@@ -264,8 +264,11 @@ fn contained_hook_rejects_codex_selected_from_writable_worktree() {
     let environment = std::env::vars_os()
         .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
         .collect::<BTreeMap<_, _>>();
-    let codex = bridge::safe_executable(Path::new("codex"), &environment)
-        .expect("installed Codex executable");
+    // #3794: the installed Codex executable is a prerequisite, not a test target.
+    // Absent means unrunnable, never failed.
+    let Some(codex) = super::support_tools::require_harness_tool("codex", &environment) else {
+        return;
+    };
     let binding = bridge::TrustedWorktreeGit {
         active_hooks: Vec::new(),
         common_dir: PathBuf::new(),

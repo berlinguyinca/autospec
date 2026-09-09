@@ -407,9 +407,12 @@ fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
     let token = "AUTOSPEC_TEST_SECRET_ALPHA";
     fs::write(generated.join("bundle.js"), format!("{token}\n")).expect("generated secret fixture");
     fs::write(source.join("source.js"), format!("{token}\n")).expect("source secret fixture");
-    let gitleaks = bridge::resolve_direct_executable(&fixture.repo, "gitleaks")
-        .expect("real gitleaks")
-        .program;
+    // #3794: real gitleaks is a prerequisite, not a test target. Absent means
+    // unrunnable, never failed.
+    let Some(gitleaks) = super::support_tools::require_direct_tool(&fixture.repo, "gitleaks")
+    else {
+        return;
+    };
     let scanners = bridge::ScannerExecutables::from_paths(
         ["gitleaks", "semgrep", "trivy", "license-checker"]
             .into_iter()
@@ -494,9 +497,12 @@ fn autonomous_executor_bridge_gitleaks_preserves_repository_rules() {
         "AUTOSPEC_CUSTOM_SECRET_SOURCE\n",
     )
     .expect("source custom-rule fixture");
-    let gitleaks = bridge::resolve_direct_executable(&fixture.repo, "gitleaks")
-        .expect("real gitleaks")
-        .program;
+    // #3794: real gitleaks is a prerequisite, not a test target. Absent means
+    // unrunnable, never failed.
+    let Some(gitleaks) = super::support_tools::require_direct_tool(&fixture.repo, "gitleaks")
+    else {
+        return;
+    };
     let scanners = bridge::ScannerExecutables::from_paths(
         ["gitleaks", "semgrep", "trivy", "license-checker"]
             .into_iter()

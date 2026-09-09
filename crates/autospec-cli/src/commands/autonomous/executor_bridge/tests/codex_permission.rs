@@ -361,8 +361,12 @@ fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_
     let env = std::env::vars_os()
         .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
         .collect::<BTreeMap<_, _>>();
-    let codex = bridge::safe_executable(Path::new("codex"), &env)
-        .expect("Codex CLI is required for its permission-profile regression");
+    // #3794: the tool is a prerequisite, not a test target. Absent means unrunnable,
+    // never failed; the marker on stderr carries that distinction to the recorder.
+    let Some(codex) = super::support_tools::require_harness_tool("codex", &env) else {
+        let _ = fs::remove_dir_all(root);
+        return;
+    };
     let home = env.get("HOME").map(PathBuf::from).expect("real HOME");
     if !codex.starts_with(home.join(".codex")) {
         let _ = fs::remove_dir_all(root);

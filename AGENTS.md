@@ -481,6 +481,13 @@ head branch of another open PR (no orphan target branches).
   + linearity) blocking instead of advisory.
 - `AUTOSPEC_STACK_DEFAULT_BRANCH` — default-branch name for `stack-guard.sh`
   (else `gh repo view`).
+- `AUTOSPEC_TOOL_ENV_FILE` — ledger path for the Rust test suite's verification
+  environment declaration (#3794). When set, the tool-dependent `executor_bridge`
+  tests append `AUTOSPEC-TOOL-ENV:` (tools found/absent + git version) and
+  `AUTOSPEC-UNRUNNABLE:` (one per test skipped for a missing tool or capability)
+  lines to that file; recording agents must carry the ledger lines with the
+  pass/fail figures and never count an `AUTOSPEC-UNRUNNABLE` line as a failure.
+  Unset: no file side effects.
 
 ## Restore-visibility contract
 

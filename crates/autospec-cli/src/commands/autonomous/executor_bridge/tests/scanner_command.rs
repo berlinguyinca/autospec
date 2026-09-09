@@ -286,9 +286,11 @@ fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() 
     .expect("clean feature larger than Semgrep's default 1 MB limit");
     git(&fixture.repo, &["add", "feature.js"]);
     git(&fixture.repo, &["commit", "-m", "clean feature"]);
-    let semgrep = bridge::resolve_direct_executable(&fixture.repo, "semgrep")
-        .expect("real Semgrep")
-        .program;
+    // #3794: real Semgrep is a prerequisite, not a test target. Absent means
+    // unrunnable, never failed.
+    let Some(semgrep) = super::support_tools::require_direct_tool(&fixture.repo, "semgrep") else {
+        return;
+    };
     let scan = |artifact: &str| {
         let mut command = bridge::DirectCommand::success(vec![
             semgrep.display().to_string(),

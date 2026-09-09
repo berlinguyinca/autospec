@@ -96,6 +96,7 @@ pub(super) mod support_invocation;
 mod support_launch;
 mod support_review;
 mod support_shim;
+mod support_tools;
 mod sync_integration;
 mod terminal_label;
 mod worktree_post;
