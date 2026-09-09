@@ -60,13 +60,27 @@
 //!    them as deferred ([`Worklist::absorb`], [`Worklist::defer`]), and
 //!    reports considered / arrived / deferred so the summary adds up to
 //!    what was on disk at the end of the run, not the start (#3801).
+//! 10. **A gate that could not run is not a failed assertion.** A pass
+//!     whose setup fails (the build died, the provisioning aborted) has not
+//!     evaluated the patch, and must not report it as if the patch were
+//!     held or otherwise defective: it records
+//!     [`ConversionClass::CouldNotEvaluate`], a distinct terminal state.
+//!     "The property is false" and "I could not evaluate it" demand
+//!     opposite responses; collapsing them sends everyone to the wrong
+//!     place (#3866). The state is terminal — the pass moves on to the next
+//!     patch — but it is not a decision *about the patch*, so it is never
+//!     memoized: memoizing a non-evaluation would make one run's setup
+//!     failure a permanent verdict against the patch, and a gate that did
+//!     not run neither satisfies nor refutes an acceptance criterion.
 
 use std::collections::BTreeMap;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
-/// The four terminal classes cost seconds (no compile): the pass already
-/// knows the answer. [`ConversionClass::Candidate`] costs a build.
+/// The four decided classes cost seconds (no compile): the pass already
+/// knows the answer. [`ConversionClass::CouldNotEvaluate`] costs nothing
+/// but is a state of the setup, not of the patch. [`Candidate`] costs a
+/// build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConversionClass {
     /// The patch already maps to an open pull request.
@@ -77,24 +91,47 @@ pub enum ConversionClass {
     MemoizedHold,
     /// The patch produces no net change against the base.
     NoNetChange,
+    /// The pass could not evaluate this patch: its setup (the build, the
+    /// checkout provisioning) failed before any property of the patch was
+    /// asserted. A terminal state of the pass, but not a decision about
+    /// the patch — never memoized, never a memo hit, and re-evaluated on
+    /// every pass until the setup succeeds (#3866).
+    CouldNotEvaluate,
     /// A genuine candidate: apply, compile-test, commit, push.
     Candidate,
 }
 
 impl ConversionClass {
     /// Every class, cheapest first.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ExistingPr,
         Self::ClosedIssue,
         Self::MemoizedHold,
         Self::NoNetChange,
+        Self::CouldNotEvaluate,
         Self::Candidate,
     ];
 
-    /// Terminal classes are decided without a compile and are therefore
-    /// memoizable.
+    /// Whether this class is a terminal state of the pass: the pass has
+    /// reached its final state for the patch this run and the worker
+    /// moves on without a successful build. Everything except
+    /// [`Candidate`] is terminal — including [`CouldNotEvaluate`], which
+    /// is final for the run but not a decision about the patch (see
+    /// [`Self::is_memoizable`]).
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::Candidate)
+    }
+
+    /// Whether this class is a decision *about the patch* and therefore
+    /// safe to memoize. The four decided classes are memoizable;
+    /// [`Candidate`] is work still to do, and [`CouldNotEvaluate`] is a
+    /// state of the setup, not of the patch — memoizing either would skip
+    /// the evaluation that still has to happen (#3866).
+    pub fn is_memoizable(self) -> bool {
+        matches!(
+            self,
+            Self::ExistingPr | Self::ClosedIssue | Self::MemoizedHold | Self::NoNetChange
+        )
     }
 }
 
@@ -151,6 +188,21 @@ impl Patch {
     /// re-tested against the current tip before acting on it.
     pub fn is_stale(&self, current_tip: &str) -> bool {
         self.base_sha != current_tip
+    }
+
+    /// The re-baseline gate's failure report: names both operands of the
+    /// equality the gate asserts — this patch's base sha and the trunk
+    /// tip. `None` when the gate passed. A gate that cannot print the
+    /// values it compared did not perform the comparison, and must not
+    /// claim the property failed (#3866).
+    pub fn stale_report(&self, current_tip: &str) -> Option<String> {
+        if self.base_sha == current_tip {
+            return None;
+        }
+        Some(format!(
+            "stale base: {} built against {}, trunk tip is {}",
+            self.identity, self.base_sha, current_tip
+        ))
     }
 }
 
@@ -211,6 +263,7 @@ pub fn order_summary(ordered: &[&Patch], top_n: usize) -> String {
             ConversionClass::ClosedIssue => "ClosedIssue",
             ConversionClass::MemoizedHold => "MemoizedHold",
             ConversionClass::NoNetChange => "NoNetChange",
+            ConversionClass::CouldNotEvaluate => "COULD-NOT-EVALUATE",
             ConversionClass::Candidate => "Candidate",
         },
         top.join(", "),
@@ -472,11 +525,14 @@ impl Worklist {
     }
 }
 
-/// Memoized terminal conversion decisions.
+/// Memoized conversion decisions.
 ///
 /// Keyed by (patch identity, base sha): patch identity plus base sha
 /// already determines the outcome, so a re-walk of a memoized patch is a
-/// map lookup, not a re-walk of the whole set.
+/// map lookup, not a re-walk of the whole set. Only decisions *about the
+/// patch* are stored: [`ConversionClass::CouldNotEvaluate`] is a state of
+/// the setup and is refused by [`ConversionMemo::record`], so the pass
+/// re-evaluates it on every run until the setup succeeds (#3866).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConversionMemo {
     entries: BTreeMap<(String, String), ConversionClass>,
@@ -504,20 +560,27 @@ impl ConversionMemo {
             .copied()
     }
 
-    /// Record a terminal decision. Non-terminal classes are rejected: a
-    /// [`ConversionClass::Candidate`] outcome is work still to do, not a
-    /// decision worth memoizing.
+    /// Record a decision about the patch. Non-memoizable classes are
+    /// rejected: a [`ConversionClass::Candidate`] outcome is work still to
+    /// do, and a [`ConversionClass::CouldNotEvaluate`] outcome is a state
+    /// of the setup, not evidence about the patch — memoizing a
+    /// non-evaluation would make one run's setup failure a permanent
+    /// verdict against the patch (#3866).
     pub fn record(
         &mut self,
         identity: &str,
         base_sha: &str,
         class: ConversionClass,
     ) -> Result<(), String> {
-        if !class.is_terminal() {
-            return Err(format!(
-                "refusing to memoize non-terminal class {:?}",
-                class
-            ));
+        if !class.is_memoizable() {
+            return Err(match class {
+                ConversionClass::CouldNotEvaluate => format!(
+                    "refusing to memoize CouldNotEvaluate for {identity}@{base_sha}: a gate that could not evaluate the patch is not evidence about it; the pass must re-evaluate, not remember"
+                ),
+                other => format!(
+                    "refusing to memoize non-terminal class {other:?}: work still to do, not a decision worth memoizing"
+                ),
+            });
         }
         if identity.trim().is_empty() || base_sha.trim().is_empty() {
             return Err("memo keys must have a non-empty identity and base sha".to_string());
@@ -604,7 +667,10 @@ pub struct ConversionSchedule<'a> {
 /// plan: the pass re-reads the world before each candidate, so a snapshot
 /// taken at startup must never reach the workers. A memo entry is honored
 /// only when its base is still the tip — a verdict about an old base is a
-/// hypothesis, not a decision (#3698).
+/// hypothesis, not a decision (#3698). A
+/// [`ConversionClass::CouldNotEvaluate`] patch can never be a memo hit: the
+/// memo cannot hold the state, so the pass re-evaluates the patch every run
+/// until the setup succeeds (#3866).
 pub fn plan_pass<'a>(
     patches: &'a [Patch],
     workers: usize,
@@ -642,6 +708,28 @@ pub fn plan_pass<'a>(
         workers: pool,
         assignments,
     })
+}
+
+/// The memo-hit gate's failure report. The gate asserts two equalities —
+/// the patch's base sha equals the trunk tip, and the recorded decision
+/// for `(identity, base sha)` equals the class the walk landed on. On
+/// failure the report names both operands of the equality that failed; a
+/// gate that cannot print the values it compared did not perform the
+/// comparison, and must not claim the property failed (#3866). `None` when
+/// the gate passed, or when nothing is recorded for the key (not yet
+/// evaluated, not failed).
+pub fn memo_gate_report(memo: &ConversionMemo, patch: &Patch, current_tip: &str) -> Option<String> {
+    if patch.base_sha != current_tip {
+        return patch.stale_report(current_tip);
+    }
+    match memo.lookup(&patch.identity, &patch.base_sha) {
+        None => None,
+        Some(recorded) if recorded == patch.class => None,
+        Some(recorded) => Some(format!(
+            "memo gate: recorded {:?} != walked {:?} for {}@{}",
+            recorded, patch.class, patch.identity, patch.base_sha
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1293,5 +1381,155 @@ mod tests {
         let identities: Vec<_> = wl.remaining().iter().map(|p| p.identity.as_str()).collect();
         assert_eq!(identities, vec!["terminal", "new", "old"]);
         assert_eq!(wl.frozen_at(), 1000);
+    }
+
+    #[test]
+    fn could_not_evaluate_is_terminal_but_not_memoizable() {
+        // A gate that could not run is a terminal state of the pass (the
+        // worker moves on) but not a decision about the patch (#3866).
+        assert!(ConversionClass::CouldNotEvaluate.is_terminal());
+        assert!(!ConversionClass::CouldNotEvaluate.is_memoizable());
+        // Memoizing it would permanently skip the re-evaluation.
+        for class in ConversionClass::ALL {
+            assert_eq!(
+                class.is_memoizable(),
+                class != ConversionClass::Candidate && class != ConversionClass::CouldNotEvaluate
+            );
+        }
+        // The pass orders a blocked evaluation before it spends a build on a
+        // candidate: retry the setup before starting new work.
+        assert!(ConversionClass::CouldNotEvaluate < ConversionClass::Candidate);
+        // Every class is represented exactly once in the ordering.
+        assert_eq!(ConversionClass::ALL.len(), 6);
+    }
+
+    #[test]
+    fn memo_refuses_could_not_evaluate_and_the_error_names_the_operands() {
+        // Acceptance: "the property is false" (HELD) and "I could not
+        // evaluate it" demand opposite responses. Memoizing the second
+        // would make one run's setup failure a permanent verdict against
+        // the patch (#3866).
+        let mut memo = ConversionMemo::new();
+        let err = memo
+            .record("p1", "base-1", ConversionClass::CouldNotEvaluate)
+            .unwrap_err();
+        assert!(err.contains("CouldNotEvaluate"), "{err}");
+        assert!(err.contains("p1"), "{err}");
+        assert!(err.contains("base-1"), "{err}");
+        assert!(memo.is_empty());
+        // A held patch is a decision about the patch and stays memoizable.
+        memo.record("p1", "base-1", ConversionClass::MemoizedHold)
+            .unwrap();
+        assert_eq!(
+            memo.lookup("p1", "base-1"),
+            Some(ConversionClass::MemoizedHold)
+        );
+    }
+
+    #[test]
+    fn a_failed_evaluation_is_re_evaluated_on_every_pass() {
+        // The same patch goes through the same classifier twice: run one's
+        // setup dies, run two's succeeds. The pass must re-evaluate, not
+        // remember, because the first run's failure was about the setup,
+        // not the patch (#3866).
+        let mut memo = ConversionMemo::new();
+
+        // Run one: the build died before the patch was evaluated.
+        let mut blocked = patch("p1", "base-1", ConversionClass::CouldNotEvaluate);
+        let queue1 = [blocked.clone()];
+        let schedule = plan_pass(&queue1, 1, "/root", &memo, "base-1").unwrap();
+        assert!(!schedule.assignments[0].memo_hit);
+        assert!(memo
+            .record("p1", "base-1", ConversionClass::CouldNotEvaluate)
+            .is_err());
+
+        // Run two: the setup succeeds and the walk lands on HELD.
+        blocked.class = ConversionClass::MemoizedHold;
+        let queue2 = [blocked.clone()];
+        let schedule = plan_pass(&queue2, 1, "/root", &memo, "base-1").unwrap();
+        assert!(!schedule.assignments[0].memo_hit);
+        memo.record("p1", "base-1", ConversionClass::MemoizedHold)
+            .unwrap();
+
+        // Run three: now the decision is about the patch and memoizable.
+        let queue3 = [blocked];
+        let schedule = plan_pass(&queue3, 1, "/root", &memo, "base-1").unwrap();
+        assert!(schedule.assignments[0].memo_hit);
+    }
+
+    #[test]
+    fn stale_report_names_both_operands_on_failure_and_silences_on_pass() {
+        // A gate that cannot print the values it compared did not perform
+        // the comparison (#3866).
+        let patch = patch("p1", "263368c7", ConversionClass::Candidate);
+        let report = patch.stale_report("785447cf").unwrap();
+        assert!(report.contains("263368c7"), "{report}");
+        assert!(report.contains("785447cf"), "{report}");
+        assert!(report.contains("p1"), "{report}");
+        assert_eq!(patch.stale_report("263368c7"), None);
+    }
+
+    #[test]
+    fn memo_gate_report_names_both_operands_of_the_failing_equality() {
+        // Base no longer the tip: the stale-base equality failed and the
+        // report names both sides.
+        let patch = patch("p1", "263368c7", ConversionClass::MemoizedHold);
+        let report = memo_gate_report(&ConversionMemo::new(), &patch, "785447cf").unwrap();
+        assert!(report.contains("263368c7"), "{report}");
+        assert!(report.contains("785447cf"), "{report}");
+
+        // Nothing recorded for the key: not yet evaluated, not failed.
+        assert_eq!(
+            memo_gate_report(&ConversionMemo::new(), &patch, "263368c7"),
+            None
+        );
+
+        // A recorded decision different from the walk: the class equality
+        // failed and the report names both operands.
+        let mut memo = ConversionMemo::new();
+        memo.record("p1", "263368c7", ConversionClass::NoNetChange)
+            .unwrap();
+        let report = memo_gate_report(&memo, &patch, "263368c7").unwrap();
+        assert!(report.contains("NoNetChange"), "{report}");
+        assert!(report.contains("MemoizedHold"), "{report}");
+        assert!(report.contains("p1"), "{report}");
+        assert!(report.contains("263368c7"), "{report}");
+
+        // Both equalities hold: the gate passed.
+        memo.record("p1", "263368c7", ConversionClass::MemoizedHold)
+            .unwrap();
+        assert_eq!(memo_gate_report(&memo, &patch, "263368c7"), None);
+    }
+
+    #[test]
+    fn order_summary_reports_could_not_evaluate_separately_from_held() {
+        // The two states must be distinguishable in the log without reading
+        // the log: a pass whose build died is not a pass that held the
+        // patch, and the summary says which (#3866).
+        let died_queue = vec![
+            patch_at("died", "s1", ConversionClass::CouldNotEvaluate, 100),
+            patch_at("cand", "s2", ConversionClass::Candidate, 50),
+        ];
+        let died_ordered = order_by_cost(&died_queue);
+        // The blocked evaluation is retried before new builds start.
+        assert_eq!(died_ordered[0].identity, "died");
+        let died_summary = order_summary(&died_ordered, 2);
+        assert!(
+            died_summary.contains("COULD-NOT-EVALUATE"),
+            "got: {died_summary}"
+        );
+
+        let held_queue = vec![
+            patch_at("held", "s1", ConversionClass::MemoizedHold, 100),
+            patch_at("cand", "s2", ConversionClass::Candidate, 50),
+        ];
+        let held_ordered = order_by_cost(&held_queue);
+        let held_summary = order_summary(&held_ordered, 2);
+        assert!(held_summary.contains("MemoizedHold"), "got: {held_summary}");
+        assert!(
+            !held_summary.contains("COULD-NOT-EVALUATE"),
+            "got: {held_summary}"
+        );
+        assert_ne!(died_summary, held_summary);
     }
 }
