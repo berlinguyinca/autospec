@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::queue::{ExecutionQueue, QueueIngestionReceipt, QueueStatus};
 use super::queue_storage::{
@@ -29,6 +29,57 @@ impl ExecutionQueue {
         if load_with_recovery(&paths, &queue.run_id)?.is_some() || paths.directory.exists() {
             return Err(format!("queue already exists for run: {}", queue.run_id));
         }
+        save_if_current(&mut queue, &paths)?;
+        Ok(queue)
+    }
+
+    /// Create the queue and stage every spec input file in the same locked
+    /// transaction: the input a run needs is written by the same action that
+    /// schedules the run, so the two cannot get out of sync. Every source
+    /// must be readable before the run is scheduled (fail-closed) — this is
+    /// the same condition the runner's guard detects later and reports as
+    /// the `no-spec` outcome.
+    pub fn create_if_absent_staged(
+        root: impl AsRef<Path>,
+        run_id: impl Into<String>,
+        specs: &[(String, PathBuf)],
+    ) -> Result<Self, String> {
+        Self::create_if_absent_staged_at(root, run_id, specs, now())
+    }
+
+    pub fn create_if_absent_staged_at(
+        root: impl AsRef<Path>,
+        run_id: impl Into<String>,
+        specs: &[(String, PathBuf)],
+        timestamp: u64,
+    ) -> Result<Self, String> {
+        // Read every input before scheduling anything: an unreadable spec
+        // input aborts the whole create, so no run is ever scheduled without
+        // its inputs.
+        let staged: Vec<(String, String)> = specs
+            .iter()
+            .map(|(spec_id, source)| {
+                fs::read_to_string(source)
+                    .map(|content| (spec_id.clone(), content))
+                    .map_err(|error| {
+                        format!(
+                            "cannot stage spec input for {spec_id} from {}: {error} (run not scheduled)",
+                            source.display()
+                        )
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        let spec_ids = staged.iter().map(|(spec_id, _)| spec_id.clone()).collect();
+        let mut queue = Self::new_at(run_id, spec_ids, timestamp);
+        validate_queue(&queue)?;
+        let paths = QueuePaths::new(root.as_ref(), &queue.run_id)?;
+        let _lock = QueueLock::acquire(&paths)?;
+        if load_with_recovery(&paths, &queue.run_id)?.is_some() || paths.directory.exists() {
+            return Err(format!("queue already exists for run: {}", queue.run_id));
+        }
+        // Stage inputs before publishing the queue so that any scheduled run
+        // (queue file present) always has its inputs present.
+        stage_spec_inputs(&paths, &staged)?;
         save_if_current(&mut queue, &paths)?;
         Ok(queue)
     }
@@ -72,6 +123,7 @@ impl ExecutionQueue {
                     | QueueStatus::Blocked
                     | QueueStatus::Deferred
                     | QueueStatus::Superseded
+                    | QueueStatus::NoSpec
             )
         {
             return Err(format!(
@@ -146,4 +198,39 @@ impl ExecutionQueue {
         }
         Ok(latest)
     }
+}
+
+/// Write staged spec inputs into the run directory under the queue lock.
+/// Files land at `.autospec/runs/<run_id>/specs/<spec_id>.md`, the stable
+/// path a runner reads its input from. Spec ids are already validated by
+/// `validate_queue` (safe character set, no path separators).
+fn stage_spec_inputs(paths: &QueuePaths, staged: &[(String, String)]) -> Result<(), String> {
+    let specs_directory = paths.directory.join("specs");
+    fs::create_dir_all(&specs_directory).map_err(|error| {
+        format!(
+            "failed to create spec input directory {}: {error}",
+            specs_directory.display()
+        )
+    })?;
+    for (spec_id, content) in staged {
+        let primary = specs_directory.join(format!("{spec_id}.md"));
+        let temporary = specs_directory.join(format!("{spec_id}.md.tmp"));
+        fs::write(&temporary, content).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!(
+                "failed to stage spec input {} for {}: {error}",
+                primary.display(),
+                spec_id
+            )
+        })?;
+        fs::rename(&temporary, &primary).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!(
+                "failed to publish staged spec input {} for {}: {error}",
+                primary.display(),
+                spec_id
+            )
+        })?;
+    }
+    Ok(())
 }

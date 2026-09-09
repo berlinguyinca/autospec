@@ -668,3 +668,248 @@ fn execution_queue_reads_legacy_documents_and_upgrades_them_on_save() {
     assert!(upgraded.contains("\"revision\":1"));
     assert!(upgraded.contains("\"agent_result_ids\":[]"));
 }
+
+#[test]
+fn execution_queue_no_spec_parks_terminal_without_attempt_and_never_redispatches() {
+    let root = TempProjectRoot::new();
+    ExecutionQueue::create_if_absent_at(
+        root.path(),
+        "run-no-spec",
+        vec![
+            "v67-agent-integration-contracts".to_string(),
+            "v68-second-spec".to_string(),
+        ],
+        100,
+    )
+    .expect("queue is created");
+    let result = IngestedAgentResult::new_at(
+        "run-no-spec",
+        "v67-agent-integration-contracts",
+        "result-1",
+        AgentOutcome::NoSpec,
+        AgentResult::new(
+            "dispatched but never started",
+            Vec::new(),
+            "n/a — runner could not read the spec input",
+            vec![
+                "cat: specs/v67-agent-integration-contracts.md: No such file or directory"
+                    .to_string(),
+            ],
+            "stage the spec input as part of dispatch",
+        ),
+        101,
+    )
+    .expect("no-spec result carries its blocker");
+
+    let receipt = ExecutionQueue::ingest_agent_result_at(root.path(), &result, 3, 102)
+        .expect("no-spec result applies");
+    assert_eq!(receipt.application, QueueResultApplication::Applied);
+    assert_eq!(receipt.status, QueueStatus::NoSpec);
+
+    let mut queue = ExecutionQueue::load_named(root.path(), "run-no-spec")
+        .expect("queue reloads")
+        .expect("queue remains");
+    let entry = queue
+        .entry("v67-agent-integration-contracts")
+        .expect("queue entry exists");
+    assert_eq!(entry.status, QueueStatus::NoSpec);
+    // Nothing was attempted: attempts stays 0 and no failure kind is recorded.
+    assert_eq!(entry.attempts, 0);
+    assert_eq!(entry.failure_kind, None);
+    assert!(entry
+        .blocker
+        .as_deref()
+        .is_some_and(|blocker| blocker.contains("No such file or directory")));
+    assert!(entry.started_at.is_some());
+
+    // The re-dispatch selector moves on to the sibling spec instead of
+    // spinning on the one that never started.
+    assert_eq!(
+        queue.next_incomplete().map(|entry| entry.spec_id.as_str()),
+        Some("v68-second-spec")
+    );
+
+    // Terminal: cannot restart, cannot receive a new result.
+    assert!(queue
+        .mark_started_at("v67-agent-integration-contracts", 103)
+        .is_err());
+    let replacement = IngestedAgentResult::new_at(
+        "run-no-spec",
+        "v67-agent-integration-contracts",
+        "result-2",
+        AgentOutcome::Passed,
+        AgentResult::new(
+            "implemented",
+            Vec::new(),
+            "cargo test --workspace: exit 0",
+            Vec::new(),
+            "ready",
+        ),
+        104,
+    )
+    .expect("passed result is valid");
+    assert!(ExecutionQueue::ingest_agent_result_at(root.path(), &replacement, 3, 105).is_err());
+
+    // A no-spec observation consumes a one-shot selector exactly like the
+    // other terminal states.
+    let mut selector = OneShotIssueSelector::new(42).expect("positive issue selector");
+    assert!(selector
+        .observe_status(42, &QueueStatus::NoSpec)
+        .expect("terminal observation"));
+    assert!(selector.consumed());
+
+    // The report counts no-spec separately from failed.
+    let report = queue.final_report_markdown();
+    assert!(report.contains("no-spec: 1"));
+    assert!(report.contains("failed: 0"));
+}
+
+#[test]
+fn execution_queue_no_spec_result_requires_a_blocker() {
+    let without_blocker = IngestedAgentResult::new_at(
+        "run-no-spec-blocker",
+        "v67-agent-integration-contracts",
+        "result-1",
+        AgentOutcome::NoSpec,
+        AgentResult::new("dispatched", Vec::new(), "n/a", Vec::new(), "handoff"),
+        100,
+    );
+    assert!(without_blocker.is_err());
+
+    let root = TempProjectRoot::new();
+    ExecutionQueue::create_if_absent_at(
+        root.path(),
+        "run-no-spec-blocker",
+        vec!["v67-agent-integration-contracts".to_string()],
+        100,
+    )
+    .expect("queue is created");
+    let result = IngestedAgentResult::new_at(
+        "run-no-spec-blocker",
+        "v67-agent-integration-contracts",
+        "result-1",
+        AgentOutcome::NoSpec,
+        AgentResult::new(
+            "dispatched but never started",
+            Vec::new(),
+            "n/a",
+            vec!["spec input missing".to_string()],
+            "stage the spec input",
+        ),
+        101,
+    )
+    .expect("no-spec result carries its blocker");
+    assert_eq!(
+        ExecutionQueue::ingest_agent_result_at(root.path(), &result, 3, 102)
+            .expect("no-spec result applies")
+            .status,
+        QueueStatus::NoSpec
+    );
+    // The status round-trips through the queue JSON without a schema bump.
+    let queue = ExecutionQueue::load_named(root.path(), "run-no-spec-blocker")
+        .expect("queue reloads")
+        .expect("queue remains");
+    assert_eq!(
+        queue
+            .entry("v67-agent-integration-contracts")
+            .expect("queue entry exists")
+            .status,
+        QueueStatus::NoSpec
+    );
+}
+
+#[test]
+fn agent_outcome_no_spec_round_trips_json_with_null_failure_kind() {
+    let result = IngestedAgentResult::new_at(
+        "run-no-spec-json",
+        "v67-agent-integration-contracts",
+        "result-1",
+        AgentOutcome::NoSpec,
+        AgentResult::new(
+            "dispatched but never started",
+            Vec::new(),
+            "n/a",
+            vec!["spec input missing".to_string()],
+            "stage the spec input",
+        ),
+        100,
+    )
+    .expect("no-spec result is valid");
+    let json = result.to_json();
+    assert!(json.contains("\"status\":\"no-spec\""));
+    assert!(json.contains("\"failure_kind\":null"));
+    let round_tripped = IngestedAgentResult::from_json(&json).expect("no-spec result round-trips");
+    assert_eq!(round_tripped, result);
+    let with_failure_kind = json.replace("\"failure_kind\":null", "\"failure_kind\":\"agent\"");
+    assert!(IngestedAgentResult::from_json(&with_failure_kind).is_err());
+}
+
+#[test]
+fn create_if_absent_staged_writes_inputs_in_the_same_action_that_schedules() {
+    let root = TempProjectRoot::new();
+    let input = root.path().join("input");
+    fs::create_dir_all(&input).expect("input directory is created");
+    fs::write(input.join("v99-first.md"), "# spec one\n").expect("first spec source is written");
+    fs::write(input.join("v99-second.md"), "# spec two\n").expect("second spec source is written");
+
+    let queue = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-staged",
+        &[
+            ("v99-first".to_string(), input.join("v99-first.md")),
+            ("v99-second".to_string(), input.join("v99-second.md")),
+        ],
+    )
+    .expect("staged queue is created");
+
+    // The scheduled run exists and every input landed at its stable path.
+    let run_directory = root.path().join(".autospec/runs/run-staged");
+    assert!(run_directory.join("queue.json").exists());
+    assert_eq!(
+        fs::read_to_string(run_directory.join("specs/v99-first.md")).expect("staged input"),
+        "# spec one\n"
+    );
+    assert_eq!(
+        fs::read_to_string(run_directory.join("specs/v99-second.md")).expect("staged input"),
+        "# spec two\n"
+    );
+    assert_eq!(queue.run_id, "run-staged");
+
+    // Re-creating the same run still refuses.
+    assert!(ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-staged",
+        &[("v99-first".to_string(), input.join("v99-first.md"),)],
+    )
+    .is_err());
+}
+
+#[test]
+fn create_if_absent_staged_fails_closed_when_an_input_is_unreadable() {
+    let root = TempProjectRoot::new();
+    let input = root.path().join("input");
+    fs::create_dir_all(&input).expect("input directory is created");
+    fs::write(input.join("v99-first.md"), "# spec one\n").expect("first spec source is written");
+
+    let missing = input.join("v99-missing.md");
+    let error = ExecutionQueue::create_if_absent_staged(
+        root.path(),
+        "run-staged-missing",
+        &[
+            ("v99-first".to_string(), input.join("v99-first.md")),
+            ("v99-missing".to_string(), missing),
+        ],
+    )
+    .expect_err("unreadable spec input aborts the create");
+    assert!(
+        error.contains("v99-missing"),
+        "error names the unreadable spec: {error}"
+    );
+    assert!(
+        error.contains("run not scheduled"),
+        "error states nothing was scheduled: {error}"
+    );
+
+    // Fail-closed: no queue, no partial staging — nothing to clean up.
+    assert!(!root.path().join(".autospec").exists());
+}
