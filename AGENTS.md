@@ -550,6 +550,27 @@ state the blast radius before any global/destructive action; stay in the issue's
 scope and park unrelated findings as follow-up issues rather than expanding the
 diff.
 
+## Factual-claim lint
+
+A comment that asserts an externally checkable fact — registry visibility,
+package publicity, a host's or worker's capability, network reachability of a
+registry or host — decays silently: it was true when written and nothing
+re-checks it. A comment cannot fail, so a fact the code depends on must be one
+of: executed (the same file carries a runtime check for that fact category),
+dated and sourced (`# verified public 2026-09-06 by anonymous manifest GET
+(200)`), or waived (`# linter:allow-FACTUAL_CLAIM <reason>`, reason mandatory).
+Intent ("publish must not depend on an unproven property") stays true and
+belongs in a comment; a bare assertion does not. Enforced by
+`scripts/lint-factual-claims.sh` (no args scans `scripts/` and
+`.github/workflows/`; exit code = finding count, capped at 64); fixtures and
+suites live in `tests/fixtures/lint-factual-claims/` and
+`tests/lint-factual-claims.bats`.
+
+Agent reports separate **observed** from **reasoned** claims: any claim that
+changes control flow (a gate, a dependency, a retry policy) must be in the
+observed set — `[verified]` with `runtime` proof in the Closeout report —
+while reasoned claims are `[assumed]` and never gate a decision.
+
 ## Memory management scripts
 
 Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
