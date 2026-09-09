@@ -58,7 +58,7 @@ fn required_section(source: &str, heading: &str) -> Option<Vec<(usize, String)>>
     section_lines(source, heading).filter(|lines| !lines.is_empty())
 }
 
-fn section_lines(source: &str, heading: &str) -> Option<Vec<(usize, String)>> {
+pub(crate) fn section_lines(source: &str, heading: &str) -> Option<Vec<(usize, String)>> {
     let mut in_section = false;
     let mut lines = Vec::new();
     let target = format!("## {heading}");
@@ -79,7 +79,7 @@ fn section_lines(source: &str, heading: &str) -> Option<Vec<(usize, String)>> {
     in_section.then_some(lines)
 }
 
-fn first_nonblank(lines: Vec<(usize, String)>) -> Option<String> {
+pub(crate) fn first_nonblank(lines: Vec<(usize, String)>) -> Option<String> {
     lines
         .into_iter()
         .map(|(_, line)| line.trim().to_string())
