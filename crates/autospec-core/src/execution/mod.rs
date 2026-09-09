@@ -1,3 +1,4 @@
+pub mod endpoint;
 pub mod executor;
 pub mod gate;
 pub mod patch_pipeline;
@@ -11,6 +12,10 @@ pub mod stage_throughput;
 pub mod test_diff;
 pub mod work;
 
+pub use endpoint::{
+    classify_status, AttemptOutcome, EndpointPool, Grant, PoolError, ReResolution, StatusReason,
+    Step, Worker, WorkerState,
+};
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
     FailureClass, Role,
