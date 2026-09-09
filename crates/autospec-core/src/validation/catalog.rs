@@ -148,6 +148,10 @@ impl ValidationCheck {
             "check_restore_visibility_ratchet" => {
                 bats_suite("tests/lint/test_restore_visibility_checker.bats")
             }
+            // #3893: the generated-artifact consumer-drift ratchet.
+            "check_generated_artifact_integrity" => {
+                bats_suite("tests/lint/test_generated_artifact_integrity_checker.bats")
+            }
             "check_code_intelligence_contract" => {
                 bats_suite("tests/code-intel/code-intelligence.bats")
             }

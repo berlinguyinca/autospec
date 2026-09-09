@@ -571,6 +571,41 @@ embedding ships the corrupted value as if it had been rebuilt (issue #3878).
   restore) is for restores that genuinely do not feed a build and requires a
   reason — a bare marker is rejected.
 
+## Generated-artifact consumer contract
+
+A generated artefact with two consumers needs two checks: regenerating it
+satisfies one and silently breaks the other (issue #3893 — a `pi` row existed
+in `config/harness-runtime-aliases.tsv` but was never propagated to the
+committed `templates/generated/` / `docs/generated/` artefacts, so
+`tests/harness-runtime-alias-generation.bats` broke on `main` with no check
+pointing at the cause).
+
+- Every committed generated artefact is enumerated **in its generator
+  script**: `# Consumers(<artefact_path>): <consumer1> <consumer2> …`. The
+  enumeration is the single source of truth for who reads the artefact and it
+  surfaces in the diff whenever the generator changes.
+- Every generator that writes committed artefacts also writes or checks a
+  digest pin manifest (`config/generated-artifact-integrity.sha256`,
+  `sha256sum` format). `scripts/gen-harness-runtime-aliases.sh --check`
+  re-renders every artefact plus the manifest and fails on any drift between
+  `config/harness-runtime-aliases.tsv` and the committed files.
+- The deterministic ratchet `scripts/lint-generated-artifacts.sh` is blocking
+  (exit 1; `--list` audits, `--root DIR` retargets) with four rules:
+  `UNLISTED_ARTIFACT` (generated file with no `# Consumers(...)` block in any
+  candidate generator), `ORPHAN_ARTIFACT` (enumerated artefact no longer
+  present), `STALE_REFERENCE` (a recorded sha256/sha512 of the artefact no
+  longer matches it), `STALE_CONSUMER` (an enumerated consumer file is gone
+  or no longer references the artefact — by path or by directory+stem
+  prefix, so parameterised `$format` references count).
+- Registered as `check_generated_artifact_integrity`
+  (`tests/lint/test_generated_artifact_integrity_checker.bats`), which
+  includes the AC3 negative case: corrupt one recorded digest and the ratchet
+  fires.
+- Adding a generator or an artefact: add the `# Consumers(...)` lines, emit
+  the digest pin manifest as a generator output, and re-run the generator.
+  Adding or removing a consumer: update the `# Consumers(...)` list in the
+  same PR — the ratchet makes a forgotten consumer blocking, not silent.
+
 ## Closeout report contract
 
 Every `auto-implement` agent ends an issue by emitting a **Closeout report** —

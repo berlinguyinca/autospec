@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
+#
+# Consumer enumeration (issue #3893): every generated artefact this script
+# owns lists its consumers below, so a change to this generator surfaces the
+# consumer list. scripts/lint-generated-artifacts.sh ratchets the enumeration
+# and verifies the recorded digests in config/generated-artifact-integrity.sha256.
+#
+# Consumers(templates/generated/harness-runtime-aliases.sh): install.sh tests/harness-runtime-alias-generation.bats tests/agent-env-install.bats config/generated-artifact-integrity.sha256
+# Consumers(templates/generated/harness-runtime-aliases.fish): install.sh tests/harness-runtime-alias-generation.bats config/generated-artifact-integrity.sha256
+# Consumers(docs/generated/harness-runtime-aliases.md): tests/harness-runtime-alias-generation.bats config/generated-artifact-integrity.sha256
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/config/harness-runtime-aliases.tsv"
 MODE=write
 FORMAT=""
+PIN_TARGET="$ROOT/config/generated-artifact-integrity.sha256"
+ARTIFACTS=(
+    "templates/generated/harness-runtime-aliases.sh"
+    "templates/generated/harness-runtime-aliases.fish"
+    "docs/generated/harness-runtime-aliases.md"
+)
 
 usage() {
     printf 'Usage: %s [--check] [--source PATH] [--stdout sh|fish|docs]\n' "$0"
@@ -58,11 +73,29 @@ render_docs() {
     awk -F '\t' '{ suffix=$3 == "" ? "" : " " $3; printf "| `%s` | `%s` | `autospec-env session -- %s%s` | %s |\n", $1, $2, $2, suffix, $4 }' "$SOURCE"
 }
 
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    fi
+}
+
+render_pins() {
+    local p
+    for p in "${ARTIFACTS[@]}"; do
+        printf '%s  %s\n' "$(sha256_of "$ROOT/$p")" "$p"
+    done
+}
+
 render() {
     case "$1" in
         sh) render_sh ;;
         fish) render_fish ;;
         docs) render_docs ;;
+        pins) render_pins ;;
         *) printf 'unsupported output format: %s\n' "$1" >&2; exit 2 ;;
     esac
 }
@@ -88,6 +121,9 @@ main() {
     write_or_check sh "$ROOT/templates/generated/harness-runtime-aliases.sh"
     write_or_check fish "$ROOT/templates/generated/harness-runtime-aliases.fish"
     write_or_check docs "$ROOT/docs/generated/harness-runtime-aliases.md"
+    # The pin manifest is rendered last so it hashes the artefacts just
+    # written; --check mode hashes the committed artefacts instead.
+    write_or_check pins "$PIN_TARGET"
 }
 
 main "$@"
