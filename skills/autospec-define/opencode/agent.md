@@ -315,6 +315,29 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a
 
 The spec must be implementable end-to-end by an agent reading only the spec.
 
+### Epistemic gates (issue #3718)
+
+Seventy classified incidents reduced to five shapes, and all five are cheap and
+mechanical — none require a larger model. The spec must carry these gates so
+every downstream implementer and reviewer applies them:
+
+1. **Name the producer of every value.** For each value a gate or test reads,
+   the spec names the process or step that computes it, and the gate must
+   verify the value is current and complete, not merely present.
+2. **State what the gate examined, not just its verdict.** Each "pass" must
+   name the inputs, version/revision, and scope it actually checked. A "passed"
+   verdict with nothing named is a defect.
+3. **Re-baseline immediately before judging.** The gate must observe the
+   system in its current state at decision time, not rely on a measurement
+   taken earlier or a value another step recorded.
+4. **Declare the shared foundation.** When one input feeds several gates or
+   tests, the spec names it as shared state and requires every consumer to read
+   the same instance, so the consumers cannot diverge silently.
+5. **Derive limits from the real constraint, not from observed history.**
+   Thresholds, caps, and budgets are computed from the resource or time budget
+   they protect, not tuned to fit past runs. An observed value is never a
+   specification.
+
 ### Diagnostic assistant
 
 When the request describes a chat or assistant that answers questions about
