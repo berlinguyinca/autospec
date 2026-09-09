@@ -7,6 +7,7 @@ mod queue_storage;
 pub mod report;
 pub mod result;
 pub mod stage_throughput;
+pub mod test_diff;
 pub mod work;
 
 pub use executor::{
@@ -18,4 +19,8 @@ pub use queue::{
     QueueStatus, QueueValidationResult, QueueValidationStatus,
 };
 pub use result::{AgentOutcome, IngestedAgentResult};
+pub use test_diff::{
+    diff_test_failures, resolve_reverification, DiffVerdict, FlakyQuarantine,
+    ReverificationOutcome, TestFailureDiff, DEFAULT_CHURN_THRESHOLD,
+};
 pub use work::ProducedWork;
