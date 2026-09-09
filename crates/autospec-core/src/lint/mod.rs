@@ -1,5 +1,6 @@
 //! Deterministic issue-body lint rules shared with the shell autospec linter.
 
+pub mod dag;
 pub mod diff;
 pub mod implementation;
 pub mod pr_size;
