@@ -1,0 +1,6 @@
+# Negative fixture: workflow comment, dated and sourced. Workflow YAML carries
+# no runtime check of its own, so the dated form is what makes this pass.
+# The registry is reachable from the runner -- verified 2026-09-08 by curl
+# (200 OK).
+steps:
+  - run: echo ok
