@@ -23,6 +23,7 @@ empty() {
 cd "$REPO_ROOT" || empty
 
 if ! command -v python3 >/dev/null 2>&1; then
+    echo "style-normalization: python3 not on PATH — researcher could not run; emitting empty proposals" >&2
     empty
 fi
 
@@ -62,13 +63,27 @@ fi
 
 has_proof() {
     [ -d "$PROOF_DIR" ] || return 1
-    test_count="$(find "$PROOF_DIR" -type f \
+    # The counts below are measurements, not assumptions: `find | wc -l`
+    # reports wc's exit status, so a find that dies reads as a clean count of
+    # 0. "No proof files" and "the count could not run" are different facts,
+    # so pipefail is enabled for the count and a failure returns 1 (proof
+    # missing) with the reason on stderr — the conservative direction for a
+    # researcher: no proposal is emitted, and the skip is explainable.
+    test_count="$(set -o pipefail; find "$PROOF_DIR" -type f \
         \( -name '*.spec.ts' -o -name '*.spec.js' -o -name '*.test.ts' -o -name '*.test.js' \) \
-        2>/dev/null | wc -l | tr -d ' ')"
-    shot_count="$(find "$PROOF_DIR" -type f \
+        | wc -l | tr -d ' ')"
+    if [ $? -ne 0 ] || [ -z "$test_count" ]; then
+        echo "style-normalization: WARNING: could not count proof test files in $PROOF_DIR (find failed) — treating proof as missing" >&2
+        return 1
+    fi
+    shot_count="$(set -o pipefail; find "$PROOF_DIR" -type f \
         \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' \) \
-        2>/dev/null | wc -l | tr -d ' ')"
-    [ "${test_count:-0}" -gt 0 ] && [ "${shot_count:-0}" -gt 0 ]
+        | wc -l | tr -d ' ')"
+    if [ $? -ne 0 ] || [ -z "$shot_count" ]; then
+        echo "style-normalization: WARNING: could not count proof screenshots in $PROOF_DIR (find failed) — treating proof as missing" >&2
+        return 1
+    fi
+    [ "$test_count" -gt 0 ] && [ "$shot_count" -gt 0 ]
 }
 
 if ! has_proof; then

@@ -3578,7 +3578,9 @@ _conductor_digest_priorities_section() {
 
 # _conductor_sandbox_drift_section: compute sandbox-to-main merge-base distance
 # and a conflict-risk estimate.  Outputs a markdown section; never rebases.
-# Fail-open: any git error produces a minimal "unavailable" line.
+# Fail-open: any git error produces a minimal "unavailable" line — but the
+# unavailable line says "could not run", never a zero. A measurement that was
+# never executed must not be printed as if it had run and found no drift.
 _conductor_sandbox_drift_section() {
     local repo_root="$1"
     local mode_file="${repo_root}/.autospec/explore-mode.json"
@@ -3600,38 +3602,82 @@ _conductor_sandbox_drift_section() {
     fi
 
     # Run git commands from the repo root.
-    local merge_base commits_behind sandbox_files conflict_risk
+    local merge_base commits_behind sandbox_files conflict_risk mb_err
 
+    # Capture stderr instead of suppressing it: the caller discards this
+    # function's stderr, so the markdown itself must carry the error text.
+    mb_err="$(mktemp)"
     merge_base="$(git -C "$repo_root" merge-base \
-        "origin/${base_branch}" "$sandbox_branch" 2>/dev/null || true)"
+        "origin/${base_branch}" "$sandbox_branch" 2>"$mb_err")" || merge_base=""
 
     if [ -z "$merge_base" ]; then
-        printf '### Sandbox drift\n\n_Merge-base unavailable (sandbox branch not fetched)._\n'
+        printf '### Sandbox drift\n\n_Merge-base could not run (%s); drift metrics unavailable._\n' \
+            "$(head -1 "$mb_err")"
+        rm -f "$mb_err"
         return 0
     fi
+    rm -f "$mb_err"
 
-    commits_behind="$(git -C "$repo_root" rev-list \
-        --count "${merge_base}..origin/${base_branch}" 2>/dev/null || echo "?")"
+    # rev-list failure is "could not run", not "0 commits behind": the cell
+    # itself says so instead of a bare "?" that reads like a measurement.
+    local behind_err
+    behind_err="$(mktemp)"
+    # pipefail inside the substitution: a failed rev-list must not be counted
+    # as zero commits by the wc at the tail of the pipeline.
+    if ! commits_behind="$(set -o pipefail; git -C "$repo_root" rev-list \
+        "${merge_base}..origin/${base_branch}" 2>"$behind_err" | wc -l)"; then
+        commits_behind="could not run ($(head -1 "$behind_err"))"
+    fi
+    rm -f "$behind_err"
 
     # Files changed in main since merge-base.
-    local tmp_base tmp_sandbox
+    #
+    # git writes its output first, sort second. If git fails inside a
+    # `git | sort` pipeline, sort hands the later count a clean zero — "no
+    # drift" and "could not run" become indistinguishable. So git's own exit
+    # status is checked before anything is counted, and its stderr is kept in
+    # a temp file for the "could not run" cells below.
+    local tmp_base tmp_sandbox err_base err_sandbox diff_state diff_err_text
     tmp_base="$(mktemp)"
     tmp_sandbox="$(mktemp)"
+    err_base="$(mktemp)"
+    err_sandbox="$(mktemp)"
+    diff_state="ok"
     git -C "$repo_root" diff --name-only \
-        "${merge_base}" "origin/${base_branch}" 2>/dev/null \
-        | sort > "$tmp_base" || true
+        "${merge_base}" "origin/${base_branch}" > "$tmp_base" 2>"$err_base" \
+        || diff_state="could not run"
+    if ! sort "$tmp_base" > "$tmp_base.sorted"; then
+        diff_state="could not run"
+    else
+        mv "$tmp_base.sorted" "$tmp_base"
+    fi
     # Files changed in sandbox since merge-base.
     git -C "$repo_root" diff --name-only \
-        "${merge_base}" "$sandbox_branch" 2>/dev/null \
-        | sort > "$tmp_sandbox" || true
+        "${merge_base}" "$sandbox_branch" > "$tmp_sandbox" 2>"$err_sandbox" \
+        || diff_state="could not run"
+    if ! sort "$tmp_sandbox" > "$tmp_sandbox.sorted"; then
+        diff_state="could not run"
+    else
+        mv "$tmp_sandbox.sorted" "$tmp_sandbox"
+    fi
 
     sandbox_files="$(wc -l < "$tmp_sandbox" | tr -d ' ')"
     # Overlap = potential conflict risk.
     local overlap
-    overlap="$(comm -12 "$tmp_base" "$tmp_sandbox" 2>/dev/null | wc -l | tr -d ' ')"
-    rm -f "$tmp_base" "$tmp_sandbox"
+    overlap="$(comm -12 "$tmp_base" "$tmp_sandbox" | wc -l | tr -d ' ')"
+    diff_err_text=""
+    if [ "$diff_state" != "ok" ]; then
+        # Both file lists are untrustworthy: say so in the cells that would
+        # otherwise print zeros measured from empty output.
+        diff_err_text="$(cat "$err_base" "$err_sandbox" | head -1)"
+        [ -z "$diff_err_text" ] && diff_err_text="git diff failed"
+        sandbox_files="could not run"
+    fi
+    rm -f "$tmp_base" "$tmp_sandbox" "$err_base" "$err_sandbox"
 
-    if [ "$overlap" -gt 0 ] 2>/dev/null; then
+    if [ "$diff_state" != "ok" ]; then
+        conflict_risk="could not run — ${diff_err_text}"
+    elif [ "$overlap" -gt 0 ] 2>/dev/null; then
         if [ "$overlap" -gt 5 ] 2>/dev/null; then
             conflict_risk="high (${overlap} overlapping files)"
         elif [ "$overlap" -gt 0 ] 2>/dev/null; then

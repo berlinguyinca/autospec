@@ -261,8 +261,22 @@ while [ "$w" -le "$workers" ]; do
 done
 wait
 
-claim_count="$(wc -l < "$claims" | tr -d ' ')"
-duplicate_claims="$(awk '{print $2}' "$claims" | sort | uniq -d | wc -l | tr -d ' ')"
+# A count that was never executed must not be compared as if it were a
+# measurement: check the command's own exit status first, then validate the
+# result is numeric. (wc is run as a single command with a redirect so its
+# failure status reaches us directly; the duplicate pipeline uses pipefail
+# inside the $( ) because a bare pipeline's status is only the last command's.)
+claim_count="$(wc -l < "$claims")" || die "could not count claims in $claims (measurement did not run)"
+claim_count="${claim_count// /}"
+case "$claim_count" in
+    ''|*[!0-9]*) die "claims count not numeric after wc (measurement did not run): '$claim_count'" ;;
+esac
+if ! duplicate_claims="$(set -o pipefail; awk '{print $2}' "$claims" | sort | uniq -d | wc -l | tr -d ' ')"; then
+    die "could not count duplicate claims in $claims (measurement did not run)"
+fi
+case "$duplicate_claims" in
+    ''|*[!0-9]*) die "duplicate-claims count not numeric (measurement did not run): '$duplicate_claims'" ;;
+esac
 stale_active=0
 queue_remaining=0
 i=1
