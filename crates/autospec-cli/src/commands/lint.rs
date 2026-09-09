@@ -16,6 +16,7 @@ use autospec_core::lint::{
     ImplementationLintOptions, ImplementationLintSeverity, IssueLintFinding, RepositoryIndex,
     UnifiedDiff,
 };
+use autospec_core::spec::{lint_spec_safety, SpecSafetyFinding};
 use yaml_edit::Document;
 
 use super::CommandFailure;
@@ -34,6 +35,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         [command, rest @ ..] if command == "implementation-contract" => {
             run_implementation_contract(rest)
         }
+        [command, rest @ ..] if command == "spec" => run_spec(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec lint command: {command}"
         ))),
@@ -703,6 +705,105 @@ fn run_issue(args: &[String]) -> Result<(), CommandFailure> {
     }
 }
 
+fn run_spec(args: &[String]) -> Result<(), CommandFailure> {
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        print_spec_help();
+        return Ok(());
+    }
+    let mut spec_path = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--help" | "-h" => {
+                return Err(spec_diagnostic(
+                    "autospec lint spec --help cannot be combined with other arguments",
+                ))
+            }
+            "-" => set_spec_path(&mut spec_path, &args[index])?,
+            option if option.starts_with('-') => {
+                return Err(spec_diagnostic(format!(
+                    "unknown autospec lint spec option: {option}"
+                )))
+            }
+            path => set_spec_path(&mut spec_path, path)?,
+        }
+        index += 1;
+    }
+    let Some(spec_path) = spec_path else {
+        return Err(spec_diagnostic("autospec lint spec requires a spec path"));
+    };
+    let source = read_spec(&spec_path)?;
+    let findings = lint_spec_safety(&source);
+
+    if json {
+        print_spec_json(&findings);
+    } else {
+        print_spec_text(&findings);
+    }
+
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(CommandFailure::status(
+            String::new(),
+            findings.len().min(64) as i32,
+        ))
+    }
+}
+
+fn set_spec_path(slot: &mut Option<String>, path: &str) -> Result<(), CommandFailure> {
+    if slot.replace(path.to_owned()).is_some() {
+        return Err(spec_diagnostic(
+            "autospec lint spec accepts exactly one spec path",
+        ));
+    }
+    Ok(())
+}
+
+fn read_spec(path: &str) -> Result<String, CommandFailure> {
+    if path == "-" {
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| spec_diagnostic(format!("could not read spec from stdin: {error}")))?;
+        return Ok(source);
+    }
+    fs::read_to_string(path)
+        .map_err(|error| spec_diagnostic(format!("could not read spec {path}: {error}")))
+}
+
+fn spec_diagnostic(message: impl Into<String>) -> CommandFailure {
+    CommandFailure::diagnostic(message)
+}
+
+fn print_spec_text(findings: &[SpecSafetyFinding]) {
+    for finding in findings {
+        eprintln!("{}: {}", finding.rule_id(), finding.message());
+    }
+}
+
+fn print_spec_json(findings: &[SpecSafetyFinding]) {
+    if findings.is_empty() {
+        println!("[]");
+        return;
+    }
+    println!("[");
+    for (index, finding) in findings.iter().enumerate() {
+        let separator = if index + 1 == findings.len() { "" } else { "," };
+        println!(
+            "  {{\"rule\":\"{}\",\"line\":{},\"phrase\":\"{}\",\"description\":\"{}\"}}{}",
+            finding.rule_id(),
+            finding.line,
+            escape_json(&finding.phrase),
+            escape_json(&finding.message()),
+            separator
+        );
+    }
+    println!("]");
+}
+
 fn run_issue_safety(args: &[String]) -> Result<(), CommandFailure> {
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         print_issue_safety_help();
@@ -1175,7 +1276,7 @@ fn escape_json(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "autospec lint\n\nUSAGE:\n    autospec lint <COMMAND>\n\nCOMMANDS:\n    issue                    Lint an issue body\n    implementation           Lint an implementation diff\n    implementation-contract  Lint issue-defined scope and regression evidence"
+        "autospec lint\n\nUSAGE:\n    autospec lint <COMMAND>\n\nCOMMANDS:\n    issue                    Lint an issue body\n    implementation           Lint an implementation diff\n    implementation-contract  Lint issue-defined scope and regression evidence\n    spec                     Review a spec document for convention-only safety properties"
     );
 }
 
@@ -1200,6 +1301,12 @@ fn print_implementation_help() {
 fn print_implementation_contract_help() {
     println!(
         "autospec lint implementation-contract\n\nUSAGE:\n    autospec lint implementation-contract --issue-body-file <PATH> --diff-file <PATH>\n\nINPUTS:\n    --issue-body-file <PATH>  Read issue policy from a literal body file\n    --diff-file <PATH>        Read an offline unified-diff file\n\nOPTIONS:\n    -h, --help                Print help\n\nEXIT STATUS:\n    0                         No blocking findings\n    1                         Input failure or one blocking finding\n    2                         Option/usage error or two blocking findings\n    3..64                     Blocking-finding count, capped at 64\n    200                       Scope explosion"
+    );
+}
+
+fn print_spec_help() {
+    println!(
+        "autospec lint spec\n\nUSAGE:\n    autospec lint spec [--json] <SPEC_PATH>\n\nSPEC_PATH:\n    -           Read the spec document from standard input\n\nOPTIONS:\n    --json      Write ordered findings as JSON\n    -h, --help  Print help\n\nEXIT STATUS:\n    0           No convention-only safety properties found\n    1..64       Finding count, capped at 64"
     );
 }
 

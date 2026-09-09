@@ -243,6 +243,117 @@ fn lint_issue_caps_the_exit_status_without_dropping_findings() {
     assert!(stderr.lines().all(|line| line.starts_with("AC_PROSE: ")));
 }
 
+fn spec_source(invariants: &str) -> String {
+    format!("# Fixture spec\n\n## Invariants\n\n{invariants}\n")
+}
+
+#[test]
+fn lint_spec_file_reports_convention_only_safety_to_stderr() {
+    let spec = spec_source(
+        "The pipeline never touches the live file.\nThe gate rejects a second writer, so the lock is never held twice.\nMake sure to snapshot the journal before rewriting it.",
+    );
+    let path = write_issue_body("autospec-lint-spec-text", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1);
+    assert!(
+        stderr.starts_with(
+            "SAFETY_WITHOUT_MECHANISM: line 5: imperative safety property (\"never\")"
+        ),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn lint_spec_json_writes_ordered_findings_to_stdout() {
+    let spec = spec_source("never rewrite it\n\nalways trust it");
+    let path = write_issue_body("autospec-lint-spec-json", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", "--json", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[\n  {\"rule\":\"SAFETY_WITHOUT_MECHANISM\",\"line\":5,\"phrase\":\"never\",\"description\":\"line 5: imperative safety property (\\\"never\\\") names no structural mechanism — convention-only\"},\n  {\"rule\":\"SAFETY_WITHOUT_MECHANISM\",\"line\":7,\"phrase\":\"always\",\"description\":\"line 7: imperative safety property (\\\"always\\\") names no structural mechanism — convention-only\"}\n]\n"
+    );
+}
+
+#[test]
+fn lint_spec_passes_when_every_imperative_names_a_mechanism() {
+    let spec = spec_source(
+        "The loader always fails closed on an ambiguous digest.\nThe gate rejects a second writer, so the lock is never held twice.",
+    );
+    let path = write_issue_body("autospec-lint-spec-clean", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn lint_spec_reads_stdin_when_spec_path_is_dash() {
+    let spec = spec_source("Be careful when replaying archived sessions.");
+
+    let output = autospec_with_stdin(["lint", "spec", "-"], &spec);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with(
+        "SAFETY_WITHOUT_MECHANISM: line 5: imperative safety property (\"be careful\")"
+    ));
+}
+
+#[test]
+fn lint_spec_help_exits_successfully_without_diagnostics() {
+    let output = autospec()
+        .args(["lint", "spec", "--help"])
+        .output()
+        .expect("autospec lint spec help runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        help_usage_invocation(&String::from_utf8_lossy(&output.stdout)),
+        Some("autospec lint spec [--json] <SPEC_PATH>")
+    );
+}
+
+#[test]
+fn lint_spec_reports_usage_errors_at_exit_two() {
+    let missing = autospec().args(["lint", "spec"]).output().expect("runs");
+    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        "autospec lint spec requires a spec path\n"
+    );
+
+    let unknown = autospec()
+        .args(["lint", "spec", "--unsupported", "a.md"])
+        .output()
+        .expect("runs");
+    assert_eq!(unknown.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&unknown.stderr),
+        "unknown autospec lint spec option: --unsupported\n"
+    );
+}
+
 #[test]
 fn lint_implementation_reads_an_offline_diff_file_and_streams_findings() {
     let diff = write_implementation_diff(
