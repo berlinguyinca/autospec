@@ -2,6 +2,7 @@ pub mod backlog;
 pub mod endpoint;
 pub mod executor;
 pub mod gate;
+pub mod gate_load;
 pub mod gate_scope;
 pub mod patch_conflicts;
 pub mod patch_pipeline;
