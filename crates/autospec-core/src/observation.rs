@@ -144,22 +144,22 @@ impl Series {
 
     /// The observation line: what was seen, without the conclusion.
     pub fn line(&self) -> String {
-        match (self.samples.len(), self.latest()) {
-            (0, _) => "observed: no samples".to_string(),
-            (1, Some(last)) => format!(
+        let Some(last) = self.latest() else {
+            return "observed: no samples".to_string();
+        };
+        if self.samples.len() == 1 {
+            return format!(
                 "observed: 1 sample at {} (signal {}); motion unknown — sample again after a gap",
                 last.at, last.signal
-            ),
-            (_, Some(last)) => format!(
-                "observed: {} samples, latest {} at {} (signal {}); motion {}",
-                self.samples.len(),
-                "sample",
-                last.at,
-                last.signal,
-                self.motion().as_str()
-            ),
-            _ => unreachable!("a non-empty series has a latest sample"),
+            );
         }
+        format!(
+            "observed: {} samples, latest sample at {} (signal {}); motion {}",
+            self.samples.len(),
+            last.at,
+            last.signal,
+            self.motion().as_str()
+        )
     }
 }
 
@@ -344,9 +344,8 @@ impl Observations {
         Authorization::Held {
             code: HoldCode::SingleObservation,
             message: format!(
-                "{action}: held on {} observation(s) from {} source(s); needs the terminal \
-                 marker or a second independent source — absence at time T is not absence",
-                self.sources.len(),
+                "{action}: held on {} independent source(s); needs the terminal marker or a \
+                 second independent source — absence at time T is not absence",
                 self.sources.len()
             ),
         }

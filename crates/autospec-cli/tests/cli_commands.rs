@@ -92,6 +92,7 @@ fn cli_commands_help_lists_required_commands() {
             "repair-loop",
             "dispatch",
             "doctor",
+            "observe",
             "status",
             "autonomous",
             "plan",

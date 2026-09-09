@@ -14,6 +14,7 @@ pub mod insights;
 pub mod issue;
 pub mod lint;
 pub mod managed_project;
+pub mod observe;
 pub mod parent;
 pub mod plan;
 pub mod queue;
@@ -105,6 +106,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "doctor",
         "Check the Rust core workspace (`doctor code-intel` for LSP health)",
     ),
+    (
+        "observe",
+        "Report a running step from its markers, not from one look",
+    ),
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
     ("plan", "Inspect a generated spec package"),
@@ -154,6 +159,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "dispatch" => dispatch::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "explore" => explore::run(rest),
+            "observe" => observe::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
