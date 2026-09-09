@@ -1,3 +1,4 @@
+pub mod dispatch_base;
 pub mod executor;
 pub mod patch_pipeline;
 pub mod queue;
