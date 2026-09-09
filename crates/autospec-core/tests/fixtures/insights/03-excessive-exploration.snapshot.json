@@ -1,0 +1,262 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "03-excessive-exploration",
+  "events": [
+    {
+      "event_id": "evt-synth-03-0001",
+      "session_id": "synth-03",
+      "timestamp": 1788897600,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-03-0002",
+      "session_id": "synth-03",
+      "timestamp": 1788897604,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Fix the off-by-one in the pager"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0003",
+      "session_id": "synth-03",
+      "timestamp": 1788897608,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/pager.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0004",
+      "session_id": "synth-03",
+      "timestamp": 1788897612,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/pager_test.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0005",
+      "session_id": "synth-03",
+      "timestamp": 1788897616,
+      "event_type": "tool_call",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "rg -n offset crates",
+        "tool": "shell"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0006",
+      "session_id": "synth-03",
+      "timestamp": 1788897620,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/window.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0007",
+      "session_id": "synth-03",
+      "timestamp": 1788897624,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/render.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0008",
+      "session_id": "synth-03",
+      "timestamp": 1788897628,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/theme.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0009",
+      "session_id": "synth-03",
+      "timestamp": 1788897632,
+      "event_type": "tool_call",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "git log --oneline -n 40",
+        "tool": "shell"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0010",
+      "session_id": "synth-03",
+      "timestamp": 1788897636,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/scroll.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0011",
+      "session_id": "synth-03",
+      "timestamp": 1788897640,
+      "event_type": "tool_call",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "rg -n page_size crates",
+        "tool": "shell"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0012",
+      "session_id": "synth-03",
+      "timestamp": 1788897644,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/layout.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0013",
+      "session_id": "synth-03",
+      "timestamp": 1788897648,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/viewport.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0014",
+      "session_id": "synth-03",
+      "timestamp": 1788897652,
+      "event_type": "file_read",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/edge_cases.rs"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0015",
+      "session_id": "synth-03",
+      "timestamp": 1788897658,
+      "event_type": "assistant_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Found the boundary in pager.rs; fixing the off-by-one."
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0016",
+      "session_id": "synth-03",
+      "timestamp": 1788897663,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/pager.rs",
+        "summary": "clamp offset to the last page"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0017",
+      "session_id": "synth-03",
+      "timestamp": 1788897670,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 9800,
+        "output": 240
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 6,
+        "suite": "demo::pager"
+      }
+    },
+    {
+      "event_id": "evt-synth-03-0018",
+      "session_id": "synth-03",
+      "timestamp": 1788897678,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

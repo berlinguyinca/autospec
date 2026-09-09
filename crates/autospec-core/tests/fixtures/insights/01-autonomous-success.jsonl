@@ -1,0 +1,10 @@
+{"ts":"2026-09-08T18:00:00Z","type":"session_started","session_id":"synth-01","model":"synth-32b"}
+{"ts":"2026-09-08T18:00:05Z","type":"user_message","text":"Implement exponential backoff in crates/demo/src/retry.rs for issue 101"}
+{"ts":"2026-09-08T18:00:09Z","type":"tool_call","tool":"shell","input":"cargo test -p demo","tokens":{"input":1240,"output":96}}
+{"ts":"2026-09-08T18:00:14Z","type":"tool_result","tool":"shell","ok":false,"summary":"baseline: retry tests absent"}
+{"ts":"2026-09-08T18:00:18Z","type":"file_patch","path":"crates/demo/src/retry.rs","summary":"add backoff loop"}
+{"ts":"2026-09-08T18:00:22Z","type":"test_run","suite":"demo::retry"}
+{"ts":"2026-09-08T18:00:31Z","type":"test_result","suite":"demo::retry","passed":12,"failed":0,"tokens":{"input":2100,"output":150}}
+{"ts":"2026-09-08T18:00:35Z","type":"git_commit","sha":"synth0001","message":"feat: exponential backoff"}
+{"ts":"2026-09-08T18:00:40Z","type":"pull_request_opened","number":201}
+{"ts":"2026-09-08T18:00:50Z","type":"session_finished","outcome":"success"}

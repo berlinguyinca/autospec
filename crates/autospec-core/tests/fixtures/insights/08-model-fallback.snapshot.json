@@ -1,0 +1,120 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "08-model-fallback",
+  "events": [
+    {
+      "event_id": "evt-synth-08-0001",
+      "session_id": "synth-08",
+      "timestamp": 1788948000,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-08-0002",
+      "session_id": "synth-08",
+      "timestamp": 1788948005,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Implement the rate limiter"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0003",
+      "session_id": "synth-08",
+      "timestamp": 1788948120,
+      "event_type": "model_fallback",
+      "model": "synth-70b",
+      "tokens": {
+        "input": 4100,
+        "output": 300
+      },
+      "payload": {
+        "reason": "quota_exhausted"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0004",
+      "session_id": "synth-08",
+      "timestamp": 1788948130,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/rate_limit.rs",
+        "summary": "token bucket"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0005",
+      "session_id": "synth-08",
+      "timestamp": 1788948140,
+      "event_type": "test_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "suite": "demo::rate_limit"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0006",
+      "session_id": "synth-08",
+      "timestamp": 1788948148,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 6800,
+        "output": 420
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 9,
+        "suite": "demo::rate_limit"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0007",
+      "session_id": "synth-08",
+      "timestamp": 1788948155,
+      "event_type": "git_commit",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "message": "feat: token bucket rate limiter",
+        "sha": "synth0008"
+      }
+    },
+    {
+      "event_id": "evt-synth-08-0008",
+      "session_id": "synth-08",
+      "timestamp": 1788948165,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

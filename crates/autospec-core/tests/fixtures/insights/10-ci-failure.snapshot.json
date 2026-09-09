@@ -1,0 +1,151 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "10-ci-failure",
+  "events": [
+    {
+      "event_id": "evt-synth-10-0001",
+      "session_id": "synth-10",
+      "timestamp": 1788955200,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-10-0002",
+      "session_id": "synth-10",
+      "timestamp": 1788955205,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Enable strict lints for the demo crate"
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0003",
+      "session_id": "synth-10",
+      "timestamp": 1788955210,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/Cargo.toml",
+        "summary": "clippy strict lints"
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0004",
+      "session_id": "synth-10",
+      "timestamp": 1788955220,
+      "event_type": "pull_request_opened",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "number": 210
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0005",
+      "session_id": "synth-10",
+      "timestamp": 1788955440,
+      "event_type": "lint_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 900,
+        "output": 120
+      },
+      "payload": {
+        "ok": false,
+        "run": 301,
+        "summary": "needless borrow in lints.rs",
+        "tool": "clippy"
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0006",
+      "session_id": "synth-10",
+      "timestamp": 1788955500,
+      "event_type": "assistant_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Clippy flags a needless borrow in the new lint config path."
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0007",
+      "session_id": "synth-10",
+      "timestamp": 1788955510,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/lints.rs",
+        "summary": "drop the needless borrow"
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0008",
+      "session_id": "synth-10",
+      "timestamp": 1788955680,
+      "event_type": "lint_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 1100,
+        "output": 140
+      },
+      "payload": {
+        "ok": true,
+        "run": 302,
+        "tool": "clippy"
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0009",
+      "session_id": "synth-10",
+      "timestamp": 1788955690,
+      "event_type": "pull_request_merged",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "number": 210
+      }
+    },
+    {
+      "event_id": "evt-synth-10-0010",
+      "session_id": "synth-10",
+      "timestamp": 1788955700,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}

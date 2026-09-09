@@ -1,0 +1,8 @@
+{"ts":"2026-09-09T10:00:00Z","type":"session_started","session_id":"synth-08","model":"synth-32b"}
+{"ts":"2026-09-09T10:00:05Z","type":"user_message","text":"Implement the rate limiter"}
+{"ts":"2026-09-09T10:02:00Z","type":"model_fallback","model":"synth-70b","reason":"quota_exhausted","tokens":{"input":4100,"output":300}}
+{"ts":"2026-09-09T10:02:10Z","type":"file_patch","path":"crates/demo/src/rate_limit.rs","summary":"token bucket"}
+{"ts":"2026-09-09T10:02:20Z","type":"test_run","suite":"demo::rate_limit"}
+{"ts":"2026-09-09T10:02:28Z","type":"test_result","suite":"demo::rate_limit","passed":9,"failed":0,"tokens":{"input":6800,"output":420}}
+{"ts":"2026-09-09T10:02:35Z","type":"git_commit","sha":"synth0008","message":"feat: token bucket rate limiter"}
+{"ts":"2026-09-09T10:02:45Z","type":"session_finished","outcome":"success"}

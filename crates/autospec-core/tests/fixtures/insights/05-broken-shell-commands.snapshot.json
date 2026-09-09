@@ -1,0 +1,195 @@
+{
+  "extractor_version": "0.1.0",
+  "fixture": "05-broken-shell-commands",
+  "events": [
+    {
+      "event_id": "evt-synth-05-0001",
+      "session_id": "synth-05",
+      "timestamp": 1788904800,
+      "event_type": "session_started",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {}
+    },
+    {
+      "event_id": "evt-synth-05-0002",
+      "session_id": "synth-05",
+      "timestamp": 1788904804,
+      "event_type": "user_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Run the smoke suite and fix what breaks"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0003",
+      "session_id": "synth-05",
+      "timestamp": 1788904809,
+      "event_type": "command_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "cargo tets -p demo"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0004",
+      "session_id": "synth-05",
+      "timestamp": 1788904810,
+      "event_type": "command_failed",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "exit_code": 127,
+        "input": "cargo tets -p demo",
+        "summary": "binary not found"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0005",
+      "session_id": "synth-05",
+      "timestamp": 1788904816,
+      "event_type": "command_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "cargo test -p demo smoke"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0006",
+      "session_id": "synth-05",
+      "timestamp": 1788904818,
+      "event_type": "command_failed",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "exit_code": 101,
+        "input": "cargo test -p demo smoke",
+        "summary": "test binary panicked"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0007",
+      "session_id": "synth-05",
+      "timestamp": 1788904824,
+      "event_type": "command_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "cargo fmt --check"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0008",
+      "session_id": "synth-05",
+      "timestamp": 1788904825,
+      "event_type": "command_failed",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "exit_code": 1,
+        "input": "cargo fmt --check",
+        "summary": "unformatted files"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0009",
+      "session_id": "synth-05",
+      "timestamp": 1788904830,
+      "event_type": "assistant_message",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "text": "Typo in the test name and a missing assert; correcting both."
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0010",
+      "session_id": "synth-05",
+      "timestamp": 1788904836,
+      "event_type": "file_patch",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "path": "crates/demo/src/smoke.rs",
+        "summary": "fix smoke test"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0011",
+      "session_id": "synth-05",
+      "timestamp": 1788904842,
+      "event_type": "command_run",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "input": "cargo test -p demo smoke"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0012",
+      "session_id": "synth-05",
+      "timestamp": 1788904848,
+      "event_type": "test_result",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 2600,
+        "output": 220
+      },
+      "payload": {
+        "failed": 0,
+        "passed": 4,
+        "suite": "demo::smoke"
+      }
+    },
+    {
+      "event_id": "evt-synth-05-0013",
+      "session_id": "synth-05",
+      "timestamp": 1788904855,
+      "event_type": "session_finished",
+      "model": "synth-32b",
+      "tokens": {
+        "input": 0,
+        "output": 0
+      },
+      "payload": {
+        "outcome": "success"
+      }
+    }
+  ]
+}
