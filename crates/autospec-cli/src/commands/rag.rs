@@ -181,14 +181,15 @@ fn route(args: &[String]) -> Result<(), CommandFailure> {
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "{{\"task\":\"{}\",\"required_context_tokens\":{},\"selected\":{},\"rejected\":[{rejected}]}}",
+            "{{\"task\":\"{}\",\"required_context_tokens\":{},\"selected\":{},\"saturated_fallback\":{},\"rejected\":[{rejected}]}}",
             task.as_str(),
             decision.required_context_tokens,
             decision
                 .selected
                 .as_ref()
                 .map(|node| format!("\"{}\"", node.id))
-                .unwrap_or_else(|| "null".to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            decision.saturated_fallback
         );
         return Ok(());
     }
@@ -209,6 +210,11 @@ fn route(args: &[String]) -> Result<(), CommandFailure> {
     match &decision.selected {
         Some(node) => println!("selected:                {}", node.id),
         None => println!("selected:                none eligible"),
+    }
+    if decision.saturated_fallback {
+        println!(
+            "saturated_fallback:      yes — the selected node has no free seats; queue the dispatch behind it"
+        );
     }
     for rejection in &decision.rejected {
         println!("  rejected {}: {}", rejection.node_id, rejection.reason);

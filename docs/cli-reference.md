@@ -58,7 +58,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec rag config [--set KEY=VALUE] [--json]` | yes | renders the effective `agentic_rag:` configuration and rejects an invalid one (a revision-blind cache, an unknown key) |
 | `autospec rag policy [--role ROLE] [--json]` | yes | prints per-role source ordering, context ceiling, sufficiency threshold, and whether the role must verify independently |
 | `autospec rag sources [--role ROLE] [--external] [--json]` | yes | reports, per source, the administrator's availability setting and whether that role and task may actually reach it |
-| `autospec rag route --task TASK [--context N] [--node id:reasoning:free_context:speed:seats]... [--json]` | yes | explains one InferWeave routing decision: required context including margin, the selected node, and why each other node was rejected |
+| `autospec rag route --task TASK [--context N] [--node id:reasoning:free_context:speed:seats]... [--json]` | yes | explains one InferWeave routing decision: required context including margin, the selected node, whether it is a `saturated_fallback` (selected with no free seats, to be queued), and why each other node was rejected |
 | `autospec evaluator init [--policy <file.json>]` | yes | writes `.autospec/evaluation/policy.json` (the default policy when omitted), `epoch-000000`, and `current.json`; re-init fails |
 | `autospec evaluator register --file <definition.json>` | yes | validates a definition, writes immutable `evaluators/<slot>/v<N>.json`, and prints the definition digest |
 | `autospec evaluator list` | yes | `slot@version kind digest[..16] created_at`, one per line |

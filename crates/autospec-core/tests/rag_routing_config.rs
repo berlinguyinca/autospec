@@ -12,6 +12,7 @@ use autospec_core::rag::metrics::ContextEfficiency;
 use autospec_core::rag::policy::AgentRole;
 use autospec_core::rag::routing::{
     select_node, LatencyPriority, ModelCapabilities, NodeCandidate, RagModelTask, ReasoningClass,
+    SeatLedger,
 };
 use autospec_core::rag::score::Score;
 use autospec_core::rag::source::SourceKind;
@@ -100,14 +101,160 @@ fn a_node_below_the_required_reasoning_class_is_rejected() {
 }
 
 #[test]
-fn a_node_with_no_free_seats_is_rejected() {
+fn a_node_with_no_free_seats_is_routed_as_a_saturated_fallback() {
+    // Issue #3754: seats rank candidates rather than rejecting them. A node
+    // that is otherwise eligible and fully saturated still takes the work;
+    // the decision is flagged so the caller can queue rather than run.
     let mut full = node("full", 200_000, 100);
     full.available_seats = 0;
 
     let decision = select_node(&needs(1_000), &[full]);
 
-    assert!(decision.selected.is_none());
-    assert!(decision.rejected[0].reason.contains("seats"));
+    assert_eq!(
+        decision
+            .selected
+            .expect("the selector is total over hard-filter-eligible candidates")
+            .id,
+        "full"
+    );
+    assert!(decision.saturated_fallback);
+    assert!(decision.rejected.is_empty());
+}
+
+#[test]
+fn a_fully_saturated_pool_still_returns_a_worker() {
+    // Acceptance criterion: every candidate busy, the selector still returns
+    // an element. Among saturated nodes the usual packing order applies, so
+    // the tightest fit takes it.
+    let mut tight = node("tight", 30_000, 10);
+    tight.available_seats = 0;
+    let mut roomy = node("roomy", 200_000, 100);
+    roomy.available_seats = 0;
+
+    let decision = select_node(&needs(1_000), &[roomy, tight]);
+
+    assert_eq!(
+        decision
+            .selected
+            .expect("a saturated pool still yields a worker")
+            .id,
+        "tight"
+    );
+    assert!(decision.saturated_fallback);
+    assert!(decision.rejected.is_empty());
+}
+
+#[test]
+fn a_node_with_free_seats_ranks_above_a_saturated_node() {
+    // Free seats are the first ranking tier: a node with a free seat wins even
+    // when the saturated node is the tighter context fit and faster.
+    let free = node("free", 200_000, 10);
+    let mut full = node("full", 30_000, 100);
+    full.available_seats = 0;
+
+    let decision = select_node(&needs(1_000), &[full, free]);
+
+    assert_eq!(decision.selected.expect("a node is eligible").id, "free");
+    assert!(!decision.saturated_fallback);
+}
+
+#[test]
+fn consecutive_ledger_dispatches_do_not_converge_on_one_worker() {
+    // Acceptance criterion: consecutive dispatches in one run must not all
+    // land on the same worker. Identical one-seat nodes, three dispatches,
+    // three distinct picks.
+    let a = seat(&node("a", 100_000, 10), 1);
+    let b = seat(&node("b", 100_000, 10), 1);
+    let c = seat(&node("c", 100_000, 10), 1);
+
+    let mut ledger = SeatLedger::new();
+    let picks: Vec<String> = (0..3)
+        .map(|_| {
+            ledger
+                .select(&needs(1_000), &[a.clone(), b.clone(), c.clone()])
+                .selected
+                .expect("a node is eligible")
+                .id
+        })
+        .collect();
+
+    assert_eq!(
+        picks.len(),
+        picks
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+}
+
+#[test]
+fn a_fully_saturated_pool_spreads_across_the_run() {
+    // The full-load case from issue #3754: the pool reports zero free seats
+    // everywhere, so only the ledger's own in-flight counts distinguish the
+    // workers, and the run still spreads across all three.
+    let a = seat(&node("a", 100_000, 10), 0);
+    let b = seat(&node("b", 100_000, 10), 0);
+    let c = seat(&node("c", 100_000, 10), 0);
+
+    let mut ledger = SeatLedger::new();
+    let picks: Vec<String> = (0..3)
+        .map(|_| {
+            ledger
+                .select(&needs(1_000), &[a.clone(), b.clone(), c.clone()])
+                .selected
+                .expect("a node is eligible even under full load")
+                .id
+        })
+        .collect();
+
+    assert_eq!(
+        picks.len(),
+        picks
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+    assert!(ledger.in_flight("a") + ledger.in_flight("b") + ledger.in_flight("c") == 3);
+}
+
+#[test]
+fn releasing_an_in_flight_seat_returns_the_node_to_the_front_of_the_ranking() {
+    let mut only = node("only", 100_000, 10);
+    only.available_seats = 1;
+
+    let mut ledger = SeatLedger::new();
+
+    let first = ledger.select(&needs(1_000), &[only.clone()]);
+    assert_eq!(first.selected.expect("eligible").id, "only");
+    assert!(!first.saturated_fallback);
+
+    let second = ledger.select(&needs(1_000), &[only.clone()]);
+    assert!(
+        second.saturated_fallback,
+        "the run consumed the node's last seat"
+    );
+
+    // Two dispatches are in flight against one reported seat, so releasing a
+    // single one still leaves the node saturated.
+    ledger.release("only", 1);
+    assert_eq!(ledger.in_flight("only"), 1);
+    let still_full = ledger.select(&needs(1_000), &[only.clone()]);
+    assert!(still_full.saturated_fallback);
+
+    ledger.release("only", 2);
+    assert_eq!(ledger.in_flight("only"), 0);
+    let third = ledger.select(&needs(1_000), &[only.clone()]);
+    assert!(
+        !third.saturated_fallback,
+        "the release made the seat visible again"
+    );
+}
+
+fn seat(candidate: &NodeCandidate, seats: u32) -> NodeCandidate {
+    NodeCandidate {
+        available_seats: seats,
+        ..candidate.clone()
+    }
 }
 
 #[test]
