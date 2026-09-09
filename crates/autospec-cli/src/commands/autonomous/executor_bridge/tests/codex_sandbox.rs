@@ -61,7 +61,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_r
         event_log: scope_root.join("events.jsonl"),
     };
 
-    bridge::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.store(1));
     let interrupted =
         bridge::run_executor_bridge(&request).expect_err("interrupt entrypoint repair");
     let crash = interrupted.to_string();

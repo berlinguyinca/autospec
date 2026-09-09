@@ -362,7 +362,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
     fs::write(common_dir.join("info/exclude"), ".autospec/\n")
         .expect("ignore private executor artifacts");
 
-    bridge::IMPLEMENTATION_COMMIT_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::IMPLEMENTATION_COMMIT_FAILPOINT.with(|fp| fp.store(1));
     let error =
         bridge::commit_sandboxed_executor_diff(&state, "test: persist implementation proof", "")
             .expect_err("interrupt after Rust commit");

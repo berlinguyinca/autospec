@@ -345,12 +345,14 @@ fn autonomous_executor_bridge_integration_sync_rejects_ambiguous_default_ref() {
 fn autonomous_executor_bridge_integration_sync_retries_default_race() {
     let fixture = GitFixture::new("integration-sync-race");
     let (old_oid, new_oid) = stage_remote_advance(&fixture, "second");
-    *bridge::INTEGRATION_SYNC_RACE.lock().unwrap() = Some((
-        fixture.repo.clone(),
-        fixture.root.join("remote.git"),
-        old_oid,
-        new_oid.clone(),
-    ));
+    bridge::INTEGRATION_SYNC_RACE.with(|race_cell| {
+        *race_cell.borrow_mut() = Some((
+            fixture.repo.clone(),
+            fixture.root.join("remote.git"),
+            old_oid,
+            new_oid.clone(),
+        ));
+    });
 
     let synchronized = bridge::synchronize_integration_base(&fixture.repo, "main")
         .expect("bounded retry must follow the remote advance");
@@ -452,10 +454,7 @@ fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before_launch() {
     let _environment = test_environment();
-    bridge::METADATA_WIP_SYNC_EVENTS
-        .lock()
-        .expect("metadata WIP event lock")
-        .clear();
+    bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow_mut().clear());
     let fixture = GitFixture::new("metadata-wip-adoption");
     fs::write(fixture.repo.join(".gitignore"), "target/\n").expect("write tracked ignore");
     git(&fixture.repo, &["add", ".gitignore"]);
@@ -492,13 +491,11 @@ fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before
     )
     .expect("write operator metadata");
 
-    bridge::METADATA_WIP_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::METADATA_WIP_FAILPOINT.with(|fp| fp.store(1));
     let interrupted = adopt().expect_err("interrupt after metadata is durably quarantined");
     assert!(interrupted.contains("injected metadata WIP crash"));
     assert_eq!(
-        *bridge::METADATA_WIP_SYNC_EVENTS
-            .lock()
-            .expect("metadata WIP event lock"),
+        bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow().clone()),
         [
             "rename-gitignore",
             "rename-omx",
@@ -510,16 +507,11 @@ fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before
             "sync-scope-root",
         ]
     );
-    bridge::METADATA_WIP_SYNC_EVENTS
-        .lock()
-        .expect("metadata WIP event lock")
-        .clear();
+    bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow_mut().clear());
 
     let adopted = adopt().expect("resume metadata-only WIP isolation");
     assert_eq!(
-        *bridge::METADATA_WIP_SYNC_EVENTS
-            .lock()
-            .expect("metadata WIP event lock"),
+        bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow().clone()),
         [
             "sync-payload",
             "sync-destination",

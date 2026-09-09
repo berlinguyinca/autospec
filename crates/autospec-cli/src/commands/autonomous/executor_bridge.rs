@@ -19,7 +19,7 @@ use std::process::Child;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU32, AtomicU8};
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -129,36 +129,71 @@ enum ImplementationLintRepairOutcome {
     RetryPrepared,
     Exhausted,
 }
+// Consume-once test failpoints are thread-scoped, not process-global. Every test runs on
+// its own libtest thread, so a `thread_local!` cell can never be read or reset by a
+// concurrently running test on another thread; the old process-global `AtomicU8` cells
+// let a parallel test consume this test's armed fault (issue #3951). `ThreadFailpoint`
+// keeps the store / swap / compare-exchange protocol the failpoint consumers are built
+// around, minus the memory ordering — there is only one accessor, so there is nothing
+// to order. Cross-thread handshake probes (the npm manifest-open TOCTOU test) receive
+// their probe cell explicitly at the call site instead of reaching for a global.
 #[cfg(test)]
-static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[derive(Debug)]
+struct ThreadFailpoint<T: Copy + PartialEq> {
+    value: RefCell<T>,
+}
+
 #[cfg(test)]
-static EMPTY_RETRY_BASE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+impl<T: Copy + PartialEq> ThreadFailpoint<T> {
+    const fn new(value: T) -> Self {
+        Self {
+            value: RefCell::new(value),
+        }
+    }
+
+    fn store(&self, value: T) {
+        *self.value.borrow_mut() = value;
+    }
+
+    fn swap(&self, value: T) -> T {
+        let mut current = self.value.borrow_mut();
+        let old = *current;
+        *current = value;
+        old
+    }
+
+    fn load(&self) -> T {
+        *self.value.borrow()
+    }
+
+    fn compare_exchange(&self, expected: T, value: T) -> Result<(), T> {
+        let mut current = self.value.borrow_mut();
+        if *current == expected {
+            *current = value;
+            Ok(())
+        } else {
+            Err(*current)
+        }
+    }
+}
+
 #[cfg(test)]
-static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static METADATA_WIP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
-    std::sync::Mutex::new(Vec::new());
-#[cfg(test)]
-static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static POST_CI_RECREATE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static PRUNABLE_RECLAIM_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static EXECUTOR_ROOT_HARDEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static IMPLEMENTATION_COMMIT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static NPM_MANIFEST_OPEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static INTEGRATION_SYNC_RACE: std::sync::Mutex<Option<(PathBuf, PathBuf, String, String)>> =
-    std::sync::Mutex::new(None);
+thread_local! {
+    static BASE_DRIFT_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static EMPTY_RETRY_BASE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static RUNTIME_CLOSE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static METADATA_WIP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static METADATA_WIP_SYNC_EVENTS: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
+    static WORKTREE_REPAIR_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static POST_CI_RECREATE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static PRUNABLE_RECLAIM_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static ZERO_EFFECT_RECOVERY_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static EXECUTOR_ROOT_HARDEN_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static IMPLEMENTATION_COMMIT_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static INTEGRATION_SYNC_RACE: RefCell<Option<(PathBuf, PathBuf, String, String)>> =
+        RefCell::new(None);
+}
 
 #[derive(Clone, Copy)]
 enum ZeroEffectRecoveryFailpoint {
@@ -172,7 +207,7 @@ enum ZeroEffectRecoveryFailpoint {
 
 #[cfg(test)]
 fn set_zero_effect_recovery_failpoint(failpoint: ZeroEffectRecoveryFailpoint) {
-    ZERO_EFFECT_RECOVERY_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+    ZERO_EFFECT_RECOVERY_FAILPOINT.with(|fp| fp.store(failpoint as u8));
 }
 
 #[cfg(test)]
@@ -181,12 +216,7 @@ fn zero_effect_recovery_failpoint(
     boundary: &str,
 ) -> Result<(), String> {
     if ZERO_EFFECT_RECOVERY_FAILPOINT
-        .compare_exchange(
-            failpoint as u8,
-            ZeroEffectRecoveryFailpoint::None as u8,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        )
+        .with(|fp| fp.compare_exchange(failpoint as u8, ZeroEffectRecoveryFailpoint::None as u8))
         .is_ok()
     {
         return Err(format!(
@@ -2652,6 +2682,10 @@ fn npm_dependency_inputs_changed(
     worktree: &Path,
     base_oid: &str,
     changed_paths: &ChangedPaths,
+    // Cross-thread handshake probe for the manifest-open TOCTOU test. This is the one
+    // failpoint in the module that must be visible from a second thread, so the test
+    // passes its own cell here instead of reaching for a process-global (issue #3951).
+    #[cfg(test)] manifest_open_failpoint: Option<&AtomicU8>,
 ) -> Result<bool, String> {
     for path in &changed_paths.all {
         let name = Path::new(path).file_name().and_then(|name| name.to_str());
@@ -2671,10 +2705,12 @@ fn npm_dependency_inputs_changed(
             reject_symlink_path(&current_path)
                 .map_err(|error| format!("current {path} is unsafe: {error}"))?;
             #[cfg(test)]
-            if NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) == 1 {
-                NPM_MANIFEST_OPEN_FAILPOINT.store(2, Ordering::SeqCst);
-                while NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) == 2 {
-                    thread::yield_now();
+            if let Some(open_probe) = manifest_open_failpoint {
+                if open_probe.load(Ordering::SeqCst) == 1 {
+                    open_probe.store(2, Ordering::SeqCst);
+                    while open_probe.load(Ordering::SeqCst) == 2 {
+                        thread::yield_now();
+                    }
                 }
             }
             #[cfg(not(unix))]
@@ -3090,8 +3126,13 @@ pub(crate) fn run_required_scanners(
         return Err("executor required scanner base OID is not canonical".to_string());
     }
     let changed_paths = changed_paths_since_base(worktree, base_oid)?;
-    let allow_preexisting_forbidden =
-        !npm_dependency_inputs_changed(worktree, base_oid, &changed_paths)?;
+    let allow_preexisting_forbidden = !npm_dependency_inputs_changed(
+        worktree,
+        base_oid,
+        &changed_paths,
+        #[cfg(test)]
+        None,
+    )?;
     let mut observations = Vec::new();
     for scanner in REQUIRED_SCANNERS {
         let scanner_root = artifact_root.join(scanner);
@@ -3296,8 +3337,13 @@ fn validate_observed_scanners(
         return Err("observed scanner differs from canonical expected base OID".to_string());
     }
     let changed_paths = changed_paths_since_base(worktree, expected_base_oid)?;
-    let allow_preexisting_forbidden =
-        !npm_dependency_inputs_changed(worktree, expected_base_oid, &changed_paths)?;
+    let allow_preexisting_forbidden = !npm_dependency_inputs_changed(
+        worktree,
+        expected_base_oid,
+        &changed_paths,
+        #[cfg(test)]
+        None,
+    )?;
     for scanner in scanners {
         validate_observed_command(worktree, &scanner.command)?;
         reject_symlink_path(&scanner.result_path)?;
@@ -10718,7 +10764,7 @@ fn commit_sandboxed_executor_diff_inner(
 #[cfg(test)]
 fn implementation_commit_failpoint() -> Result<(), String> {
     if IMPLEMENTATION_COMMIT_FAILPOINT
-        .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .with(|fp| fp.compare_exchange(1, 0))
         .is_ok()
     {
         Err("injected executor crash after implementation commit".to_string())
@@ -13670,7 +13716,7 @@ fn verify_or_create_base_merge(
 
 #[cfg(test)]
 fn fail_base_drift_after_merge() -> Result<(), String> {
-    if BASE_DRIFT_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if BASE_DRIFT_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         Err("injected crash after base merge".to_string())
     } else {
         Ok(())
@@ -13684,7 +13730,7 @@ fn fail_base_drift_after_merge() -> Result<(), String> {
 
 #[cfg(test)]
 fn fail_empty_retry_after_fast_forward() -> Result<(), String> {
-    if EMPTY_RETRY_BASE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if EMPTY_RETRY_BASE_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         Err("injected crash after proven-empty base fast-forward".to_string())
     } else {
         Ok(())
@@ -15314,7 +15360,7 @@ fn close_owned_runtime(
         .map_err(|error| error.message)?;
     }
     #[cfg(test)]
-    if RUNTIME_CLOSE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if RUNTIME_CLOSE_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("injected crash after runtime close".to_string());
     }
     crate::commands::runtime::env::verify_runtime_session_released(
@@ -16567,11 +16613,17 @@ fn validate_integration_base_checkouts(
 
 #[cfg(test)]
 fn integration_sync_race_failpoint(repo: &Path) {
-    let mut race = INTEGRATION_SYNC_RACE.lock().unwrap();
-    if race.as_ref().map(|race| race.0.as_path()) != Some(repo) {
+    let (matched, race) = INTEGRATION_SYNC_RACE.with(|race_cell| {
+        let mut race = race_cell.borrow_mut();
+        match race.as_ref() {
+            Some(r) if r.0.as_path() == repo => (true, race.take()),
+            _ => (false, None),
+        }
+    });
+    if !matched {
         return;
     }
-    let (_, remote, old_oid, new_oid) = race.take().expect("matching integration race");
+    let (_, remote, old_oid, new_oid) = race.expect("matching integration race");
     git(
         &remote,
         &["update-ref", "refs/heads/main", &new_oid, &old_oid],
@@ -17047,22 +17099,21 @@ pub(crate) struct HarnessLaunch<'a> {
     pub(crate) prompt: &'a str,
 }
 
+// Launch-family failpoints: same thread-scoping story as the top block. `TestEnvironment`
+// already serializes tests that touch these, so thread-local state is strictly safer and
+// never leaks between parallel `cargo test` threads (issue #3951).
 #[cfg(test)]
-static LAUNCH_FAILPOINT: AtomicU8 = AtomicU8::new(LaunchFailpoint::None as u8);
-#[cfg(test)]
-static CLEANUP_FAILPOINT: AtomicU8 = AtomicU8::new(LaunchFailpoint::None as u8);
-#[cfg(all(test, target_os = "linux"))]
-static CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER: AtomicU8 = AtomicU8::new(2);
-#[cfg(test)]
-static LAST_SPAWN_SUPERVISOR: AtomicU32 = AtomicU32::new(0);
-#[cfg(test)]
-static LAST_SPAWN_HARNESS: AtomicU32 = AtomicU32::new(0);
-#[cfg(test)]
-static PARENT_CAPTURE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static PARENT_REAP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
-#[cfg(test)]
-static RAW_READ_INTERRUPTED_ONCE: AtomicU8 = AtomicU8::new(0);
+thread_local! {
+    static LAUNCH_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(LaunchFailpoint::None as u8);
+    static CLEANUP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(LaunchFailpoint::None as u8);
+    #[cfg(target_os = "linux")]
+    static CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER: ThreadFailpoint<u8> = ThreadFailpoint::new(2);
+    static LAST_SPAWN_SUPERVISOR: ThreadFailpoint<u32> = ThreadFailpoint::new(0);
+    static LAST_SPAWN_HARNESS: ThreadFailpoint<u32> = ThreadFailpoint::new(0);
+    static PARENT_CAPTURE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static PARENT_REAP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static RAW_READ_INTERRUPTED_ONCE: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+}
 const LAUNCH_FAILPOINT_NEVER_READY: u8 = 4;
 const LAUNCH_FAILPOINT_NEVER_CLOSE_EXEC_STATUS: u8 = 5;
 const CLEANUP_FAILPOINT_SIGNAL: u8 = 10;
@@ -17076,7 +17127,7 @@ const CLEANUP_FAILPOINT_DESCENDANT_CAPTURE: u8 = 28;
 fn launch_child_failpoint() -> u8 {
     #[cfg(test)]
     {
-        LAUNCH_FAILPOINT.load(Ordering::SeqCst)
+        LAUNCH_FAILPOINT.with(|fp| fp.load())
     }
     #[cfg(not(test))]
     {
@@ -17103,8 +17154,8 @@ use post_fork::*;
 
 #[cfg(test)]
 fn set_launch_failpoint(failpoint: LaunchFailpoint) {
-    RAW_READ_INTERRUPTED_ONCE.store(0, Ordering::SeqCst);
-    LAUNCH_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+    RAW_READ_INTERRUPTED_ONCE.with(|fp| fp.store(0));
+    LAUNCH_FAILPOINT.with(|fp| fp.store(failpoint as u8));
 }
 
 #[cfg(test)]
@@ -17117,21 +17168,21 @@ enum ParentReapFailpoint {
 
 #[cfg(test)]
 fn set_parent_capture_failpoint(enabled: bool) {
-    PARENT_CAPTURE_FAILPOINT.store(u8::from(enabled), Ordering::SeqCst);
+    PARENT_CAPTURE_FAILPOINT.with(|fp| fp.store(u8::from(enabled)));
 }
 
 #[cfg(test)]
 fn set_parent_reap_failpoint(failpoint: ParentReapFailpoint) {
-    PARENT_REAP_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+    PARENT_REAP_FAILPOINT.with(|fp| fp.store(failpoint as u8));
 }
 
 #[cfg(target_os = "linux")]
 fn reap_after_capture_failure(child: Pid) -> Result<(), String> {
     loop {
         #[cfg(test)]
-        let result = match PARENT_REAP_FAILPOINT.load(Ordering::SeqCst) {
+        let result = match PARENT_REAP_FAILPOINT.with(|fp| fp.load()) {
             value if value == ParentReapFailpoint::InterruptedOnce as u8 => {
-                PARENT_REAP_FAILPOINT.store(ParentReapFailpoint::None as u8, Ordering::SeqCst);
+                PARENT_REAP_FAILPOINT.with(|fp| fp.store(ParentReapFailpoint::None as u8));
                 Err(nix::errno::Errno::EINTR)
             }
             value if value == ParentReapFailpoint::Failure as u8 => Err(nix::errno::Errno::EIO),
@@ -17171,27 +17222,23 @@ fn set_cleanup_failpoint(failpoint: LaunchFailpoint) {
                 )
             };
             assert_eq!(result, 0, "capture cleanup-fixture subreaper state");
-            let _ = CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.compare_exchange(
-                2,
-                u8::from(previous != 0),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
+            let _ = CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER
+                .with(|fp| fp.compare_exchange(2, u8::from(previous != 0)));
         } else {
-            let previous = CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.swap(2, Ordering::SeqCst);
+            let previous = CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.with(|fp| fp.swap(2));
             if previous != 2 {
                 nix::sys::prctl::set_child_subreaper(previous != 0)
                     .expect("restore cleanup-fixture subreaper state");
             }
         }
     }
-    CLEANUP_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+    CLEANUP_FAILPOINT.with(|fp| fp.store(failpoint as u8));
 }
 
 fn cleanup_failpoint() -> u8 {
     #[cfg(test)]
     {
-        CLEANUP_FAILPOINT.load(Ordering::SeqCst)
+        CLEANUP_FAILPOINT.with(|fp| fp.load())
     }
     #[cfg(not(test))]
     {
@@ -17297,7 +17344,7 @@ fn fail_launch_at(label: &str) -> Result<(), String> {
             "ownership-after-marker" => LaunchFailpoint::OwnershipAfterMarker,
             _ => LaunchFailpoint::None,
         };
-        if LAUNCH_FAILPOINT.load(Ordering::SeqCst) == expected as u8
+        if LAUNCH_FAILPOINT.with(|fp| fp.load()) == expected as u8
             && expected != LaunchFailpoint::None
         {
             return Err(format!("injected {label} failure after executor spawn"));
@@ -18328,21 +18375,23 @@ fn cleanup_proof_failure(mut failure: AdoptionFailure, detail: &str) -> Adoption
 const DESCENDANT_DESCRIPTOR_RESERVE: u64 = 32;
 
 #[cfg(all(test, target_os = "linux"))]
-static DESCRIPTOR_LIMIT_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static DESCRIPTOR_LIMIT_OVERRIDE: ThreadFailpoint<u64> = ThreadFailpoint::new(0);
+}
 
 /// Test-only ceiling. Lowering the real `RLIMIT_NOFILE` is process-global and would poison
 /// every concurrently running test, so the budget arithmetic stays real and only the ceiling
 /// is simulated. `0` restores the observed limit.
 #[cfg(all(test, target_os = "linux"))]
 fn set_descriptor_limit_override(limit: u64) {
-    DESCRIPTOR_LIMIT_OVERRIDE.store(limit, Ordering::SeqCst);
+    DESCRIPTOR_LIMIT_OVERRIDE.with(|fp| fp.store(limit));
 }
 
 #[cfg(target_os = "linux")]
 fn descriptor_soft_limit() -> Result<u64, String> {
     #[cfg(test)]
     {
-        let simulated = DESCRIPTOR_LIMIT_OVERRIDE.load(Ordering::SeqCst);
+        let simulated = DESCRIPTOR_LIMIT_OVERRIDE.with(|fp| fp.load());
         if simulated != 0 {
             return Ok(simulated);
         }
@@ -18454,7 +18503,7 @@ fn terminate_cleanup_instance(harness: &ProcessIdentity) -> Result<(), AdoptionF
 impl OwnedProcessSet {
     fn from_forked_child(pid: u32) -> Result<Self, String> {
         #[cfg(test)]
-        if PARENT_CAPTURE_FAILPOINT.load(Ordering::SeqCst) != 0 {
+        if PARENT_CAPTURE_FAILPOINT.with(|fp| fp.load()) != 0 {
             return Err("capture forked executor ownership failpoint".to_string());
         }
         Ok(Self {
@@ -19649,7 +19698,7 @@ fn spawn_blocked_harness(
     match unsafe { fork() }.map_err(|error| format!("fork executor harness: {error}"))? {
         ForkResult::Parent { child } => {
             #[cfg(test)]
-            LAST_SPAWN_SUPERVISOR.store(child.as_raw() as u32, Ordering::SeqCst);
+            LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(child.as_raw() as u32));
             // fork(2) only returns a positive child PID in the parent branch.
             let child_pid = child.as_raw() as u32;
             let supervisor_birth = match observe_process_birth(child_pid) {
@@ -19732,7 +19781,7 @@ fn spawn_blocked_harness(
                 )?;
                 let harness_pid = u32::from_ne_bytes(harness_pid_bytes);
                 #[cfg(test)]
-                LAST_SPAWN_HARNESS.store(harness_pid, Ordering::SeqCst);
+                LAST_SPAWN_HARNESS.with(|fp| fp.store(harness_pid));
                 fail_launch_at("parent-harness-birth")?;
                 let harness_birth = observe_process_birth(harness_pid)?
                     .ok_or_else(|| "executor harness exited before pidfd capture".to_string())?;
@@ -22295,7 +22344,7 @@ fn validate_prunable_zero_effect_transfer(
 #[cfg(test)]
 fn fail_prunable_reclaim(boundary: u8, label: &str) -> Result<(), String> {
     if PRUNABLE_RECLAIM_FAILPOINT
-        .compare_exchange(boundary, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .with(|fp| fp.compare_exchange(boundary, 0))
         .is_ok()
     {
         Err(format!("injected executor prunable reclaim crash {label}"))
@@ -22944,7 +22993,7 @@ fn harden_executor_worktree_root(repo: &Path, executor_root: &Path) -> Result<()
     reject_symlink_path(executor_root)?;
     validate_executor_ownership(repo, &[executor_root])?;
     #[cfg(test)]
-    if EXECUTOR_ROOT_HARDEN_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("harden executor worktree root: injected failure".to_string());
     }
     #[cfg(unix)]
@@ -22966,7 +23015,7 @@ fn harden_executor_worktree_root(repo: &Path, executor_root: &Path) -> Result<()
 #[cfg(unix)]
 fn sync_zero_effect_scope_parent(executor_root: &Path) -> Result<(), String> {
     #[cfg(test)]
-    if ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("sync recreated executor zero-effect scope: injected failure".to_string());
     }
     File::open(executor_root)
@@ -23095,7 +23144,7 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
         git(&repo, &["worktree", "prune", "--expire", "now"])?;
     }
     #[cfg(test)]
-    if WORKTREE_REPAIR_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("injected executor worktree repair crash after prune".to_string());
     }
     git_with_path(
@@ -23220,10 +23269,7 @@ fn isolate_adopted_metadata_wip(
 
 #[cfg(test)]
 fn record_metadata_wip_sync_event(event: &'static str) {
-    METADATA_WIP_SYNC_EVENTS
-        .lock()
-        .expect("metadata WIP event lock")
-        .push(event);
+    METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow_mut().push(event));
 }
 
 #[cfg(not(test))]
@@ -23326,7 +23372,7 @@ fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(
     sync_metadata_wip_directory(scope_root, "scope root", Some("sync-scope-root"))?;
 
     #[cfg(test)]
-    if METADATA_WIP_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if METADATA_WIP_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("injected metadata WIP crash after quarantine move".to_string());
     }
 
@@ -24215,7 +24261,7 @@ fn recreate_missing_post_ci_worktree(
         return Err("executor recreated post-CI worktree head mismatch".to_string());
     }
     #[cfg(test)]
-    if POST_CI_RECREATE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+    if POST_CI_RECREATE_FAILPOINT.with(|fp| fp.swap(0)) == 1 {
         return Err("injected executor post-CI crash after worktree recreation".to_string());
     }
     ensure_cleanup_record(

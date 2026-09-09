@@ -108,7 +108,7 @@ pub(super) unsafe fn raw_pump_stream(
         let count = {
             #[cfg(test)]
             if launch_child_failpoint() == LaunchFailpoint::RingReadInterrupted as u8
-                && RAW_READ_INTERRUPTED_ONCE.swap(1, Ordering::SeqCst) == 0
+                && RAW_READ_INTERRUPTED_ONCE.with(|fp| fp.swap(1)) == 0
             {
                 nix::errno::Errno::EINTR.set();
                 -1

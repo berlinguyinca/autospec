@@ -174,8 +174,8 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
         let mut state = supervision_state(&fixture);
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-        bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
-        bridge::LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
+        bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(0));
+        bridge::LAST_SPAWN_HARNESS.with(|fp| fp.store(0));
         environment.launch(failpoint);
         let error = supervise_harness(
             &fixture.root.join("state/invocation.json"),
@@ -190,8 +190,8 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
         assert!(error.contains("parent-"), "{error}");
 
         for pid in [
-            bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst),
-            bridge::LAST_SPAWN_HARNESS.load(Ordering::SeqCst),
+            bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.load()),
+            bridge::LAST_SPAWN_HARNESS.with(|fp| fp.load()),
         ] {
             if pid == 0 {
                 continue;
@@ -224,7 +224,7 @@ fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
     let state_path = fixture.root.join("state/invocation.json");
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-    bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+    bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(0));
     environment.parent_capture(true);
     environment.parent_reap(bridge::ParentReapFailpoint::InterruptedOnce);
 
@@ -240,7 +240,7 @@ fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
     environment.parent_capture(false);
     environment.parent_reap(bridge::ParentReapFailpoint::None);
 
-    let supervisor = bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+    let supervisor = bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.load());
     assert!(error.contains("capture"), "{error}");
     assert_eq!(state.phase, BridgePhase::Interrupted);
     assert!(state.supervisor.is_none());
@@ -264,7 +264,7 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
     let launches = fixture.root.join("launches");
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-    bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+    bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(0));
     environment.parent_capture(true);
     environment.parent_reap(bridge::ParentReapFailpoint::Failure);
 
@@ -284,7 +284,7 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
         &fs::read_to_string(&state_path).expect("durable capture quarantine"),
     )
     .expect("strict capture quarantine");
-    let supervisor = bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+    let supervisor = bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.load());
     let mut subreaper = 0_i32;
     // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only process-state probe.
     // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
@@ -358,7 +358,7 @@ fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
             let event_log = fixture.root.join("log/executor.jsonl");
             let snapshot =
                 MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-            bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+            bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.store(0));
             environment.launch(parent_failpoint);
             environment.cleanup(cleanup_failpoint);
             let error = supervise_harness(
@@ -377,7 +377,7 @@ fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
             environment.launch(bridge::LaunchFailpoint::None);
             environment.cleanup(bridge::LaunchFailpoint::None);
 
-            let supervisor_pid = bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+            let supervisor_pid = bridge::LAST_SPAWN_SUPERVISOR.with(|fp| fp.load());
             if supervisor_pid != 0
                 && bridge::observe_process_birth(supervisor_pid)
                     .expect("observe RED supervisor")
@@ -463,7 +463,7 @@ fn autonomous_executor_bridge_environment_guard_disarms_after_a_panic() {
     assert!(outcome.is_err(), "the closure must actually unwind");
     let _environment = test_environment();
     assert_eq!(
-        bridge::LAUNCH_FAILPOINT.load(Ordering::SeqCst),
+        bridge::LAUNCH_FAILPOINT.with(|fp| fp.load()),
         none,
         "a panicking armer left its failpoint set"
     );

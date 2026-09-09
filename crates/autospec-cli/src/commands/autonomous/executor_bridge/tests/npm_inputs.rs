@@ -9,7 +9,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -240,7 +241,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_follow_manifest_policy() {
             .expect("changed manifest paths");
 
         assert_eq!(
-            bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+            bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None)
                 .expect("manifest classification"),
             expected,
             "{field}"
@@ -271,7 +272,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes(
             .expect("changed lockfile paths");
 
         assert!(
-            bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+            bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None)
                 .expect("lockfile classification"),
             "{lockfile}"
         );
@@ -288,7 +289,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes(
     let changed =
         bridge::changed_paths_since_base(&deleted.repo, &base_oid).expect("deleted manifest paths");
     assert!(
-        bridge::npm_dependency_inputs_changed(&deleted.repo, &base_oid, &changed)
+        bridge::npm_dependency_inputs_changed(&deleted.repo, &base_oid, &changed, None)
             .expect("deleted manifest classification")
     );
 
@@ -305,7 +306,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes(
     let changed =
         bridge::changed_paths_since_base(&renamed.repo, &base_oid).expect("renamed lockfile paths");
     assert!(
-        bridge::npm_dependency_inputs_changed(&renamed.repo, &base_oid, &changed)
+        bridge::npm_dependency_inputs_changed(&renamed.repo, &base_oid, &changed, None)
             .expect("renamed lockfile classification")
     );
 
@@ -324,7 +325,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes(
     let changed =
         bridge::changed_paths_since_base(&copied.repo, &base_oid).expect("copied lockfile paths");
     assert!(
-        bridge::npm_dependency_inputs_changed(&copied.repo, &base_oid, &changed)
+        bridge::npm_dependency_inputs_changed(&copied.repo, &base_oid, &changed, None)
             .expect("copied lockfile classification")
     );
 
@@ -341,7 +342,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes(
         .expect("type-changed lockfile paths");
     assert!(changed.type_changed.contains("package-lock.json"));
     assert!(
-        bridge::npm_dependency_inputs_changed(&typed.repo, &base_oid, &changed)
+        bridge::npm_dependency_inputs_changed(&typed.repo, &base_oid, &changed, None)
             .expect("type-changed lockfile classification")
     );
 }
@@ -363,7 +364,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
     git(&fixture.repo, &["commit", "-m", "malformed manifest"]);
     let changed = bridge::changed_paths_since_base(&fixture.repo, &base_oid)
         .expect("malformed manifest paths");
-    let error = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+    let error = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None)
         .expect_err("malformed JSON must fail closed");
     assert!(error.contains("parse current package.json:"), "{error}");
 
@@ -373,7 +374,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
     let changed = bridge::changed_paths_since_base(&fixture.repo, &base_oid)
         .expect("non-object manifest paths");
     assert_eq!(
-        bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+        bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None)
             .expect_err("non-object JSON must fail closed"),
         "current package.json is not a JSON object"
     );
@@ -390,7 +391,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
         .permissions();
     permissions.set_mode(0o000);
     fs::set_permissions(&manifest, permissions).expect("make manifest unreadable");
-    let result = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed);
+    let result = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None);
     let mut permissions = fs::metadata(&manifest)
         .expect("manifest metadata")
         .permissions();
@@ -399,8 +400,9 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
     let error = result.expect_err("unreadable current manifest must fail closed");
     assert!(error.contains("read current package.json:"), "{error}");
 
-    let error = bridge::npm_dependency_inputs_changed(&fixture.repo, "missing-base", &changed)
-        .expect_err("missing base evidence must fail closed");
+    let error =
+        bridge::npm_dependency_inputs_changed(&fixture.repo, "missing-base", &changed, None)
+            .expect_err("missing base evidence must fail closed");
     assert!(error.contains("read base package.json:"), "{error}");
 
     fs::remove_file(&manifest).expect("remove regular manifest");
@@ -409,7 +411,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence(
     git(&fixture.repo, &["commit", "-m", "symlink manifest"]);
     let changed =
         bridge::changed_paths_since_base(&fixture.repo, &base_oid).expect("symlink manifest paths");
-    let error = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+    let error = bridge::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed, None)
         .expect_err("unsafe manifest symlink must fail closed");
     assert!(error.contains("current package.json is unsafe:"), "{error}");
     assert!(error.contains("path contains a symlink"), "{error}");
@@ -440,12 +442,17 @@ fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_
     git(&fixture.repo, &["commit", "-m", "scripts-only change"]);
     let changed =
         bridge::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed manifest paths");
-    bridge::NPM_MANIFEST_OPEN_FAILPOINT.store(1, Ordering::SeqCst);
+    // The open-boundary probe is a local shared cell passed to the classifier, not a
+    // process-global failpoint (issue #3951): the handshake crosses a thread, so the
+    // cell must live where both threads can see it.
+    let open_probe = Arc::new(AtomicU8::new(1));
     let repo = fixture.repo.clone();
-    let classifier =
-        thread::spawn(move || bridge::npm_dependency_inputs_changed(&repo, &base_oid, &changed));
+    let probe = Arc::clone(&open_probe);
+    let classifier = thread::spawn(move || {
+        bridge::npm_dependency_inputs_changed(&repo, &base_oid, &changed, Some(probe.as_ref()))
+    });
     let deadline = Instant::now() + Duration::from_secs(5);
-    while bridge::NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) != 2 {
+    while open_probe.load(Ordering::SeqCst) != 2 {
         assert!(
             Instant::now() < deadline,
             "classifier did not reach open boundary"
@@ -457,12 +464,11 @@ fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_
     let attacker = fixture.root.join("attacker-package.json");
     fs::write(&attacker, r#"{"dependencies":{"fixture":"2"}}"#).expect("attacker manifest");
     symlink(&attacker, &manifest).expect("replace manifest with symlink");
-    bridge::NPM_MANIFEST_OPEN_FAILPOINT.store(3, Ordering::SeqCst);
+    open_probe.store(3, Ordering::SeqCst);
 
     let error = classifier
         .join()
         .expect("classifier thread")
         .expect_err("manifest swap must fail closed");
     assert!(error.contains("current package.json"), "{error}");
-    bridge::NPM_MANIFEST_OPEN_FAILPOINT.store(0, Ordering::SeqCst);
 }

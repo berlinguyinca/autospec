@@ -464,7 +464,7 @@ fn autonomous_executor_bridge_recovers_crash_after_owned_base_merge() {
     git(&fixture.root.join("seed"), &["commit", "-m", "base drift"]);
     git(&fixture.root.join("seed"), &["push", "origin", "main"]);
 
-    bridge::BASE_DRIFT_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::BASE_DRIFT_FAILPOINT.with(|fp| fp.store(1));
     let error = bridge::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
         Ok(bridge::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
     })

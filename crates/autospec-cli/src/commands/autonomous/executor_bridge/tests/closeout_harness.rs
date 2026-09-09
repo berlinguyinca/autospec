@@ -41,7 +41,7 @@ fn autonomous_executor_bridge_codex_sandbox_repairs_prunable_post_child_worktree
     state.identity.base_oid = base.base_oid.clone();
     fs::remove_dir_all(&worktree.path).expect("simulate disappeared worktree");
 
-    bridge::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+    bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.store(1));
     let interrupted = bridge::repair_missing_post_child_worktree(&state)
         .expect_err("interrupt repair after durable prune");
     assert!(interrupted.contains("injected executor worktree repair crash"));
