@@ -184,6 +184,14 @@ resolves and invokes that script, and is mirrored byte-identically (modulo `SKIL
 across all multi-harness skill trios. `autospec validate` (`check_startup_preflight`)
 enforces byte-identity.
 
+The lock (`~/.autospec/.update.lock.d/owner`) carries the holder's PID and start time; a
+lock whose owner is dead — or that has no owner — is reclaimed automatically after a 30s
+write-grace window (and unconditionally after 30 min), so a crashed run can no longer
+silently disable self-update (issue #3937). Run `bash scripts/autospec-startup-self-update.sh
+--doctor [--clear-stale-lock]` for an operator health check (lock state, throttle stamp age,
+installed-vs-remote version drift, last failure record; exits 1 on any finding; bypasses
+`AUTOSPEC_NO_SELF_UPDATE`).
+
 **Never inline shell that assigns a positional parameter into an injected skill block.**
 A harness substitutes `$1` inside a *rendered* skill body at load time, so `target="$1"`
 becomes the caller's slash-command argument (issue #3177). `check_startup_preflight`

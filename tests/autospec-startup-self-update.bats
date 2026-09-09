@@ -157,3 +157,199 @@ EOS
     [ "$(cat "$victim")" = "original spec content" ]
     [ ! -x "$victim" ]
 }
+
+# ---------------------------------------------------------------------------
+# Stale lock reclamation (issue #3937)
+#
+# A lock directory is a mkdir marker with an owner file
+# (<pid> <epoch> <iso>). A lock whose owner is dead — or which has no owner —
+# is stale and must be reclaimed, not mistaken for a concurrent run.
+# ---------------------------------------------------------------------------
+
+# Write a URL-aware curl shim: the API call returns a SHA, the bootstrap
+# download returns a no-op installer script. Everything else fails loudly.
+_install_curl_shim() {
+    cat > "$SHIMDIR/curl" <<'CURLSHIM'
+#!/usr/bin/env bash
+for a in "$@"; do
+    case "$a" in
+        *api.github.com*) printf '{"sha":"newsha1"}\n'; exit 0 ;;
+        *bootstrap.sh*) printf '#!/usr/bin/env bash\nexit 0\n'; exit 0 ;;
+    esac
+done
+echo "UNEXPECTED curl call" >&2
+exit 1
+CURLSHIM
+    chmod +x "$SHIMDIR/curl"
+}
+
+# A PID that is guaranteed to be dead: spawn, reap, reuse its number.
+_dead_pid() {
+    sleep 0.01 &
+    local p=$!
+    wait "$p"
+    printf '%s\n' "$p"
+}
+
+@test "stale lock with dead owner is reclaimed and the update proceeds" {
+    # The populated case (#3793): a lock dir that carries an owner file, but
+    # the owner process is gone.
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    local dead
+    dead="$(_dead_pid)"
+    if kill -0 "$dead" 2>/dev/null; then
+        fail "test setup: PID $dead unexpectedly alive"
+    fi
+    printf '%s %s %s\n' "$dead" "$(date -u +%s)" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$lock/owner"
+    # Backdate past the 1800s stale threshold (portable to BSD + GNU touch).
+    touch -t 2001010000 "$lock"
+    echo "oldsha1" > "$SANDBOX_HOME/.autospec/installed-version"
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$SANDBOX_HOME/.autospec/last-update-check"
+    _install_curl_shim
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "reclaiming stale update lock"
+    echo "$output" | grep -q "not running"
+    echo "$output" | grep -q "\[autospec\] updated oldsha1"
+    [ "$(cat "$SANDBOX_HOME/.autospec/installed-version")" = "newsha1" ]
+    # The reclaimed lock is released again on exit.
+    [ ! -e "$lock" ]
+}
+
+@test "stale ownerless lock is reclaimed and the update proceeds" {
+    # The empty case: a bare mkdir marker left by a crashed run, backdated.
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    touch -t 2001010000 "$lock"
+    echo "oldsha1" > "$SANDBOX_HOME/.autospec/installed-version"
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$SANDBOX_HOME/.autospec/last-update-check"
+    _install_curl_shim
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "reclaiming stale update lock"
+    echo "$output" | grep -q "no live owner found"
+    [ "$(cat "$SANDBOX_HOME/.autospec/installed-version")" = "newsha1" ]
+    [ ! -e "$lock" ]
+}
+
+@test "fresh lock with no owner is not reclaimed (write-grace window)" {
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "write-grace window"
+    [ -d "$lock" ]
+    [[ "$output" != *"UNEXPECTED"* ]]
+}
+
+@test "fresh lock with a live owner is not reclaimed (verified concurrent run)" {
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    printf '%s %s %s\n' "$$" "$(date -u +%s)" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$lock/owner"
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "concurrent update in progress"
+    [ -d "$lock" ]
+    [ -f "$lock/owner" ]
+    [[ "$output" != *"UNEXPECTED"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Doctor mode: out-of-band health check (issue #3937)
+# ---------------------------------------------------------------------------
+
+@test "--doctor on a healthy state exits 0 and reports healthy" {
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "doctor: healthy"
+    echo "$output" | grep -q "throttle stamp:"
+    echo "$output" | grep -q "last failure:     none"
+}
+
+@test "--doctor flags a stale lock and exits 1" {
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    touch -t 2001010000 "$lock"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "lock:.*STALE"
+    echo "$output" | grep -q "finding(s)"
+    # Doctor is read-only without --clear-stale-lock.
+    [ -d "$lock" ]
+}
+
+@test "--doctor --clear-stale-lock clears a stale lock and exits 0" {
+    local lock="$SANDBOX_HOME/.autospec/.update.lock.d"
+    mkdir -p "$lock"
+    touch -t 2001010000 "$lock"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor --clear-stale-lock
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "lock:.*cleared"
+    echo "$output" | grep -q "doctor: healthy"
+    [ ! -e "$lock" ]
+}
+
+@test "--doctor flags a throttle stamp older than 3x the interval" {
+    date -u -v-4d +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '4 days ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$SANDBOX_HOME/.autospec/last-update-check"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "throttle stamp:.*STALE"
+}
+
+@test "--doctor flags installed-vs-remote drift" {
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    echo "v1" > "$SANDBOX_HOME/.autospec/installed-version"
+    echo "v2" > "$SANDBOX_HOME/.autospec/remote-version"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "version drift:.*installed v1 vs remote v2"
+}
+
+@test "--doctor reports the last failure record" {
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    printf '{"timestamp":"2026-01-01T00:00:00Z","installer_exit_code":1}\n' \
+        > "$SANDBOX_HOME/.autospec/last-update-failure.json"
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "last failure:.*2026-01-01T00:00:00Z"
+    echo "$output" | grep -q "installer exit 1"
+}
+
+@test "--doctor bypasses AUTOSPEC_NO_SELF_UPDATE (operator-invoked repair)" {
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$SANDBOX_HOME/.autospec/last-update-check"
+    run env HOME="$SANDBOX_HOME" AUTOSPEC_NO_SELF_UPDATE=1 \
+        PATH="$SHIMDIR:$PATH" bash "$SCRIPT" --doctor
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "doctor: healthy"
+}
+
+@test "preflight emits the stale-throttle alarm even when the update then succeeds" {
+    # A 4-day-old stamp must fail loudly (invariant 4) regardless of the
+    # update outcome; the update still runs and heals the stamp.
+    date -u -v-4d +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '4 days ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$SANDBOX_HOME/.autospec/last-update-check"
+    echo "oldsha1" > "$SANDBOX_HOME/.autospec/installed-version"
+    _install_curl_shim
+    run env HOME="$SANDBOX_HOME" PATH="$SHIMDIR:$PATH" bash "$SCRIPT" autospec-run
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "self-update has not completed"
+    echo "$output" | grep -q -- "--doctor"
+    [ "$(cat "$SANDBOX_HOME/.autospec/installed-version")" = "newsha1" ]
+    # The healed stamp is fresh again.
+    local fresh
+    fresh="$(date -u -v-1H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    [ "$(cat "$SANDBOX_HOME/.autospec/last-update-check")" \> "$fresh" ]
+}
