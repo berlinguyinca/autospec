@@ -171,6 +171,7 @@
     "check_db_telemetry_contract",
     "check_grooming_contract",
     "check_run_groom_preflight_contract",
-    "check_pipeline_verdict_ratchet"
+    "check_pipeline_verdict_ratchet",
+    "check_restore_visibility_ratchet"
   ]
 }

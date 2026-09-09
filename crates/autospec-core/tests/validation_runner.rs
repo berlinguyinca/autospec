@@ -142,8 +142,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 160); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716)
-    assert_eq!(full.unique_ids().len(), 155); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 161); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716); +1: restore-visibility ratchet (#3878)
+    assert_eq!(full.unique_ids().len(), 156); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -176,6 +176,7 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_verify_gate"
                 | "check_verify_produced_work"
                 | "check_pipeline_verdict_ratchet"
+                | "check_restore_visibility_ratchet"
         )
     }));
 }
@@ -2033,6 +2034,11 @@ fn runner_executes_the_newly_registered_bats_suites() {
         (
             "check_pipeline_verdict_ratchet",
             "tests/lint/test_pipeline_verdict_checker.bats",
+        ),
+        // Registered by #3878: the mtime-preserving-restore ratchet.
+        (
+            "check_restore_visibility_ratchet",
+            "tests/lint/test_restore_visibility_checker.bats",
         ),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
