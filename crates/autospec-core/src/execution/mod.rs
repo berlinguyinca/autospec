@@ -3,6 +3,7 @@ pub mod endpoint;
 pub mod executor;
 pub mod gate;
 pub mod gate_scope;
+pub mod patch_conflicts;
 pub mod patch_pipeline;
 pub mod queue;
 mod queue_parser;
@@ -23,6 +24,10 @@ pub use endpoint::{
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
     FailureClass, Role,
+};
+pub use patch_conflicts::{
+    hold_shape, resolve, HoldShape, Refusal, RefusalKind, ResolveOutcome, ResolvedFile,
+    UnverifiedResolution,
 };
 pub use queue::{
     ExecutionQueue, FailureKind, OneShotIssueSelector, QueueEntry, QueueResultApplication,
