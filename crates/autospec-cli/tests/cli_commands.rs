@@ -35,6 +35,57 @@ fn help_command_names(help: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The CLI's own command table — the same source `print_help` iterates when
+/// it renders the `COMMANDS:` section of `--help` (#3964). Reading it from the
+/// source file (rather than duplicating it as a literal array in this test)
+/// removes the lockstep site that `autospec cost` (#3793) silently skipped.
+const COMMANDS_TABLE_SOURCE: &str = include_str!("../src/commands/mod.rs");
+const COMMANDS_TABLE_PATH: &str = "crates/autospec-cli/src/commands/mod.rs";
+
+/// Parses the `const COMMANDS: &[(&str, &str)]` table out of the CLI source,
+/// returning `(1-based source line, command name)` for every entry. Handles
+/// both single-line entries (`("init", "...")`) and block entries where the
+/// name sits alone on its own line after the opening paren.
+fn command_table_entries(source: &str) -> Vec<(usize, &str)> {
+    let start = source
+        .find("const COMMANDS: &[(&str, &str)]")
+        .unwrap_or_else(|| panic!("const COMMANDS table not found in {COMMANDS_TABLE_PATH}"));
+    let table = source[start..]
+        .split_once("];")
+        .map(|(head, _)| head)
+        .unwrap_or_else(|| panic!("unterminated const COMMANDS table in {COMMANDS_TABLE_PATH}"));
+    let base_lines = source[..start].lines().count();
+    let mut entries = Vec::new();
+    let mut pending_open = false;
+    for (idx, line) in table.lines().enumerate() {
+        let lineno = base_lines + idx + 1;
+        let trimmed = line.trim();
+        if pending_open {
+            if let Some(name) = table_entry_name(trimmed) {
+                entries.push((lineno, name));
+            }
+            pending_open = false;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('(') {
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                pending_open = true; // block entry: name is on the next line
+            } else if let Some(name) = table_entry_name(rest) {
+                entries.push((lineno, name)); // single-line entry: ("name", "...")
+            }
+        }
+    }
+    entries
+}
+
+/// Extracts the quoted name from an entry fragment that starts with it.
+fn table_entry_name(rest: &str) -> Option<&str> {
+    rest.strip_prefix('"')
+        .and_then(|r| r.split('"').next())
+        .filter(|n| !n.is_empty())
+}
+
 fn help_usage_invocation(help: &str) -> Option<&str> {
     help.lines()
         .skip_while(|line| line.trim() != "USAGE:")
@@ -73,39 +124,48 @@ fn help_usage_parser_returns_first_usage_invocation() {
 }
 
 #[test]
+fn command_table_parser_reads_both_entry_shapes_with_source_lines() {
+    let source = "mod x;\n\nconst COMMANDS: &[(&str, &str)] = &[\n    (\"init\", \"Initialize AutoSpec metadata\"),\n    (\n        \"growth-report\",\n        \"Render metrics\",\n    ),\n];\n";
+
+    let entries = command_table_entries(source);
+    assert_eq!(
+        entries,
+        vec![(4, "init"), (6, "growth-report")],
+        "entry (line, name) pairs must track the table in {COMMANDS_TABLE_PATH}"
+    );
+}
+
+#[test]
 fn cli_commands_help_lists_required_commands() {
     let output = autospec().arg("--help").output().expect("autospec runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert_eq!(
-        help_command_names(&stdout),
-        [
-            "init",
-            "aar",
-            "initiative",
-            "lint",
-            "claim",
-            "cost",
-            "parent",
-            "queue",
-            "repair-loop",
-            "dispatch",
-            "resources",
-            "doctor",
-            "status",
-            "autonomous",
-            "plan",
-            "rag",
-            "validate",
-            "run",
-            "runtime",
-            "resume",
-            "report",
-            "showcase",
-            "benchmark",
-            "growth-report",
-        ]
+
+    // The expected list is derived from the CLI's own command table, so this
+    // test fails only when --help and the table genuinely disagree (#3964).
+    let expected = command_table_entries(COMMANDS_TABLE_SOURCE);
+    assert!(
+        !expected.is_empty(),
+        "derived command table is empty — parser or {COMMANDS_TABLE_PATH} shape changed"
+    );
+    let actual = help_command_names(&stdout);
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|(_, name)| !actual.iter().any(|a| a == name))
+        .map(|(line, name)| format!("{name} ({COMMANDS_TABLE_PATH}:{line})"))
+        .collect();
+    let extra: Vec<&str> = actual
+        .iter()
+        .copied()
+        .filter(|name| !expected.iter().any(|(_, n)| n == name))
+        .collect();
+
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "--help COMMANDS section diverged from the command table: \
+         missing from --help (add this value): {missing:?}; \
+         unexpected in --help (remove from print_help or add to the table): {extra:?}"
     );
 }
 

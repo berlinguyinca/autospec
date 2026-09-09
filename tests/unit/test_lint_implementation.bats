@@ -120,7 +120,7 @@ EOF
     echo "$output" | grep -q "MISSING_TEST"
 }
 
-@test "lint-implementation: --help lists all 10 RULE_IDs" {
+@test "lint-implementation: --help lists all 13 RULE_IDs" {
     run bash "$LINT" --help
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "OUT_OF_SCOPE"
@@ -133,6 +133,9 @@ EOF
     echo "$output" | grep -q "HALLUCINATED_API"
     echo "$output" | grep -q "DUPLICATE_CODE"
     echo "$output" | grep -q "INVENTED_CONFIG"
+    echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+    echo "$output" | grep -q "COMMAND_NOT_REGISTERED"
+    echo "$output" | grep -q "CATALOG_ENTRY_INCOMPLETE"
 }
 
 # ── good fixture ──────────────────────────────────────────────────────────────
@@ -992,4 +995,139 @@ bats_suite_file() {
     run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
     rm -rf "$repo"
     ! echo "$output" | grep -q "BATS_SUITE_UNREGISTERED"
+}
+
+# ── COMMAND_NOT_REGISTERED / CATALOG_ENTRY_INCOMPLETE (#3964) ──────────────
+# Adding an autospec CLI subcommand requires updating N hand-maintained sites
+# (COMMANDS table, dispatch arm, docs row); #3793 (autospec cost) silently
+# missed the fourth. A new catalog id requires two lockstep sites. The
+# pre-commit gate names every unvisited site with file:line and value.
+
+# cmd_reg_repo REPO — scratch git repo shaped like the autospec repository:
+# the CLI marker (commands/mod.rs with a two-entry COMMANDS table, one
+# single-line and one block-form entry, plus the dispatch match) and the
+# docs row for each existing command.
+cmd_reg_repo() {
+    local repo="$1"
+    mkdir -p "$repo/crates/autospec-cli/src/commands" "$repo/docs"
+    printf 'pub mod init;\npub mod lint;\n\nconst COMMANDS: &[(&str, &str)] = &[\n    ("init", "Initialize"),\n    (\n        "lint",\n        "Run lints",\n    ),\n];\n\npub fn run(args: Vec<String>) -> Result<(), String> {\n    match args.as_slice() {\n        [command, rest @ ..] => match command.as_str() {\n            "init" => init::run(rest),\n            "lint" => lint::run(rest),\n            _ => Err("unknown".to_string()),\n        },\n    }\n}\n' \
+        > "$repo/crates/autospec-cli/src/commands/mod.rs"
+    printf '# CLI reference\n\n| Command | JSON | Description |\n|---------|------|-------------|\n| `autospec init` | no | Initialize |\n| `autospec lint` | no | Run lints |\n' \
+        > "$repo/docs/cli-reference.md"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m "init"
+}
+
+# cat_entry_repo REPO — scratch git repo with the two catalog lockstep sites.
+cat_entry_repo() {
+    local repo="$1"
+    mkdir -p "$repo/crates/autospec-core/src/validation/catalog"
+    printf 'pub struct ValidationCheck;\nimpl ValidationCheck {\n    pub fn catalog_entry(id: &str) -> Self {\n        let owner = match id {\n            "check_lockstep" => 1,\n            "check_bash_syntax" => 2,\n            unknown => panic!("no owner: {unknown}"),\n        };\n        let _ = owner;\n        ValidationCheck\n    }\n}\n' \
+        > "$repo/crates/autospec-core/src/validation/catalog.rs"
+    printf 'pub(super) const STANDARD_CHECK_IDS: &[&str] = &[\n    "check_lockstep",\n    "check_bash_syntax",\n];\n' \
+        > "$repo/crates/autospec-core/src/validation/catalog/catalog_ids.rs"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" add -A
+    git -C "$repo" commit -q -m "init"
+}
+
+@test "command registration: new dispatch arm without table entry or docs row fails" {
+    local repo="$PR_SIZE_TMP/cmd-reg-fail"
+    cmd_reg_repo "$repo"
+    # #3793 repro: the dispatch arm for a new command lands, the table and
+    # docs sites are not touched.
+    sed -i 's|"lint" => lint::run(rest),|"lint" => lint::run(rest),\n            "cost" => cost::run(rest),|' \
+        "$repo/crates/autospec-cli/src/commands/mod.rs"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "COMMAND_NOT_REGISTERED"
+    echo "$output" | grep -q "crates/autospec-cli/src/commands/mod.rs"
+    echo "$output" | grep -q "docs/cli-reference.md"
+    echo "$output" | grep -q "'cost'"
+    echo "$output" | grep -q "COMMANDS table"
+}
+
+@test "command registration: all three sites staged in one commit passes" {
+    local repo="$PR_SIZE_TMP/cmd-reg-pass"
+    cmd_reg_repo "$repo"
+    sed -i 's|^\];$|    ("cost", "Show cost"),\n];|' \
+        "$repo/crates/autospec-cli/src/commands/mod.rs"
+    sed -i 's|"lint" => lint::run(rest),|"lint" => lint::run(rest),\n            "cost" => cost::run(rest),|' \
+        "$repo/crates/autospec-cli/src/commands/mod.rs"
+    printf '| `autospec cost` | no | Show cost |\n' >> "$repo/docs/cli-reference.md"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "COMMAND_NOT_REGISTERED"
+}
+
+@test "command registration: inert outside the autospec repository" {
+    local repo="$PR_SIZE_TMP/cmd-reg-foreign"
+    mkdir -p "$repo/src"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "t@t.com"
+    git -C "$repo" config user.name "T"
+    git -C "$repo" commit -q --allow-empty -m "init"
+    printf 'fn main() {\n    println!("cost");\n}\n' > "$repo/src/main.rs"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "COMMAND_NOT_REGISTERED"
+}
+
+@test "catalog entry: id without match arm fails and names catalog.rs" {
+    local repo="$PR_SIZE_TMP/cat-entry-id-only"
+    cat_entry_repo "$repo"
+    sed -i 's|    "check_bash_syntax",|    "check_bash_syntax",\n    "check_new_thing",|' \
+        "$repo/crates/autospec-core/src/validation/catalog/catalog_ids.rs"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "CATALOG_ENTRY_INCOMPLETE"
+    echo "$output" | grep -q "'check_new_thing'"
+    echo "$output" | grep -q "crates/autospec-core/src/validation/catalog.rs"
+}
+
+@test "catalog entry: match arm without id fails and names catalog_ids.rs" {
+    local repo="$PR_SIZE_TMP/cat-entry-arm-only"
+    cat_entry_repo "$repo"
+    sed -i 's|"check_bash_syntax" => 2,|"check_bash_syntax" => 2,\n            "check_other_thing" => 3,|' \
+        "$repo/crates/autospec-core/src/validation/catalog.rs"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "CATALOG_ENTRY_INCOMPLETE"
+    echo "$output" | grep -q "'check_other_thing'"
+    echo "$output" | grep -q "crates/autospec-core/src/validation/catalog/catalog_ids.rs"
+}
+
+@test "catalog entry: both sites staged in one commit passes" {
+    local repo="$PR_SIZE_TMP/cat-entry-both"
+    cat_entry_repo "$repo"
+    sed -i 's|    "check_bash_syntax",|    "check_bash_syntax",\n    "check_both",|' \
+        "$repo/crates/autospec-core/src/validation/catalog/catalog_ids.rs"
+    sed -i 's|"check_bash_syntax" => 2,|"check_bash_syntax" => 2,\n            "check_both" => 4,|' \
+        "$repo/crates/autospec-core/src/validation/catalog.rs"
+    git -C "$repo" add -A
+
+    run bash -c "cd '$repo' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$repo"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "CATALOG_ENTRY_INCOMPLETE"
 }
