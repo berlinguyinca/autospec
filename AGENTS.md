@@ -481,6 +481,29 @@ head branch of another open PR (no orphan target branches).
 - `AUTOSPEC_STACK_DEFAULT_BRANCH` — default-branch name for `stack-guard.sh`
   (else `gh repo view`).
 
+## Restore-visibility contract
+
+Restoring a file is not the same as making the restoration visible to an
+mtime-based build system. `mv` (and `cp -p`/`-a`/`--preserve`, `install -p`,
+`tar -x`, `git stash pop`) put a file back with the backup's timestamp; if the
+backup predates the last build of that input, the rebuild declines to run and
+the stale artefact is wrong rather than merely old — an `include_str!`-style
+embedding ships the corrupted value as if it had been rebuilt (issue #3878).
+
+- Any harness that corrupts and restores a tracked file (test fixtures,
+  recovery traps, session restore) must `touch` the restored path in the same
+  scope, **including trap paths** (inline `trap '...' EXIT` bodies and
+  functions referenced by `trap NAME`). A content rewrite (`> "$f"`) also
+  observes the restoration.
+- Every rebuild a test depends on is followed by an artefact-content
+  assertion. The mtime gate is the producer, not the proof.
+- The deterministic ratchet `scripts/lint-restore-visibility.sh` makes an
+  unobserved mtime-preserving restore site blocking (`STALE_RESTORE`, exit 1;
+  `--list` audits existing sites). The per-site escape hatch
+  `# restore-visibility:allow <reason>` (same line or the line above the
+  restore) is for restores that genuinely do not feed a build and requires a
+  reason — a bare marker is rejected.
+
 ## Closeout report contract
 
 Every `auto-implement` agent ends an issue by emitting a **Closeout report** —

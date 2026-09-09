@@ -133,6 +133,22 @@ if [ "$validate_exit" -ne 0 ]; then
 "
 fi
 
+# Step 3: restore-visibility ratchet (whole-tree mtime-preserving restore scan,
+# issue #3878: a restored file must be touch-observed or the stale rebuild ships)
+RV_SCRIPT="$REPO_ROOT/scripts/lint-restore-visibility.sh"
+if [ -f "$RV_SCRIPT" ]; then
+  rv_out=""
+  rv_exit=0
+  rv_out=$(bash "$RV_SCRIPT" --root "$REPO_ROOT" 2>&1) || rv_exit=$?
+  if [ "$rv_exit" -ne 0 ]; then
+    BLOCKING=$((BLOCKING + 1))
+    FINDINGS="${FINDINGS}${rv_out}
+"
+  fi
+else
+  printf 'WARN: lint-restore-visibility.sh not found at %s — skipping restore-visibility step\n' "$RV_SCRIPT" >&2
+fi
+
 # ── emit summary ──────────────────────────────────────────────────────────────
 
 if [ "$BLOCKING" -gt 0 ]; then
