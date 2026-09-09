@@ -184,6 +184,29 @@ a broken migration replay.
 3. Verify the diff matches the issue's scope. If you ended up touching more than the issue called for, either split the extra work into a separate issue or revert it from this branch.
 4. Commit message follows the repo's existing style (see recent `git log --oneline`).
 
+### Epistemic gates (verify before finishing — issue #3718)
+
+The retrospective on 70 classified incidents reduced them to five shapes. They
+are cheap and mechanical, so missing one is a defect, not a judgment call.
+Before declaring the issue done, verify the work satisfies each:
+
+1. **Name the producer of every value.** Every value a gate or test reads
+   names the process or step that computed it, and you confirmed the value is
+   current and complete, not merely present.
+2. **State what the gate examined, not just its verdict.** Each "pass" names
+   the inputs, version/revision, and scope it actually checked. "Passed" with
+   nothing named is a defect.
+3. **Re-baseline immediately before judging.** Each gate observed the system
+   in its current state at decision time, not a measurement taken earlier or a
+   value another step recorded.
+4. **Declare the shared foundation.** If one input feeds several gates or
+   tests, it is named as shared state and every consumer read the same
+   instance, so the consumers cannot diverge silently.
+5. **Derive limits from the real constraint, not from observed history.** Any
+   threshold, cap, or budget is computed from the resource or time budget it
+   protects, not tuned to fit past runs. An observed value is never a
+   specification.
+
 ### Fab full-suite gate (only for `area:fab` / `autospec:fab-flow` issues)
 
 If this issue carries `area:fab` or `autospec:fab-flow` (the monitor routes it
