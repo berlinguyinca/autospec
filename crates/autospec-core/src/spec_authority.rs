@@ -450,25 +450,51 @@ impl SpecSet {
             }
             match self.status_of(&authority) {
                 CurrencyStatus::Unknown => {
-                    let paths = docs
+                    // Two distinct defects, reported separately: documents that
+                    // declare nothing, and documents whose marker omits the
+                    // version. Collapsing them into one code picked whichever
+                    // applied to *some* document and then named the paths of
+                    // the others, so a tree of unmarked specs sitting next to
+                    // one versioned spec was reported as "marker with no
+                    // version" in files that carry no marker at all.
+                    let unmarked = docs
                         .iter()
                         .filter(|document| document.currency.is_none())
                         .map(|document| document.path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let message = if docs.iter().all(|document| document.currency.is_none()) {
-                        format!(
-                            "spec set {authority} declares no currency marker (no {KEY_AUTHORITY}/{KEY_VERSION}/{KEY_SUPERSEDED_BY} header) in {paths}"
-                        )
-                    } else {
-                        format!("spec set {authority} declares a marker with no version in {paths}")
-                    };
-                    let code = if docs.iter().all(|document| document.currency.is_none()) {
-                        AuthorityCode::CurrencyMissing
-                    } else {
-                        AuthorityCode::VersionMissing
-                    };
-                    findings.push(finding(code, &authority, &message));
+                        .collect::<Vec<_>>();
+                    if !unmarked.is_empty() {
+                        findings.push(finding(
+                            AuthorityCode::CurrencyMissing,
+                            &authority,
+                            &format!(
+                                "{} of {} document(s) in spec set {authority} declare no currency marker (no {KEY_AUTHORITY}/{KEY_VERSION}/{KEY_SUPERSEDED_BY} header): {}",
+                                unmarked.len(),
+                                docs.len(),
+                                shorten_paths(&unmarked)
+                            ),
+                        ));
+                    }
+                    let versionless = docs
+                        .iter()
+                        .filter(|document| {
+                            document
+                                .currency
+                                .as_ref()
+                                .is_some_and(|marker| marker.version.is_none())
+                        })
+                        .map(|document| document.path.as_str())
+                        .collect::<Vec<_>>();
+                    if !versionless.is_empty() {
+                        findings.push(finding(
+                            AuthorityCode::VersionMissing,
+                            &authority,
+                            &format!(
+                                "{} document(s) in spec set {authority} declare a marker with no {KEY_VERSION}: {}",
+                                versionless.len(),
+                                shorten_paths(&versionless)
+                            ),
+                        ));
+                    }
                 }
                 CurrencyStatus::Superseded => {
                     let successor = docs
@@ -821,6 +847,22 @@ pub fn invalidated_tasks(records: &[TaskRecord], set: &SpecSet) -> Vec<String> {
     ids
 }
 
+/// Path lists in a finding message are read by a human in a terminal: the
+/// first few name the defect, the rest only cost scrollback. The full set is
+/// recoverable by re-running with a narrower `--spec-dir`.
+const MAX_LISTED_PATHS: usize = 6;
+
+fn shorten_paths(paths: &[&str]) -> String {
+    if paths.len() <= MAX_LISTED_PATHS {
+        return paths.join(", ");
+    }
+    format!(
+        "{}, (+{} more)",
+        paths[..MAX_LISTED_PATHS].join(", "),
+        paths.len() - MAX_LISTED_PATHS
+    )
+}
+
 fn finding(code: AuthorityCode, subject: &str, message: &str) -> AuthorityFinding {
     AuthorityFinding {
         code,
@@ -986,7 +1028,8 @@ Authority-Over: control-plane
             finding_code(&verdict, AuthorityCode::CurrencyMissing).expect("missing finding");
         assert_eq!(blocked.subject, UNDETERMINED);
         assert!(blocked.message.contains("docs/legacy-charter.md"));
-        assert!(blocked.message.contains("declares no currency marker"));
+        assert!(blocked.message.contains("declare no currency marker"));
+        assert!(blocked.message.starts_with("1 of 1 document(s)"));
     }
 
     #[test]
@@ -996,6 +1039,57 @@ Authority-Over: control-plane
         let verdict = set.dispatch_verdict(&[]);
         assert!(!verdict.allowed);
         assert!(finding_code(&verdict, AuthorityCode::VersionMissing).is_some());
+    }
+
+    #[test]
+    fn unmarked_documents_are_named_even_beside_a_versioned_sibling() {
+        // A tree where one document carries `Spec-Version:` and the rest carry
+        // nothing used to be reported as "a marker with no version" naming the
+        // very files that have no marker. The two defects are reported apart.
+        let versioned = "Authority-Over: gateway\nSpec-Version: V2\n";
+        let set = SpecSet::from_sources(&[
+            ("docs/versioned.md", versioned),
+            ("docs/unmarked.md", NO_CURRENCY),
+        ]);
+        let verdict = set.dispatch_verdict(&[]);
+        assert!(!verdict.allowed);
+        let missing =
+            finding_code(&verdict, AuthorityCode::CurrencyMissing).expect("missing finding");
+        assert!(missing.message.contains("1 of 2 document(s)"));
+        assert!(missing.message.contains("docs/unmarked.md"));
+        assert!(
+            !missing.message.contains("docs/versioned.md"),
+            "the versioned document is not the defect: {}",
+            missing.message
+        );
+        assert!(
+            finding_code(&verdict, AuthorityCode::VersionMissing).is_none(),
+            "no document here lacks a version"
+        );
+    }
+
+    #[test]
+    fn a_finding_names_a_few_paths_and_counts_the_rest() {
+        // 204 unmarked specs in one directory produced a single finding whose
+        // message was a wall of 204 paths, which reads as nothing at all.
+        let sources: Vec<(String, &str)> = (0..9)
+            .map(|i| (format!("docs/spec-{i}.md"), NO_CURRENCY))
+            .collect();
+        let set = SpecSet::from_sources(
+            &sources
+                .iter()
+                .map(|(path, text)| (path.as_str(), *text))
+                .collect::<Vec<_>>(),
+        );
+        let verdict = set.dispatch_verdict(&[]);
+        let missing =
+            finding_code(&verdict, AuthorityCode::CurrencyMissing).expect("missing finding");
+        assert!(missing.message.starts_with("9 of 9 document(s)"));
+        assert!(missing.message.contains("(+3 more)"), "{}", missing.message);
+        assert_eq!(
+            missing.message.matches("docs/spec-").count(),
+            MAX_LISTED_PATHS
+        );
     }
 
     #[test]
