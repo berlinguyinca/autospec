@@ -2219,7 +2219,10 @@ fn quarantine_authoritative_stale_heartbeat_with_sync_hook(
                     }
                 }
                 HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed => {
-                    let snapshot = terminal_heartbeat_snapshot(
+                    // A legacy record was discarded as absent evidence
+                    // (#3008): there is no current generation to quarantine.
+                    let Some(snapshot) = terminal_heartbeat_snapshot(
+                        &root_path.join(&repo_key),
                         &repo,
                         issue_name.as_ref(),
                         ClaimMutationIdentity {
@@ -2229,7 +2232,10 @@ fn quarantine_authoritative_stale_heartbeat_with_sync_hook(
                             branch: &record.branch,
                             claim_id,
                         },
-                    )?;
+                    )?
+                    else {
+                        return Ok(false);
+                    };
                     match classify_startup_heartbeat_snapshot(
                         snapshot.file.clone(),
                         expected,
@@ -4489,10 +4495,11 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
 
 #[cfg(unix)]
 fn terminal_heartbeat_snapshot(
+    directory_display: &Path,
     directory: &fs::File,
     name: &std::ffi::OsStr,
     identity: ClaimMutationIdentity<'_>,
-) -> Result<StartupHeartbeatSnapshot, CommandFailure> {
+) -> Result<Option<StartupHeartbeatSnapshot>, CommandFailure> {
     let mut archive = None;
     let file = match read_regular_file_at_no_follow(directory, name) {
         Ok(file) => file,
@@ -4520,17 +4527,51 @@ fn terminal_heartbeat_snapshot(
             )))
         }
     };
-    let evidence = parse_startup_heartbeat(&file.document)
-        .ok_or_else(|| CommandFailure::diagnostic("terminal heartbeat evidence is invalid"))?;
-    let snapshot = StartupHeartbeatSnapshot { file, evidence };
-    let (source, observed) = archive
-        .as_ref()
-        .map_or((directory, name), |(handoff, name)| {
-            (handoff, name.as_ref())
-        });
-    held_heartbeat_at(source, observed, &snapshot)?
-        .ok_or_else(|| CommandFailure::diagnostic("terminal heartbeat evidence is absent"))?;
-    Ok(snapshot)
+    let (source, observed, path) = archive.as_ref().map_or(
+        (directory, name, directory_display.join(name)),
+        |(handoff, archive_name)| {
+            (
+                handoff,
+                archive_name.as_ref(),
+                directory_display
+                    .join("quarantine")
+                    .join("startup-heartbeat-handoffs")
+                    .join(archive_name),
+            )
+        },
+    );
+    match startup_heartbeat_shape(&file.document) {
+        // A record written before the post-upgrade schema is absent evidence,
+        // never a conductor killer (#3008): discard it and report no snapshot
+        // so the next publication can take the slot.
+        StartupHeartbeatShape::Legacy => {
+            eprintln!("WARN: discarding legacy startup heartbeat record: {path:?}");
+            nix::unistd::unlinkat(source, observed, nix::unistd::UnlinkatFlags::NoRemoveDir)
+                .map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "could not discard legacy startup heartbeat record {path:?}: {error}"
+                    ))
+                })?;
+            nix::unistd::fsync(source).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not sync legacy startup heartbeat removal {path:?}: {error}"
+                ))
+            })?;
+            Ok(None)
+        }
+        StartupHeartbeatShape::Malformed => Err(CommandFailure::diagnostic(format!(
+            "terminal heartbeat evidence is invalid: {path:?}"
+        ))),
+        StartupHeartbeatShape::Current(evidence) => {
+            let snapshot = StartupHeartbeatSnapshot { file, evidence };
+            held_heartbeat_at(source, observed, &snapshot)?.ok_or_else(|| {
+                CommandFailure::diagnostic(format!(
+                    "terminal heartbeat evidence is absent: {path:?}"
+                ))
+            })?;
+            Ok(Some(snapshot))
+        }
+    }
 }
 #[cfg(unix)]
 fn handoff_terminal_heartbeat(
@@ -4584,7 +4625,17 @@ fn retire_released_startup_heartbeat_with_hook(
     let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
     let repo = open_heartbeat_directory_beneath(&root, Path::new(&repo_name))?;
     let issue_name = format!("{}.json", identity.issue);
-    let issue = terminal_heartbeat_snapshot(&repo, issue_name.as_ref(), identity)?;
+    let Some(issue) = terminal_heartbeat_snapshot(
+        &root_path.join(&repo_name),
+        &repo,
+        issue_name.as_ref(),
+        identity,
+    )?
+    else {
+        // A legacy record was discarded as absent evidence (#3008): there is
+        // no current heartbeat left to retire.
+        return Ok(());
+    };
     let evidence = &issue.evidence;
     let exact = exact_heartbeat_claim_identity(evidence, identity)
         && evidence.step == "claimed"
@@ -4626,20 +4677,28 @@ fn retire_released_startup_heartbeat_with_hook(
     if let Some(session) = &evidence.session_id {
         let sessions = open_heartbeat_directory_beneath(&repo, Path::new("sessions"))?;
         let session_name = format!("{}.json", heartbeat_session_key(session));
-        let session = terminal_heartbeat_snapshot(&sessions, session_name.as_ref(), identity)?;
-        if session.evidence != issue.evidence {
-            return Err(CommandFailure::diagnostic(
-                "terminal session heartbeat does not match issue evidence",
-            ));
-        }
-        handoff_terminal_heartbeat(
+        // A legacy session record was discarded as absent evidence (#3008);
+        // retire the issue heartbeat without the session handoff.
+        if let Some(session) = terminal_heartbeat_snapshot(
             &repo_path.join("sessions"),
             &sessions,
             session_name.as_ref(),
-            &session,
-            "session",
-            boundary,
-        )?;
+            identity,
+        )? {
+            if session.evidence != issue.evidence {
+                return Err(CommandFailure::diagnostic(
+                    "terminal session heartbeat does not match issue evidence",
+                ));
+            }
+            handoff_terminal_heartbeat(
+                &repo_path.join("sessions"),
+                &sessions,
+                session_name.as_ref(),
+                &session,
+                "session",
+                boundary,
+            )?;
+        }
     }
     handoff_terminal_heartbeat(
         &repo_path,
@@ -5436,6 +5495,42 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         process_start,
         session_id,
     })
+}
+/// The shape of a heartbeat record on disk (#3008).
+///
+/// `Legacy` records are valid JSON objects written before the post-upgrade
+/// schema: they carry none of the identity fields the current parser
+/// requires. They are absent evidence, never a conductor killer. `Malformed`
+/// records are not valid JSON objects at all and still fail closed.
+enum StartupHeartbeatShape {
+    Current(StartupHeartbeatEvidence),
+    Legacy,
+    Malformed,
+}
+
+/// Classify a raw heartbeat document without requiring the current schema.
+fn startup_heartbeat_shape(document: &[u8]) -> StartupHeartbeatShape {
+    let Ok(text) = std::str::from_utf8(document) else {
+        return StartupHeartbeatShape::Malformed;
+    };
+    let Ok(mut fields) = JsonParser::new(text)
+        .parse()
+        .and_then(|value| value.into_object("startup heartbeat"))
+    else {
+        return StartupHeartbeatShape::Malformed;
+    };
+    // A record written before the post-upgrade schema carries none of the
+    // identity fields the current parser requires (#3008).
+    let legacy = ["nonce", "host", "boot_id", "process_start"]
+        .iter()
+        .all(|field| fields.remove(*field).is_none());
+    if legacy {
+        return StartupHeartbeatShape::Legacy;
+    }
+    match parse_startup_heartbeat(document) {
+        Some(evidence) => StartupHeartbeatShape::Current(evidence),
+        None => StartupHeartbeatShape::Malformed,
+    }
 }
 #[allow(dead_code)]
 fn classify_startup_heartbeat(

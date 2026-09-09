@@ -27,8 +27,14 @@ pub(super) fn publish_with_hooks(
     after_repo_open: &mut impl FnMut(&Path),
     before_rename: &mut impl FnMut(&Path),
 ) -> Result<(), CommandFailure> {
-    let expected = parse_startup_heartbeat(document)
-        .ok_or_else(|| CommandFailure::diagnostic("startup heartbeat document is malformed"))?;
+    let expected = parse_startup_heartbeat(document).ok_or_else(|| {
+        CommandFailure::diagnostic(format!(
+            "startup heartbeat document is malformed: {}",
+            root.join(&repository_progress_key(repo))
+                .join(format!("{issue}.json"))
+                .display()
+        ))
+    })?;
     ensure_private_directory(root)?;
     let root = open_existing_private_directory(root)?
         .ok_or_else(|| CommandFailure::diagnostic("heartbeat root directory disappeared"))?;
@@ -131,17 +137,33 @@ pub(super) fn existing_generation(
     let mut document = Vec::new();
     file.read_to_end(&mut document)
         .map_err(|_| CommandFailure::diagnostic("heartbeat publication target conflicts"))?;
-    let Some(observed) = parse_startup_heartbeat(&document) else {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ));
-    };
-    if same_generation(&observed, expected) {
-        Ok(true)
-    } else {
-        Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts",
-        ))
+    let target = directory.path.join(name);
+    match startup_heartbeat_shape(&document) {
+        // A record written before the post-upgrade schema is absent
+        // evidence, not a conflicting generation (#3008): discard it so the
+        // publication can take the slot.
+        StartupHeartbeatShape::Legacy => {
+            eprintln!(
+                "WARN: discarding legacy startup heartbeat record: {}",
+                target.display()
+            );
+            unlink_staged_file(directory, name, &file)?;
+            sync_private_directory(directory)?;
+            Ok(false)
+        }
+        StartupHeartbeatShape::Malformed => Err(CommandFailure::diagnostic(format!(
+            "heartbeat publication target conflicts: {}",
+            target.display()
+        ))),
+        StartupHeartbeatShape::Current(observed) => {
+            if same_generation(&observed, expected) {
+                Ok(true)
+            } else {
+                Err(CommandFailure::diagnostic(
+                    "heartbeat publication target conflicts",
+                ))
+            }
+        }
     }
 }
 
