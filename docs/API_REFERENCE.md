@@ -148,6 +148,26 @@ than being ignored. The built-in policy is used only when the implicit default
 `.autospec/autospec.yml` is absent; an explicit, unreadable, or malformed config fails
 closed instead of silently selecting defaults.
 
+### `autospec lint spec`
+
+Review a spec document for safety properties that rest on convention rather than a
+structural mechanism. A spec line written in the imperative mood (`always`, `never`,
+`make sure to`, `be careful`) that does not name a mechanism on the same line (a lock,
+snapshot, gate, check, test, fail-closed behavior, ...) is reported as
+`SAFETY_WITHOUT_MECHANISM`. Fenced code blocks are not spec prose and are skipped. The
+review is advisory: findings are reported, and a spec is never failed by it.
+
+```
+Usage: autospec lint spec [--json] <SPEC_PATH>
+```
+
+- `SPEC_PATH`: Path to the spec document, or `-` for standard input.
+- `--json`: Write the ordered findings as a JSON array with `rule`, `line`, `phrase`,
+  and `description` fields.
+
+Exit: `0` when no convention-only safety properties are found, `1`-`64` for the finding
+count capped at 64, and `2` for a usage error.
+
 ### `autospec issue promote`
 
 Authoritative admission transaction for a canonical GitHub issue.
