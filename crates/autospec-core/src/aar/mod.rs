@@ -22,6 +22,7 @@ pub mod capsule;
 pub mod classify;
 pub mod context;
 pub mod dashboard;
+pub mod dispatch_fit;
 pub mod escalation;
 pub mod guards;
 pub mod inferweave;
@@ -47,6 +48,10 @@ pub use dashboard::{
     advise, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource, HistorySummary,
     IssueSample, LiveWorkItem, ProfileSample, RoutingAdvice, DEFAULT_LOCKED_MODEL_FAMILY,
     DEFAULT_MIN_SAMPLES, LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
+};
+pub use dispatch_fit::{
+    dispatch, parse_context_class, redispatch, status_json_with_grant, ContextClass, ContextGrant,
+    DispatchGrant, DispatchVerdict, Endpoint, NO_ENDPOINT_LARGE_ENOUGH,
 };
 pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,

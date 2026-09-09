@@ -47,6 +47,7 @@ model, a node, or a worktree.
 | `aar::telemetry` | 14 | versioned execution records with three-way token accounting and redaction |
 | `aar::outcome` | 15 | outcome scoring, cheapest-adequate-profile recommendation, hard policy override |
 | `aar::policy` | 18, 19 | `decide()`, the policy-versioned decision record, and the explanation |
+| `aar::dispatch_fit` | issue #3694 | context-class fit at dispatch: parse the card's declared pack, grant the largest fitting endpoint slot, hold with `NO-ENDPOINT-LARGE-ENOUGH` when nothing fits, record the granted context in the run's status file, and treat under-provisioned runs as not-yet-attempted |
 
 ## Decisions worth knowing about
 
@@ -60,6 +61,16 @@ required class, hold the projected context, or see an image when the task needs
 vision is rejected outright rather than out-scored. The same rule governs node
 routing: per spec section 12, a faster node without enough free context loses to
 a slower eligible one, so free context is checked before any speed term.
+
+**Dispatch fits the declared context class (issue #3694).** A task card's
+context class (e.g. `C75`, 65–82K pack) is compared against the endpoint's
+per-slot context — the engine's window divided by `--parallel N` — before the
+card is scheduled. The largest fitting slot wins; round-robin is not a fit
+criterion. When nothing fits, the issue is held with
+`NO-ENDPOINT-LARGE-ENOUGH` rather than dispatched truncated, the granted
+context is written into the run's status file next to the declared class, and
+an under-provisioned run does not count as an attempt: re-dispatch goes to a
+strictly larger class of endpoint, never back to the slot shape that lost.
 
 **More reasoning is not assumed to be better.** A larger budget is kept only
 when the measured success rate at that budget beats the smaller one by more than
