@@ -1,3 +1,4 @@
+pub mod authority;
 pub mod model;
 pub mod parser;
 pub mod review;

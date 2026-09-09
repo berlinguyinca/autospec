@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autospec_core::grading::{Gate, GateSet};
+use autospec_core::spec::authority;
 use autospec_core::staged_spec::{
     authorize, format_timestamp, issue_endpoint, parse_timestamp, EnvironmentProbe, IssueComment,
     IssueSnapshot, ProbeState, KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY,
@@ -135,6 +136,16 @@ pub fn freshness(args: &[String]) -> Result<(), CommandFailure> {
         }
     };
 
+    // Spec authority currency (#3947): a staged document that claims
+    // authority must be current before it is handed to a worker. The
+    // refusal precedes the freshness verdict: a superseded spec set is
+    // stale by definition, so its revision cannot save it.
+    if let Some(text) = &staged {
+        if let Some(failure) = authority_refusal(args, issue, text) {
+            return Err(failure);
+        }
+    }
+
     let live = live_updated_at(args, issue)?;
     let verdict = authorize(staged.as_deref(), live.value);
     let rendered = path.display().to_string();
@@ -183,6 +194,39 @@ impl LiveRead {
             detail: Some(detail.into()),
         }
     }
+}
+
+/// The spec authority currency gate (#3947) as a dispatch refusal. Returns
+/// `None` when the staged document makes no authority claim or its currency
+/// verifies; otherwise prints the refusal (`SPEC-AUTHORITY issue {N} REFUSED`
+/// in text mode, an `authority_refused` JSON object in `--json` mode) and
+/// returns the hold failure so the dispatch exits before the freshness
+/// verdict is computed.
+fn authority_refusal(args: &[String], issue: u64, staged: &str) -> Option<CommandFailure> {
+    let authority_doc = authority::parse_authority_doc(&issue.to_string(), staged);
+    let authority::DispatchGate::Refused { refusal } =
+        authority::gate_dispatch(std::slice::from_ref(&authority_doc))
+    else {
+        return None;
+    };
+    if is_json(args) {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "issue": issue,
+                "authority_refused": true,
+                "reason": refusal.message(),
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        );
+    } else {
+        println!(
+            "SPEC-AUTHORITY issue {issue} REFUSED: {}",
+            refusal.message()
+        );
+    }
+    Some(verdict_exit(true).unwrap_err())
 }
 
 fn live_updated_at(args: &[String], issue: u64) -> Result<LiveRead, CommandFailure> {
@@ -749,4 +793,99 @@ fn truncate(text: &str, max: usize) -> String {
     let mut kept: String = text.chars().take(max).collect();
     kept.push('\u{2026}');
     kept
+}
+
+#[cfg(test)]
+mod authority_gate_tests {
+    use super::*;
+    use crate::commands::CommandFailureKind;
+
+    /// A staged file shaped like `stage` writes one: revision headers first,
+    /// then the body.
+    fn temp_staged(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "autospec-dispatch-spec-{}-{name}.md",
+            std::process::id()
+        ));
+        fs::write(&path, body).expect("write temp staged file");
+        path
+    }
+
+    fn freshness_args(path: &Path, issue: u64, live: u64) -> Vec<String> {
+        vec![
+            "--issue".to_string(),
+            issue.to_string(),
+            "--staged".to_string(),
+            path.display().to_string(),
+            "--live-updated-at".to_string(),
+            live.to_string(),
+        ]
+    }
+
+    #[test]
+    fn freshness_refuses_superseded_authority_before_dispatch() {
+        let body = "\
+# staged-at: 1000 (2026-01-01T00:00:00Z)
+# source-updated-at: 2000 (2026-01-01T00:33:20Z)
+
+# Former Product Charter
+
+## Version
+V1
+
+## Superseded by
+inferweave-v2/README.md
+
+## Authority
+- edge-and-gateway
+";
+        let path = temp_staged("superseded", body);
+        let result = freshness(&freshness_args(&path, 50, 2000));
+        let err = result.expect_err("a superseded authority document must refuse the dispatch");
+        assert_eq!(err.kind, CommandFailureKind::Status);
+        assert_eq!(err.exit_code, 1);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn freshness_refuses_currencyless_authority_before_dispatch() {
+        let body = "\
+# staged-at: 1000 (2026-01-01T00:00:00Z)
+# source-updated-at: 2000 (2026-01-01T00:33:20Z)
+
+# Clean-Slate Implementation Monorepo
+
+The specs repository `inferweave/specs` is authoritative over anything
+written here.
+
+## Authority
+- edge-and-gateway
+";
+        let path = temp_staged("currencyless", body);
+        let result = freshness(&freshness_args(&path, 51, 2000));
+        let err = result.expect_err("a currency-less authority document must refuse the dispatch");
+        assert_eq!(err.kind, CommandFailureKind::Status);
+        assert_eq!(err.exit_code, 1);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn freshness_passes_plain_issue_body_without_authority_claim() {
+        let body = "\
+# staged-at: 1000 (2026-01-01T00:00:00Z)
+# source-updated-at: 2000 (2026-01-01T00:33:20Z)
+
+# Fix the queue refresher
+
+## Objective
+Refresh queue.txt on an interval.
+";
+        let path = temp_staged("plain", body);
+        let result = freshness(&freshness_args(&path, 52, 2000));
+        assert!(
+            result.is_ok(),
+            "a body with no authority claim dispatches as before: {result:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
 }
