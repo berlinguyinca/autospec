@@ -102,7 +102,7 @@ fn beat_all_scheduled_hops(harness: &Harness) {
 }
 
 #[test]
-fn dispatch_help_lists_the_four_subcommands() {
+fn dispatch_help_lists_the_five_subcommands() {
     let output = run(&[
         "dispatch".to_string(),
         "--help".to_string(),
@@ -111,7 +111,7 @@ fn dispatch_help_lists_the_four_subcommands() {
 
     assert_eq!(output.status.code(), Some(0));
     let help = stdout(&output);
-    for subcommand in ["check", "stamp", "beat", "status"] {
+    for subcommand in ["check", "guard", "stamp", "beat", "status"] {
         assert!(help.contains(subcommand), "{help}");
     }
     assert!(help.contains("EXIT CODES"), "{help}");
@@ -125,7 +125,10 @@ fn unknown_subcommand_is_a_diagnostic_not_a_verdict() {
     assert_eq!(output.status.code(), Some(2));
     let message = stderr(&output);
     assert!(message.contains("unknown dispatch subcommand"), "{message}");
-    assert!(message.contains("check, stamp, beat, status"), "{message}");
+    assert!(
+        message.contains("check, guard, stamp, beat, status"),
+        "{message}"
+    );
 }
 
 // ── check: the consumer's gate ──────────────────────────────────────────────
@@ -418,6 +421,223 @@ fn status_refuses_to_overwrite_a_corrupt_ledger() {
     assert!(
         message.contains("refusing to start a fresh one"),
         "{message}"
+    );
+}
+
+// ── guard: the pre-dispatch gate against unconverted output (#3764) ────────
+
+fn guard_out_dir(harness: &Harness) -> PathBuf {
+    let out = harness.temp.join("out");
+    std::fs::create_dir_all(&out).expect("out dir created");
+    out
+}
+
+#[test]
+fn guard_holds_when_an_unconverted_patch_exists_and_touches_nothing() {
+    let harness = Harness::new("autospec-dispatch-guard-hold");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-1234");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff --git a/x b/x\n+fix\n").expect("patch written");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "1234",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let line = stdout(&output);
+    assert!(line.contains("DISPATCH issue 1234 HELD"), "{line}");
+    assert!(line.contains("unconverted patch exists"), "{line}");
+    assert!(line.contains("changes.patch"), "{line}");
+    // A held guard touches nothing: the patch must survive the dispatch.
+    assert!(patch.exists(), "a held guard must not destroy the patch");
+    assert!(issue_dir.exists());
+}
+
+#[test]
+fn guard_dry_run_reports_every_check_and_the_verdict_without_mutation() {
+    let harness = Harness::new("autospec-dispatch-guard-dryrun");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-42");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+
+    // Patch present: the dry run names the check, the evidence and the hold.
+    let held = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "42",
+        "--out-dir",
+        &out.display().to_string(),
+        "--dry-run",
+    ]);
+    assert_eq!(held.status.code(), Some(1), "{}", stdout(&held));
+    let report = stdout(&held);
+    assert!(
+        report.contains("check unconverted_patch: DANGEROUS"),
+        "{report}"
+    );
+    assert!(report.contains("DISPATCH issue 42 HELD"), "{report}");
+    assert!(patch.exists(), "--dry-run must not mutate the directory");
+
+    // Patch gone: the same command reports clear and authorized, exit 0 —
+    // and still does not remove the directory, because it was asked to look,
+    // not to act.
+    std::fs::remove_file(&patch).expect("patch removed");
+    let clear = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "42",
+        "--out-dir",
+        &out.display().to_string(),
+        "--dry-run",
+    ]);
+    assert_eq!(clear.status.code(), Some(0), "{}", stdout(&clear));
+    let report = stdout(&clear);
+    assert!(
+        report.contains("check unconverted_patch: clear"),
+        "{report}"
+    );
+    assert!(report.contains("DISPATCH issue 42 authorized"), "{report}");
+    assert!(
+        issue_dir.exists(),
+        "--dry-run must not remove the directory"
+    );
+}
+
+#[test]
+fn guard_removes_stale_output_only_when_the_patch_is_gone() {
+    let harness = Harness::new("autospec-dispatch-guard-clean");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-7");
+    let debris = issue_dir.join("logs");
+    std::fs::create_dir_all(&debris).expect("debris dir");
+    std::fs::write(debris.join("run.log"), "old run").expect("debris written");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "7",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    let report = stdout(&output);
+    assert!(report.contains("DISPATCH issue 7 authorized"), "{report}");
+    assert!(report.contains("removed stale output"), "{report}");
+    assert!(!issue_dir.exists(), "stale output must be gone");
+
+    // Absent directory: still authorized, and it says so rather than failing.
+    let again = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "7",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(again.status.code(), Some(0), "{}", stdout(&again));
+    assert!(
+        stdout(&again).contains("nothing to remove"),
+        "{}",
+        stdout(&again)
+    );
+}
+
+#[test]
+fn guard_fails_closed_when_the_check_cannot_answer() {
+    let harness = Harness::new("autospec-dispatch-guard-failclosed");
+    let out = guard_out_dir(&harness);
+    // `issue-7` is a regular file, so `issue-7/changes.patch` is a stat error,
+    // not a clean "not found": the check cannot answer. The dispatcher that
+    // read that error as "no patch" is exactly the #3764 failure, so the
+    // guard must hold, not authorize.
+    let issue_file = out.join("issue-7");
+    std::fs::write(&issue_file, "not a directory").expect("file written");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "7",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let line = stdout(&output);
+    assert!(line.contains("DISPATCH issue 7 HELD"), "{line}");
+    assert!(line.contains("check unconverted_patch failed"), "{line}");
+    assert!(
+        line.contains("a check that cannot answer is unsafe"),
+        "{line}"
+    );
+    // And it must not have destroyed the thing it could not inspect.
+    assert!(
+        issue_file.exists(),
+        "a failed check must not authorize removal"
+    );
+}
+
+#[test]
+fn guard_json_reports_the_verdict_and_the_evidence() {
+    let harness = Harness::new("autospec-dispatch-guard-json");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-9");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "9",
+        "--out-dir",
+        &out.display().to_string(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let json = stdout(&output);
+    assert!(json.contains("\"unconverted_patch\""), "{json}");
+    assert!(json.contains("\"dangerous\""), "{json}");
+    assert!(json.contains("\"hold\""), "{json}");
+    assert!(json.contains("changes.patch"), "{json}");
+}
+
+#[test]
+fn guard_rejects_non_numeric_issues_and_traversal_patch_names() {
+    let harness = Harness::new("autospec-dispatch-guard-validation");
+
+    let bad_issue = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "../x",
+        "--out-dir",
+        &harness.temp.display().to_string(),
+    ]);
+    assert_eq!(bad_issue.status.code(), Some(2));
+    assert!(
+        stderr(&bad_issue).contains("positive integer"),
+        "{}",
+        stderr(&bad_issue)
+    );
+
+    let bad_name = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "3",
+        "--out-dir",
+        &harness.temp.display().to_string(),
+        "--patch-name",
+        "../changes.patch",
+    ]);
+    assert_eq!(bad_name.status.code(), Some(2));
+    assert!(
+        stderr(&bad_name).contains("plain file name"),
+        "{}",
+        stderr(&bad_name)
     );
 }
 

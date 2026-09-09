@@ -10,6 +10,11 @@
 //! - `beat` — record liveness for any other hop (file, top-up, dispatch).
 //! - `status` — topology, credential-hosted steps, per-hop liveness, verdict.
 //!   Exit 0 healthy, 1 any hop failed.
+//! - `guard` — the pre-dispatch gate against unconverted output (#3764):
+//!   the dispatch path destroys the issue's output directory, so before it
+//!   does, the guard verifies the directory holds no unconverted patch. A
+//!   check that cannot answer is unsafe, never clear. `--dry-run` reports
+//!   the decision without touching the directory. Exit 0 authorized, 1 hold.
 //!
 //! A cron line for the refresh step is the intended deployment:
 //!
@@ -23,6 +28,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use autospec_core::dispatch_guard::{self, CheckId, CheckReport};
 use autospec_core::dispatch_pipeline::{
     DispatchPipeline, FreshnessPolicy, LivenessLedger, PipelineReport, PipelineTopology, QueueFile,
     DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
@@ -39,6 +45,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     (
         "check",
         "Gate on the queue artifact (exit 0 proceed/idle / 1 hold)",
+    ),
+    (
+        "guard",
+        "Gate on unconverted output before dispatch (#3764)",
     ),
     ("stamp", "Stamp the queue artifact after repopulating it"),
     ("beat", "Record a liveness beat for one hop"),
@@ -58,6 +68,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             Ok(())
         }
         "check" => check(rest),
+        "guard" => guard(rest),
         "stamp" => stamp(rest),
         "beat" => beat(rest),
         "status" => status(rest),
@@ -86,6 +97,10 @@ fn print_help() {
         "    --topology <PATH>     Topology JSON (default: built-in filing-to-dispatch chain)"
     );
     println!("    --step <NAME>         Hop the beat is for (required for beat)");
+    println!("    --issue <N>           Issue the guard checks (required for guard)");
+    println!("    --out-dir <PATH>      Runner output root (default $HOME/.autospec/dispatch/out)");
+    println!("    --patch-name <NAME>   Patch file under issue-<N> (default changes.patch)");
+    println!("    --dry-run             guard: report the decision without touching the directory");
     println!(
         "    --by <NAME>           Producer named in the stamp (default: declared queue producer)"
     );
@@ -119,6 +134,119 @@ fn check(args: &[String]) -> Result<(), CommandFailure> {
     }
 
     verdict_exit(outcome.held())
+}
+
+/// `guard` — the pre-dispatch gate against unconverted output (#3764).
+///
+/// The dispatch path destroys the issue's output directory (`issue-<N>`
+/// under `--out-dir`) before re-dispatching, and this guard is what verifies
+/// the directory holds no unconverted patch. The check fails closed: a `stat`
+/// error is an unsafe answer, never a clear one. Without `--dry-run`, an
+/// authorized dispatch removes the (verified patch-free) directory; a held
+/// dispatch touches nothing.
+fn guard(args: &[String]) -> Result<(), CommandFailure> {
+    let issue = opt_string(args, "--issue")?
+        .ok_or_else(|| CommandFailure::diagnostic("guard needs --issue <N>"))?;
+    validate_issue_number(&issue)?;
+    let out_dir = match opt_string(args, "--out-dir")? {
+        Some(dir) => PathBuf::from(dir),
+        None => autospec_home()?.join("dispatch").join("out"),
+    };
+    let patch_name =
+        opt_string(args, "--patch-name")?.unwrap_or_else(|| "changes.patch".to_string());
+    validate_patch_name(&patch_name)?;
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+
+    let issue_dir = out_dir.join(format!("issue-{issue}"));
+    let patch_path = issue_dir.join(&patch_name);
+    let report = dispatch_guard::decide(
+        &issue,
+        std::slice::from_ref(&check_unconverted_patch(&patch_path)),
+    );
+
+    if super::is_json(args) {
+        println!("{}", report.to_json());
+    } else if dry_run {
+        for line in report.lines() {
+            println!("{line}");
+        }
+    } else {
+        println!("{}", report.line());
+        if !report.held() {
+            // The guard verified the directory holds no unconverted patch;
+            // whatever remains is stale debris, and removing it is what
+            // `rm -rf issue-<N>` was always for.
+            match fs::remove_dir_all(&issue_dir) {
+                Ok(()) => println!("removed stale output {}", issue_dir.display()),
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    println!("nothing to remove: {} is absent", issue_dir.display())
+                }
+                Err(error) => {
+                    return Err(CommandFailure::diagnostic(format!(
+                        "guard authorized dispatch but stale output could not be removed: {error}"
+                    )));
+                }
+            }
+        }
+    }
+    if report.held() {
+        return Err(CommandFailure::status(String::new(), HOLD_EXIT));
+    }
+    Ok(())
+}
+
+/// The unconverted-patch check, run against the local filesystem.
+///
+/// `symlink_metadata` on purpose: the question is whether the *artifact*
+/// exists at its path, not what it points at — a symlink is unconverted
+/// output too. Anything that is not a clean "not found" (permission errors,
+/// the path component not being a directory, I/O errors) is a failed check:
+/// a check that cannot answer is unsafe, never clear.
+fn check_unconverted_patch(patch_path: &Path) -> CheckReport {
+    match fs::symlink_metadata(patch_path) {
+        Ok(_) => CheckReport::dangerous(
+            CheckId::UnconvertedPatch,
+            Some(patch_path.display().to_string()),
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => CheckReport::clear(
+            CheckId::UnconvertedPatch,
+            Some(patch_path.display().to_string()),
+        ),
+        Err(error) => CheckReport::failed(
+            CheckId::UnconvertedPatch,
+            format!("stat {}: {error}", patch_path.display()),
+        ),
+    }
+}
+
+/// Issue numbers name a path component (`issue-<N>`); keep them numeric so
+/// they cannot traverse.
+fn validate_issue_number(issue: &str) -> Result<(), CommandFailure> {
+    match issue.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(()),
+        _ => Err(CommandFailure::diagnostic(format!(
+            "guard --issue must be a positive integer, got '{issue}'"
+        ))),
+    }
+}
+
+/// The patch name sits under a directory the guard may remove, so it must be
+/// a plain file name.
+fn validate_patch_name(name: &str) -> Result<(), CommandFailure> {
+    let safe = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\0')
+        && name
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'));
+    if !safe {
+        return Err(CommandFailure::diagnostic(format!(
+            "guard --patch-name must be a plain file name, got '{name}'"
+        )));
+    }
+    Ok(())
 }
 
 /// `stamp` — write the freshness headers into the artifact and beat for the hop.

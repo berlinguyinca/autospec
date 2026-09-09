@@ -81,6 +81,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec repair-loop record --loop <name> [--expected <id>]... [--repaired <id>]... [--ticket <id=ticket>]... [--state-file <path>]` | no | records one repair sweep; exit 0 idle / 1 repaired / 2 persistent (ALERT) |
 | `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
 | `autospec dispatch check [--queue <path>] [--state-file <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | gate on the queue artifact before dispatching: exit 0 fresh (proceed or genuinely idle) / 1 hold (missing, unstamped, stale, clock rewind) |
+| `autospec dispatch guard --issue <N> [--out-dir <path>] [--patch-name <name>] [--dry-run] [--json]` | yes | pre-dispatch gate on the issue's output directory (#3764): exit 0 no unconverted patch (stale output removed) / 1 hold (patch present, or a check that cannot answer); `--dry-run` reports without touching the directory |
 | `autospec dispatch stamp [--by <name>] [--queue <path>] [--state-file <path>] [--at <epoch>]` | no | the producer's call: writes `# refreshed-at:` / `# refreshed-by:` atomically and beats for its own hop |
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
@@ -110,7 +111,15 @@ future). Exit codes are cron-shaped throughout: `0` ok, `1` hold, `2` diagnostic
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records
 liveness for the other hops (`file-issue`, `topup`, `dispatch-agent`) into
-`~/.autospec/dispatch-liveness.json`. `status` reports the declared topology — the
+`~/.autospec/dispatch-liveness.json`. `guard --issue <N>` is the pre-dispatch gate on the
+issue's output directory (`<out-dir>/issue-<N>`, default `~/.autospec/dispatch/out`): the
+dispatch path removes that directory before re-dispatching, and the guard verifies the
+removal is safe by checking it holds no unconverted patch (`changes.patch` by default).
+The check fails closed — a `stat` error is an unsafe answer, never a clear one, and a
+missing check holds the dispatch — so the #3764 failure (an unanswerable existence check
+read as "no patch", and the directory destroyed anyway) is now a `HELD` verdict. Without
+`--dry-run`, an authorized guard removes the verified patch-free directory; a held guard
+touches nothing. `status` reports the declared topology — the
 built-in filing-to-dispatch chain unless `--topology` points at a JSON file with a
 `{"steps": [...]}` array, whose `host` is one of `authenticated`, `shared-cluster`,
 `ephemeral-session`, `credential` one of `none`, `gh-token`, and `schedule` either
