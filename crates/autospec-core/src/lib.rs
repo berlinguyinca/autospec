@@ -49,6 +49,7 @@ pub mod runtime_env;
 pub mod runtime_policy;
 pub mod safety;
 pub mod spec;
+pub mod spec_authority;
 pub mod staged_spec;
 pub mod state;
 pub mod validation;
