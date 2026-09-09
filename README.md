@@ -262,6 +262,24 @@ project resolve --repo-dir "$PWD"`, the bounded `autospec project onboard --repo
 command, and `autospec project sync --repo-dir "$PWD"`. Autospec does not delete or rewrite the
 legacy file, and `--apply-boards` continues to consume it independently.
 
+### Spec portfolios
+
+A frozen multi-repository plan manifest (`autospec.portfolio-plan.v1`) moves through one public
+transaction — the verified primary Project always precedes issue admission:
+
+```bash
+autospec portfolio validate --manifest plan.yml [--dry-run] [--state-dir PATH] [--portfolio ID] [--project-owner OWNER]
+autospec portfolio apply --manifest plan.yml --portfolio ID --state-dir PATH [--dry-run] [--project-owner OWNER]
+autospec portfolio reconcile --manifest plan.yml --portfolio ID --state-dir PATH [--project-owner OWNER]
+```
+
+Every invocation prints the bound Project URL before any issue URL and ends with one stable
+JSON result whose `result` is `complete`, `blocked`, or `degraded`. `validate --dry-run`
+certifies zero mutations against an existing journal, `apply --dry-run` reads state without
+creating anything, and an explicit `--project-owner` is carried through unchanged — it never
+falls back to another owner. Duplicate flags are rejected, and a manifest whose frozen fields
+were edited is blocked on the plan digest before any state is touched.
+
 ## Install
 
 For day-to-day use, install the latest `main` version on macOS/Linux:
