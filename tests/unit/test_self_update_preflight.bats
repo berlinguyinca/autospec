@@ -367,14 +367,70 @@ CURLSHIM
 # Scenario 7 — Lock contention: lock dir already held → WARN, exit 0
 # ---------------------------------------------------------------------------
 
-@test "lock contention: WARN logged, exit 0" {
+@test "lock contention, fresh lock with no owner: grace-window skip WARN, exit 0" {
     mkdir -p "$HOME/.autospec/.update.lock.d"   # simulate lock already held
     # Shim curl to fail loudly if invoked — should never get past the lock.
     printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
     chmod +x "$SHIMDIR/curl"
     _run_block_shimmed
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q "WARN:"
+    # Honest skip: the message reports what was observed (no live owner),
+    # not an inferred "concurrent run" (#3937).
+    echo "$output" | grep -q "no live owner found"
+    echo "$output" | grep -q "write-grace window"
+    ! echo "$output" | grep -q "UNEXPECTED"
+}
+
+@test "lock contention, live owner: verified-concurrent skip WARN, exit 0" {
+    mkdir -p "$HOME/.autospec/.update.lock.d"   # simulate lock already held
+    # $$ is this test's own shell — a verified-live owner PID.
+    printf '%s %s %s\n' "$$" "$(date -u +%s)" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+        > "$HOME/.autospec/.update.lock.d/owner"
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "concurrent update in progress"
+    echo "$output" | grep -q "live PID $$"
+    ! echo "$output" | grep -q "UNEXPECTED"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 9 — Stale throttle stamp: loud WARN, not silent (issue #3937)
+# ---------------------------------------------------------------------------
+
+@test "stale throttle stamp (4 days): loud WARN before the update attempt" {
+    mkdir -p "$HOME/.autospec"
+    date -u -v-96H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '4 days ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    # Network is down, but the alarm must fire regardless of update outcome.
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "self-update has not completed"
+    echo "$output" | grep -q -- "--doctor"
+    echo "$output" | grep -q "WARN: self-update skipped (network)"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 10 — Version drift: throttled skip is not silent (issue #3937)
+# ---------------------------------------------------------------------------
+
+@test "throttled skip with installed/remote drift: drift WARN on stderr" {
+    mkdir -p "$HOME/.autospec"
+    date -u -v-1H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "installed-1" > "$HOME/.autospec/installed-version"
+    echo "remote-2" > "$HOME/.autospec/remote-version"
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "installed suite is stale"
+    echo "$output" | grep -q "remote-2"
     ! echo "$output" | grep -q "UNEXPECTED"
 }
 
@@ -400,8 +456,30 @@ CURLSHIM
 
     _run_block_shimmed
     [ "$status" -eq 0 ]
-    ! echo "$output" | grep -q "WARN:"
+    if echo "$output" | grep -q "WARN:"; then
+        fail "unexpected WARN on a clean up-to-date no-op: $output"
+    fi
     ! echo "$output" | grep -q "\[autospec\]"
+}
+
+@test "throttled skip with matching installed/remote: no drift WARN" {
+    mkdir -p "$HOME/.autospec"
+    date -u -v-1H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "same-1" > "$HOME/.autospec/installed-version"
+    echo "same-1" > "$HOME/.autospec/remote-version"
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    if echo "$output" | grep -q "installed suite is stale"; then
+        fail "drift WARN emitted although installed == remote: $output"
+    fi
+    if echo "$output" | grep -q "WARN:"; then
+        fail "unexpected WARN on a throttled in-sync skip: $output"
+    fi
+    ! echo "$output" | grep -q "UNEXPECTED"
 }
 
 @test "up-to-date self-update heals stale autonomous wrapper before remote no-op" {

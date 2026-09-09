@@ -163,8 +163,46 @@ and the round-trip cost would double user wait time on every refresh.
 ### 3.5 Concurrency
 
 Cross-skill races (e.g. `/autospec-listen` and `/autospec` running at once) are serialized by
-atomically creating `~/.autospec/.update.lock.d`, which is portable to macOS. If the lock directory
-already exists, the loser fails open with a one-line WARN.
+atomically creating `~/.autospec/.update.lock.d`, which is portable to macOS.
+
+**Owner file and stale reclamation (issue #3937).** A bare `mkdir` marker cannot distinguish
+a live concurrent run from a lock left behind by a crashed process — one such orphan
+silently disabled self-update for 18 days. The holder now writes an owner file
+`~/.autospec/.update.lock.d/owner` containing `<pid> <epoch> <iso>` immediately after the
+`mkdir` succeeds. The acquire loop then classifies the lock:
+
+| Observed state                                   | Action |
+|--------------------------------------------------|--------|
+| owner PID alive, age < 1800s                     | skip — WARN names the live PID and the lock age (verified concurrent run) |
+| no owner file, age < 30s                         | skip — WARN states no live owner was found and that the window is the write-grace gap between `mkdir` and the owner write |
+| owner PID dead (or no owner past grace)          | reclaim — WARN states the lock age and that the owner is not running; remove and re-`mkdir` |
+| age ≥ 1800s (`LOCK_STALE_SECS`)                  | reclaim regardless of PID (a wedged live holder must not block updates for days) |
+
+Reclamation is bounded to 3 attempts (1s apart); on exhaustion the preflight fails open with a
+WARN carrying the full observed state. Every skip message reports what was *observed* (PID
+liveness, owner presence, age), never an inferred "concurrent run" that may not exist.
+
+### 3.6b Doctor mode
+
+`autospec-startup-self-update.sh --doctor [--clear-stale-lock]` is an operator-invoked, out-of-band
+health check that inspects preflight state without performing an update:
+
+- **lock** — present/absent; if present, the lock age, owner PID liveness, and whether the lock
+  is stale per the §3.5 thresholds.
+- **throttle stamp** — `last-update-check` age; flagged STALE when older than 3× the 86400s
+  interval (the same alarm the preflight emits persistently on stderr).
+- **version drift** — `installed-version` vs last-seen `remote-version`; flagged when they differ.
+- **last failure** — timestamp and installer exit code from `last-update-failure.json`, if any.
+
+Exit code: 0 healthy, 1 when any finding is reported. `--clear-stale-lock` removes a lock that
+the doctor classifies as stale and resolves that finding. The doctor bypasses
+`AUTOSPEC_NO_SELF_UPDATE` — it is a repair diagnostic, not an update attempt.
+
+The preflight itself also gained two observability behaviors (issue #3937): when the
+`last-update-check` stamp is older than 3× the interval it emits a persistent stderr alarm
+pointing at `--doctor` *before* attempting the update; and when the daily throttle skips the
+update but the installed version differs from the last-seen remote version, it emits a drift
+WARN instead of failing silently.
 
 ### 3.6 Spec-PR auto-merge authority
 
@@ -201,6 +239,7 @@ delivery train.
 | `~/.autospec/last-update-failure.json`    | failure evidence JSON     | failed installer        | start + status          |
 | `~/.autospec/self-update.log{,.1}`        | bounded diagnostic text   | installer attempt       | operator                |
 | `~/.autospec/.update.lock.d`              | directory lock            | preflight                | preflight               |
+| `~/.autospec/.update.lock.d/owner`        | `<pid> <epoch> <iso>\n`   | lock holder              | preflight + `--doctor`  |
 
 All state is user-local (`$HOME`-rooted), zero-byte safe (missing →
 "first run"), and survives across sessions.
@@ -218,7 +257,11 @@ guard, so a later invocation can retry. There is no in-process retry or re-exec.
 | Network down / DNS fail           | `WARN: self-update skipped (network); continuing on installed`    |
 | GitHub API 5xx / 429              | `WARN: self-update skipped (api rc=N); continuing on installed`   |
 | installer non-zero exit           | persist record/log; WARN with both paths; continue installed       |
-| lock directory contended          | `WARN: self-update skipped (concurrent update in progress)`       |
+| lock held by verified live PID    | `WARN: self-update skipped; lock held since <iso> by live PID <pid> (age <age>s; concurrent update in progress)` |
+| lock held, no owner, < 30s old     | `WARN: self-update skipped; ... no live owner found (within 30s write-grace window; presumed concurrent)` |
+| stale lock (dead/absent owner)    | `WARN: reclaiming stale update lock: held since <iso>, age <age>s (...)`; update proceeds on the reclaimed lock |
+| stale throttle stamp (> 3× 24h)   | `WARN: self-update has not completed in <age>s (...)`; persistent stderr alarm, update still attempted |
+| throttled skip with version drift | `WARN: installed-version ... differs from last-seen remote-version ...; installed suite is stale` |
 | State receipt publication fails  | WARN with failed path; keep old receipt; no success timestamp/banner |
 | Successful no-op (already current)| no WARN, no banner                                                |
 | Successful update applied         | `[autospec] updated <old> → <new> (<harnesses>)`                  |
@@ -266,7 +309,13 @@ sandboxed `$HOME` (using a temp dir), and exercises:
 | Installer diagnostics            | failing installer emits output                     | bounded log + durable JSON        |
 | Failed installer retry           | run the same failing attempt twice                 | no 24h suppression; log rotates   |
 | Installed receipt rename fails   | selective failing `mv`                             | old receipt; no timestamp/banner  |
-| Lock contention                  | pre-create the portable lock directory             | WARN logged, exit 0               |
+| Lock contention, fresh + live owner | pre-create lock with owner file holding a live PID | skip WARN names live PID; exit 0  |
+| Lock contention, fresh + no owner | pre-create the portable lock directory             | grace-window skip WARN; exit 0    |
+| Stale lock reclamation           | pre-create backdated lock with dead/absent owner   | reclaim WARN; update proceeds     |
+| Stale throttle stamp             | `last-update-check` set to `now - 4d`              | loud alarm WARN, update proceeds  |
+| Version drift on throttle        | throttled; installed ≠ remote version              | drift WARN, exit 0                |
+| Doctor healthy                   | fresh state, `--doctor`                            | exit 0, `doctor: healthy`         |
+| Doctor findings                  | stale lock / stale stamp / drift / failure record  | exit 1, finding line(s)           |
 | Up-to-date no-op                 | `installed-version` matches stub remote            | no WARN, no banner                |
 
 Rust CLI tests additionally require explicit `toolchain` JSON fields from `status` and `list`, a
@@ -311,7 +360,7 @@ Two doc updates:
   explaining auto-update, the 24h cadence, and the `AUTOSPEC_NO_SELF_UPDATE`
   opt-out. One sentence in the FAQ.
 - **AGENTS.md**: a new `## Startup self-update` heading codifying the
-  fail-open contract and the opt-out env var, mirroring the existing
+  fail-open contract, the opt-out env var, and the `--doctor` mode, mirroring the existing
   `## Auto-merge authority` heading style.
 
 ## 9. Decomposition outline
