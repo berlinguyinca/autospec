@@ -1,9 +1,9 @@
 [
   {
-    "file": "crates/autospec-cli/src/commands/autonomous.rs",
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/repair_implementation.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Subcommand dispatch matches on CLI verb strings supplied by the operator; these are the command surface, not a domain representation."
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds harness-marker and command-output assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split path."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous/accountability.rs",
