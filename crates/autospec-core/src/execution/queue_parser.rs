@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::state::json::JsonValue;
 
 use super::queue::{
-    FailureKind, QueueEntry, QueueStatus, QueueValidationResult, QueueValidationStatus,
-    LEGACY_QUEUE_SCHEMA,
+    is_spec_sha256, FailureKind, QueueEntry, QueueStatus, QueueValidationResult,
+    QueueValidationStatus, SpecDigest, LEGACY_QUEUE_SCHEMA, QUEUE_SCHEMA,
 };
 
 pub(super) fn parse_entry(value: JsonValue, schema: u64) -> Result<QueueEntry, String> {
@@ -21,6 +21,7 @@ pub(super) fn parse_entry(value: JsonValue, schema: u64) -> Result<QueueEntry, S
         updated_at: fields.updated_at,
         validation: fields.validation,
         agent_result_ids: fields.agent_result_ids,
+        spec_digest: fields.spec_digest,
     })
 }
 
@@ -38,21 +39,15 @@ fn validate_entry_keys(object: &BTreeMap<String, JsonValue>, schema: u64) -> Res
     if schema == LEGACY_QUEUE_SCHEMA {
         require_keys(object, &expected, "queue entry")?;
     } else {
-        require_keys(
-            object,
-            &[
-                "spec_id",
-                "status",
-                "attempts",
-                "failure_kind",
-                "blocker",
-                "started_at",
-                "updated_at",
-                "validation",
-                "agent_result_ids",
-            ],
-            "queue entry",
-        )?;
+        let mut current = expected
+            .iter()
+            .chain(std::iter::once(&"agent_result_ids"))
+            .copied()
+            .collect::<Vec<_>>();
+        if schema == QUEUE_SCHEMA {
+            current.push("spec_digest");
+        }
+        require_keys(object, &current, "queue entry")?;
     }
     Ok(())
 }
@@ -67,6 +62,7 @@ struct EntryFields {
     updated_at: u64,
     validation: Option<QueueValidationResult>,
     agent_result_ids: Vec<String>,
+    spec_digest: Option<SpecDigest>,
 }
 
 fn take_entry_fields(
@@ -95,6 +91,11 @@ fn take_entry_fields(
             .map(|value| value.into_string("agent_result_id"))
             .collect::<Result<Vec<_>, _>>()?
     };
+    let spec_digest = if schema == QUEUE_SCHEMA {
+        parse_spec_digest(take(object, "spec_digest", "queue entry")?)?
+    } else {
+        None
+    };
     Ok(EntryFields {
         spec_id,
         status,
@@ -105,7 +106,26 @@ fn take_entry_fields(
         updated_at,
         validation,
         agent_result_ids,
+        spec_digest,
     })
+}
+
+fn parse_spec_digest(value: JsonValue) -> Result<Option<SpecDigest>, String> {
+    match value {
+        JsonValue::Null => Ok(None),
+        value => {
+            let mut object = value.into_object("spec_digest")?;
+            require_keys(&object, &["bytes", "sha256"], "spec_digest")?;
+            let bytes =
+                take(&mut object, "bytes", "spec_digest")?.into_number("spec_digest bytes")?;
+            let sha256 =
+                take(&mut object, "sha256", "spec_digest")?.into_string("spec_digest sha256")?;
+            if !is_spec_sha256(&sha256) {
+                return Err("spec_digest sha256 must be 64 lowercase hex characters".to_string());
+            }
+            Ok(Some(SpecDigest { bytes, sha256 }))
+        }
+    }
 }
 
 fn optional_validation(value: JsonValue) -> Result<Option<QueueValidationResult>, String> {
