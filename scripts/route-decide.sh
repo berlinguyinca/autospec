@@ -42,7 +42,12 @@
 #     (ctx and reasoning); effective cost only orders profiles that already fit.
 #   * Cold-start exploration is OFF by default and, when enabled, is confined to
 #     the lowest-stakes cell. An unproven profile is never explored on real work
-#     it could damage.
+#     it could damage. The triviality floor (R6) guards that same cell from the
+#     other direction: a local profile is eligible there only when the ledger
+#     shows it strictly faster than the baseline on that cell. The floor lives
+#     in routing-cost.sh next to the latency ceiling; this script only hands it
+#     the baseline via --baseline. Exploration is not floored — it is the
+#     evidence-gathering path that lifts the floor.
 #
 # Usage:
 #   route-decide.sh --labels "<comma-separated-issue-labels>"
@@ -361,6 +366,9 @@ fi
 # ── score and decide ──────────────────────────────────────────────────────────
 _cost_args="--kind $KIND --ctx $_cell_ctx --reasoning $_cell_reasoning --candidates $candidates"
 if [ -n "$STATS_FILE" ]; then _cost_args="$_cost_args --stats-file $STATS_FILE"; fi
+# The triviality floor needs the baseline to compare measured latency against;
+# no baseline (unresolvable selector) means no latency win, so the floor holds.
+if [ -n "$baseline_profile" ]; then _cost_args="$_cost_args --baseline $baseline_profile"; fi
 
 # shellcheck disable=SC2086
 scored="$(AUTOSPEC_MODEL_PROFILES="$PROFILES_FILE" bash "$SCRIPT_DIR/routing-cost.sh" $_cost_args 2>/dev/null || printf '[]')"

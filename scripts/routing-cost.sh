@@ -12,6 +12,7 @@
 #   effective_cost = unit_cost * (1 + E[retries]) * cache_penalty
 #                  + P(escalate) * advisor_unit_cost
 #                  + P(fail)     * fallback_unit_cost
+#                  + cost_minute * E[measured wall-clock minutes]   (local only)
 #
 # Rate estimation is Bayesian-smoothed exactly as explore-source-weights.sh does
 # (alpha pseudo-count toward a prior) so small-N cells are not overconfident and
@@ -46,16 +47,36 @@
 # A profile with NO cost keys is NOT scoreable and is reported ineligible, so the
 # caller falls back to its existing choice rather than guessing a price.
 #
+# Wall clock is part of the price, not a footnote (R6). The ten-GPU-minute unit
+# above is a PRIOR; on top of it every profile pays cost_minute x its MEASURED
+# mean wall-clock minutes on this cell, so a local model that is cheap per
+# minute but takes ten times the baseline's time cannot masquerade as cheap.
+# The term is 0 for cloud profiles (they carry no per-minute rate — inventing
+# one would be guessing a price) and 0 when the ledger has no wall-clock data,
+# so "no data" still means "no change".
+#
+# The TRIVIALITY FLOOR is the matching guard on the other end (R6): in the
+# lowest-stakes cell (ctx 32k + reasoning shallow) the work is small enough that
+# a local dispatch's startup, eviction and ceiling risk is not worth taking, so
+# a local profile is eligible there only when the ledger shows it is STRICTLY
+# faster than the baseline on that same cell (passed with --baseline). Without
+# data the floor stays up. It mirrors the latency ceiling: the ceiling bounds
+# how slow a profile may be, the floor decides whether the task is worth it at
+# all. The floor does not block cold-start exploration, which is the evidence-
+# gathering path that eventually lifts it.
+#
 # Usage:
 #   routing-cost.sh --kind <dispatch_kind> --ctx <32k|64k|120k>
 #                   --reasoning <shallow|medium|deep>
 #                   --candidates <p1,p2,...>
 #                   [--profiles-file <path>] [--stats-file <path>]
+#                   [--baseline <profile>]
 #                   [--alpha N] [--min-samples N] [--floor F] [--json|--explain]
 #
 # Output (--json): array sorted by effective_cost ascending, each entry
 #   {profile, unit_cost, n, first_pass_rate, mean_retries, escalation_rate,
-#    cache_hit_ratio, effective_cost, eligible, reason}
+#    cache_hit_ratio, effective_cost, eligible, reason,
+#    is_local, trivial_floor, latency_win}
 #
 # Environment:
 #   AUTOSPEC_MODEL_PROFILES        profile catalog (default ~/.autospec/model-profiles.yml)
@@ -91,7 +112,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROFILES_FILE="${AUTOSPEC_MODEL_PROFILES:-$HOME/.autospec/model-profiles.yml}"
 STATS_FILE=""
-KIND=""; CTX=""; REASONING=""; CANDIDATES=""
+KIND=""; CTX=""; REASONING=""; CANDIDATES=""; BASELINE=""
 ALPHA="${AUTOSPEC_ROUTING_ALPHA:-5}"
 MIN_SAMPLES="${AUTOSPEC_ROUTING_MIN_SAMPLES:-10}"
 FLOOR="${AUTOSPEC_ROUTING_FIRST_PASS_FLOOR:-0.6}"
@@ -111,6 +132,7 @@ while [ $# -gt 0 ]; do
         --candidates)    CANDIDATES="${2:-}"; shift 2 ;;
         --profiles-file) PROFILES_FILE="${2:-}"; shift 2 ;;
         --stats-file)    STATS_FILE="${2:-}"; shift 2 ;;
+        --baseline)      BASELINE="${2:-}"; shift 2 ;;
         --alpha)         ALPHA="${2:-}"; shift 2 ;;
         --min-samples)   MIN_SAMPLES="${2:-}"; shift 2 ;;
         --floor)         FLOOR="${2:-}"; shift 2 ;;
@@ -192,12 +214,21 @@ result="$(jq -n \
     --argjson catalog "$catalog_json" \
     --argjson stats "$stats_json" \
     --arg kind "$KIND" --arg ctx "$CTX" --arg reasoning "$REASONING" \
+    --arg baseline "$BASELINE" \
     --argjson alpha "$ALPHA" --argjson min_samples "$MIN_SAMPLES" \
     --argjson floor "$FLOOR" --argjson cache_beta "$CACHE_BETA" \
     --argjson max_wall_ms "$MAX_WALL_MS" --argjson cloud_mult "$CLOUD_MULT" \
     --argjson prefix_tokens "$PREFIX_TOKENS" '
     def cell($p): ($stats | map(select(
         .dispatch_kind == $kind and .profile == $p and
+        .cell_ctx == $ctx and .cell_reasoning == $reasoning)) | first);
+
+    # The baseline is the profile the decision falls back to when nothing
+    # overrides it. The triviality floor compares the measured latency of a
+    # local profile against that of the baseline on this very cell; no
+    # baseline row, or no measured wall clock, means no win, so the floor holds.
+    def bcell: ($stats | map(select(
+        .dispatch_kind == $kind and .profile == $baseline and
         .cell_ctx == $ctx and .cell_reasoning == $reasoning)) | first);
 
     # A dispatch is ~1 unit of work; price it per-dispatch so cloud (per-token)
@@ -238,7 +269,17 @@ result="$(jq -n \
             (($catalog[.profile] // {}).cache_min_tokens) as $floor_tok
             | ($prefix_tokens > 0 and $floor_tok != null and $prefix_tokens < $floor_tok)),
           mean_wall_clock_ms: (.row.mean_wall_clock_ms // 0),
-          wall_clock_ceiling_ms: ((($catalog[.profile] // {}).max_wall_clock_ms) // $max_wall_ms)
+          wall_clock_ceiling_ms: ((($catalog[.profile] // {}).max_wall_clock_ms) // $max_wall_ms),
+          is_local: ((($catalog[.profile] // {}).cost_minute) != null),
+          # Triviality floor (R6): this profile is a local one sitting on the
+          # lowest-stakes cell, so it must earn its way in with a measured
+          # latency win. No data -> no win -> floor holds.
+          trivial_floor: (($ctx == "32k" and $reasoning == "shallow")
+                          and ((($catalog[.profile] // {}).cost_minute) != null)),
+          # STRICT: both means measured, local strictly faster than baseline.
+          latency_win: (((.row.mean_wall_clock_ms // 0) > 0)
+                        and ((((bcell // {}).mean_wall_clock_ms) // 0)
+                             > ((.row.mean_wall_clock_ms) // 0)))
         })
       | map(. + { cache_penalty: (1 + ($cache_beta * (1 - .cache_hit_ratio))) })
     ) as $scored
@@ -250,17 +291,24 @@ result="$(jq -n \
             else (.unit * (1 + .mean_retries) * .cache_penalty)
                  + (.escalation_rate * ($strongest // .unit))
                  + (.failure_rate * ($strongest // .unit))
+                 # Wall clock is priced (R6): cost_minute x measured mean
+                 # minutes. 0 for cloud profiles and 0 with no ledger data.
+                 + (((($catalog[.profile] // {}).cost_minute) // 0)
+                    * (.mean_wall_clock_ms / 60000))
             end)
         })
       | map(. + {
           eligible: (
             .unit != null and .effective_cost != null and
             .n >= $min_samples and .first_pass_rate >= $floor and
+            (if .trivial_floor then .latency_win else true end) and
             (.wall_clock_ceiling_ms == 0 or .mean_wall_clock_ms <= .wall_clock_ceiling_ms)),
           reason: (
             if .unit == null then "no cost keys in profile catalog"
             elif .n < $min_samples then "insufficient samples (\(.n)/\($min_samples))"
             elif .first_pass_rate < $floor then "first-pass rate \(.first_pass_rate) below floor \($floor)"
+            elif .trivial_floor and (.latency_win | not)
+              then "triviality floor: local profile on 32k/shallow without a measured latency win over the baseline"
             elif (.wall_clock_ceiling_ms != 0 and .mean_wall_clock_ms > .wall_clock_ceiling_ms)
               then "mean wall clock \(.mean_wall_clock_ms)ms exceeds ceiling \(.wall_clock_ceiling_ms)ms"
             else "" end)

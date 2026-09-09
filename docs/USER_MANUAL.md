@@ -476,7 +476,10 @@ recommendation and the reason for it on stderr, without dispatching anything.
   tier — the same fail-closed contract `select-model-profile.sh` uses.
 - `scripts/routing-cost.sh ... --explain` shows the per-candidate arithmetic:
   sample count, unit cost, expected retries, escalation rate, cache penalty, and
-  the resulting effective cost.
+  the resulting effective cost. For local profiles the effective cost also prices
+  measured wall clock at the profile's `cost_minute` rate, and on the trivial
+  `ctx:32k` + `reasoning:shallow` cell a local profile is only eligible with a
+  measured latency win over the baseline (the triviality floor).
 - `scripts/routing-ledger.sh --stats` shows what the decisions are being learned
   from, per dispatch kind and routing cell.
 
