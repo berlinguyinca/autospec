@@ -58,6 +58,13 @@ RULE_IDs enforced (deterministic detectors):
   MOCK_DB           mock/stub near DB-symbol in test diff hunks.
   DOC_OUT_OF_SYNC   Public-surface change (CLI flag/env var/exported func/config key)
                     without a touched doc file (README*, AGENTS.md, docs/**, SKILL.md).
+  BATS_SUITE_UNREGISTERED  (pre-commit mode only) Staged .bats file under
+                    tests/unit/ or tests/lint/ owned by no validate check. Register it as a
+                    typed ExternalCheck::BatsSuite owner in
+                    crates/autospec-core/src/validation/catalog.rs or add its path to
+                    BATS_REGISTRATION_BASELINE in
+                    crates/autospec-core/src/validation/external/bats_registration_baseline.rs.
+                    Suites at tests/ root need no registration (#3919).
   VACUOUS_GREP_INVERSE_OR_TRUE  grep -qv ... || true — always passes; assertion is a no-op.
   VACUOUS_OR_TRUE               || true at end of any test assertion line — masks failures.
   VACUOUS_TAUTOLOGY             expect(true).toBe(true), assert(1===1), assert True, xit(...).
@@ -1158,6 +1165,62 @@ $diff_files
 EOF
 }
 
+# ── BATS_SUITE_UNREGISTERED detector (#3919) ─────────────────────────────────
+# Bats suites at the root of tests/ need no registration; suites under
+# tests/unit/ or tests/lint/ are the exception — run_bats_suite_registration
+# (crates/autospec-core/src/validation/external.rs) fails conversion on any
+# suite owned by no typed ExternalCheck::BatsSuite check in
+# crates/autospec-core/src/validation/catalog.rs and absent from
+# BATS_REGISTRATION_BASELINE. This gate surfaces the same rule while the suite
+# is still staged, so the agent registers it in the same commit instead of
+# losing the patch at conversion.
+#
+# Pre-commit mode only: in diff-file / PR modes the checkout is a clean main,
+# so the authoritative scan at conversion owns those paths.
+
+# bats_suite_added_paths — print the b-paths of .bats files under tests/unit/
+# or tests/lint/ that the diff newly adds or renames in (deletions and plain
+# edits are not this gate's concern; a moved-in suite is).
+bats_suite_added_paths() {
+    awk '
+        function emit() {
+            if (path != "" && (is_new || renamed) && path ~ /^tests\/(unit|lint)\/.*\.bats$/) print path
+        }
+        /^diff --git / { emit(); path = $NF; sub(/^b\//, "", path); is_new = 0; renamed = 0; next }
+        /^--- \/dev\/null$/ { is_new = 1; next }
+        /^rename to / { renamed = 1 }
+        END { emit() }
+    '
+}
+
+# bats_suite_registered SUITE — 0 when the staged tree registers SUITE as a
+# typed catalog owner or a BATS_REGISTRATION_BASELINE entry (the quoted path
+# literal is what both registration forms produce).
+bats_suite_registered() {
+    git grep --cached -q -F -e "\"$1\"" \
+        -- 'crates/autospec-core/src/validation/' 2>/dev/null
+}
+
+detect_bats_suite_registration() {
+    [ "$PRE_COMMIT" -eq 1 ] || return 0
+    # Only the autospec repository has a registry to cross-reference; the Rust
+    # gate fails open on the same marker.
+    [ -d "crates/autospec-core/src/validation" ] || return 0
+
+    local suite added
+    added="$(bats_suite_added_paths < "$TMP_DIFF")"
+    [ -n "$added" ] || return 0
+
+    while IFS= read -r suite; do
+        [ -n "$suite" ] || continue
+        if bats_suite_registered "$suite"; then
+            continue
+        fi
+        emit_capped BATS_SUITE_UNREGISTERED "$suite" 0 \
+            "bats suite under tests/unit or tests/lint is owned by no validate check; register it as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs — suites at tests/ root need no registration"
+    done <<< "$added"
+}
+
 # ── §3.1 VACUOUS_* detectors ─────────────────────────────────────────────────
 # Detects 8 vacuous-test patterns where assertions always pass regardless of behavior.
 # Active when --vacuous-assertions or --pre-commit flag is set.
@@ -1608,6 +1671,7 @@ rule_directive() {
         REINVENT_REPO_UTIL) printf 'Reuse the existing helper found in scripts/ instead of re-implementing the same function.' ;;
         NEW_DEP_UNJUSTIFIED) printf "Add a '# why: <reason>' comment in the same diff hunk justifying this new dependency." ;;
         NEW_ABSTRACTION_SINGLE_CALLER) printf 'Inline this abstraction — with only one caller, the named wrapper adds indirection without value.' ;;
+        BATS_SUITE_UNREGISTERED) printf 'Register the new bats suite as a typed ExternalCheck::BatsSuite owner in crates/autospec-core/src/validation/catalog.rs, or add its path to BATS_REGISTRATION_BASELINE in crates/autospec-core/src/validation/external/bats_registration_baseline.rs; suites at tests/ root need no registration.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -1632,6 +1696,7 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_todo_left
         detect_mock_db
         detect_doc_out_of_sync
+        detect_bats_suite_registration
         if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
             detect_vacuous_assertions
         fi
@@ -1674,6 +1739,7 @@ else
     detect_todo_left
     detect_mock_db
     detect_doc_out_of_sync
+    detect_bats_suite_registration
     if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
         detect_vacuous_assertions
     fi
