@@ -29,6 +29,7 @@ pub mod dispatch_pipeline;
 pub mod error;
 pub mod evaluation;
 pub mod evidence;
+pub mod evidence_fidelity;
 pub mod execution;
 pub mod explore;
 pub mod failure_signatures;
