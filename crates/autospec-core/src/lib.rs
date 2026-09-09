@@ -33,6 +33,7 @@ pub mod explore;
 pub mod failure_signatures;
 pub mod fleet_dispatch;
 pub mod gate_provenance;
+pub mod grading;
 pub mod graph;
 pub mod growth;
 pub mod initiative;

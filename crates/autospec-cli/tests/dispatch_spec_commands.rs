@@ -363,6 +363,156 @@ fn staging_records_an_explicit_environment_over_the_probe() {
 }
 
 #[test]
+fn staging_carries_the_gate_set_the_patch_is_graded_against() {
+    // The spec the worker reads names the very gates that decide whether the
+    // patch lands (#3925); a run graded against a weaker set is not a run
+    // this spec asked for.
+    let harness = Harness::new("stage-gates");
+    harness.gh_failing();
+    let body = harness.write("body.md", "Body paragraph one.\n");
+    let out = harness.temp.join("gates.md").display().to_string();
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--out",
+        &out,
+        "--staged-at",
+        STAGED_AT,
+        "--no-probe",
+        "--gate",
+        "build=cargo build --workspace",
+        "--gate",
+        "clippy=cargo clippy --workspace --all-targets -- -D warnings",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = read(&out);
+    assert!(
+        text.contains("## Gate set (run before completion)"),
+        "{text}"
+    );
+    assert!(text.contains("- [ ] cargo build --workspace"), "{text}");
+    assert!(
+        text.contains("- [ ] cargo clippy --workspace --all-targets -- -D warnings"),
+        "{text}"
+    );
+    // The JSON output counts the gates the way it counts the comments.
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--no-probe",
+        "--gate",
+        "build=cargo build --workspace",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("\"gates\":1"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn staging_without_gate_flags_stages_no_gate_section() {
+    // No gates named, no section rendered: a spec that names no gates cannot
+    // be graded against one.
+    let harness = Harness::new("stage-gates-none");
+    harness.gh_failing();
+    let body = harness.write("body.md", "Body paragraph one.\n");
+    let out = harness.temp.join("gates-none.md").display().to_string();
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--out",
+        &out,
+        "--staged-at",
+        STAGED_AT,
+        "--no-probe",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = read(&out);
+    assert!(
+        !text.contains("## Gate set"),
+        "gate section staged without gates: {text}"
+    );
+}
+
+#[test]
+fn staging_refuses_a_gate_flag_without_a_command() {
+    // A gate name with no command is a staging-host fault (exit 2), not a
+    // silently weaker set: grading against an unrunnable gate is the drift
+    // this flag exists to close.
+    let harness = Harness::new("stage-gate-malformed");
+    harness.gh_failing();
+    let body = harness.write("body.md", "Body paragraph one.\n");
+    let out = harness.temp.join("gates.md").display().to_string();
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--out",
+        &out,
+        "--no-probe",
+        "--gate",
+        "clippy",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("NAME=COMMAND"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn staging_refuses_duplicate_gate_names() {
+    let harness = Harness::new("stage-gate-duplicate");
+    harness.gh_failing();
+    let body = harness.write("body.md", "Body paragraph one.\n");
+    let out = harness.temp.join("gates.md").display().to_string();
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--out",
+        &out,
+        "--no-probe",
+        "--gate",
+        "test=cargo test --workspace",
+        "--gate",
+        "test=cargo test -p autospec-core",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("appears twice"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn staging_writes_the_default_path_under_the_dispatch_home() {
     let harness = Harness::new("stage-default-path");
     let issue = harness.write("issue.json", &issue_payload());
