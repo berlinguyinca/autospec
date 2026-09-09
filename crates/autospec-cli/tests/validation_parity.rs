@@ -47,9 +47,9 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
     // +2 for the loud-failure verification gates (#3535). The two counts here
     // were left one behind by #3497, which bumped the catalog and runner
     // assertions but not this file; they were back in step at 159/154. The
-    // pipeline-verdict ratchet (#3716) is full-plan only: 160/155.
-    assert_eq!(full.ids().len(), 160);
-    assert_eq!(full.unique_ids().len(), 155);
+    // pipeline-verdict ratchet (#3716) is full-plan only: 161/156.
+    assert_eq!(full.ids().len(), 161);
+    assert_eq!(full.unique_ids().len(), 156);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");
