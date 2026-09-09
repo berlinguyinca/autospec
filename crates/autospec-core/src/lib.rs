@@ -18,6 +18,7 @@ pub mod autonomous {
     pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
+pub mod ci_gate_promotion;
 pub mod claim;
 pub mod code_intel;
 pub mod context;
