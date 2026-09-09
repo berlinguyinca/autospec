@@ -1,4 +1,5 @@
 mod conductor;
+mod dispatch_eligibility;
 mod ready_queue;
 mod repositories;
 
@@ -11,6 +12,12 @@ pub use repositories::{
     parse_repository_routing_input_json, plan_repository_routing, CanonicalTarget,
     DoNotFileRepository, RepositoryEvidence, RepositoryFinding, RepositoryRoutingInput,
     RepositoryRoutingReport, RoutedFinding,
+};
+
+pub use dispatch_eligibility::{
+    evaluate_dispatch_eligibility, is_dispatch_eligible, reconcile, DispatchEligibilityPolicy,
+    EligibilityVerdict, ReconcileError, ReconcileErrorKind, ReconcileInput, ReconcileReport,
+    DISPATCH_ELIGIBILITY_LABEL,
 };
 
 pub use ready_queue::{

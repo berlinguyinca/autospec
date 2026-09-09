@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
+use crate::coordination::dispatch_eligibility::{is_dispatch_eligible, DispatchEligibilityPolicy};
 use crate::state::json::{JsonParser, JsonValue};
 
 mod labels;
@@ -423,6 +424,9 @@ pub fn plan_ready_queue_with_trusted_actors(
         input.policy.batch_size
     };
 
+    // One authoritative dispatch-eligibility predicate (#3771); the label
+    // name lives only in `dispatch_eligibility`.
+    let eligibility_policy = DispatchEligibilityPolicy::default();
     let mut ready: Vec<QueueIssueView> = Vec::new();
     let mut blocked: Vec<QueueIssueView> = Vec::new();
     let mut conflicts: Vec<QueueIssueView> = Vec::new();
@@ -468,7 +472,7 @@ pub fn plan_ready_queue_with_trusted_actors(
             blocked.push(view);
             continue;
         }
-        if !view.issue.has_label("auto-implement") {
+        if !is_dispatch_eligible(&view.issue, &eligibility_policy) {
             view.reason = Some("missing_auto_implement".to_string());
             blocked.push(view);
             continue;
