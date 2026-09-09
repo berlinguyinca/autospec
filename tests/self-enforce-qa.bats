@@ -20,7 +20,7 @@ _fast_repo_root() {
   mkdir -p "$d/scripts" "$d/bin"
   cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
   # every sibling the lint step resolves from REPO_ROOT
-  for extra in lint-path-classifiers.sh lint-restore-visibility.sh; do
+  for extra in lint-path-classifiers.sh lint-restore-visibility.sh lint-scratch-promotion.sh; do
     if [ -f "$REAL_REPO_ROOT/scripts/$extra" ]; then
       cp "$REAL_REPO_ROOT/scripts/$extra" "$d/scripts/$extra"
     fi
@@ -169,7 +169,7 @@ _rv_repo_root() {
   # copy the lint step and every sibling it resolves, so the QA chain gets
   # past steps 1-2 and only the tree scan decides the verdict here
   cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
-  for extra in lint-path-classifiers.sh lint-restore-visibility.sh; do
+  for extra in lint-path-classifiers.sh lint-restore-visibility.sh lint-scratch-promotion.sh; do
     if [ -f "$REAL_REPO_ROOT/scripts/$extra" ]; then
       cp "$REAL_REPO_ROOT/scripts/$extra" "$d/scripts/$extra"
     fi
