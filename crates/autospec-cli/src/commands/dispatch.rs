@@ -4,6 +4,11 @@
 //! Subcommands:
 //! - `check` — the consumer's gate. Reads the queue artifact and refuses to
 //!   call a stale or unstamped queue "no work". Exit 0 proceed/idle, 1 hold.
+//!   With `--admitted-file <PATH>`, an idle queue over admitted work is a fault,
+//!   not silence (#3927).
+//! - `reconcile` — the admission reconciliation: report the count of admitted
+//!   but unschedulable issues; zero is the expected answer, nonzero a failure.
+//!   Exit 0 clean, 1 defect (#3927).
 //! - `stamp` — the producer's call, just before it renames the artifact into
 //!   place: writes `refreshed-at`/`refreshed-by` atomically and beats for the
 //!   producing hop.
@@ -31,7 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autospec_core::dispatch_guard::{self, CheckId, CheckReport};
 use autospec_core::dispatch_pipeline::{
     DispatchPipeline, FreshnessPolicy, LivenessLedger, PipelineReport, PipelineTopology, QueueFile,
-    DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
+    SchedulingReconciliation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
 
 use super::CommandFailure;
@@ -45,6 +50,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
     (
         "check",
         "Gate on the queue artifact (exit 0 proceed/idle / 1 hold)",
+    ),
+    (
+        "reconcile",
+        "Reconciliation: admitted-but-unschedulable issues by count (exit 1 nonzero)",
     ),
     (
         "guard",
@@ -76,6 +85,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             Ok(())
         }
         "check" => check(rest),
+        "reconcile" => reconcile(rest),
         "guard" => guard(rest),
         "stage" => super::dispatch_spec::stage(rest),
         "freshness" => super::dispatch_spec::freshness(rest),
@@ -102,6 +112,7 @@ fn print_help() {
     }
     println!("OPTIONS:");
     println!("    --queue <PATH>        Queue artifact (default $HOME/.autospec/{QUEUE_ARTIFACT})");
+    println!("    --admitted-file <PATH>  check/reconcile: the tracker's admitted set, one issue number per line");
     println!("    --state-file <PATH>   Liveness ledger (default $HOME/.autospec/dispatch-liveness.json)");
     println!(
         "    --topology <PATH>     Topology JSON (default: built-in filing-to-dispatch chain)"
@@ -149,7 +160,15 @@ fn print_help() {
 fn check(args: &[String]) -> Result<(), CommandFailure> {
     let pipeline = build_pipeline(args)?;
     let queue = read_queue(&queue_path(args)?)?;
-    let outcome = pipeline.authorize_queue(queue.as_ref(), eval_now(args)?);
+    let now = eval_now(args)?;
+    let outcome = match opt_string(args, "--admitted-file")? {
+        Some(path) => pipeline.authorize_queue_with_admission(
+            queue.as_ref(),
+            read_admitted(&PathBuf::from(path))?,
+            now,
+        ),
+        None => pipeline.authorize_queue(queue.as_ref(), now),
+    };
 
     if super::is_json(args) {
         println!(
@@ -162,6 +181,48 @@ fn check(args: &[String]) -> Result<(), CommandFailure> {
     }
 
     verdict_exit(outcome.held())
+}
+
+/// `reconcile` — the periodic admission reconciliation (#3927): report the
+/// admitted-but-unschedulable issues by count. Zero is the expected answer; any
+/// other number is a failure. The label set is authoritative and the queue a
+/// derived copy, so a queue entry no longer admitted is reported as stale, never
+/// as the defect.
+fn reconcile(args: &[String]) -> Result<(), CommandFailure> {
+    let admitted_path = opt_string(args, "--admitted-file")?
+        .map(PathBuf::from)
+        .ok_or_else(|| CommandFailure::diagnostic("reconcile needs --admitted-file <PATH>"))?;
+    let admitted = read_admitted(&admitted_path)?;
+    let schedulable = match read_queue(&queue_path(args)?)? {
+        Some(queue) => queue.entries,
+        None => Vec::new(),
+    };
+
+    let recon = SchedulingReconciliation::new(admitted, schedulable);
+    if super::is_json(args) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&recon)
+                .map_err(|error| CommandFailure::diagnostic(error.to_string()))?
+        );
+    } else {
+        println!("{}", recon.line());
+    }
+
+    verdict_exit(recon.is_defect())
+}
+
+/// Read the admitted set: the issue numbers the tracker labels as dispatchable,
+/// one per line (comments and blanks ignored). The file is required — a missing
+/// admitted set is a diagnostic, not an empty one, because the label is the
+/// authoritative gate and an absent label set is not proof there is no work.
+fn read_admitted(path: &Path) -> Result<Vec<u64>, CommandFailure> {
+    let text = fs::read_to_string(path).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot read admitted file {path:?}: {error} (the label set is required)"
+        ))
+    })?;
+    Ok(QueueFile::parse(&text).entries)
 }
 
 /// `guard` — the pre-dispatch gate against unconverted output (#3764).
