@@ -81,8 +81,34 @@
 //!     Conflicting` transition is surfaced in the pass that observes it:
 //!     that is the moment the cheap fix expired, and decay measured by
 //!     age alone is invisible until it is terminal (#3899).
+//! 12. **A build is hermetic and an empty build dies at the builder**
+//!     ([`HermeticBuild`]). The pass once opened a PR whose title and
+//!     body named one patch and whose diff carried another patch's files,
+//!     because the build helper (a) reset the *prior* patch's branch
+//!     while it was still checked out, and (b) checked out the *next*
+//!     patch's branch with the first patch's hunks still staged: `git
+//!     apply --index` had staged them and nothing had committed them, so
+//!     the staged work followed the checkout and committed as the next
+//!     patch's content. The build now issues exactly one checkout form —
+//!     `checkout -B <branch> <base>` — so no prior branch is ever reset
+//!     and every build starts from the base, it refuses to run a checkout
+//!     or stage a patch over a staged or dirty index
+//!     ([`HermeticBuild::checkout`], [`HermeticBuild::apply`]), and a
+//!     build that commits nothing fails at the builder, naming the patch,
+//!     instead of surfacing later as a "No commits between …" error read
+//!     against the wrong branch ([`HermeticBuild::commit`]).
+//! 13. **Evidence is about a tree, not a name** ([`HermeticBuild`]).
+//!     Before push, the files the branch actually contains must equal the
+//!     files the patch's own diff touches
+//!     ([`HermeticBuild::assert_content`]) — the PR's title and body are
+//!     the patch's identity, and a diff that does not carry it is a
+//!     different patch. And a gate receipt records the commit sha it ran
+//!     against; publication is refused when the branch tip is no longer
+//!     that sha ([`HermeticBuild::record_gate`],
+//!     [`HermeticBuild::push`]), so a gate that ran against the prior
+//!     patch's tree can never clear this patch's publish (#3915).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -1046,6 +1072,353 @@ impl PrLedger {
             if open.len() == 1 { "" } else { "s" },
             parts.join(", ")
         )
+    }
+}
+
+/// The hermetic build of one patch into one branch (#3915).
+///
+/// The failure this encodes: a PR was opened whose title and body named
+/// one patch and whose diff carried another patch's files. Two defects in
+/// the build helper compounded —
+///
+/// - a `git reset` that ran **on the prior patch's branch** while it was
+///   still checked out, and
+/// - a `git checkout` to the next patch's branch **with the first patch's
+///   hunks still staged**: `git apply --index` had staged them and nothing
+///   had committed them, so the staged work followed the checkout (git
+///   carries an unconflicted staged index across checkouts) and committed
+///   as the *next* patch's content.
+///
+/// The helper had no idea either step was illegal because the identity it
+/// was told — the patch's name in the PR title — was never checked
+/// against what the branch actually contained, the gate's result was never
+/// bound to the tree it ran on, and a build that produced zero commits
+/// reached the gate instead of failing at the builder. This type is the
+/// state machine that makes each of those impossible to perform silently.
+///
+/// The caller performs the git I/O and reports the repository state the
+/// state machine cannot see on its behalf (the current branch, whether the
+/// index is staged); that division is deliberate — the old helper did the
+/// I/O without reporting, which is precisely why it had no guard at all.
+/// A build walks exactly one sequence:
+///
+/// ```text
+/// checkout            git checkout -B <branch> <base>   (the only form)
+/// apply               git apply --index <patch>
+/// commit              git commit                        (zero commits = builder error)
+/// assert_content      git diff --name-only <base> <branch> vs the patch's own files
+/// record_gate         bind the gate receipt to the sha it ran against
+/// push                git push origin <branch>          (evidence must match the tip)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermeticBuild {
+    /// The patch this build carries: its identity in every error and in
+    /// the PR the build becomes.
+    patch: String,
+    /// The branch this build owns.
+    branch: String,
+    /// The base commit the branch is reset to.
+    base: String,
+    /// The files the patch's own diff touches: the expected side of the
+    /// content assertion.
+    patch_files: BTreeSet<String>,
+    applied: bool,
+    tip: Option<String>,
+    content_checked: bool,
+    gate_sha: Option<String>,
+}
+
+impl HermeticBuild {
+    /// Build the state machine for one patch.
+    ///
+    /// `patch_files` is the file list of the patch's own diff (its `diff
+    /// --git` headers): the side the branch is asserted against before
+    /// push. An empty list is accepted here and fails at
+    /// [`HermeticBuild::commit`] — a patch that stages nothing produces
+    /// zero commits, and the builder must say so, naming the patch.
+    pub fn new(
+        patch: impl Into<String>,
+        branch: impl Into<String>,
+        base: impl Into<String>,
+        patch_files: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, String> {
+        let patch = patch.into();
+        let branch = branch.into();
+        let base = base.into();
+        if patch.trim().is_empty() {
+            return Err(
+                "build patch identity must not be empty: the builder must be able to name the patch it failed to build".to_string(),
+            );
+        }
+        if branch.trim().is_empty() {
+            return Err("build branch must not be empty".to_string());
+        }
+        if base.trim().is_empty() {
+            return Err("build base sha must not be empty".to_string());
+        }
+        Ok(Self {
+            patch,
+            branch,
+            base,
+            patch_files: patch_files.into_iter().map(Into::into).collect(),
+            applied: false,
+            tip: None,
+            content_checked: false,
+            gate_sha: None,
+        })
+    }
+
+    /// The patch identity this build carries.
+    pub fn patch(&self) -> &str {
+        &self.patch
+    }
+
+    /// The branch this build owns.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// The files the patch's own diff touches, in sorted order.
+    pub fn patch_files(&self) -> &BTreeSet<String> {
+        &self.patch_files
+    }
+
+    /// The checkout step (#3915): the one command this build issues —
+    /// `git checkout -B <branch> <base>` — returned when the index is
+    /// clean, and a refusal when it is not.
+    ///
+    /// The `-B` form is the only checkout form the build issues: it moves
+    /// the branch ref to the base commit and checks it out in one
+    /// operation, so no prior branch is ever reset and every build starts
+    /// hermetically from the base. The old helper's `reset` + `checkout`
+    /// pair is not expressible here.
+    ///
+    /// Refusing the checkout is the first half of the mislabeling guard:
+    /// `git checkout -B` carries an unconflicted staged index across the
+    /// checkout, so checking out the next patch's branch with the first
+    /// patch's hunks staged is exactly the step that committed one
+    /// patch's work under another patch's name. The caller reports the
+    /// index state from `git status --porcelain`; it must report it,
+    /// because the state machine cannot see the repository.
+    pub fn checkout(&self, index_staged: bool) -> Result<String, String> {
+        if index_staged {
+            return Err(format!(
+                "refusing to check out {} for {}: the index has staged work; the staged work would follow the checkout and commit as {}'s content — commit or unstage it first",
+                self.branch, self.patch, self.patch
+            ));
+        }
+        Ok(self.checkout_command())
+    }
+
+    /// The checkout command itself, without the index guard: useful for
+    /// logging the plan. Run it only after [`Self::checkout`] has
+    /// approved the index state.
+    pub fn checkout_command(&self) -> String {
+        format!("git checkout -B {} {}", self.branch, self.base)
+    }
+
+    /// The staging step: the guard for `git apply --index <patch>`.
+    ///
+    /// Refused in the three states the old helper walked into: the
+    /// checkout is not on this build's branch, the index is not clean, or
+    /// the patch was already staged. The staged-index case is the
+    /// mislabeling bug in its other form: staging this patch over staged
+    /// work from another step commits that other work as **this**
+    /// patch's content, and the PR carries this patch's name.
+    /// `current_branch` is what `git branch --show-current` reports; the
+    /// caller must read it, for the same reason it must report the index
+    /// state.
+    pub fn apply(&mut self, current_branch: &str, index_staged: bool) -> Result<(), String> {
+        if self.applied {
+            return Err(format!(
+                "build for {}: the patch is already staged; a build carries exactly one patch",
+                self.patch
+            ));
+        }
+        if current_branch != self.branch {
+            return Err(format!(
+                "build for {} is on {} but the checkout is on {current_branch}: run {} first; staging the patch on {current_branch} would commit it on the wrong branch",
+                self.patch, self.branch, self.checkout_command()
+            ));
+        }
+        if index_staged {
+            return Err(format!(
+                "index has staged work while building {} on {}: refusing to stage the patch over it — the staged work would be committed as {}'s content",
+                self.patch, self.branch, self.patch
+            ));
+        }
+        self.applied = true;
+        Ok(())
+    }
+
+    /// The commit step: the guard for `git commit`, which also records the
+    /// resulting branch tip.
+    ///
+    /// A build that produces zero commits fails **here, at the builder,
+    /// naming the patch** (#3915): the old pass let an empty build
+    /// through, and it only surfaced later as a "No commits between
+    /// origin/main and conv/issue-…" error — read against the *other*
+    /// patch's branch, which is how a missing build became a misattributed
+    /// one. `commits_ahead` is `git rev-list --count <base>..HEAD` after
+    /// the commit; `tip_sha` is the new `HEAD`.
+    pub fn commit(
+        &mut self,
+        current_branch: &str,
+        commits_ahead: usize,
+        tip_sha: &str,
+    ) -> Result<(), String> {
+        if !self.applied {
+            return Err(format!(
+                "build for {}: committing before the patch was staged; nothing on the branch is this patch's",
+                self.patch
+            ));
+        }
+        if self.tip.is_some() {
+            return Err(format!(
+                "build for {}: already committed at {}; a build makes exactly one commit",
+                self.patch,
+                self.tip.as_deref().unwrap_or("")
+            ));
+        }
+        if current_branch != self.branch {
+            return Err(format!(
+                "build for {} is on {} but the commit would run on {current_branch}: it would land on the wrong branch",
+                self.patch, self.branch
+            ));
+        }
+        if commits_ahead == 0 {
+            return Err(format!(
+                "build produced no commits for {} on {}: the apply staged nothing or was lost; the builder fails here, naming the patch, instead of opening an empty PR",
+                self.patch, self.branch
+            ));
+        }
+        if tip_sha.trim().is_empty() {
+            return Err(format!(
+                "build for {} on {}: no tip sha to record; gate evidence that cannot be bound to a tree cannot clear the publish",
+                self.patch, self.branch
+            ));
+        }
+        self.tip = Some(tip_sha.to_string());
+        Ok(())
+    }
+
+    /// The content assertion before push (#3915): the files the branch
+    /// actually contains — `git diff --name-only <base> <branch>` — must
+    /// equal the files the patch's own diff touches.
+    ///
+    /// The PR's title and body are the patch's identity; a diff that does
+    /// not carry it is a *different* patch, and publishing it under this
+    /// patch's name is the mislabeling this module exists to make
+    /// impossible. The report names both sides of the mismatch: the files
+    /// only in the branch (someone else's work committed as this patch)
+    /// and the files only in the patch (work that never landed).
+    pub fn assert_content(&mut self, branch_files: &[&str]) -> Result<(), String> {
+        if self.tip.is_none() {
+            return Err(format!(
+                "build for {}: asserting content before the build committed; there is no tree to assert",
+                self.patch
+            ));
+        }
+        let actual: BTreeSet<String> = branch_files.iter().map(|f| f.to_string()).collect();
+        let only_in_branch: Vec<&str> = actual
+            .difference(&self.patch_files)
+            .map(|f| f.as_str())
+            .collect();
+        let only_in_patch: Vec<&str> = self
+            .patch_files
+            .difference(&actual)
+            .map(|f| f.as_str())
+            .collect();
+        if only_in_branch.is_empty() && only_in_patch.is_empty() {
+            self.content_checked = true;
+            return Ok(());
+        }
+        let mut parts = Vec::new();
+        if !only_in_branch.is_empty() {
+            parts.push(format!(
+                "{} carries files the patch does not touch: {}",
+                self.branch,
+                only_in_branch.join(", ")
+            ));
+        }
+        if !only_in_patch.is_empty() {
+            parts.push(format!(
+                "{} is missing files the patch touches: {}",
+                self.branch,
+                only_in_patch.join(", ")
+            ));
+        }
+        Err(format!(
+            "content assertion for {} failed: {}; refusing to push a branch that is not this patch",
+            self.patch,
+            parts.join("; ")
+        ))
+    }
+
+    /// Bind a gate receipt to the tree it ran against (#3915).
+    ///
+    /// A gate result is evidence about **a tree**, not about a name: the
+    /// receipt records the commit sha the gate ran against, and
+    /// [`HermeticBuild::push`] refuses to publish when the branch tip is
+    /// no longer that sha. The old pass ran its gate against the prior
+    /// patch's branch and let the result clear this patch's publish —
+    /// "No commits between origin/main and conv/issue-…" is the shape of
+    /// that error: a statement about a tree this patch never touched. An
+    /// honest observation of a mismatching sha is accepted here (the gate
+    /// did run, against some tree); the refusal happens at publish, where
+    /// the mismatch is a defect rather than a fact.
+    pub fn record_gate(&mut self, gate_sha: &str) -> Result<(), String> {
+        if self.tip.is_none() {
+            return Err(format!(
+                "build for {}: recording gate evidence before the build committed; evidence needs a tree to be about",
+                self.patch
+            ));
+        }
+        if gate_sha.trim().is_empty() {
+            return Err(format!(
+                "build for {}: refusing to record a gate receipt without a commit sha; an unbound receipt is the unbound evidence this module exists to forbid",
+                self.patch
+            ));
+        }
+        self.gate_sha = Some(gate_sha.to_string());
+        Ok(())
+    }
+
+    /// The publish gate (#3915): the caller is cleared to `git push
+    /// origin <branch>` only when the build committed, the content
+    /// assertion passed, a gate receipt exists, and the receipt is bound
+    /// to the branch's current tip.
+    ///
+    /// The last check is the tree identity: if the tip moved off the sha
+    /// the gate ran against — an amend, a stray commit, a checkout of the
+    /// other patch — the evidence is about a different tree and the
+    /// publish is refused, naming both shas.
+    pub fn push(&self, current_tip: &str) -> Result<(), String> {
+        let Some(tip) = self.tip.as_deref() else {
+            return Err(format!(
+                "build for {}: pushing before the build committed",
+                self.patch
+            ));
+        };
+        if !self.content_checked {
+            return Err(format!(
+                "build for {}: pushing before the content assertion ran; the branch has not been checked against the patch's own file list",
+                self.patch
+            ));
+        }
+        let Some(gate_sha) = self.gate_sha.as_deref() else {
+            return Err(format!(
+                "build for {}: pushing without gate evidence; a publish needs a receipt bound to a tree",
+                self.patch
+            ));
+        };
+        if gate_sha != current_tip || current_tip != tip {
+            return Err(format!(
+                "publish for {} refused: the gate ran against {gate_sha} but the branch tip is {current_tip}; the evidence is about a different tree and cannot clear this publish",
+                self.patch
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2091,5 +2464,250 @@ mod tests {
         assert_eq!(format_age(90), "1m 30s");
         assert_eq!(format_age(9_900), "2h 45m 0s");
         assert_eq!(format_age(93_784), "1d 2h 3m 4s");
+    }
+
+    // --- Hermetic build (#3915) ---
+
+    fn build_a() -> HermeticBuild {
+        HermeticBuild::new(
+            "issue-a.patch",
+            "conv/issue-a",
+            "base-sha",
+            ["src/a.rs", "tests/a_test.rs"],
+        )
+        .unwrap()
+    }
+
+    fn build_b() -> HermeticBuild {
+        HermeticBuild::new("issue-b.patch", "conv/issue-b", "base-sha", ["src/b.rs"]).unwrap()
+    }
+
+    /// Drive a build to a committed state at `tip`.
+    fn committed(build: &mut HermeticBuild, branch: &str, tip: &str) {
+        build.checkout(false).unwrap();
+        build.apply(branch, false).unwrap();
+        build.commit(branch, 1, tip).unwrap();
+    }
+
+    #[test]
+    fn hermetic_build_rejects_empty_identity_branch_or_base() {
+        assert!(
+            HermeticBuild::new("", "conv/x", "base", ["a"]).is_err(),
+            "an unnamed patch cannot be named in the builder's failure report"
+        );
+        assert!(HermeticBuild::new("p.patch", "", "base", ["a"]).is_err());
+        assert!(HermeticBuild::new("p.patch", "conv/x", "", ["a"]).is_err());
+    }
+
+    #[test]
+    fn the_only_checkout_form_is_checkout_b_from_the_base() {
+        // No `reset` step is expressible: the branch ref moves to the
+        // base in one operation, so no prior branch is ever reset.
+        let build = build_a();
+        assert_eq!(
+            build.checkout_command(),
+            "git checkout -B conv/issue-a base-sha"
+        );
+        assert_eq!(
+            build.checkout(false).unwrap(),
+            "git checkout -B conv/issue-a base-sha"
+        );
+    }
+
+    #[test]
+    fn staging_the_second_patch_before_committing_the_first_fails() {
+        // The #3793 case, replayed: two patches on one worker, the second
+        // staged before the first is committed. The run must fail, not
+        // mislabel.
+        let mut a = build_a();
+        let mut b = build_b();
+
+        // Patch A: clean index, checkout of its branch, stage.
+        a.checkout(false).unwrap();
+        a.apply("conv/issue-a", /* index_staged */ false).unwrap();
+        // A is staged in the index and not yet committed.
+
+        // The run moves on to B. Checking out B's branch with A's hunks
+        // still staged is the incident's step: the staged work would
+        // follow the checkout and commit as B's content.
+        let err = b.checkout(/* index_staged */ true).unwrap_err();
+        assert!(err.contains("conv/issue-b"), "{err}");
+        assert!(err.contains("issue-b.patch"), "{err}");
+        assert!(err.contains("staged"), "{err}");
+
+        // And even if the checkout somehow happened, staging B over A's
+        // staged hunks is refused on the branch side too.
+        let err = b
+            .apply("conv/issue-b", /* index_staged */ true)
+            .unwrap_err();
+        assert!(err.contains("issue-b.patch"), "{err}");
+        assert!(err.contains("staged"), "{err}");
+    }
+
+    #[test]
+    fn apply_refuses_the_wrong_branch() {
+        // The checkout never happened (or landed on the other patch's
+        // branch): staging here would commit on the wrong branch.
+        let mut build = build_a();
+        let err = build.apply("conv/issue-b", false).unwrap_err();
+        assert!(err.contains("conv/issue-b"), "{err}");
+        assert!(err.contains("issue-a.patch"), "{err}");
+        assert!(err.contains("checkout -B conv/issue-a"), "{err}");
+    }
+
+    #[test]
+    fn apply_refuses_to_stage_twice() {
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        let err = build.apply("conv/issue-a", false).unwrap_err();
+        assert!(err.contains("already staged"), "{err}");
+    }
+
+    #[test]
+    fn a_build_that_commits_nothing_fails_at_the_builder_naming_the_patch() {
+        // Invariant: `ahead=0` is an error at build time. The old shape —
+        // surfacing later as "No commits between origin/main and
+        // conv/issue-…" read against the other branch — must be gone.
+        let mut build = build_a();
+        build.checkout(false).unwrap();
+        build.apply("conv/issue-a", false).unwrap();
+        let err = build.commit("conv/issue-a", 0, "base-sha").unwrap_err();
+        assert!(err.contains("no commits"), "{err}");
+        assert!(err.contains("issue-a.patch"), "{err}");
+        assert!(err.contains("conv/issue-a"), "{err}");
+    }
+
+    #[test]
+    fn commit_refuses_the_wrong_branch_and_double_commit() {
+        let mut build = build_a();
+        build.checkout(false).unwrap();
+        build.apply("conv/issue-a", false).unwrap();
+        let err = build.commit("conv/issue-b", 1, "tip").unwrap_err();
+        assert!(err.contains("conv/issue-b"), "{err}");
+        build.commit("conv/issue-a", 1, "tip-a").unwrap();
+        let err = build.commit("conv/issue-a", 1, "tip-b").unwrap_err();
+        assert!(err.contains("already committed"), "{err}");
+    }
+
+    #[test]
+    fn commit_before_apply_is_refused() {
+        let mut build = build_a();
+        let err = build.commit("conv/issue-a", 1, "tip").unwrap_err();
+        assert!(err.contains("before the patch was staged"), "{err}");
+    }
+
+    #[test]
+    fn content_assertion_fails_when_the_branch_carries_files_the_patch_does_not_touch() {
+        // The incident's shape: the PR named patch A but the branch
+        // carried patch B's files.
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        let err = build.assert_content(&["src/b.rs", "src/c.rs"]).unwrap_err();
+        assert!(err.contains("issue-a.patch"), "{err}");
+        assert!(err.contains("src/b.rs"), "{err}");
+        assert!(err.contains("src/c.rs"), "{err}");
+        // The refusal must stand: push is still impossible.
+        build.record_gate("tip-a").unwrap();
+        assert!(build.push("tip-a").is_err());
+    }
+
+    #[test]
+    fn content_assertion_fails_when_the_branch_is_missing_files_the_patch_touches() {
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        let err = build.assert_content(&["src/a.rs"]).unwrap_err();
+        assert!(err.contains("issue-a.patch"), "{err}");
+        assert!(err.contains("tests/a_test.rs"), "{err}");
+    }
+
+    #[test]
+    fn content_assertion_passes_on_the_same_set_in_any_order() {
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        build
+            .assert_content(&["tests/a_test.rs", "src/a.rs"])
+            .unwrap();
+    }
+
+    #[test]
+    fn content_assertion_before_commit_is_refused() {
+        let mut build = build_a();
+        let err = build.assert_content(&["src/a.rs"]).unwrap_err();
+        assert!(err.contains("before the build committed"), "{err}");
+    }
+
+    #[test]
+    fn push_refuses_gate_evidence_bound_to_another_tree() {
+        // The gate ran against the prior patch's tip (the incident's
+        // error shape: "No commits between origin/main and
+        // conv/issue-<other>"). The receipt is honestly recorded; the
+        // publish is what is refused.
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        build
+            .assert_content(&["src/a.rs", "tests/a_test.rs"])
+            .unwrap();
+        build.record_gate("tip-other-patch").unwrap();
+        let err = build.push("tip-a").unwrap_err();
+        assert!(err.contains("tip-other-patch"), "{err}");
+        assert!(err.contains("tip-a"), "{err}");
+        assert!(err.contains("different tree"), "{err}");
+    }
+
+    #[test]
+    fn push_refuses_when_the_tip_moves_after_the_gate() {
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        build
+            .assert_content(&["src/a.rs", "tests/a_test.rs"])
+            .unwrap();
+        build.record_gate("tip-a").unwrap();
+        // An amend or stray commit moved the tip off the gated tree.
+        let err = build.push("tip-amended").unwrap_err();
+        assert!(err.contains("tip-a"), "{err}");
+        assert!(err.contains("tip-amended"), "{err}");
+    }
+
+    #[test]
+    fn push_refuses_without_gate_evidence_or_before_the_assertion() {
+        let mut build = build_a();
+        committed(&mut build, "conv/issue-a", "tip-a");
+        let err = build.push("tip-a").unwrap_err();
+        assert!(err.contains("content assertion"), "{err}");
+        build
+            .assert_content(&["src/a.rs", "tests/a_test.rs"])
+            .unwrap();
+        let err = build.push("tip-a").unwrap_err();
+        assert!(err.contains("without gate evidence"), "{err}");
+    }
+
+    #[test]
+    fn record_gate_before_commit_and_without_a_sha_are_refused() {
+        let mut build = build_a();
+        let err = build.record_gate("tip").unwrap_err();
+        assert!(err.contains("before the build committed"), "{err}");
+        committed(&mut build, "conv/issue-a", "tip-a");
+        let err = build.record_gate("  ").unwrap_err();
+        assert!(err.contains("without a commit sha"), "{err}");
+    }
+
+    #[test]
+    fn a_two_patch_run_in_order_completes_both_builds() {
+        // The legitimate sequence the guard must not block: commit A
+        // before staging B, index clean at every boundary.
+        let mut a = build_a();
+        let mut b = build_b();
+
+        committed(&mut a, "conv/issue-a", "tip-a");
+        a.assert_content(&["src/a.rs", "tests/a_test.rs"]).unwrap();
+        a.record_gate("tip-a").unwrap();
+        a.push("tip-a").unwrap();
+
+        // A is committed: the index is clean again, so B's checkout is
+        // legal.
+        committed(&mut b, "conv/issue-b", "tip-b");
+        b.assert_content(&["src/b.rs"]).unwrap();
+        b.record_gate("tip-b").unwrap();
+        b.push("tip-b").unwrap();
     }
 }
