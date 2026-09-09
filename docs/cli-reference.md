@@ -16,7 +16,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec doctor code-intel [--json]` | yes | code intelligence backend, language-server and fallback health ([docs](code-intelligence.md)) |
 | `autospec doctor failures [--runs-dir <dir>] [--last <n>] [--threshold-percent <n>] [--top <k>] [--json]` | yes | failure signatures over a rolling window of fleet agent runs: counts against the window denominator, `SYSTEMIC` above the repetition threshold (exit `1`), `<no output>` / `<no status file>` counted as their own buckets ([docs](failure-signatures.md)) |
-| `autospec status --json` | yes | persisted local spec-lifecycle counts |
+| `autospec status [--json] [--limit <n>]` | yes | persisted local spec-lifecycle counts; `--limit n` caps list lines in the text rendering and ends with a `… K more lines (T total)` notice on stdout when the list was truncated |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
 | `autospec initiative init --id INIT-YYYY-NNNN --slug <slug> [--spec <path>] [--root <dir>]` | yes | creates the Initiative artifact registry and its first audit event; refuses an existing Initiative |
 | `autospec initiative validate --id INIT-YYYY-NNNN [--json]` | yes | checks the Definition, workspace, plan, and task DAG against each other; exits `1` when the Initiative is not executable |

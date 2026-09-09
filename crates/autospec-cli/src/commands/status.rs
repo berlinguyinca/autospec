@@ -2,6 +2,7 @@ use autospec_core::issue_lock::IssueLockManager;
 use autospec_core::state::{SpecRunState, SpecStateStore};
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    let limit = parse_limit(args)?;
     let store = SpecStateStore::load_or_default(".")?;
     let counts = Counts::from_store(&store);
     let parent_store = match std::env::var_os("AUTOSPEC_PARENT_STATE_ROOT") {
@@ -53,17 +54,53 @@ pub fn run(args: &[String]) -> Result<(), String> {
             parent_counts.complete_but_stale,
             parent_counts.closed
         );
-        for line in parent_store.parent_issue_status_lines() {
-            println!("parent issue {line}");
-        }
-        for line in lock_manager
-            .status_lines()
-            .map_err(|error| error.to_string())?
-        {
+        let mut lines: Vec<String> = parent_store
+            .parent_issue_status_lines()
+            .into_iter()
+            .map(|line| format!("parent issue {line}"))
+            .collect();
+        lines.extend(
+            lock_manager
+                .status_lines()
+                .map_err(|error| error.to_string())?,
+        );
+        let withheld = lines.len().saturating_sub(limit);
+        for line in lines.iter().take(limit) {
             println!("{line}");
+        }
+        if withheld > 0 {
+            // Same stream as the list itself: a truncated view must say so,
+            // with the withheld count and the full count, so absence in the
+            // visible lines cannot be read as absence overall (issue #3773).
+            println!("… {withheld} more lines ({} total)", lines.len());
         }
     }
     Ok(())
+}
+
+/// `--limit <n>` caps how many list lines the text rendering shows. Without
+/// the flag the list is unbounded and no truncation notice is emitted.
+fn parse_limit(args: &[String]) -> Result<usize, String> {
+    const ERROR: &str = "--limit expects a positive integer";
+    let mut limit = usize::MAX;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] != "--limit" {
+            index += 1;
+            continue;
+        }
+        let raw = args.get(index + 1).ok_or_else(|| ERROR.to_string())?;
+        let value: usize = raw
+            .trim()
+            .parse()
+            .map_err(|_| format!("{ERROR}, got {raw}"))?;
+        if value == 0 {
+            return Err(format!("{ERROR}, got {raw}"));
+        }
+        limit = value;
+        index += 2;
+    }
+    Ok(limit)
 }
 
 #[derive(Default)]
