@@ -149,6 +149,23 @@ else
   printf 'WARN: lint-restore-visibility.sh not found at %s — skipping restore-visibility step\n' "$RV_SCRIPT" >&2
 fi
 
+# Step 4: scratch-promotion ratchet (a tool invoked from a scratch path more
+# than twice is a promotion candidate — issue #3977: supervision tooling must
+# not accumulate in temp dirs without a test, version control, or owner)
+SP_SCRIPT="$REPO_ROOT/scripts/lint-scratch-promotion.sh"
+if [ -f "$SP_SCRIPT" ]; then
+  sp_out=""
+  sp_exit=0
+  sp_out=$(bash "$SP_SCRIPT" --root "$REPO_ROOT" 2>&1) || sp_exit=$?
+  if [ "$sp_exit" -ne 0 ]; then
+    BLOCKING=$((BLOCKING + 1))
+    FINDINGS="${FINDINGS}${sp_out}
+"
+  fi
+else
+  printf 'WARN: lint-scratch-promotion.sh not found at %s — skipping scratch-promotion step\n' "$SP_SCRIPT" >&2
+fi
+
 # ── emit summary ──────────────────────────────────────────────────────────────
 
 if [ "$BLOCKING" -gt 0 ]; then

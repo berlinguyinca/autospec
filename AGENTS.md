@@ -689,6 +689,43 @@ explicit `.rs` files or directories can be passed as arguments. Bats:
 `tests/lint-cfg-test-statics.bats`. Not yet wired into
 `lint-implementation.sh` (follow-up).
 
+## Scratch-promotion contract
+
+Supervision tooling has a lifecycle problem: it accumulates in scratch paths
+(`/tmp/…`) with no test, no owner, and no version control, then either rots or
+gets re-derived on every session. The invariant (issue #3977): a helper that is
+*invoked* from a scratch path more than twice is a tool, not a throwaway — it
+must be promoted into the repo (gaining a test and an owner) or explicitly
+discarded. The promote-or-discard decision is a process step a human or the
+agent makes; the gate only reports the candidate, it never mutates.
+
+`scripts/lint-scratch-promotion.sh` is the deterministic ratchet (RULE_ID
+`SCRATCH_PROMOTION`). It is a read-only, static, token-level scanner over shell
+and bats files. Default corpus is `scripts/` and `skills/`; pass explicit
+`PATH…` args to sweep a supervision session log or any other tree. `tests/` is
+excluded by default because its fixtures deliberately contain scratch
+invocations. It counts, per distinct scratch tool path, how many times it is
+*invoked* — in an invocation position (command start, or immediately after a
+launcher: `bash sh zsh dash ksh ash python python2 python3 perl ruby node nodejs
+source exec env sudo nohup xargs time nice stdbuf command .`). Scratch prefixes
+are `/tmp/`, `/var/tmp/`, `/private/tmp/`, `${TMPDIR}/`, `$TMPDIR/`; recognized
+tool extensions are `.sh .bash .py .bats .rb .pl .js .mjs .ts`. Paths carrying
+`XXXXXX` or `$$` (mktemp templates) are exempt, and data-only references (`rm`,
+`mv`, `>`) are not invocations. A tool invoked more than twice across the corpus
+is a finding: `SCRATCH_PROMOTION:<file>:<line>: <tool> invoked <N>x from a
+scratch path (first seen here): promote it into the repo or discard it`.
+`--list` emits an `SCRATCH_TOOL:<tool>: <N>x` audit line per scratch tool and
+always exits 0; blocking exit code = finding count (capped at 64).
+
+The ratchet resolves no variables — `bash "$conv"` is invisible to it (static
+text scan, not an interpreter); a tool must be invoked by a literal scratch path
+to be counted. Waiver: `# linter:allow-SCRATCH_PROMOTION <reason>` (reason
+mandatory) on the invocation line or the line immediately before it. Wired into
+`scripts/self-enforce-qa.sh` as step 4 (WARN+skip if the script is absent), so
+it enforces in the Phase 4 QA chain. Bats: `tests/lint-scratch-promotion.bats`,
+fixtures under `tests/fixtures/lint-scratch-promotion/` (including the populated
+#3793 case).
+
 ## Memory management scripts
 
 Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
