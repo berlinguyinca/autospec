@@ -5,9 +5,9 @@
 //! advice never moves the model family away from the locked one.
 
 use autospec_core::aar::dashboard::{
-    advise, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource, IssueSample,
-    LiveWorkItem, ProfileSample, DEFAULT_LOCKED_MODEL_FAMILY, DEFAULT_MIN_SAMPLES,
-    LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
+    advise, elapsed_ratio, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource,
+    IssueSample, LiveWorkItem, Liveness, ProfileSample, DEFAULT_LIVENESS_THRESHOLD_MS,
+    DEFAULT_LOCKED_MODEL_FAMILY, DEFAULT_MIN_SAMPLES, LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
 };
 
 fn live() -> LiveWorkItem {
@@ -25,6 +25,8 @@ fn live() -> LiveWorkItem {
         test_ms: 61_200,
         repair_count: 1,
         queue_ms: 2_400,
+        started_ms: 1_700_000_000_000,
+        last_heartbeat_ms: 1_700_000_300_000,
     }
 }
 
@@ -90,6 +92,8 @@ fn history_reports_p50_p90_and_p95_issue_duration() {
     assert_eq!(history.p50_ms, 50_000);
     assert_eq!(history.p90_ms, 90_000);
     assert_eq!(history.p95_ms, 95_000);
+    // mean of 1000..=100000 step 1000 is 50_500
+    assert_eq!(history.mean_duration_ms, 50_500);
 }
 
 #[test]
@@ -260,4 +264,96 @@ fn advice_never_changes_model_family_away_from_the_locked_one() {
     let advice = advise(&candidates[..1], &config);
     assert_eq!(advice.source, AdviceSource::Static);
     assert_eq!(advice.model_family, "qwen3.8");
+}
+
+/// Issue #3723: the live card records the run's start and its last heartbeat
+/// timestamp, so liveness comes from the run's own artifacts.
+#[test]
+fn live_card_records_start_and_last_heartbeat() {
+    let rendered = live().render();
+    assert!(
+        rendered.contains("started_ms: 1700000000000"),
+        "live card is missing started_ms\n{rendered}"
+    );
+    assert!(
+        rendered.contains("last_heartbeat_ms: 1700000300000"),
+        "live card is missing last_heartbeat_ms\n{rendered}"
+    );
+    assert!(LIVE_CARD_FIELDS.contains(&"started_ms"));
+    assert!(LIVE_CARD_FIELDS.contains(&"last_heartbeat_ms"));
+}
+
+/// Issue #3723 item 4: liveness answers in one line — `progressing` or
+/// `no output for N minutes` — from the last heartbeat versus now.
+#[test]
+fn liveness_answers_in_one_line() {
+    let heartbeat = 1_700_000_000_000_u64;
+    let threshold = DEFAULT_LIVENESS_THRESHOLD_MS;
+    assert_eq!(threshold, 5 * 60 * 1000);
+
+    // A fresh heartbeat is progress; one exactly at the edge still is.
+    let fresh = Liveness::assess(heartbeat + threshold - 1, heartbeat, threshold);
+    assert_eq!(fresh, Liveness::Progressing);
+    assert_eq!(fresh.render(), "progressing");
+    assert_eq!(
+        Liveness::assess(heartbeat + threshold, heartbeat, threshold),
+        Liveness::Progressing
+    );
+
+    // 381 quiet minutes — the shape of the 6-hour keystone run from the issue.
+    let stalled = Liveness::assess(heartbeat + 381 * 60_000 + 30_000, heartbeat, threshold);
+    assert_eq!(stalled, Liveness::NoOutput { minutes: 381 });
+    assert_eq!(stalled.render(), "no output for 381 minutes");
+
+    // A heartbeat ahead of now can only count as progress.
+    assert_eq!(
+        Liveness::assess(heartbeat - 1, heartbeat + 100, threshold),
+        Liveness::Progressing
+    );
+}
+
+/// Issue #3723 item 3: the history summary carries the mean completed-issue
+/// duration a live run can be reported against.
+#[test]
+fn history_reports_mean_completed_issue_duration() {
+    let samples = vec![
+        IssueSample {
+            issue_id: "a".to_string(),
+            duration_ms: 60_000,
+            succeeded: true,
+            time_to_passing_change_ms: None,
+        },
+        IssueSample {
+            issue_id: "b".to_string(),
+            duration_ms: 90_000,
+            succeeded: true,
+            time_to_passing_change_ms: None,
+        },
+        IssueSample {
+            issue_id: "c".to_string(),
+            duration_ms: 120_000,
+            succeeded: false,
+            time_to_passing_change_ms: None,
+        },
+        IssueSample {
+            issue_id: "d".to_string(),
+            duration_ms: 30_000,
+            succeeded: true,
+            time_to_passing_change_ms: None,
+        },
+    ];
+    let history = summarize_history(&samples, 24.0);
+    assert_eq!(history.mean_duration_ms, 75_000);
+
+    let empty = summarize_history(&[], 24.0);
+    assert_eq!(empty.mean_duration_ms, 0);
+}
+
+/// Issue #3723 item 3: elapsed-versus-expected is the multiplier the
+/// supervisor sees at a glance (6.8x) instead of computing it.
+#[test]
+fn elapsed_ratio_is_the_multiplier_against_the_mean() {
+    assert!((elapsed_ratio(20_400_000, 3_000_000) - 6.8).abs() < f64::EPSILON);
+    assert_eq!(elapsed_ratio(10_000, 0), 0.0);
+    assert_eq!(elapsed_ratio(0, 1_000), 0.0);
 }

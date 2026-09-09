@@ -44,9 +44,10 @@ pub use context::{
     PromptBlock, RetrievalStrategy,
 };
 pub use dashboard::{
-    advise, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource, HistorySummary,
-    IssueSample, LiveWorkItem, ProfileSample, RoutingAdvice, DEFAULT_LOCKED_MODEL_FAMILY,
-    DEFAULT_MIN_SAMPLES, LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
+    advise, elapsed_ratio, percentile_nearest_rank, summarize_history, AdviceConfig, AdviceSource,
+    HistorySummary, IssueSample, LiveWorkItem, Liveness, ProfileSample, RoutingAdvice,
+    DEFAULT_LIVENESS_THRESHOLD_MS, DEFAULT_LOCKED_MODEL_FAMILY, DEFAULT_MIN_SAMPLES,
+    LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
 };
 pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,

@@ -23,12 +23,21 @@
 # Live record (one JSON object, every key required):
 #   issue_id state node_id profile turns context_tokens ttft_ms
 #   decode_tokens_per_second cache_hit_rate tool_ms test_ms repair_count
-#   queue_ms
+#   queue_ms started_ms last_heartbeat_ms
+#
+# Liveness (issue #3723): started_ms is the run's wall-clock start (epoch ms)
+# and last_heartbeat_ms its last unbuffered heartbeat line (epoch ms). The
+# live card reports "liveness: progressing" or "liveness: no output for N
+# minutes" from the heartbeat versus --now (default: current time), and
+# "elapsed_ratio" as the run's elapsed time over the ledger's mean
+# completed-issue duration (mean_ms). Silence up to --liveness-threshold-minutes
+# (default 5) still counts as progress.
 #
 # Usage:
 #   pi-performance-dashboard.sh --ledger <jsonl> [--live <json>]
 #   [--window-hours <n>] [--min-samples <n>] [--static-profile <name>]
-#   [--model-family <family>]
+#   [--model-family <family>] [--now <epoch-seconds>]
+#   [--liveness-threshold-minutes <n>]
 #
 # Advice: a profile is eligible when it is inside the locked family, has at
 # least the configured sample count, and clears the 0.80 Wilson success lower
@@ -54,6 +63,8 @@ window_hours=24
 min_samples=20
 static_profile="qwen3.8-coding-local"
 model_family="qwen3.8"
+now_epoch="$(date +%s)"
+liveness_threshold_minutes=5
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -65,6 +76,8 @@ while [ $# -gt 0 ]; do
         --min-samples) [ $# -ge 2 ] || die "missing value for --min-samples"; min_samples="$2"; shift 2 ;;
         --static-profile) [ $# -ge 2 ] || die "missing value for --static-profile"; static_profile="$2"; shift 2 ;;
         --model-family) [ $# -ge 2 ] || die "missing value for --model-family"; model_family="$2"; shift 2 ;;
+        --now) [ $# -ge 2 ] || die "missing value for --now"; now_epoch="$2"; shift 2 ;;
+        --liveness-threshold-minutes) [ $# -ge 2 ] || die "missing value for --liveness-threshold-minutes"; liveness_threshold_minutes="$2"; shift 2 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -80,6 +93,12 @@ case "$min_samples" in '' | *[!0-9]*) die "min-samples must be a positive intege
 [ "$min_samples" -gt 0 ] || die "min-samples must be a positive integer"
 [ -n "$static_profile" ] || die "static-profile must not be empty"
 [ -n "$model_family" ] || die "model-family must not be empty"
+case "$now_epoch" in '' | *[!0-9]*) die "now must be a positive epoch-seconds integer" ;; esac
+[ "$now_epoch" -gt 0 ] || die "now must be a positive epoch-seconds integer"
+case "$liveness_threshold_minutes" in '' | *[!0-9]*) die "liveness-threshold-minutes must be a positive integer" ;; esac
+[ "$liveness_threshold_minutes" -gt 0 ] || die "liveness-threshold-minutes must be a positive integer"
+now_ms=$((now_epoch * 1000))
+liveness_threshold_ms=$((liveness_threshold_minutes * 60 * 1000))
 
 # ── ledger validation: a bad row would poison every derived number ───────────
 ledger_err="$(jq -rs '
@@ -125,7 +144,7 @@ if [ -n "$live" ]; then
       . as $row |
       (["issue_id", "state", "node_id", "profile", "turns", "context_tokens", "ttft_ms",
         "decode_tokens_per_second", "cache_hit_rate", "tool_ms", "test_ms",
-        "repair_count", "queue_ms"]) as $keys |
+        "repair_count", "queue_ms", "started_ms", "last_heartbeat_ms"]) as $keys |
       (if ($row | type) != "object"
          then "live record is not a JSON object"
          elif ([$keys[] | . as $k | select($row | has($k) | not)] | length) > 0
@@ -136,7 +155,9 @@ if [ -n "$live" ]; then
                 (($row.tool_ms | type) != "number" or ($row.tool_ms < 0)),
                 (($row.test_ms | type) != "number" or ($row.test_ms < 0)),
                 (($row.repair_count | type) != "number" or ($row.repair_count < 0)),
-                (($row.queue_ms | type) != "number" or ($row.queue_ms < 0))] | any)
+                (($row.queue_ms | type) != "number" or ($row.queue_ms < 0)),
+                (($row.started_ms | type) != "number" or ($row.started_ms < 0)),
+                (($row.last_heartbeat_ms | type) != "number" or ($row.last_heartbeat_ms < 0))] | any)
          then "live record numeric fields must be non-negative numbers"
          elif (($row.decode_tokens_per_second | type) != "number" or ($row.decode_tokens_per_second < 0))
          then "decode_tokens_per_second must be a non-negative number"
@@ -195,6 +216,9 @@ stats="$(wh="$window_hours" ms="$min_samples" fam="$model_family" jq -s '
     successes: $successes,
     per_hour: ($successes / $window),
     median_passing_ms: (if ($passing | length) > 0 then $passing[(rankv(50)) - 1] else null end),
+    # Mean completed-issue duration (issue #3723): integer mean, same rule
+    # as the Rust core (sum / count, truncating).
+    mean_ms: (if ($durations | length) > 0 then ((($durations | add) / ($durations | length)) | floor) else 0 end),
     candidates: $candidates,
     winner: ($eligible | sort_by(.mean_cost_micros, .mean_wall_ms, .profile) | (.[0].profile // ""))
   }' "$ledger" 2>/dev/null)" || die "ledger failed the stats pass: $ledger"
@@ -219,7 +243,24 @@ if [ -n "$live" ]; then
       + "\n  tool_ms: \(.tool_ms)"
       + "\n  test_ms: \(.test_ms)"
       + "\n  repair_count: \(.repair_count)"
-      + "\n  queue_ms: \(.queue_ms)"' "$live"
+      + "\n  queue_ms: \(.queue_ms)"
+      + "\n  started_ms: \(.started_ms)"
+      + "\n  last_heartbeat_ms: \(.last_heartbeat_ms)"' "$live"
+    # Issue #3723: the one-line liveness verdict, from the run's own
+    # timestamps. Same rule as aar::dashboard::Liveness::assess: silence up
+    # to (and including) the threshold is progress; minutes is floor of
+    # silent ms / 60000. elapsed_ratio is the run's elapsed time as a
+    # multiple of the ledger's mean completed-issue duration (n/a until the
+    # ledger has history).
+    jq -r --argjson now_ms "$now_ms" --argjson threshold_ms "$liveness_threshold_ms" --argjson mean_ms "$(jq -r '.mean_ms' <<<"$stats")" '
+      (($now_ms - .last_heartbeat_ms) | if . < 0 then 0 else . end) as $silent
+      | (($now_ms - .started_ms) | if . < 0 then 0 else . end) as $elapsed
+      | "  liveness: "
+        + (if $silent <= $threshold_ms then "progressing"
+           else "no output for \($silent / 60000 | floor) minutes" end)
+      + "\n  elapsed_ratio: "
+        + (if $mean_ms > 0 then ($elapsed / $mean_ms * 100 | round / 100) | tostring
+           else "n/a" end)' "$live"
     printf '\n'
 fi
 
@@ -230,6 +271,7 @@ printf '  p90_ms: %s\n' "$(jq -r '.p90_ms // "n/a"' <<<"$stats")"
 printf '  p95_ms: %s\n' "$(jq -r '.p95_ms // "n/a"' <<<"$stats")"
 printf '  successful_issues_per_hour: %s\n' "$(printf '%.2f' "$(jq -r '.per_hour' <<<"$stats")")"
 printf '  median_time_to_passing_ms: %s\n' "$(jq -r '.median_passing_ms // "n/a"' <<<"$stats")"
+printf '  mean_ms: %s\n' "$(jq -r '.mean_ms' <<<"$stats")"
 printf '\n'
 
 winner="$(jq -r '.winner' <<<"$stats")"

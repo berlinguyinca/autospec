@@ -13,6 +13,14 @@
 //! contract from a JSONL ledger. The two implementations stay in lockstep on
 //! the percentile rule (nearest-rank, ceil, integer arithmetic) and the
 //! Wilson lower bound (reused from `outcome::ProfileStats`).
+//!
+//! Issue #3723 closes the "unobservable run" gap on the supervisor side:
+//! the live record carries the run's start time and its last heartbeat
+//! timestamp (heartbeat lines are written unbuffered by the runner, item 1),
+//! the history summary carries the mean completed-issue duration (item 3, so
+//! a run can be reported as e.g. "6.8x expected"), and `Liveness` answers in
+//! one line whether the run is progressing or has produced no output for N
+//! minutes (item 4).
 
 use super::classify::TaskClass;
 use super::outcome::ProfileStats;
@@ -27,7 +35,7 @@ pub const DEFAULT_LOCKED_MODEL_FAMILY: &str = "qwen3.8";
 pub const MIN_SUCCESS_RATE: f64 = 0.8;
 
 /// The execution fields the live card must always expose (issue #3327 AC1).
-pub const LIVE_CARD_FIELDS: [&str; 12] = [
+pub const LIVE_CARD_FIELDS: [&str; 14] = [
     "state",
     "node_id",
     "profile",
@@ -40,6 +48,8 @@ pub const LIVE_CARD_FIELDS: [&str; 12] = [
     "test_ms",
     "repair_count",
     "queue_ms",
+    "started_ms",
+    "last_heartbeat_ms",
 ];
 
 /// One in-flight work item as the dashboard should show it.
@@ -59,6 +69,14 @@ pub struct LiveWorkItem {
     pub test_ms: u64,
     pub repair_count: u32,
     pub queue_ms: u64,
+    /// Wall-clock start of the run (epoch milliseconds), recorded next to the
+    /// start record so elapsed time comes from the run's own artifacts, not
+    /// the inference-server slot state (issue #3723).
+    pub started_ms: u64,
+    /// Wall-clock time of the last unbuffered heartbeat line (epoch
+    /// milliseconds). Heartbeats carry a timestamp plus a monotonic counter
+    /// (turns), so "no line for N minutes" is a fact, not a guess.
+    pub last_heartbeat_ms: u64,
 }
 
 impl LiveWorkItem {
@@ -95,6 +113,11 @@ impl LiveWorkItem {
         out.push_str(&format!("  test_ms: {}\n", self.test_ms));
         out.push_str(&format!("  repair_count: {}\n", self.repair_count));
         out.push_str(&format!("  queue_ms: {}\n", self.queue_ms));
+        out.push_str(&format!("  started_ms: {}\n", self.started_ms));
+        out.push_str(&format!(
+            "  last_heartbeat_ms: {}\n",
+            self.last_heartbeat_ms
+        ));
         out
     }
 }
@@ -109,7 +132,9 @@ pub struct IssueSample {
     pub time_to_passing_change_ms: Option<u64>,
 }
 
-/// The historical half of the dashboard.
+/// The historical half of the dashboard. The mean is the "expected duration"
+/// a live run can be reported against (issue #3723 item 3) — the rolling
+/// mean the status history already contains.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistorySummary {
     pub samples: usize,
@@ -118,6 +143,8 @@ pub struct HistorySummary {
     pub p95_ms: u64,
     pub successful_issues_per_hour: f64,
     pub median_time_to_passing_ms: Option<u64>,
+    /// Mean completed-issue duration in ms; 0 when there are no samples.
+    pub mean_duration_ms: u64,
 }
 
 /// Nearest-rank percentile (ceil) over an unsorted slice.
@@ -149,6 +176,12 @@ pub fn summarize_history(samples: &[IssueSample], window_hours: f64) -> HistoryS
     } else {
         0.0
     };
+    let mean_duration_ms = if durations.is_empty() {
+        0
+    } else {
+        durations.iter().sum::<u64>() / durations.len() as u64
+    };
+
     HistorySummary {
         samples: samples.len(),
         p50_ms: percentile_nearest_rank(&durations, 50).unwrap_or(0),
@@ -156,6 +189,56 @@ pub fn summarize_history(samples: &[IssueSample], window_hours: f64) -> HistoryS
         p95_ms: percentile_nearest_rank(&durations, 95).unwrap_or(0),
         successful_issues_per_hour: per_hour,
         median_time_to_passing_ms: percentile_nearest_rank(&passing, 50),
+        mean_duration_ms,
+    }
+}
+
+/// Default stall threshold (issue #3723): with heartbeat lines arriving at
+/// fixed intervals, silence for longer than this is reported as no output.
+pub const DEFAULT_LIVENESS_THRESHOLD_MS: u64 = 5 * 60 * 1000;
+
+/// The one-line liveness verdict a supervisor needs (issue #3723 item 4):
+/// is the run progressing, or has it produced no output for N minutes?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// A heartbeat arrived within the threshold window.
+    Progressing,
+    /// The last heartbeat is `minutes` old (floor of silent ms / 60_000).
+    NoOutput { minutes: u64 },
+}
+
+impl Liveness {
+    /// Assess liveness from the run's own artifacts: the last heartbeat
+    /// timestamp versus now, against the configured silence threshold.
+    /// A heartbeat exactly at the threshold edge still counts as progress.
+    pub fn assess(now_ms: u64, last_heartbeat_ms: u64, threshold_ms: u64) -> Self {
+        let silent_ms = now_ms.saturating_sub(last_heartbeat_ms);
+        if silent_ms <= threshold_ms {
+            Liveness::Progressing
+        } else {
+            Liveness::NoOutput {
+                minutes: silent_ms / 60_000,
+            }
+        }
+    }
+
+    /// The operator-facing line: `progressing` or `no output for N minutes`.
+    pub fn render(&self) -> String {
+        match self {
+            Liveness::Progressing => "progressing".to_string(),
+            Liveness::NoOutput { minutes } => format!("no output for {minutes} minutes"),
+        }
+    }
+}
+
+/// How long a live run has taken relative to the expected (mean historical)
+/// duration: 6.8 means the run is already 6.8x the mean completed-issue time
+/// (issue #3723 item 3). 0.0 when no expected duration exists yet.
+pub fn elapsed_ratio(elapsed_ms: u64, expected_ms: u64) -> f64 {
+    if expected_ms == 0 {
+        0.0
+    } else {
+        elapsed_ms as f64 / expected_ms as f64
     }
 }
 
