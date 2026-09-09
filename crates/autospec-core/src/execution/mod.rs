@@ -9,6 +9,7 @@ pub mod report;
 pub mod result;
 pub mod stage_throughput;
 pub mod test_diff;
+pub mod verification;
 pub mod work;
 
 pub use executor::{
