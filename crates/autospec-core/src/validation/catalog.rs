@@ -142,6 +142,12 @@ impl ValidationCheck {
             "check_pipeline_verdict_ratchet" => {
                 bats_suite("tests/lint/test_pipeline_verdict_checker.bats")
             }
+            // #3878: the mtime-preserving-restore ratchet. Registered here so
+            // the suite is actually invoked by validate; a bats file under
+            // tests/lint that no check runs is a silent no-op.
+            "check_restore_visibility_ratchet" => {
+                bats_suite("tests/lint/test_restore_visibility_checker.bats")
+            }
             "check_code_intelligence_contract" => {
                 bats_suite("tests/code-intel/code-intelligence.bats")
             }
