@@ -20,6 +20,11 @@
 //!   does, the guard verifies the directory holds no unconverted patch. A
 //!   check that cannot answer is unsafe, never clear. `--dry-run` reports
 //!   the decision without touching the directory. Exit 0 authorized, 1 hold.
+//! - `runs` — classify a dispatch batch of agent runs (#3918): each run
+//!   becomes an `OK` / `NO-OUTPUT` / `INFRA-FAIL` / `LAUNCH-FAIL` status
+//!   record (the `agent-status.tsv` row), transcripts under the size
+//!   threshold are quoted verbatim, the batch is summarized, and repeated
+//!   identical failures raise a fleet-level fault. Exit 0 no fault, 1 fault.
 //!
 //! A cron line for the refresh step is the intended deployment:
 //!
@@ -38,6 +43,11 @@ use autospec_core::dispatch_pipeline::{
     DispatchPipeline, FreshnessPolicy, LivenessLedger, PipelineReport, PipelineTopology, QueueFile,
     SchedulingReconciliation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
+use autospec_core::fleet_dispatch::{
+    classify_run, idle_subfleet_lines, summarize_batch, BatchSummary, FleetDispatchPolicy,
+    RunRecord, RunStatusRecord, SubfleetState, TSV_HEADER,
+};
+use serde::{Deserialize, Serialize};
 
 use super::CommandFailure;
 
@@ -73,6 +83,7 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "freshness",
         "Gate on the staged spec matching the live issue revision (#3864)",
     ),
+    ("runs", "Classify a dispatch batch and summarize it (#3918)"),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -92,6 +103,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "stamp" => stamp(rest),
         "beat" => beat(rest),
         "status" => status(rest),
+        "runs" => runs(rest),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown dispatch subcommand: {other} (expected one of: {})",
             SUBCOMMANDS
@@ -143,6 +155,15 @@ fn print_help() {
     println!(
         "    --by <NAME>           Producer named in the stamp (default: declared queue producer)"
     );
+    println!(
+        "    --runs <PATH>         runs: JSON of the batch (array of runs, or {{runs, subfleets}})"
+    );
+    println!(
+        "    --duration-floor <S>  runs: seconds below which a run is LAUNCH-FAIL (default 30)"
+    );
+    println!("    --quote-bytes <N>     runs: transcripts of at most N bytes are quoted verbatim (default 4096)");
+    println!("    --fault-threshold <N> runs: identical failures at/above N in one batch raise a fleet fault (default 3)");
+    println!("    --out <PATH>          runs: where to write the agent-status.tsv record (default stdout)");
     println!("    --at <EPOCH>          Beat timestamp in epoch seconds (default: current time)");
     println!("    --now <EPOCH>         Evaluate against this instant instead of the clock");
     println!("    --interval <SECONDS>  Interval for hops that declare none (default {DEFAULT_INTERVAL_SECS})");
@@ -595,4 +616,329 @@ fn opt_raw<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, Comman
         .get(index + 1)
         .ok_or_else(|| CommandFailure::diagnostic(format!("flag needs a value: {flag}")))?;
     Ok(Some(value.as_str()))
+}
+
+/// Input shape for `runs`: either a bare array of runs (the common case,
+/// where the caller has no sub-fleet view) or an object that also carries
+/// the sub-fleet states for the idle-sub-fleet report.
+#[derive(Deserialize)]
+struct RunsInput {
+    runs: Vec<RunRecord>,
+    #[serde(default)]
+    subfleets: Vec<SubfleetState>,
+}
+
+/// The `--json` report for `runs`: the classified records, the batch
+/// summary, and the idle-sub-fleet report lines.
+#[derive(Serialize)]
+pub(crate) struct RunsReport {
+    pub records: Vec<RunStatusRecord>,
+    pub summary: BatchSummary,
+    pub idle_subfleets: Vec<String>,
+}
+
+/// Parse the batch JSON: a bare array of runs, or an object with `runs`
+/// and optional `subfleets`.
+fn parse_runs_input(
+    value: serde_json::Value,
+    source: &str,
+) -> Result<(Vec<RunRecord>, Vec<SubfleetState>), CommandFailure> {
+    match value {
+        serde_json::Value::Array(_) => {
+            let run_records: Vec<RunRecord> = serde_json::from_value(value).map_err(|error| {
+                CommandFailure::diagnostic(format!("runs file {source}: {error}"))
+            })?;
+            Ok((run_records, Vec::new()))
+        }
+        other => {
+            let input: RunsInput = serde_json::from_value(other).map_err(|error| {
+                CommandFailure::diagnostic(format!("runs file {source}: {error}"))
+            })?;
+            Ok((input.runs, input.subfleets))
+        }
+    }
+}
+
+/// Classify the batch and build the report (pure: no file or stdout access).
+fn build_runs_report(
+    run_records: Vec<RunRecord>,
+    subfleets: Vec<SubfleetState>,
+    policy: &FleetDispatchPolicy,
+) -> RunsReport {
+    let records: Vec<RunStatusRecord> = run_records
+        .iter()
+        .map(|record| classify_run(record, policy))
+        .collect();
+    let summary = summarize_batch(&records, policy);
+    let idle_subfleets = idle_subfleet_lines(&subfleets);
+    RunsReport {
+        records,
+        summary,
+        idle_subfleets,
+    }
+}
+
+/// The `runs` policy: each knob defaults independently, but whatever ends up
+/// in the policy must be positive — `FleetDispatchPolicy::new` is the single
+/// check for that.
+fn runs_policy(args: &[String]) -> Result<FleetDispatchPolicy, CommandFailure> {
+    let default = FleetDispatchPolicy::default();
+    let duration_floor_secs =
+        opt_u64(args, "--duration-floor")?.unwrap_or(default.duration_floor_secs);
+    let quote_bytes: u64 =
+        opt_u64(args, "--quote-bytes")?.unwrap_or(default.transcript_quote_bytes as u64);
+    let fault_threshold: u64 =
+        opt_u64(args, "--fault-threshold")?.unwrap_or(default.repeat_fault_threshold as u64);
+    FleetDispatchPolicy::new(
+        duration_floor_secs,
+        quote_bytes.try_into().map_err(|_| {
+            CommandFailure::diagnostic(format!(
+                "--quote-bytes {quote_bytes} does not fit in a byte count"
+            ))
+        })?,
+        fault_threshold.try_into().map_err(|_| {
+            CommandFailure::diagnostic(format!(
+                "--fault-threshold {fault_threshold} does not fit in a count"
+            ))
+        })?,
+    )
+    .ok_or_else(|| {
+        CommandFailure::diagnostic(
+            "runs: --duration-floor, --quote-bytes and --fault-threshold must all be positive",
+        )
+    })
+}
+
+/// `autospec dispatch runs` — classify a dispatch batch (#3918).
+///
+/// Reads a JSON file describing the batch (a run is
+/// `{"issue", "duration_secs", "transcript"}`), classifies each run into
+/// `OK` / `NO-OUTPUT` / `INFRA-FAIL` / `LAUNCH-FAIL`, writes the
+/// `agent-status.tsv` record (to `--out`, or stdout), and prints the batch
+/// summary plus any fleet-level faults and idle-sub-fleet report lines.
+/// `--json` prints the full report instead of the TSV.
+///
+/// Exit 0 when no fleet-level fault was raised; exit 1 when one was. The
+/// idle-sub-fleet report lines are informational and do not affect the exit
+/// code.
+fn runs(args: &[String]) -> Result<(), CommandFailure> {
+    const USAGE: &str = "usage: autospec dispatch runs --runs <PATH> \
+[--out <PATH>] [--duration-floor <SECS>] [--quote-bytes <N>] [--fault-threshold <N>] [--json]";
+    let runs_path =
+        opt_string(args, "--runs")?.ok_or_else(|| CommandFailure::diagnostic(USAGE.to_string()))?;
+    let out_path = opt_string(args, "--out")?;
+    let as_json = args.iter().any(|arg| arg == "--json");
+    let policy = runs_policy(args)?;
+
+    let raw = fs::read_to_string(&runs_path).map_err(|error| {
+        CommandFailure::transient(format!("cannot read runs file {runs_path}: {error}"))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        CommandFailure::diagnostic(format!("runs file {runs_path} is not valid JSON: {error}"))
+    })?;
+    let (run_records, subfleets) = parse_runs_input(value, &runs_path)?;
+
+    let report = build_runs_report(run_records, subfleets, &policy);
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("report serializes")
+        );
+    } else {
+        let tsv = std::iter::once(TSV_HEADER.to_string())
+            .chain(report.records.iter().map(RunStatusRecord::tsv_line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        match &out_path {
+            Some(path) => fs::write(path, &tsv).map_err(|error| {
+                CommandFailure::transient(format!("cannot write status record {path}: {error}"))
+            })?,
+            None => print!("{tsv}"),
+        }
+        for line in report.summary.lines() {
+            println!("{line}");
+        }
+        for line in &report.idle_subfleets {
+            println!("{line}");
+        }
+    }
+
+    if report.summary.faults.is_empty() {
+        Ok(())
+    } else {
+        Err(CommandFailure::status(
+            format!(
+                "fleet-level fault raised in the dispatch batch: {}",
+                report
+                    .summary
+                    .faults
+                    .iter()
+                    .map(|fault| fault.signature.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            1,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod runs_tests {
+    use super::*;
+    use autospec_core::fleet_dispatch::{
+        DEFAULT_DURATION_FLOOR_SECS, DEFAULT_REPEAT_FAULT_THRESHOLD, DEFAULT_TRANSCRIPT_QUOTE_BYTES,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn fixture_dir(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-dispatch-runs-{label}-{}-{}",
+            std::process::id(),
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("fixture directory");
+        directory
+    }
+
+    fn write(path: &Path, content: &str) {
+        fs::write(path, content).expect("fixture write");
+    }
+
+    /// The acceptance test from #3918 at the CLI level: a bad-credential
+    /// dispatch is `INFRA-FAIL`, never `NO-OUTPUT`, and does not consume an
+    /// attempt.
+    #[test]
+    fn bad_credential_batch_reports_infra_fail_and_raises_fault() {
+        let dir = fixture_dir("badcred");
+        let runs_path = dir.join("runs.json");
+        let out_path = dir.join("agent-status.tsv");
+        write(
+            &runs_path,
+            r#"[
+  {"issue": "51", "duration_secs": 40, "transcript": "401 Unauthorized: invalid api key"},
+  {"issue": "52", "duration_secs": 38, "transcript": "401 Unauthorized: invalid api key"},
+  {"issue": "53", "duration_secs": 41, "transcript": "401 Unauthorized: invalid api key"}
+]"#,
+        );
+
+        let failure = runs(&[
+            "--runs".to_string(),
+            runs_path.to_string_lossy().into_owned(),
+            "--out".to_string(),
+            out_path.to_string_lossy().into_owned(),
+        ])
+        .expect_err("three identical infra failures must raise a fleet fault");
+        assert_eq!(failure.exit_code, 1);
+
+        let tsv = fs::read_to_string(&out_path).expect("status record written");
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), 4, "header + three runs: {tsv:?}");
+        assert!(lines[0].starts_with("issue\tstatus\tduration_secs"));
+        for line in &lines[1..] {
+            let columns: Vec<&str> = line.split('\t').collect();
+            assert_eq!(columns.len(), 7, "one row per run: {line:?}");
+            assert_eq!(
+                columns[1], "INFRA-FAIL",
+                "a bad credential must never be NO-OUTPUT: {line:?}"
+            );
+            assert_eq!(
+                columns[5], "false",
+                "INFRA-FAIL must not consume an attempt: {line:?}"
+            );
+        }
+        assert!(
+            tsv.contains("INFRA-FAIL/auth/401 unauthorized"),
+            "the signature must name the category and the matched pattern: {tsv:?}"
+        );
+        // Short transcripts ride along verbatim, escaped.
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.contains("401 Unauthorized: invalid api key")),
+            "transcripts under the quote threshold are verbatim: {tsv:?}"
+        );
+    }
+
+    #[test]
+    fn no_fault_batch_exits_cleanly_and_reports_idle_subfleets() {
+        let dir = fixture_dir("clean");
+        let runs_path = dir.join("runs.json");
+        write(
+            &runs_path,
+            r#"{
+  "runs": [
+    {"issue": "60", "duration_secs": 120, "transcript": ""},
+    {"issue": "61", "duration_secs": 300, "transcript": "patch generated"}
+  ],
+  "subfleets": [
+    {"name": "gw-issue-51-53", "running_agents": 0, "open_eligible": 7}
+  ]
+}"#,
+        );
+
+        let result = runs(&[
+            "--runs".to_string(),
+            runs_path.to_string_lossy().into_owned(),
+        ]);
+        assert!(
+            result.is_ok(),
+            "no repeated failures means no fault: {result:?}"
+        );
+    }
+
+    #[test]
+    fn report_json_round_trips_the_classified_batch() {
+        let (run_records, subfleets) = parse_runs_input(
+            serde_json::json!([{
+                "issue": "51",
+                "duration_secs": 2,
+                "transcript": "connection refused"
+            }]),
+            "test",
+        )
+        .expect("bare array parses");
+        assert!(subfleets.is_empty());
+
+        let report = build_runs_report(run_records, subfleets, &FleetDispatchPolicy::default());
+        assert_eq!(
+            report.records[0].status,
+            autospec_core::fleet_dispatch::RunStatus::LaunchFail
+        );
+        assert_eq!(report.summary.launch_fail, 1);
+        assert!(report.summary.faults.is_empty());
+
+        let json = serde_json::to_string(&report).expect("report serializes");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("report deserializes");
+        assert_eq!(value["records"][0]["status"], "LAUNCH-FAIL");
+        assert_eq!(value["records"][0]["consumes_attempt"], false);
+        assert_eq!(value["summary"]["launch_fail"], 1);
+    }
+
+    #[test]
+    fn runs_policy_defaults_and_rejects_zero() {
+        let default = runs_policy(&[]).expect("flags are all optional");
+        assert_eq!(
+            default,
+            FleetDispatchPolicy {
+                duration_floor_secs: DEFAULT_DURATION_FLOOR_SECS,
+                transcript_quote_bytes: DEFAULT_TRANSCRIPT_QUOTE_BYTES,
+                repeat_fault_threshold: DEFAULT_REPEAT_FAULT_THRESHOLD
+            }
+        );
+
+        let zero = runs_policy(&["--duration-floor".to_string(), "0".to_string()])
+            .expect_err("a zero floor is a misconfiguration");
+        assert_eq!(zero.exit_code, 2);
+    }
+
+    #[test]
+    fn runs_requires_the_runs_flag() {
+        let failure = runs(&[]).expect_err("--runs is required");
+        assert_eq!(failure.exit_code, 2);
+        assert!(failure.message.starts_with("usage: autospec dispatch runs"));
+    }
 }
