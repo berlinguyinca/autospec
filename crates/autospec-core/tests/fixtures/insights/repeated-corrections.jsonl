@@ -1,0 +1,13 @@
+{"type": "session_started", "timestamp": "2026-09-08T18:20:00Z", "session_id": "sess_02", "repo": "inferweave/autospec", "branch": "feat/golden-repeated-corrections", "work_item_id": "issue-722", "agent_role": "implementer", "provider": "local", "model": "qwen3"}
+{"type": "user_message", "timestamp": "2026-09-08T18:20:05Z", "text": "Add a cache for the lookup path.", "tokens": {"input": 800, "output": 20}}
+{"type": "assistant_message", "timestamp": "2026-09-08T18:20:20Z", "text": "I will introduce a new cache service layer.", "model": "qwen3", "tokens": {"input": 850, "output": 60}}
+{"type": "user_message", "timestamp": "2026-09-08T18:21:00Z", "text": "We already have a helper for this. Use the existing service.", "tokens": {"input": 900, "output": 25}}
+{"type": "user_intervention", "timestamp": "2026-09-08T18:21:01Z", "payload": {"category": "unnecessary_work", "severity": 3}, "tokens": {"input": 900, "output": 25}}
+{"type": "assistant_message", "timestamp": "2026-09-08T18:21:30Z", "text": "Switching to the existing helper.", "model": "qwen3", "tokens": {"input": 950, "output": 40}}
+{"type": "user_message", "timestamp": "2026-09-08T18:23:00Z", "text": "Run the tests first.", "tokens": {"input": 1000, "output": 18}}
+{"type": "user_intervention", "timestamp": "2026-09-08T18:23:01Z", "payload": {"category": "test_process", "severity": 2}, "tokens": {"input": 1000, "output": 18}}
+{"type": "test_run", "timestamp": "2026-09-08T18:24:00Z", "tool": "shell", "payload": {"command": "cargo test -p autospec-core cache"}, "tokens": {"input": 1100, "output": 30}}
+{"type": "test_result", "timestamp": "2026-09-08T18:25:00Z", "payload": {"passed": 2, "failed": 0}, "tokens": {"input": 1200, "output": 40}}
+{"type": "user_message", "timestamp": "2026-09-08T18:26:00Z", "text": "Don't rewrite this; the current code is fine.", "tokens": {"input": 1300, "output": 22}}
+{"type": "user_intervention", "timestamp": "2026-09-08T18:26:01Z", "payload": {"category": "code_quality", "severity": 2}, "tokens": {"input": 1300, "output": 22}}
+{"type": "session_finished", "timestamp": "2026-09-08T18:27:00Z", "payload": {"outcome": "success"}, "tokens": {"input": 1400, "output": 20}}

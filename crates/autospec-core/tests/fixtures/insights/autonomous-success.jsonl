@@ -1,0 +1,13 @@
+{"type": "session_started", "timestamp": "2026-09-08T18:00:00Z", "session_id": "sess_01", "repo": "inferweave/autospec", "branch": "feat/golden-autonomous-success", "work_item_id": "issue-721", "agent_role": "orchestrator", "provider": "local", "model": "qwen3"}
+{"type": "user_message", "timestamp": "2026-09-08T18:00:05Z", "text": "Implement the retry helper described in issue-721 without further questions.", "tokens": {"input": 900, "output": 40}}
+{"type": "model_selected", "timestamp": "2026-09-08T18:00:06Z", "model": "qwen3", "payload": {"reason": "default routing"}}
+{"type": "file_read", "timestamp": "2026-09-08T18:01:00Z", "tool": "read", "payload": {"path": "crates/autospec-core/src/retry.rs"}, "tokens": {"input": 1200, "output": 12}}
+{"type": "file_patch", "timestamp": "2026-09-08T18:04:00Z", "tool": "edit", "payload": {"path": "crates/autospec-core/src/retry.rs"}, "tokens": {"input": 2100, "output": 640}}
+{"type": "tool_call", "timestamp": "2026-09-08T18:06:00Z", "tool": "shell", "payload": {"command": "cargo test -p autospec-core retry"}, "tokens": {"input": 2400, "output": 30}}
+{"type": "test_run", "timestamp": "2026-09-08T18:06:30Z", "tool": "shell", "payload": {"command": "cargo test -p autospec-core retry"}, "tokens": {"input": 2500, "output": 25}}
+{"type": "test_result", "timestamp": "2026-09-08T18:07:00Z", "payload": {"passed": 3, "failed": 0}, "tokens": {"input": 2600, "output": 40}}
+{"type": "git_commit", "timestamp": "2026-09-08T18:08:00Z", "payload": {"sha": "a1b2c3d", "message": "feat: add retry helper"}, "tokens": {"input": 2700, "output": 55}}
+{"type": "pull_request_opened", "timestamp": "2026-09-08T18:09:00Z", "payload": {"pr": 9001}, "tokens": {"input": 2800, "output": 70}}
+{"type": "ci_started", "timestamp": "2026-09-08T18:09:30Z", "payload": {"pr": 9001}}
+{"type": "ci_finished", "timestamp": "2026-09-08T18:12:00Z", "payload": {"pr": 9001, "status": "success"}, "tokens": {"input": 2900, "output": 20}}
+{"type": "session_finished", "timestamp": "2026-09-08T18:12:30Z", "payload": {"outcome": "success"}, "tokens": {"input": 3000, "output": 25}}

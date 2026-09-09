@@ -1,0 +1,202 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_04",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:40:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-context-exhaustion",
+      "work_item_id": "issue-724",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:41:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Reading the validation pipeline modules."
+      },
+      "tokens": {
+        "input": 40000,
+        "output": 300
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:42:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/validation/runner.rs"
+      },
+      "tokens": {
+        "input": 55000,
+        "output": 200
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:43:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/validation/catalog.rs"
+      },
+      "tokens": {
+        "input": 72000,
+        "output": 210
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:44:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "context_limit_warning",
+      "payload": {
+        "limit_tokens": 131072,
+        "used_tokens": 96000
+      },
+      "tokens": {
+        "input": 96000,
+        "output": 180
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:45:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/validation/results.rs"
+      },
+      "tokens": {
+        "input": 118000,
+        "output": 240
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:46:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "context_compaction",
+      "payload": {
+        "after_tokens": 42000,
+        "before_tokens": 126000
+      },
+      "tokens": {
+        "input": 126000,
+        "output": 420
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:47:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Resuming after compaction; re-reading the touched module."
+      },
+      "tokens": {
+        "input": 43000,
+        "output": 260
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:49:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "context_limit_warning",
+      "payload": {
+        "limit_tokens": 131072,
+        "used_tokens": 104000
+      },
+      "tokens": {
+        "input": 104000,
+        "output": 190
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:50:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "context_compaction",
+      "payload": {
+        "after_tokens": 39000,
+        "before_tokens": 111000
+      },
+      "tokens": {
+        "input": 111000,
+        "output": 380
+      }
+    },
+    {
+      "event_id": "evt_0011",
+      "session_id": "sess_04",
+      "timestamp": "2026-09-08T18:51:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "degraded"
+      },
+      "tokens": {
+        "input": 40000,
+        "output": 150
+      }
+    }
+  ]
+}

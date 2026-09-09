@@ -1,0 +1,188 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_05",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:00:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-broken-shell-commands",
+      "work_item_id": "issue-725",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:01:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_run",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test --workspace --no-fail-fas"
+      },
+      "tokens": {
+        "input": 3000,
+        "output": 40
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:01:10Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_failed",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test --workspace --no-fail-fas",
+        "exit_code": 101,
+        "stderr": "error: unexpected argument '--no-fail-fas'"
+      },
+      "tokens": {
+        "input": 3100,
+        "output": 60
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:02:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_run",
+      "tool": "shell",
+      "payload": {
+        "command": "cd crate/autospec-core && cargo test"
+      },
+      "tokens": {
+        "input": 3200,
+        "output": 35
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:02:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_failed",
+      "tool": "shell",
+      "payload": {
+        "command": "cd crate/autospec-core && cargo test",
+        "exit_code": 1,
+        "stderr": "cd: no such file or directory: crate/autospec-core"
+      },
+      "tokens": {
+        "input": 3300,
+        "output": 55
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:02:10Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_error",
+      "tool": "shell",
+      "payload": {
+        "error": "shell: command failed with exit code 1"
+      },
+      "tokens": {
+        "input": 3400,
+        "output": 45
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:03:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_run",
+      "tool": "shell",
+      "payload": {
+        "command": "cd crates/autospec-core && cargo test"
+      },
+      "tokens": {
+        "input": 3500,
+        "output": 40
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:04:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_result",
+      "tool": "shell",
+      "payload": {
+        "exit_code": 0
+      },
+      "tokens": {
+        "input": 3600,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:04:10Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "test_result",
+      "payload": {
+        "failed": 0,
+        "passed": 4
+      },
+      "tokens": {
+        "input": 3700,
+        "output": 35
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_05",
+      "timestamp": "2026-09-08T19:05:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "success"
+      },
+      "tokens": {
+        "input": 3800,
+        "output": 20
+      }
+    }
+  ]
+}

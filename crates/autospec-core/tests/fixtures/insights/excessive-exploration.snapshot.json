@@ -1,0 +1,308 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_03",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:30:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-excessive-exploration",
+      "work_item_id": "issue-723",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:30:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Fix the flaky queue test."
+      },
+      "tokens": {
+        "input": 700,
+        "output": 15
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:31:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "README.md"
+      },
+      "tokens": {
+        "input": 750,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:31:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "grep -rn \"queue\" ."
+      },
+      "tokens": {
+        "input": 800,
+        "output": 12
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:32:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/execution/queue.rs"
+      },
+      "tokens": {
+        "input": 850,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:32:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/execution/queue_state.rs"
+      },
+      "tokens": {
+        "input": 900,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:33:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "grep -rn \"queue\" tests/"
+      },
+      "tokens": {
+        "input": 950,
+        "output": 12
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:33:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "tests/execution_queue.rs"
+      },
+      "tokens": {
+        "input": 1000,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:34:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "docs/memory/MEMORY.md"
+      },
+      "tokens": {
+        "input": 1050,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:34:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "grep -rn \"flaky\" ."
+      },
+      "tokens": {
+        "input": 1100,
+        "output": 12
+      }
+    },
+    {
+      "event_id": "evt_0011",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:35:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/execution/mod.rs"
+      },
+      "tokens": {
+        "input": 1150,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0012",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:35:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "scripts/autospec-watchdog.sh"
+      },
+      "tokens": {
+        "input": 1200,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0013",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:36:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "git log --oneline -20"
+      },
+      "tokens": {
+        "input": 1250,
+        "output": 12
+      }
+    },
+    {
+      "event_id": "evt_0014",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:36:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_read",
+      "tool": "read",
+      "payload": {
+        "path": "crates/autospec-core/src/execution/work.rs"
+      },
+      "tokens": {
+        "input": 1300,
+        "output": 10
+      }
+    },
+    {
+      "event_id": "evt_0015",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:37:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "You're looking in the wrong directory."
+      },
+      "tokens": {
+        "input": 1350,
+        "output": 20
+      }
+    },
+    {
+      "event_id": "evt_0016",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:37:01Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_intervention",
+      "payload": {
+        "category": "repository_navigation",
+        "severity": 3
+      },
+      "tokens": {
+        "input": 1350,
+        "output": 20
+      }
+    },
+    {
+      "event_id": "evt_0017",
+      "session_id": "sess_03",
+      "timestamp": "2026-09-08T18:38:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "abandoned"
+      },
+      "tokens": {
+        "input": 1400,
+        "output": 15
+      }
+    }
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_07",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:30:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-unused-skill",
+      "work_item_id": "issue-727",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:30:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Record a quality check for the staging dashboard."
+      },
+      "tokens": {
+        "input": 500,
+        "output": 16
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:30:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "skill",
+      "payload": {
+        "skill": "autospec-quality"
+      },
+      "tokens": {
+        "input": 550,
+        "output": 20
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:30:40Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_result",
+      "tool": "skill",
+      "payload": {
+        "result": "synthetic quality record written",
+        "skill": "autospec-quality"
+      },
+      "tokens": {
+        "input": 600,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:31:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Moving on to the unrelated config tweak."
+      },
+      "tokens": {
+        "input": 650,
+        "output": 50
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:32:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_patch",
+      "tool": "edit",
+      "payload": {
+        "path": "crates/autospec-core/src/autonomous/config.rs"
+      },
+      "tokens": {
+        "input": 700,
+        "output": 140
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:33:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo build -p autospec-core"
+      },
+      "tokens": {
+        "input": 800,
+        "output": 25
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:34:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_result",
+      "tool": "shell",
+      "payload": {
+        "exit_code": 0
+      },
+      "tokens": {
+        "input": 900,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_07",
+      "timestamp": "2026-09-08T19:35:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "success"
+      },
+      "tokens": {
+        "input": 950,
+        "output": 20
+      }
+    }
+  ]
+}

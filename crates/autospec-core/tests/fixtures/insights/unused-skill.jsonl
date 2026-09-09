@@ -1,0 +1,9 @@
+{"type": "session_started", "timestamp": "2026-09-08T19:30:00Z", "session_id": "sess_07", "repo": "inferweave/autospec", "branch": "feat/golden-unused-skill", "work_item_id": "issue-727", "agent_role": "implementer", "provider": "local", "model": "qwen3"}
+{"type": "user_message", "timestamp": "2026-09-08T19:30:05Z", "text": "Record a quality check for the staging dashboard.", "tokens": {"input": 500, "output": 16}}
+{"type": "tool_call", "timestamp": "2026-09-08T19:30:30Z", "tool": "skill", "payload": {"skill": "autospec-quality"}, "tokens": {"input": 550, "output": 20}}
+{"type": "tool_result", "timestamp": "2026-09-08T19:30:40Z", "tool": "skill", "payload": {"skill": "autospec-quality", "result": "synthetic quality record written"}, "tokens": {"input": 600, "output": 30}}
+{"type": "assistant_message", "timestamp": "2026-09-08T19:31:00Z", "text": "Moving on to the unrelated config tweak.", "model": "qwen3", "tokens": {"input": 650, "output": 50}}
+{"type": "file_patch", "timestamp": "2026-09-08T19:32:00Z", "tool": "edit", "payload": {"path": "crates/autospec-core/src/autonomous/config.rs"}, "tokens": {"input": 700, "output": 140}}
+{"type": "tool_call", "timestamp": "2026-09-08T19:33:00Z", "tool": "shell", "payload": {"command": "cargo build -p autospec-core"}, "tokens": {"input": 800, "output": 25}}
+{"type": "tool_result", "timestamp": "2026-09-08T19:34:00Z", "tool": "shell", "payload": {"exit_code": 0}, "tokens": {"input": 900, "output": 30}}
+{"type": "session_finished", "timestamp": "2026-09-08T19:35:00Z", "payload": {"outcome": "success"}, "tokens": {"input": 950, "output": 20}}

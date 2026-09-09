@@ -1,0 +1,182 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_06",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:10:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-over-abstraction",
+      "work_item_id": "issue-726",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:10:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Add one CLI flag to the insights command."
+      },
+      "tokens": {
+        "input": 600,
+        "output": 18
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:12:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_write",
+      "tool": "write",
+      "payload": {
+        "path": "crates/autospec-core/src/insights/traits.rs"
+      },
+      "tokens": {
+        "input": 1200,
+        "output": 800
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:14:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_write",
+      "tool": "write",
+      "payload": {
+        "path": "crates/autospec-core/src/insights/factory.rs"
+      },
+      "tokens": {
+        "input": 2000,
+        "output": 900
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:16:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_write",
+      "tool": "write",
+      "payload": {
+        "path": "crates/autospec-core/src/insights/registry.rs"
+      },
+      "tokens": {
+        "input": 2900,
+        "output": 850
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:18:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Don't create another abstraction. The flag is one line."
+      },
+      "tokens": {
+        "input": 3800,
+        "output": 24
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:18:01Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_intervention",
+      "payload": {
+        "category": "architecture",
+        "severity": 4
+      },
+      "tokens": {
+        "input": 3800,
+        "output": 24
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:19:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Deleting the new modules and adding the flag directly."
+      },
+      "tokens": {
+        "input": 3900,
+        "output": 60
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:20:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_patch",
+      "tool": "edit",
+      "payload": {
+        "path": "crates/autospec-cli/src/commands/insights.rs"
+      },
+      "tokens": {
+        "input": 4000,
+        "output": 120
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_06",
+      "timestamp": "2026-09-08T19:21:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "success"
+      },
+      "tokens": {
+        "input": 4100,
+        "output": 25
+      }
+    }
+  ]
+}

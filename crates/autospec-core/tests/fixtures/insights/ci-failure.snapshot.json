@@ -1,0 +1,185 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_10",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:10:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-ci-failure",
+      "work_item_id": "issue-730",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:11:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "git_commit",
+      "payload": {
+        "message": "fix: tighten validation option parsing",
+        "sha": "d4e5f6a"
+      },
+      "tokens": {
+        "input": 1900,
+        "output": 55
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:12:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "pull_request_opened",
+      "payload": {
+        "pr": 9003
+      },
+      "tokens": {
+        "input": 2000,
+        "output": 60
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:12:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "ci_started",
+      "payload": {
+        "pr": 9003
+      },
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:16:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "ci_finished",
+      "payload": {
+        "failed_check": "cargo test --workspace",
+        "pr": 9003,
+        "status": "failure"
+      },
+      "tokens": {
+        "input": 2100,
+        "output": 70
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:17:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "tool_call",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test -p autospec-cli validation_options"
+      },
+      "tokens": {
+        "input": 2200,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:18:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_run",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test -p autospec-cli validation_options"
+      },
+      "tokens": {
+        "input": 2300,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:19:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "command_failed",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test -p autospec-cli validation_options",
+        "exit_code": 101,
+        "stderr": "test validation_options::parses_flag ... FAILED"
+      },
+      "tokens": {
+        "input": 2400,
+        "output": 85
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:21:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_patch",
+      "tool": "edit",
+      "payload": {
+        "path": "crates/autospec-core/src/validation/options.rs"
+      },
+      "tokens": {
+        "input": 2500,
+        "output": 180
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_10",
+      "timestamp": "2026-09-08T20:22:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "in_progress"
+      },
+      "tokens": {
+        "input": 2600,
+        "output": 25
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{"type": "session_started", "timestamp": "2026-09-08T19:40:00Z", "session_id": "sess_08", "repo": "inferweave/autospec", "branch": "feat/golden-model-fallback", "work_item_id": "issue-728", "agent_role": "implementer", "provider": "local", "model": "spark-mini"}
+{"type": "model_selected", "timestamp": "2026-09-08T19:40:05Z", "model": "spark-mini", "payload": {"reason": "tier B routing"}}
+{"type": "assistant_message", "timestamp": "2026-09-08T19:41:00Z", "text": "Drafting the patch for the claim lease fix.", "model": "spark-mini", "tokens": {"input": 2000, "output": 400}}
+{"type": "model_fallback", "timestamp": "2026-09-08T19:42:00Z", "payload": {"from_model": "spark-mini", "to_model": "qwen3", "reason": "capacity failure"}, "tokens": {"input": 2500, "output": 60}}
+{"type": "model_selected", "timestamp": "2026-09-08T19:42:05Z", "model": "qwen3", "payload": {"reason": "fallback to tier A"}}
+{"type": "assistant_message", "timestamp": "2026-09-08T19:43:00Z", "text": "Continuing the patch from the forked context.", "model": "qwen3", "tokens": {"input": 3000, "output": 500}}
+{"type": "file_patch", "timestamp": "2026-09-08T19:44:00Z", "tool": "edit", "payload": {"path": "crates/autospec-core/src/claim/lease.rs"}, "tokens": {"input": 3500, "output": 260}}
+{"type": "test_run", "timestamp": "2026-09-08T19:45:00Z", "tool": "shell", "payload": {"command": "cargo test -p autospec-core claim"}, "tokens": {"input": 3700, "output": 30}}
+{"type": "test_result", "timestamp": "2026-09-08T19:46:00Z", "payload": {"passed": 2, "failed": 0}, "tokens": {"input": 3800, "output": 35}}
+{"type": "session_finished", "timestamp": "2026-09-08T19:47:00Z", "payload": {"outcome": "success"}, "tokens": {"input": 3900, "output": 20}}

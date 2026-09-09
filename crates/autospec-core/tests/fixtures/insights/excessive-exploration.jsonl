@@ -1,0 +1,17 @@
+{"type": "session_started", "timestamp": "2026-09-08T18:30:00Z", "session_id": "sess_03", "repo": "inferweave/autospec", "branch": "feat/golden-excessive-exploration", "work_item_id": "issue-723", "agent_role": "implementer", "provider": "local", "model": "qwen3"}
+{"type": "user_message", "timestamp": "2026-09-08T18:30:05Z", "text": "Fix the flaky queue test.", "tokens": {"input": 700, "output": 15}}
+{"type": "file_read", "timestamp": "2026-09-08T18:31:00Z", "tool": "read", "payload": {"path": "README.md"}, "tokens": {"input": 750, "output": 10}}
+{"type": "tool_call", "timestamp": "2026-09-08T18:31:30Z", "tool": "shell", "payload": {"command": "grep -rn \"queue\" ."}, "tokens": {"input": 800, "output": 12}}
+{"type": "file_read", "timestamp": "2026-09-08T18:32:00Z", "tool": "read", "payload": {"path": "crates/autospec-core/src/execution/queue.rs"}, "tokens": {"input": 850, "output": 10}}
+{"type": "file_read", "timestamp": "2026-09-08T18:32:30Z", "tool": "read", "payload": {"path": "crates/autospec-core/src/execution/queue_state.rs"}, "tokens": {"input": 900, "output": 10}}
+{"type": "tool_call", "timestamp": "2026-09-08T18:33:00Z", "tool": "shell", "payload": {"command": "grep -rn \"queue\" tests/"}, "tokens": {"input": 950, "output": 12}}
+{"type": "file_read", "timestamp": "2026-09-08T18:33:30Z", "tool": "read", "payload": {"path": "tests/execution_queue.rs"}, "tokens": {"input": 1000, "output": 10}}
+{"type": "file_read", "timestamp": "2026-09-08T18:34:00Z", "tool": "read", "payload": {"path": "docs/memory/MEMORY.md"}, "tokens": {"input": 1050, "output": 10}}
+{"type": "tool_call", "timestamp": "2026-09-08T18:34:30Z", "tool": "shell", "payload": {"command": "grep -rn \"flaky\" ."}, "tokens": {"input": 1100, "output": 12}}
+{"type": "file_read", "timestamp": "2026-09-08T18:35:00Z", "tool": "read", "payload": {"path": "crates/autospec-core/src/execution/mod.rs"}, "tokens": {"input": 1150, "output": 10}}
+{"type": "file_read", "timestamp": "2026-09-08T18:35:30Z", "tool": "read", "payload": {"path": "scripts/autospec-watchdog.sh"}, "tokens": {"input": 1200, "output": 10}}
+{"type": "tool_call", "timestamp": "2026-09-08T18:36:00Z", "tool": "shell", "payload": {"command": "git log --oneline -20"}, "tokens": {"input": 1250, "output": 12}}
+{"type": "file_read", "timestamp": "2026-09-08T18:36:30Z", "tool": "read", "payload": {"path": "crates/autospec-core/src/execution/work.rs"}, "tokens": {"input": 1300, "output": 10}}
+{"type": "user_message", "timestamp": "2026-09-08T18:37:00Z", "text": "You're looking in the wrong directory.", "tokens": {"input": 1350, "output": 20}}
+{"type": "user_intervention", "timestamp": "2026-09-08T18:37:01Z", "payload": {"category": "repository_navigation", "severity": 3}, "tokens": {"input": 1350, "output": 20}}
+{"type": "session_finished", "timestamp": "2026-09-08T18:38:00Z", "payload": {"outcome": "abandoned"}, "tokens": {"input": 1400, "output": 15}}

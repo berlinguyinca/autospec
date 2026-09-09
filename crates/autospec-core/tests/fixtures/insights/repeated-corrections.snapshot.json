@@ -1,0 +1,234 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_02",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:20:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-repeated-corrections",
+      "work_item_id": "issue-722",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:20:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Add a cache for the lookup path."
+      },
+      "tokens": {
+        "input": 800,
+        "output": 20
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:20:20Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "I will introduce a new cache service layer."
+      },
+      "tokens": {
+        "input": 850,
+        "output": 60
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:21:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "We already have a helper for this. Use the existing service."
+      },
+      "tokens": {
+        "input": 900,
+        "output": 25
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:21:01Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_intervention",
+      "payload": {
+        "category": "unnecessary_work",
+        "severity": 3
+      },
+      "tokens": {
+        "input": 900,
+        "output": 25
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:21:30Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Switching to the existing helper."
+      },
+      "tokens": {
+        "input": 950,
+        "output": 40
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:23:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Run the tests first."
+      },
+      "tokens": {
+        "input": 1000,
+        "output": 18
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:23:01Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_intervention",
+      "payload": {
+        "category": "test_process",
+        "severity": 2
+      },
+      "tokens": {
+        "input": 1000,
+        "output": 18
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:24:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "test_run",
+      "tool": "shell",
+      "payload": {
+        "command": "cargo test -p autospec-core cache"
+      },
+      "tokens": {
+        "input": 1100,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:25:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "test_result",
+      "payload": {
+        "failed": 0,
+        "passed": 2
+      },
+      "tokens": {
+        "input": 1200,
+        "output": 40
+      }
+    },
+    {
+      "event_id": "evt_0011",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:26:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_message",
+      "payload": {
+        "text": "Don't rewrite this; the current code is fine."
+      },
+      "tokens": {
+        "input": 1300,
+        "output": 22
+      }
+    },
+    {
+      "event_id": "evt_0012",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:26:01Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "user_intervention",
+      "payload": {
+        "category": "code_quality",
+        "severity": 2
+      },
+      "tokens": {
+        "input": 1300,
+        "output": 22
+      }
+    },
+    {
+      "event_id": "evt_0013",
+      "session_id": "sess_02",
+      "timestamp": "2026-09-08T18:27:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "success"
+      },
+      "tokens": {
+        "input": 1400,
+        "output": 20
+      }
+    }
+  ]
+}

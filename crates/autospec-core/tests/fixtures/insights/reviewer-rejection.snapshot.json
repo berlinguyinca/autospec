@@ -1,0 +1,203 @@
+{
+  "extractor_version": "1.0.0",
+  "session_id": "sess_09",
+  "events": [
+    {
+      "event_id": "evt_0001",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:50:00Z",
+      "repo": "inferweave/autospec",
+      "branch": "feat/golden-reviewer-rejection",
+      "work_item_id": "issue-729",
+      "agent_role": "implementer",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "session_started",
+      "payload": {},
+      "tokens": {
+        "input": 0,
+        "output": 0
+      }
+    },
+    {
+      "event_id": "evt_0002",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:51:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "git_commit",
+      "payload": {
+        "message": "feat: extend claim state machine",
+        "sha": "b2c3d4e"
+      },
+      "tokens": {
+        "input": 2400,
+        "output": 50
+      }
+    },
+    {
+      "event_id": "evt_0003",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:52:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "pull_request_opened",
+      "payload": {
+        "pr": 9002
+      },
+      "tokens": {
+        "input": 2500,
+        "output": 65
+      }
+    },
+    {
+      "event_id": "evt_0004",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:56:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "pull_request_reviewed",
+      "payload": {
+        "comment": "missing test for the expired-lease branch",
+        "decision": "changes_requested",
+        "pr": 9002
+      },
+      "tokens": {
+        "input": 2600,
+        "output": 80
+      }
+    },
+    {
+      "event_id": "evt_0005",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:56:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "review_result",
+      "payload": {
+        "decision": "changes_requested",
+        "pr": 9002
+      },
+      "tokens": {
+        "input": 2700,
+        "output": 30
+      }
+    },
+    {
+      "event_id": "evt_0006",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:57:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "model": "qwen3",
+      "event_type": "assistant_message",
+      "payload": {
+        "text": "Adding the expired-lease test and re-pushing."
+      },
+      "tokens": {
+        "input": 2800,
+        "output": 90
+      }
+    },
+    {
+      "event_id": "evt_0007",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:58:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "file_write",
+      "tool": "write",
+      "payload": {
+        "path": "crates/autospec-core/tests/claim_lease.rs"
+      },
+      "tokens": {
+        "input": 2900,
+        "output": 320
+      }
+    },
+    {
+      "event_id": "evt_0008",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T19:59:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "git_commit",
+      "payload": {
+        "message": "test: cover expired lease path",
+        "sha": "c3d4e5f"
+      },
+      "tokens": {
+        "input": 3000,
+        "output": 45
+      }
+    },
+    {
+      "event_id": "evt_0009",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T20:03:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "pull_request_reviewed",
+      "payload": {
+        "comment": "LGTM",
+        "decision": "approved",
+        "pr": 9002
+      },
+      "tokens": {
+        "input": 3100,
+        "output": 40
+      }
+    },
+    {
+      "event_id": "evt_0010",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T20:03:05Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "review_result",
+      "payload": {
+        "decision": "approved",
+        "pr": 9002
+      },
+      "tokens": {
+        "input": 3200,
+        "output": 25
+      }
+    },
+    {
+      "event_id": "evt_0011",
+      "session_id": "sess_09",
+      "timestamp": "2026-09-08T20:04:00Z",
+      "repo": "synthetic/repo",
+      "branch": "main",
+      "agent_role": "orchestrator",
+      "provider": "local",
+      "event_type": "session_finished",
+      "payload": {
+        "outcome": "success"
+      },
+      "tokens": {
+        "input": 3300,
+        "output": 20
+      }
+    }
+  ]
+}
