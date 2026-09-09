@@ -703,6 +703,33 @@ not exported to child processes — so `rg` can work at your prompt and be missi
 inside every script autospec runs.
 | `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool); required scanners remain verified and fail closed by exact name. |
 
+## Insights (continuous improvement engine)
+
+The `insights:` block (spec §45, `docs/specs/2026-09-08-continuous-improvement-engine.md`) is
+parsed into `InsightsConfig` (`autospec-core::insights::config`). Parsing is fail-closed: unknown
+keys at any level are rejected rather than ignored, and out-of-range thresholds are errors. An
+empty document yields the defaults below.
+
+| Key | Default | Effect |
+|---|---|---|
+| `insights.enabled` | `true` | Master toggle for the insights engine. |
+| `insights.ingestion.pi` | `true` | Ingest Pi session events. |
+| `insights.ingestion.codex` | `false` | Ingest Codex session events. |
+| `insights.ingestion.claude` | `false` | Ingest Claude session events. |
+| `insights.semantic_analysis.provider` | `inferweave` | Provider for semantic (LLM) session analysis. |
+| `insights.semantic_analysis.model` | `local-qwen` | Model used for semantic analysis. |
+| `insights.semantic_analysis.remote_allowed` | `false` | Allow remote models for semantic enrichment; off by default (§39). |
+| `insights.strong_analysis.provider` | `autospec-router` | Provider for strong-model analysis. |
+| `insights.strong_analysis.role` | `planning` | Routing role for strong-model analysis. |
+| `insights.retention.raw_sessions_days` | `90` | Retention window (days) for raw session rows. |
+| `insights.retention.normalized_events_days` | `365` | Retention window (days) for normalized event rows. |
+| `insights.thresholds.recurring_pattern_min_sessions` | `3` | Minimum distinct sessions for a recurring-pattern finding. |
+| `insights.thresholds.recurring_pattern_min_occurrences` | `5` | Minimum total occurrences for a recurring-pattern finding. |
+| `insights.thresholds.proposal_confidence_min` | `0.80` | Confidence floor for proposals; must be in `[0, 1]`. |
+| `insights.self_improvement.allow_auto_pr` | `true` | Allow the engine to open auto-PRs. |
+| `insights.self_improvement.allow_auto_merge` | `false` | Allow auto-merge of engine PRs; off by default. |
+| `insights.privacy.redact_secrets` | `true` | Redact secrets before analysis; on by default. |
+
 ## Explore (autospec-explore RSI)
 | Var | Default | Effect |
 |---|---|---|
