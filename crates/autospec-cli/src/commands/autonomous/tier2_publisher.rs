@@ -339,7 +339,7 @@ fn render_draft(
         title = proposal.title,
     );
     let findings = lint_issue_body(&body);
-    if !findings.is_empty() {
+    if findings.iter().any(|finding| finding.is_blocking()) {
         let summary = findings
             .iter()
             .map(|finding| format!("{}: {}", finding.rule_id(), finding.message))

@@ -137,7 +137,10 @@ fn continuation_child_document(
         .collect::<Vec<_>>()
         .join("\n");
     body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Files touched\n\n{files_touched}\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
-    if !autospec_core::lint::lint_issue_body(&body).is_empty() {
+    if autospec_core::lint::lint_issue_body(&body)
+        .iter()
+        .any(|finding| finding.is_blocking())
+    {
         return Err("continuation issue body failed the issue-quality contract".to_string());
     }
     if autospec_core::lint::declared_implementation_scope(&body).is_empty() {

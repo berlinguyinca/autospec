@@ -50,6 +50,8 @@ pub enum IssueQualityRule {
     BodyTooLong,
     OutlineTooLong,
     UiSectionsIncomplete,
+    DagDependencyUnjustified,
+    DagMetadataMismatch,
 }
 
 impl IssueQualityRule {
@@ -75,14 +77,28 @@ impl IssueQualityRule {
             Self::BodyTooLong => "BODY_TOO_LONG",
             Self::OutlineTooLong => "OUTLINE_TOO_LONG",
             Self::UiSectionsIncomplete => "UI_SECTIONS_INCOMPLETE",
+            Self::DagDependencyUnjustified => "AS-DAG-001",
+            Self::DagMetadataMismatch => "AS-DAG-009",
         }
     }
+}
+
+/// Severity of an issue-lint finding.
+///
+/// `Warning` findings (rollout stage 1 of the AS-DAG catalogue) are reported
+/// but never affect the exit code or rejection decisions, matching
+/// `scripts/lint-issue.sh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLintSeverity {
+    Blocking,
+    Warning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueLintFinding {
     pub rule: IssueQualityRule,
     pub message: String,
+    pub severity: IssueLintSeverity,
 }
 
 impl IssueLintFinding {
@@ -90,11 +106,25 @@ impl IssueLintFinding {
         Self {
             rule,
             message: message.into(),
+            severity: IssueLintSeverity::Blocking,
+        }
+    }
+
+    fn warning(rule: IssueQualityRule, message: impl Into<String>) -> Self {
+        Self {
+            rule,
+            message: message.into(),
+            severity: IssueLintSeverity::Warning,
         }
     }
 
     pub fn rule_id(&self) -> &'static str {
         self.rule.id()
+    }
+
+    /// True for findings that affect the exit code and rejection decisions.
+    pub fn is_blocking(&self) -> bool {
+        matches!(self.severity, IssueLintSeverity::Blocking)
     }
 }
 
@@ -114,6 +144,7 @@ pub fn lint_issue_body(body: &str) -> Vec<IssueLintFinding> {
     check_body_size(&document, &mut findings);
     check_outline_size(&document, &mut findings);
     check_ui_sections(&document, &mut findings);
+    check_dag_metadata(&document, &mut findings);
 
     findings
 }
@@ -819,4 +850,206 @@ fn first_chars(input: &str, max: usize) -> &str {
         .char_indices()
         .nth(max)
         .map_or(input, |(index, _)| &input[..index])
+}
+
+/// One hard dependency entry from the `autospec:` machine metadata block.
+#[derive(Debug, Clone, Default)]
+struct MetadataHardDependency {
+    issue: u64,
+    reason_code: Option<String>,
+    artifact: Option<String>,
+}
+
+/// Find the fenced `autospec:` machine metadata block, if present (spec §15).
+///
+/// The block is a fenced code block whose first non-blank interior line is
+/// exactly `autospec:` at column 0. The block may appear anywhere in the body,
+/// including after the primary smoke block, so every fenced block is scanned.
+fn autospec_metadata_block<'a>(document: &IssueDocument<'a>) -> Option<Vec<&'a str>> {
+    let mut index = 0;
+    while index < document.lines.len() {
+        if !document.lines[index].starts_with("```") {
+            index += 1;
+            continue;
+        }
+        let open = index;
+        index += 1;
+        while index < document.lines.len() && !document.lines[index].starts_with("```") {
+            index += 1;
+        }
+        let close = index;
+        let interior = &document.lines[open + 1..close];
+        let is_metadata = interior
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| *line == "autospec:");
+        if is_metadata {
+            return Some(interior.to_vec());
+        }
+        index = if close < document.lines.len() {
+            close + 1
+        } else {
+            close
+        };
+    }
+    None
+}
+
+/// Strip one pair of matching surrounding quotes (single or double) from a
+/// YAML scalar; unquoted scalars pass through unchanged.
+fn metadata_scalar(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let first = *value.as_bytes().first()?;
+    let last = *value.as_bytes().last()?;
+    match (first, last) {
+        (b'"', b'"') if value.len() >= 2 => Some(value[1..value.len() - 1].to_string()),
+        (b'\'', b'\'') if value.len() >= 2 => Some(value[1..value.len() - 1].to_string()),
+        _ => Some(value.to_string()),
+    }
+}
+
+/// Parse the interior of an `autospec:` metadata block for hard dependencies
+/// (spec §15). Linear state machine only: no regex, no YAML dependency.
+///
+/// Indentation tiers: ≤2 spaces is a top-level key, 3–4 spaces is a
+/// `dependencies:` subkey, and >4 spaces is a `hard:` list item.
+fn parse_autospec_metadata(interior: &[&str]) -> Vec<MetadataHardDependency> {
+    let mut entries: Vec<MetadataHardDependency> = Vec::new();
+    let mut current: Option<MetadataHardDependency> = None;
+    let mut in_dependencies = false;
+    let mut in_hard = false;
+
+    let flush = |entries: &mut Vec<MetadataHardDependency>,
+                 current: &mut Option<MetadataHardDependency>| {
+        if current.is_some() {
+            entries.push(current.take().unwrap());
+        }
+    };
+
+    for line in interior {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line
+            .chars()
+            .take_while(|character| *character == ' ')
+            .count();
+        if indent <= 2 {
+            flush(&mut entries, &mut current);
+            in_hard = false;
+            in_dependencies = trimmed.starts_with("dependencies:");
+            continue;
+        }
+        if indent <= 4 {
+            if in_dependencies {
+                flush(&mut entries, &mut current);
+                in_hard = trimmed.starts_with("hard:");
+            } else {
+                in_hard = false;
+            }
+            continue;
+        }
+        if !in_hard {
+            continue;
+        }
+        // List items carry a `- ` prefix; continuation lines of the same
+        // entry (e.g. `reason_code:` under `- issue:`) align with the item's
+        // content instead and have no prefix.
+        let item = if trimmed.starts_with("- ") {
+            trimmed[2..].trim()
+        } else {
+            trimmed
+        };
+        if let Some(value) = item.strip_prefix("issue:") {
+            if current.is_some() {
+                flush(&mut entries, &mut current);
+            }
+            if let Some(scalar) = metadata_scalar(value) {
+                if let Ok(issue) = scalar.parse::<u64>() {
+                    current = Some(MetadataHardDependency {
+                        issue,
+                        ..MetadataHardDependency::default()
+                    });
+                }
+            }
+            continue;
+        }
+        if current.is_none() {
+            continue;
+        }
+        if let Some(value) = item.strip_prefix("reason_code:") {
+            if let Some(scalar) = metadata_scalar(value) {
+                current.as_mut().unwrap().reason_code = Some(scalar);
+            }
+            continue;
+        }
+        if let Some(value) = item.strip_prefix("artifact:") {
+            if let Some(scalar) = metadata_scalar(value) {
+                current.as_mut().unwrap().artifact = Some(scalar);
+            }
+        }
+    }
+    flush(&mut entries, &mut current);
+    entries
+}
+
+/// Extract the issue numbers from a Markdown `## Dependencies` section.
+///
+/// Only canonical dependency lines (`Depends on issue #N`) count, matching the
+/// `DEPS_MALFORMED` validation in `check_sections`; `none` yields an empty set.
+fn parse_markdown_dependencies(lines: &[&str]) -> Vec<u64> {
+    lines
+        .iter()
+        .filter(|line| is_dependency_line(line))
+        .filter_map(|line| {
+            line.strip_prefix("Depends on issue #")
+                .and_then(|rest| rest.parse::<u64>().ok())
+        })
+        .collect()
+}
+
+/// AS-DAG stage-1 checks (spec §14, §15, §36, §37): warning-level findings
+/// that are reported but never affect the exit code.
+fn check_dag_metadata(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let Some(dependency_lines) = document.section("## Dependencies") else {
+        return;
+    };
+    let markdown_deps = parse_markdown_dependencies(&dependency_lines);
+    if markdown_deps.is_empty() {
+        return;
+    }
+    let metadata =
+        autospec_metadata_block(document).map(|interior| parse_autospec_metadata(&interior[..]));
+
+    for number in &markdown_deps {
+        let entry = metadata
+            .as_ref()
+            .and_then(|entries| entries.iter().find(|entry| &entry.issue == number))
+            .cloned();
+        if let Some(finding) = dag::unjustified_dependency(
+            entry
+                .as_ref()
+                .and_then(|entry| entry.reason_code.as_deref()),
+            entry.as_ref().and_then(|entry| entry.artifact.as_deref()),
+        ) {
+            findings.push(IssueLintFinding::warning(
+                IssueQualityRule::DagDependencyUnjustified,
+                finding.message,
+            ));
+        }
+    }
+
+    if let Some(entries) = metadata {
+        let yaml_deps: Vec<u64> = entries.iter().map(|entry| entry.issue).collect();
+        if let Some(finding) = dag::metadata_mismatch(&yaml_deps, &markdown_deps) {
+            findings.push(IssueLintFinding::warning(
+                IssueQualityRule::DagMetadataMismatch,
+                finding.message,
+            ));
+        }
+    }
 }

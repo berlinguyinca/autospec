@@ -115,7 +115,14 @@ esac
             autospec_core::lint::declared_implementation_scope(body),
             continuation_scope
         );
-        assert!(autospec_core::lint::lint_issue_body(body).is_empty());
+        // Warning-level AS-DAG findings (rollout stage 1) do not block publication;
+        // only blocking findings would make the generated body rejectable.
+        assert!(
+            !autospec_core::lint::lint_issue_body(body)
+                .iter()
+                .any(|finding| finding.is_blocking()),
+            "generated continuation body must carry no blocking findings: {body}"
+        );
     }
     let publication_calls = fs::read_to_string(store.join("calls")).expect("publication calls");
     assert_eq!(

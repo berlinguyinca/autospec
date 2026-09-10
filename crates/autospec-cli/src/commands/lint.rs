@@ -695,12 +695,18 @@ fn run_issue(args: &[String]) -> Result<(), CommandFailure> {
         print_text(&findings);
     }
 
-    if findings.is_empty() {
+    // Warning-level findings (AS-DAG stage 1) are reported but never affect
+    // the exit code, matching scripts/lint-issue.sh.
+    let blocking = findings
+        .iter()
+        .filter(|finding| finding.is_blocking())
+        .count();
+    if blocking == 0 {
         Ok(())
     } else {
         Err(CommandFailure::status(
             String::new(),
-            findings.len().min(64) as i32,
+            blocking.min(64) as i32,
         ))
     }
 }
@@ -1235,7 +1241,11 @@ fn read_body(path: &str) -> Result<String, CommandFailure> {
 
 fn print_text(findings: &[IssueLintFinding]) {
     for finding in findings {
-        eprintln!("{}: {}", finding.rule_id(), finding.message);
+        if finding.is_blocking() {
+            eprintln!("{}: {}", finding.rule_id(), finding.message);
+        } else {
+            eprintln!("WARNING:{}: {}", finding.rule_id(), finding.message);
+        }
     }
 }
 
@@ -1247,11 +1257,19 @@ fn print_json(findings: &[IssueLintFinding]) {
     println!("[");
     for (index, finding) in findings.iter().enumerate() {
         let separator = if index + 1 == findings.len() { "" } else { "," };
-        println!(
-            "  {{\"rule\":\"{}\",\"description\":\"{}\"}}{separator}",
-            finding.rule_id(),
-            escape_json(&finding.message)
-        );
+        if finding.is_blocking() {
+            println!(
+                "  {{\"rule\":\"{}\",\"description\":\"{}\"}}{separator}",
+                finding.rule_id(),
+                escape_json(&finding.message)
+            );
+        } else {
+            println!(
+                "  {{\"rule\":\"{}\",\"description\":\"{}\",\"severity\":\"warning\"}}{separator}",
+                finding.rule_id(),
+                escape_json(&finding.message)
+            );
+        }
     }
     println!("]");
 }
