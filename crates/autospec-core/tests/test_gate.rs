@@ -22,20 +22,18 @@ fn workspace() -> (Vec<String>, BTreeMap<String, Vec<String>>) {
     )
 }
 
-/// Regression: a patch that touches only non-compiled files, against a
-/// suite with one flaky test, is NOT held.
+/// Regression: a patch that touches only prose files (`.md`/`.txt`), against a
+/// suite with one flaky test, is NOT held. Prose-only patches are the only
+/// category that may skip the test gate.
 #[test]
-fn non_compiled_patch_against_one_flaky_test_is_not_held() {
+fn prose_only_patch_against_one_flaky_test_is_not_held() {
     let (crates, deps) = workspace();
-    let touched = [
-        "scripts/autospec-explore.sh",
-        "docs/runbooks/needs-classify-sweep.md",
-    ];
+    let touched = ["docs/runbooks/needs-classify-sweep.md", "README.md"];
 
     let affected = affected_crates(&touched, &crates, &deps);
     assert!(
         affected.is_empty(),
-        "a patch that touches no compiled code cannot affect any crate by the dependency graph"
+        "a prose-only patch cannot affect any crate by the dependency graph"
     );
 
     let suite = SuiteOutcome {
@@ -122,14 +120,16 @@ fn an_unknown_component_is_classified_fail_closed() {
 #[test]
 fn persistent_failure_outside_blast_radius_is_unattributable() {
     let (crates, deps) = workspace();
-    let touched = ["scripts/autospec-explore.sh"];
+    // Touching autospec-cli marks only autospec-cli (it is the leaf).
+    // A failure in autospec-core is outside the blast radius.
+    let touched = ["crates/autospec-cli/src/main.rs"];
     let affected = affected_crates(&touched, &crates, &deps);
 
     let suite = SuiteOutcome {
         passed: 919,
         failures: vec![SuiteFailure {
             name: "some_deterministic_failure".to_string(),
-            component: Some("autospec-cli".to_string()),
+            component: Some("autospec-core".to_string()),
         }],
     };
     let reruns = BTreeMap::from([("some_deterministic_failure".to_string(), false)]);
@@ -295,4 +295,133 @@ fn malformed_ledger_line_fails_closed() {
     assert!(error.to_string().contains("line 2"), "error: {error}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #4190: build-configuration files trigger full-workspace scope.
+#[test]
+fn build_config_paths_trigger_full_workspace() {
+    let (crates, deps) = workspace();
+    let build_configs = [
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo/config.toml",
+        ".github/workflows/ci.yml",
+        ".github/dependabot.yml",
+    ];
+    for path in build_configs {
+        let affected = affected_crates(&[path], &crates, &deps);
+        assert_eq!(
+            affected,
+            BTreeSet::from(["autospec-core".to_string(), "autospec-cli".to_string()]),
+            "build-config path `{path}` must affect every crate"
+        );
+    }
+}
+
+/// Issue #4190: an unrecognised non-prose path triggers full-workspace scope
+/// (fail-closed). The gate cannot verify the blast radius of an unknown path,
+/// so it verifies everything.
+#[test]
+fn unrecognised_non_prose_path_triggers_full_workspace() {
+    let (crates, deps) = workspace();
+    let unrecognised = [
+        "scripts/autospec-explore.sh",
+        "Makefile",
+        "Dockerfile",
+        "config.toml",
+    ];
+    for path in unrecognised {
+        let affected = affected_crates(&[path], &crates, &deps);
+        assert_eq!(
+            affected,
+            BTreeSet::from(["autospec-core".to_string(), "autospec-cli".to_string()]),
+            "unrecognised non-prose path `{path}` must trigger full-workspace scope"
+        );
+    }
+}
+
+/// Issue #4190: prose-only patches (.md/.txt) produce an empty affected set
+/// and may skip the test gate.
+#[test]
+fn prose_only_patch_produces_empty_affected_set() {
+    let (crates, deps) = workspace();
+    let prose = [
+        "README.md",
+        "docs/specs/some-design.md",
+        "NOTICE.txt",
+        "CHANGELOG.md",
+    ];
+    for path in prose {
+        let affected = affected_crates(&[path], &crates, &deps);
+        assert!(
+            affected.is_empty(),
+            "prose path `{path}` must produce an empty affected set"
+        );
+    }
+
+    // Mixed prose + crate: the crate path seeds the set, prose is ignored.
+    let mixed = ["README.md", "crates/autospec-core/src/lib.rs"];
+    let affected = affected_crates(&mixed, &crates, &deps);
+    assert_eq!(
+        affected,
+        BTreeSet::from(["autospec-core".to_string(), "autospec-cli".to_string()]),
+        "a mixed prose+crate patch is seeded by the crate path"
+    );
+}
+
+/// Issue #4190: a patch mixing prose and unrecognised non-prose paths
+/// triggers full-workspace scope (the unrecognised path dominates).
+#[test]
+fn prose_and_unrecognised_mixed_triggers_full_workspace() {
+    let (crates, deps) = workspace();
+    let mixed = ["README.md", "scripts/autospec-explore.sh"];
+    let affected = affected_crates(&mixed, &crates, &deps);
+    assert_eq!(
+        affected,
+        BTreeSet::from(["autospec-core".to_string(), "autospec-cli".to_string()]),
+        "an unrecognised non-prose path in a mixed patch must trigger full-workspace scope"
+    );
+}
+
+/// Issue #4190: a suite reporting 0 passed and 0 failures is an error,
+/// not a pass. The gate cannot certify a patch when no tests actually ran.
+#[test]
+fn zero_passed_zero_failed_is_not_a_pass() {
+    let suite = SuiteOutcome {
+        passed: 0,
+        failures: vec![],
+    };
+    let error = evaluate(
+        &suite,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        None,
+    )
+    .expect_err("0 passed is not evidence of success");
+    assert_eq!(error, GateError::NoTestsRan);
+    assert!(
+        error.to_string().contains("0 passed"),
+        "the error must explain that no tests ran: {error}"
+    );
+}
+
+/// Issue #4190: a suite with tests that passed (passed > 0) and no failures
+/// is a normal Pass, even for a prose-only patch with an empty affected set.
+#[test]
+fn non_zero_passed_with_no_failures_is_pass() {
+    let suite = SuiteOutcome {
+        passed: 42,
+        failures: vec![],
+    };
+    let verdict = evaluate(
+        &suite,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        None,
+    )
+    .expect("verdict");
+    assert_eq!(verdict.decision, GateDecision::Pass);
+    assert_eq!(verdict.message(), "PASS: 42 passed; none flaky");
 }

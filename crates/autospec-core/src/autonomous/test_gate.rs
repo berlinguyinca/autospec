@@ -217,6 +217,11 @@ pub enum GateError {
         /// The failing test with no re-run.
         test: String,
     },
+    /// The suite reported zero passed tests and zero failures. This is not a
+    /// success: either the scope was wrong or the crate has no tests. A gate
+    /// that cannot demonstrate that tests ran and passed is a failure, not a
+    /// pass.
+    NoTestsRan,
 }
 
 impl fmt::Display for GateError {
@@ -227,6 +232,11 @@ impl fmt::Display for GateError {
                 "no isolated re-run recorded for failing test `{test}`; the gate re-runs every \
                  failing test in isolation before the verdict is recorded"
             ),
+            GateError::NoTestsRan => write!(
+                f,
+                "the test suite reported 0 passed and 0 failed; no tests actually ran, so the \
+                 gate cannot certify the patch"
+            ),
         }
     }
 }
@@ -236,10 +246,20 @@ impl std::error::Error for GateError {}
 /// The set of crates a patch could affect, computed from the files it touches
 /// and the reverse-dependency closure.
 ///
+/// The default is **fail-closed**: any path that is not a recognised crate
+/// source file, not build configuration, and not prose marks the entire
+/// workspace. Only a patch in which *every* touched file is prose (`.md`/
+/// `.txt`) produces an empty affected set, meaning the gate may skip cargo.
+///
 /// - A file under `crates/<name>/` marks crate `<name>` (when `<name>` is a workspace crate).
-/// - A root `Cargo.toml` or `Cargo.lock` marks every crate: the workspace manifest is a compiled input to all.
-/// - Non-compiled files (`scripts/`, `docs/`, `skills/`, …) mark nothing: a patch that does not
-///   change compiled code cannot break a compiled test by the dependency graph.
+/// - Build configuration (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+///   `.cargo/…`, `.github/workflows/…`, `.github/dependabot*`) marks every
+///   crate: these are compiled inputs to the entire workspace.
+/// - Prose files (`.md`, `.txt`) mark nothing: a patch that changes only
+///   documentation cannot break a compiled test by the dependency graph.
+/// - Any other path (e.g. `scripts/…`, `Makefile`, `Dockerfile`) is
+///   **unrecognised** and triggers full-workspace scope: the gate cannot
+///   verify the patch's blast radius, so it verifies everything.
 /// - Every marked crate pulls in every crate that depends on it, transitively.
 pub fn affected_crates(
     touched: &[impl AsRef<str>],
@@ -247,16 +267,41 @@ pub fn affected_crates(
     depends_on: &BTreeMap<String, Vec<String>>,
 ) -> BTreeSet<String> {
     let mut seed = BTreeSet::new();
+    let mut has_unrecognised = false;
     for file in touched {
         let path = normalize_path(file.as_ref());
-        if path == "Cargo.toml" || path == "Cargo.lock" {
+        if is_build_config(&path) {
             return crates.iter().cloned().collect();
         }
         if let Some(crate_name) = crate_for_path(&path, crates) {
             seed.insert(crate_name);
+        } else if !is_prose(&path) {
+            has_unrecognised = true;
         }
     }
+    if has_unrecognised {
+        return crates.iter().cloned().collect();
+    }
     reverse_closure(&seed, depends_on)
+}
+
+/// Paths that are build configuration: a change to any of them can alter how
+/// the entire workspace compiles, so they affect every crate.
+fn is_build_config(path: &str) -> bool {
+    path == "Cargo.toml"
+        || path == "Cargo.lock"
+        || path == "rust-toolchain.toml"
+        || path == "rust-toolchain"
+        || path.starts_with(".cargo/")
+        || path.starts_with(".github/workflows/")
+        || path.starts_with(".github/dependabot")
+}
+
+/// A file is prose if its extension is `.md` or `.txt`. Prose-only patches
+/// (every touched file is prose) cannot affect compiled code and are the only
+/// category allowed to skip the test gate.
+fn is_prose(path: &str) -> bool {
+    path.ends_with(".md") || path.ends_with(".txt")
 }
 
 /// Classify every failing test and produce the verdict.
@@ -289,6 +334,12 @@ pub fn evaluate(
     affected: &BTreeSet<String>,
     tree_commit: Option<&str>,
 ) -> Result<GateVerdict, GateError> {
+    // A suite that reports zero passed and zero failures ran no tests.
+    // This is not a success: the scope was wrong or the crate has no tests.
+    if suite.passed == 0 && suite.failures.is_empty() {
+        return Err(GateError::NoTestsRan);
+    }
+
     let mut reports: Vec<FailureReport> = Vec::with_capacity(suite.failures.len());
     for failure in &suite.failures {
         let rerun_passed = *reruns
