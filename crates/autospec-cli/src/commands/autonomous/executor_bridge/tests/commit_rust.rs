@@ -313,29 +313,32 @@ fn contained_hook_rejects_linter_symlink_into_worktree() {
 )]
 #[test]
 fn rust_commit_runs_trusted_validation_hook_inside_containment() {
+    // Each precondition is bound by name so a skip can say which one failed.
+    // Previously five probes shared one message ("macOS developer tools are
+    // unavailable"), which is not diagnosable from a CI log.
     #[cfg(target_os = "macos")]
-    let developer_tools_valid = Command::new("/usr/bin/xcode-select")
-        .arg("-p")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|path| Path::new(path.trim()).join("usr/bin/xcrun").is_file());
-    #[cfg(target_os = "macos")]
-    if !developer_tools_valid
-        || !Command::new("/usr/bin/xcrun")
-            .args(["--find", "sandbox-exec"])
+    let probe = {
+        let ok = |program: &str, args: &[&str]| {
+            Command::new(program)
+                .args(args)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        // Keep the resolved path: a probe that reports only "the path was
+        // wrong" cannot be acted on from a CI log. The first CI run with the
+        // named probes said this one failed and nothing more, which is one
+        // round-trip spent to learn a boolean.
+        let developer_dir = Command::new("/usr/bin/xcode-select")
+            .arg("-p")
             .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/xcrun")
-            .args(["--find", "git"])
-            .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/git")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/sandbox-exec")
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|path| path.trim().to_string());
+        let developer_tools_valid = developer_dir
+            .as_deref()
+            .is_some_and(|path| Path::new(path).join("usr/bin/xcrun").is_file());
+        let sandbox_runs = Command::new("/usr/bin/sandbox-exec")
             .env_clear()
             .env("HOME", "/tmp")
             .env(
@@ -352,9 +355,43 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
                 "--version",
             ])
             .output()
-            .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping live containment proof: macOS developer tools are unavailable");
+            .is_ok_and(|output| output.status.success());
+
+        if !developer_tools_valid {
+            // `xcrun --find` below is the supported way to locate these tools;
+            // this hand-rolled path check is a stricter pre-filter that can
+            // reject a host the supported query would accept. Report what it
+            // actually saw so that can be judged rather than guessed.
+            Some(match developer_dir.as_deref() {
+                None => "xcode-select -p failed or printed non-UTF-8".to_string(),
+                Some(dir) => {
+                    format!("xcode-select -p = {dir:?}, but {dir:?}/usr/bin/xcrun is not a file")
+                }
+            })
+        } else if !ok("/usr/bin/xcrun", &["--find", "sandbox-exec"]) {
+            Some("xcrun --find sandbox-exec failed".to_string())
+        } else if !ok("/usr/bin/xcrun", &["--find", "git"]) {
+            Some("xcrun --find git failed".to_string())
+        } else if !ok("/usr/bin/git", &["--version"]) {
+            Some("/usr/bin/git --version failed".to_string())
+        } else if !sandbox_runs {
+            Some("sandbox-exec refused a permissive (allow default) profile".to_string())
+        } else {
+            None
+        }
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(probe) = probe {
+        // This proof runs NOWHERE today: Linux ignores the test and defers to
+        // macOS ("macOS CI supplies live containment evidence", above), and
+        // macOS reaches here and declines. The obligation evaporates between
+        // the two platforms, and the CI step's failure demanding
+        // AUTOSPEC_CONTAINMENT_PROOF_COMPLETE is the only signal that the
+        // evidence does not exist. That demand is deliberately left in place:
+        // answering it with a "skipped" marker would make the absence
+        // permanent and silent.
+        eprintln!("skipping live containment proof: {probe}");
+        println!("AUTOSPEC_CONTAINMENT_PROOF_UNAVAILABLE: {probe}");
         return;
     }
     let (_fixture, state, _snapshot, _closeout) =
