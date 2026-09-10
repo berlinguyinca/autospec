@@ -8,9 +8,11 @@
 #[cfg(unix)]
 use super::support_base::test_root;
 use std::fs;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::Path;
 #[cfg(unix)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
@@ -67,9 +69,6 @@ pub(super) fn write_executable_mode(path: &Path, body: &[u8], mode: u32) {
 /// for writing — which is why the write happens out of process.
 #[cfg(unix)]
 fn publish_executable(path: &Path, body: &[u8], mode: u32) {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-
     let mut staged_name = path
         .file_name()
         .expect("executable fixture file name")
@@ -84,19 +83,34 @@ fn publish_executable(path: &Path, body: &[u8], mode: u32) {
     // bits included, so a caller restoring a captured mode passes 0o100755 rather than
     // 0o755. Mask to the permission bits before chmod sees them.
     let permissions = mode & 0o7777;
-    // $1 staged path, $2 body, $3 published path, $4 octal mode. `printf '%s'` does
-    // not interpret escapes in its argument, so the body lands byte for byte, and the
-    // `mv` is a same-directory rename.
-    let status = Command::new("/bin/sh")
+    // $1 staged path, $2 published path, $3 octal mode; the body arrives on
+    // STDIN, not in argv. An argv entry is a NUL-terminated C string, so a body
+    // containing a NUL byte -- which every real executable does -- is rejected
+    // with `InvalidInput: nul byte found in provided data` before /bin/sh is
+    // ever spawned, and a body past `ARG_MAX` fails with `E2BIG`. argv is for
+    // parameters (paths, modes), never for data (issue #4150).
+    //
+    // `cat` copies stdin byte for byte, so the body still lands verbatim, and
+    // the `mv` is a same-directory rename. The property the staging exists for
+    // is preserved: the child, not the parent, opens the staged file for
+    // writing, so no descriptor on the published inode is ever held here.
+    let mut child = Command::new("/bin/sh")
         .arg("-c")
-        .arg("set -eu; printf '%s' \"$2\" > \"$1\"; chmod \"$4\" \"$1\"; mv -f \"$1\" \"$3\"")
+        .arg("set -eu; cat > \"$1\"; chmod \"$3\" \"$1\"; mv -f \"$1\" \"$2\"")
         .arg("executor-bridge-shim")
         .arg(&staged)
-        .arg(OsStr::from_bytes(body))
         .arg(path)
         .arg(format!("{permissions:o}"))
-        .status()
-        .expect("publish executable fixture");
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn executable fixture publisher");
+    child
+        .stdin
+        .take()
+        .expect("fixture publisher stdin")
+        .write_all(body)
+        .expect("write executable fixture body");
+    let status = child.wait().expect("publish executable fixture");
     assert!(
         status.success(),
         "publish executable fixture {}: {status}",
@@ -107,6 +121,22 @@ fn publish_executable(path: &Path, body: &[u8], mode: u32) {
 #[cfg(not(unix))]
 fn publish_executable(path: &Path, body: &[u8], _mode: u32) {
     fs::write(path, body).expect("write executable fixture");
+}
+
+/// Regression for #4150: the body must reach the published file byte for byte
+/// even when it carries NUL bytes. While the body travelled in argv this failed
+/// deterministically — `InvalidInput: nul byte found in provided data` — before
+/// /bin/sh was ever spawned, because an argv entry is a NUL-terminated C
+/// string. Content now arrives on stdin.
+#[cfg(unix)]
+#[test]
+fn executor_bridge_shim_publish_accepts_nul_bytes_in_body() {
+    let root = test_root("shim-nul-body");
+    let shim = root.join("binary-fixture");
+    let mut body = b"#!/bin/sh\nexit 0\n".to_vec();
+    body.extend_from_slice(&[0u8, 0x7f, b'E', 0x4c, 0, 0]);
+    write_executable_mode(&shim, &body, 0o755);
+    assert_eq!(fs::read(&shim).expect("published fixture"), body);
 }
 
 /// Publish and run one shim per iteration, returning every path whose exec failed.
