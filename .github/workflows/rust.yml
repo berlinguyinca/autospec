@@ -7,7 +7,13 @@ on:
 
 concurrency:
   group: rust-suites-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on branches, never on main. Measured over the last 20
+  # runs on main: 12 cancelled, 7 failed, 0 succeeded. Merges land every ~3.3 min
+  # and a run is cancelled after ~3.1 min, so no run on main ever finished and
+  # main carried no build signal at all -- it broke twice in one hour without
+  # anything reporting it. On a branch a superseded run is genuinely worthless;
+  # on main every commit's result is the only record that commit will ever get.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build-test:
