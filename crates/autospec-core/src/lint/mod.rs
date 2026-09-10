@@ -2,11 +2,13 @@
 
 pub mod dag;
 pub mod diff;
+pub mod evidence;
 pub mod implementation;
 pub mod pr_size;
 mod text;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
+pub use evidence::{lint_failure_evidence, trap_removal_targets, EvidenceFinding, EvidenceRule};
 pub use implementation::{
     declared_implementation_scope, directive_for, lint_implementation,
     lint_issue_implementation_contract, ImplementationLintContext, ImplementationLintFinding,
