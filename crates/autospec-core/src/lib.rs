@@ -11,6 +11,7 @@ pub mod autonomous {
     pub mod premerge;
     pub mod quality_balance;
     pub mod review_policy;
+    pub mod test_gate;
     pub mod tier15;
     pub mod tier2;
     pub mod tier3;
