@@ -666,6 +666,72 @@ Children are written assuming the implementer is a 32B-class local model with **
 - One **Primary smoke test** runs in the inner loop; the heavier verification list runs once at the end.
 - If the work fans out across many tables/packages, split it. Two 3 KB children chained by `Depends on` beat one 7 KB child a 32B model garbles at 60k tokens of working context.
 
+## Phase 3A — Freeze the spec portfolio plan (pure validation)
+
+Phase 3 creates or adopts a typed spec portfolio before it files any planned
+issue. The decomposer renders a frozen `autospec.portfolio-plan.v1` manifest to
+`$MANIFEST` — source spec, `project_owner` (the verified portfolio binding),
+target repositories, planned local trackers, implementation/prerequisite
+children, the source-repository Phase 5.5 audit node, and the
+cross-repository dependency edges, every edge keyed by a stable `item_key`. The
+per-issue `gh issue create` calls in the lint/safety loops above are the
+draft-quality gate; the **actual filing of planned issues goes through the
+apply transaction in Phase 3B**, never a bare `gh issue create` fallback.
+
+Phase 3A is pure planning over the full multi-repository manifest — issue
+lint, safety lint, security-artifact validation when applicable, supersession
+resolution, DAG validation, and read/write capability probes against every
+target repository. No remote mutation happens here. A repository that cannot
+accept issues is a blocking prerequisite, never a silently omitted lane; the
+audit logically depends on every implementation/prerequisite deliverable.
+`--dry-run` ends here: it emits the frozen plan and reports each capability as
+`verified`, `unavailable`, or `unknown`, and it never claims a write permission
+was proven by a read. A non-zero exit blocks Phase 3 — fix the manifest and
+re-run.
+
+```bash
+PLAN_JSON=$("${AUTOSPEC_BIN:-autospec}" portfolio validate --manifest "$MANIFEST" --dry-run) || {
+  printf '%s\n' 'ERROR: Phase 3A portfolio validate failed (pure planning, no remote mutation)' >&2
+  exit 1
+}
+```
+
+## Phase 3B — Apply the spec portfolio (provision the primary Project, then file the planned issues)
+
+The apply transaction is the **sole provisioning/materialization entry point**:
+it exposes no separate public record or add commands that could let Project
+identity, issue creation, membership, and recovery ordering diverge. It
+provisions the primary spec Project (verified **before** any issue is filed)
+and then files the frozen plan in this order — primary umbrella; secondary
+repository trackers; implementation/prerequisite children; the source-repository
+Phase 5.5 audit. Implementation and audit issues start as `needs-classify`,
+never `auto-implement`, so an external runner cannot claim a partially
+prepared portfolio; blocked prerequisites keep their blocking label. After
+every issue URL exists, the transaction creates the complete repository-local
+parent records and persists the cross-repository graph — a parent- or
+graph-persistence failure blocks admission. Re-running for the same source-spec
+blob and plan digest adopts and reconciles the existing Project; a changed plan
+digest stops for explicit plan-revision reconciliation.
+
+```bash
+APPLY_JSON=$("${AUTOSPEC_BIN:-autospec}" portfolio apply --manifest "$MANIFEST") || {
+  printf '%s\n' 'ERROR: primary portfolio provisioning failed before issue filing; no issue is admitted' >&2
+  exit 1
+}
+```
+
+Every issue-definition command prints the Project URL **before** the issue URLs
+and carries it in its JSON result (`portfolio_id`, `project`, `umbrellas`,
+`children`). Child bodies gain a `## Delivery portfolio` section with the
+canonical Project URL and portfolio ID; repository-local umbrellas keep
+`autospec parent record` relationships, and cross-repository dependencies use
+`Depends on <canonical-issue-url>`. Phase 3 may report success only when every
+planned key is bound exactly once, every initial Project membership/field
+projection is acknowledged, all local parent records and graph edges are
+durable, and each required child is admitted or explicitly blocked. Resume uses
+the frozen manifest and checkpoints — it never re-decomposes a partially
+applied plan.
+
 Capture the umbrella + child issue numbers.
 
 Persist the relationship on GitHub and in the shared per-repository parent-state
