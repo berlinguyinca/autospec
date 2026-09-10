@@ -660,6 +660,29 @@ Required fields (exact field names are gated by `autospec validate`):
 - **One likely hidden failure** — the single most probable thing still wrong. Not
   optional; "none" is itself a claim to be challenged.
 
+Post-merge observation fields (optional at parse time, mandatory at review time
+for control-plane changes — `autospec-core::post_merge`): merged and fixed are
+separate states. A change whose effect is only observable after deployment
+(CI configuration, dispatch policy, merge automation) records its confirmation
+as part of the change:
+
+- **Post-merge observation** — `Post-merge observation: <query, log, or metric> —
+  expected: <value>`, the specific observation that confirms the change took
+  effect, recorded in the closeout so the confirmation cannot be lost with the
+  session that made the change.
+- **Follow-up check** — `Follow-up check: <what gets re-checked and when>`, the
+  scheduled re-look. Control-plane changes with no follow-up check are flagged
+  at review: the re-look is left to chance, which is exactly how a merged fix
+  ages from incident into "fixed" without ever being checked.
+
+While the observation is unrecorded the `Result:` line must say *merged*, not
+*fixed* or *resolved* — the closeout validator rejects a fixed/resolved claim in
+a closeout that declares a post-merge observation. The state becomes *fixed*
+only once the observation is recorded and matches the expected value
+(`post_merge::confirm_fixed`); a contradicting observation keeps it *merged*.
+A fix that declares no observable effect at all is flagged at review, not
+silently accepted.
+
 ### Consumer contract (critic / merge-gate)
 
 The merge-gate and the autospec-run done-challenge treat the Closeout report as a

@@ -54,6 +54,7 @@ use autospec_core::lint::{
     ImplementationLintOptions, ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits,
     RepositoryIndex,
 };
+use autospec_core::post_merge as post_merge_closeout;
 #[cfg(unix)]
 use nix::fcntl::OFlag;
 #[cfg(target_os = "linux")]
@@ -9745,6 +9746,10 @@ pub(crate) fn build_implementer_prompt(
          Artifacts: <exact paths and a rerunnable command>\n\
          Scoped git status: <only files touched for this issue>\n\
          One likely hidden failure: <single most probable remaining defect>\n\
+         For a fix whose effect is only observable after deployment (CI or control-plane changes),\n\
+         also add `Post-merge observation: <query, log, or metric> — expected: <value>` and\n\
+         `Follow-up check: <what gets re-checked and when>`, and say merged — not fixed or resolved —\n\
+         in the Result line while the observation is unrecorded.\n\
          Optionally append both `Completed criteria: [\"...\"]` and `Unmet criteria: [\"...\"]`.\n\
          \n\
          Issue title:\n{title}\n\
@@ -11261,6 +11266,11 @@ fn validate_closeout_report_body(body: &str) -> Result<(), String> {
         "One likely hidden failure:",
     ];
     parse_closeout_criteria(body)?;
+    // Merged and fixed are separate states (#4119): a declared post-merge
+    // observation keeps the change merged until the observation is recorded,
+    // and a closeout that declares one may not claim the defect fixed.
+    post_merge_closeout::validate_post_merge_closeout(body)
+        .map_err(|error| format!("executor Closeout report: {error}"))?;
     for field in required {
         let values = lines
             .iter()
@@ -11308,9 +11318,14 @@ fn validate_closeout_report_body(body: &str) -> Result<(), String> {
         let line = line.trim();
         if !line.is_empty()
             && !required.iter().any(|field| line.starts_with(field))
-            && !["Completed criteria:", "Unmet criteria:"]
-                .iter()
-                .any(|field| line.starts_with(field))
+            && ![
+                "Completed criteria:",
+                "Unmet criteria:",
+                post_merge_closeout::OBSERVATION_KEY,
+                post_merge_closeout::FOLLOW_UP_KEY,
+            ]
+            .iter()
+            .any(|field| line.starts_with(field))
         {
             return Err(
                 "executor Closeout report contains an unrecognized nonblank line".to_string(),
