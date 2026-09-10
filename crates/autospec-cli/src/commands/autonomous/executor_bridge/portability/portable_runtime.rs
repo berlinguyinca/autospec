@@ -412,7 +412,10 @@ pub(in crate::commands::autonomous::executor_bridge) fn supervise_validated_harn
     )?;
     append_executor_event(event_log, state, "child_cleanup_complete", None)?;
     #[cfg(test)]
-    if PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.with(|fp| fp.swap(false)) {
+    // `Cell::swap` takes `&Cell<T>`, not a value -- `swap(false)` is the
+    // `AtomicBool` signature. The consume-once read of a `Cell<bool>` is
+    // `replace`, which stores the new value and returns the old one.
+    if PORTABLE_AFTER_CLEANUP_PROOF_FAILPOINT.with(|fp| fp.replace(false)) {
         return Err("injected portable failure after cleanup proof".to_string());
     }
 

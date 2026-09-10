@@ -5,9 +5,14 @@
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{
-    git, git_stdout, test_environment, DirectCrashFixtureCleanup, GitFixture,
-};
+use super::support_base::{git, git_stdout, test_environment, GitFixture};
+// `DirectCrashFixtureCleanup` is `#[cfg(target_os = "linux")]` in
+// support_base, and every test here that uses it already carries the same
+// gate. The import did not, so on macOS/Windows/FreeBSD it resolved to an
+// item that was configured out and the crate failed to compile -- the same
+// gate the `nix` import below already uses.
+#[cfg(target_os = "linux")]
+use super::support_base::DirectCrashFixtureCleanup;
 use super::support_invocation::{
     implementation_proof_fixture, shell_invocation, supervision_config, supervision_state,
 };
