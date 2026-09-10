@@ -35,26 +35,46 @@
 #     (exit 2 — the same refusal channel `autospec claim acquire` uses for
 #     in-flight issues).
 #
+# Background (issue #3686): the queue covered one repository, so a defect found in
+# any other in-scope repo could be filed, labelled and prioritised and no agent
+# would ever see it — work that *looks* scheduled but is never dispatched. The
+# queue is now multi-repository, and coverage is asserted:
+#
+#   * The repo option is repeatable: the queue covers the set of repos given, and
+#     the default (current repo) still works unchanged.
+#   * Every covered repo must be reachable via gh api and must carry the
+#     auto-implement label the pipeline reads, or the refresh fails loudly
+#     (exit 3) before the queue file is touched — a label a pipeline never reads
+#     (or cannot read) is how the gap stayed hidden.
+#   * Queue entries carry their repo ({"repo","number"} objects) so a dispatcher
+#     knows where to open the PR. A previous single-repo queue (bare issue
+#     numbers) is still read and its entries re-stamped with the repo.
+#   * `--check` covers exactly one repo: the dispatcher passes the repo it is
+#     dispatching into, taken from the queue entry.
+#
 # Usage:
 #   refresh-queue.sh [refresh options]
 #   refresh-queue.sh [refresh options] --check N
 #
 # Refresh options:
-#   --repo OWNER/REPO   target repo (default: current repo, via `gh api repo`)
+#   --repo OWNER/REPO   target repo, repeatable to cover a set of repos
+#                       (default: current repo, via `gh api repo`)
 #   --out FILE          queue file to write (default: ~/.autospec/queue.json)
 #
 # Output:
-#   refresh: the two report lines above on stdout; the queue file is a JSON array
-#            of the surviving issue numbers — previous order kept for entries still
-#            live, newly dispatchable issues appended in tracker order.
+#   refresh: the two report lines above on stdout (plus one per-repo line when
+#            several repos are covered); the queue file is a JSON array of the
+#            surviving {"repo","number"} objects — previous order kept for entries
+#            still live, newly dispatchable issues appended in tracker order.
 #   check:   silent on pass; one refusal line on stderr on refuse.
 #
 # Exit codes:
 #   0  refresh OK (queue written) / check pass (no open PR for the issue)
 #   1  usage error
 #   2  check refused: issue N already has an open PR
-#   3  refresh/check failed (missing gh or jq, API error, non-array response) —
-#      fail-closed: any previous queue file is left untouched.
+#   3  refresh/check failed (missing gh or jq, API error, non-array response,
+#      covered repo unreachable, or covered repo missing the auto-implement
+#      label) — fail-closed: any previous queue file is left untouched.
 #
 # Implementation note: this script calls `gh api` endpoints rather than the long
 # flags of `gh issue list` / `gh pr list`, so the new file introduces no
@@ -79,7 +99,7 @@ fail() {
     exit 3
 }
 
-repo=""
+repos_list=""
 out_file="$HOME/.autospec/queue.json"
 check_issue=""
 
@@ -91,7 +111,7 @@ while [ $# -gt 0 ]; do
             ;;
         --repo)
             [ $# -ge 2 ] || die_usage "option $1 needs a value"
-            repo="$2"
+            repos_list="${repos_list:+${repos_list} }$2"
             shift 2
             ;;
         --out)
@@ -116,18 +136,48 @@ for tool in gh jq; do
     fi
 done
 
-resolve_repo() {
-    if [ -n "$repo" ]; then
-        return 0
+resolve_repos() {
+    local out r seen
+    if [ -z "$repos_list" ]; then
+        if ! out="$(gh api repo 2>&1)"; then
+            fail "cannot resolve current repo (run inside a git checkout or pass the repo option): $out"
+        fi
+        repos_list="$(jq -r '.full_name // empty' <<<"$out")"
+        if [ -z "$repos_list" ]; then
+            fail "gh api repo did not return full_name"
+        fi
     fi
-    local out
-    if ! out="$(gh api repo 2>&1)"; then
-        fail "cannot resolve current repo (run inside a git checkout or pass the repo option): $out"
-    fi
-    repo="$(jq -r '.full_name // empty' <<<"$out")"
-    if [ -z "$repo" ]; then
-        fail "gh api repo did not return full_name"
-    fi
+    # Deduplicate, preserving the order given (order is not dispatch order — the
+    # queue file is — but a stable repo order keeps per-repo output stable).
+    repos=()
+    seen=""
+    for r in $repos_list; do
+        case " $seen " in
+            *" $r "*) continue ;;
+        esac
+        seen="${seen:+$seen }$r"
+        repos+=("$r")
+    done
+    [ ${#repos[@]} -gt 0 ] || fail "no repos to cover"
+}
+
+# Coverage assertion (issue #3686): every covered repo must be reachable by the
+# dispatcher and carry the label the pipeline reads. Runs before anything is
+# fetched or written and fails loudly — an in-scope repo that is unreachable or
+# missing the label is not dispatchable, and a queue that silently skips it is
+# worse than no queue.
+verify_repos() {
+    local r out
+    for r in "${repos[@]}"; do
+        if ! out="$(gh api "repos/${r}" 2>&1)"; then
+            fail "coverage check failed: repo ${r} is not reachable via gh api — in-scope and dispatchable must not drift; refusing to build the queue (${out})"
+        fi
+        if [ -z "$check_issue" ]; then
+            if ! out="$(gh api "repos/${r}/labels/auto-implement" 2>&1)"; then
+                fail "repo ${r} is missing the label the pipeline depends on (auto-implement) — define it (gh label create auto-implement for repo ${r}) so dispatchers can read the queue; refusing to build the queue (${out})"
+            fi
+        fi
+    done
 }
 
 # fetch_pages ENDPOINT PAGES_FILE
@@ -194,6 +244,52 @@ run_check() {
     exit 0
 }
 
+# refresh_repo REPO ENTRIES_FILE
+# Fetch that repo's open PRs and open auto-implement issues, apply the PR-covered
+# filter, and append its dispatchable entries ({"repo","number"} objects in
+# tracker order) to ENTRIES_FILE. Sets last_excluded and last_dispatched.
+#
+# /issues also returns pull requests; drop anything that is a PR, then keep
+# numbers. Keep tracker (fetch) order — NOT sorted — because the queue is
+# dispatched in order and reshuffling would starve whatever is near the front
+# (issue #3655).
+refresh_repo() {
+    local r="$1"
+    local entries_file="$2"
+    local safe="${r//\//_}"
+    local prs_file="$work_dir/pulls-${safe}.jsonl"
+    local issues_file="$work_dir/issues-${safe}.jsonl"
+    fetch_pages "repos/${r}/pulls?state=open&per_page=100" "$prs_file"
+    fetch_pages "repos/${r}/issues?labels=auto-implement&state=open&per_page=100" "$issues_file"
+    local issues_json prs_json excluded_json dispatchable_json
+    issues_json="$(jq -s 'add // [] | map(select(.pull_request == null)) | map(.number)' "$issues_file")"
+    prs_json="$(jq -s 'add // []' "$prs_file")"
+    printf '%s' "$issues_json" > "$work_dir/issues.json"
+    printf '%s' "$prs_json" > "$work_dir/prs.json"
+    # Issues that already have an open PR (the #4033 solution-state filter).
+    excluded_json="$(jq -n '
+        input as $issues
+        | input as $prs
+        | [ $issues[]
+            | . as $num
+            | select(any($prs[];
+                (.head.ref == ("fix/issue-" + ($num | tostring)))
+                or (((.body // "") | test(
+                    "(?i)\\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#"
+                    + ($num | tostring) + "([^0-9]|$)")))))
+            | $num
+          ]' "$work_dir/issues.json" "$work_dir/prs.json")"
+    printf '%s' "$excluded_json" > "$work_dir/excluded.json"
+    # Dispatchable = open + auto-implement minus PR-covered, in tracker order.
+    dispatchable_json="$(jq -n '
+        input as $issues
+        | input as $excluded
+        | $issues - $excluded' "$work_dir/issues.json" "$work_dir/excluded.json")"
+    last_excluded="$(jq 'length' <<<"$excluded_json")"
+    repo="$r" jq -c '[ .[] | { repo: env.repo, number: . } ]' <<<"$dispatchable_json" >> "$entries_file"
+    last_dispatched="$(jq 'length' <<<"$dispatchable_json")"
+}
+
 # write_queue FILE
 # Atomically replace FILE with $kept_json (tmp + mv in the target directory,
 # 0600 file; 0700 directory when it is the default ~/.autospec state dir).
@@ -221,79 +317,91 @@ write_queue() {
     fi
 }
 
-resolve_repo
+resolve_repos
+if [ -n "$check_issue" ] && [ ${#repos[@]} -gt 1 ]; then
+    die_usage "check mode covers exactly one repo: the dispatcher passes the repo it is dispatching into, taken from the queue entry"
+fi
+verify_repos
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "$work_dir"' EXIT
 
-prs_file="$work_dir/pulls.jsonl"
-fetch_pages "repos/${repo}/pulls?state=open&per_page=100" "$prs_file"
-
+# Open PRs for a single repo — one fetch serves both the refresh and the --check
+# path.
 if [ -n "$check_issue" ]; then
+    prs_file="$work_dir/pulls.jsonl"
+    fetch_pages "repos/${repos[0]}/pulls?state=open&per_page=100" "$prs_file"
     run_check "$prs_file"
 fi
 
-issues_file="$work_dir/issues.jsonl"
-fetch_pages "repos/${repo}/issues?labels=auto-implement&state=open&per_page=100" "$issues_file"
+# Per-repo dispatchable computation (issue #3686): the queue covers the whole
+# set of repos, and every entry is stamped with the repo it belongs to.
+entries_file="$work_dir/entries.jsonl"
+: > "$entries_file"
+excluded_total=0
+per_repo_lines=()
+for r in "${repos[@]}"; do
+    refresh_repo "$r" "$entries_file"
+    excluded_total=$((excluded_total + last_excluded))
+    per_repo_lines+=("repo ${r}: ${last_dispatched} dispatchable")
+done
+all_file="$work_dir/all.json"
+jq -s 'add // []' "$entries_file" > "$all_file"
 
-# /issues also returns pull requests; drop anything that is a PR, then keep numbers.
-# Keep tracker (fetch) order — NOT sorted — because the queue is dispatched in order
-# and reshuffling would starve whatever is near the front (issue #3655).
-issues_json="$(jq -s 'add // [] | map(select(.pull_request == null)) | map(.number)' "$issues_file")"
-prs_json="$(jq -s 'add // []' "$prs_file")"
-printf '%s' "$issues_json" > "$work_dir/issues.json"
-printf '%s' "$prs_json" > "$work_dir/prs.json"
-
-# Issues that already have an open PR (the #4033 solution-state filter).
-excluded_json="$(jq -n '
-    input as $issues
-    | input as $prs
-    | [ $issues[]
-        | . as $num
-        | select(any($prs[];
-            (.head.ref == ("fix/issue-" + ($num | tostring)))
-            or (((.body // "") | test(
-                "(?i)\\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#"
-                + ($num | tostring) + "([^0-9]|$)")))))
-        | $num
-      ]' "$work_dir/issues.json" "$work_dir/prs.json")"
-printf '%s' "$excluded_json" > "$work_dir/excluded.json"
-
-# Dispatchable = open + auto-implement minus PR-covered, in tracker order.
-dispatchable_json="$(jq -n '
-    input as $issues
-    | input as $excluded
-    | $issues - $excluded' "$work_dir/issues.json" "$work_dir/excluded.json")"
-printf '%s' "$dispatchable_json" > "$work_dir/dispatchable.json"
-
-# Previous queue, read from the same file we are about to rewrite. A missing, empty,
-# or malformed file counts as a first run (empty previous queue).
-old_queue_json="$(jq -c 'if type == "array" then map(tonumber) else [] end' "$out_file" 2>/dev/null || printf '[]')"
+# The previous queue, read from the same file we are about to rewrite. Entries
+# are {"repo","number"} objects; a pre-#3686 single-repo queue's bare issue
+# numbers are accepted and re-stamped with their repo below (attributed by
+# matching the dispatchable set, so a number no covered repo dispatches is
+# simply dropped). A missing, empty, or malformed file counts as a first run.
+old_queue_json="$(jq -c '
+    if type == "array"
+    then map(
+            if type == "number" then { repo: null, number: . }
+            elif type == "object" and (.number? != null)
+            then { repo: (.repo? // null), number: .number }
+            else empty
+          end)
+    else [] end' "$out_file" 2>/dev/null || printf '[]')"
 printf '%s' "$old_queue_json" > "$work_dir/old.json"
 
 # Regenerate: surviving entries keep their previous position; newly dispatchable
-# entries are appended in tracker order. dropped = previous entries no longer live
-# (typically resolved); added = dispatchable entries new to the queue.
+# entries are appended in tracker order. dropped = previous entries no longer
+# live (typically resolved); added = dispatchable entries new to the queue. A
+# legacy bare-number entry is attributed to the (first) dispatchable entry
+# sharing its number, so a single-repo queue migrates to the repo-stamped
+# format without reordering.
 report_json="$(jq -n '
     input as $o
     | input as $d
-    | [ $o[] | select(. as $n | $d | index($n) != null) ] as $surviving
-    | [ $d[] | select(. as $n | $o | index($n) == null) ] as $added
+    | def resolved($e):
+        if $e.repo == null
+        then ([ $d[] | select(.number == $e.number) ] | .[0]) // $e
+        else $e end;
+    def dispatched($r):
+        any($d[]; .repo == $r.repo and .number == $r.number);
+    [ $o[] | resolved(.) | select(dispatched(.)) ] as $surviving
+    | [ $d[] | select(. as $x | all($surviving[]; .repo != $x.repo or .number != $x.number)) ] as $added
     | ($surviving + $added) as $queue
     | { queue: $queue,
         old_count: ($o | length),
         new_count: ($queue | length),
         added: ($added | length),
-        dropped: ([ $o[] | select(. as $n | $d | index($n) == null) ] | length) }' "$work_dir/old.json" "$work_dir/dispatchable.json")"
+        dropped: ([ $o[] | resolved(.) | select(dispatched(.) | not) ] | length) }' "$work_dir/old.json" "$all_file")"
 
 kept_json="$(jq -c '.queue' <<<"$report_json")"
 old_count="$(jq -r '.old_count' <<<"$report_json")"
 new_count="$(jq -r '.new_count' <<<"$report_json")"
 added_count="$(jq -r '.added' <<<"$report_json")"
 dropped_count="$(jq -r '.dropped' <<<"$report_json")"
-excluded_count="$(jq 'length' <<<"$excluded_json")"
 
-printf 'excluded %s issues that already have an open PR\n' "$excluded_count"
+# Report the delta first — what changed, then the artifact. With several repos
+# covered, one line per repo so the operator sees the coverage, not just the sum.
+printf 'excluded %s issues that already have an open PR\n' "$excluded_total"
+if [ ${#repos[@]} -gt 1 ]; then
+    for line in "${per_repo_lines[@]}"; do
+        printf '%s\n' "$line"
+    done
+fi
 printf 'queue: %s -> %s, dropped %s resolved, added %s newly labelled\n' \
     "$old_count" "$new_count" "$dropped_count" "$added_count"
 
