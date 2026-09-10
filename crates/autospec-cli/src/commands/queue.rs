@@ -1071,6 +1071,7 @@ const VIEW_FIELD_DISPATCHERS: &[ViewFieldDispatcher] = &[
     append_parallel_safety_fields,
     append_blocked_capabilities_field,
     append_zero_output_streak_field,
+    append_unblocks_field,
 ];
 
 fn view_json(view: &QueueIssueView) -> String {
@@ -1168,6 +1169,12 @@ fn append_blocked_capabilities_field(view: &QueueIssueView, fields: &mut Vec<Str
 fn append_zero_output_streak_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(streak) = view.zero_output_streak {
         fields.push(json_field("zero_output_streak", streak.to_string()));
+    }
+}
+
+fn append_unblocks_field(view: &QueueIssueView, fields: &mut Vec<String>) {
+    if view.unblocks > 0 {
+        fields.push(json_field("unblocks", view.unblocks.to_string()));
     }
 }
 

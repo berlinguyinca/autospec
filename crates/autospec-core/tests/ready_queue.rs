@@ -1140,3 +1140,152 @@ fn hold_view_names_the_missing_capability_for_the_hold_message() {
         Some("blocked_capabilities")
     );
 }
+
+#[test]
+fn orders_the_ready_frontier_by_unblocking_value_not_issue_age() {
+    let input = ready_input(vec![
+        // #40 is a leaf with no dependents: lowest unblocking value, but the
+        // lowest issue number. It must be dispatched *after* the foundation.
+        issue(
+            40,
+            "## Implementation outline\n\n- edit `src/a.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        // #50 is the foundation two open issues wait on.
+        issue(
+            50,
+            "## Implementation outline\n\n- edit `src/b.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            60,
+            "## Dependencies\n\nDepends on #50\n\n## Implementation outline\n\n- edit `src/c.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            61,
+            "## Dependencies\n\nDepends on #50\n\n## Implementation outline\n\n- edit `src/d.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    // The foundation (#50) is dispatched before the lower-numbered leaf (#40).
+    assert_eq!(plan.ready_numbers(), vec![50, 40]);
+    assert_eq!(plan.batch_numbers(), vec![50, 40]);
+    let foundation = plan
+        .ready
+        .iter()
+        .find(|view| view.issue.number == 50)
+        .expect("foundation ready");
+    assert_eq!(foundation.unblocks, 2);
+    let leaf = plan
+        .ready
+        .iter()
+        .find(|view| view.issue.number == 40)
+        .expect("leaf ready");
+    assert_eq!(leaf.unblocks, 0);
+    // The two downstream issues stay held, not dispatched.
+    let blocked: Vec<u64> = plan.blocked.iter().map(|view| view.issue.number).collect();
+    assert_eq!(blocked, vec![60, 61]);
+}
+
+#[test]
+fn breaks_unblocking_value_ties_by_issue_number() {
+    let input = ready_input(vec![
+        // #70 gates #90; #80 gates #91. Both unblock exactly one issue, so the
+        // tie falls back to the pre-existing issue-number order.
+        issue(
+            70,
+            "## Implementation outline\n\n- edit `src/a.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            80,
+            "## Implementation outline\n\n- edit `src/b.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            90,
+            "## Dependencies\n\nDepends on #70\n\n## Implementation outline\n\n- edit `src/c.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            91,
+            "## Dependencies\n\nDepends on #80\n\n## Implementation outline\n\n- edit `src/d.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![70, 80]);
+    let a = plan
+        .ready
+        .iter()
+        .find(|view| view.issue.number == 70)
+        .expect("first foundation");
+    let b = plan
+        .ready
+        .iter()
+        .find(|view| view.issue.number == 80)
+        .expect("second foundation");
+    assert_eq!(a.unblocks, 1);
+    assert_eq!(b.unblocks, 1);
+}
+
+#[test]
+fn counts_transitive_dependents_in_unblocking_value() {
+    let input = ready_input(vec![
+        // #10 is the root of a chain: #20 waits on #10 and #30 waits on #20.
+        issue(
+            10,
+            "## Implementation outline\n\n- edit `src/a.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            20,
+            "## Dependencies\n\nDepends on #10\n\n## Implementation outline\n\n- edit `src/b.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            30,
+            "## Dependencies\n\nDepends on #20\n\n## Implementation outline\n\n- edit `src/c.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![10]);
+    assert_eq!(plan.ready[0].unblocks, 2);
+    let blocked: Vec<u64> = plan.blocked.iter().map(|view| view.issue.number).collect();
+    assert_eq!(blocked, vec![20, 30]);
+}
+
+#[test]
+fn ignores_non_dependency_references_when_ordering_by_unblocking_value() {
+    // "Expected parallel peers" is informative, not a `## Dependencies` edge, so
+    // the cross-referenced issue must not raise #40's unblocking value.
+    let input = ready_input(vec![
+        issue(
+            40,
+            "## Expected parallel peers\n\n- #55\n\n## Implementation outline\n\n- edit `src/a.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            55,
+            "## Implementation outline\n\n- edit `src/b.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    // No real dependency: both issues unblock nothing and keep issue-number
+    // order, so the peer mention did not promote either one.
+    assert_eq!(plan.ready_numbers(), vec![40, 55]);
+    assert_eq!(plan.ready[0].unblocks, 0);
+    assert_eq!(plan.ready[1].unblocks, 0);
+}

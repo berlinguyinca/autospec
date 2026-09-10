@@ -340,6 +340,11 @@ pub struct QueueIssueView {
     /// Set when the view is held for review after consecutive zero-output
     /// runs.
     pub zero_output_streak: Option<usize>,
+    /// For ready issues: how many open issues this one gates via `## Dependencies`
+    /// edges, counted transitively. The ready frontier is ordered by this
+    /// descending (ties by issue number) so foundation/pipeline work runs before
+    /// the leaf work that waits on it (#3728).
+    pub unblocks: usize,
 }
 
 impl QueueIssueView {
@@ -361,6 +366,7 @@ impl QueueIssueView {
             parallel_safe: None,
             blocked_capabilities: Vec::new(),
             zero_output_streak: None,
+            unblocks: 0,
         }
     }
 }
@@ -596,6 +602,34 @@ pub fn plan_ready_queue_with_trusted_actors(
         ready.push(view);
     }
 
+    // Order the ready frontier by unblocking value, not by issue-number age. A
+    // foundation/pipeline issue gates the most downstream work, so it should be
+    // dispatched before the leaf issues that wait on it; ordering by number
+    // ascending is exactly backwards for that kind of work (#3728). Ties keep
+    // the lowest-numbered issue first — the pre-existing deterministic order —
+    // which also preserves the "lowest-numbered owns the foundation path"
+    // convention the conflict loop above relies on. Blocked and conflict holds
+    // stay in issue-number order; only the dispatch order (ready -> batch)
+    // changes.
+    let reverse = reverse_dependency_edges(&known);
+    let unblocking: BTreeMap<u64, usize> = ready
+        .iter()
+        .map(|view| {
+            (
+                view.issue.number,
+                unblocking_value(view.issue.number, &known, &reverse),
+            )
+        })
+        .collect();
+    for view in &mut ready {
+        view.unblocks = unblocking[&view.issue.number];
+    }
+    ready.sort_by(|a, b| {
+        unblocking[&b.issue.number]
+            .cmp(&unblocking[&a.issue.number])
+            .then_with(|| a.issue.number.cmp(&b.issue.number))
+    });
+
     let batch = if effective_batch_size == 0 {
         Vec::new()
     } else if ready
@@ -632,6 +666,54 @@ fn deduplicate_issues(issues: &[RemoteIssue]) -> Vec<RemoteIssue> {
             .or_insert_with(|| issue.clone());
     }
     deduplicated.into_values().collect()
+}
+
+/// Reverse `## Dependencies` edges over the open issues in `known`: maps a
+/// dependency number to the open issues that declare it. Closed issues are
+/// skipped — they are already done, so nothing waits on them and they do not
+/// wait on anything. Only the scoped `depends on` references counted by
+/// [`dependency_numbers`] become edges, matching the readiness model.
+fn reverse_dependency_edges(known: &BTreeMap<u64, RemoteIssue>) -> BTreeMap<u64, BTreeSet<u64>> {
+    let mut reverse: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    for (number, issue) in known.iter() {
+        if issue.closed {
+            continue;
+        }
+        for dependency in dependency_numbers(&issue.body) {
+            reverse.entry(dependency).or_default().insert(*number);
+        }
+    }
+    reverse
+}
+
+/// How many open issues move closer to dispatchable when `issue` completes: the
+/// open issues that transitively depend on it via `## Dependencies` edges
+/// (`reverse` maps a dependency to its open dependents). This is the
+/// "unblocking value" the ready frontier is ordered by, descending.
+fn unblocking_value(
+    issue: u64,
+    known: &BTreeMap<u64, RemoteIssue>,
+    reverse: &BTreeMap<u64, BTreeSet<u64>>,
+) -> usize {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![issue];
+    let mut count = 0usize;
+    while let Some(current) = stack.pop() {
+        let Some(dependents) = reverse.get(&current) else {
+            continue;
+        };
+        for &dependent in dependents {
+            if dependent == issue || !seen.insert(dependent) {
+                continue;
+            }
+            let open = known.get(&dependent).is_some_and(|open| !open.closed);
+            if open {
+                count += 1;
+            }
+            stack.push(dependent);
+        }
+    }
+    count
 }
 
 fn queue_gate_counts(
