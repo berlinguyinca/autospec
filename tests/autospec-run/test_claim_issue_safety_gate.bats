@@ -6,6 +6,11 @@ setup() {
     FIXTURE_DIR="$(mktemp -d)"
     MOCK_BIN="$FIXTURE_DIR/bin"
     mkdir -p "$MOCK_BIN"
+    # claim acquire resolves the authoritative claim ref against a git remote;
+    # point it at a local bare repo so the gate is testable without network.
+    git init --bare --quiet "$FIXTURE_DIR/claim-remote.git"
+    export AUTOSPEC_CLAIM_GIT_REMOTE="$FIXTURE_DIR/claim-remote.git"
+    export AUTOSPEC_CLAIM_GIT_STATE_DIR="$FIXTURE_DIR/claim-state"
     : > "$FIXTURE_DIR/edit.log"
     : > "$FIXTURE_DIR/comment.log"
 
@@ -31,13 +36,28 @@ case "\$sub" in
     exit 0
     ;;
   "issue edit")
-    if [ -f "\${AUTOSPEC_HEARTBEAT_DIR:-\$FIXTURE_DIR/heartbeats}/test__repo/700.json" ]; then
+    if [ -f "\${AUTOSPEC_HEARTBEAT_DIR:-\$FIXTURE_DIR/heartbeats}/o4_test_r4_repo/700.json" ]; then
       printf 'heartbeat_present_at_edit=yes\n' >> "\$FIXTURE_DIR/edit.log"
     else
       printf 'heartbeat_present_at_edit=no\n' >> "\$FIXTURE_DIR/edit.log"
     fi
     printf '%s\n' "\$*" >> "\$FIXTURE_DIR/edit.log"
-    exit "\${ISSUE_EDIT_FAIL:-1}"
+    if [ "\${ISSUE_EDIT_FAIL:-1}" = "1" ]; then
+      exit 1
+    fi
+    # Apply the label mutation so confirmation reads observe post-mutation labels.
+    remove=""; add=""
+    args=("\$@")
+    for i in "\${!args[@]}"; do
+      case "\${args[\$i]}" in
+        --remove-label) remove="\${args[\$((i+1))]}" ;;
+        --add-label) add="\${args[\$((i+1))]}" ;;
+      esac
+    done
+    jq --arg remove "\$remove" --arg add "\$add" \
+      '.labels = (([.labels[].name] | map(select(. != \$remove)) + (if \$add == "" then [] else [\$add] end)) | map({name: .}))' \
+      "\$FIXTURE_DIR/issue.json" > "\$FIXTURE_DIR/issue.json.tmp"
+    mv "\$FIXTURE_DIR/issue.json.tmp" "\$FIXTURE_DIR/issue.json"
     ;;
   "issue comment")
     printf '%s\n' "\$*" >> "\$FIXTURE_DIR/comment.log"
@@ -317,7 +337,7 @@ EOF
     grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
 }
 
-@test "claim removes startup heartbeat when label mutation fails" {
+@test "claim publishes startup heartbeat before label mutation and keeps it as predecessor evidence on failure" {
     write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
     export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
 
@@ -325,20 +345,21 @@ EOF
 
     [ "$status" -eq 2 ]
     [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
-    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
     grep -q 'heartbeat_present_at_edit=yes' "$FIXTURE_DIR/edit.log"
+    # The refused claim leaves its startup heartbeat in place; the next
+    # acquirer's predecessor path retires it.
+    [ -f "$FIXTURE_DIR/heartbeats/o4_test_r4_repo/700.json" ]
 }
 
-@test "claim restores labels and removes heartbeat when run-state comment creation fails" {
+@test "claim succeeds when run-state comment projection fails (best-effort audit)" {
     write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
     export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
 
     ISSUE_EDIT_FAIL=0 ISSUE_COMMENT_FAIL=1 run run_claim
 
-    [ "$status" -eq 2 ]
-    [ "$(echo "$output" | jq -r '.reason')" = "run_state_create_failed" ]
-    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    [ "$status" -eq 0 ]
+    # The best-effort projection WARNs land on stderr; the claim JSON is the final line.
+    [ "$(echo "$output" | tail -n 1 | jq -r '.claimed')" = "true" ]
     grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
-    grep -q -- "--remove-label in-progress-by-bot --add-label auto-implement" "$FIXTURE_DIR/edit.log"
     grep -q -- "--body" "$FIXTURE_DIR/comment.log"
 }

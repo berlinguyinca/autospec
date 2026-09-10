@@ -539,6 +539,24 @@ During the normal monitor loop:
 > label transition, and confirms the lowest-ID run-state comment. The monitor
 > never reimplements that safety or lease transition with `gh issue edit`.
 
+> **Portfolio admission and reconciliation gate.** Before the label transition,
+> `autospec claim acquire` also consults the typed portfolio graph and refuses
+> the claim (no label mutation, no run-state comment) until the issue's
+> `autospec:portfolio-item` marker is bound to its verified primary delivery
+> Project (`kind: spec_portfolio`) and every typed repository-local
+> (`Depends on issue #N`) and cross-repository
+> (`Depends on <canonical-issue-url>`) dependency is terminal-success in its own
+> repository. Unavailable or contradictory predecessor state fails closed as
+> Blocked, and an unbound or mismatched marker blocks the claim. Admission
+> expands queue gating only; it does not change merge authority after a child
+> is admitted. Reconciliation runs after each Phase 4 lifecycle boundary
+> (claim, PR open, merge, terminal failure), after parent reconciliation, and
+> during monitor sweeps (step 2 below), so the primary Project projection and
+> dependency edges reflect the latest authoritative issue/PR/CI facts before
+> the next admission decision. The monitor never reimplements Project binding
+> or dependency admission with `gh` commands; a missing typed command fails
+> the monitor start visibly.
+
 0. Reconcile parents whose children may have closed outside autospec before
    selecting work:
    ```bash
@@ -550,12 +568,23 @@ During the normal monitor loop:
    ```
 1. Run `autospec queue ready --repo {repo} --batch-size "$effective_batch_size"`
    after watchdog reconciliation and profile filtering.
-2. Use `.ready[0].number` as the next issue candidate.
-3. Claim it through `autospec claim acquire --issue "$ISSUE" --repo {repo}
-   --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --branch "<BRANCH>"`.
-4. Treat claim exit `2` as a normal lost-race or conflict outcome: refresh the
+2. Reconcile delivery portfolios before admission: for each ready candidate
+   whose body carries an `autospec:portfolio-item` marker, run
+   `autospec portfolio reconcile --portfolio <ID>` (ID from the marker) so the
+   typed graph and the primary Project projection reflect the latest
+   authoritative issue/PR/CI facts. Candidates without a marker are outside
+   the portfolio gate. A reconcile failure fails closed: the candidate is
+   skipped this sweep and is never admitted on inferred dependency readiness.
+3. Use `.ready[0].number` as the next issue candidate.
+4. Claim it through `autospec claim acquire --issue "$ISSUE" --repo {repo}
+   --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --branch "<BRANCH>"`. The
+   portfolio admission gate inside the claim refuses a candidate whose primary
+   Project binding is missing or whose typed dependencies are not ready; a
+   refusal surfaces as a non-success claim exit and takes the skip-and-refresh
+   handling below.
+5. Treat claim exit `2` as a normal lost-race or conflict outcome: refresh the
    queue and try another candidate without failing the batch.
-5. On failure, stop, or retry exhaustion, call `autospec claim release` before
+6. On failure, stop, or retry exhaustion, call `autospec claim release` before
    returning `auto-implement` to the queue.
 
 ### Final safety-stamp contract
@@ -671,6 +700,13 @@ do not fall back to an inline label-swap path.
 >       continue
 >     fi
 >   fi
+>   # Portfolio admission gate (enforced inside claim acquire, never here): the
+>   # claim is refused before label mutation until the issue's
+>   # autospec:portfolio-item marker is bound to its verified primary delivery
+>   # Project and every typed in-repo / cross-repository dependency is
+>   # terminal-success. A refusal is a non-zero claim exit and takes the
+>   # skip-and-refresh path below; never re-implement binding or dependency
+>   # admission with gh commands.
 >   # Atomic claim: autospec claim acquire is the SOLE claim path. It performs the
 >   # check-and-swap (auto-implement -> in-progress-by-bot) atomically with a
 >   # read-back verification, so the hot loop NEVER re-implements the inline
@@ -1580,6 +1616,10 @@ do not fall back to an inline label-swap path.
 >      gh issue comment "<ISSUE>" --repo {repo} --body "Parent reconciliation failed after merge; remote parent state is unknown and will be retried by the recurring parent sweep."
 >      echo "[monitor] WARN: parent reconciliation failed for merged child #<ISSUE>" >&2
 >    fi
+>    # Portfolio lifecycle boundary: a merged child is an authoritative fact
+>    # for the typed portfolio graph; the monitor sweep's portfolio
+>    # reconciliation (step 2) publishes it to the primary Project before the
+>    # next admission decision.
 >    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
 >    ```
 >    The block ends with the admin-merge and merged-state claim release; merge auto-closes the issue.
