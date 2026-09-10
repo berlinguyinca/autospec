@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::coordination::capabilities::{unmet_capabilities, CapabilityState};
 use crate::coordination::dispatch_eligibility::{is_dispatch_eligible, DispatchEligibilityPolicy};
-use crate::coordination::review_routing::{review_routing, ReviewRouting};
+use crate::coordination::withdrawal::WithdrawalDecision;
 use crate::state::json::{JsonParser, JsonValue};
 
 mod labels;
@@ -585,14 +585,16 @@ pub fn plan_ready_queue_with_trusted_actors(
             conflicts.push(view);
             continue;
         }
-        // A second consecutive zero-output run means re-dispatch is burning
-        // compute on an impossible run; hold the issue for review instead.
+        // A trailing streak of zero-output runs ending at the present means
+        // re-dispatch is burning compute on an impossible run; withdraw the
+        // issue from dispatch and hold it for review instead. The decision
+        // reads only the streak — never the issue's cumulative cost
+        // (issue #3983): an issue that failed early and then succeeded keeps
+        // its streak at zero and stays dispatchable.
         if let Some(zero_output_streak) = input.no_output_streaks.get(&view.issue.number) {
-            if let ReviewRouting::Review { zero_output_streak } =
-                review_routing(*zero_output_streak)
-            {
+            if WithdrawalDecision::from_trailing_streak(*zero_output_streak).withdrawn() {
                 view.reason = Some("zero_output_review".to_string());
-                view.zero_output_streak = Some(zero_output_streak);
+                view.zero_output_streak = Some(*zero_output_streak);
                 blocked.push(view);
                 continue;
             }
