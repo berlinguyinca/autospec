@@ -155,11 +155,34 @@ pub enum GateResult {
 ///
 /// The command is recorded rather than assumed, because the comparison
 /// against the gate set's specified command is exactly what separates
-/// "the gate ran" from "the gate was enforced".
+/// "the gate ran" from "the gate was enforced". The load is recorded
+/// rather than described (issue #3963), because "the thing I started is
+/// done" is not "nothing is running": a long-lived background job in the
+/// session is invisible to that inference, and a clean result produced
+/// under contention is different evidence from one produced alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateRun {
     pub command: String,
     pub result: GateResult,
+    pub load: MachineLoad,
+}
+
+/// The machine's concurrent load, observed alongside a gate run (issue
+/// #3963).
+///
+/// "No other test process running" is a check, not a description, and the
+/// observation belongs in the result alongside the numbers.
+///
+/// `exclusive` is a lock held for the run's duration — a guarantee, not a
+/// sample. `competing` is the number of competing test processes observed
+/// while the run did not hold a lock; an observed zero is a snapshot taken
+/// once, and says nothing about the processes that appeared after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MachineLoad {
+    /// Competing test processes observed while the gate ran.
+    pub competing: u64,
+    /// The run held an exclusivity lock for its full duration.
+    pub exclusive: bool,
 }
 
 /// Why a gate did not count as passing.
@@ -190,14 +213,46 @@ pub struct GradeFinding {
     pub detail: String,
 }
 
+/// The machine's load across a passing grade, so the one line a status
+/// log carries distinguishes the kind of evidence, not only its size
+/// (issue #3963).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassLoad {
+    /// Every run held an exclusivity lock for its full duration.
+    Exclusive,
+    /// No run held a lock; `competing` is the highest competing-process
+    /// count observed across the runs. Zero observed is a snapshot, not
+    /// idleness.
+    Observed { competing: u64 },
+}
+
+impl PassLoad {
+    /// The load suffix of a pass line: how the machine's load qualifies
+    /// the "found nothing".
+    fn suffix(&self) -> String {
+        match self {
+            Self::Exclusive => " (exclusive: lock held for the full run)".to_string(),
+            Self::Observed { competing: 0 } => {
+                " (not exclusive: 0 competing process(es) observed)".to_string()
+            }
+            Self::Observed { competing } => {
+                format!(" (contended: {competing} competing process(es) observed, no lock held)")
+            }
+        }
+    }
+}
+
 /// The grade of a patch's gate runs against a gate set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GradeVerdict {
     /// Every gate in the set ran its specified command and found
     /// nothing. `gates` is how many, so the line can say how much
-    /// passing it covers.
-    Pass { gates: usize },
+    /// passing it covers; `load` is what the machine was doing while
+    /// the gates ran, so a clean result produced under contention is
+    /// reported as different evidence from one produced alone.
+    Pass { gates: usize, load: PassLoad },
     /// At least one gate failed the grade; every finding is named, in
     /// gate-set order.
     Fail { findings: Vec<GradeFinding> },
@@ -218,8 +273,11 @@ impl GradeVerdict {
     /// cannot tell the operator what to re-run.
     pub fn line(&self) -> String {
         match self {
-            Self::Pass { gates } => {
-                format!("GRADE PASS: {gates} of {gates} gates ran as specified and found nothing")
+            Self::Pass { gates, load } => {
+                let base = format!(
+                    "GRADE PASS: {gates} of {gates} gates ran as specified and found nothing"
+                );
+                format!("{base}{}", load.suffix())
             }
             Self::Fail { findings } => {
                 let segments: Vec<String> = findings
@@ -286,8 +344,19 @@ pub fn grade(gate_set: &GateSet, runs: &BTreeMap<String, GateRun>) -> Result<Gra
         }
     }
     if findings.is_empty() {
+        let load = if runs.values().all(|run| run.load.exclusive) {
+            PassLoad::Exclusive
+        } else {
+            let competing = runs
+                .values()
+                .map(|run| run.load.competing)
+                .max()
+                .unwrap_or(0);
+            PassLoad::Observed { competing }
+        };
         Ok(GradeVerdict::Pass {
             gates: gate_set.gates().len(),
+            load,
         })
     } else {
         Ok(GradeVerdict::Fail { findings })
@@ -364,6 +433,13 @@ mod tests {
     use super::*;
 
     fn runs(pairs: &[(&str, &str, GateResult)]) -> BTreeMap<String, GateRun> {
+        runs_with_load(pairs, MachineLoad::default())
+    }
+
+    fn runs_with_load(
+        pairs: &[(&str, &str, GateResult)],
+        load: MachineLoad,
+    ) -> BTreeMap<String, GateRun> {
         pairs
             .iter()
             .map(|(name, command, result)| {
@@ -372,6 +448,28 @@ mod tests {
                     GateRun {
                         command: (*command).to_string(),
                         result: result.clone(),
+                        load,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The gate set's runs, each under the given load.
+    fn all_runs(
+        set: &GateSet,
+        result: &GateResult,
+        load: MachineLoad,
+    ) -> BTreeMap<String, GateRun> {
+        set.gates()
+            .iter()
+            .map(|gate| {
+                (
+                    gate.name.clone(),
+                    GateRun {
+                        command: gate.command.clone(),
+                        result: result.clone(),
+                        load,
                     },
                 )
             })
@@ -393,9 +491,135 @@ mod tests {
         let verdict = grade(&set, &runs(&all(GateResult::Clean))).expect("grades");
 
         assert!(verdict.is_pass(), "{}", verdict.line());
+        // Default load is the honest one: no lock held, a zero-competitor
+        // snapshot. The line says that, not "clean and serial".
         assert_eq!(
             verdict.line(),
-            "GRADE PASS: 4 of 4 gates ran as specified and found nothing"
+            "GRADE PASS: 4 of 4 gates ran as specified and found nothing \
+             (not exclusive: 0 competing process(es) observed)"
+        );
+    }
+
+    /// Acceptance criterion 4, the populated #3793 case: a gate started
+    /// while another test binary is running must report contention, not a
+    /// clean serial result. The result is still a pass — the gates ran and
+    /// found nothing — but the line that a status log carries must name
+    /// the competing process and the missing lock, so the two kinds of
+    /// evidence are no longer reported identically.
+    #[test]
+    fn a_pass_observed_under_contention_reports_contention_not_a_clean_serial_result() {
+        let set = GateSet::rust_workspace();
+        let contended = runs_with_load(
+            &set.gates()
+                .iter()
+                .map(|gate| (gate.name.as_str(), gate.command.as_str(), GateResult::Clean))
+                .collect::<Vec<_>>(),
+            MachineLoad {
+                competing: 1,
+                exclusive: false,
+            },
+        );
+
+        let verdict = grade(&set, &contended).expect("grades");
+
+        assert!(verdict.is_pass(), "contention is a label, not a failure");
+        assert_eq!(
+            verdict,
+            GradeVerdict::Pass {
+                gates: 4,
+                load: PassLoad::Observed { competing: 1 },
+            }
+        );
+        let line = verdict.line();
+        assert!(
+            line.contains("contended: 1 competing process(es) observed, no lock held"),
+            "{}",
+            line
+        );
+        assert_ne!(
+            verdict.line(),
+            GradeVerdict::Pass {
+                gates: 4,
+                load: PassLoad::Exclusive,
+            }
+            .line(),
+            "a contended pass must not read the same as an exclusive one"
+        );
+    }
+
+    /// A pass whose runs held the exclusivity lock is labeled exclusive:
+    /// the claim was acquired, and the line says so.
+    #[test]
+    fn a_pass_under_a_held_lock_is_labeled_exclusive() {
+        let set = GateSet::rust_workspace();
+        let table = all_runs(
+            &set,
+            &GateResult::Clean,
+            MachineLoad {
+                competing: 0,
+                exclusive: true,
+            },
+        );
+
+        let verdict = grade(&set, &table).expect("grades");
+
+        assert_eq!(
+            verdict,
+            GradeVerdict::Pass {
+                gates: 4,
+                load: PassLoad::Exclusive,
+            }
+        );
+        assert_eq!(
+            verdict.line(),
+            "GRADE PASS: 4 of 4 gates ran as specified and found nothing \
+             (exclusive: lock held for the full run)"
+        );
+    }
+
+    /// The highest competing count across the runs is what the pass
+    /// reports: one clean gate run observed beside the 21-hour loop is
+    /// enough to make the grade contended, however clean the others were.
+    #[test]
+    fn the_pass_reports_the_highest_competing_count_across_runs() {
+        let set = GateSet::rust_workspace();
+        let quiet = MachineLoad::default();
+        let table: BTreeMap<String, GateRun> = set
+            .gates()
+            .iter()
+            .map(|gate| {
+                let load = if gate.name == "test" {
+                    MachineLoad {
+                        competing: 9,
+                        exclusive: false,
+                    }
+                } else {
+                    quiet
+                };
+                (
+                    gate.name.clone(),
+                    GateRun {
+                        command: gate.command.clone(),
+                        result: GateResult::Clean,
+                        load,
+                    },
+                )
+            })
+            .collect();
+
+        let verdict = grade(&set, &table).expect("grades");
+
+        assert_eq!(
+            verdict,
+            GradeVerdict::Pass {
+                gates: 4,
+                load: PassLoad::Observed { competing: 9 },
+            }
+        );
+        assert!(
+            verdict.line().contains("contended: 9 competing"),
+            "{}",
+            verdict.line()
         );
     }
 
