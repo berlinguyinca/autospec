@@ -45,6 +45,7 @@ pub mod failure_signatures;
 pub mod fix_surface;
 pub mod fleet_dispatch;
 pub mod gate_provenance;
+pub mod gate_verdict;
 pub mod grading;
 pub mod graph;
 pub mod growth;
