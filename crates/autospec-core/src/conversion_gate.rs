@@ -116,6 +116,23 @@ pub struct GateRun {
     pub fmt_rc: i32,
     /// A baseline of pre-change test results exists and was consulted.
     pub has_baseline: bool,
+    /// The node the gate ran on.
+    ///
+    /// Recorded with every verdict (issue #3725). The scheduler assigns the
+    /// node per run, so a verdict and its node belong together: a reader
+    /// comparing two runs' failures needs to know whether they ran in the
+    /// same world. Always written to the status file.
+    pub node: String,
+    /// Whether the declared test-database dependency was reachable at run
+    /// time.
+    ///
+    /// `true` when no test-database dependency is declared, or when the
+    /// declared one is reachable. `false` when a declared dependency is
+    /// unreachable: the test stage's *runtime* results are void (the targets
+    /// never ran against a live database), so the run classifies as
+    /// [`GateStatus::NoTestDb`] — a distinct state from "tests failed" — and
+    /// the failures do not count against the patch (issue #3725).
+    pub test_db_reachable: bool,
 }
 
 /// The classification of a gate run, as written to the status file.
@@ -126,6 +143,12 @@ pub enum GateStatus {
     /// The test stage failed to build. Terminal and unconditional: no
     /// baseline can justify a test that does not compile.
     TestsDoNotCompile,
+    /// The declared test-database dependency was unreachable, so the test
+    /// stage's runtime results are void. Terminal on the evidence at hand:
+    /// the targets did not run, so the failures are a property of the node,
+    /// not of the patch — a non-result rather than a regression (issue
+    /// #3725).
+    NoTestDb,
     /// The test stage built and failed at run time; the baseline attributes
     /// the failures to this change.
     NewTestFailures,
@@ -142,6 +165,7 @@ impl GateStatus {
         match self {
             Self::BuildFailed => "BUILD-FAILED",
             Self::TestsDoNotCompile => "TESTS-DO-NOT-COMPILE",
+            Self::NoTestDb => "NO-TEST-DB",
             Self::NewTestFailures => "NEW-TEST-FAILURES",
             Self::UnknownNoBaseline => "UNKNOWN-NO-BASELINE",
             Self::Pass => "PASS",
@@ -153,6 +177,7 @@ impl GateStatus {
         match value {
             "BUILD-FAILED" => Ok(Self::BuildFailed),
             "TESTS-DO-NOT-COMPILE" => Ok(Self::TestsDoNotCompile),
+            "NO-TEST-DB" => Ok(Self::NoTestDb),
             "NEW-TEST-FAILURES" => Ok(Self::NewTestFailures),
             "UNKNOWN-NO-BASELINE" => Ok(Self::UnknownNoBaseline),
             "PASS" => Ok(Self::Pass),
@@ -163,7 +188,10 @@ impl GateStatus {
     /// Terminal statuses are final on the evidence at hand: re-running
     /// downstream stages or consulting a baseline cannot demote them.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::BuildFailed | Self::TestsDoNotCompile)
+        matches!(
+            self,
+            Self::BuildFailed | Self::TestsDoNotCompile | Self::NoTestDb
+        )
     }
 
     /// Only a green build *and* a green test stage admit a patch to the
@@ -183,16 +211,23 @@ impl GateStatus {
 ///    `has_baseline`, because a test that does not compile is a fact about
 ///    the patch, not about the baseline.
 /// 2. `build_rc != 0` — the build stage failed; downstream evidence is void.
-/// 3. `test_rc != 0` — the tests built and failed at run time; a baseline
+/// 3. `!test_db_reachable` — the declared test-database dependency was
+///    unreachable, so the test stage never ran against a live database and
+///    its runtime exit code is void. Classifies as `NO-TEST-DB`, a
+///    non-result rather than a regression (issue #3725).
+/// 4. `test_rc != 0` — the tests built and failed at run time; a baseline
 ///    attributes the failures (`NEW-TEST-FAILURES`), its absence does not
 ///    (`UNKNOWN-NO-BASELINE`).
-/// 4. otherwise — `PASS`.
+/// 5. otherwise — `PASS`.
 pub fn classify_gate_run(run: &GateRun) -> GateStatus {
     if run.test_build_failed {
         return GateStatus::TestsDoNotCompile;
     }
     if run.build_rc != 0 {
         return GateStatus::BuildFailed;
+    }
+    if !run.test_db_reachable {
+        return GateStatus::NoTestDb;
     }
     if run.test_rc != 0 {
         return if run.has_baseline {
@@ -218,13 +253,15 @@ pub fn contradictory_signals(run: &GateRun) -> Option<&'static str> {
 /// Renders the status file line for a gate run, flagging contradictory
 /// signals at write time.
 ///
-/// Format: `status=<STATUS> build_rc=<n> test_rc=<n> fmt_rc=<n>` followed by
-/// ` contradiction=<reason>` when the signals contradict each other.
+/// Format: `status=<STATUS> node=<NODE> build_rc=<n> test_rc=<n>
+/// fmt_rc=<n>` followed by ` contradiction=<reason>` when the signals
+/// contradict each other.
 pub fn render_status_file(run: &GateRun) -> String {
     let status = classify_gate_run(run);
     let mut line = format!(
-        "status={} build_rc={} test_rc={} fmt_rc={}",
+        "status={} node={} build_rc={} test_rc={} fmt_rc={}",
         status.as_str(),
+        run.node,
         run.build_rc,
         run.test_rc,
         run.fmt_rc,
@@ -250,6 +287,9 @@ pub struct StatusFile {
     pub build_rc: i32,
     pub test_rc: i32,
     pub fmt_rc: i32,
+    /// The node the run happened on, as recorded in the file. Empty for files
+    /// written before the `node=` token existed.
+    pub node: String,
     /// The `contradiction=` token as written, if any.
     pub contradiction: Option<String>,
 }
@@ -267,12 +307,14 @@ impl StatusFile {
 /// Parses a status file produced by [`render_status_file`].
 ///
 /// Accepts the canonical single-line form and multi-line files; whitespace
-/// separates `key=value` tokens.
+/// separates `key=value` tokens. The `node=` token is optional: files written
+/// before it existed parse with an empty [`StatusFile::node`].
 pub fn parse_status_file(text: &str) -> Result<StatusFile, String> {
     let mut status: Option<GateStatus> = None;
     let mut build_rc: Option<i32> = None;
     let mut test_rc: Option<i32> = None;
     let mut fmt_rc: Option<i32> = None;
+    let mut node: Option<String> = None;
     let mut contradiction: Option<String> = None;
 
     for token in text.split_whitespace() {
@@ -289,6 +331,12 @@ pub fn parse_status_file(text: &str) -> Result<StatusFile, String> {
             "build_rc" => build_rc = Some(parse_rc(key, value)?),
             "test_rc" => test_rc = Some(parse_rc(key, value)?),
             "fmt_rc" => fmt_rc = Some(parse_rc(key, value)?),
+            "node" => {
+                if node.is_some() {
+                    return Err("status file declares node twice".to_string());
+                }
+                node = Some(value.to_string());
+            }
             "contradiction" => {
                 if contradiction.is_some() {
                     return Err("status file declares contradiction twice".to_string());
@@ -307,6 +355,7 @@ pub fn parse_status_file(text: &str) -> Result<StatusFile, String> {
         build_rc: build_rc.ok_or("status file has no build_rc")?,
         test_rc: test_rc.ok_or("status file has no test_rc")?,
         fmt_rc: fmt_rc.ok_or("status file has no fmt_rc")?,
+        node: node.unwrap_or_default(),
         contradiction,
     })
 }
@@ -331,6 +380,8 @@ mod tests {
             test_build_failed: true,
             fmt_rc: 1,
             has_baseline: false,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: true,
         }
     }
 
@@ -411,6 +462,8 @@ mod tests {
             test_build_failed: false,
             fmt_rc: 0,
             has_baseline: false,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: true,
         };
         assert_eq!(classify_gate_run(&run), GateStatus::UnknownNoBaseline);
     }
@@ -423,6 +476,8 @@ mod tests {
             test_build_failed: false,
             fmt_rc: 0,
             has_baseline: true,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: true,
         };
         assert_eq!(classify_gate_run(&run), GateStatus::NewTestFailures);
     }
@@ -435,6 +490,8 @@ mod tests {
             test_build_failed: false,
             fmt_rc: 0,
             has_baseline: false,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: true,
         };
         assert_eq!(classify_gate_run(&run), GateStatus::BuildFailed);
     }
@@ -447,6 +504,8 @@ mod tests {
             test_build_failed: false,
             fmt_rc: 0,
             has_baseline: true,
+            node: "hive-as-11-3-51".to_string(),
+            test_db_reachable: true,
         };
         assert_eq!(classify_gate_run(&run), GateStatus::Pass);
     }
@@ -487,6 +546,8 @@ mod tests {
             test_build_failed: true,
             fmt_rc: 0,
             has_baseline: false,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: true,
         };
         // The build stage itself reports the failure, so its nonzero rc and
         // the test-stage build failure agree: no contradiction.
@@ -507,6 +568,7 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         assert_eq!(parsed.status, GateStatus::TestsDoNotCompile);
+        assert_eq!(parsed.node, "hive-as-11-2-54");
         assert_eq!(parsed.build_rc, 0);
         assert_eq!(parsed.test_rc, 101);
         assert_eq!(parsed.fmt_rc, 1);
@@ -532,6 +594,7 @@ mod tests {
         for status in [
             GateStatus::BuildFailed,
             GateStatus::TestsDoNotCompile,
+            GateStatus::NoTestDb,
             GateStatus::NewTestFailures,
             GateStatus::UnknownNoBaseline,
             GateStatus::Pass,
@@ -553,6 +616,127 @@ mod tests {
         assert!(parse_status_file("notkeyvalue").is_err());
         assert!(
             parse_status_file("status=PASS status=PASS build_rc=0 test_rc=0 fmt_rc=0").is_err()
+        );
+    }
+
+    // --- NO-TEST-DB (issue #3725) ------------------------------------------
+
+    /// A run on a node whose declared test database is unreachable: the build
+    /// stage is green and the test stage "failed" (connection refused -> rc
+    /// 101), but the targets never ran against a live database, so the runtime
+    /// exit code is void.
+    fn no_test_db_run() -> GateRun {
+        GateRun {
+            build_rc: 0,
+            test_rc: 101,
+            test_build_failed: false,
+            fmt_rc: 0,
+            has_baseline: true,
+            node: "hive-as-11-2-54".to_string(),
+            test_db_reachable: false,
+        }
+    }
+
+    #[test]
+    fn an_unreachable_test_db_is_a_distinct_status_not_a_failure() {
+        // A baseline exists and the test stage "failed" (rc 101). Without the
+        // DB-awareness this would classify as NEW-TEST-FAILURES — a regression
+        // attributed to the patch. With it, the honest report is NO-TEST-DB:
+        // the targets did not run. It holds with or without a baseline.
+        let run = no_test_db_run();
+        assert_eq!(classify_gate_run(&run), GateStatus::NoTestDb);
+        assert_eq!(classify_gate_run(&run).as_str(), "NO-TEST-DB");
+        assert_eq!(
+            classify_gate_run(&GateRun {
+                has_baseline: false,
+                ..run
+            }),
+            GateStatus::NoTestDb
+        );
+    }
+
+    #[test]
+    fn no_test_db_is_terminal() {
+        // Re-running the test stage on the same node or consulting a baseline
+        // cannot demote it: the database was unreachable, full stop.
+        assert!(GateStatus::NoTestDb.is_terminal());
+        let run = no_test_db_run();
+        let flipped_baseline = GateRun {
+            has_baseline: !run.has_baseline,
+            ..run
+        };
+        assert_eq!(classify_gate_run(&flipped_baseline), GateStatus::NoTestDb);
+    }
+
+    #[test]
+    fn no_test_db_does_not_admit_to_the_conversion_queue() {
+        // No positive test evidence exists, so the patch cannot be admitted —
+        // but the non-admission is a non-result, not a counted failure.
+        assert!(!GateStatus::NoTestDb.admits_to_conversion_queue());
+    }
+
+    #[test]
+    fn a_build_or_compile_failure_outranks_no_test_db() {
+        // The database may be unreachable, but a patch that does not build, or
+        // whose tests do not compile, is a fact about the patch — it wins.
+        assert_eq!(
+            classify_gate_run(&GateRun {
+                build_rc: 101,
+                test_db_reachable: false,
+                ..no_test_db_run()
+            }),
+            GateStatus::BuildFailed
+        );
+        assert_eq!(
+            classify_gate_run(&GateRun {
+                test_build_failed: true,
+                test_db_reachable: false,
+                ..no_test_db_run()
+            }),
+            GateStatus::TestsDoNotCompile
+        );
+    }
+
+    #[test]
+    fn a_reachable_db_leaves_the_existing_classification_intact() {
+        // test_rc != 0 with the database reachable is still a real runtime
+        // failure (a baseline is present, so it is attributed).
+        assert_eq!(
+            classify_gate_run(&GateRun {
+                test_db_reachable: true,
+                ..no_test_db_run()
+            }),
+            GateStatus::NewTestFailures
+        );
+    }
+
+    #[test]
+    fn the_node_is_recorded_with_the_verdict() {
+        let line = render_status_file(&no_test_db_run());
+        assert!(line.starts_with("status=NO-TEST-DB"), "{line}");
+        assert!(line.contains("node=hive-as-11-2-54"), "{line}");
+    }
+
+    #[test]
+    fn the_node_round_trips_through_the_status_file() {
+        let line = render_status_file(&no_test_db_run());
+        let parsed = parse_status_file(&line).expect("parses");
+        assert_eq!(parsed.status, GateStatus::NoTestDb);
+        assert_eq!(parsed.node, "hive-as-11-2-54");
+    }
+
+    #[test]
+    fn a_legacy_status_file_without_a_node_parses_with_an_empty_node() {
+        let legacy = "status=PASS build_rc=0 test_rc=0 fmt_rc=0\n";
+        let parsed = parse_status_file(legacy).expect("parses");
+        assert_eq!(parsed.status, GateStatus::Pass);
+        assert_eq!(parsed.node, "");
+    }
+
+    #[test]
+    fn the_parser_rejects_a_duplicate_node_token() {
+        assert!(
+            parse_status_file("status=PASS node=a node=b build_rc=0 test_rc=0 fmt_rc=0").is_err()
         );
     }
 }

@@ -45,6 +45,7 @@ Statuses written to the status file (`GateStatus`):
 | `PASS` | Build and test stages green | no | yes |
 | `TESTS-DO-NOT-COMPILE` | Test stage failed to build | **yes** | no |
 | `BUILD-FAILED` | Build stage failed | **yes** | no |
+| `NO-TEST-DB` | Declared test database unreachable; test stage's runtime results void | **yes** | no |
 | `NEW-TEST-FAILURES` | Tests built; ran; failed; baseline attributes the failures | no | no |
 | `UNKNOWN-NO-BASELINE` | Tests built; ran; failed; no baseline to attribute them | no | no |
 
@@ -55,10 +56,16 @@ Classification precedence (most specific evidence first):
    justify (attribute) a test failure, but no baseline can justify a test that
    does not compile.
 2. `build_rc != 0` → `BUILD-FAILED`.
-3. `test_rc != 0` → `NEW-TEST-FAILURES` when a baseline exists,
+3. `!test_db_reachable` → `NO-TEST-DB`. The declared test-database dependency
+   was unreachable, so the test stage never ran against a live database and
+   its runtime exit code is void. A **non-result**, not a regression: the
+   failures are a property of the node, not of the patch (issue #3725). It is
+   terminal — re-running the test stage on the same node or consulting a
+   baseline cannot demote it.
+4. `test_rc != 0` → `NEW-TEST-FAILURES` when a baseline exists,
    `UNKNOWN-NO-BASELINE` when it does not. `UNKNOWN-NO-BASELINE` therefore
    holds **only when the test stage actually built**.
-4. otherwise → `PASS`.
+5. otherwise → `PASS`.
 
 Only `PASS` admits a patch to the conversion queue; in particular a patch
 whose tests do not compile never reaches it.
@@ -76,8 +83,11 @@ recorded signals for files written before the token existed.
 Status file format:
 
 ```text
-status=<STATUS> build_rc=<n> test_rc=<n> fmt_rc=<n>[ contradiction=<reason>]
+status=<STATUS> node=<NODE> build_rc=<n> test_rc=<n> fmt_rc=<n>[ contradiction=<reason>]
 ```
 
 `fmt_rc` is recorded as evidence; fmt is gated separately from build/test
-admission.
+admission. `node` records the scheduler-assigned node the run happened on, so
+a reader comparing two runs' failures can see whether they ran in the same
+world; it is always written, but optional when parsing files written before it
+existed (they parse with an empty node).
