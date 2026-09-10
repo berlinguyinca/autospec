@@ -16,9 +16,11 @@ setup() {
     BIN="$WORK/bin"
     PRS_DIR="$WORK/prs"
     ISSUES_DIR="$WORK/issues"
+    ISSUE_BODIES_DIR="$WORK/issue-bodies"
     LABELS_DIR="$WORK/labels"
     REPOS_DIR="$WORK/repos"
-    mkdir -p "$BIN" "$PRS_DIR" "$ISSUES_DIR" "$LABELS_DIR" "$REPOS_DIR"
+    SPEC_DIR="$WORK/specs"
+    mkdir -p "$BIN" "$PRS_DIR" "$ISSUES_DIR" "$ISSUE_BODIES_DIR" "$LABELS_DIR" "$REPOS_DIR"
 
     cat > "$BIN/gh" <<'MOCK'
 #!/usr/bin/env bash
@@ -47,9 +49,21 @@ if [ "$1" = "api" ]; then
           exit 0
           ;;
         *issues*)
-          if [ -f "$MOCK_ISSUES_DIR/$safe" ]; then cat "$MOCK_ISSUES_DIR/$safe"; exit 0; fi
-          printf '[]\n'
-          exit 0
+          if [[ "$rest" == *\?* ]]; then
+            # open auto-implement issue list
+            if [ -f "$MOCK_ISSUES_DIR/$safe" ]; then cat "$MOCK_ISSUES_DIR/$safe"; exit 0; fi
+            printf '[]\n'
+            exit 0
+          else
+            # single issue body: repos/<o>/<n>/issues/<num> (issue #3736)
+            num="${rest##*/}"
+            if [ -f "$MOCK_ISSUE_BODIES_DIR/${safe}__${num}" ]; then
+              cat "$MOCK_ISSUE_BODIES_DIR/${safe}__${num}"
+              exit 0
+            fi
+            printf 'HTTP 404: Not Found (mock: issue body missing)\n' >&2
+            exit 1
+          fi
           ;;
         *labels*)
           if [ -f "$MOCK_LABELS_DIR/$safe" ]; then cat "$MOCK_LABELS_DIR/$safe"; exit 0; fi
@@ -73,6 +87,7 @@ MOCK
     export PATH="$BIN:$PATH"
     export MOCK_PRS_DIR="$PRS_DIR"
     export MOCK_ISSUES_DIR="$ISSUES_DIR"
+    export MOCK_ISSUE_BODIES_DIR="$ISSUE_BODIES_DIR"
     export MOCK_LABELS_DIR="$LABELS_DIR"
     export MOCK_REPOS_DIR="$REPOS_DIR"
 
@@ -109,8 +124,16 @@ write_prs() {
     printf '%s\n' "$1" > "$PRS_DIR/${repo//\//__}"
 }
 
+# write_issue_body <body> <number> [REPO] — the full issue JSON (with a `body`
+# field) served for `gh api repos/<o>/<n>/issues/<num>` (issue #3736).
+write_issue_body() {
+    local body="$1" number="$2" repo="${3:-me/repo}"
+    printf '{"number":%s,"body":%s}\n' "$number" "$(jq -cn --arg b "$body" '$b')" \
+        > "$ISSUE_BODIES_DIR/${repo//\//__}__${number}"
+}
+
 run_refresh() {
-    run bash "$SCRIPT" --repo me/repo --out "$WORK/q.json" "$@"
+    run bash "$SCRIPT" --repo me/repo --out "$WORK/q.json" --spec-dir "$SPEC_DIR" "$@"
 }
 
 # assert_queue EXPECTED_JSON — the queue file is exactly EXPECTED_JSON.
@@ -148,7 +171,7 @@ assert_queue() {
     pin_repo me/other
     write_issues '["300","100"]' me/repo
     write_issues '["500","400"]' me/other
-    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json"
+    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json" --spec-dir "$SPEC_DIR"
     [ "$status" -eq 0 ]
     assert_queue '[{"repo":"me/repo","number":300},{"repo":"me/repo","number":100},{"repo":"me/other","number":500},{"repo":"me/other","number":400}]'
 }
@@ -158,7 +181,7 @@ assert_queue() {
     pin_repo me/other
     write_issues '["300","100"]' me/repo
     write_issues '["500"]' me/other
-    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json"
+    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json" --spec-dir "$SPEC_DIR"
     [ "$status" -eq 0 ]
     [[ "$output" == *"repo me/repo: 2 dispatchable"* ]]
     [[ "$output" == *"repo me/other: 1 dispatchable"* ]]
@@ -169,7 +192,7 @@ assert_queue() {
     pin_repo me/other
     write_issues '["100"]' me/repo
     write_issues '["500"]' me/other
-    run bash "$SCRIPT" --repo me/repo --repo me/other --repo me/repo --out "$WORK/q.json"
+    run bash "$SCRIPT" --repo me/repo --repo me/other --repo me/repo --out "$WORK/q.json" --spec-dir "$SPEC_DIR"
     [ "$status" -eq 0 ]
     assert_queue '[{"repo":"me/repo","number":100},{"repo":"me/other","number":500}]'
 }
@@ -181,7 +204,7 @@ assert_queue() {
     write_issues '["500","600"]' me/other
     write_prs '[{"number":9,"head":{"ref":"fix/issue-200"},"body":""}]' me/repo
     write_prs '[{"number":19,"head":{"ref":"fix/issue-500"},"body":"fixes #999"}]' me/other
-    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json"
+    run bash "$SCRIPT" --repo me/repo --repo me/other --out "$WORK/q.json" --spec-dir "$SPEC_DIR"
     [ "$status" -eq 0 ]
     assert_queue '[{"repo":"me/repo","number":100},{"repo":"me/other","number":600}]'
     [[ "$output" == *"excluded 2 issues that already have an open PR"* ]]
@@ -305,4 +328,54 @@ assert_queue() {
     local mode
     mode="$(stat -c '%a' "$WORK/q.json")"
     [ "$mode" = "600" ]
+}
+
+@test "stages a spec for every queued issue that lacks one (issue #3736)" {
+    pin_repo me/repo
+    write_issues '["100","200"]'
+    write_issue_body "Goal: do the thing" 100
+    write_issue_body "Goal: another thing" 200
+    run_refresh
+    [ "$status" -eq 0 ]
+    [ -s "$SPEC_DIR/100.md" ]
+    [ -s "$SPEC_DIR/200.md" ]
+    [[ "$output" == *"staged 2 spec(s) for queued issues that lacked one"* ]]
+    [[ "$output" == *"eligible 2 of 2 queued issues"* ]]
+}
+
+@test "already-staged specs are not re-fetched (issue #3736)" {
+    pin_repo me/repo
+    write_issues '["100"]'
+    write_issue_body "fresh body from GitHub" 100
+    mkdir -p "$SPEC_DIR"
+    printf 'already staged\n' > "$SPEC_DIR/100.md"
+    run_refresh
+    [ "$status" -eq 0 ]
+    [[ "$(cat "$SPEC_DIR/100.md")" == "already staged" ]]
+    [[ "$output" == *"all queued issues have a spec"* ]]
+    [[ "$output" == *"eligible 1 of 1 queued issues"* ]]
+}
+
+@test "surfaces an ineligible issue whose body cannot be fetched (issue #3736)" {
+    pin_repo me/repo
+    write_issues '["100","200"]'
+    write_issue_body "present body" 100
+    # No body fixture for 200 -> the mock gh 404s the single-issue fetch.
+    run_refresh
+    [ "$status" -eq 0 ]
+    [ -s "$SPEC_DIR/100.md" ]
+    [ ! -e "$SPEC_DIR/200.md" ]
+    [[ "$output" == *"staged 1 spec(s) for queued issues that lacked one"* ]]
+    [[ "$output" == *"eligible 1 of 2 queued issues; 1 without a spec (ineligible): 200"* ]]
+}
+
+@test "an empty body is ineligible, not a staged spec (issue #3736)" {
+    pin_repo me/repo
+    write_issues '["100"]'
+    write_issue_body "" 100
+    run_refresh
+    [ "$status" -eq 0 ]
+    [ ! -e "$SPEC_DIR/100.md" ]
+    [[ "$output" == *"no new spec staged; 1 queued issue(s) could not be established"* ]]
+    [[ "$output" == *"eligible 0 of 1 queued issues; 1 without a spec (ineligible): 100"* ]]
 }
