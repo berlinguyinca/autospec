@@ -2,9 +2,14 @@
 //
 // Split out of tests.rs; see the note in that file.
 
-use super::support_base::{
-    test_environment, write_executable, DirectCrashFixtureCleanup, GitFixture,
-};
+use super::support_base::{test_environment, write_executable, GitFixture};
+// `DirectCrashFixtureCleanup` is `#[cfg(target_os = "linux")]` in
+// support_base, and every test here that uses it already carries the same
+// gate. The import did not, so on macOS/Windows/FreeBSD it resolved to an
+// item that was configured out and the crate failed to compile -- the same
+// gate the `nix` import below already uses.
+#[cfg(target_os = "linux")]
+use super::support_base::DirectCrashFixtureCleanup;
 use crate::commands::autonomous::executor_bridge as bridge;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
