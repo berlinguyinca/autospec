@@ -60,6 +60,7 @@ pub mod not_reproducible;
 pub mod planning;
 pub mod post_merge;
 pub mod rag;
+pub mod rebaseline;
 pub mod repair_loop;
 pub mod repairs;
 pub mod resources;
