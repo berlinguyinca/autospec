@@ -153,7 +153,7 @@ candidates="$(
 
 # ── verify each against the remote ────────────────────────────────────────────
 findings=0
-while IFS= read -r ref; do
+while IFS= read -r ref <&3; do
     [ -n "$ref" ] || continue
     # Ask once for both namespaces; --exit-code is 2 when nothing matches.
     if git ls-remote --heads --tags --exit-code "$REMOTE" \
@@ -164,7 +164,7 @@ while IFS= read -r ref; do
         "$ref" "$REMOTE"
     findings=$((findings + 1))
     [ "$findings" -ge 64 ] && break
-done <<EOF
+done 3<<EOF
 $candidates
 EOF
 

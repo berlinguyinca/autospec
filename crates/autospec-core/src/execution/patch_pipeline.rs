@@ -129,6 +129,21 @@
 //! 16. **The queue reports its inert fraction** ([`queue_health`]):
 //!     "120 queued, 43 held" is the line that makes the trap visible, and
 //!     it is one loop to compute (#3674).
+//! 17. **The pass reconciles its phase counts before it exits**
+//!     ([`reconcile_phase_counts`]). Phase 1 is the cheap triage that
+//!     decides the terminal classes without compute and hands the
+//!     remainder to phase 2 as the candidates that need it; phase 2 is
+//!     the expensive gate that applies, compile-tests, commits, and
+//!     pushes each candidate. The one number the phases exchange is the
+//!     candidate count, and phase 2's only obligation is to process all
+//!     of them. A pass that processes fewer than it was handed and still
+//!     exits `0` has *dropped, not decided* the candidates it never
+//!     reached, and because the pass that dropped them also owns the
+//!     summary that would have named them, the shortfall is silent. The
+//!     gate asserts the two counts reconcile and, when they do not,
+//!     returns an error the caller turns into a non-zero exit, so the
+//!     pass fails loudly instead of printing a summary that adds up to a
+//!     lie (#3742).
 
 use std::collections::BTreeMap;
 
@@ -2071,6 +2086,65 @@ pub fn logic_change_report(logic_started: u32, logic_finished: u32) -> Option<St
     ))
 }
 
+// ---- #3742: the phase-2 count reconciliation ----
+
+/// The phase-2 count reconciliation of the conversion pass (#3742).
+///
+/// The pass has two phases. Phase 1 is the cheap triage: the terminal
+/// classes — an existing PR, a closed issue, a memoized hold, a
+/// no-net-change — are decided without compute, and the remainder is
+/// handed to phase 2 as the candidates that do need it. Phase 2 is the
+/// expensive gate: each candidate is applied, compile-tested, committed,
+/// and pushed, one at a time.
+///
+/// The two phases exchange exactly one number — how many candidates phase
+/// 1 produced — and phase 2's only obligation is to process all of them.
+/// The trap this rule closes is a pass that processes fewer than it was
+/// handed and still exits `0`: the candidates it never reached are
+/// *dropped, not decided*. They sit in the queue looking like finished
+/// work, and because the pass that dropped them also owns the summary
+/// that would have named them, the shortfall is silent. The classic
+/// cause is a shell loop that reads its worklist from stdin while a
+/// command in the body (`gh`, `cargo`, `git`, `ssh`) consumes it: the
+/// loop reads one line, the command eats the rest, and the `while` ends
+/// cleanly.
+///
+/// The gate asserts the one equality that matters: the candidates phase 1
+/// produced (`candidates_produced`) equal the candidates phase 2 actually
+/// processed (`candidates_processed`). On a mismatch in either direction
+/// it returns an error naming both operands and the gap — a gate that
+/// cannot print the values it compared did not perform the comparison
+/// (#3866 pattern) — and the caller turns that error into a non-zero
+/// exit, so the pass fails loudly instead of printing a summary that
+/// adds up to a lie. When the counts reconcile it returns the line the
+/// run summary can print.
+///
+/// The counts are passed in rather than read from a shared counter: the
+/// caller is the only thing that knows both the worklist it handed phase
+/// 2 and the work phase 2 actually finished, and deriving the gate from
+/// the caller's two readings — not from a counter a buggy loop stopped
+/// incrementing — is the detection.
+pub fn reconcile_phase_counts(
+    candidates_produced: usize,
+    candidates_processed: usize,
+) -> Result<String, String> {
+    if candidates_processed < candidates_produced {
+        let dropped = candidates_produced - candidates_processed;
+        return Err(format!(
+            "phase reconciliation failed: phase 1 produced {candidates_produced} candidate(s) but phase 2 processed only {candidates_processed} — {dropped} candidate(s) were dropped, not decided; the pass must not exit 0"
+        ));
+    }
+    if candidates_processed > candidates_produced {
+        let surplus = candidates_processed - candidates_produced;
+        return Err(format!(
+            "phase reconciliation failed: phase 1 produced {candidates_produced} candidate(s) but phase 2 processed {candidates_processed} — {surplus} candidate(s) processed beyond the worklist; the counts disagree and the pass must not exit 0"
+        ));
+    }
+    Ok(format!(
+        "phase reconciliation: all {candidates_produced} candidate(s) from phase 1 processed by phase 2"
+    ))
+}
+
 // ---- #3899: the pass run summary ----
 
 /// The run summary of one conversion pass (#3899).
@@ -3799,6 +3873,62 @@ mod tests {
         // the remote disagree.
         let err = reconcile_converted(&log, &[("#41", "#99"), ("#42", "#43")]).unwrap_err();
         assert!(err.contains("#41: recorded #42, remote shows #99"), "{err}");
+    }
+
+    // ---- #3742: the phase-2 count reconciliation ----
+
+    #[test]
+    fn phase_reconciliation_passes_when_every_candidate_is_processed() {
+        // The normal case: phase 1 hands phase 2 exactly the candidates
+        // it produced, and phase 2 works through all of them.
+        let ok = reconcile_phase_counts(73, 73).unwrap();
+        assert!(
+            ok.contains("all 73 candidate(s) from phase 1 processed"),
+            "{ok}"
+        );
+    }
+
+    #[test]
+    fn phase_reconciliation_treats_a_zero_candidate_pass_as_complete() {
+        // No candidates, no work: phase 1 decided everything cheaply, so
+        // phase 2 processed 0 of 0 and the counts reconcile.
+        let ok = reconcile_phase_counts(0, 0).unwrap();
+        assert!(
+            ok.contains("all 0 candidate(s) from phase 1 processed"),
+            "{ok}"
+        );
+    }
+
+    #[test]
+    fn phase_reconciliation_fails_loudly_on_a_shortfall() {
+        // The bug from #3742: phase 1 produced 73 candidates, the loop
+        // processed 1 (a command in the body ate the worklist from
+        // stdin), and the pass still exited 0. The gate must refuse:
+        // the 72 never reached are dropped, not decided, and the pass
+        // must not report success.
+        let err = reconcile_phase_counts(73, 1).unwrap_err();
+        assert!(err.contains("produced 73 candidate(s)"), "{err}");
+        assert!(err.contains("processed only 1"), "{err}");
+        assert!(
+            err.contains("72 candidate(s) were dropped, not decided"),
+            "{err}"
+        );
+        assert!(err.contains("the pass must not exit 0"), "{err}");
+    }
+
+    #[test]
+    fn phase_reconciliation_fails_loudly_on_a_surplus() {
+        // The mirror case: phase 2 processed more than phase 1 produced.
+        // The two numbers do not reconcile, so the pass fails loudly
+        // rather than exiting 0 with a summary that does not add up.
+        let err = reconcile_phase_counts(9, 11).unwrap_err();
+        assert!(err.contains("produced 9 candidate(s)"), "{err}");
+        assert!(err.contains("processed 11"), "{err}");
+        assert!(
+            err.contains("2 candidate(s) processed beyond the worklist"),
+            "{err}"
+        );
+        assert!(err.contains("the pass must not exit 0"), "{err}");
     }
 
     // ---- #3899: the pass run summary ----

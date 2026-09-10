@@ -334,7 +334,7 @@ case "$cmd" in
         filed=0
         report_only=0
         labels_ready=0
-        while IFS= read -r row; do
+        while IFS= read -r row <&3; do
             [ -n "$row" ] || continue
             change_class="$(printf '%s' "$row" | jq -r '.change_class // "neutral"')"
             if [ "$change_class" = "weakening" ]; then
@@ -386,7 +386,7 @@ case "$cmd" in
             issue_url="$(gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify --label origin:self)"
             project_sync_issue "$issue_url"
             filed=$((filed + 1))
-        done < "$tmp"
+        done 3< "$tmp"
         jq -n --argjson filed "$filed" --argjson candidates "${total:-0}" \
           --argjson report_only "$report_only" \
           '{dry:($filed == 0),filed:$filed,candidates:$candidates,report_only:$report_only,reason:"filed deterministic self-improvement candidates"}'
