@@ -673,6 +673,45 @@ Tests: `crates/autospec-core/tests/service_address.rs`, including the
 regression case "relocate the gateway, start a worker, it registers" with
 nothing else restarted.
 
+## Stored-output lifecycle and blocker escalation
+
+A guard that prevents an action must name the action that releases it
+(issue #4170). "I will not destroy this" is only half a policy; the other
+half is who decides it may be destroyed, and when. A hold whose release is
+unnamed is a deadlock reporting itself as normal operation, and it stays
+armed forever — two issues sat undispatched behind such a hold while the
+blocker line repeated itself, unchanged, on every run.
+
+- A held state always names its release
+  (`release(state)` -> `Release::ConvertPatch | ArchiveSuperseded |
+  ReviewFailure`); a hold rendered with no named release is a
+  defect (`"no release path (deadlock)"`), never an ordinary hold.
+- Stored agent output has a lifecycle decided from cheap evidence
+  (`classify(OutputEvidence)`): `awaiting_conversion`, `converted`,
+  `superseded`, `failed`. The cheap test for *superseded* is the one the
+  guard already has — the patch no longer applies to the trunk
+  (`git apply --check` rejects it, `ApplyCheck::Rejected`). A check that
+  cannot run (`Unrunnable`, or never run) is **fail-closed**: it is never
+  read as "no longer applies", the output stays live.
+- Superseded output is expendable and gets archived; archiving is the
+  release action that disarms the guard. The guard itself must not be the
+  thing that decides the output is expendable.
+- A blocker that persists across runs escalates: `BlockerLedger` records
+  the first observation (the caller persists the ledger as JSON between
+  runs) and `escalation_phrase` renders its age ("blocked for 2d") once it
+  passes `DEFAULT_ESCALATION_AFTER` — so "blocked 2 days by stored output"
+  is not rendered the same as an ordinary idle cycle. A clock that rewinds
+  is zero age, never an underflow.
+- `ready` and `dispatchable` are different counts and are reported
+  separately (`FrontierCounts::line` prints "N ready (M dispatchable)",
+  plus the blocked count grouped by reason). The counts must reconcile
+  (`ready == dispatchable + blocked.len()`); a frontier whose numbers do
+  not reconcile is reporting a state that cannot exist.
+
+Checkable in `autospec_core::stored_output` (`classify`, `release`,
+`held_line`, `BlockerLedger`, `FrontierCounts`, `format_age`). Tests:
+`crates/autospec-core/tests/stored_output.rs`.
+
 ## Restore-visibility contract
 
 Restoring a file is not the same as making the restoration visible to an

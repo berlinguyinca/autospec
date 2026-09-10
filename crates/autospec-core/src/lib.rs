@@ -79,6 +79,7 @@ pub mod service_timeout;
 pub mod spec;
 pub mod staged_spec;
 pub mod state;
+pub mod stored_output;
 pub mod tractability;
 pub mod validation;
 pub mod verification;
