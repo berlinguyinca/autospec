@@ -35,6 +35,13 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+PROCESS_TREE_HELPER="$SCRIPT_DIR/lib/autospec-process-tree.sh"
+if [ ! -f "$PROCESS_TREE_HELPER" ]; then
+    echo "autospec-explore: process-tree helper missing: $PROCESS_TREE_HELPER" >&2
+    exit 3
+fi
+# shellcheck source=/dev/null
+. "$PROCESS_TREE_HELPER"
 
 project_sync_issue() {
     local helper="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR/../skills/autospec-shared/scripts}/project-sync-issue.sh"
@@ -229,27 +236,21 @@ _explore_remove_child_pid() {
 }
 
 _explore_kill_tree() {
-    local pid="$1" child
-    local pgid
+    local pid="$1" pgid
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     # Group-kill ONLY when this pid is its own process-group leader (pgid == pid),
     # i.e. setsid gave the handoff a dedicated group we own. When setsid is absent
     # (e.g. macOS) the handoff shares the CALLER's group; a `kill -TERM -$pgid`
     # there would take down autospec-explore itself, the test runner, or the
     # operator's shell. In that case fall back to killing the pid + its
-    # descendants individually (pgrep -P recursion below).
+    # descendants individually (post-order walk in the shared helper, #2751).
     if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-        kill -TERM "-$pgid" 2>/dev/null || true
+        autospec_kill_tree "$pid" separate-recursive
+    else
+        # The shared helper's public policies refuse same-group targets, which is
+        # right for group-directed kills; descend individually instead.
+        _autospec_pt_descend "$pid" 20
     fi
-    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-        _explore_kill_tree "$child"
-    done
-    kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
-    if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-        kill -KILL "-$pgid" 2>/dev/null || true
-    fi
-    kill -KILL "$pid" 2>/dev/null || true
 }
 
 _explore_cleanup_children() {
