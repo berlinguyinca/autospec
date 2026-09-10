@@ -12,6 +12,7 @@
 //! module is applied to live dispatch or written to any routing policy file.
 
 pub mod config;
+pub mod context;
 pub mod correlate;
 pub mod events;
 pub mod metrics;
