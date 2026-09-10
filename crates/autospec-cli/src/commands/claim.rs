@@ -626,6 +626,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         [command, rest @ ..] if command == "state" => run_state(rest),
         [command, rest @ ..] if command == "acquire" => acquire(rest),
         [command, rest @ ..] if command == "release" => release(rest),
+        [command, rest @ ..] if command == "branch-live" => branch_live(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec claim command: {command}"
         ))),
@@ -6943,7 +6944,8 @@ fn branch_ref_exists(branch: &str) -> bool {
     }
 }
 
-/// Whether a branch still represents a live attempt at its issue.
+/// The single definition of whether a branch represents a live attempt at
+/// its issue, with the deciding fact attached.
 ///
 /// A branch is live while a pull request keeps it in play — open or merged —
 /// or while a local worktree has it checked out. A branch with neither is an
@@ -6951,12 +6953,52 @@ fn branch_ref_exists(branch: &str) -> bool {
 /// overwrites the stale branch, so recovery proceeds instead of being blocked
 /// forever by the bare branch. Read failures surface as `Err` so callers fail
 /// closed.
-fn branch_attempt_is_live(repo: &str, branch: &str) -> Result<bool, CommandFailure> {
+///
+/// Every consumer of the answer — including shell tools that call
+/// `autospec claim branch-live` — must go through this rather than re-derive
+/// it: `gh pr list` over all states includes closed, unmerged PRs, which are
+/// exactly the abandoned case, and a consumer counting them as live parks the
+/// issue behind a branch that will never merge (#4146).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptLiveness {
+    /// A local worktree has the branch checked out; an attempt may still be
+    /// writing to it.
+    Worktree,
+    /// An open pull request uses the branch as its head.
+    OpenPr,
+    /// A merged pull request landed from the branch; the attempt is finished
+    /// but was real.
+    MergedPr,
+    /// The branch ref exists nowhere; nothing was ever attempted here.
+    NoBranch,
+    /// The branch exists but no open or merged pull request uses it: the
+    /// attempt is closed-unmerged or never opened.
+    Abandoned,
+}
+
+impl AttemptLiveness {
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Worktree | Self::OpenPr | Self::MergedPr)
+    }
+
+    /// The deciding fact, as a stable machine-readable string.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Worktree => "worktree-checked-out",
+            Self::OpenPr => "open-pr",
+            Self::MergedPr => "merged-pr",
+            Self::NoBranch => "branch-missing",
+            Self::Abandoned => "no-open-or-merged-pr",
+        }
+    }
+}
+
+fn attempt_liveness(repo: &str, branch: &str) -> Result<AttemptLiveness, CommandFailure> {
     if branch.trim().is_empty() {
-        return Ok(false);
+        return Ok(AttemptLiveness::NoBranch);
     }
     if local_branch_checked_out(&format!("refs/heads/{branch}"))? {
-        return Ok(true);
+        return Ok(AttemptLiveness::Worktree);
     }
     // A branch that does not exist cannot be a live attempt, so answer locally
     // and do not ask GitHub. Asking anyway made this predicate depend on network
@@ -6965,17 +7007,27 @@ fn branch_attempt_is_live(repo: &str, branch: &str) -> Result<bool, CommandFailu
     // abandoned generation was never requeued (#4123). It also spends a `gh` call
     // per stale record in production for branches that are provably gone.
     if !branch_ref_exists(branch) {
-        return Ok(false);
+        return Ok(AttemptLiveness::NoBranch);
     }
-    if branch_has_live_pr(repo, branch)? {
-        return Ok(true);
+    if let Some(state) = branch_live_pr_state(repo, branch)? {
+        return Ok(if state == "open" {
+            AttemptLiveness::OpenPr
+        } else {
+            AttemptLiveness::MergedPr
+        });
     }
     eprintln!("WARN: branch {branch} has no open or merged PR; treating the attempt as abandoned");
-    Ok(false)
+    Ok(AttemptLiveness::Abandoned)
 }
 
-/// Whether any open or merged pull request uses the branch as its head.
-fn branch_has_live_pr(repo: &str, branch: &str) -> Result<bool, CommandFailure> {
+/// Whether a branch still represents a live attempt at its issue.
+fn branch_attempt_is_live(repo: &str, branch: &str) -> Result<bool, CommandFailure> {
+    Ok(attempt_liveness(repo, branch)?.is_live())
+}
+
+/// Which pull-request state (open or merged) still keeps the branch in play,
+/// if any.
+fn branch_live_pr_state(repo: &str, branch: &str) -> Result<Option<&'static str>, CommandFailure> {
     for state in ["open", "merged"] {
         let output = lease::read_gh_with_retry(
             &[
@@ -6985,10 +7037,81 @@ fn branch_has_live_pr(repo: &str, branch: &str) -> Result<bool, CommandFailure> 
             &format!("list {state} pull requests for branch {branch}"),
         )?;
         if gh_json_has_entries(&output.stdout)? {
-            return Ok(true);
+            return Ok(Some(state));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// `autospec claim branch-live <BRANCH> [OWNER/REPO]` — the liveness rule,
+/// stated once in this file, exposed so a shell tool calls the binary instead
+/// of re-deriving it in a pipeline (#4146).
+///
+/// Prints one JSON object — the branch, the repo, the verdict, and the
+/// deciding reason — and exits 0 when the attempt is live, 1 when it is not,
+/// 2 on error.
+fn branch_live(args: &[String]) -> Result<(), CommandFailure> {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        print_branch_live_help();
+        return Ok(());
+    }
+    let mut branch: Option<&str> = None;
+    let mut repo: Option<&str> = None;
+    for arg in args {
+        if arg.starts_with('-') {
+            return Err(CommandFailure::diagnostic(format!(
+                "unknown autospec claim branch-live option: {arg}"
+            )));
+        }
+        if branch.is_none() {
+            branch = Some(arg);
+        } else if repo.is_none() {
+            repo = Some(arg);
+        } else {
+            return Err(CommandFailure::diagnostic(
+                "usage: autospec claim branch-live <BRANCH> [OWNER/REPO]",
+            ));
+        }
+    }
+    let branch = match branch {
+        Some(branch) => branch,
+        None => {
+            return Err(CommandFailure::diagnostic(
+                "usage: autospec claim branch-live <BRANCH> [OWNER/REPO]",
+            ))
+        }
+    };
+    let repo = match repo {
+        Some(repo) => repo.to_string(),
+        None => infer_repo()?,
+    };
+    let liveness = attempt_liveness(&repo, branch)?;
+    println!(
+        "{{\"branch\":\"{}\",\"repo\":\"{}\",\"live\":{},\"reason\":\"{}\"}}",
+        json_escape(branch),
+        json_escape(&repo),
+        liveness.is_live(),
+        liveness.reason()
+    );
+    if !liveness.is_live() {
+        return Err(CommandFailure::status(
+            format!(
+                "branch {branch} is not a live attempt: {}",
+                liveness.reason()
+            ),
+            1,
+        ));
+    }
+    Ok(())
+}
+
+fn print_branch_live_help() {
+    println!(
+        "autospec claim branch-live\n\nUSAGE:\n    autospec claim branch-live <BRANCH> [OWNER/REPO]\n\nReports whether a branch represents a live attempt at its issue, using the\nsame rule as claim acquisition: a live attempt is a branch with an open or\nmerged pull request, or a branch checked out in a local worktree. A branch\nwhose only pull request is closed and unmerged is abandoned, not live.\n\nPrints one JSON object with the verdict and the deciding reason\n(open-pr, merged-pr, worktree-checked-out, branch-missing,\nno-open-or-merged-pr). Exit 0 when the attempt is live, 1 when it is not,\n2 on error. Without OWNER/REPO the repository is inferred from the\nsurrounding checkout."
+    );
 }
 
 /// Whether `gh pr list --json` output is a non-empty array.
@@ -7255,7 +7378,7 @@ fn json_escape(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n    autospec claim branch-live <BRANCH> [OWNER/REPO]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease\n    branch-live    Report whether a branch is a live attempt, with the deciding reason"
     );
 }
 
@@ -7282,3 +7405,64 @@ use lease::{
 };
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod branch_live_tests {
+    use super::super::CommandFailureKind;
+    use super::*;
+
+    #[test]
+    fn liveness_reasons_separate_live_and_abandoned_facts() {
+        assert!(AttemptLiveness::Worktree.is_live());
+        assert!(AttemptLiveness::OpenPr.is_live());
+        assert!(AttemptLiveness::MergedPr.is_live());
+        assert!(!AttemptLiveness::NoBranch.is_live());
+        assert!(!AttemptLiveness::Abandoned.is_live());
+
+        assert_eq!(AttemptLiveness::OpenPr.reason(), "open-pr");
+        assert_eq!(AttemptLiveness::MergedPr.reason(), "merged-pr");
+        assert_eq!(AttemptLiveness::Worktree.reason(), "worktree-checked-out");
+        assert_eq!(AttemptLiveness::NoBranch.reason(), "branch-missing");
+        assert_eq!(AttemptLiveness::Abandoned.reason(), "no-open-or-merged-pr");
+    }
+
+    #[test]
+    fn an_empty_branch_is_abandoned_without_any_lookup() {
+        let liveness = attempt_liveness("example/repo", "   ")
+            .expect("no git or gh call is made for an empty branch");
+        assert_eq!(liveness, AttemptLiveness::NoBranch);
+        assert!(!liveness.is_live());
+    }
+
+    #[test]
+    fn branch_live_requires_a_branch_positional() {
+        let failure = branch_live(&[]).expect_err("no branch given");
+        assert_eq!(failure.kind, CommandFailureKind::Diagnostic);
+        assert!(failure
+            .message
+            .contains("usage: autospec claim branch-live"));
+    }
+
+    #[test]
+    fn branch_live_rejects_flags() {
+        let failure = branch_live(&["--branch".to_string(), "feat/issue-1".to_string()])
+            .expect_err("flags are rejected");
+        assert!(failure
+            .message
+            .contains("unknown autospec claim branch-live option"));
+    }
+
+    #[test]
+    fn branch_live_rejects_extra_positionals() {
+        let failure = branch_live(&["a".into(), "b".into(), "c".into()])
+            .expect_err("at most a branch and a repo");
+        assert!(failure
+            .message
+            .contains("usage: autospec claim branch-live"));
+    }
+
+    #[test]
+    fn branch_live_help_never_fails() {
+        branch_live(&["--help".to_string()]).expect("help never fails");
+    }
+}
