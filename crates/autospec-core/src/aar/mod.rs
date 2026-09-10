@@ -24,6 +24,7 @@ pub mod context;
 pub mod dashboard;
 pub mod dispatch_fit;
 pub mod escalation;
+pub mod execution_profile;
 pub mod guards;
 pub mod inferweave;
 pub mod knowledge;
@@ -59,6 +60,10 @@ pub use dispatch_fit::{
 pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,
     QuotaState,
+};
+pub use execution_profile::{
+    default_registry, family_slug, ExecutionBudgets, ExecutionProfile, ExecutionProfileRegistry,
+    REGISTRY_VERSION, TIERS,
 };
 pub use guards::{
     evaluate_stop, EditAction, EditGuard, EditGuardViolation, EditPolicy, ExecutionProgress,
