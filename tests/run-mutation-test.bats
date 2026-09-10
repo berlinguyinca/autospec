@@ -170,3 +170,27 @@ teardown() {
     # Check default in script source
     grep -q "MUTATION_KILL_FLOOR.*80\|80.*MUTATION_KILL_FLOOR" "$ORCHESTRATOR"
 }
+
+# ─────────────────────────────────────────────────────────────────
+# Adapter hard failure (issue #3677): a validation step that could
+# not run must fail the gate loudly, never look like "0 mutants".
+# ─────────────────────────────────────────────────────────────────
+@test "adapter hard failure (exit 2) fails the gate loudly" {
+    local branch_base
+    branch_base=$(cd "$FAKE_REPO" && git rev-parse HEAD)
+
+    cd "$FAKE_REPO"
+    printf '#!/usr/bin/env bash\necho hard-fail\n' > hard-fail.sh
+    git add hard-fail.sh && git commit -q -m "add hard-fail sh"
+
+    _write_stub "bash-mutate-hard-fail" 'printf "MUTATION_NOT_APPLIED: edit did not land\\n" >&2; exit 2'
+
+    run bash "$ORCHESTRATOR" --base "$branch_base" \
+        --repo-root "$FAKE_REPO" \
+        --bash-adapter "$STUB_BIN/bash-mutate-hard-fail" \
+        --issue-labels "area:hardening"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUTATION_NOT_APPLIED"* ]]
+    [[ "$output" == *"ADAPTER FAILURE"* ]]
+    [[ "$output" == *"GATE FAILED"* ]]
+}
