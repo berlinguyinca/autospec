@@ -6,7 +6,7 @@ A spec is the durable design artifact AutoSpec writes before implementation. It 
 
 ## Spec Metadata
 
-V62+ specs are parsed into a small metadata contract before any dependency ordering or execution queue logic runs. The initial Rust parser reads generated Markdown specs, extracts the title, `## Version`, `## Objective`, `## Dependencies`, `## Acceptance Criteria`, and `## Validation Commands`, and serializes that shape according to `schemas/autospec-spec-metadata.schema.json`.
+V62+ specs are parsed into a small metadata contract before any dependency ordering or execution queue logic runs. The initial Rust parser reads generated Markdown specs, extracts the title, `## Version`, `## Objective`, `## Dependencies`, `## Files To Create/Modify`, `## Acceptance Criteria`, and `## Validation Commands`, and serializes that shape according to `schemas/autospec-spec-metadata.schema.json`. It also extracts the optional `## Blocking Gates` and `## Run Budget` sections (named blocking gates and the derived run budget); when a spec omits either section the corresponding field serializes as empty, so specs that predate those sections still parse.
 
 The parser is intentionally strict for dependency IDs: dependencies must use generated spec IDs like `v62-rust-core-workspace`. Broader Markdown compatibility is deferred until the generated package path is stable.
 

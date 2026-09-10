@@ -49,6 +49,21 @@
     },
     "validation_command": {
       "type": "string"
+    },
+    "blocking_gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_to_touch": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "run_budget": {
+      "type": "string"
     }
   },
   "additionalProperties": false
