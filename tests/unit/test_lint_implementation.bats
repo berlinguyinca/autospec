@@ -646,7 +646,7 @@ EOF
     echo "$output" | grep -q "Fix TODO_LEFT"
 }
 
-# ── --vacuous-assertions: POSITIVE fixtures (8 detections) ───────────────────
+# ── --vacuous-assertions: POSITIVE fixtures (9 detections) ───────────────────
 
 # _vac_diff FPATH LINE1 [LINE2 ...] — write a minimal added-lines diff to a temp file,
 # print the temp file path. Caller must rm the file.
@@ -845,6 +845,68 @@ _vac_diff() {
     run bash "$LINT" --diff-file "$FIX/good.diff" --vacuous-assertions
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -qE "^VACUOUS_"
+}
+
+@test "vacuous: VACUOUS_EMPTY_LOOP detected for unguarded loop over externally parsed collection" {
+    _vac_diff 'tests/unit/test_loop.rs' \
+        'let raw: String = std::fs::read_to_string("data/cases.json").unwrap();' \
+        'let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();' \
+        'for case in &cases {' \
+        '    assert_eq!(case.id, 1);' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_EMPTY_LOOP"
+    echo "$output" | grep -q "no non-empty guard"
+}
+
+@test "vacuous: no VACUOUS_EMPTY_LOOP when a non-emptiness guard is present" {
+    _vac_diff 'tests/unit/test_loop.rs' \
+        'let raw: String = std::fs::read_to_string("data/cases.json").unwrap();' \
+        'let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();' \
+        'assert!(!cases.is_empty(), "fixture missing");' \
+        'for case in &cases {' \
+        '    assert_eq!(case.id, 1);' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_EMPTY_LOOP"
+}
+
+@test "vacuous: no VACUOUS_EMPTY_LOOP for locally constructed collection" {
+    _vac_diff 'tests/unit/test_loop.rs' \
+        'let items: Vec<i32> = vec![1, 2, 3];' \
+        'for item in &items {' \
+        '    assert!(item > 0);' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_EMPTY_LOOP"
+}
+
+@test "vacuous: no VACUOUS_EMPTY_LOOP in non-Rust test files" {
+    _vac_diff 'tests/unit/test_loop.py' \
+        'let raw: String = std::fs::read_to_string("data/cases.json").unwrap();' \
+        'let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();' \
+        'for case in &cases {' \
+        '    assert_eq!(case.id, 1);' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_EMPTY_LOOP"
+}
+
+@test "vacuous: no VACUOUS_EMPTY_LOOP in non-test Rust files" {
+    _vac_diff 'src/lib.rs' \
+        'let raw: String = std::fs::read_to_string("data/cases.json").unwrap();' \
+        'let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();' \
+        'for case in &cases {' \
+        '    assert_eq!(case.id, 1);' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_EMPTY_LOOP"
 }
 
 # ── --pre-commit bundles --vacuous-assertions ─────────────────────────────────

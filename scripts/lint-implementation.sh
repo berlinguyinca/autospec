@@ -42,7 +42,7 @@ Flags:
                     \"Fix <RULE_ID>: <imperative action>\"
                     Suitable for injecting into implementer retry prompts.
   --vacuous-assertions  Run vacuous-assertion detector (bundled in --pre-commit).
-                    Detects 8 patterns where tests always pass regardless of behavior.
+                    Detects 9 patterns where tests always pass regardless of behavior.
 
 RULE_IDs enforced (deterministic detectors):
 
@@ -82,6 +82,9 @@ RULE_IDs enforced (deterministic detectors):
   VACUOUS_AC_STUB               @test ... { skip \"auto-stub\" } in tests/ac/ — auto-generated stub.
   VACUOUS_EMPTY_TEST            Empty test body: it(\"...\", () => {}) or @test with only braces.
   VACUOUS_NO_ASSERT             Loop or function test body with no assert/expect call (WARN).
+  VACUOUS_EMPTY_LOOP            for-loop over an externally-parsed collection with assertions
+                    but no non-empty guard (Rust test files) — an empty input makes the test
+                    pass vacuously.
 
   REINVENT_REPO_UTIL  Net-new function whose name duplicates an existing helper found by rg
                     across scripts/. Opt-out: # linter:allow-REINVENT_REPO_UTIL <reason>.
@@ -1433,7 +1436,7 @@ detect_catalog_entry_completeness() {
 }
 
 # ── §3.1 VACUOUS_* detectors ─────────────────────────────────────────────────
-# Detects 8 vacuous-test patterns where assertions always pass regardless of behavior.
+# Detects 9 vacuous-test patterns where assertions always pass regardless of behavior.
 # Active when --vacuous-assertions or --pre-commit flag is set.
 
 # _vacuous_grep_or_true FILE LINENO CONTENT — check GREP_INVERSE and OR_TRUE patterns
@@ -1542,6 +1545,147 @@ EOF
     fi
 }
 
+# _vacuous_empty_loop FILE — flag `for` loops over externally-parsed collections
+# whose body asserts without a non-empty guard (Rust test files only). An empty
+# parsed input makes such a test pass vacuously. Emits VACUOUS_EMPTY_LOOP.
+_vacuous_empty_loop() {
+    local diff_file="$1"
+    local lineno head
+    while IFS=: read -r lineno head; do
+        [ -n "$head" ] || continue
+        emit_capped "VACUOUS_EMPTY_LOOP" "$diff_file" "$lineno" \
+            "loop over externally-parsed \`$head\` has assertions but no non-empty guard — an empty input makes the test pass vacuously"
+    done <<EOF
+$(get_added_lines_with_lineno "$diff_file" | awk '
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function is_ident(s) { return (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/) }
+function contains_word(s, w,    off, i, before, after) {
+    off = 1
+    while ((i = index(substr(s, off), w)) > 0) {
+        i = off + i - 1
+        before = (i > 1) ? substr(s, i - 1, 1) : ""
+        after = substr(s, i + length(w), 1)
+        if ((before == "" || before !~ /[A-Za-z0-9_]/) && (after == "" || after !~ /[A-Za-z0-9_]/)) return 1
+        off = i + length(w)
+    }
+    return 0
+}
+function has_word_start(s, w,    off, i, before) {
+    off = 1
+    while ((i = index(substr(s, off), w)) > 0) {
+        i = off + i - 1
+        before = (i > 1) ? substr(s, i - 1, 1) : ""
+        if (before == "" || before !~ /[A-Za-z0-9_]/) return 1
+        off = i + length(w)
+    }
+    return 0
+}
+function first_ident(expr,    e, name) {
+    e = expr
+    sub(/^[ \t]+/, "", e)
+    if (e ~ /^&mut/) e = substr(e, 5)
+    if (e ~ /^&/) e = substr(e, 2)
+    sub(/^[ \t]+/, "", e)
+    if (match(e, /^[A-Za-z0-9_]+/)) {
+        name = substr(e, 1, RLENGTH)
+        if (is_ident(name)) return name
+    }
+    return ""
+}
+{
+    pos = index($0, ":")
+    if (pos == 0) next
+    lineno = substr($0, 1, pos - 1)
+    t = trim(substr($0, pos + 1))
+    if (t == "" || t ~ /^\//) next
+
+    # let <name>: <type> = <rhs>; — track bindings derived from external data
+    if (t ~ /^let[ \t]/) {
+        rest = substr(t, 4)
+        eq = index(rest, "=")
+        if (eq > 0) {
+            lhs = trim(substr(rest, 1, eq - 1))
+            cpos = index(lhs, ":")
+            if (cpos > 0) lhs = trim(substr(lhs, 1, cpos - 1))
+            if (is_ident(lhs)) {
+                rhs = trim(substr(rest, eq + 1))
+                sub(/;+$/, "", rhs)
+                rhs = trim(rhs)
+                if (rhs != "") {
+                    is_ext = (rhs ~ /from_str|from_slice|from_reader|from_bytes|read_to_string|read_to_end|read_line|parse_json|parse::</)
+                    if (!is_ext) {
+                        for (k in external) if (contains_word(rhs, k)) { is_ext = 1; break }
+                    }
+                    if (is_ext) external[lhs] = 1
+                }
+            }
+        }
+    }
+
+    # guard: !<x>.is_empty() / <x>.len() > 0 / <x>.len() >= 1 on an assert/panic line
+    is_assert = has_word_start(t, "assert") || has_word_start(t, "panic")
+    if (is_assert) {
+        for (k in external) {
+            if (index(t, "!" k ".is_empty()") > 0 || index(t, k ".len() > 0") > 0 || index(t, k ".len() >= 1") > 0)
+                guarded[k] = 1
+        }
+    }
+    asserts_here = is_assert || index(t, ".expect(") > 0
+
+    # for <pat> in <expr> { — push a loop frame
+    head = ""
+    is_loop = 0
+    if (t ~ /^for[ \t]/) {
+        rest = trim(substr(t, 4))
+        off = 1
+        in_pos = 0
+        while ((i = index(substr(rest, off), "in")) > 0) {
+            i = off + i - 1
+            before = (i > 1) ? substr(rest, i - 1, 1) : ""
+            after = substr(rest, i + 2, 1)
+            if ((before == "" || before !~ /[A-Za-z0-9_]/) && (after == "" || after !~ /[A-Za-z0-9_]/)) { in_pos = i; break }
+            off = i + 2
+        }
+        if (in_pos > 0) {
+            expr = trim(substr(rest, in_pos + 2))
+            if (expr ~ /\{$/) {
+                expr = trim(substr(expr, 1, length(expr) - 1))
+                if (expr != "") { is_loop = 1; head = first_ident(expr) }
+            }
+        }
+    }
+    if (is_loop) {
+        n++
+        f_depth[n] = depth + 1
+        f_head[n] = head
+        f_assert[n] = asserts_here
+        f_line[n] = lineno
+    } else if (n > 0 && depth >= f_depth[n] && asserts_here) {
+        f_assert[n] = 1
+    }
+
+    tmp = t
+    depth += gsub(/{/, "", tmp)
+    tmp = t
+    depth -= gsub(/}/, "", tmp)
+
+    while (n > 0 && depth < f_depth[n]) {
+        if (f_assert[n] && f_head[n] != "" && (f_head[n] in external) && !(f_head[n] in guarded))
+            print f_line[n] ":" f_head[n]
+        n--
+    }
+}
+END {
+    while (n > 0) {
+        if (f_assert[n] && f_head[n] != "" && (f_head[n] in external) && !(f_head[n] in guarded))
+            print f_line[n] ":" f_head[n]
+        n--
+    }
+}
+')
+EOF
+}
+
 detect_vacuous_assertions() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
@@ -1553,6 +1697,10 @@ detect_vacuous_assertions() {
         # VACUOUS_NO_ASSERT only for test files
         if is_test_file "$diff_file"; then
             _vacuous_scan_no_assert "$diff_file"
+        fi
+        # VACUOUS_EMPTY_LOOP only for Rust test files
+        if is_test_file "$diff_file" && [[ "$diff_file" == *.rs ]]; then
+            _vacuous_empty_loop "$diff_file"
         fi
     done <<EOF
 $(get_diff_files)
@@ -1878,6 +2026,7 @@ rule_directive() {
         VACUOUS_AC_STUB) printf 'Replace the auto-stub skip with a real assertion that exercises the acceptance criterion.' ;;
         VACUOUS_EMPTY_TEST) printf 'Add at least one assertion to the empty test body.' ;;
         VACUOUS_NO_ASSERT) printf 'Add an assert/expect/run+grep call to the test so it can actually fail.' ;;
+        VACUOUS_EMPTY_LOOP) printf 'Guard the loop with `assert!(!<x>.is_empty(), "...")` or provide a non-empty fixture before re-pushing — an empty parsed collection makes the test pass vacuously.' ;;
         ASSERTION_DENSITY) printf 'Add at least one assert/expect/run/grep call to each test block — zero-assertion tests cannot catch regressions.' ;;
         REINVENT_REPO_UTIL) printf 'Reuse the existing helper found in scripts/ instead of re-implementing the same function.' ;;
         NEW_DEP_UNJUSTIFIED) printf "Add a '# why: <reason>' comment in the same diff hunk justifying this new dependency." ;;

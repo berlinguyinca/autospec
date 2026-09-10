@@ -748,6 +748,7 @@ fn guardian_skip_reason(line: &str) -> Option<&str> {
         "VACUOUS_AC_STUB",
         "VACUOUS_EMPTY_TEST",
         "VACUOUS_NO_ASSERT",
+        "VACUOUS_EMPTY_LOOP",
         "ASSERTION_DENSITY",
         "REINVENT_REPO_UTIL",
         "NEW_DEP_UNJUSTIFIED",

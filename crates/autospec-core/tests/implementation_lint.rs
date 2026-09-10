@@ -206,7 +206,7 @@ fn implementation_lint_uses_injected_post_change_snapshots_for_file_complexity()
 #[test]
 fn implementation_lint_reports_every_vacuous_test_rule() {
     let diff = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         new_file(
             "tests/unit/test_grep.bats",
             &["grep -qv 'bad' result.txt || true"],
@@ -224,6 +224,15 @@ fn implementation_lint_reports_every_vacuous_test_rule() {
         new_file(
             "tests/unit/test_no_assert.bats",
             &["@test \"no assert\" {", "  echo no-op", "}"],
+        ),
+        new_file(
+            "tests/unit/test_empty_loop.rs",
+            &[
+                "let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();",
+                "for case in &cases {",
+                "    assert_eq!(case.id, 1);",
+                "}",
+            ],
         ),
     );
     let result = lint(
@@ -246,6 +255,7 @@ fn implementation_lint_reports_every_vacuous_test_rule() {
             "VACUOUS_AC_STUB",
             "VACUOUS_EMPTY_TEST",
             "VACUOUS_NO_ASSERT",
+            "VACUOUS_EMPTY_LOOP",
         ]
     );
 }
