@@ -8,6 +8,31 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
+## Conductor generation-log retention
+
+Each detached conductor generation appends its own scoped log
+(`autospec-autonomous-conductor-<nanos>-<pid>-<seq>.log`) under the
+repository-scope log directory, so relaunches and supervisor restarts
+accumulate logs over time. `autospec autonomous cleanup` bounds that growth:
+
+- At most 10 stopped conductor generation logs are retained per repository
+  scope. The oldest surplus is pruned first, ordered deterministically by
+  numeric generation timestamp and then path.
+- The log referenced by `conductor.logpath` for a live conductor PID is never
+  deleted. Once that conductor stops and its stale metadata is removed, its
+  generation log becomes subject to the 10-log cap like any other.
+- Companion logs (`autospec-autonomous-conductor.log`,
+  `autospec-autonomous-monitor.log`, and operator `--log` overrides) do not
+  match the generation grammar and are never pruned.
+- `autospec autonomous cleanup --dry-run` performs no mutations: it reports
+  0 removed and 0 pruned and enumerates every generation log that a real
+  run would select for deletion. The JSON report carries
+  `generation_logs_pruned` and `generation_logs_selected`.
+
+Cleanup remains scoped to the requested repository: it removes only stale
+conductor/monitor/supervisor metadata and generation logs for that scope and
+never signals a live unit.
+
 ## Integration base synchronization
 
 A fresh foreground selection synchronizes the configured integration base before
