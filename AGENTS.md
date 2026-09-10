@@ -573,6 +573,43 @@ issue→issue dependencies (issue #3908):
   `autospec:needs-human` label to it. Any successful completion clears the
   streak.
 
+## Service-address resolution and pool health
+
+A service address is a fact with an expiry: it is decided by whatever placed
+the service and changes there, not in the argument list of a process that
+started earlier. Resolve it from the authoritative record **at use time**
+(the record a gateway writes for itself, e.g. `state/gateway-url`), never from
+a value captured at launch. Checkable in `autospec_core::service_address`:
+
+- `AddressResolver::resolve` reads the record. A launch argument is a fallback
+  used only when the record is unreadable, and the resolution reports
+  `AddressOrigin::LaunchArgument` so the stale capture is visible in the output.
+  Empty and malformed records are errors, never an empty address.
+- A cache in a long-lived process is invalidated on **any** failure
+  (`AddressResolver::record_failure`, called by `register`), so the next use
+  re-reads and follows a relocated service without a restart. `000` /
+  connection-refused means the address may be stale
+  (`RegistrationOutcome::address_may_be_stale`); a `401` proves reachability
+  and indicts auth instead.
+- A component that serves but cannot join the pool it was created for is
+  **degraded, not healthy** (`component_health` ->
+  `ComponentHealth::DegradedNotInPool`). "Serving anyway" is the fold that hid
+  a fleet-wide registration failure for a day: agents dispatched directly, GPUs
+  stayed busy, tests passed, and only the gateway's inventory was wrong.
+- A health check asserts that the **service responded**
+  (`service_health(HealthEvidence::SchedulerJobState{..})` ->
+  `AssertedWrongThing`, never `Up`). Container or job liveness is not service
+  health, and reachability of an address some third party recorded is not
+  either.
+- A reconciler over a pool reports the pool **size** on the same line as its
+  verdict (`PoolMonitor::reconcile_line`) and flags `decline_window` consecutive
+  declines as `PoolTrend::Draining` — slow drain must be visible before it
+  reaches zero, not after.
+
+Tests: `crates/autospec-core/tests/service_address.rs`, including the
+regression case "relocate the gateway, start a worker, it registers" with
+nothing else restarted.
+
 ## Restore-visibility contract
 
 Restoring a file is not the same as making the restoration visible to an

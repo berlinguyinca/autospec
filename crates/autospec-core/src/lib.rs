@@ -70,6 +70,7 @@ pub mod runtime_policy;
 pub mod safe_publish;
 pub mod safety;
 pub mod semantic_integration;
+pub mod service_address;
 pub mod service_timeout;
 pub mod spec;
 pub mod staged_spec;
