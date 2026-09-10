@@ -1,37 +1,64 @@
 use super::*;
 
-pub(super) fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
-    let selected =
-        usize::from(options.follow) + usize::from(options.detach) + usize::from(options.foreground);
-    if selected > 1 {
-        return Err("--follow, --detach, and --foreground are mutually exclusive".to_string());
-    }
-    if (options.follow || options.detach || options.foreground) && options.subcommand != "start" {
-        return Err(format!(
-            "launch modes are valid only with autospec autonomous start, not {}",
-            options.subcommand
-        ));
-    }
-    if options.follow && options.force {
-        return Err(
+type LaunchModeRule = (fn(&Options) -> bool, fn(&Options) -> String);
+
+const LAUNCH_MODE_RULES: &[LaunchModeRule] = &[
+    (
+        |options| {
+            usize::from(options.follow)
+                + usize::from(options.detach)
+                + usize::from(options.foreground)
+                > 1
+        },
+        |_| "--follow, --detach, and --foreground are mutually exclusive".to_string(),
+    ),
+    (
+        |options| {
+            (options.follow || options.detach || options.foreground)
+                && options.subcommand != "start"
+        },
+        |options| {
+            format!(
+                "launch modes are valid only with autospec autonomous start, not {}",
+                options.subcommand
+            )
+        },
+    ),
+    (
+        |options| options.follow && options.force,
+        |_| {
             "--force cannot be combined with --follow; use autospec autonomous restart --force"
-                .to_string(),
-        );
-    }
-    if options.follow && options.json {
-        return Err(
+                .to_string()
+        },
+    ),
+    (
+        |options| options.follow && options.json,
+        |_| {
             "--json is not supported with --follow; use autospec autonomous status --json"
-                .to_string(),
-        );
-    }
-    if options.subcommand == "resume" && options.epic.is_none() {
-        return Err("autospec autonomous resume requires --epic N".to_string());
-    }
-    if options.subcommand == "resume" && options.force {
-        return Err("--force is not valid with resume".to_string());
-    }
-    if options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume") {
-        return Err("--epic is valid only with autospec autonomous start or resume".to_string());
+                .to_string()
+        },
+    ),
+    (
+        |options| options.subcommand == "resume" && options.epic.is_none(),
+        |_| "autospec autonomous resume requires --epic N".to_string(),
+    ),
+    (
+        |options| options.subcommand == "resume" && options.force,
+        |_| "--force is not valid with resume".to_string(),
+    ),
+    (
+        |options| {
+            options.epic.is_some() && !matches!(options.subcommand.as_str(), "start" | "resume")
+        },
+        |_| "--epic is valid only with autospec autonomous start or resume".to_string(),
+    ),
+];
+
+pub(super) fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
+    for &(predicate, message) in LAUNCH_MODE_RULES {
+        if predicate(options) {
+            return Err(message(options));
+        }
     }
     Ok(if options.follow {
         LaunchMode::Follow
