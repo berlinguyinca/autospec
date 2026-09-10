@@ -1,4 +1,4 @@
-// executor_bridge tests: json / identity — 13 cases.
+// executor_bridge tests: json / identity — 14 cases.
 //
 // Split out of tests.rs; see the note in that file.
 
@@ -285,6 +285,33 @@ fn autonomous_executor_bridge_prompt_binds_local_only_authority() {
         assert!(
             prompt.contains(required),
             "prompt omitted required binding: {required}"
+        );
+    }
+}
+
+#[test]
+fn autonomous_executor_bridge_prompt_states_commit_blocking_rules_up_front() {
+    // #3603: the pre-commit gate's blocking rules must be visible to the worker
+    // while it still has the context to fix them, not discovered at commit time.
+    let invocation = persisted_invocation();
+    let closeout = Path::new("/safe/worktree/.autospec/closeout.json");
+    let prompt = build_implementer_prompt(
+        &invocation.identity,
+        "Executor bridge stalls",
+        "Implement the exact acceptance criteria.",
+        closeout,
+    )
+    .expect("build bounded prompt");
+
+    assert!(
+        prompt.contains("Commit-blocking lint rules"),
+        "prompt omitted the commit-blocking rules section"
+    );
+    for rule in autospec_core::lint::commit_blocking_rules() {
+        assert!(
+            prompt.contains(rule.rule_id),
+            "prompt omitted blocking rule {}",
+            rule.rule_id
         );
     }
 }

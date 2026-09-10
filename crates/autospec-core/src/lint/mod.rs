@@ -10,10 +10,10 @@ mod text;
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use evidence::{lint_failure_evidence, trap_removal_targets, EvidenceFinding, EvidenceRule};
 pub use implementation::{
-    declared_implementation_scope, directive_for, lint_implementation,
-    lint_issue_implementation_contract, ImplementationLintContext, ImplementationLintFinding,
-    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
-    ImplementationLintSeverity, RepositoryIndex,
+    commit_blocking_rules, declared_implementation_scope, directive_for, lint_implementation,
+    lint_issue_implementation_contract, CommitBlockingRule, ImplementationLintContext,
+    ImplementationLintFinding, ImplementationLintOptions, ImplementationLintResult,
+    ImplementationLintRule, ImplementationLintSeverity, RepositoryIndex,
 };
 pub use pr_size::{
     evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,

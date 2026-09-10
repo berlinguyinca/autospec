@@ -355,6 +355,95 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
     }
 }
 
+/// One commit-blocking lint rule expressed as an acceptance criterion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitBlockingRule {
+    /// Stable rule id (matches [`ImplementationLintRule::id`]).
+    pub rule_id: &'static str,
+    /// The acceptance criterion text, sourced from the rule's corrective
+    /// directive so a spec or executor prompt can state the rule up front
+    /// rather than discovering it at commit time.
+    pub acceptance: &'static str,
+}
+
+/// The core deterministic commit-blocking rules an implementation must satisfy,
+/// expressed as acceptance criteria a spec or executor prompt can state up front
+/// so the pre-commit gate is not a surprise at commit time (#3603).
+///
+/// The set is the commit contract that runs in every [`lint_implementation`]
+/// pass and blocks by default. `COMPLEXITY` is excluded because it is advisory
+/// by default, and the
+/// vacuous-assertion and reuse lenses are excluded because they are opt-in test
+/// quality and code reuse gates, not the baseline commit contract.
+///
+/// The acceptance text is sourced from [`directive_for`], the single source of
+/// truth for the corrective directive, so the stated criteria cannot drift from
+/// the enforced gate. If a new core blocking rule is added, extend this list and
+/// the pinned test below.
+pub fn commit_blocking_rules() -> Vec<CommitBlockingRule> {
+    const RULES: &[ImplementationLintRule] = &[
+        ImplementationLintRule::PrSize,
+        ImplementationLintRule::OutOfScope,
+        ImplementationLintRule::MissingTest,
+        ImplementationLintRule::Security,
+        ImplementationLintRule::TodoLeft,
+        ImplementationLintRule::MockDb,
+        ImplementationLintRule::DocOutOfSync,
+    ];
+    RULES
+        .iter()
+        .map(|rule| CommitBlockingRule {
+            rule_id: rule.id(),
+            acceptance: directive_for(*rule),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod commit_blocking_rule_tests {
+    use super::*;
+
+    #[test]
+    fn commit_blocking_rules_pin_the_core_commit_contract() {
+        let rules = commit_blocking_rules();
+        let ids: Vec<&str> = rules.iter().map(|rule| rule.rule_id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "PR_SIZE",
+                "OUT_OF_SCOPE",
+                "MISSING_TEST",
+                "SECURITY",
+                "TODO_LEFT",
+                "MOCK_DB",
+                "DOC_OUT_OF_SYNC",
+            ]
+        );
+    }
+
+    #[test]
+    fn doc_out_of_sync_is_a_commit_blocking_rule() {
+        // #3603: the rule three agent runs tripped on must be stateable up front.
+        assert!(commit_blocking_rules()
+            .iter()
+            .any(|rule| rule.rule_id == ImplementationLintRule::DocOutOfSync.id()));
+    }
+
+    #[test]
+    fn acceptance_text_matches_the_rule_directive() {
+        for rule in commit_blocking_rules() {
+            let lint_rule = ImplementationLintRule::from_id(rule.rule_id).expect("known rule id");
+            assert_eq!(
+                rule.acceptance,
+                directive_for(lint_rule),
+                "acceptance text must stay in lock-step with the directive for {}",
+                rule.rule_id
+            );
+            assert!(!rule.acceptance.trim().is_empty(), "empty acceptance text");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PrSizeException {
     GeneratedMigration(String),
