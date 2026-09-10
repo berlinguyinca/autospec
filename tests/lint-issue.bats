@@ -42,3 +42,120 @@ FIXTURES="$REPO_ROOT/tests/fixtures/lint-issue"
   done
   [ "$flagged" -eq 2 ]
 }
+
+# ── AS-DAG warning-level checks (issue #3831, rollout stage 1) ──
+# Warnings are reported but never affect the exit code.
+
+write_dag_body() {
+  # $1 = target file, $2 = dependencies-section body, $3 = optional extra sections
+  cat > "$1" <<EOF
+## Goal
+Add a \`scripts/validate-dag.sh\` that exits 0 on a clean dependency graph.
+
+## Files to read first
+- crates/autospec-core/src/lint/dag.rs
+
+## Implementation outline
+1. Add the validator under \`scripts/\`.
+
+## Tests required
+- shell
+
+## Verification
+### Primary smoke test
+
+\`\`\`bash
+bash scripts/validate-dag.sh
+\`\`\`
+
+## Acceptance criteria
+- [ ] \`scripts/validate-dag.sh\` exits 0 on the fixture in tests/fixtures/dag/
+
+## Dependencies
+$2
+$3
+EOF
+}
+
+DAG_REASON_META='## Machine metadata
+
+```
+autospec:
+  dependencies:
+    hard:
+      - issue: 42
+        reason_code: consumes-new-interface
+```
+'
+
+DAG_ARTIFACT_META='## Machine metadata
+
+```
+autospec:
+  dependencies:
+    hard:
+      - issue: 42
+        artifact: crates/autospec-core/src/lint/dag.rs
+```
+'
+
+DAG_MISMATCH_META='## Machine metadata
+
+```
+autospec:
+  dependencies:
+    hard:
+      - issue: 123
+        reason_code: consumes-new-interface
+```
+'
+
+@test "a reason-code-free dependency emits AS-DAG-001 as a warning (exit 0)" {
+  body="$(mktemp)"
+  write_dag_body "$body" 'Depends on issue #42' ''
+  run bash "$LINTER" "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING:AS-DAG-001"* ]]
+  [[ "$output" == *"no reason code and no artifact named"* ]]
+  rm -f "$body"
+}
+
+@test "a recognized reason_code in the metadata block suppresses AS-DAG-001" {
+  body="$(mktemp)"
+  write_dag_body "$body" 'Depends on issue #42' "$DAG_REASON_META"
+  run bash "$LINTER" "$body"
+  [ "$status" -eq 0 ]
+  [[ -z "$output" ]]
+  rm -f "$body"
+}
+
+@test "an artifact in the metadata block suppresses AS-DAG-001" {
+  body="$(mktemp)"
+  write_dag_body "$body" 'Depends on issue #42' "$DAG_ARTIFACT_META"
+  run bash "$LINTER" "$body"
+  [ "$status" -eq 0 ]
+  [[ -z "$output" ]]
+  rm -f "$body"
+}
+
+@test "metadata/markdown disagreement emits AS-DAG-009 as a warning (exit 0)" {
+  body="$(mktemp)"
+  write_dag_body "$body" 'Depends on issue #42' "$DAG_MISMATCH_META"
+  run bash "$LINTER" "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AS-DAG-009"* ]]
+  [[ "$output" == *"declares {123}"* ]]
+  [[ "$output" == *"declares {42}"* ]]
+  rm -f "$body"
+}
+
+@test "AS-DAG warnings carry severity in --json output" {
+  body="$(mktemp)"
+  write_dag_body "$body" 'Depends on issue #42' "$DAG_MISMATCH_META"
+  run bash "$LINTER" --json "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"rule":"AS-DAG-001"'* ]]
+  [[ "$output" == *'"rule":"AS-DAG-009"'* ]]
+  [[ "$output" == *'"severity":"warning"'* ]]
+  rm -f "$body"
+}

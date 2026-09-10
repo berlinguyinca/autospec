@@ -15,6 +15,11 @@
 #                | MISSING_SECTION_TESTS | DEPS_MALFORMED
 #                | FILES_TOUCHED_MALFORMED | TOO_MANY_FILES
 #                | BODY_TOO_LONG | OUTLINE_TOO_LONG
+#                | AS-DAG-001 (warning) | AS-DAG-009 (warning)
+#
+# The AS-DAG-* rules are warning-level (rollout stage 1, spec §14/§15): they are
+# reported with a 'WARNING:' prefix (text mode) or a "severity":"warning" field
+# (JSON mode) but never affect the exit code.
 #
 # Implementer-load-bearing section + sizing rules (autospec trackers #420/#421):
 # the per-issue implementer reads "Files to read first", "Implementation outline",
@@ -62,8 +67,17 @@ Rules enforced (§3 quality contract):
     one of the five required sections present) is missing one or more of:
     Design reference, Interaction states, UX flows, Motion & feedback,
     Device & viewport.
+  AS-DAG-001            [warning] a '## Dependencies' edge names neither a
+    recognized reason code nor an artifact in the fenced 'autospec:' machine
+    metadata block (spec §14/§15)
+  AS-DAG-009            [warning] the fenced 'autospec:' machine metadata block
+    declares a different set of hard dependencies than the Markdown
+    '## Dependencies' section
 
-Exit code = number of findings (capped at 64). Exit 0 means all rules pass."
+Warning-level rules (AS-DAG-*) are reported but never affect the exit code.
+
+Exit code = number of blocking findings (capped at 64). Exit 0 means all
+blocking rules pass."
 
 # ── argument parsing ──────────────────────────────────────────────────────────
 
@@ -225,6 +239,21 @@ count_findings() {
         printf '0'
     else
         printf '%s\n' "$FINDINGS" | wc -l | tr -d ' '
+    fi
+}
+
+# Warning-level findings (AS-DAG stage 1, spec §14/§15): reported but never
+# affect the exit code. Same "RULE: desc" line format as blocking findings.
+WARNINGS=""
+
+add_warning() {
+    local rule_id="$1"
+    local desc="$2"
+    if [ -z "$WARNINGS" ]; then
+        WARNINGS="${rule_id}: ${desc}"
+    else
+        WARNINGS="${WARNINGS}
+${rule_id}: ${desc}"
     fi
 }
 
@@ -600,6 +629,205 @@ check_ui_sections() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+# ── AS-DAG stage-1 checks (warning-level; spec §14/§15) ─────────────────────────
+
+# Canonical dependency numbers from '## Dependencies' ('Depends on issue #N'
+# lines only; leading zeros normalize the same way Rust's u64 parse does).
+# 'none' yields nothing.
+extract_dependency_numbers() {
+    extract_section '## Dependencies' "$BODY_FILE" \
+        | awk '
+            /^Depends on issue #[0-9]+$/ {
+                n = substr($0, 19)
+                sub(/^0+/, "", n)
+                if (n == "") n = "0"
+                print n
+            }'
+}
+
+# Interior lines of the first fenced block whose first non-blank interior line
+# is exactly 'autospec:' at column 0 (the machine metadata block, spec §15);
+# empty when no such block exists. Every fenced block is scanned because the
+# block may appear after the primary smoke block.
+extract_autospec_metadata_block() {
+    awk '
+        { lines[NR] = $0 }
+        function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        END {
+            n = NR
+            idx = 1
+            while (idx <= n) {
+                if (substr(lines[idx], 1, 3) != "```") { idx++; continue }
+                open_idx = idx
+                idx++
+                close_idx = idx
+                while (close_idx <= n && substr(lines[close_idx], 1, 3) != "```") close_idx++
+                is_meta = 0
+                for (i = open_idx + 1; i < close_idx; i++) {
+                    if (trim(lines[i]) != "") {
+                        if (lines[i] == "autospec:") is_meta = 1
+                        break
+                    }
+                }
+                if (is_meta) {
+                    for (i = open_idx + 1; i < close_idx; i++) print lines[i]
+                    exit
+                }
+                idx = close_idx + 1
+            }
+        }' "$BODY_FILE"
+}
+
+# Parse a machine metadata block interior (stdin) into one line per hard
+# dependency entry: <issue>\t<reason_code>\t<artifact> (empty field when the
+# scalar is absent). Linear state machine mirroring autospec-core: ≤2-space
+# indent is a top-level key, 3–4 spaces a 'dependencies:' subkey, >4 spaces a
+# 'hard:' list item. Lines without a '- ' prefix are list-item continuations.
+parse_autospec_metadata_entries() {
+    awk '
+        function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        function scalar(v,   s, f, l) {
+            s = trim(v)
+            if (s == "") return ""
+            f = substr(s, 1, 1)
+            l = substr(s, length(s), 1)
+            if (length(s) >= 2 && ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")))
+                return substr(s, 2, length(s) - 2)
+            return s
+        }
+        function flush_entry() {
+            if (have) {
+                print cur_issue "\t" cur_rc "\t" cur_art
+                have = 0
+            }
+        }
+        { lines[NR] = $0 }
+        END {
+            in_deps = 0; in_hard = 0; have = 0
+            for (i = 1; i <= NR; i++) {
+                line = lines[i]
+                tt = trim(line)
+                if (tt == "" || tt ~ /^#/) continue
+                ind = 0
+                while (substr(line, ind + 1, 1) == " ") ind++
+                if (ind <= 2) {
+                    flush_entry()
+                    in_hard = 0
+                    in_deps = (tt ~ /^dependencies:/)
+                    continue
+                }
+                if (ind <= 4) {
+                    if (in_deps) {
+                        flush_entry()
+                        in_hard = (tt ~ /^hard:/)
+                    } else {
+                        in_hard = 0
+                    }
+                    continue
+                }
+                if (!in_hard) continue
+                item = tt
+                if (item ~ /^- /) item = trim(substr(item, 3))
+                if (item ~ /^issue:/) {
+                    if (have) flush_entry()
+                    s = scalar(substr(item, 7))
+                    if (s ~ /^[0-9]+$/) {
+                        sub(/^0+/, "", s)
+                        if (s == "") s = "0"
+                        have = 1
+                        cur_issue = s
+                        cur_rc = ""
+                        cur_art = ""
+                    }
+                    continue
+                }
+                if (!have) continue
+                if (item ~ /^reason_code:/) {
+                    s = scalar(substr(item, 13))
+                    if (s != "") cur_rc = s
+                    continue
+                }
+                if (item ~ /^artifact:/) {
+                    s = scalar(substr(item, 10))
+                    if (s != "") cur_art = s
+                }
+            }
+            flush_entry()
+        }'
+}
+
+# Recognized machine reason codes (spec §12) — must stay in lockstep with
+# RECOGNIZED_REASON_CODES in crates/autospec-core/src/lint/dag.rs.
+reason_code_recognized() {
+    case "$1" in
+        consumes-new-interface|consumes-new-type|consumes-new-schema|consumes-new-migration|consumes-generated-artifact|requires-structural-migration|requires-new-protocol|verification-requires-predecessor|external-prerequisite)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# Format numbers (one per line, possibly empty) the way Rust's BTreeSet<u64>
+# Debug renders them: {1, 2, 3} or {} — sorted ascending, deduplicated.
+format_num_set() {
+    local joined
+    joined="$(printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | sort -n -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+    printf '{%s}' "$joined"
+}
+
+# AS-DAG-001 / AS-DAG-009 (warning-level, spec §14/§15/§36/§37): dependency
+# edges need justification in the machine metadata, and the metadata block must
+# agree with the Markdown '## Dependencies' section. Legacy bodies (no
+# metadata block) get AS-DAG-001 per edge; a 'none'/'empty' dependencies
+# section is silent.
+check_dag() {
+    local md_numbers block entries
+    md_numbers="$(extract_dependency_numbers)"
+    [ -n "$md_numbers" ] || return 0
+
+    block="$(extract_autospec_metadata_block)"
+    entries=""
+    if [ -n "$block" ]; then
+        entries="$(printf '%s\n' "$block" | parse_autospec_metadata_entries)"
+    fi
+
+    # AS-DAG-001: one warning per unjustified Markdown dependency edge.
+    local num lookup rc art
+    while IFS= read -r num; do
+        [ -z "$num" ] && continue
+        lookup=""
+        if [ -n "$entries" ]; then
+            lookup="$(printf '%s\n' "$entries" | awk -F'\t' -v num="$num" '$1 == num { print $2 "\t" $3; exit }')"
+        fi
+        rc=""; art=""
+        if [ -n "$lookup" ]; then
+            rc="${lookup%%$'\t'*}"
+            art="${lookup#*$'\t'}"
+        fi
+        if [ -n "$rc" ] && reason_code_recognized "$rc"; then continue; fi
+        if [ -n "$art" ]; then continue; fi
+        if [ -n "$rc" ]; then
+            add_warning "AS-DAG-001" "dependency is unjustified: reason code '${rc}' is not a recognized code and no artifact is named"
+        else
+            add_warning "AS-DAG-001" "dependency is unjustified: no reason code and no artifact named"
+        fi
+    done <<EOF_DAG2
+$md_numbers
+EOF_DAG2
+
+    # AS-DAG-009: metadata block present but its hard-dependency set disagrees
+    # with the Markdown section (sorted, deduplicated set comparison, as in
+    # Rust's BTreeSet<u64> comparison).
+    if [ -n "$block" ]; then
+        local yaml_set md_set
+        yaml_set="$(printf '%s\n' "$entries" | awk -F'\t' 'NF { print $1 }' | sort -n -u)"
+        md_set="$(printf '%s\n' "$md_numbers" | sort -n -u)"
+        if [ "$yaml_set" != "$md_set" ]; then
+            add_warning "AS-DAG-009" "machine metadata declares $(format_num_set "$yaml_set") but the Markdown dependency section declares $(format_num_set "$md_set")"
+        fi
+    fi
+}
+
 check_goal
 check_ac
 check_smoke
@@ -608,6 +836,7 @@ check_files_touched
 check_body_size
 check_outline_size
 check_ui_sections
+check_dag
 
 finding_count="$(count_findings)"
 
@@ -618,7 +847,7 @@ fi
 
 if [ "$JSON_MODE" -eq 1 ]; then
     # Emit findings as JSON array to stdout
-    if [ -z "$FINDINGS" ]; then
+    if [ -z "$FINDINGS" ] && [ -z "$WARNINGS" ]; then
         printf '[]\n'
     else
         printf '[\n'
@@ -639,12 +868,30 @@ if [ "$JSON_MODE" -eq 1 ]; then
         done <<EOF2
 $FINDINGS
 EOF2
+        # Warning-level findings carry the severity marker (Rust parity).
+        while IFS= read -r warning; do
+            [ -z "$warning" ] && continue
+            rule_id="$(printf '%s' "$warning" | sed 's/: .*//')"
+            desc="$(printf '%s' "$warning" | sed 's/^[^:]*: //')"
+            desc_escaped="$(printf '%s' "$desc" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')"
+            if [ "$first" -eq 1 ]; then
+                printf '  {"rule":"%s","description":"%s","severity":"warning"}' "$rule_id" "$desc_escaped"
+                first=0
+            else
+                printf ',\n  {"rule":"%s","description":"%s","severity":"warning"}' "$rule_id" "$desc_escaped"
+            fi
+        done <<EOF3
+$WARNINGS
+EOF3
         printf '\n]\n'
     fi
 else
     # Emit findings to stderr, one per line
     if [ -n "$FINDINGS" ]; then
         printf '%s\n' "$FINDINGS" >&2
+    fi
+    if [ -n "$WARNINGS" ]; then
+        printf 'WARNING:%s\n' "$WARNINGS" >&2
     fi
 fi
 
