@@ -143,7 +143,7 @@ Operators can halt a running autospec monitor in two ways, both leaving clean st
 - **Graceful** (`/autospec-stop --graceful`, default): the monitor finishes the current `process(ISSUE)` to its natural end (success → admin-merge, or 3-iter failure → label restore + comment). The outer loop exits BEFORE dispatching the next issue.
 - **Immediate** (`/autospec-stop --immediate`): the current `process(ISSUE)` commits any uncommitted work (`chore: WIP — autospec stop`), pushes the branch, marks the issue `paused-by-user`, inserts a `## Resume context` block, and exits at the next major-step boundary.
 
-**Sentinel file**: `~/.autospec/stop.flag`. Two-line format: `<mode>\n<ISO8601> <user>@<host>`. Atomic write via `temp+mv`. Stale flags (>24h) are ignored with a WARN to stderr.
+**Sentinel file**: `~/.autospec/stop.flag`. Two-line format: `<mode>\n<ISO8601> <user>@<host>`. Atomic write via `temp+mv`. Stale flags (>24h) are ignored with a WARN to stderr. Corrected rule (issue #3689): `temp+mv` is atomic for *future* openers, not for a process *already reading* the file — after the rename it keeps the old inode, which a network filesystem tears down ("Stale file handle"). Never replace a file a live job may be streaming: check for open holders and either refuse or publish a versioned path (`autospec_core::safe_publish`).
 
 **`paused-by-user` label**: color `#d4c5f9` (lavender), created idempotently by the abort path. Issues carrying this label are removed from the `auto-implement` queue until `/autospec-stop --resume` strips the label.
 

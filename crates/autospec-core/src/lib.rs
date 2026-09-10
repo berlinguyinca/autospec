@@ -54,6 +54,7 @@ pub mod repairs;
 pub mod resources;
 pub mod runtime_env;
 pub mod runtime_policy;
+pub mod safe_publish;
 pub mod safety;
 pub mod service_timeout;
 pub mod spec;
