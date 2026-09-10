@@ -24,6 +24,7 @@ pub mod ci_gate_promotion;
 pub mod claim;
 pub mod code_intel;
 pub mod context;
+pub mod convert_pass;
 pub mod coordination;
 pub mod cost;
 pub mod dispatch_guard;
