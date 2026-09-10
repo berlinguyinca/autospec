@@ -287,6 +287,35 @@ Read-only synthesis: produces a cited Markdown report of implementation state, s
 
 Passive listener — fires mid-conversation when the user mentions filing an issue or starting a spec. It also auto-routes common build/change verbs (`design` / `new feature` / `spec` → `/autospec-define`; `implement` / `build` / `ship` → `/autospec-run`; `review` → `/autospec-review`; `autospec …` → `/autospec`) into the matching skill. Routing is gated by an imperative-intent check (the deterministic `listener-match.sh --classify` classifier, invoked via `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}`) biased to false-negatives, and every route prints a one-line opt-out: `Routing to /<skill> — say "plain" to opt out.`
 
+## Fleet capacity walkthrough
+
+The planner decomposes a spec so an implementation fleet can work on many issues at once. Capacity is how many agents you expect to implement in parallel.
+
+**Setting the capacity.** The invocation flag wins:
+
+```text
+/autospec-define --agents 48 <feature description>
+autospec define --agents 48 <feature description>
+```
+
+Precedence: explicit `--agents` flag → project config (`planning.parallelism.target_agents`) → orchestrator-discovered capacity → `AUTOSPEC_AGENT_CAPACITY` environment variable → default `32`. Project config example:
+
+```yaml
+planning:
+  parallelism:
+    target_agents: 32
+```
+
+The supported fleet range is **10–100** (`10 <= fleet_capacity <= 100`): planning behavior is tuned and tested only for that range. The value is a decomposition target, not a correctness gate — a smaller fleet still gets a correct issue DAG, just a coarser initial width.
+
+**What the planner does with it.** The planner does not blindly create `fleet_capacity` issues; it optimizes for useful concurrency. The target initial width is `min(C, ceil(N * 0.60))` for N issues and capacity C, so large specs expose enough root work to keep at least 60% of the fleet busy when technically possible. Every issue keeps a minimum useful size: one coherent architectural responsibility, one independently testable change, one principal write ownership domain, normally 1–3 logical implementation units.
+
+**Waves.** The DAG analyzer projects execution waves: Wave 0 is every issue with no unresolved hard dependencies, Wave 1 the issues that become ready after Wave 0 merges, and so on. Waves are a diagnostic projection — a preview of how the run will parallelize — and never replace the dynamic ready-queue scheduler that `/autospec-run` uses.
+
+**Conflict domains.** Issues that write the same files are grouped into conflict domains (probability, surfaces, mitigation). Conflict domains are scheduling hints for dispatch ordering, never blockers: a high-conflict issue is ready as soon as its hard dependencies merge, and a conflict score never blocks readiness.
+
+The hard-dependency rules and the worked example live in `docs/concepts.md` → Parallel decomposition; metric definitions live in `docs/specs/2026-09-08-parallel-decomposition-fleet-saturation.md` section 20. Neither is duplicated here.
+
 ## Configuration
 
 ### Model profiles (`~/.autospec/model-profiles.yml`)

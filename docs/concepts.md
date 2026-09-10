@@ -14,6 +14,83 @@ The parser is intentionally strict for dependency IDs: dependencies must use gen
 
 AutoSpec splits a spec into a parent issue and smaller child issues. Each child issue is meant to be independently understandable and reviewable.
 
+## Parallel decomposition
+
+Decomposition produces an **issue DAG**: a directed acyclic graph whose edges are *hard dependencies only*. The DAG is a scheduling artifact, not a fixed work order. The executor schedules from a dynamic ready queue (an issue is ready when all of its hard predecessors have merged), and the analyzer projects **execution waves** — a diagnostic view of which issues would run together wave by wave — without replacing that dynamic scheduling.
+
+A hard dependency MUST be added only when the dependent issue cannot be correctly implemented or independently verified against the current base branch without the predecessor (source spec section 5.1, stated verbatim).
+
+### Valid hard-dependency reasons
+
+Only these 8 reasons justify a hard-dependency edge. Each carries a stable `reason_code` used in the machine-readable issue metadata:
+
+| `reason_code` | Reason (source spec section 5.1, verbatim) |
+| --- | --- |
+| `required-public-api` | predecessor introduces a required public API |
+| `required-type-or-interface` | predecessor introduces a required type or interface |
+| `required-schema` | predecessor introduces a required schema |
+| `required-database-migration` | predecessor introduces a required database migration |
+| `required-wire-protocol-version` | predecessor introduces a required wire/protocol version |
+| `generated-artifact` | predecessor introduces a generated artifact consumed by the child |
+| `structural-migration` | predecessor performs a structural migration that must precede child changes |
+| `acceptance-tests-require-output` | child acceptance tests literally cannot run without predecessor output |
+
+### Reasons that must not create an edge
+
+The following MUST NOT create a hard dependency by themselves (source spec section 5.1):
+
+- issue appears earlier in the spec
+- issue is described as "foundational"
+- implementation order would be convenient
+- issues belong to the same epic
+- files are nearby
+- one issue is documentation
+- one issue is testing
+- conceptual relationship
+- expected merge conflicts
+- parent/child relationship
+- planner preference
+- "do this first" wording without technical evidence
+
+### Conflict risk is not dependency
+
+Issues that write the same files are tracked separately as **conflict domains** (probability, surfaces, mitigation). A high conflict score may affect dispatch ordering later, but it MUST NOT make an issue blocked: a conflict domain never blocks readiness. Conflict risk is a scheduling hint, never a dependency.
+
+### Worked example (source spec section 31)
+
+Bad — a chain whose edges have no justifiable reason:
+
+```text
+#1 core -> #2 API -> #3 CLI -> #4 tests -> #5 docs
+```
+
+Initial width: `1`.
+
+Better — only the edges that carry a valid reason remain:
+
+```text
+       +-> #2 API + API tests
+#1 ----+-> #3 CLI + CLI tests
+       +-> #4 metrics
+       +-> #5 docs
+```
+
+Initial width: `1`. After #1: `4`.
+
+Best When Contract Already Exists — no dependency merely because all belong to the same feature:
+
+```text
+#1 core behavior + focused tests
+#2 API + focused tests
+#3 CLI + focused tests
+#4 metrics
+#5 docs
+```
+
+Initial width: `5`.
+
+Metric definitions (initial width, maximum width, critical path, fleet saturation) live in source spec section 20 and are intentionally not duplicated here.
+
 ## Model Fit
 
 Issues receive labels such as `ctx:*` and `reasoning:*` so operators can route work to an appropriate model or harness. The goal is not to benchmark models; it is to keep work units honest about context and reasoning needs.
