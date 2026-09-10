@@ -1963,7 +1963,7 @@ fn recover_stale_startup_record(
             })
         }
     };
-    let outcome = recover_authoritative_stale_startup(repo, issue, timeout_seconds, *head, None)?;
+    let outcome = recover_authoritative_stale_startup(repo, issue, timeout_seconds, *head)?;
     if !outcome.recovered {
         return Ok(outcome);
     }
