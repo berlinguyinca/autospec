@@ -28,6 +28,7 @@ pub enum ImplementationLintRule {
     VacuousAcStub,
     VacuousEmptyTest,
     VacuousNoAssert,
+    VacuousEmptyLoop,
     AssertionDensity,
     ReinventRepoUtil,
     NewDepUnjustified,
@@ -51,6 +52,7 @@ impl ImplementationLintRule {
             Self::VacuousAcStub => "VACUOUS_AC_STUB",
             Self::VacuousEmptyTest => "VACUOUS_EMPTY_TEST",
             Self::VacuousNoAssert => "VACUOUS_NO_ASSERT",
+            Self::VacuousEmptyLoop => "VACUOUS_EMPTY_LOOP",
             Self::AssertionDensity => "ASSERTION_DENSITY",
             Self::ReinventRepoUtil => "REINVENT_REPO_UTIL",
             Self::NewDepUnjustified => "NEW_DEP_UNJUSTIFIED",
@@ -74,6 +76,7 @@ impl ImplementationLintRule {
             "VACUOUS_AC_STUB" => Self::VacuousAcStub,
             "VACUOUS_EMPTY_TEST" => Self::VacuousEmptyTest,
             "VACUOUS_NO_ASSERT" => Self::VacuousNoAssert,
+            "VACUOUS_EMPTY_LOOP" => Self::VacuousEmptyLoop,
             "ASSERTION_DENSITY" => Self::AssertionDensity,
             "REINVENT_REPO_UTIL" => Self::ReinventRepoUtil,
             "NEW_DEP_UNJUSTIFIED" => Self::NewDepUnjustified,
@@ -322,6 +325,9 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
         ImplementationLintRule::VacuousEmptyTest => "Add at least one assertion to the empty test body.",
         ImplementationLintRule::VacuousNoAssert => {
             "Add an assert/expect/run+grep call to the test so it can actually fail."
+        }
+        ImplementationLintRule::VacuousEmptyLoop => {
+            "Guard the loop with `assert!(!<x>.is_empty(), \"...\")` or provide a non-empty fixture before re-pushing — an empty parsed collection makes the test pass vacuously."
         }
         ImplementationLintRule::AssertionDensity => {
             "Add at least one assert/expect/run/grep call to each test block — zero-assertion tests cannot catch regressions."
@@ -1185,6 +1191,9 @@ fn detect_vacuous_assertions(diff: &UnifiedDiff, collector: &mut FindingCollecto
         }
         if is_test_file(&file.path) {
             scan_no_assertions(file, collector);
+            if file.path.ends_with(".rs") {
+                scan_empty_loop_assertions(file, collector);
+            }
         }
     }
 }
@@ -1378,6 +1387,208 @@ fn flush_no_assertion(
             Some(line),
             format!("Test '{name}' has no assert/run/grep assertion (WARN)."),
         );
+    }
+}
+
+const EXTERNAL_PARSE_MARKERS: &[&str] = &[
+    "from_str",
+    "from_slice",
+    "from_reader",
+    "from_bytes",
+    "from_str_lossy",
+    "read_to_string",
+    "read_to_end",
+    "read_line",
+    "parse_json",
+    "parse::<",
+];
+
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Split `let <name>: <type> = <rhs>;` into (name, rhs), if this line is a plain
+/// single-binding let. The rhs is stripped of the trailing semicolon.
+fn let_binding(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix("let")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let name = lhs.split(':').next()?.trim();
+    if !is_identifier(name) {
+        return None;
+    }
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+    if rhs.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), rhs.to_string()))
+}
+
+fn parses_external_data(rhs: &str) -> bool {
+    EXTERNAL_PARSE_MARKERS
+        .iter()
+        .any(|marker| rhs.contains(marker))
+}
+
+/// True when `word` starts a token in `text`: the character before it is a
+/// boundary. Unlike `contains_word` no trailing boundary is required, so
+/// `assert` matches `assert!`, `assert_eq!` and `assert_ne!` alike.
+fn has_word_start(text: &str, word: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = text[offset..].find(word) {
+        let start = offset + index;
+        let before = text[..start].chars().next_back();
+        if before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
+            return true;
+        }
+        offset = start + word.len();
+    }
+    false
+}
+
+/// Extract the iterable expression from `for <pat> in <expr> {`.
+fn for_loop_iterable(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("for")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let in_index = rest
+        .match_indices("in")
+        .find(|(index, _)| {
+            let before = rest[..*index].chars().next_back();
+            let after = rest[*index + 2..].chars().next();
+            before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+                && after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        })?
+        .0;
+    let expr = rest[in_index + 2..].trim();
+    let expr = expr.strip_suffix('{')?;
+    let expr = expr.trim();
+    (!expr.is_empty()).then(|| expr.to_string())
+}
+
+/// The leading binding name of an iterable expression, if any: `items`, `&items`,
+/// `&mut items`, `items.iter()`, `items.into_iter()` all yield `items`.
+fn first_identifier(expr: &str) -> Option<String> {
+    let expr = expr.trim_start();
+    let expr = expr.strip_prefix("&mut").unwrap_or(expr);
+    let expr = expr.strip_prefix('&').unwrap_or(expr);
+    let expr = expr.trim_start();
+    let end = expr
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
+        .map(|(index, _)| index)
+        .unwrap_or(expr.len());
+    let name = &expr[..end];
+    is_identifier(name).then(|| name.to_string())
+}
+
+/// A test `for` loop whose iterable is bound to externally-parsed data, with
+/// assertions in the body and no non-empty guard, passes vacuously when the
+/// input is empty — the test cannot distinguish a missing or empty fixture from
+/// a passing one.
+fn scan_empty_loop_assertions(file: &DiffFile, collector: &mut FindingCollector) {
+    let mut external: BTreeSet<String> = BTreeSet::new();
+    let mut guarded: BTreeSet<String> = BTreeSet::new();
+    // (body_start_depth, head_binding, has_assert, for_line)
+    let mut loops: Vec<(i32, Option<String>, bool, usize)> = Vec::new();
+    let mut depth: i32 = 0;
+
+    for line in file.added_lines() {
+        let text = line.content.trim();
+        if text.is_empty() || text.starts_with("//") {
+            continue;
+        }
+
+        if let Some((name, rhs)) = let_binding(text) {
+            if parses_external_data(&rhs) || external.iter().any(|known| contains_word(&rhs, known))
+            {
+                external.insert(name);
+            }
+        }
+
+        if has_word_start(text, "assert") || has_word_start(text, "panic") {
+            for name in &external {
+                if text.contains(&format!("!{name}.is_empty()"))
+                    || text.contains(&format!("{name}.len() > 0"))
+                    || text.contains(&format!("{name}.len() >= 1"))
+                {
+                    guarded.insert(name.clone());
+                }
+            }
+        }
+
+        let asserts_here = has_word_start(text, "assert")
+            || has_word_start(text, "panic")
+            || text.contains(".expect(");
+
+        if let Some(expr) = for_loop_iterable(text) {
+            loops.push((
+                depth + 1,
+                first_identifier(&expr),
+                asserts_here,
+                line.new_line.unwrap_or(0),
+            ));
+        } else if let Some((body_depth, _, has_assert, _)) = loops.last_mut() {
+            if depth >= *body_depth && asserts_here {
+                *has_assert = true;
+            }
+        }
+
+        for c in text.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        while let Some((body_depth, _, _, _)) = loops.last() {
+            if depth < *body_depth {
+                let (_, head, has_assert, for_line) = loops.pop().expect("loop frame");
+                if has_assert {
+                    if let Some(head) = head {
+                        if external.contains(&head) && !guarded.contains(&head) {
+                            collector.emit(
+                                ImplementationLintRule::VacuousEmptyLoop,
+                                &file.path,
+                                Some(for_line),
+                                format!(
+                                    "loop over externally-parsed `{head}` has assertions but no non-empty guard — an empty input makes the test pass vacuously"
+                                ),
+                            );
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    // The diff may end mid-function: evaluate loops still open at the last added line.
+    while let Some((_, head, has_assert, for_line)) = loops.pop() {
+        if has_assert {
+            if let Some(head) = head {
+                if external.contains(&head) && !guarded.contains(&head) {
+                    collector.emit(
+                        ImplementationLintRule::VacuousEmptyLoop,
+                        &file.path,
+                        Some(for_line),
+                        format!(
+                            "loop over externally-parsed `{head}` has assertions but no non-empty guard — an empty input makes the test pass vacuously"
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1973,6 +2184,138 @@ mod tests {
             severity(files, Some(body)),
             ImplementationLintSeverity::Info
         );
+    }
+
+    fn source_file(path: &str, lines: &[&str]) -> DiffFile {
+        DiffFile {
+            path: path.to_string(),
+            is_new: true,
+            is_binary: false,
+            hunks: vec![DiffHunk {
+                old_start: 0,
+                new_start: 1,
+                lines: lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, content)| DiffLine {
+                        kind: DiffLineKind::Added,
+                        content: (*content).to_string(),
+                        old_line: None,
+                        new_line: Some(index + 1),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    fn vacuous_empty_loop_findings(files: Vec<DiffFile>) -> Vec<ImplementationLintFinding> {
+        lint_implementation(
+            &UnifiedDiff { files },
+            ImplementationLintContext {
+                issue_body: None,
+                repository: &EmptyRepository,
+                options: ImplementationLintOptions {
+                    enable_vacuous_assertions: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .findings
+        .into_iter()
+        .filter(|finding| finding.rule == ImplementationLintRule::VacuousEmptyLoop)
+        .collect()
+    }
+
+    #[test]
+    fn vacuous_empty_loop_flags_assertions_over_externally_parsed_collection() {
+        let file = source_file(
+            "crates/demo/tests/fixture.rs",
+            &[
+                "fn loads_cases() {",
+                "    let raw = std::fs::read_to_string(\"data/cases.json\").unwrap();",
+                "    let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();",
+                "    for case in cases {",
+                "        assert_eq!(case.id, expected(&case));",
+                "    }",
+                "}",
+            ],
+        );
+        let findings = vacuous_empty_loop_findings(vec![file]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, Some(4));
+        assert_eq!(findings[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(
+            findings[0].message,
+            "loop over externally-parsed `cases` has assertions but no non-empty guard — an empty input makes the test pass vacuously"
+        );
+    }
+
+    #[test]
+    fn vacuous_empty_loop_accepts_non_empty_guard() {
+        let file = source_file(
+            "crates/demo/tests/fixture.rs",
+            &[
+                "fn loads_cases() {",
+                "    let raw = std::fs::read_to_string(\"data/cases.json\").unwrap();",
+                "    let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();",
+                "    assert!(!cases.is_empty(), \"cases fixture must not be empty\");",
+                "    for case in cases {",
+                "        assert_eq!(case.id, expected(&case));",
+                "    }",
+                "}",
+            ],
+        );
+        assert!(vacuous_empty_loop_findings(vec![file]).is_empty());
+    }
+
+    #[test]
+    fn vacuous_empty_loop_ignores_locally_constructed_collections() {
+        let file = source_file(
+            "crates/demo/tests/fixture.rs",
+            &[
+                "fn checks() {",
+                "    let items = vec![1, 2, 3];",
+                "    for item in items {",
+                "        assert!(item > 0);",
+                "    }",
+                "}",
+            ],
+        );
+        assert!(vacuous_empty_loop_findings(vec![file]).is_empty());
+    }
+
+    #[test]
+    fn vacuous_empty_loop_ignores_non_rust_test_files() {
+        let file = source_file(
+            "tests/fixtures/test_cases.py",
+            &[
+                "def test_cases():",
+                "    cases = json.load(open(\"data/cases.json\"))",
+                "    for case in cases:",
+                "        assert case['id']",
+            ],
+        );
+        assert!(vacuous_empty_loop_findings(vec![file]).is_empty());
+    }
+
+    #[test]
+    fn vacuous_empty_loop_tracks_external_binding_propagation() {
+        let file = source_file(
+            "crates/demo/tests/fixture.rs",
+            &[
+                "fn loads_cases() {",
+                "    let raw = std::fs::read_to_string(\"data/cases.json\").unwrap();",
+                "    let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();",
+                "    let refs = &cases;",
+                "    for case in refs {",
+                "        assert!(case.valid);",
+                "    }",
+                "}",
+            ],
+        );
+        let findings = vacuous_empty_loop_findings(vec![file]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].message, "loop over externally-parsed `refs` has assertions but no non-empty guard — an empty input makes the test pass vacuously");
     }
 
     #[test]
