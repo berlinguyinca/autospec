@@ -311,7 +311,14 @@ ready and blocks its twin with reason `duplicate_issue` and the canonical issue 
 surfacing later as a merge conflict. Its JSON includes a stable `gate_counts`
 object for discovered, candidate, reviewed,
 blocked, duplicate, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and
-selected issues. `scan_scope` is `repository` for a full scan and `slice` when
+selected issues. The `ready` list (and the `batch` drawn from it) is ordered by **unblocking value
+descending**, ties broken by issue number ascending: a candidate's unblocking value is the count
+of other open issues that transitively depend on it through `## Dependencies` edges, so a
+pipeline-fixing foundation issue (dispatcher, gates, runner) is dispatched before the
+lower-numbered leaf work it unblocks instead of after it. Selection of which issues are ready stays
+in issue-number order; only the dispatch order of the already-ready set changes. A ready issue
+that unblocks at least one other reports its count in a top-level `unblocks` field (omitted when
+zero). `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
 whole-queue completion.
 
