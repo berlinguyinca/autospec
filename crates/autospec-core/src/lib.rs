@@ -54,6 +54,7 @@ pub mod rag;
 pub mod repair_loop;
 pub mod repairs;
 pub mod resources;
+pub mod review_checklist;
 pub mod runtime_env;
 pub mod runtime_policy;
 pub mod safe_publish;
