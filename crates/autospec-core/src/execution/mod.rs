@@ -45,7 +45,8 @@ pub use queue::{
 pub use queue_runtime::StagedSpecCheck;
 pub use result::{AgentOutcome, IngestedAgentResult};
 pub use test_diff::{
-    diff_test_failures, resolve_reverification, DiffVerdict, FlakyQuarantine,
-    ReverificationOutcome, TestFailureDiff, DEFAULT_CHURN_THRESHOLD,
+    diff_test_failures, isolation_reverify_args, resolve_reverification, DiffVerdict,
+    FlakyQuarantine, MissingReobservation, QuarantineMark, Reobservation, ReverificationOutcome,
+    ReverificationResolution, TestFailureDiff, DEFAULT_CHURN_THRESHOLD, ISOLATION_RUNS,
 };
 pub use work::ProducedWork;
