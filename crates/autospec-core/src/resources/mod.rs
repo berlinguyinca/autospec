@@ -17,12 +17,14 @@
 
 pub mod db;
 pub mod docker;
+pub mod dry_run;
 pub mod git;
 pub mod ledger;
 pub mod model;
 pub mod process;
 
 pub use docker::observe_docker;
+pub use dry_run::{DryRunEntry, DryRunPlan, ProposedAction, ResourceTypeTotals};
 pub use git::{observe_branches, observe_worktrees};
 pub use ledger::ResourceLedger;
 pub use model::{ManagedResource, ObservedResource, OwnershipClass, ResourceState, ResourceType};
