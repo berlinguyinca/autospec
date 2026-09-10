@@ -30,6 +30,18 @@
 #     escalated       true when the dispatch pulled in a stronger advisor/tier
 #     outcome         pending | merged_clean | lgtm_first_pass | retried_ok |
 #                     escalated | qa_failed | reverted | abandoned
+# §25 per-dispatch telemetry (all OPTIONAL, all accept "unknown"):
+#   role, model_version, hardware_fingerprint, runtime, quantization,
+#   context_requested, context_reserved, context_used, concurrency_at_start,
+#   queue_depth_at_start, prompt_tok_s, decode_tok_s, aggregate_decode_tok_s,
+#   ttft_ms, retry_index, previous_model, review_outcome, tests_outcome,
+#   merged, reverted
+#   Absent fields are normalized to "unknown" by --append/--update-outcome and
+#   presented as "unknown" by --show; unknown is preferable to a fabricated 0
+#   (spec §25). When PRESENT their types are binding: numbers are non-negative
+#   numbers, merged/reverted are booleans, role/runtime are closed vocabularies.
+#   Legacy rows carrying none of these fields stay valid.
+#
 #     stack           OPTIONAL. The detected stack-profile id this dispatch ran
 #                     on (autospec-detect-stack-profile.sh). When present it
 #                     must be a non-empty string; when absent, --append and
@@ -47,6 +59,7 @@
 #   routing-ledger.sh --stats [--json]
 #   routing-ledger.sh --show [--profile <name>] [--kind <dispatch_kind>] [--json]
 #   routing-ledger.sh --validate [<file>]
+#   routing-ledger.sh --rebuild
 #   routing-ledger.sh -h | --help
 #
 # Ledger path (precedence): --ledger <path> > $AUTOSPEC_ROUTING_LEDGER
@@ -66,6 +79,27 @@ ALLOWED_OUTCOMES="pending merged_clean lgtm_first_pass retried_ok escalated qa_f
 ALLOWED_KINDS="implementer lgtm-reviewer explore-researcher verify-voter refine-lens qa-sweep secaudit-pass growth-lens spec-decompose spec-research spec-design broad-audit refine-scope"
 ALLOWED_CTX="32k 64k 120k"
 ALLOWED_REASONING="shallow medium deep"
+
+# §25 telemetry: optional-at-rest fields, grouped by their binding type.
+_TEL_STRING_KEYS="role model_version hardware_fingerprint runtime quantization previous_model review_outcome tests_outcome"
+_TEL_NUMBER_KEYS="context_requested context_reserved context_used concurrency_at_start queue_depth_at_start prompt_tok_s decode_tok_s aggregate_decode_tok_s ttft_ms retry_index"
+_TEL_BOOL_KEYS="merged reverted"
+# Closed vocabularies: spec §3 (mandatory roles) and §7 (supported runtimes).
+_TEL_ALLOWED_ROLES="orchestrator planner architect test_planner implementer code_reviewer test_reviewer qa_verifier documentation_writer documentation_reviewer ui_ux_reviewer security_reviewer researcher advisor"
+_TEL_ALLOWED_RUNTIMES="ollama vllm llamacpp opencode codex"
+
+# jq prelude shared by every writer and reader: the §25 key list and the
+# unknown-defaulting normalizer, so the invariant "every row at rest and on
+# read carries all 20 telemetry keys" lives in exactly one place.
+_JQ_TEL='
+def _tel_keys: ["role","model_version","hardware_fingerprint","runtime",
+  "quantization","previous_model","review_outcome","tests_outcome",
+  "context_requested","context_reserved","context_used",
+  "concurrency_at_start","queue_depth_at_start",
+  "prompt_tok_s","decode_tok_s","aggregate_decode_tok_s","ttft_ms","retry_index",
+  "merged","reverted"];
+def tel_norm: reduce _tel_keys[] as $k (.; if has($k) then . else .[$k] = "unknown" end);
+'
 
 REQUIRED_KEYS="dispatch_id ts dispatch_kind profile model harness issue cell_ctx cell_reasoning input_tokens output_tokens cached_tokens wall_clock_ms retries escalated outcome reason"
 
@@ -108,6 +142,7 @@ while [ $# -gt 0 ]; do
             fi ;;
         --stats)    MODE="stats"; shift ;;
         --show)     MODE="show"; shift ;;
+        --rebuild)  MODE="rebuild"; shift ;;
         --validate)
             MODE="validate"
             shift
@@ -172,7 +207,61 @@ _validate_object() {
             return 1
         fi
     fi
+    _validate_telemetry "$_obj" || return 1
     _validate_counters "$_obj"
+}
+
+# _validate_telemetry <json> — optional §25 telemetry half of the contract.
+# Absent and "unknown" are both fine (spec §25: unknown is preferable to a
+# fabricated value), but a value that IS recorded has a binding type: a
+# stringly-typed number or a truthy-string boolean poisons every aggregate
+# downstream exactly like a bad required counter does.
+_validate_telemetry() {
+    _obj="$1"
+    for _k in $_TEL_STRING_KEYS; do
+        if printf '%s' "$_obj" | jq -e --arg k "$_k" 'has($k)' >/dev/null 2>&1; then
+            if ! printf '%s' "$_obj" | jq -e --arg k "$_k" \
+                '.[$k] | (type=="string") and (length>0)' >/dev/null 2>&1; then
+                printf '%s must be a non-empty string ("unknown" when unmeasured)\n' "$_k"
+                return 1
+            fi
+        fi
+    done
+    for _k in $_TEL_NUMBER_KEYS; do
+        if printf '%s' "$_obj" | jq -e --arg k "$_k" 'has($k)' >/dev/null 2>&1; then
+            if ! printf '%s' "$_obj" | jq -e --arg k "$_k" \
+                '.[$k] == "unknown" or ((.[$k]|type)=="number" and .[$k] >= 0)' >/dev/null 2>&1; then
+                printf '%s must be a non-negative number or "unknown"\n' "$_k"
+                return 1
+            fi
+        fi
+    done
+    for _k in $_TEL_BOOL_KEYS; do
+        if printf '%s' "$_obj" | jq -e --arg k "$_k" 'has($k)' >/dev/null 2>&1; then
+            if ! printf '%s' "$_obj" | jq -e --arg k "$_k" \
+                '.[$k] == "unknown" or (.[$k]|type)=="boolean"' >/dev/null 2>&1; then
+                printf '%s must be a boolean or "unknown"\n' "$_k"
+                return 1
+            fi
+        fi
+    done
+    # role and runtime are closed vocabularies: a typo would silently split
+    # every derived aggregate across two names for one thing.
+    if printf '%s' "$_obj" | jq -e 'has("role")' >/dev/null 2>&1; then
+        _v="$(printf '%s' "$_obj" | jq -r '.role')"
+        if [ "$_v" != "unknown" ] && ! _in_list "$_v" "$_TEL_ALLOWED_ROLES"; then
+            printf 'invalid role: %s\n' "$_v"
+            return 1
+        fi
+    fi
+    if printf '%s' "$_obj" | jq -e 'has("runtime")' >/dev/null 2>&1; then
+        _v="$(printf '%s' "$_obj" | jq -r '.runtime')"
+        if [ "$_v" != "unknown" ] && ! _in_list "$_v" "$_TEL_ALLOWED_RUNTIMES"; then
+            printf 'invalid runtime: %s\n' "$_v"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # _validate_counters <json> — numeric/boolean half of the record contract.
@@ -202,15 +291,17 @@ _validate_counters() {
     return 0
 }
 
-# Latest line per dispatch_id, preserving first-seen order.
+# Latest line per dispatch_id, preserving first-seen order. §25 telemetry is
+# normalized on READ here too, so rows written before the telemetry fields
+# existed present every key as "unknown" instead of null to every reader.
 _latest_records() {
     if [ ! -f "$LEDGER" ]; then
         printf '[]'
         return 0
     fi
-    jq -s 'map(select(type=="object" and has("dispatch_id")))
+    jq -s "${_JQ_TEL} map(select(type==\"object\" and has(\"dispatch_id\")))
            | group_by(.dispatch_id)
-           | map(.[-1])' "$LEDGER" 2>/dev/null || printf '[]'
+           | map(.[-1] | tel_norm)" "$LEDGER" 2>/dev/null || printf '[]'
 }
 
 case "$MODE" in
@@ -220,9 +311,9 @@ case "$MODE" in
         fi
         _dir="$(dirname "$LEDGER")"
         if [ ! -d "$_dir" ]; then mkdir -p "$_dir"; fi
-        # Normalize the optional stack field on the way in so the invariant
-        # "every row at rest carries stack" holds for --show readers.
-        printf '%s\n' "$(printf '%s' "$ARG1" | jq -c 'if has("stack") then . else . + {stack: "unknown"} end')" >> "$LEDGER"
+        # Normalize the optional stack and §25 telemetry fields on the way in
+        # so the invariant "every row at rest carries them" holds for readers.
+        printf '%s\n' "$(printf '%s' "$ARG1" | jq -c "${_JQ_TEL} if has(\"stack\") then . else . + {stack: \"unknown\"} end | tel_norm")" >> "$LEDGER"
         exit 0
         ;;
 
@@ -240,11 +331,12 @@ case "$MODE" in
         # Append a NEW record rather than rewriting: the ledger is an audit trail.
         # A pre-stack legacy row is normalized the same way --append normalizes,
         # so the "every row carries stack" invariant survives outcome updates too.
+        _prog="${_JQ_TEL} .outcome=\$oc | .ts=\$ts | (if \$rs != \"\" then .reason=\$rs else . end)
+             | (if has(\"stack\") then . else . + {stack: \"unknown\"} end) | tel_norm"
         printf '%s' "$_prev" | jq -c \
             --arg oc "$ARG2" --arg rs "$ARG3" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '.outcome=$oc | .ts=$ts | (if $rs != "" then .reason=$rs else . end)
-             | (if has("stack") then . else . + {stack: "unknown"} end)' >> "$LEDGER"
+            "$_prog" >> "$LEDGER"
         exit 0
         ;;
 
@@ -281,6 +373,37 @@ case "$MODE" in
             printf '%s' "$_recs" | jq -r '.[] |
                 "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\t\(.outcome)\tretries=\(.retries)\tms=\(.wall_clock_ms)"'
         fi
+        exit 0
+        ;;
+
+    rebuild)
+        # Regenerate the ledger in its canonical form: exactly one fully
+        # normalized record per dispatch_id (the latest one). Local file only —
+        # this is recovery of the derived view, not re-derivation from GitHub.
+        if [ ! -f "$LEDGER" ]; then
+            _dir="$(dirname "$LEDGER")"
+            if [ ! -d "$_dir" ]; then mkdir -p "$_dir"; fi
+            : > "$LEDGER"
+            printf 'routing-ledger: rebuilt 0 records into %s\n' "$LEDGER"
+            exit 0
+        fi
+        # Fail closed on corruption: an invalid raw row must abort before the
+        # swap, leaving the existing ledger byte-for-byte untouched.
+        _ln=0
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            _ln=$((_ln + 1))
+            if [ -z "$_line" ]; then continue; fi
+            if ! _reason="$(_validate_object "$_line")"; then
+                printf 'routing-ledger: %s:%d: %s\n' "$LEDGER" "$_ln" "$_reason" >&2
+                _die 'rebuild aborted: ledger contains invalid rows'
+            fi
+        done < "$LEDGER"
+        _rows="$(_latest_records)"
+        _n="$(printf '%s' "$_rows" | jq 'length')"
+        _tmp="$(mktemp "${LEDGER}.XXXXXX")" || _die 'rebuild: cannot create temp file next to the ledger'
+        printf '%s' "$_rows" | jq -c '.[]' > "$_tmp"
+        mv "$_tmp" "$LEDGER"
+        printf 'routing-ledger: rebuilt %s records into %s\n' "$_n" "$LEDGER"
         exit 0
         ;;
 

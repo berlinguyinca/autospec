@@ -510,6 +510,24 @@ over the baseline — routing fails closed rather than guessing a price.
 Only `implementer` dispatches are re-routable. The reviewer keeps its own tier, which
 also keeps every safety gate and all spec/decompose work on its existing tier.
 
+**Per-dispatch telemetry (design §25).** Each ledger record may additionally carry
+twenty per-dispatch telemetry fields: `role`, `model_version`, `hardware_fingerprint`,
+`runtime`, `quantization`, `context_requested`, `context_reserved`, `context_used`,
+`concurrency_at_start`, `queue_depth_at_start`, `prompt_tok_s`, `decode_tok_s`,
+`aggregate_decode_tok_s`, `ttft_ms`, `retry_index`, `previous_model`, `review_outcome`,
+`tests_outcome`, `merged`, `reverted`. They are optional at rest — legacy rows stay
+valid — but every omitted field is normalized to `"unknown"` on `--append` and
+`--update-outcome`, and `--show` presents absent fields as `"unknown"` too: unknown is
+preferable to a fabricated `0`. When present their types bind: the throughput/context/
+latency fields must be non-negative numbers, `merged`/`reverted` booleans, and
+`role`/`runtime` are closed vocabularies (`orchestrator planner architect test_planner
+implementer code_reviewer test_reviewer qa_verifier documentation_writer
+documentation_reviewer ui_ux_reviewer security_reviewer researcher advisor`; `ollama
+vllm llamacpp opencode codex`). `routing-ledger.sh --rebuild` regenerates the ledger in
+canonical form — exactly one fully normalized record per `dispatch_id` (the latest),
+written atomically — and fails closed, leaving the file untouched, if any row is
+invalid.
+
 ## Local model dispatch
 `scripts/local-dispatch.sh` runs a dispatch on a local model via Codex CLI's native
 `--oss --local-provider` support. It is chosen over a bespoke HTTP client because
