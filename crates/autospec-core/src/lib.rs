@@ -44,6 +44,7 @@ pub mod gate_provenance;
 pub mod grading;
 pub mod graph;
 pub mod growth;
+pub mod heartbeat;
 pub mod initiative;
 pub mod insights;
 pub mod integration;

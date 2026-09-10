@@ -57,6 +57,39 @@ a destructive step). It does not derive state from log mtime or tail
 recency: those describe when the log was last touched, not whether the
 pass is still advancing.
 
+## Heartbeat liveness (issue #3995)
+
+A periodic process (a cron or loop pass) is **live by its heartbeat, never
+by its log's mtime**. Two incidents pinned this: a top-up cron was read as
+dead because the check looked at `cron-topup.log` while the loop writes to
+`topup.log` (an empty, never-touched file), and a repaired reg-sweep was
+read as broken because its log ended in a syntax error while its
+heartbeat was fresh. Both misdiagnoses are impossible when liveness is a
+function of the heartbeat line and the check proves it is reading the
+process's own log.
+
+The Rust side lives in `autospec-core`'s `heartbeat` module
+(`crates/autospec-core/src/heartbeat.rs`):
+
+- **Write** — `write_heartbeat(log, step, now, outcome)` appends
+  `heartbeat: <step> <RFC3339Z> [<outcome>]`. Every pass appends one,
+  *including a pass that did nothing* (outcome `nothing to do`). The
+  shell counterpart is `autospec_log_heartbeat` above; the line shape is
+  the same, so the two writers are interchangeable for a reader.
+- **Assess** — `assess_liveness(step, lines, interval, now)` returns
+  `Live` / `Stale` / `NoRecord`. Stale means "no heartbeat since T" —
+  `Liveness::describe()` never says "dead", because silence past the
+  stale threshold is a claim about heartbeats, not about the process.
+- **Path check** — `LogHealthCheck::verdict(observed_log, lines, now)`
+  first compares the path it was given with the process's declared log.
+  A mismatch is `BrokenCheck { expected, observed }`: the check is
+  broken, and says nothing about the process. The empty-`cron-topup.log`
+  incident is exactly this shape.
+
+Tests: `crates/autospec-core/tests/heartbeat.rs` — ran-and-did-nothing is
+`Live`, not-run is `Stale` (not "dead"), wrong log path is `BrokenCheck`
+(not a process verdict).
+
 ## Tests
 
 `tests/autospec-log-status.bats` covers the populated #3793 case — a
