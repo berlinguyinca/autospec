@@ -48,7 +48,7 @@ fn non_compiled_patch_against_one_flaky_test_is_not_held() {
     // The gate re-runs the failing test in isolation; it passes.
     let reruns = BTreeMap::from([("executor_bridge::tests::terminal_label".to_string(), true)]);
 
-    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected).expect("verdict");
+    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected, None).expect("verdict");
 
     assert_eq!(verdict.decision, GateDecision::Pass);
     assert_eq!(
@@ -105,7 +105,7 @@ fn an_unknown_component_is_classified_fail_closed() {
     };
     let reruns = BTreeMap::from([("mystery".to_string(), false)]);
     let affected = BTreeSet::from(["autospec-core".to_string()]);
-    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected).expect("verdict");
+    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected, None).expect("verdict");
 
     assert_eq!(
         verdict.decision,
@@ -134,7 +134,7 @@ fn persistent_failure_outside_blast_radius_is_unattributable() {
     };
     let reruns = BTreeMap::from([("some_deterministic_failure".to_string(), false)]);
 
-    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected).expect("verdict");
+    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected, None).expect("verdict");
 
     assert_eq!(
         verdict.decision,
@@ -176,7 +176,7 @@ fn hold_attribution_follows_the_signals() {
     ]);
     let baseline = BTreeSet::from(["pre_existing_one".to_string()]);
 
-    let verdict = evaluate(&suite, &reruns, &baseline, &affected).expect("verdict");
+    let verdict = evaluate(&suite, &reruns, &baseline, &affected, None).expect("verdict");
 
     assert_eq!(verdict.failures[0].class, FailureClass::Caused);
     assert_eq!(verdict.failures[1].class, FailureClass::PreExisting);
@@ -201,8 +201,14 @@ fn missing_rerun_fails_closed() {
             component: Some("autospec-core".to_string()),
         }],
     };
-    let error = evaluate(&suite, &BTreeMap::new(), &BTreeSet::new(), &BTreeSet::new())
-        .expect_err("a failing test is re-run before the verdict is recorded");
+    let error = evaluate(
+        &suite,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        None,
+    )
+    .expect_err("a failing test is re-run before the verdict is recorded");
     assert_eq!(
         error,
         GateError::MissingRerun {

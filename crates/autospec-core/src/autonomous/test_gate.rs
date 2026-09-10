@@ -31,6 +31,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::autonomous::verdict_validity::{self, RecordedVerdict};
+
 /// A test that flakes at least this many times is reported as a defect, not as noise.
 pub const REPEATED_FLAKY_THRESHOLD: u64 = 3;
 
@@ -106,7 +108,8 @@ pub enum GateDecision {
     },
 }
 
-/// The recorded verdict: the decision plus every failure, classified.
+/// The recorded verdict: the decision plus every failure, classified, plus
+/// the two validity conditions the decision was graded under (#4031).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateVerdict {
     pub decision: GateDecision,
@@ -118,6 +121,13 @@ pub struct GateVerdict {
     pub flaky: Vec<String>,
     /// Persistent failures outside the patch's blast radius: suite failures, not failures of the change.
     pub unattributable: Vec<String>,
+    /// The commit of the tree the verdict was graded against. `None` means the
+    /// runner could not read it, and a verdict persisted without it is
+    /// unverifiable, never trusted ([`verdict_validity`]).
+    pub tree_commit: Option<String>,
+    /// [`verdict_validity::baseline_hash`] of the failing baseline used at
+    /// grading time: the condition the decision was made under.
+    pub baseline_hash: String,
 }
 
 impl GateVerdict {
@@ -129,6 +139,39 @@ impl GateVerdict {
             GateDecision::Hold { attribution } => {
                 format!("HELD: tests failed -- {}", attribution.token())
             }
+        }
+    }
+
+    /// The decision token the runner records per patch: `pass`, or
+    /// `new-test-failures` for any hold — the token the converter
+    /// short-circuits on.
+    pub fn verdict_token(&self) -> &'static str {
+        match self.decision {
+            GateDecision::Pass => "pass",
+            GateDecision::Hold { .. } => "new-test-failures",
+        }
+    }
+
+    /// The recorded form this verdict must be persisted in (#4031): the
+    /// decision token plus the failing tests it named (the persistent
+    /// failures — a flaky failure that passed on re-run is not a failure the
+    /// verdict stands on) and the two validity conditions. `identity` is the
+    /// patch the verdict is recorded for; `at` is Unix epoch seconds, audit
+    /// only.
+    pub fn recorded(&self, identity: &str, at: i64) -> RecordedVerdict {
+        let failing_tests: BTreeSet<String> = self
+            .failures
+            .iter()
+            .filter(|report| !report.rerun_passed)
+            .map(|report| report.name.clone())
+            .collect();
+        RecordedVerdict {
+            patch_identity: identity.to_string(),
+            verdict: self.verdict_token().to_string(),
+            failing_tests,
+            tree_commit: self.tree_commit.clone(),
+            baseline_hash: Some(self.baseline_hash.clone()),
+            recorded_at: at,
         }
     }
 
@@ -205,6 +248,12 @@ pub fn affected_crates(
 /// base; an empty set means "no baseline data", and no failure is ever
 /// claimed pre-existing on nothing.
 ///
+/// `tree_commit` is the commit of the tree the suite ran on. The verdict
+/// records it (and the hash of `baseline`) so a later reader can tell
+/// whether the verdict was graded against the tree it is being applied to
+/// (#4031); `None` means the commit could not be read, and the persisted
+/// verdict is then unverifiable, never trusted.
+///
 /// Classification order per failure: flaky (passed on re-run) beats
 /// everything — a test that passes on re-run is not a failure at all.
 /// Then unattributable (known component outside the blast radius — the
@@ -216,6 +265,7 @@ pub fn evaluate(
     reruns: &BTreeMap<String, bool>,
     baseline: &BTreeSet<String>,
     affected: &BTreeSet<String>,
+    tree_commit: Option<&str>,
 ) -> Result<GateVerdict, GateError> {
     let mut reports: Vec<FailureReport> = Vec::with_capacity(suite.failures.len());
     for failure in &suite.failures {
@@ -276,6 +326,8 @@ pub fn evaluate(
         failures: reports,
         flaky,
         unattributable,
+        tree_commit: tree_commit.map(|commit| commit.to_string()),
+        baseline_hash: verdict_validity::baseline_hash(baseline),
     })
 }
 

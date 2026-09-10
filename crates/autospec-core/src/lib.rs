@@ -17,6 +17,7 @@ pub mod autonomous {
     pub mod tier3;
     pub mod tier4;
     pub mod timeout_triage;
+    pub mod verdict_validity;
     pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
