@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -502,10 +501,7 @@ fn assert_before(haystack: &str, first: &str, second: &str) {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write executable");
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
+    autospec_core::test_support::write_executable(path, contents);
 }
 
 const GH_FIXTURE: &str = r###"#!/usr/bin/env bash

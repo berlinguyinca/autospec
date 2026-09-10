@@ -8294,8 +8294,7 @@ fn git_fixture(directory: &Path, args: &[&str]) -> String {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write fake executable");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make fake executable");
+    autospec_core::test_support::write_executable(path, contents);
 }
 
 fn path_with(bin: &Path) -> String {

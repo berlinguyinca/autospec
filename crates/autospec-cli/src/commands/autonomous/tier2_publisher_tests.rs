@@ -283,8 +283,6 @@ fn tier2_publisher_syncs_with_verified_checkout_root() {
 #[test]
 #[ignore = "changes process environment and working directory"]
 fn tier2_publisher_syncs_with_verified_checkout_root_isolated() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = TempRoot::new();
     let checkout = root.path().join("verified-checkout");
     let elsewhere = root.path().join("elsewhere");
@@ -295,14 +293,11 @@ fn tier2_publisher_syncs_with_verified_checkout_root_isolated() {
     let log = root.path().join("autospec.log");
     let gh = bin.join("gh");
     let autospec = bin.join("autospec");
-    fs::write(&gh, "#!/bin/sh\nprintf '73\\n'\n").expect("fake gh");
-    fs::write(
+    autospec_core::test_support::write_executable(&gh, "#!/bin/sh\nprintf '73\\n'\n");
+    autospec_core::test_support::write_executable(
         &autospec,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
-    )
-    .expect("fake autospec");
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("chmod gh");
-    fs::set_permissions(&autospec, fs::Permissions::from_mode(0o755)).expect("chmod autospec");
+        &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+    );
     let old_path = std::env::var_os("PATH");
     let old_cwd = std::env::current_dir().expect("cwd");
     std::env::set_var(

@@ -3,7 +3,6 @@ use autospec_core::autonomous::waterfall::{TierReceipt, WaterfallState};
 use autospec_core::coordination::{ConductorPhase, ConductorState};
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -330,8 +329,7 @@ fn temp_dir() -> PathBuf {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write executable");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+    autospec_core::test_support::write_executable(path, contents);
 }
 
 fn path_with(bin: &Path) -> String {

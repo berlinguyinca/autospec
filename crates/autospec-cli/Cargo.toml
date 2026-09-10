@@ -17,3 +17,8 @@ yaml-edit = "=0.2.3" # why: reject malformed explicit safety-policy YAML instead
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", default-features = false, features = ["dir", "fs", "process", "signal", "user"] } # why: safe descriptor enumeration/openat, euid, PID, and process operations
+
+[dev-dependencies]
+# Enable the shared fixture-executable publisher (issue #3500) so `src` unit tests
+# and the integration test binaries publish fixtures through one implementation.
+autospec-core = { path = "../autospec-core", features = ["test-support"] }
