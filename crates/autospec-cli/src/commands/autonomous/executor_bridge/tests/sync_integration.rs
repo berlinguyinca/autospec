@@ -493,6 +493,7 @@ fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before
 
     bridge::METADATA_WIP_FAILPOINT.with(|fp| fp.store(1));
     let interrupted = adopt().expect_err("interrupt after metadata is durably quarantined");
+    bridge::METADATA_WIP_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(interrupted.contains("injected metadata WIP crash"));
     assert_eq!(
         bridge::METADATA_WIP_SYNC_EVENTS.with(|events| events.borrow().clone()),

@@ -9,7 +9,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -442,17 +441,18 @@ fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_
     git(&fixture.repo, &["commit", "-m", "scripts-only change"]);
     let changed =
         bridge::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed manifest paths");
-    // The open-boundary probe is a local shared cell passed to the classifier, not a
-    // process-global failpoint (issue #3951): the handshake crosses a thread, so the
-    // cell must live where both threads can see it.
-    let open_probe = Arc::new(AtomicU8::new(1));
+    // The open-boundary probe is a named `CrossThreadFailpoint` cell passed to the
+    // classifier, not a per-test thread-local failpoint (issues #3951, #3778): the
+    // handshake crosses a thread, so the cell must live where both threads can see it.
+    let open_probe = Arc::new(bridge::CrossThreadFailpoint::new());
+    open_probe.store(1);
     let repo = fixture.repo.clone();
     let probe = Arc::clone(&open_probe);
     let classifier = thread::spawn(move || {
         bridge::npm_dependency_inputs_changed(&repo, &base_oid, &changed, Some(probe.as_ref()))
     });
     let deadline = Instant::now() + Duration::from_secs(5);
-    while open_probe.load(Ordering::SeqCst) != 2 {
+    while open_probe.load() != 2 {
         assert!(
             Instant::now() < deadline,
             "classifier did not reach open boundary"
@@ -464,7 +464,7 @@ fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_
     let attacker = fixture.root.join("attacker-package.json");
     fs::write(&attacker, r#"{"dependencies":{"fixture":"2"}}"#).expect("attacker manifest");
     symlink(&attacker, &manifest).expect("replace manifest with symlink");
-    open_probe.store(3, Ordering::SeqCst);
+    open_probe.store(3);
 
     let error = classifier
         .join()

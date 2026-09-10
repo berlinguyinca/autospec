@@ -40,6 +40,7 @@ fn autonomous_executor_bridge_prunable_zero_effect_branch_resumes_both_crash_bou
             Some(("claim-fresh", "invocation-fresh")),
         )
         .expect_err("interrupt zero-effect reclaim");
+        bridge::PRUNABLE_RECLAIM_FAILPOINT.with(|fp| fp.assert_reached());
         assert!(interrupted.contains("injected executor prunable reclaim crash"));
         let intent = worktree
             .path

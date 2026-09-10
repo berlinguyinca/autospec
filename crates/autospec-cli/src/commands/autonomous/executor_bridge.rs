@@ -138,17 +138,23 @@ enum ImplementationLintRepairOutcome {
 // keeps the store / swap / compare-exchange protocol the failpoint consumers are built
 // around, minus the memory ordering — there is only one accessor, so there is nothing
 // to order. Cross-thread handshake probes (the npm manifest-open TOCTOU test) receive
-// their probe cell explicitly at the call site instead of reaching for a global.
+// their probe cell explicitly at the call site instead of reaching for a global; the
+// `CrossThreadFailpoint` type below is the named home for that one cross-thread case,
+// deliberately distinct from this per-test, per-thread type (issue #3778).
 #[cfg(test)]
 #[derive(Debug)]
 struct ThreadFailpoint<T: Copy + PartialEq> {
+    name: &'static str,
+    default: T,
     value: RefCell<T>,
 }
 
 #[cfg(test)]
 impl<T: Copy + PartialEq> ThreadFailpoint<T> {
-    const fn new(value: T) -> Self {
+    const fn named(name: &'static str, value: T) -> Self {
         Self {
+            name,
+            default: value,
             value: RefCell::new(value),
         }
     }
@@ -177,22 +183,95 @@ impl<T: Copy + PartialEq> ThreadFailpoint<T> {
             Err(*current)
         }
     }
+
+    /// True while the current thread has armed this failpoint: the cell is
+    /// away from the disarmed default. A one-shot consumer resets the cell
+    /// to the default when the fault fires, so `!is_armed()` after the
+    /// expected crash proves the injected fault actually fired here.
+    fn is_armed(&self) -> bool {
+        !self.value.borrow().eq(&self.default)
+    }
+
+    /// A test that armed this failpoint but never observed the injected
+    /// failure must not pass silently: the consumer took the success path
+    /// and the crash the test exists to pin was never exercised (issue
+    /// #3778, AC3).
+    fn assert_reached(&self) {
+        assert!(
+            !self.is_armed(),
+            "failpoint {} was armed but never reached: the injected fault did not fire",
+            self.name
+        );
+    }
+}
+
+/// The one cross-thread failpoint type in this module (issue #3778, AC2).
+///
+/// Every other failpoint is a per-test, per-thread `ThreadFailpoint`. A
+/// cross-thread handshake probe is a different mechanism and a different
+/// type: the test allocates a single cell, passes it to the boundary
+/// explicitly, and the boundary reports when it reaches the open point so
+/// the test can change the world while the read is held. No global name can
+/// reach this type, and the type name says so at every use site.
+#[cfg(test)]
+#[derive(Debug)]
+struct CrossThreadFailpoint(AtomicU8);
+
+#[cfg(test)]
+impl CrossThreadFailpoint {
+    /// Disarmed. The test arms the cell (1) before the boundary runs; the
+    /// boundary holds at 2 and the test releases it with any other value.
+    const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    fn load(&self) -> u8 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn store(&self, value: u8) {
+        self.0.store(value, Ordering::SeqCst)
+    }
+
+    /// Reader side of the open-boundary handshake: when the test has armed
+    /// the cell (1), report that the open boundary is reached (2) and yield
+    /// until the test has changed the world and released the cell (any
+    /// value other than 2).
+    fn hold_at_open_boundary(&self) {
+        if self.load() == 1 {
+            self.store(2);
+            while self.load() == 2 {
+                thread::yield_now();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 thread_local! {
-    static BASE_DRIFT_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static EMPTY_RETRY_BASE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static RUNTIME_CLOSE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static METADATA_WIP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static BASE_DRIFT_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("base_drift", 0);
+    static EMPTY_RETRY_BASE_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("empty_retry_base", 0);
+    static RUNTIME_CLOSE_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("runtime_close", 0);
+    static METADATA_WIP_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("metadata_wip", 0);
     static METADATA_WIP_SYNC_EVENTS: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
-    static WORKTREE_REPAIR_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static POST_CI_RECREATE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static PRUNABLE_RECLAIM_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static ZERO_EFFECT_RECOVERY_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static EXECUTOR_ROOT_HARDEN_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static IMPLEMENTATION_COMMIT_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static WORKTREE_REPAIR_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("worktree_repair", 0);
+    static POST_CI_RECREATE_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("post_ci_recreate", 0);
+    static PRUNABLE_RECLAIM_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("prunable_reclaim", 0);
+    static ZERO_EFFECT_RECOVERY_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("zero_effect_recovery", 0);
+    static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("zero_effect_scope_parent_sync", 0);
+    static EXECUTOR_ROOT_HARDEN_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("executor_root_harden", 0);
+    static IMPLEMENTATION_COMMIT_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("implementation_commit", 0);
     static INTEGRATION_SYNC_RACE: RefCell<Option<(PathBuf, PathBuf, String, String)>> =
         RefCell::new(None);
 }
@@ -2690,7 +2769,9 @@ fn npm_dependency_inputs_changed(
     // Cross-thread handshake probe for the manifest-open TOCTOU test. This is the one
     // failpoint in the module that must be visible from a second thread, so the test
     // passes its own cell here instead of reaching for a process-global (issue #3951).
-    #[cfg(test)] manifest_open_failpoint: Option<&AtomicU8>,
+    // The named `CrossThreadFailpoint` type marks the distinction: it is the only
+    // cross-thread failpoint and is never reachable through a global name (issue #3778).
+    #[cfg(test)] manifest_open_failpoint: Option<&CrossThreadFailpoint>,
 ) -> Result<bool, String> {
     for path in &changed_paths.all {
         let name = Path::new(path).file_name().and_then(|name| name.to_str());
@@ -2711,12 +2792,7 @@ fn npm_dependency_inputs_changed(
                 .map_err(|error| format!("current {path} is unsafe: {error}"))?;
             #[cfg(test)]
             if let Some(open_probe) = manifest_open_failpoint {
-                if open_probe.load(Ordering::SeqCst) == 1 {
-                    open_probe.store(2, Ordering::SeqCst);
-                    while open_probe.load(Ordering::SeqCst) == 2 {
-                        thread::yield_now();
-                    }
-                }
+                open_probe.hold_at_open_boundary();
             }
             #[cfg(not(unix))]
             let body: Vec<u8> =
@@ -17369,15 +17445,23 @@ pub(crate) struct HarnessLaunch<'a> {
 // never leaks between parallel `cargo test` threads (issue #3951).
 #[cfg(test)]
 thread_local! {
-    static LAUNCH_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(LaunchFailpoint::None as u8);
-    static CLEANUP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(LaunchFailpoint::None as u8);
+    static LAUNCH_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("launch", LaunchFailpoint::None as u8);
+    static CLEANUP_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("cleanup", LaunchFailpoint::None as u8);
     #[cfg(target_os = "linux")]
-    static CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER: ThreadFailpoint<u8> = ThreadFailpoint::new(2);
-    static LAST_SPAWN_SUPERVISOR: ThreadFailpoint<u32> = ThreadFailpoint::new(0);
-    static LAST_SPAWN_HARNESS: ThreadFailpoint<u32> = ThreadFailpoint::new(0);
-    static PARENT_CAPTURE_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static PARENT_REAP_FAILPOINT: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
-    static RAW_READ_INTERRUPTED_ONCE: ThreadFailpoint<u8> = ThreadFailpoint::new(0);
+    static CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("cleanup_previous_subreaper", 2);
+    static LAST_SPAWN_SUPERVISOR: ThreadFailpoint<u32> =
+        ThreadFailpoint::named("last_spawn_supervisor", 0);
+    static LAST_SPAWN_HARNESS: ThreadFailpoint<u32> =
+        ThreadFailpoint::named("last_spawn_harness", 0);
+    static PARENT_CAPTURE_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("parent_capture", 0);
+    static PARENT_REAP_FAILPOINT: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("parent_reap", 0);
+    static RAW_READ_INTERRUPTED_ONCE: ThreadFailpoint<u8> =
+        ThreadFailpoint::named("raw_read_interrupted_once", 0);
 }
 const LAUNCH_FAILPOINT_NEVER_READY: u8 = 4;
 const LAUNCH_FAILPOINT_NEVER_CLOSE_EXEC_STATUS: u8 = 5;
@@ -18641,7 +18725,8 @@ const DESCENDANT_DESCRIPTOR_RESERVE: u64 = 32;
 
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
-    static DESCRIPTOR_LIMIT_OVERRIDE: ThreadFailpoint<u64> = ThreadFailpoint::new(0);
+    static DESCRIPTOR_LIMIT_OVERRIDE: ThreadFailpoint<u64> =
+        ThreadFailpoint::named("descriptor_limit_override", 0);
 }
 
 /// Test-only ceiling. Lowering the real `RLIMIT_NOFILE` is process-global and would poison

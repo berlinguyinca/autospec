@@ -44,6 +44,7 @@ fn autonomous_executor_bridge_codex_sandbox_repairs_prunable_post_child_worktree
     bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.store(1));
     let interrupted = bridge::repair_missing_post_child_worktree(&state)
         .expect_err("interrupt repair after durable prune");
+    bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(interrupted.contains("injected executor worktree repair crash"));
     let repair_intent = worktree
         .path

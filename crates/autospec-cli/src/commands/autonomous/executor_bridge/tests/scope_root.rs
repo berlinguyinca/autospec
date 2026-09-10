@@ -310,6 +310,7 @@ fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair()
     bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.store(1));
     let first = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("scope parent sync must fail after recreation");
+    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(
         first.contains("sync recreated executor zero-effect scope"),
         "{first}"
@@ -323,6 +324,7 @@ fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair()
     bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.store(1));
     let retry = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("restart must retry parent sync for the existing scope");
+    bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(
         retry.contains("sync recreated executor zero-effect scope"),
         "{retry}"
@@ -365,6 +367,7 @@ fn autonomous_executor_bridge_hardens_root_only_after_zero_effect_marker() {
 
     let error = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("recovery must harden the executor root before scope recreation");
+    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(error.contains("harden executor worktree root"), "{error}");
     assert!(
         bridge::zero_effect_recovery_marker_path(&state_path).is_file(),
@@ -452,7 +455,9 @@ fn autonomous_executor_bridge_provisioning_hardens_root_before_scope_creation() 
         .join(bridge::safe_scope(&repository_scope).expect("safe scope"));
 
     bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.store(1));
-    match bridge::provision_issue_worktree(&fixture.repo, &repository_scope, 42, &base) {
+    let outcome = bridge::provision_issue_worktree(&fixture.repo, &repository_scope, 42, &base);
+    bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT.with(|fp| fp.assert_reached());
+    match outcome {
         Err(error) => assert!(error.contains("harden executor worktree root"), "{error}"),
         Ok(worktree) => {
             git(
