@@ -21,6 +21,15 @@
 //! 3. **Transcripts under the size threshold are quoted verbatim** in the
 //!    status record. Longer transcripts are recorded by byte count only, so
 //!    a status line stays printable.
+//! 4. **`agent_rc=0` with zero output is a contradiction, not a quiet
+//!    success** (issue #3749). A runner that exited cleanly but produced
+//!    nothing is the shape of a silent failure — the agent believed it
+//!    succeeded while writing nothing. Such a record carries the
+//!    [`NO_OUTPUT_RC_ZERO`] failure signature, and N of them in one batch
+//!    raise the same `REPEATED_IDENTICAL_FAILURE` fault as N identical
+//!    infrastructure failures. A nonzero exit with zero output stays a plain
+//!    `NO-OUTPUT`: the agent died, which is plausible and not a
+//!    contradiction.
 //!
 //! The batch layer: `summarize_batch` counts the statuses and raises a
 //! fleet-level fault (`REPEATED_IDENTICAL_FAILURE`) when the same failure
@@ -54,6 +63,9 @@ pub const LAUNCH_FAIL_STATUS: &str = "LAUNCH-FAIL";
 pub const REPEATED_IDENTICAL_FAILURE: &str = "REPEATED_IDENTICAL_FAILURE";
 /// Sub-fleet report code: no agents running while eligible work is open.
 pub const SUBFLEET_IDLE: &str = "SUBFLEET-IDLE";
+/// Failure signature: the agent exited 0 but produced no output — a
+/// contradiction that must be reported, not read as success (issue #3749).
+pub const NO_OUTPUT_RC_ZERO: &str = "NO-OUTPUT-RC-ZERO";
 
 /// The column order of the `agent-status.tsv` record.
 pub const TSV_HEADER: &str =
@@ -196,6 +208,10 @@ pub struct RunRecord {
     pub duration_secs: u64,
     /// The run's full transcript (stderr + final message).
     pub transcript: String,
+    /// The agent's exit code when the runner reports it. Used to flag
+    /// `agent_rc=0` with zero output as the [`NO_OUTPUT_RC_ZERO`] contradiction.
+    #[serde(default)]
+    pub agent_rc: Option<i32>,
 }
 
 /// Tunables for classification and batch summarization.
@@ -246,7 +262,9 @@ pub struct RunStatusRecord {
     pub duration_secs: u64,
     /// Transcript length in bytes, always recorded.
     pub transcript_bytes: usize,
-    /// `INFRA-FAIL/<category>/<signature>` for infra failures, else `None`.
+    /// `INFRA-FAIL/<category>/<signature>` for infra failures,
+    /// [`NO_OUTPUT_RC_ZERO`] for a zero-output run whose agent exited 0,
+    /// else `None`.
     pub failure_signature: Option<String>,
     /// The transcript verbatim when it fits the quote threshold, else `None`.
     pub quoted_transcript: Option<String>,
@@ -372,12 +390,21 @@ pub fn classify_run(run: &RunRecord, policy: &FleetDispatchPolicy) -> RunStatusR
     } else {
         RunStatus::Ok
     };
+    // A clean exit with zero output is a contradiction: the agent reported
+    // success while writing nothing. Sign it so it is reported (and groups
+    // into a fleet fault) instead of read as a quiet success. A nonzero exit
+    // with no output is a plausible failure and stays unsigned.
+    let failure_signature = if status == RunStatus::NoOutput && run.agent_rc == Some(0) {
+        Some(NO_OUTPUT_RC_ZERO.to_string())
+    } else {
+        None
+    };
     RunStatusRecord {
         issue: run.issue.clone(),
         status,
         duration_secs: run.duration_secs,
         transcript_bytes,
-        failure_signature: None,
+        failure_signature,
         quoted_transcript,
         consumes_attempt: true,
     }
@@ -563,6 +590,16 @@ mod tests {
             issue: issue.to_string(),
             duration_secs,
             transcript: transcript.to_string(),
+            agent_rc: None,
+        }
+    }
+
+    fn run_with_rc(issue: &str, duration_secs: u64, transcript: &str, agent_rc: i32) -> RunRecord {
+        RunRecord {
+            issue: issue.to_string(),
+            duration_secs,
+            transcript: transcript.to_string(),
+            agent_rc: Some(agent_rc),
         }
     }
 
@@ -804,6 +841,73 @@ mod tests {
         assert!(
             summary.faults.is_empty(),
             "three different infrastructure failures are not one repeated failure"
+        );
+    }
+
+    /// The zero-output contradiction from issue #3749: an agent that exited
+    /// 0 while writing nothing must be flagged, not read as a quiet success.
+    #[test]
+    fn zero_output_with_rc_zero_is_flagged_contradiction() {
+        let record = classify_run(&run_with_rc("71", 300, "", 0), &policy());
+        assert_eq!(record.status, RunStatus::NoOutput);
+        assert!(record.consumes_attempt);
+        assert_eq!(record.failure_signature.as_deref(), Some(NO_OUTPUT_RC_ZERO));
+    }
+
+    /// A nonzero exit with zero output is a plausible failure and stays a
+    /// plain unsigned NO-OUTPUT.
+    #[test]
+    fn zero_output_with_nonzero_rc_is_not_flagged() {
+        for rc in [1, 2, 127] {
+            let record = classify_run(&run_with_rc("72", 300, "", rc), &policy());
+            assert_eq!(record.status, RunStatus::NoOutput);
+            assert_eq!(
+                record.failure_signature, None,
+                "rc={rc} with no output is a plausible failure, not a contradiction"
+            );
+        }
+    }
+
+    /// Without a reported exit code there is no contradiction to flag.
+    #[test]
+    fn zero_output_without_exit_code_is_not_flagged() {
+        let record = classify_run(&run("73", 300, "   "), &policy());
+        assert_eq!(record.status, RunStatus::NoOutput);
+        assert_eq!(record.failure_signature, None);
+    }
+
+    /// N identical zero-output-rc-zero runs in one batch raise the same
+    /// fleet fault as N identical infrastructure failures.
+    #[test]
+    fn repeated_zero_output_rc_zero_is_a_fleet_fault() {
+        let records = (1..=3)
+            .map(|n| classify_run(&run_with_rc(&n.to_string(), 300, "", 0), &policy()))
+            .collect::<Vec<_>>();
+        let summary = summarize_batch(&records, &policy());
+        assert_eq!(summary.no_output, 3);
+        assert_eq!(summary.faults.len(), 1);
+        let fault = &summary.faults[0];
+        assert_eq!(fault.code, REPEATED_IDENTICAL_FAILURE);
+        assert_eq!(fault.status, RunStatus::NoOutput);
+        assert_eq!(fault.signature, NO_OUTPUT_RC_ZERO);
+        assert_eq!(fault.count, 3);
+        assert!(summary.lines()[1].contains("signature=NO-OUTPUT-RC-ZERO"));
+    }
+
+    /// rc-zero contradictions and bare zero-output failures are distinct
+    /// identities and must not group into one fault.
+    #[test]
+    fn rc_zero_and_bare_no_output_do_not_mingle() {
+        let records = vec![
+            classify_run(&run_with_rc("81", 300, "", 0), &policy()),
+            classify_run(&run("82", 300, ""), &policy()),
+            classify_run(&run("83", 300, "  \n "), &policy()),
+        ];
+        let summary = summarize_batch(&records, &policy());
+        assert_eq!(summary.no_output, 3);
+        assert!(
+            summary.faults.is_empty(),
+            "one signed plus two unsigned no-output records are two distinct identities of 1 and 2, neither at threshold"
         );
     }
 
