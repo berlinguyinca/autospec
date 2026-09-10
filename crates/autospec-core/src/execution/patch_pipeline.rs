@@ -108,6 +108,27 @@
 //!     reported in the run summary ([`logic_change_report`],
 //!     [`run_summary`]) instead of silently attributing results from two
 //!     logics to one (#4041).
+//! 14. **A patch's verdict, not its existence, answers "already
+//!     produced"** ([`PatchVerdict`], [`ConversionClass::verdict`]). A
+//!     re-dispatch gate that keyed on existence could not tell a held
+//!     patch from a converted one: both sit in the queue, and a hold was
+//!     therefore indistinguishable from done work — the issue stayed open,
+//!     owed its work, and was acted on by nothing (#3674). A converted or
+//!     resolved patch is done; a held patch is not; a candidate and a
+//!     [`ConversionClass::CouldNotEvaluate`] state have no verdict at
+//!     all, because the pass has not decided.
+//! 15. **Held patches are retired to outside the patch glob, with the
+//!     reason recorded** ([`plan_retirement`], [`HoldReason`],
+//!     [`retirement_root`]) — and only where a re-run would plausibly
+//!     differ, so the issue becomes eligible for re-dispatch again and a
+//!     repeat hold is visible instead of silent. Retirement invalidates
+//!     the memoized hold ([`ConversionMemo::invalidate`]) so the next
+//!     pass re-walks the patch against the rules as they stand now
+//!     instead of re-holding it from the record for the same since-fixed
+//!     reason (#3674).
+//! 16. **The queue reports its inert fraction** ([`queue_health`]):
+//!     "120 queued, 43 held" is the line that makes the trap visible, and
+//!     it is one loop to compute (#3674).
 
 use std::collections::BTreeMap;
 
@@ -122,7 +143,12 @@ use std::collections::BTreeMap;
 /// recorded under ([`ConversionMemo::records`]) and the pass reports a
 /// mid-run change of logic instead of passing it off as one version's
 /// work ([`logic_change_report`], #3866 pattern).
-pub const CONVERSION_LOGIC_VERSION: u32 = 1;
+/// Bumped to 2 in #3674: the re-dispatch verdict ([`PatchVerdict`],
+/// [`ConversionClass::verdict`]) and held-patch retirement
+/// ([`plan_retirement`]) are new decision logic in this module, so
+/// results recorded under version 1 are hypotheses the version-2 logic
+/// re-verifies, not decisions.
+pub const CONVERSION_LOGIC_VERSION: u32 = 2;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -181,6 +207,51 @@ impl ConversionClass {
             self,
             Self::ExistingPr | Self::ClosedIssue | Self::MemoizedHold | Self::NoNetChange
         )
+    }
+
+    /// The verdict this class carries for the re-dispatch gate (#3674).
+    /// A landed or resolved terminal class is done; a memoized hold is
+    /// not, because the work is produced but unlanded and the issue is
+    /// still open. [`Candidate`] and [`CouldNotEvaluate`] have no verdict
+    /// at all: the pass has not decided (work still to do, or a state of
+    /// the setup, not of the patch), and "not yet decided" must not be
+    /// reported as "done".
+    pub fn verdict(self) -> Option<PatchVerdict> {
+        match self {
+            Self::ExistingPr => Some(PatchVerdict::Converted),
+            Self::ClosedIssue | Self::NoNetChange => Some(PatchVerdict::Resolved),
+            Self::MemoizedHold => Some(PatchVerdict::Held),
+            Self::CouldNotEvaluate | Self::Candidate => None,
+        }
+    }
+}
+
+/// The verdict of a terminal patch, as a re-dispatch gate must see it
+/// (#3674).
+///
+/// Existence is not the test. A held patch exists — produced, paid for,
+/// sitting in the queue — and it is not done: its issue is still open
+/// and still owed the work. A gate that answers "already produced" from
+/// existence makes such issues inert forever, because nothing ever
+/// retires a hold that looks exactly like a completed conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchVerdict {
+    /// The work has landed: the patch converted to a pull request.
+    Converted,
+    /// The work resolved to no conversion: the issue is closed, or the
+    /// patch is a no-op. Terminal like converted — the issue must not be
+    /// re-dispatched.
+    Resolved,
+    /// The pass held the patch for a recorded reason: the work is
+    /// produced but unlanded, and the issue is still open.
+    Held,
+}
+
+impl PatchVerdict {
+    /// The "already produced" answer for the re-dispatch gate (#3674):
+    /// a converted or resolved patch is done; a held patch is not.
+    pub fn is_done(self) -> bool {
+        !matches!(self, Self::Held)
     }
 }
 
@@ -252,6 +323,15 @@ impl Patch {
             "stale base: {} built against {}, trunk tip is {}",
             self.identity, self.base_sha, current_tip
         ))
+    }
+
+    /// The "already produced" check for this patch (#3674): it references
+    /// the verdict, not the existence. A converted or resolved patch is
+    /// done; a held patch is not, because its issue is still open; a
+    /// candidate and a [`ConversionClass::CouldNotEvaluate`] state have
+    /// no verdict, and the pass has not decided.
+    pub fn is_done(&self) -> bool {
+        self.class.verdict().is_some_and(PatchVerdict::is_done)
     }
 }
 
@@ -675,6 +755,20 @@ impl ConversionMemo {
             .rev()
             .collect()
     }
+
+    /// Invalidate the recorded decision for this exact (identity, base
+    /// sha) pair under the given logic version (#3674). Retiring a held
+    /// patch removes its entry so the next pass re-walks the patch
+    /// against the rules as they stand now, instead of re-holding it
+    /// from the record for the same since-fixed reason. Only the entry
+    /// under the named version is removed: verdicts a superseded version
+    /// recorded stay queryable via [`Self::records`] — the audit trail
+    /// outlives the decision. Returns whether an entry was removed.
+    pub fn invalidate(&mut self, identity: &str, base_sha: &str, logic_version: u32) -> bool {
+        self.entries
+            .remove(&(identity.to_string(), base_sha.to_string(), logic_version))
+            .is_some()
+    }
 }
 
 /// A memo record with the identity of the logic that produced it (#4041).
@@ -976,6 +1070,139 @@ pub fn superseded_verdict_report(
         "superseded memo verdict: {}@{} was last decided under logic v{}, the pass is running v{} — the recorded decision requires re-verification, not a memo hit",
         patch.identity, patch.base_sha, newest.logic_version, logic_version
     ))
+}
+
+/// Why the pass held a patch (#3674). Recorded with the retirement so a
+/// repeat hold is visible rather than silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldReason {
+    /// A deterministic rule — a lint or policy gate — failed, and the
+    /// agent prompt or the rule itself has since changed.
+    RuleFixed,
+    /// A genuine build or test failure the agent reproduces.
+    BuildFailure,
+}
+
+impl HoldReason {
+    /// Whether a re-run of the held patch could plausibly differ. That is
+    /// the retirement question, and it is a judgement about *why* the
+    /// patch was held, not about the hold itself: a deterministic rule
+    /// the agent has learned since, yes — a re-run meets the fixed rule;
+    /// a genuine build failure the agent reproduces, no — a re-run
+    /// reproduces it, and retiring would discard paid-for work with no
+    /// chance of a different outcome.
+    pub fn rerun_plausibly_differs(self) -> bool {
+        matches!(self, Self::RuleFixed)
+    }
+}
+
+/// One held patch being retired out of the active queue (#3674).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirementPlan {
+    /// The identity of the held patch being retired.
+    pub patch: String,
+    /// The retirement destination, deliberately outside the active patch
+    /// glob: once the patch is moved there it no longer counts as
+    /// "already produced", so the issue becomes eligible for
+    /// re-dispatch.
+    pub destination: String,
+    /// Why the pass held the patch, recorded next to the retired patch so
+    /// a repeat hold is visible rather than silent.
+    pub reason: HoldReason,
+}
+
+/// The retirement directory under `root`: `{root}/out-retired`, outside
+/// the active patch glob.
+pub fn retirement_root(root: &str) -> String {
+    format!("{root}/out-retired")
+}
+
+/// Plan the retirement of one held patch (#3674): held patches are
+/// retired rather than left in place, so their issue becomes eligible
+/// for re-dispatch, and the hold reason travels with the patch so a
+/// repeat is visible.
+///
+/// Retirement is refused when:
+/// - the patch is not held: only a held patch is inert and worth
+///   retiring;
+/// - the hold would not differ on a re-run ([`HoldReason`]): retiring a
+///   build failure discards paid-for work with no chance of a different
+///   outcome;
+/// - the root is empty.
+///
+/// The plan does not move the patch or touch the memo. The caller moves
+/// the file to `destination` and calls [`ConversionMemo::invalidate`]
+/// for the same (identity, base sha, logic version) triple: skip the
+/// invalidation and the pass re-holds the patch from the record, for the
+/// same since-fixed reason.
+pub fn plan_retirement(
+    patch: &Patch,
+    reason: HoldReason,
+    root: &str,
+) -> Result<RetirementPlan, String> {
+    if patch.class != ConversionClass::MemoizedHold {
+        return Err(format!(
+            "only held patches can be retired, not {:?}",
+            patch.class
+        ));
+    }
+    if !reason.rerun_plausibly_differs() {
+        return Err(format!(
+            "refusing to retire a {:?} hold: a re-run would not plausibly differ",
+            reason
+        ));
+    }
+    if root.trim().is_empty() {
+        return Err("retirement root must not be empty".to_string());
+    }
+    Ok(RetirementPlan {
+        patch: patch.identity.clone(),
+        destination: format!("{}/{}", retirement_root(root), patch.identity),
+        reason,
+    })
+}
+
+/// The health of a conversion queue, as the operator should see it
+/// (#3674): the total, and the inert fraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueHealth {
+    /// Every patch in the queue, held or not.
+    pub queued: usize,
+    /// Patches the pass held: produced, unlandable, skipped by every
+    /// later pass. Their issues are open but inert.
+    pub held: usize,
+}
+
+impl QueueHealth {
+    /// The inert fraction: held patches as a share of the queue. An empty
+    /// queue is not inert — there is nothing sitting there.
+    pub fn inert_fraction(&self) -> f64 {
+        if self.queued == 0 {
+            return 0.0;
+        }
+        self.held as f64 / self.queued as f64
+    }
+
+    /// The one line that makes the inert fraction visible: "120 queued,
+    /// 43 held".
+    pub fn report(&self) -> String {
+        format!("{} queued, {} held", self.queued, self.held)
+    }
+}
+
+/// Measure the queue's inert fraction in one loop (#3674). A patch counts
+/// as held when its verdict is held — the same verdict the re-dispatch
+/// gate references, never the bare existence of the patch. A candidate
+/// and a [`ConversionClass::CouldNotEvaluate`] state count as queued but
+/// not held: the pass has not decided them, and an undecided patch is
+/// not yet inert.
+pub fn queue_health(patches: &[Patch]) -> QueueHealth {
+    let queued = patches.len();
+    let held = patches
+        .iter()
+        .filter(|patch| patch.class.verdict() == Some(PatchVerdict::Held))
+        .count();
+    QueueHealth { queued, held }
 }
 
 /// The platform's `mergeable` state for an open pull request.
@@ -3368,7 +3595,7 @@ mod tests {
             decide_publication("#41", &a, Some("#42"), CONVERSION_LOGIC_VERSION).unwrap();
         assert_eq!(
             outcome_a.claim_line("#41"),
-            "CONVERTED (PR #42 merged): #41 [logic v1]"
+            format!("CONVERTED (PR #42 merged): #41 [logic v{CONVERSION_LOGIC_VERSION}]")
         );
         log.record("#41", outcome_a).unwrap();
 
@@ -3385,7 +3612,9 @@ mod tests {
             decide_publication("#42", &b, Some("#43"), CONVERSION_LOGIC_VERSION).unwrap();
         assert_eq!(
             outcome_b.claim_line("#42"),
-            "CONVERTED (PR #43 open, merge deferred): #42 [logic v1]"
+            format!(
+                "CONVERTED (PR #43 open, merge deferred): #42 [logic v{CONVERSION_LOGIC_VERSION}]"
+            )
         );
         log.record("#42", outcome_b).unwrap();
 
@@ -3413,7 +3642,9 @@ mod tests {
         }
         let line_c = outcome_c.claim_line("#43");
         assert!(
-            line_c.starts_with("HELD at gh pr create: #43 [logic v1]:"),
+            line_c.starts_with(&format!(
+                "HELD at gh pr create: #43 [logic v{CONVERSION_LOGIC_VERSION}]:"
+            )),
             "{line_c}"
         );
         assert!(
@@ -3429,9 +3660,11 @@ mod tests {
         assert_eq!(
             log.claim_lines(),
             vec![
-                "CONVERTED (PR #42 merged): #41 [logic v1]",
-                "CONVERTED (PR #43 open, merge deferred): #42 [logic v1]",
-                "HELD at gh pr create: #43 [logic v1]: GraphQL: no commits between main and conv/issue-#43",
+                format!("CONVERTED (PR #42 merged): #41 [logic v{CONVERSION_LOGIC_VERSION}]"),
+                format!("CONVERTED (PR #43 open, merge deferred): #42 [logic v{CONVERSION_LOGIC_VERSION}]"),
+                format!(
+                    "HELD at gh pr create: #43 [logic v{CONVERSION_LOGIC_VERSION}]: GraphQL: no commits between main and conv/issue-#43"
+                ),
             ]
         );
         // A patch cannot be re-recorded over its first claim.
@@ -3602,11 +3835,15 @@ mod tests {
         );
         assert!(summary.contains("converted: 1, held: 1"), "{summary}");
         assert!(
-            summary.contains("CONVERTED (PR #42 merged): #41 [logic v1]"),
+            summary.contains(&format!(
+                "CONVERTED (PR #42 merged): #41 [logic v{CONVERSION_LOGIC_VERSION}]"
+            )),
             "{summary}"
         );
         assert!(
-            summary.contains("HELD at gh pr create: #44 [logic v1]:"),
+            summary.contains(&format!(
+                "HELD at gh pr create: #44 [logic v{CONVERSION_LOGIC_VERSION}]:"
+            )),
             "{summary}"
         );
         assert!(
@@ -3787,7 +4024,10 @@ mod tests {
         let report =
             superseded_verdict_report(&memo, &patches[0], CONVERSION_LOGIC_VERSION).unwrap();
         assert!(report.contains("logic v0"), "{report}");
-        assert!(report.contains("running v1"), "{report}");
+        assert!(
+            report.contains(&format!("running v{CONVERSION_LOGIC_VERSION}")),
+            "{report}"
+        );
 
         // The same decision re-recorded under the current logic is live:
         // a memo hit, nothing superseded.
@@ -3819,7 +4059,10 @@ mod tests {
         // it in the summary — with both operands (#3866).
         let alarm = logic_change_report(0, CONVERSION_LOGIC_VERSION).unwrap();
         assert!(alarm.contains("v0"), "{alarm}");
-        assert!(alarm.contains("v1"), "{alarm}");
+        assert!(
+            alarm.contains(&format!("v{CONVERSION_LOGIC_VERSION}")),
+            "{alarm}"
+        );
 
         let summary = run_summary(
             &PublicationLog::new(),
@@ -3847,5 +4090,161 @@ mod tests {
         );
         assert!(logic_change_report(CONVERSION_LOGIC_VERSION, CONVERSION_LOGIC_VERSION).is_none());
         assert_eq!(summary.lines().count(), 2);
+    }
+
+    // #3674: the inert-queue trap — verdicts, retirement, inert fraction.
+
+    #[test]
+    fn the_verdict_maps_every_decided_class_and_leaves_undecided_open() {
+        assert_eq!(
+            ConversionClass::ExistingPr.verdict(),
+            Some(PatchVerdict::Converted)
+        );
+        assert_eq!(
+            ConversionClass::ClosedIssue.verdict(),
+            Some(PatchVerdict::Resolved)
+        );
+        assert_eq!(
+            ConversionClass::NoNetChange.verdict(),
+            Some(PatchVerdict::Resolved)
+        );
+        assert_eq!(
+            ConversionClass::MemoizedHold.verdict(),
+            Some(PatchVerdict::Held)
+        );
+        // The pass has not decided either of these: no verdict, and
+        // "not yet decided" must not be reported as "done". A
+        // CouldNotEvaluate is a state of the setup, not of the patch
+        // (#3866), re-evaluated on every pass.
+        assert_eq!(ConversionClass::Candidate.verdict(), None);
+        assert_eq!(ConversionClass::CouldNotEvaluate.verdict(), None);
+    }
+
+    #[test]
+    fn only_converted_and_resolved_verdicts_are_done() {
+        assert!(PatchVerdict::Converted.is_done());
+        assert!(PatchVerdict::Resolved.is_done());
+        // The trap #3674 closes: a held patch exists, and it is not done.
+        assert!(!PatchVerdict::Held.is_done());
+    }
+
+    #[test]
+    fn the_patch_is_done_check_references_the_verdict_not_the_existence() {
+        // The patch exists in every case here; only the verdict differs.
+        assert!(patch("a", "s1", ConversionClass::ExistingPr).is_done());
+        assert!(patch("b", "s2", ConversionClass::NoNetChange).is_done());
+        // The held patch exists in the queue, and the gate must not
+        // answer "already produced": the issue is still open.
+        assert!(!patch("c", "s3", ConversionClass::MemoizedHold).is_done());
+        // A candidate exists too, and the pass has not decided.
+        assert!(!patch("d", "s4", ConversionClass::Candidate).is_done());
+        assert!(!patch("e", "s5", ConversionClass::CouldNotEvaluate).is_done());
+    }
+
+    #[test]
+    fn queue_health_counts_the_inert_fraction_in_one_loop() {
+        let patches = vec![
+            patch("a", "s1", ConversionClass::MemoizedHold),
+            patch("b", "s2", ConversionClass::ExistingPr),
+            patch("c", "s3", ConversionClass::MemoizedHold),
+            patch("d", "s4", ConversionClass::Candidate),
+            patch("e", "s5", ConversionClass::CouldNotEvaluate),
+            patch("f", "s6", ConversionClass::MemoizedHold),
+        ];
+
+        let health = queue_health(&patches);
+        assert_eq!(health.queued, 6);
+        assert_eq!(health.held, 3);
+        assert!((health.inert_fraction() - 0.5).abs() < f64::EPSILON);
+        assert_eq!(health.report(), "6 queued, 3 held");
+    }
+
+    #[test]
+    fn an_empty_queue_is_not_inert() {
+        let health = queue_health(&[]);
+        assert_eq!(health.queued, 0);
+        assert_eq!(health.held, 0);
+        assert_eq!(health.inert_fraction(), 0.0);
+        assert_eq!(health.report(), "0 queued, 0 held");
+    }
+
+    #[test]
+    fn only_rule_fixed_holds_rerun_plausibly_differ() {
+        // A deterministic rule the agent has learned since: a re-run
+        // differs. A genuine build failure the agent reproduces: it does
+        // not.
+        assert!(HoldReason::RuleFixed.rerun_plausibly_differs());
+        assert!(!HoldReason::BuildFailure.rerun_plausibly_differs());
+    }
+
+    #[test]
+    fn retirement_is_planned_for_rule_fixed_holds_only() {
+        let held = patch("issue-41", "base-1", ConversionClass::MemoizedHold);
+        let converted = patch("issue-42", "base-2", ConversionClass::ExistingPr);
+
+        let plan = plan_retirement(&held, HoldReason::RuleFixed, "/scratch/out").unwrap();
+        // The destination is outside the active patch glob: once moved,
+        // the patch no longer counts as "already produced".
+        assert_eq!(plan.destination, "/scratch/out/out-retired/issue-41");
+        assert_eq!(plan.patch, "issue-41");
+        // The reason travels with the patch: a repeat hold is visible.
+        assert_eq!(plan.reason, HoldReason::RuleFixed);
+
+        // A build-failure hold is not retired: a re-run would reproduce
+        // it, so retiring discards paid-for work for nothing.
+        let error = plan_retirement(&held, HoldReason::BuildFailure, "/scratch/out").unwrap_err();
+        assert!(error.contains("BuildFailure"));
+        // A patch the pass did not hold is not retired.
+        let error = plan_retirement(&converted, HoldReason::RuleFixed, "/scratch/out").unwrap_err();
+        assert!(error.contains("only held"));
+        // An empty root is a configuration error.
+        assert!(plan_retirement(&held, HoldReason::RuleFixed, "  ").is_err());
+    }
+
+    #[test]
+    fn retirement_invalidates_only_the_running_logic_version() {
+        let mut memo = ConversionMemo::new();
+        // A superseded version's hold is still on file (audit trail),
+        // and the running version holds the same pair.
+        memo.record("issue-41", "base-1", ConversionClass::MemoizedHold, 1)
+            .unwrap();
+        memo.record(
+            "issue-41",
+            "base-1",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            memo.lookup("issue-41", "base-1", CONVERSION_LOGIC_VERSION),
+            Some(ConversionClass::MemoizedHold)
+        );
+
+        // Without invalidation the next pass re-holds from the record,
+        // for the same since-fixed reason.
+        assert!(memo.invalidate("issue-41", "base-1", CONVERSION_LOGIC_VERSION));
+        assert_eq!(
+            memo.lookup("issue-41", "base-1", CONVERSION_LOGIC_VERSION),
+            None
+        );
+        // The superseded version's record survives: the audit trail
+        // outlives the decision.
+        assert_eq!(memo.records("issue-41", "base-1").len(), 1);
+
+        // A different (identity, base sha) pair is untouched.
+        memo.record("issue-42", "base-2", ConversionClass::MemoizedHold, 1)
+            .unwrap();
+        assert!(memo.invalidate("issue-42", "base-2", 1));
+        // Invalidating twice, or a never-recorded pair, removes nothing.
+        assert!(!memo.invalidate("issue-42", "base-2", 1));
+        assert!(!memo.invalidate("never-recorded", "base-3", 1));
+    }
+
+    #[test]
+    fn the_logic_version_bumped_when_the_verdict_logic_landed() {
+        // #3674 added new decision logic (the re-dispatch verdict and
+        // retirement planning): results recorded under version 1 are
+        // hypotheses the version-2 logic re-verifies, not decisions.
+        assert_eq!(CONVERSION_LOGIC_VERSION, 2);
     }
 }
