@@ -1,4 +1,5 @@
 pub mod backlog;
+pub mod closure;
 pub mod endpoint;
 pub mod executor;
 pub mod gate;
