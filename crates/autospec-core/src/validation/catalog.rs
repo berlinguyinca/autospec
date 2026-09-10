@@ -32,6 +32,7 @@ impl ValidationCheck {
             "check_lockstep" => CheckOwner::RustNative(StructuralCheck::TrioLockstep),
             "check_lockstep_duo" => CheckOwner::RustNative(StructuralCheck::DuoLockstep),
             "check_bash_syntax" => CheckOwner::ExternalBatch(ExternalCheck::BashSyntax),
+            "check_shell_lint" => CheckOwner::ExternalBatch(ExternalCheck::ShellLint),
             "check_frontmatter" => CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
             "check_flag_sentinel_docs" => CheckOwner::RustNative(StructuralCheck::FlagSentinelDocs),

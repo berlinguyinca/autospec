@@ -51,8 +51,8 @@ fn direct_plans_match_the_frozen_catalog_in_full_fast_scoped_and_parallel_modes(
     // restore-visibility ratchet (#3878) moved the true count to 161/156 and
     // this file caught up there; the generated-artifact consumer-drift
     // ratchet (#3893) is full-plan only: 162/157.
-    assert_eq!(full.ids().len(), 163);
-    assert_eq!(full.unique_ids().len(), 158);
+    assert_eq!(full.ids().len(), 164); // +1: shell-lint gate (#3856)
+    assert_eq!(full.unique_ids().len(), 159);
 
     let fast_options =
         ValidationOptions::parse(["--fast", "--jobs=4"]).expect("fast options parse");

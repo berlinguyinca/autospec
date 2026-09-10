@@ -106,6 +106,7 @@ pub enum ExternalCheck {
     ArchitectureFitnessEngine,
     Phase4TestSuites,
     ValidationMatrixSmoke,
+    ShellLint,
 }
 
 impl ExternalCheck {
@@ -317,6 +318,7 @@ impl ExternalCheck {
             Self::ArchitectureFitnessEngine => run_architecture_fitness_engine(id, required, root),
             Self::Phase4TestSuites => run_phase4_test_suites(id, required, root),
             Self::ValidationMatrixSmoke => run_validation_matrix_smoke(id, required, root),
+            Self::ShellLint => run_shell_lint(id, required, root),
         }
     }
 }
@@ -368,6 +370,187 @@ fn run_bash_syntax_targets(
         }
     }
     aggregate(id, required, results)
+}
+
+/// The shell-lint rule set is deliberately targeted (#3856), not "all of shellcheck":
+/// only these codes fail the check, so the gate lands green and can widen incrementally
+/// as findings clear.
+///
+/// - SC2164: `cd` without `|| exit` / `|| return` — a failed `cd` makes every later
+///   command run somewhere the author did not intend.
+/// - SC2103: `if a; then b; fi` — a missing `;` swallows the condition.
+///
+/// SC2015 (`A && B || C` is not if-then-else) is part of the rule set at its native
+/// info severity: shellcheck reports it, but it does not block, since the corpus
+/// already carries it in established patterns.
+const SHELL_LINT_BLOCKING_CODES: [u32; 2] = [2164, 2103];
+
+/// #3856: fail-closed for a missing shellcheck. An absent tool is a `TOOLS-MISSING`
+/// unknown, never a pass: a check that silently skips when its tool is unavailable is
+/// the failure mode already recorded in #3794 and #16.
+pub fn shell_lint_unavailable(id: &str, required: bool) -> CheckResult {
+    CheckResult::unmeasured(
+        id,
+        required,
+        "TOOLS-MISSING: shellcheck is not on PATH, so the shell-lint gate measured nothing",
+    )
+}
+
+fn run_shell_lint(id: &str, required: bool, root: &Path) -> CheckResult {
+    if !program_on_path("shellcheck") {
+        return shell_lint_unavailable(id, required);
+    }
+    let targets = shell_lint_targets(root);
+    if targets.is_empty() {
+        return CheckResult::unmeasured(
+            id,
+            required,
+            "no shell files under scripts/ or skills/, so nothing was measured",
+        );
+    }
+    let mut args: Vec<std::ffi::OsString> = ["--format=gcc", "--color=never"]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    args.extend(targets.iter().map(std::ffi::OsString::from));
+    let command = ToolCommand::new("shellcheck", args)
+        .expect("shellcheck lint uses static flags and file path arguments");
+    let captured = command.execute_in_capturing(id, required, root);
+    if captured.result.is_unmeasured() {
+        return captured.result;
+    }
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let findings: Vec<ShellLintFinding> =
+        stdout.lines().filter_map(shell_lint_gcc_finding).collect();
+    let blocking = findings
+        .iter()
+        .filter(|finding| SHELL_LINT_BLOCKING_CODES.contains(&finding.code))
+        .map(|finding| finding.describe())
+        .collect::<Vec<_>>();
+    if !blocking.is_empty() {
+        let summary = blocking
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let reason = format!(
+            "{} blocking shellcheck finding(s): {}",
+            blocking.len(),
+            summary
+        );
+        return captured
+            .result
+            .with_failure(reason.chars().take(400).collect::<String>());
+    }
+    match captured.result.exit_code {
+        // Exit 1 means shellcheck found something; if none of its lines parsed, the
+        // gate cannot classify the findings and must fail closed, not read them green.
+        Some(1) if findings.is_empty() => captured
+            .result
+            .with_failure("shellcheck reported findings whose gcc output could not be parsed"),
+        // Exit 1 with no blocking finding means every report was outside the targeted
+        // rule set (advisory codes included): the gate is green.
+        Some(0) | Some(1) => CheckResult::completed(
+            id,
+            required,
+            0,
+            captured.result.elapsed_ms,
+            captured.result.spawn_count,
+            captured.result.stdout_bytes,
+            captured.result.stderr_bytes,
+            captured.result.output_digest.clone(),
+        ),
+        // Exit 2 (or a signalled run) is an operational error, never a pass.
+        _ => captured.result,
+    }
+}
+
+/// The script corpus the shell-lint gate covers (#3856): every `.sh` file under
+/// `scripts/` plus every shell file shipped inside `skills/`.
+fn shell_lint_targets(root: &Path) -> Vec<String> {
+    let mut targets = Vec::new();
+    for directory in ["scripts", "skills"] {
+        collect_shell_lint_files(root.join(directory), root, &mut targets);
+    }
+    targets.sort();
+    targets
+}
+
+fn collect_shell_lint_files(directory: PathBuf, root: &Path, targets: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_shell_lint_files(path, root, targets);
+        } else if path.extension().is_some_and(|extension| extension == "sh") {
+            if let Ok(relative) = path.strip_prefix(root) {
+                targets.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+}
+
+struct ShellLintFinding {
+    file: String,
+    line: u32,
+    level: &'static str,
+    code: u32,
+    message: String,
+}
+
+impl ShellLintFinding {
+    fn describe(&self) -> String {
+        format!(
+            "{}:{}: SC{} ({}): {}",
+            self.file, self.line, self.code, self.level, self.message
+        )
+    }
+}
+
+/// Parses one `--format=gcc` line: `<file>:<line>:<column>: <level>: <message> [SC<code>]`.
+///
+/// Older shellcheck (0.8.x) spells the level in capitals and the code `(SC<code>)`;
+/// 0.9.0 uses a lowercase level and `[SC<code>]`. Both are accepted so the gate does
+/// not depend on the minor version of the tool.
+fn shell_lint_gcc_finding(line: &str) -> Option<ShellLintFinding> {
+    let (file, rest) = line.split_once(':')?;
+    let (line, rest) = rest.split_once(':')?;
+    let (_column, rest) = rest.split_once(':')?;
+    let mut parts = rest.splitn(2, ':');
+    let level = match parts.next()?.trim().to_ascii_uppercase().as_str() {
+        "ERROR" => "error",
+        "WARNING" => "warning",
+        "INFO" | "NOTE" => "info",
+        "STYLE" => "style",
+        _ => return None,
+    };
+    let detail = parts.next()?.trim();
+    let open = detail
+        .rfind("(SC")
+        .or_else(|| detail.rfind("[SC"))
+        .filter(|&open| {
+            detail[open + 3..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        })?;
+    let close_char = if detail.as_bytes()[open] == b'(' {
+        b')'
+    } else {
+        b']'
+    };
+    let close = detail[open..].find(close_char as char)? + open;
+    let code: u32 = detail[open + 3..close].parse().ok()?;
+    Some(ShellLintFinding {
+        file: file.to_string(),
+        line: line.trim().parse().ok()?,
+        level,
+        code,
+        message: detail[..open].trim_end().to_string(),
+    })
 }
 fn run_commands(
     id: &str,

@@ -163,6 +163,7 @@ pub(super) const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_db_telemetry_contract",
     "check_bash_syntax",
     "check_bash_syntax",
+    "check_shell_lint",
     "check_pipeline_verdict_ratchet",
     "check_restore_visibility_ratchet",
     "check_generated_artifact_integrity",
@@ -344,4 +345,5 @@ pub(super) const STANDARD_CHECK_IDS: &[&str] = &[
     "check_restore_visibility_ratchet",
     "check_generated_artifact_integrity",
     "check_cross_language_boundaries",
+    "check_shell_lint",
 ];

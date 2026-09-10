@@ -83,7 +83,10 @@ case "$VERDICT" in
     *)  VERDICT="$(cd "$(dirname "$VERDICT")" && pwd)/$(basename "$VERDICT")" ;;
 esac
 TMP_OUT="${VERDICT}.tmp"
-cd "$REPO_TOP"
+cd "$REPO_TOP" || {
+    echo "qa-finding-filter: cannot cd to repo top: $REPO_TOP" >&2
+    exit 2
+}
 HEAD_SHA="$(git rev-parse HEAD)"
 
 if ! command -v python3 >/dev/null 2>&1; then

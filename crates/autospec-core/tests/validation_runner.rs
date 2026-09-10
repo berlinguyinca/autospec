@@ -182,8 +182,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 163); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: generated-artifact ratchet (#3893); +1: cross-language boundaries (#3210)
-    assert_eq!(full.unique_ids().len(), 158); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 164); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: generated-artifact ratchet (#3893); +1: cross-language boundaries (#3210); +1: shell-lint gate (#3856)
+    assert_eq!(full.unique_ids().len(), 159); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -2115,6 +2115,88 @@ fn runner_executes_the_newly_registered_bats_suites() {
             "{id} must pass when the runner invokes {suite}, not only when bats is run by hand"
         );
     }
+}
+
+#[test]
+fn runner_shell_lint_fails_on_an_unguarded_cd() {
+    let root = shell_lint_root(
+        "unguarded",
+        &[(
+            "unguarded.sh",
+            "#!/usr/bin/env bash\ncd /nonexistent\nexit 0\n",
+        )],
+    );
+
+    let report = run_shell_lint(&root);
+
+    assert!(report.results[0].is_failure(), "{:?}", report.results[0]);
+    assert!(
+        report.results[0]
+            .reason()
+            .is_some_and(|reason| reason.contains("SC2164")),
+        "the failure must name the rule and the site: {:?}",
+        report.results[0]
+    );
+}
+
+#[test]
+fn runner_shell_lint_passes_guarded_cd_and_advisory_sc2015() {
+    let root = shell_lint_root(
+        "guarded",
+        &[(
+            "guarded.sh",
+            "#!/usr/bin/env bash\ncd \"${1:-/tmp}\" || exit 1\ndo_thing && other_thing || fallback_thing\n",
+        )],
+    );
+
+    let report = run_shell_lint(&root);
+
+    assert!(report.results[0].is_success(), "{:?}", report.results[0]);
+}
+
+#[test]
+fn shell_lint_unavailable_reports_tools_missing_and_never_passes() {
+    let result =
+        autospec_core::validation::external::shell_lint_unavailable("check_shell_lint", true);
+
+    assert!(result.is_unmeasured());
+    assert!(!result.is_success());
+    assert_eq!(result.status(), ValidationStatus::Unknown);
+    assert!(result
+        .reason()
+        .is_some_and(|reason| reason.contains("TOOLS-MISSING: shellcheck")));
+
+    let aggregate = ValidationExecutionReport::new(vec![result])
+        .aggregate()
+        .expect("aggregate");
+    assert!(
+        !aggregate.status.is_passed(),
+        "a missing tool must not read as a pass"
+    );
+}
+
+fn run_shell_lint(root: &std::path::Path) -> ValidationExecutionReport {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_shell_lint",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ShellLint),
+    }]);
+    ValidationRunner::run(&catalog, root)
+}
+
+fn shell_lint_root(name: &str, scripts: &[(&str, &str)]) -> PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("autospec-shell-lint-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let scripts_dir = root.join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("scripts fixture directory");
+    for (file, body) in scripts {
+        fs::write(scripts_dir.join(file), body).expect("script fixture");
+    }
+    root
 }
 
 fn run_bats_registration(root: &std::path::Path) -> ValidationExecutionReport {

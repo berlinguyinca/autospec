@@ -122,6 +122,7 @@ fn is_fast_only(check: &ValidationCheck) -> bool {
                 | ExternalCheck::BatsSuite(_)
                 | ExternalCheck::BatsDirectory(_)
                 | ExternalCheck::InstallTests
+                | ExternalCheck::ShellLint
         )
     )
 }

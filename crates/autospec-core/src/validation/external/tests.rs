@@ -177,3 +177,54 @@ fn retired_safety_writer_guard_rejects_the_file_and_all_live_writeback_surfaces(
 
     fs::remove_dir_all(root).expect("remove temporary guard fixture");
 }
+
+#[test]
+fn shell_lint_parser_reads_both_gcc_spellings() {
+    let old =
+        shell_lint_gcc_finding("a.sh:3:5: WARNING: Use cd or exit (SC2164)").expect("old gcc");
+    assert_eq!(old.code, 2164);
+    assert_eq!(old.level, "warning");
+    assert_eq!(old.file, "a.sh");
+    assert_eq!(old.line, 3);
+
+    let new =
+        shell_lint_gcc_finding("a.sh:3:5: warning: Use cd or exit [SC2164]").expect("new gcc");
+    assert_eq!(new.code, 2164);
+    assert_eq!(new.level, "warning");
+
+    let note = shell_lint_gcc_finding("a.sh:9:1: note: A and B or C [SC2015]").expect("new note");
+    assert_eq!(note.code, 2015);
+    assert_eq!(note.level, "info");
+
+    assert!(shell_lint_gcc_finding("a.sh:3:5: warning: no code here").is_none());
+    assert!(shell_lint_gcc_finding("not a finding line").is_none());
+}
+
+#[test]
+fn run_shell_lint_flags_the_unguarded_cd_and_ignores_advisory_only() {
+    let root =
+        std::env::temp_dir().join(format!("autospec-shell-lint-unit-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let scripts = root.join("scripts");
+    fs::create_dir_all(&scripts).expect("scripts fixture directory");
+    fs::write(
+        scripts.join("bad.sh"),
+        "#!/usr/bin/env bash\ncd /nonexistent\nexit 0\n",
+    )
+    .expect("write unguarded cd fixture");
+
+    let result = run_shell_lint("check_shell_lint", true, &root);
+    assert!(
+        result.is_failure(),
+        "unguarded cd must fail the gate: {result:?}"
+    );
+    assert!(
+        result
+            .failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("SC2164")),
+        "the failure must name the rule: {result:?}"
+    );
+
+    fs::remove_dir_all(&root).expect("remove temporary shell-lint fixture");
+}
