@@ -838,6 +838,10 @@ Before creating a new worktree, call `worktree-guard.sh resolve-branch`:
   worktree and continue (#917 recovery).
 - `fresh` — nothing exists: `worktree-guard.sh create` off `origin/main`.
 
+### Resetting a worktree (guarded, detached)
+
+Never run a bare `git -C <wt> checkout ... && git -C <wt> reset ... && git -C <wt> clean ...` sequence by hand: an unguarded chain plows on after the first failure (e.g. `checkout -f main` fails when a sibling worktree holds `main`) and can move a local branch off its base commit (#3653). Use `worktree-guard.sh reset --path <wt> [--base <ref>] [--clean]` instead. It fetches, parks the worktree DETACHED at the base tip via `git checkout --detach` (it never names a shared branch, so a sibling holding `main` cannot fail it), checks every step and stops at the first failure (exit 7 mid-unit), and asserts the detached HEAD state after each step. Exit codes: 3 primary, 4 dirty (without `--clean`), 5 unknown/stale base ref, 7 mid-unit failure.
+
 ### Cleanup after merge + prune
 
 After a PR is confirmed merged, remove the worktree and prune the git metadata:
@@ -859,7 +863,7 @@ for the full concurrency model and tuning table.
 ### Pointer to enforcement tool
 
 `scripts/worktree-guard.sh` (installed to `~/.autospec/scripts/worktree-guard.sh`)
-implements `assert`, `resolve-branch`, and `create`. See
+implements `assert`, `resolve-branch`, `create`, and `reset` (`--path`, `--base`, `--clean`). See
 `docs/specs/2026-06-03-worktree-guard-design.md` §D1 for the full contract and
 pinned exit codes.
 

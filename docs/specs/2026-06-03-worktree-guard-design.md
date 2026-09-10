@@ -117,6 +117,31 @@ is read-only for agents; fresh-or-verified-clean worktrees only; cleanup after
 merge + prune; the PR-aware ladder as the standard branch-exists behavior;
 pointer to `worktree-guard.sh` as the enforcement tool.
 
+### D6 — `reset` subcommand (guarded detached re-park; #3653)
+
+```
+worktree-guard.sh reset --path /tmp/wt-B [--base origin/main] [--clean]
+```
+
+The unguarded chain `git -C <wt> checkout -q -f main && git -C <wt> reset -q
+--hard origin/main && git -C <wt> clean -qfd` failed in the wild (#3653):
+`checkout -f main` aborts when a sibling worktree already holds `main`, and
+the sequence plowed on, moving a local branch off its base commit. The fix
+is a single guarded unit:
+
+- **`reset`** — fetch `origin`, resolve the base ref (`--base`, default
+  `origin/main`), then park the worktree **DETACHED** at the base tip via
+  `git checkout -q --detach <tip>` — the branch name is never used as the
+  checkout target, so a sibling holding it cannot fail the step. `--clean`
+  adds `-f` to the checkout and runs `git clean -qfd` afterwards. Every step
+  is checked and the unit stops at the first failure; HEAD state (detached,
+  at the base tip) is asserted after each step. Exit codes: `2` usage,
+  `3` primary checkout, `4` dirty (without `--clean`), `5` unknown/stale
+  base ref (worktree left untouched), `7` mid-unit reset failure, `0` ok.
+  Bats: `tests/worktree-guard/test_reset.bats` (includes the #3653
+  regression: sibling worktree holds the base branch; reset succeeds and
+  the branch ref does not move).
+
 ## Sequencing constraint
 
 D3 edits the autospec-run trio — serialize behind the cost-efficiency chain
