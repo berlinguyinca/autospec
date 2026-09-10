@@ -1902,23 +1902,136 @@ fn timeline(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum stopped conductor generation logs retained per repository scope.
+const GENERATION_LOG_RETENTION: usize = 10;
+/// Generation log grammar written by `launch::default_unit_logpath`:
+/// `autospec-autonomous-conductor-<nanos>-<pid>-<seq>.log`.
+const GENERATION_LOG_PREFIX: &str = "autospec-autonomous-conductor-";
+
 fn cleanup(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
+    if options.dry_run {
+        let selected = select_generation_log_prunes(&layout)?;
+        print_cleanup_report(&layout.repo, 0, 0, &selected, options.json);
+        return Ok(());
+    }
     let mut removed = 0;
     for name in ["conductor", "monitor", "supervisor"] {
         let unit = read_unit(name, &layout);
         removed += remove_stale_unit_metadata(&unit)?;
     }
-    if options.json {
+    let selected = select_generation_log_prunes(&layout)?;
+    let mut pruned = 0;
+    for path in &selected {
+        fs::remove_file(path)
+            .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        pruned += 1;
+    }
+    print_cleanup_report(&layout.repo, removed, pruned, &selected, options.json);
+    Ok(())
+}
+
+/// Parse the generation timestamp (nanoseconds since the UNIX epoch) out of a
+/// conductor generation log name. Companion unit logs
+/// (`autospec-autonomous-monitor.log`), the shared `empty_unit` conductor log
+/// (`autospec-autonomous-conductor.log`), and operator `--log` overrides do
+/// not match this grammar and are never pruned.
+fn generation_log_timestamp(name: &str) -> Option<u64> {
+    let rest = name
+        .strip_prefix(GENERATION_LOG_PREFIX)?
+        .strip_suffix(".log")?;
+    let (generation, tail) = rest.split_once('-')?;
+    let (pid, sequence) = tail.split_once('-')?;
+    for part in [generation, pid, sequence] {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    generation.parse().ok()
+}
+
+/// Select stopped conductor generation logs for retention pruning.
+///
+/// At most [`GENERATION_LOG_RETENTION`] logs are retained per repository
+/// scope. The oldest surplus is returned in deterministic oldest-first order
+/// (numeric generation timestamp, then path). The log referenced by
+/// `conductor.logpath` for a live PID is never selected.
+fn select_generation_log_prunes(layout: &RunLayout) -> Result<Vec<PathBuf>, String> {
+    let conductor = read_unit("conductor", layout);
+    let live_logpath = if conductor.running && !conductor.logpath.is_empty() {
+        Some(conductor.logpath.clone())
+    } else {
+        None
+    };
+    let entries = match fs::read_dir(&layout.log_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!("cannot read {}: {error}", layout.log_dir.display()));
+        }
+    };
+    let mut logs: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("cannot read {}: {error}", layout.log_dir.display()))?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(timestamp) = generation_log_timestamp(&name) else {
+            continue;
+        };
+        if path.is_file() && !live_log_matches(&live_logpath, &path) {
+            logs.push((timestamp, path));
+        }
+    }
+    logs.sort_by(|(timestamp_a, path_a), (timestamp_b, path_b)| {
+        timestamp_a
+            .cmp(timestamp_b)
+            .then_with(|| path_a.cmp(path_b))
+    });
+    if logs.len() > GENERATION_LOG_RETENTION {
+        logs.truncate(logs.len() - GENERATION_LOG_RETENTION);
+    }
+    Ok(logs.into_iter().map(|(_, path)| path).collect())
+}
+
+/// True when `path` is the file referenced by the live conductor's recorded
+/// logpath, compared both raw and canonicalized so spelling differences cannot
+/// delete a live log.
+fn live_log_matches(live_logpath: &Option<String>, path: &Path) -> bool {
+    let Some(logpath) = live_logpath.as_deref() else {
+        return false;
+    };
+    if path.display().to_string() == *logpath {
+        return true;
+    }
+    path.canonicalize()
+        .ok()
+        .is_some_and(|canonical| canonical.display().to_string() == *logpath)
+}
+
+fn print_cleanup_report(
+    repo: &str,
+    removed: usize,
+    pruned: usize,
+    selected: &[PathBuf],
+    json: bool,
+) {
+    if json {
+        let paths = selected
+            .iter()
+            .map(|path| format!("\"{}\"", json_escape(&path.display().to_string())))
+            .collect::<Vec<_>>()
+            .join(",");
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"cleanup\",\"repo\":\"{}\",\"removed\":{}}}",
-            json_escape(&layout.repo),
-            removed
+            "{{\"command\":\"autonomous\",\"subcommand\":\"cleanup\",\"repo\":\"{}\",\"removed\":{removed},\"generation_logs_pruned\":{pruned},\"generation_logs_selected\":[{paths}]}}",
+            json_escape(repo)
         );
     } else {
-        println!("autospec autonomous cleanup: removed {removed}");
+        println!("autospec autonomous cleanup: removed {removed}, generation logs pruned {pruned}");
+        for path in selected {
+            println!("generation log: {}", path.display());
+        }
     }
-    Ok(())
 }
 
 fn remove_stale_unit_metadata(unit: &UnitStatus) -> Result<usize, String> {

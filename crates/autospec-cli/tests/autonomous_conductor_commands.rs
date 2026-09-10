@@ -8274,3 +8274,163 @@ fn wait_for_file_contents(path: &Path, expected: &str) {
     }
     panic!("{} did not contain {expected}", path.display());
 }
+
+/// Seed `count` conductor generation logs plus the companion (non-generation)
+/// logs into `log_dir`. Generation timestamps are `999 + offset`, so the
+/// oldest log has a shorter decimal rendering than its successors: a
+/// lexicographic sort would misplace it while the numeric ordering must not.
+fn seed_generation_logs(log_dir: &Path, count: usize) -> Vec<PathBuf> {
+    fs::create_dir_all(log_dir).expect("create log dir");
+    fs::write(
+        log_dir.join("autospec-autonomous-conductor.log"),
+        "shared\n",
+    )
+    .expect("write shared conductor log");
+    fs::write(log_dir.join("autospec-autonomous-monitor.log"), "monitor\n")
+        .expect("write monitor log");
+    (0..count)
+        .map(|offset| {
+            let path = log_dir.join(format!(
+                "autospec-autonomous-conductor-{}-4242-1.log",
+                999 + offset
+            ));
+            fs::write(&path, "generation log\n").expect("write generation log");
+            path
+        })
+        .collect()
+}
+
+/// Record live conductor unit metadata bound to a real sleeping process whose
+/// process-group identity matches, so `read_unit` classifies it as Live.
+/// Returns the PID for the caller to terminate after the test.
+fn live_conductor_metadata(operator: &Path, live_log: &Path) -> u32 {
+    let mut command = Command::new("sleep");
+    command
+        .arg("300")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.process_group(0);
+    let child = command.spawn().expect("spawn live conductor stand-in");
+    let pid = child.id();
+    let (pgid, start_time_ticks) = process_identity(pid).expect("live process identity");
+    let state_dir = operator.join("test_repo");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))
+        .expect("make state dir private");
+    fs::write(
+        state_dir.join("conductor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"test/repo\",\"scope\":\"test_repo\",\"pgid\":{},\"start_time_ticks\":{}}}\n",
+            pid, pgid, start_time_ticks
+        ),
+    )
+    .expect("write live pid metadata");
+    fs::write(
+        state_dir.join("conductor.logpath"),
+        format!("{}\n", live_log.display()),
+    )
+    .expect("write live logpath");
+    pid
+}
+
+fn run_autonomous_cleanup(args: &[&str], operator_root: &Path, log_root: &Path) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+    command
+        .args(["autonomous", "cleanup", "--repo", "test/repo"])
+        .args(args)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", operator_root)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_root);
+    let output = command.output().expect("autospec autonomous cleanup runs");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("cleanup stdout is UTF-8")
+}
+
+#[test]
+fn cleanup_prunes_oldest_stopped_generation_logs_and_preserves_live_log() {
+    let root = temp_dir("autospec-autonomous-cleanup-generation");
+    let operator = root.join("operator");
+    let log_dir = root.join("logs").join("test_repo");
+    let logs = seed_generation_logs(&log_dir, 13);
+    // The live conductor references the oldest generation log: without the
+    // live-log preservation rule it would be the first prune candidate.
+    let live_log = logs[0].clone();
+    let pid = live_conductor_metadata(&operator, &live_log);
+
+    let stdout = run_autonomous_cleanup(&["--json"], &operator, &root.join("logs"));
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("cleanup JSON");
+    assert_eq!(json["removed"], 0);
+    assert_eq!(json["generation_logs_pruned"], 2);
+    let selected: Vec<String> = json["generation_logs_selected"]
+        .as_array()
+        .expect("selected generation logs")
+        .iter()
+        .map(|value| value.as_str().expect("selected path").to_string())
+        .collect();
+    // Oldest-first, deterministic: the live log (999) is excluded, so the two
+    // next-oldest logs (1000, 1001) are selected.
+    assert_eq!(
+        selected,
+        [1usize, 2]
+            .iter()
+            .map(|index| logs[*index].display().to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(live_log.exists(), "live conductor log must be preserved");
+    assert!(!logs[1].exists(), "second-oldest log must be pruned");
+    assert!(!logs[2].exists(), "third-oldest log must be pruned");
+    for path in &logs[3..] {
+        assert!(path.exists(), "{} must be retained", path.display());
+    }
+    assert!(log_dir.join("autospec-autonomous-conductor.log").exists());
+    assert!(log_dir.join("autospec-autonomous-monitor.log").exists());
+    assert!(operator.join("test_repo").join("conductor.pid").exists());
+
+    terminate_process(pid);
+    wait_for_process_exit(pid);
+    fs::remove_dir_all(&root).expect("remove fixture");
+}
+
+#[test]
+fn cleanup_dry_run_reports_zero_mutations_and_lists_selected_generation_logs() {
+    let root = temp_dir("autospec-autonomous-cleanup-dry-run");
+    let operator = root.join("operator");
+    let log_dir = root.join("logs").join("test_repo");
+    let logs = seed_generation_logs(&log_dir, 13);
+
+    let stdout = run_autonomous_cleanup(&["--dry-run", "--json"], &operator, &root.join("logs"));
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("cleanup JSON");
+    assert_eq!(json["removed"], 0);
+    assert_eq!(json["generation_logs_pruned"], 0);
+    let selected: Vec<String> = json["generation_logs_selected"]
+        .as_array()
+        .expect("selected generation logs")
+        .iter()
+        .map(|value| value.as_str().expect("selected path").to_string())
+        .collect();
+    // Oldest-first deterministic selection of the three oldest of thirteen.
+    assert_eq!(
+        selected,
+        (0..3)
+            .map(|index| logs[index].display().to_string())
+            .collect::<Vec<_>>()
+    );
+    for path in &logs {
+        assert!(path.exists(), "{} must survive a dry run", path.display());
+    }
+
+    let stdout = run_autonomous_cleanup(&["--dry-run"], &operator, &root.join("logs"));
+    assert!(stdout.contains("autospec autonomous cleanup: removed 0, generation logs pruned 0"));
+    for path in &logs[..3] {
+        assert!(
+            stdout.contains(&format!("generation log: {}", path.display())),
+            "stdout={stdout}"
+        );
+    }
+
+    fs::remove_dir_all(&root).expect("remove fixture");
+}
