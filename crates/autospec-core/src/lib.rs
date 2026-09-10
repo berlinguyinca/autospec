@@ -10,6 +10,7 @@ pub mod autonomous {
     pub mod no_work;
     pub mod premerge;
     pub mod quality_balance;
+    pub mod regrade;
     pub mod review_policy;
     pub mod test_gate;
     pub mod tier15;
@@ -29,6 +30,7 @@ pub mod context;
 pub mod conversion_gate;
 pub mod coordination;
 pub mod cost;
+pub mod deadline_ratchet;
 pub mod dispatch_guard;
 pub mod dispatch_pipeline;
 pub mod error;

@@ -29,6 +29,13 @@
 //!    verdict recorded none, or the current tree's commit cannot be read —
 //!    discard and retire refuse to operate on the patch and report why the
 //!    verdict cannot be verified ([`guard_destructive`]).
+//! 5. **A verdict records the host it was graded under** (issue #4080) —
+//!    load average and concurrent-agent count — and the FLAKY set produced
+//!    by the re-run of its failing tests. The host conditions are reported,
+//!    not trusted on their own: a verdict graded under heavy load is as valid
+//!    as one graded under an idle host. A verdict that recorded no host
+//!    conditions is unverifiable, fail-closed, like a verdict that recorded
+//!    no commit ([`RecordedVerdict::host`], [`RecordedVerdict::flaky_tests`]).
 //!
 //! Nothing here uses wall-clock time as a trust condition.
 //! [`RecordedVerdict::recorded_at`] is kept for audit only.
@@ -37,6 +44,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::autonomous::regrade::HostConditions;
 
 /// Deterministic hash of a failing baseline: lowercase hex SHA-256 over the
 /// test names in sorted order, one per line. [`BTreeSet`] iterates in sorted
@@ -56,7 +65,7 @@ pub fn baseline_hash(baseline: &BTreeSet<String>) -> String {
 
 /// A verdict the runner recorded for one patch, as it must exist on disk:
 /// the decision plus the two validity conditions it was graded under.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordedVerdict {
     /// The patch this verdict was recorded for.
     pub patch_identity: String,
@@ -64,6 +73,11 @@ pub struct RecordedVerdict {
     pub verdict: String,
     /// The failing tests the verdict named, at grading time.
     pub failing_tests: BTreeSet<String>,
+    /// The tests the verdict's re-run passed: FLAKY, recorded never trusted
+    /// on their own (issue #4080). A legacy record that predates the re-run
+    /// has an empty set.
+    #[serde(default)]
+    pub flaky_tests: BTreeSet<String>,
     /// The commit of the tree the verdict was graded against. `None` means
     /// the verdict was recorded without it — the verdict is then
     /// unverifiable, never trusted.
@@ -72,6 +86,12 @@ pub struct RecordedVerdict {
     pub baseline_hash: Option<String>,
     /// Unix epoch seconds. Audit only — never a trust condition.
     pub recorded_at: i64,
+    /// The host the verdict was graded under (issue #4080): load average and
+    /// concurrent-agent count, reported with the verdict. `None` means the
+    /// record predates host reporting — the verdict is then unverifiable,
+    /// fail-closed, like a record that named no commit.
+    #[serde(default)]
+    pub host: Option<HostConditions>,
 }
 
 /// Encode a recorded verdict for persistence.
@@ -204,6 +224,12 @@ pub fn verify(verdict: &RecordedVerdict, current: &CurrentTree) -> VerdictValidi
             )
         }
     };
+    if verdict.host.is_none() {
+        return VerdictValidity::Unverifiable(
+            "verdict recorded no host conditions; it cannot be verified against the current tree"
+                .to_string(),
+        );
+    }
 
     let mut reasons = Vec::new();
     if recorded_commit != current_commit {
@@ -328,14 +354,23 @@ mod tests {
         names.iter().map(|name| (*name).to_string()).collect()
     }
 
+    fn host() -> HostConditions {
+        HostConditions {
+            load_average: 0.5,
+            concurrent_agents: 1,
+        }
+    }
+
     fn verdict(commit: Option<&str>, baseline: &BTreeSet<String>) -> RecordedVerdict {
         RecordedVerdict {
             patch_identity: "issue-42/0001-fix.patch".to_string(),
             verdict: "new-test-failures".to_string(),
             failing_tests: set(&["crate_a::tests::broken"]),
+            flaky_tests: BTreeSet::new(),
             tree_commit: commit.map(|commit| commit.to_string()),
             baseline_hash: Some(baseline_hash(baseline)),
             recorded_at: 1_700_000_000,
+            host: Some(host()),
         }
     }
 
@@ -544,5 +579,56 @@ mod tests {
             ),
             "legacy records without validity fields fail closed"
         );
+    }
+
+    #[test]
+    fn a_verdict_without_host_conditions_is_unverifiable() {
+        let baseline = set(&["crate_a::tests::broken"]);
+        let mut v = verdict(Some("abc123"), &baseline);
+        v.host = None;
+        let current = tree(Some("abc123"), &baseline);
+        match verify(&v, &current) {
+            VerdictValidity::Unverifiable(reason) => {
+                assert!(reason.contains("no host conditions"), "reason: {reason}");
+            }
+            other => panic!("expected unverifiable, got {other:?}"),
+        }
+        assert!(
+            guard_destructive("discard", &v, &current).is_err(),
+            "a verdict that recorded no host conditions must not authorize discard"
+        );
+    }
+
+    #[test]
+    fn a_legacy_decoded_verdict_without_host_is_unverifiable() {
+        // A record written before host reporting omitted the field entirely;
+        // `#[serde(default)]` brings it back `None`, and `None` fails closed.
+        let text = r#"{"patch_identity":"issue-42/0001","verdict":"new-test-failures","failing_tests":[],"tree_commit":"abc123","baseline_hash":"0.0","recorded_at":1}"#;
+        let v = decode(text).expect("decodes");
+        assert!(v.host.is_none());
+        let current = tree(Some("abc123"), &set(&[]));
+        assert!(
+            matches!(verify(&v, &current), VerdictValidity::Unverifiable(_)),
+            "a legacy record that named no host conditions fails closed"
+        );
+    }
+
+    #[test]
+    fn a_fresh_verdict_carries_host_and_flaky_set() {
+        let baseline = set(&["crate_a::tests::broken"]);
+        let mut v = verdict(Some("abc123"), &baseline);
+        v.flaky_tests = set(&["crate_a::tests::flaky"]);
+        let current = tree(Some("abc123"), &baseline);
+        assert_eq!(verify(&v, &current), VerdictValidity::Fresh);
+        assert_eq!(v.host, Some(host()));
+        assert_eq!(
+            v.flaky_tests,
+            set(&["crate_a::tests::flaky"]),
+            "the flaky set rides along in the verdict"
+        );
+        let decoded = decode(&encode(&v)).expect("round-trips");
+        assert_eq!(decoded, v);
+        assert_eq!(decoded.host, Some(host()));
+        assert_eq!(decoded.flaky_tests, v.flaky_tests);
     }
 }

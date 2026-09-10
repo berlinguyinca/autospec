@@ -31,6 +31,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::autonomous::regrade::HostConditions;
 use crate::autonomous::verdict_validity::{self, RecordedVerdict};
 
 /// A test that flakes at least this many times is reported as a defect, not as noise.
@@ -152,26 +153,32 @@ impl GateVerdict {
         }
     }
 
-    /// The recorded form this verdict must be persisted in (#4031): the
-    /// decision token plus the failing tests it named (the persistent
-    /// failures — a flaky failure that passed on re-run is not a failure the
-    /// verdict stands on) and the two validity conditions. `identity` is the
-    /// patch the verdict is recorded for; `at` is Unix epoch seconds, audit
-    /// only.
-    pub fn recorded(&self, identity: &str, at: i64) -> RecordedVerdict {
-        let failing_tests: BTreeSet<String> = self
-            .failures
-            .iter()
-            .filter(|report| !report.rerun_passed)
-            .map(|report| report.name.clone())
-            .collect();
+    /// The recorded form this verdict must be persisted in (#4031, #4080):
+    /// the decision token plus the persistent failures (a flaky failure that
+    /// passed on re-run is not a failure the verdict stands on), the flaky
+    /// set, the validity conditions, and the host it was graded under.
+    /// `identity` is the patch the verdict is recorded for; `at` is Unix
+    /// epoch seconds, audit only; `host` is the load average and concurrent
+    /// agent count of the grading host (issue #4080).
+    pub fn recorded(&self, identity: &str, at: i64, host: &HostConditions) -> RecordedVerdict {
+        let mut failing_tests = BTreeSet::new();
+        let mut flaky_tests = BTreeSet::new();
+        for report in &self.failures {
+            if report.rerun_passed {
+                flaky_tests.insert(report.name.clone());
+            } else {
+                failing_tests.insert(report.name.clone());
+            }
+        }
         RecordedVerdict {
             patch_identity: identity.to_string(),
             verdict: self.verdict_token().to_string(),
             failing_tests,
+            flaky_tests,
             tree_commit: self.tree_commit.clone(),
             baseline_hash: Some(self.baseline_hash.clone()),
             recorded_at: at,
+            host: Some(*host),
         }
     }
 
