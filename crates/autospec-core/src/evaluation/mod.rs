@@ -4,6 +4,7 @@
 pub mod anchor;
 pub mod digest;
 pub mod error;
+pub mod evaluator;
 pub mod ids;
 pub mod policy;
 pub mod statistics;
