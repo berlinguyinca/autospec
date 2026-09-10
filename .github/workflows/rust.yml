@@ -6,14 +6,15 @@ on:
     branches: [main]
 
 concurrency:
-  group: rust-suites-${{ github.ref }}
-  # Cancel superseded runs on branches, never on main. Measured over the last 20
-  # runs on main: 12 cancelled, 7 failed, 0 succeeded. Merges land every ~3.3 min
-  # and a run is cancelled after ~3.1 min, so no run on main ever finished and
-  # main carried no build signal at all -- it broke twice in one hour without
-  # anything reporting it. On a branch a superseded run is genuinely worthless;
-  # on main every commit's result is the only record that commit will ever get.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Main gets a per-commit group so a run can never be cancelled by the next
+  # merge; branches keep the shared group where a superseded run is worthless.
+  #
+  # The previous attempt used `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`
+  # and did NOT work: six consecutive commits on main all carried that expression
+  # and all six runs were still cancelled. Expressions are reliable in `group`,
+  # so the distinction is expressed there instead of in the boolean.
+  group: rust-suites-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
