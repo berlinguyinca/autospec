@@ -65,6 +65,42 @@ pub enum GithubCommand {
         project_number: u64,
         issue_url: String,
     },
+    /// Reads the tip of a git ref via the `matching-refs` endpoint. Returns a JSON
+    /// array of matching refs; an empty array means the ref is absent. Slashes in the
+    /// ref path are kept literal (the endpoint takes a path, not a percent-encoded ref).
+    ReadGitRef {
+        repository: String,
+        ref_name: String,
+    },
+    /// Reads a commit object by SHA. The response carries the `message` at the top
+    /// level (the git data API, not the REST commits endpoint).
+    ReadGitCommit {
+        repository: String,
+        sha: String,
+    },
+    /// Creates a commit object with a message, tree, and parent commits. Returns the
+    /// new commit SHA. An empty `parents` list creates a root commit.
+    CreateGitCommit {
+        repository: String,
+        message: String,
+        tree: String,
+        parents: Vec<String>,
+    },
+    /// Creates a new git ref pointing at `sha`. Fails if the ref already exists.
+    CreateGitRef {
+        repository: String,
+        ref_name: String,
+        sha: String,
+    },
+    /// Updates an existing git ref to `sha`, but only when it fast-forwards from the
+    /// current tip (`force=false`). This is the compare-and-swap primitive for the
+    /// portfolio lease: the server rejects the update if the tip moved since the
+    /// commit's parent was read.
+    FastForwardGitRef {
+        repository: String,
+        ref_name: String,
+        sha: String,
+    },
 }
 
 impl GithubCommand {
@@ -254,6 +290,76 @@ impl GithubCommand {
                 ],
                 None,
             ),
+            Self::ReadGitRef { repository, ref_name } => {
+                // The matching-refs endpoint takes a path relative to `refs/`.
+                let path = ref_name.strip_prefix("refs/").unwrap_or(&ref_name);
+                (
+                    vec![
+                        "api".into(),
+                        format!("repos/{repository}/git/matching-refs/{path}"),
+                    ],
+                    None,
+                )
+            }
+            Self::ReadGitCommit { repository, sha } => (
+                vec![
+                    "api".into(),
+                    format!("repos/{repository}/git/commits/{sha}"),
+                ],
+                None,
+            ),
+            Self::CreateGitCommit {
+                repository,
+                message,
+                tree,
+                parents,
+            } => {
+                let mut parts = vec![
+                    "api".into(),
+                    "--method".into(),
+                    "POST".into(),
+                    format!("repos/{repository}/git/commits"),
+                    "-f".into(),
+                    format!("message={message}"),
+                    "-f".into(),
+                    format!("tree={tree}"),
+                ];
+                for parent in &parents {
+                    parts.push("-f".into());
+                    parts.push(format!("parents[]={parent}"));
+                }
+                (parts, None)
+            }
+            Self::CreateGitRef { repository, ref_name, sha } => (
+                vec![
+                    "api".into(),
+                    "--method".into(),
+                    "POST".into(),
+                    format!("repos/{repository}/git/refs"),
+                    "-f".into(),
+                    format!("ref={ref_name}"),
+                    "-f".into(),
+                    format!("sha={sha}"),
+                ],
+                None,
+            ),
+            Self::FastForwardGitRef { repository, ref_name, sha } => {
+                // The ref name is a path segment, so slashes must be percent-encoded.
+                let encoded = ref_name.replace('/', "%2F");
+                (
+                    vec![
+                        "api".into(),
+                        "--method".into(),
+                        "PATCH".into(),
+                        format!("repos/{repository}/git/refs/{encoded}"),
+                        "-f".into(),
+                        format!("sha={sha}"),
+                        "-f".into(),
+                        "force=false".into(),
+                    ],
+                    None,
+                )
+            }
         }
     }
 }
@@ -316,6 +422,8 @@ fn execute_gh(command: GithubCommand) -> Result<String, GithubFailure> {
             | GithubCommand::ListOwnerRepositories { .. }
             | GithubCommand::ViewProject { .. }
             | GithubCommand::ListProjectItems { .. }
+            | GithubCommand::ReadGitRef { .. }
+            | GithubCommand::ReadGitCommit { .. }
     );
     let (args, stdin) = command.into_parts();
     let mut process =
