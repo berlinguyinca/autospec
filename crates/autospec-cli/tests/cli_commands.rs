@@ -371,6 +371,64 @@ fn lint_spec_passes_when_every_imperative_names_a_mechanism() {
 }
 
 #[test]
+fn lint_spec_blocks_consumed_signal_missing_empty_semantics() {
+    let spec = "# Fixture spec\n\n## Consumed Signals\n\n### `ci_failures`\n- Healthy value: 0 on green main\n- Produced under: suite green at HEAD\n";
+    let path = write_issue_body("autospec-lint-spec-signal-incomplete", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with(
+            "CONSUMED_SIGNAL_INCOMPLETE: line 5: consumed signal \"ci_failures\" omits Empty/absent means:"
+        ),
+        "the rejection must name the missing field; stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn lint_spec_passes_when_consumed_signal_declares_all_fields() {
+    let spec = "# Fixture spec\n\n## Consumed Signals\n\n### `ci_failures`\n- Empty/absent means: the suite did not run\n- Healthy value: 0 on green main\n- Produced under: suite green at HEAD\n";
+    let path = write_issue_body("autospec-lint-spec-signal-complete", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert!(
+        output.status.success(),
+        "stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn lint_spec_merges_safety_and_signal_findings_by_line() {
+    let spec = "# Fixture spec\n\n## Invariants\n\nnever rewrite it\n\n## Consumed Signals\n\n### exit_code\n- Empty/absent means: no run\n";
+    let path = write_issue_body("autospec-lint-spec-signal-merged", &spec);
+
+    let output = autospec()
+        .args(["lint", "spec", "--json", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint spec runs");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[\n  {\"rule\":\"SAFETY_WITHOUT_MECHANISM\",\"line\":5,\"phrase\":\"never\",\"description\":\"line 5: imperative safety property (\\\"never\\\") names no structural mechanism — convention-only\"},\n  {\"rule\":\"CONSUMED_SIGNAL_INCOMPLETE\",\"line\":9,\"phrase\":\"exit_code\",\"description\":\"line 9: consumed signal \\\"exit_code\\\" omits Healthy value: — declare it before the spec can be reviewed\"},\n  {\"rule\":\"CONSUMED_SIGNAL_INCOMPLETE\",\"line\":9,\"phrase\":\"exit_code\",\"description\":\"line 9: consumed signal \\\"exit_code\\\" omits Produced under: — declare it before the spec can be reviewed\"}\n]\n"
+    );
+}
+
+#[test]
 fn lint_spec_reads_stdin_when_spec_path_is_dash() {
     let spec = spec_source("Be careful when replaying archived sessions.");
 
