@@ -3613,7 +3613,6 @@ fn execute_foreground_dispatch(
                     selection.issue,
                     &worker_id,
                     &branch,
-                    base_branch,
                 ) {
                     Ok(acquisition) => acquisition,
                     Err(error) => {
