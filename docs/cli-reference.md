@@ -7,6 +7,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | Command | JSON | Status |
 | --- | --- | --- |
 | `autospec init --spec <id> [--spec <id>]... [--json]` | yes | initialize persisted planned state without executing work; refuses existing state |
+| `autospec handoff probe --repo OWNER/NAME --intent TEXT [--artifact issue:N|spec:PATH] [--correlation ID] [--intent-kind implement|explain|plan] [--repo-dir PATH]` | yes | side-effect-free producer for the autospec.implementation-handoff.v1 handoff: probes the installed workflow surface and local run-state, then returns one typed route state (run/start/split_then_run/recover/none) or a typed unavailable reason with zero mutations |
+| `autospec handoff capabilities` | yes | advertise the installed handoff workflow surface (autospec.handoff-capabilities.v1) |
 | `autospec doctor --json` | yes | implemented |
 | `autospec aar classify --title <text> [--body <text>\|--body-file <path>] [--label <l>]... [--path <p>]... [--files <n>] [--language <name>] [--json]` | yes | deterministic task classification with evidence and confidence; no LLM call |
 | `autospec aar plan --title <text> [...] [--policy-version <v>] [--json]` | yes | full execution policy: topology, model, reasoning budget, retrieval ladder, guards, escalation |
