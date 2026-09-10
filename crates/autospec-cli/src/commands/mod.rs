@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod dispatch_spec;
 pub mod doctor;
 pub mod explore;
+pub mod graph;
 pub mod growth_report;
 pub mod handoff;
 pub mod init;
@@ -127,6 +128,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "Render local-only launch readiness metrics",
     ),
     (
+        "graph",
+        "Analyze a proposed issue DAG: metrics, execution waves, planner summary",
+    ),
+    (
         "handoff",
         "Produce the autospec.implementation-handoff.v1 handoff (side-effect-free)",
     ),
@@ -179,6 +184,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "benchmark" => benchmark::run(rest).map_err(CommandFailure::diagnostic),
             "growth-report" => growth_report::run(rest).map_err(CommandFailure::diagnostic),
             "handoff" => handoff::run(rest),
+            "graph" => graph::run(rest),
             _ => Err(CommandFailure::diagnostic(format!(
                 "unknown autospec command: {command}"
             ))),
