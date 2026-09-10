@@ -1259,3 +1259,81 @@ fixture directories in `tests/fixtures/lockstep-{trio-pass,duo-pass,duo-divergen
   reason: "Bats unit tests and fixtures for validate.sh lockstep checks"
   generated: false
 -->
+
+## Graph analyzer (`autospec graph analyze`)
+
+Deterministic analysis of the proposed issue dependency DAG produced by
+capacity-aware decomposition. Spec:
+[`docs/specs/2026-09-08-parallel-decomposition-fleet-saturation.md`](specs/2026-09-08-parallel-decomposition-fleet-saturation.md)
+§19–§22 (proposed command §19, metric contract §20, score §21, lint rules §22).
+Inputs: proposed issue JSON, issue drafts, or GitHub issue bodies.
+
+```
+Usage: autospec graph analyze <issue-json | issue-drafts | issue-bodies>
+       (script-first form: scripts/autospec-analyze-issue-dag.sh)
+```
+
+### Output field contract
+
+| Field | Type | Meaning |
+|---|---|---|
+| `issue_count` | integer | Number of planned issues in the graph. |
+| `hard_edge_count` | integer | Number of hard dependency edges. |
+| `root_count` | integer | Issues with zero unresolved hard dependencies. |
+| `leaf_count` | integer | Issues with no hard successors. |
+| `critical_path_length` | integer | Length of the longest hard-dependency chain. |
+| `maximum_width` | integer | Maximum number of simultaneously dependency-ready nodes, assuming immediate predecessor completion and ignoring resource conflicts. |
+| `initial_width` | integer | Issues dependency-ready at decomposition time (no unresolved hard dependencies). |
+| `average_wave_width` | float | Mean width of the projected execution waves. |
+| `serialization_ratio` | float | Hard edges relative to the maximum possible pair count (below). |
+| `shared_write_hotspots` | integer | Count of overlapping primary-write ownership groups among root issues. |
+| `high_fan_in_nodes` | array of issue IDs | Nodes whose fan-in exceeds `max_dependency_fan_in_before_warning`. |
+| `high_fan_out_nodes` | array of issue IDs | Nodes whose fan-out exceeds `max_dependency_fan_in_before_warning`. |
+| `estimated_fleet_saturation` | object | `capacity` (integer), `initial` (float), `peak` (float) — see `initial_saturation` / `peak_saturation` in Metric formulas. |
+
+### Metric formulas
+
+| Metric | Formula |
+|---|---|
+| `initial_width` | `initial_width = |roots|` — number of issues with zero unresolved hard dependencies. |
+| `maximum_width` | Maximum number of simultaneously dependency-ready nodes assuming immediate predecessor completion and ignoring resource conflicts. |
+| `critical_path_length` | Longest hard-dependency chain. |
+| `serialization_ratio` | `hard_edge_count / max(1, issue_count * (issue_count - 1) / 2)` |
+| `critical_path_pressure` | `critical_path_length / issue_count` — intuitive execution score. |
+| `initial_saturation` | `min(initial_width, C) / C` for fleet capacity C. |
+| `peak_saturation` | `min(maximum_width, C) / C` for fleet capacity C. |
+
+Small features that naturally contain fewer useful work packages than C are
+not punished: saturation is capped by the `min(…, C)` clamp, never by an
+assumed full fleet.
+
+### Parallelization score
+
+A 0–100 advisory score (advisory only — correctness always wins):
+
+| Component | Weight |
+|---|---|
+| Initial saturation | `30` |
+| Peak saturation | `20` |
+| Inverse critical-path pressure | `20` |
+| Low shared-write overlap | `15` |
+| Dependency justification quality | `15` |
+
+### DAG lint rules
+
+Stable lint codes emitted against the dependency graph. Rows without a
+severity fixed by the spec inherit the linter default; the spec fixes
+severities for the `003`, `005`, `006`, and `010` rows.
+
+| Code | Name | Condition | Severity |
+|---|---|---|---|
+| `AS-DAG-001` | `UNJUSTIFIED_DEPENDENCY` | Dependency has no recognized reason code or artifact. | Unspecified |
+| `AS-DAG-002` | `ORDER_ONLY_DEPENDENCY` | Dependency rationale describes ordering/convenience rather than a technical prerequisite (e.g. `"implement first"`, `"foundation"`, `"do before UI"`, `"easier if"`). | Unspecified |
+| `AS-DAG-003` | `ARTIFICIAL_SERIALIZATION` | Child references no artifact produced by predecessor and appears independently implementable. | Warning (until deterministic proof is available) |
+| `AS-DAG-004` | `EXCESSIVE_FAN_IN` | Issue depends on more than `max_dependency_fan_in_before_warning` (default `5`); requires explicit justification for each edge. | Unspecified |
+| `AS-DAG-005` | `EXCESSIVE_CRITICAL_PATH` | For issue count `>= 10`: `critical_path_length > max(5, ceil(issue_count * 0.30))`. | Warning |
+| `AS-DAG-006` | `LOW_INITIAL_WIDTH` | For issue count `>= 10` and capacity `>= 10`: `initial_width < min(capacity, max(4, ceil(issue_count * 0.25)))`; forces one concurrency-review retry. | Warning |
+| `AS-DAG-007` | `SHARED_WRITE_HOTSPOT` | Three or more root issues declare overlapping primary write ownership. | Unspecified |
+| `AS-DAG-008` | `SPLIT_CREATED_ORDERING` | Two sibling-sized issues are connected only because they were produced by splitting one oversized issue. | Unspecified |
+| `AS-DAG-009` | `METADATA_DEPENDENCY_MISMATCH` | Machine metadata and Markdown dependency section differ. | Unspecified |
+| `AS-DAG-010` | `CYCLE` | The dependency graph contains a cycle. | Fatal |
