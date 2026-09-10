@@ -20,6 +20,23 @@
 //!
 //! [`RepairTracker`] is JSON-serializable so a cron-style sweep can persist the
 //! ledger between runs and keep counting consecutive streaks across processes.
+//!
+//! # Staging grace and population comparison (#3668)
+//!
+//! A pruner and a scaler acting on the same resource fight when the pruner
+//! cannot tell "not answering yet" from "dead": the sweep health-checks with
+//! a short timeout on a short cadence, a worker loading a large model does
+//! not answer for minutes, and the repair loop deletes what the scaling loop
+//! just created — in equal measure, invisibly. The rules encoded below:
+//!
+//! * prune only when the underlying job is **gone**, or when it has been
+//!   running longer than a stated staging window and still does not answer;
+//! * the grace is keyed on the job's own lifecycle (its elapsed time as
+//!   reported by the job scheduler — the creation loop's intent, made
+//!   visible), never on the pruner's wall clock;
+//! * compare the populations: workers-running vs endpoints-dispatchable is
+//!   one subtraction, and a non-zero gap is the alarm that catches
+//!   create-destroy churn that a flat pool count hides.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,6 +48,15 @@ pub const DEFAULT_RATE_WINDOW: usize = 5;
 /// Default number of consecutive sweeps repairing the same identity before
 /// the repair escalates from a status line to an alert.
 pub const DEFAULT_ESCALATION_THRESHOLD: u64 = 3;
+
+/// Default staging window: 20 minutes.
+///
+/// Derived from what the thing actually does, not from the probe's
+/// patience: a worker staging a 30 GiB model does not answer `/health` for
+/// several minutes, so an 8-second probe on a 5-minute cadence is not a
+/// liveness signal for a worker that young (#3668). Resource types with a
+/// cheaper startup pass a smaller window explicitly.
+pub const DEFAULT_STAGING_WINDOW_SECS: u64 = 1200;
 
 /// One pass of a repair loop over the identities it reconciles.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +408,189 @@ impl RepairTracker {
     }
 }
 
+/// The state of an identity's own underlying job, as observed by the pruner
+/// from the job scheduler at sweep time.
+///
+/// The running time is the creation loop's intent made visible: how long the
+/// job itself has been running, never how long the pruner has been watching
+/// the identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    /// The job is provably gone — the corpse case the sweep exists for.
+    Gone,
+    /// The job is running; `running_for_secs` is the job's own elapsed time
+    /// (its lifecycle), not the pruner's wall clock.
+    Running { running_for_secs: u64 },
+}
+
+/// What the pruner may do to an identity that is not answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneDecision {
+    /// Prune now: the underlying job is gone, regardless of age.
+    JobGone,
+    /// Do not prune: the job is running and younger than the staging window.
+    /// "Not answering yet" and "dead" are different states.
+    StagingGrace,
+    /// Prune: the job has been running at least as long as the stated
+    /// staging window and still does not answer.
+    StagingExpired,
+}
+
+/// Prune only when the underlying job is gone, or when it has been running
+/// longer than the stated staging window and still does not answer (#3668).
+///
+/// The grace is keyed on the job's own lifecycle — `running_for_secs` is
+/// measured from the job's start, as reported by the job scheduler — rather
+/// than on wall-clock time since the pruner first saw the identity. A job
+/// that has *gone* is pruned immediately, regardless of age: that is the
+/// corpse case the sweep exists for.
+pub fn prune_decision(job: &JobState, staging_window_secs: u64) -> PruneDecision {
+    match job {
+        JobState::Gone => PruneDecision::JobGone,
+        JobState::Running { running_for_secs } => {
+            if *running_for_secs < staging_window_secs {
+                PruneDecision::StagingGrace
+            } else {
+                PruneDecision::StagingExpired
+            }
+        }
+    }
+}
+
+/// The operator-facing hold line for a staging-grace decision: it names the
+/// endpoint, the job, and the job's own running time, so the pruner's intent
+/// ("the scaler started this job 4:51 ago; I am not touching it") is visible
+/// in the sweep log.
+pub fn staging_grace_line(endpoint: &str, job_id: &str, running_for_secs: u64) -> String {
+    format!(
+        "staging grace: {endpoint} not answering yet, job {job_id} RUNNING {} -- not pruning",
+        format_slurm_elapsed(running_for_secs)
+    )
+}
+
+/// Render seconds the way Slurm's `%M` elapsed column does: `M:SS` under an
+/// hour, `H:MM:SS` under a day, `D-HH:MM:SS` beyond. `291` → `4:51`,
+/// `53432` → `14:50:32`, `178800` → `2-03:00:00`.
+pub fn format_slurm_elapsed(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Parse a Slurm `%M` elapsed string into seconds.
+///
+/// Accepts exactly the shapes Slurm prints — `M:SS`, `H:MM:SS`, and
+/// `D-HH:MM:SS` (hours, minutes, and seconds fields each in range) — and
+/// rejects everything else, so a malformed field degrades to "unknown
+/// elapsed" instead of a wrong grace window.
+pub fn parse_slurm_elapsed(elapsed: &str) -> Option<u64> {
+    let text = elapsed.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (days_text, rest) = match text.split_once('-') {
+        Some((day_part, rest)) => (day_part, rest),
+        None => ("", text),
+    };
+    let days: u64 = if days_text.is_empty() {
+        0
+    } else {
+        days_text.parse().ok()?
+    };
+    let fields: Vec<&str> = rest.split(':').collect();
+    // Slurm zero-pads the seconds field (and minutes/hours in the longer
+    // forms) to two digits; reject anything it would not print, so a
+    // malformed field degrades to "unknown elapsed" instead of a wrong
+    // grace window.
+    let (hours, minutes, seconds) = match (days_text.is_empty(), fields.len()) {
+        (true, 2) if fields[1].len() == 2 => ("0", fields[0], fields[1]),
+        (true, 3) if fields[1].len() == 2 && fields[2].len() == 2 => {
+            (fields[0], fields[1], fields[2])
+        }
+        (false, 3) if fields[0].len() == 2 && fields[1].len() == 2 && fields[2].len() == 2 => {
+            (fields[0], fields[1], fields[2])
+        }
+        _ => return None,
+    };
+    let hours: u64 = hours.parse().ok()?;
+    let minutes: u64 = minutes.parse().ok()?;
+    let seconds: u64 = seconds.parse().ok()?;
+    if hours >= 24 || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
+}
+
+/// The result of comparing two populations of the same resource, when they
+/// disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopulationGap {
+    /// Name of the larger population (e.g. `workers running`).
+    pub larger: String,
+    /// Size of the larger population.
+    pub larger_count: usize,
+    /// Name of the smaller population (e.g. `endpoints dispatchable`).
+    pub smaller: String,
+    /// Size of the smaller population.
+    pub smaller_count: usize,
+    /// `larger_count - smaller_count`; always positive.
+    pub gap: usize,
+}
+
+impl PopulationGap {
+    /// The alarm line: both named populations with their counts and the gap.
+    /// A non-zero gap between workers-running and endpoints-dispatchable is
+    /// the signal that a repair loop is deleting what a scaling loop just
+    /// created (#3668); a flat pool count hides it.
+    pub fn line(&self) -> String {
+        format!(
+            "ALERT population gap: {} {} vs {} {} — gap {}",
+            self.larger_count, self.larger, self.smaller_count, self.smaller, self.gap
+        )
+    }
+}
+
+/// Compare two populations of the same resource: one subtraction.
+///
+/// `None` when the populations agree — no alarm. Otherwise the gap, with the
+/// larger and smaller sides named, so the alarm says *what* disagrees, not
+/// just *that* something does.
+pub fn population_gap(
+    a_name: impl Into<String>,
+    a_count: usize,
+    b_name: impl Into<String>,
+    b_count: usize,
+) -> Option<PopulationGap> {
+    if a_count == b_count {
+        return None;
+    }
+    if a_count > b_count {
+        Some(PopulationGap {
+            larger: a_name.into(),
+            larger_count: a_count,
+            smaller: b_name.into(),
+            smaller_count: b_count,
+            gap: a_count - b_count,
+        })
+    } else {
+        Some(PopulationGap {
+            larger: b_name.into(),
+            larger_count: b_count,
+            smaller: a_name.into(),
+            smaller_count: a_count,
+            gap: b_count - a_count,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +600,148 @@ mod tests {
             expected: expected.iter().map(|id| (*id).to_string()).collect(),
             repaired: repaired.iter().map(|id| (*id).to_string()).collect(),
         }
+    }
+
+    // #3668 — staging grace, lifecycle-keyed running time, population gap.
+
+    #[test]
+    fn a_gone_job_is_pruned_regardless_of_age() {
+        // The corpse case the sweep exists for: no grace window protects a
+        // job the scheduler has already removed.
+        assert_eq!(
+            prune_decision(&JobState::Gone, DEFAULT_STAGING_WINDOW_SECS),
+            PruneDecision::JobGone
+        );
+    }
+
+    #[test]
+    fn a_running_job_inside_the_staging_window_is_not_pruned() {
+        // 4:51 of a 20-minute window: the worker is staging, not dead.
+        let job = JobState::Running {
+            running_for_secs: 291,
+        };
+        assert_eq!(
+            prune_decision(&job, DEFAULT_STAGING_WINDOW_SECS),
+            PruneDecision::StagingGrace
+        );
+        assert_eq!(
+            staging_grace_line("22739810", "40211", 291),
+            "staging grace: 22739810 not answering yet, job 40211 RUNNING 4:51 -- not pruning"
+        );
+    }
+
+    #[test]
+    fn a_running_job_past_the_staging_window_is_pruned() {
+        // Exactly at the window the job is no longer "younger than" it, and
+        // past it the not-answering has outlived every plausible staging.
+        for running_for_secs in [1200u64, 1201] {
+            let job = JobState::Running { running_for_secs };
+            assert_eq!(prune_decision(&job, 1200), PruneDecision::StagingExpired);
+        }
+    }
+
+    #[test]
+    fn the_staging_window_is_explicit_per_resource_type() {
+        // The grace is derived from what the thing actually does: the same
+        // running time is held under a 20-minute model-staging window but
+        // pruned under a 60-second window for a cheap resource.
+        let job = JobState::Running {
+            running_for_secs: 100,
+        };
+        assert_eq!(
+            prune_decision(&job, DEFAULT_STAGING_WINDOW_SECS),
+            PruneDecision::StagingGrace
+        );
+        assert_eq!(prune_decision(&job, 60), PruneDecision::StagingExpired);
+    }
+
+    #[test]
+    fn slurm_elapsed_rendering_matches_the_scheduler_column() {
+        assert_eq!(format_slurm_elapsed(0), "0:00");
+        assert_eq!(format_slurm_elapsed(291), "4:51");
+        assert_eq!(format_slurm_elapsed(1493), "24:53");
+        assert_eq!(format_slurm_elapsed(53432), "14:50:32");
+        assert_eq!(format_slurm_elapsed(183600), "2-03:00:00");
+    }
+
+    #[test]
+    fn slurm_elapsed_parsing_accepts_every_shape_the_scheduler_prints() {
+        // The four shapes the sweep sees in the `%M` column.
+        assert_eq!(parse_slurm_elapsed("4:51"), Some(291));
+        assert_eq!(parse_slurm_elapsed("24:53"), Some(1493));
+        assert_eq!(parse_slurm_elapsed("14:50:32"), Some(53432));
+        assert_eq!(parse_slurm_elapsed("2-03:00:00"), Some(183600));
+        // Render and parse are inverses on every boundary.
+        for secs in [0u64, 59, 60, 3599, 3600, 86_399, 86_400, 183_600, 999_999] {
+            let rendered = format_slurm_elapsed(secs);
+            assert_eq!(
+                parse_slurm_elapsed(&rendered),
+                Some(secs),
+                "round-trip failed for {secs} via {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn slurm_elapsed_parsing_rejects_malformed_fields() {
+        for bad in [
+            "",
+            "  ",
+            ":",
+            "4:5",
+            "4:60",
+            "25:00:00",
+            "14:60:00",
+            "14:50:60",
+            "2-25:00:00",
+            "1:2:3:4",
+            "4:5:6:7:8",
+            "abc",
+            "4:-51",
+        ] {
+            assert_eq!(
+                parse_slurm_elapsed(bad),
+                None,
+                "accepted malformed elapsed {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn population_comparison_is_silent_when_the_populations_agree() {
+        assert_eq!(
+            population_gap("workers running", 5, "endpoints dispatchable", 5),
+            None
+        );
+    }
+
+    #[test]
+    fn population_comparison_reports_the_subtraction_either_direction() {
+        // The incident shape: 10 workers running, 5 endpoints dispatchable —
+        // the flat count of 10 looked healthy.
+        let gap = population_gap("workers running", 10, "endpoints dispatchable", 5)
+            .expect("a gap exists");
+        assert_eq!(gap.larger, "workers running");
+        assert_eq!(gap.larger_count, 10);
+        assert_eq!(gap.smaller, "endpoints dispatchable");
+        assert_eq!(gap.smaller_count, 5);
+        assert_eq!(gap.gap, 5);
+
+        // The comparison does not care which side is named first.
+        let reversed = population_gap("endpoints dispatchable", 7, "workers running", 4)
+            .expect("a gap exists");
+        assert_eq!(reversed.larger, "endpoints dispatchable");
+        assert_eq!(reversed.gap, 3);
+    }
+
+    #[test]
+    fn the_population_gap_line_is_the_alarm() {
+        let gap = population_gap("workers running", 10, "endpoints dispatchable", 5)
+            .expect("a gap exists");
+        assert_eq!(
+            gap.line(),
+            "ALERT population gap: 10 workers running vs 5 endpoints dispatchable — gap 5"
+        );
     }
 
     #[test]
