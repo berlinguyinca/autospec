@@ -1865,8 +1865,11 @@ fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
 }
 
 #[test]
-fn autonomous_main_health_reports_branch_not_found_without_waiting() {
-    let temp = temp_dir("autospec-main-health-missing-branch");
+fn autonomous_main_health_abstains_when_the_branch_read_fails() {
+    // A failed branch read must not answer "missing": the old code folded every
+    // read failure into BranchNotFound and halted on a verdict it could not
+    // vouch for. The guard now abstains — wait, logged, non-destructive.
+    let temp = temp_dir("autospec-main-health-unreadable-branch");
     let state_dir = temp.join("state");
     let log = temp.join("gh.log");
     let bin = fake_bin(
@@ -1889,21 +1892,81 @@ fn autonomous_main_health_reports_branch_not_found_without_waiting() {
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_GH_LOG", &log)
         .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_GH_API_RETRIES", "2")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "10")
         .output()
         .expect("autospec autonomous main-health runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(stdout.contains("DECISION:halt"));
-    assert!(stdout.contains("REASON:branch-not-found"));
-    assert!(!stdout.contains("DECISION:wait"));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a read failure must abstain, not halt; stderr={stderr}"
+    );
+    assert!(stdout.contains("DECISION:wait"), "stdout={stdout}");
+    assert!(stdout.contains("REASON:gh-api-failed"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("DECISION:halt"),
+        "a failed read must not fabricate a branch verdict; stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("WARN: mainline health"),
+        "the abstain must be logged so it is visible, not silent; stderr={stderr}"
+    );
     let persisted = std::fs::read_to_string(
         state_dir.join("berlinguyinca_autospec/main-health-observations.jsonl"),
     )
     .expect("health observation persisted");
     assert!(persisted.contains("\"branch\":\"missing-health\""));
-    assert!(persisted.contains("\"outcome\":\"halt\""));
-    assert!(persisted.contains("\"diagnostic\":\"branch-not-found\""));
+    assert!(persisted.contains("\"outcome\":\"wait\""));
+    assert!(persisted.contains("\"diagnostic\":\"gh-api-failed\""));
+}
+
+#[test]
+fn autonomous_main_health_abstains_when_gh_is_not_on_path() {
+    // No gh on PATH at all: every read in the health gate fails, and the first
+    // one (default-branch resolution) must log and abstain with its own
+    // diagnostic instead of recording DefaultBranchMissing and halting.
+    let temp = temp_dir("autospec-main-health-no-gh");
+    let state_dir = temp.join("state");
+    let empty_bin = temp.join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).expect("empty bin dir");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "main-health",
+            "--repo",
+            "berlinguyinca/autospec",
+        ])
+        .env("PATH", empty_bin.display().to_string())
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &state_dir)
+        .output()
+        .expect("autospec autonomous main-health runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a missing gh must abstain, not halt; stderr={stderr}"
+    );
+    assert!(stdout.contains("DECISION:wait"), "stdout={stdout}");
+    assert!(
+        stdout.contains("REASON:default-branch-unreadable"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("gh_unavailable"),
+        "the abstain must carry the stable resolution reason; stderr={stderr}"
+    );
+    let persisted = std::fs::read_to_string(
+        state_dir.join("berlinguyinca_autospec/main-health-observations.jsonl"),
+    )
+    .expect("health observation persisted");
+    assert!(persisted.contains("\"outcome\":\"wait\""));
+    assert!(persisted.contains("\"diagnostic\":\"default-branch-unreadable\""));
 }
 
 #[test]
@@ -1980,7 +2043,10 @@ fn autonomous_main_health_blocks_required_check_failure() {
 }
 
 #[test]
-fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_missing() {
+fn autonomous_run_foreground_parks_with_health_wait_when_the_branch_read_fails() {
+    // The `missing-health` fixture makes the branch read fail, so the health
+    // guard abstains with health_wait (non-destructive) instead of recording a
+    // BranchNotFound halt — still parking before the Rust executor.
     let temp = temp_dir("autospec-foreground-health-block");
     let repo_dir = temp.join("repo");
     make_git_repo(
@@ -2000,6 +2066,8 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
         ])
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_TEST_AUTONOMOUS_GH_MODE", "missing-health")
+        .env("AUTOSPEC_GH_API_RETRIES", "2")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "10")
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
         .env("AUTOSPEC_STATE_DIR", temp.join("state"))
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
@@ -2010,13 +2078,13 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"health_wait\"}\n"
     );
     let lifecycle = temp.join("operator/berlinguyinca_autospec/lifecycle.json");
     assert!(lifecycle.exists(), "missing {}", lifecycle.display());
     assert!(std::fs::read_to_string(lifecycle)
         .expect("lifecycle record")
-        .contains("\"reason\":\"health_halt\""));
+        .contains("\"reason\":\"health_wait\""));
 }
 
 #[test]

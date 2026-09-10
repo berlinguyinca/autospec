@@ -5303,17 +5303,22 @@ fn autonomous_start_records_kernel_hostname_without_host_env() {
 
 #[test]
 fn foreground_stops_before_executor_when_main_health_blocks() {
+    // The `missing` branch read fails (the fake `gh` exits non-zero), so the
+    // health guard abstains with health_wait — still parking before the
+    // executor instead of fabricating a BranchNotFound halt.
     let fixture = ForegroundFixture::new();
     let output = fixture
         .command()
         .args(["--branch", "missing"])
+        .env("AUTOSPEC_GH_API_RETRIES", "2")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "10")
         .output()
         .expect("run");
 
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"health_wait\"}\n"
     );
     assert!(!fixture.state_path().exists());
     assert!(fixture.operator.join("test_repo/lifecycle.json").exists());
@@ -5547,7 +5552,11 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 }
 
 #[test]
-fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
+fn unreadable_default_branch_keeps_its_typed_policy_bound_health_receipt() {
+    // An empty default-branch read is a failed read, not a verdict: GitHub
+    // repositories always have a default branch. The guard logs and abstains
+    // (wait) instead of recording DefaultBranchMissing and halting — but the
+    // abstain still carries the unresolved-branch policy receipt.
     const UNRESOLVED_POLICY_DIGEST: &str = "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
@@ -5557,15 +5566,30 @@ fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
         .output()
         .expect("run main-health without GitHub default branch metadata");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("default-branch-missing"));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an unreadable default branch must abstain, not halt; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"diagnostic\":\"default-branch-unreadable\""),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("\"outcome\":\"wait\""), "stdout={stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WARN: mainline health"),
+        "the abstain must be logged; stderr={stderr}"
+    );
     let receipts = fs::read_to_string(fixture.main_health_observations_path())
-        .expect("missing branch health must retain a policy-bound observation");
+        .expect("unreadable branch health must retain a policy-bound observation");
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     assert_eq!(
         json_string_field(lines[0], "diagnostic"),
-        "default-branch-missing"
+        "default-branch-unreadable"
     );
     assert_eq!(
         json_string_field(lines[0], "effective_policy_digest"),
@@ -5574,7 +5598,10 @@ fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
 }
 
 #[test]
-fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy() {
+fn foreground_unreadable_default_branch_parks_with_health_wait_after_recording_policy() {
+    // The foreground admission gate fails safe: an unreadable default branch
+    // parks with health_wait (non-destructive) after recording the policy
+    // receipt, instead of halting on a verdict the read cannot vouch for.
     const UNRESOLVED_POLICY_DIGEST: &str = "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
@@ -5587,15 +5614,15 @@ fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy()
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"health_wait\"}\n"
     );
     let receipts = fs::read_to_string(fixture.main_health_observations_path())
-        .expect("foreground health halt must retain a policy-bound observation");
+        .expect("foreground health wait must retain a policy-bound observation");
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     assert_eq!(
         json_string_field(lines[0], "diagnostic"),
-        "default-branch-missing"
+        "default-branch-unreadable"
     );
     assert_eq!(
         json_string_field(lines[0], "effective_policy_digest"),
@@ -5708,11 +5735,25 @@ fn invalid_configured_branch_does_not_fall_back_to_github_default() {
 
     let output = fixture
         .unbranched_main_health_command()
+        .env("AUTOSPEC_GH_API_RETRIES", "2")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "10")
         .output()
         .expect("run main-health with missing configured branch");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("branch-not-found"));
+    // A failed branch read abstains (wait) rather than recording
+    // BranchNotFound on a verdict the read cannot vouch for.
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"diagnostic\":\"gh-api-failed\""),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("\"outcome\":\"wait\""), "stdout={stdout}");
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     assert!(calls.contains("repos/test/repo/branches/missing"));
     assert!(!calls.contains("repo\nview"));

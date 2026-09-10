@@ -7,11 +7,38 @@
 //! caller's identity, so nothing could ever release it.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use super::CommandFailure;
+
+/// Reason token logged (and embedded in the failure message) when the shared
+/// `gh` resolution finds no binary on `PATH`.
+pub(crate) const REASON_GH_UNAVAILABLE: &str = "gh_unavailable";
+
+/// Resolve the shared `gh` binary from `PATH` once per read.
+///
+/// Every conductor `gh` read goes through here, so a `PATH` that cannot
+/// produce a `gh` is reported once, with its own log line and a stable reason
+/// token, instead of surfacing later as a spawn error that some callers read
+/// as a verdict ("branch missing", "no default branch").
+pub(crate) fn resolve_gh_binary() -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .as_deref()
+        .and_then(gh_binary_on_path)
+}
+
+fn gh_binary_on_path(path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("gh"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn gh_unavailable_failure(action: &str) -> CommandFailure {
+    eprintln!("WARN: gh resolution: {REASON_GH_UNAVAILABLE}; cannot run {action}");
+    CommandFailure::diagnostic(format!("cannot run {action}: {REASON_GH_UNAVAILABLE}"))
+}
 
 fn env_u64(name: &str, fallback: u64) -> u64 {
     std::env::var(name)
@@ -26,18 +53,19 @@ fn env_u64(name: &str, fallback: u64) -> u64 {
 /// Shares `AUTOSPEC_GH_API_RETRIES` and `AUTOSPEC_CLAIM_RETRY_SLEEP_MS` with the
 /// claim path's `run_gh_with_retry`, and returns the captured output that helper
 /// discards. Only use this for reads: a retried mutation would not be safe.
+///
+/// The `gh` binary is resolved once through [`resolve_gh_binary`]: a `PATH`
+/// without `gh` fails with the stable [`REASON_GH_UNAVAILABLE`] reason instead
+/// of a bare spawn error, and every caller (branch lookup, default-branch read,
+/// check-run evidence) shares the same resolution.
 pub(crate) fn run_gh_read_with_retry(
     arguments: &[&str],
     action: &str,
 ) -> Result<Output, CommandFailure> {
-    run_command_read_with_retry(
-        || {
-            let mut command = Command::new("gh");
-            command.args(arguments);
-            command
-        },
-        action,
-    )
+    let Some(binary) = resolve_gh_binary() else {
+        return Err(gh_unavailable_failure(action));
+    };
+    run_gh_read_with_retry_in(&binary, arguments, &BTreeMap::new(), action)
 }
 
 pub(crate) fn run_command_read_with_retry(
@@ -82,7 +110,10 @@ pub(crate) fn run_gh_read_with_retry_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{env_u64, run_command_read_with_retry};
+    use super::{
+        env_u64, gh_binary_on_path, gh_unavailable_failure, run_command_read_with_retry,
+        REASON_GH_UNAVAILABLE,
+    };
     use std::process::Command;
 
     #[test]
@@ -103,6 +134,36 @@ mod tests {
             std::env::remove_var("AUTOSPEC_TEST_ZERO_RETRY_KNOB");
             std::env::remove_var("AUTOSPEC_TEST_JUNK_RETRY_KNOB");
         }
+    }
+
+    #[test]
+    fn gh_resolution_walks_path_and_reports_a_stable_reason_when_absent() {
+        let root =
+            std::env::temp_dir().join(format!("autospec-gh-resolution-{}", std::process::id()));
+        let empty = root.join("empty");
+        let with_gh = root.join("with-gh");
+        std::fs::create_dir_all(&empty).expect("create empty bin directory");
+        std::fs::create_dir_all(&with_gh).expect("create populated bin directory");
+        std::fs::write(with_gh.join("gh"), "#!/bin/sh\nexit 0\n").expect("write fake gh");
+        let found =
+            std::env::join_paths([empty.clone(), with_gh.clone()]).expect("join PATH entries");
+        assert_eq!(
+            gh_binary_on_path(found.as_os_str()).as_deref(),
+            Some(with_gh.join("gh").as_path()),
+            "resolution must find the binary in the populated PATH entry"
+        );
+        assert_eq!(
+            gh_binary_on_path(empty.as_os_str()),
+            None,
+            "a PATH without gh resolves to nothing so the caller can abstain"
+        );
+        let failure = gh_unavailable_failure("resolve the default branch");
+        assert!(
+            failure.to_string().contains(REASON_GH_UNAVAILABLE),
+            "the failure must carry the stable reason token, got: {}",
+            failure
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

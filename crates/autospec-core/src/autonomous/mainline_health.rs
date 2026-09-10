@@ -55,6 +55,10 @@ pub enum MainlineHealthDiagnostic {
     NoRequiredChecks,
     BranchNotFound,
     DefaultBranchMissing,
+    /// The default-branch read itself failed or came back empty where a
+    /// branch name was required. This is "cannot evaluate", not "branch
+    /// missing": the receipt must be a retryable wait, never a halt.
+    DefaultBranchUnreadable,
     GhApiFailed,
     CheckRunsApiFailed,
     RequiredCheckPending,
@@ -71,6 +75,7 @@ impl MainlineHealthDiagnostic {
             Self::NoRequiredChecks => "no-required-checks",
             Self::BranchNotFound => "branch-not-found",
             Self::DefaultBranchMissing => "default-branch-missing",
+            Self::DefaultBranchUnreadable => "default-branch-unreadable",
             Self::GhApiFailed => "gh-api-failed",
             Self::CheckRunsApiFailed => "check-runs-api-failed",
             Self::RequiredCheckPending => "required-check-pending",

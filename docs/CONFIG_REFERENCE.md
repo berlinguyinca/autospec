@@ -103,7 +103,11 @@ reloads the repository file and records the resulting digest on every evaluated
 conductor state. When GitHub supplies no default branch, the typed
 `default-branch-missing` observation uses the reserved, invalid-ref identity
 `autospec:unresolved-default-branch` so the failed evaluation is still bound to
-the effective policy.
+the effective policy. A failed or empty default-branch *read* (for example,
+`gh` missing from PATH) records a typed `default-branch-unreadable` wait with
+the same reserved identity; a failed branch-existence read records a
+`gh-api-failed` wait. Neither read failure fabricates a missing-branch halt:
+the guard logs a `WARN: mainline health:` line and abstains.
 
 A missing file preserves existing behavior. An unreadable file or malformed,
 duplicate, unknown, incorrectly indented, or wrongly typed field inside

@@ -300,6 +300,39 @@ fn a_wait_receipt_distinguishes_unreachable_github_from_a_pending_check() {
 }
 
 #[test]
+fn an_unreadable_default_branch_is_a_wait_never_a_missing_branch_halt() {
+    // "Cannot read the default branch" is not "the default branch is missing":
+    // the receipt must carry its own diagnostic and the wait outcome, so the
+    // conductor retries instead of recording a permanent halt.
+    let unreadable = autospec_core::autonomous::mainline_health::MainlineHealth::diagnostic(
+        "",
+        MainlineHealthOutcome::Wait,
+        MainlineHealthDiagnostic::DefaultBranchUnreadable,
+    );
+
+    assert_eq!(
+        MainlineHealthDiagnostic::DefaultBranchUnreadable.as_str(),
+        "default-branch-unreadable"
+    );
+    assert_eq!(
+        unreadable.diagnostic,
+        MainlineHealthDiagnostic::DefaultBranchUnreadable
+    );
+    assert_eq!(unreadable.outcome, MainlineHealthOutcome::Wait);
+
+    let receipt = unreadable.to_json("owner/repo");
+    assert!(receipt.contains("\"outcome\":\"wait\""), "got: {receipt}");
+    assert!(
+        receipt.contains("\"diagnostic\":\"default-branch-unreadable\""),
+        "got: {receipt}"
+    );
+    assert!(
+        !receipt.contains("default-branch-missing"),
+        "an unreadable branch must not be reported as a missing branch, got: {receipt}"
+    );
+}
+
+#[test]
 fn a_repo_with_no_ci_at_all_continues_rather_than_waiting() {
     // A repo that deliberately runs no CI reports state=pending/total_count=0 on the legacy
     // endpoint forever, and zero check-runs. That must not be read as "CI is pending".
