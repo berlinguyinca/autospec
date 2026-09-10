@@ -1,4 +1,4 @@
-//! Context-class fit at dispatch time (issue #3694).
+//! Context-class fit at dispatch time (issue #3694, corrected by #3749).
 //!
 //! Task cards declare a context requirement, e.g. `context class \`C75\`
 //! (tier \`tier-integration\`, **65–82K pack**)`, but `--parallel N` divides
@@ -6,14 +6,23 @@
 //! (8 slots → 32,768; 4 → 65,536; 2 → 131,072 out of a 256K window).
 //!
 //! - [`parse_context_class`] extracts the declared requirement from card text.
+//! - [`slots_for_prompt`] derives `--parallel` for a workload: the launcher
+//!   sizes slots to `floor(window / prompt ceiling)` so every slot holds the
+//!   workload's prompt ceiling, and records the window and slot count in the
+//!   endpoint file.
 //! - [`dispatch`] picks the **largest-context** endpoint whose slot holds the
-//!   pack floor; when nothing fits the issue is held with
-//!   [`NO_ENDPOINT_LARGE_ENOUGH`] — a queued issue is recoverable, a silently
-//!   truncated run is not.
+//!   pack **ceiling** — not just the floor (issue #3749: a 65,536 slot holds
+//!   a C75 floor but truncates its 82K ceiling); when nothing fits the issue
+//!   is held with [`NO_ENDPOINT_LARGE_ENOUGH`] and the hold names the
+//!   mismatched workers ([`mismatched_workers`]) instead of silently skipping
+//!   them. A queued issue is recoverable, a silently truncated run is not.
 //! - [`ContextGrant`] is the record merged into the run's status file by
 //!   [`status_json_with_grant`]; a grant short of the declared floor does not
 //!   count as an attempt ([`ContextGrant::counts_as_attempt`]), and
 //!   [`redispatch`] excludes the endpoint class that already lost.
+//! - [`status_json_with_prompt_size`] records the actual prompt size next to
+//!   the granted slot context so a zero-output run is auditable against the
+//!   window it ran in.
 //!
 //! Everything here is pure: callers do the I/O with the returned plan.
 
@@ -36,15 +45,24 @@ pub struct ContextClass {
 }
 
 impl ContextClass {
-    /// The context a slot must hold for the card to fit.
+    /// The context a slot must hold for the card's *typical* prompt: the
+    /// pack floor.
     pub fn floor_tokens(&self) -> u32 {
         self.pack_min_tokens
+    }
+
+    /// The context a slot must hold for the card's *worst-case* prompt: the
+    /// pack ceiling. A slot between the floor and the ceiling holds the
+    /// typical prompt but truncates a ceiling-sized one (issue #3749), so
+    /// dispatch fit is checked against this, not the floor.
+    pub fn ceiling_tokens(&self) -> u32 {
+        self.pack_max_tokens
     }
 }
 
 /// An endpoint as the dispatcher sees it: `--parallel N` divides its context
 /// window across `N` slots, and the output reservation reduces each further.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Endpoint {
     /// Endpoint name (e.g. from the endpoint file).
     pub name: String,
@@ -69,28 +87,49 @@ impl Endpoint {
             .saturating_sub(self.output_reserve_tokens)
     }
 
-    /// Whether a single slot on this endpoint can hold the declared pack.
+    /// Whether a single slot on this endpoint can hold the card's
+    /// worst-case prompt. The check is against the pack **ceiling** (issue
+    /// #3749): the launcher sizes slots to `floor(window / ceiling)` so a
+    /// slot below the ceiling will truncate a ceiling-sized prompt even
+    /// though it holds the floor.
     pub fn fits(&self, class: &ContextClass) -> bool {
-        self.context_per_slot() >= class.pack_min_tokens
+        self.context_per_slot() >= class.pack_max_tokens
     }
 }
 
 /// The outcome of a dispatch decision: grant the card to one endpoint, or
 /// hold the issue with a machine-readable code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum DispatchVerdict {
     /// Dispatch the card to `endpoint`, and write `record` to the status file.
     Grant(DispatchGrant),
     /// Nothing fits. `code` is [`NO_ENDPOINT_LARGE_ENOUGH`] for context fit;
-    /// the issue stays queued rather than running truncated.
+    /// the issue stays queued rather than running truncated. `mismatched`
+    /// names the unusable capacity so it is reported, not silently skipped
+    /// (issue #3749).
     Hold {
         code: &'static str,
         rationale: String,
+        mismatched: Vec<MismatchedWorker>,
     },
 }
 
+/// An endpoint this workload cannot use: its per-slot window is below the
+/// workload's prompt ceiling. Undersized capacity must be *reported*, not
+/// counted as capacity, because dispatching into it truncates the prompt
+/// (issue #3749).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MismatchedWorker {
+    /// Endpoint name (e.g. from the endpoint file).
+    pub name: String,
+    /// Context per slot on this endpoint, in tokens.
+    pub context_per_slot_tokens: u32,
+    /// The per-slot window the workload requires (its prompt ceiling).
+    pub required_tokens: u32,
+}
+
 /// A granted dispatch: the chosen endpoint plus the record to persist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DispatchGrant {
     /// The endpoint the card is dispatched to.
     pub endpoint: Endpoint,
@@ -147,7 +186,7 @@ impl ContextGrant {
 /// with the largest slot context (ties broken by the smaller endpoint name,
 /// so the result is independent of fleet ordering). When nothing fits the
 /// verdict holds with [`NO_ENDPOINT_LARGE_ENOUGH`] rather than dispatching a
-/// truncated run.
+/// truncated run, and names the mismatched workers in the hold.
 pub fn dispatch(class: &ContextClass, endpoints: &[Endpoint]) -> DispatchVerdict {
     let mut best: Option<&Endpoint> = None;
     for endpoint in endpoints {
@@ -171,16 +210,22 @@ pub fn dispatch(class: &ContextClass, endpoints: &[Endpoint]) -> DispatchVerdict
             endpoint: endpoint.clone(),
             record: ContextGrant::for_dispatch(class, endpoint),
         }),
-        None => DispatchVerdict::Hold {
-            code: NO_ENDPOINT_LARGE_ENOUGH,
-            rationale: hold_rationale(class, endpoints),
-        },
+        None => {
+            let mismatched = mismatched_workers(endpoints, class.ceiling_tokens());
+            DispatchVerdict::Hold {
+                code: NO_ENDPOINT_LARGE_ENOUGH,
+                rationale: hold_rationale(class, &mismatched),
+                mismatched,
+            }
+        }
     }
 }
 
 /// Re-dispatch an under-provisioned run over the fitting endpoints that are
 /// **strictly larger** than the grant that already lost; holds with
-/// [`NO_ENDPOINT_LARGE_ENOUGH`] when no larger endpoint remains.
+/// [`NO_ENDPOINT_LARGE_ENOUGH`] when no larger endpoint remains. The hold
+/// reports the mismatched workers over the caller's full fleet view, not
+/// just the (filtered) strictly-larger set.
 pub fn redispatch(
     class: &ContextClass,
     endpoints: &[Endpoint],
@@ -191,7 +236,81 @@ pub fn redispatch(
         .filter(|e| e.fits(class) && e.context_per_slot() > previous.granted_context_tokens)
         .cloned()
         .collect();
-    dispatch(class, &bigger)
+    match dispatch(class, &bigger) {
+        DispatchVerdict::Grant(grant) => DispatchVerdict::Grant(grant),
+        DispatchVerdict::Hold { .. } => DispatchVerdict::Hold {
+            code: NO_ENDPOINT_LARGE_ENOUGH,
+            rationale: format!(
+                "declared {} prompt ceiling {} tokens; no slot strictly larger than the previous grant of {} tokens remains",
+                class.name, class.pack_max_tokens, previous.granted_context_tokens
+            ),
+            mismatched: mismatched_workers(endpoints, class.ceiling_tokens()),
+        },
+    }
+}
+
+/// The slot count for a workload whose prompt ceiling is
+/// `prompt_ceiling_tokens` on an engine with a `window_tokens` window:
+/// `floor(window / ceiling)`, at least 1. The launcher records this next to
+/// the window in the endpoint file so consumers can verify that
+/// `window / slots >= ceiling` before dispatching (issue #3749).
+///
+/// A ceiling of 0 means "no known ceiling" and yields the undivided window
+/// (1 slot), the safe default; a ceiling the window cannot hold at all still
+/// yields 1 slot — it is the dispatch fit check, not the slot count, that
+/// holds the card.
+pub fn slots_for_prompt(window_tokens: u32, prompt_ceiling_tokens: u32) -> u32 {
+    match prompt_ceiling_tokens {
+        0 => 1,
+        ceiling => (window_tokens / ceiling).max(1),
+    }
+}
+
+/// The endpoints whose per-slot window is below `required_tokens`, i.e. the
+/// capacity this workload cannot use. Sorted by endpoint name so the report
+/// is stable regardless of fleet ordering.
+pub fn mismatched_workers(endpoints: &[Endpoint], required_tokens: u32) -> Vec<MismatchedWorker> {
+    let mut workers: Vec<MismatchedWorker> = endpoints
+        .iter()
+        .filter(|e| e.context_per_slot() < required_tokens)
+        .map(|e| MismatchedWorker {
+            name: e.name.clone(),
+            context_per_slot_tokens: e.context_per_slot(),
+            required_tokens,
+        })
+        .collect();
+    workers.sort_by(|a, b| a.name.cmp(&b.name));
+    workers
+}
+
+/// Record the actual prompt size next to the granted slot context in the
+/// run's status file: `prompt_tokens` is inserted into the existing
+/// `"context"` object (or a fresh one), keeping whatever the runner already
+/// wrote; returns the serialised JSON. This is what makes a zero-output run
+/// auditable — the prompt size next to `granted_context_tokens` shows
+/// whether the slot held the prompt (issue #3749).
+pub fn status_json_with_prompt_size(
+    existing: Option<&str>,
+    prompt_tokens: u32,
+) -> Result<String, String> {
+    let mut obj: serde_json::Value = match existing {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| format!("existing status is not valid JSON: {e}"))?,
+        None => serde_json::json!({}),
+    };
+    let obj = obj
+        .as_object_mut()
+        .ok_or_else(|| "existing status is not a JSON object".to_string())?;
+    let context = obj
+        .entry("context")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "existing status \"context\" is not a JSON object".to_string())?;
+    context.insert(
+        "prompt_tokens".to_string(),
+        serde_json::json!(prompt_tokens),
+    );
+    serde_json::to_string_pretty(obj).map_err(|e| e.to_string())
 }
 
 /// Merge `grant` into the run's status file as a `"context"` object, keeping
@@ -213,15 +332,26 @@ pub fn status_json_with_grant(
     serde_json::to_string_pretty(obj).map_err(|e| e.to_string())
 }
 
-fn hold_rationale(class: &ContextClass, endpoints: &[Endpoint]) -> String {
-    let largest = endpoints
+fn hold_rationale(class: &ContextClass, mismatched: &[MismatchedWorker]) -> String {
+    // On a hold every endpoint is mismatched (none holds the ceiling), so
+    // the largest mismatched slot is the largest slot available.
+    let largest = mismatched
         .iter()
-        .map(|e| e.context_per_slot())
+        .map(|w| w.context_per_slot_tokens)
         .max()
         .unwrap_or(0);
+    let names = if mismatched.is_empty() {
+        "(none)".to_string()
+    } else {
+        mismatched
+            .iter()
+            .map(|w| format!("{} ({} tokens)", w.name, w.context_per_slot_tokens))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        "declared {} pack floor {} tokens; largest slot available is {} tokens",
-        class.name, class.pack_min_tokens, largest
+        "declared {} prompt ceiling {} tokens (pack floor {}); no slot holds the ceiling; mismatched workers: {}; largest slot available is {} tokens",
+        class.name, class.pack_max_tokens, class.pack_min_tokens, names, largest
     )
 }
 

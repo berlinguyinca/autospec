@@ -1,12 +1,16 @@
-//! Integration tests for `aar::dispatch_fit` (issue #3694): context-class
-//! fit at dispatch time. The card's declared pack must be compared against
-//! the endpoint's slot context before dispatch; when nothing fits the issue
-//! is held, not dispatched truncated, and an under-provisioned run does not
-//! count as an attempt.
+//! Integration tests for `aar::dispatch_fit` (issue #3694, corrected by
+//! #3749): context-class fit at dispatch time. The card's declared pack must
+//! be compared against the endpoint's slot context before dispatch; when
+//! nothing fits the issue is held, not dispatched truncated, and an
+//! under-provisioned run does not count as an attempt. The fit check is
+//! against the pack **ceiling** (#3749): a slot that holds the typical prompt
+//! but truncates a ceiling-sized one is reported as a mismatched worker, not
+//! granted.
 
 use autospec_core::aar::dispatch_fit::{
-    dispatch, parse_context_class, redispatch, status_json_with_grant, ContextGrant,
-    DispatchVerdict, Endpoint, NO_ENDPOINT_LARGE_ENOUGH,
+    dispatch, mismatched_workers, parse_context_class, redispatch, slots_for_prompt,
+    status_json_with_grant, status_json_with_prompt_size, ContextGrant, DispatchVerdict, Endpoint,
+    MismatchedWorker, NO_ENDPOINT_LARGE_ENOUGH,
 };
 
 /// The exact card line from the issue.
@@ -53,6 +57,7 @@ fn card_line_parses_name_tier_and_pack_range() {
     assert_eq!(class.pack_min_tokens, 65_000);
     assert_eq!(class.pack_max_tokens, 82_000);
     assert_eq!(class.floor_tokens(), 65_000);
+    assert_eq!(class.ceiling_tokens(), 82_000);
 }
 
 #[test]
@@ -103,21 +108,35 @@ fn dispatch_prefers_the_largest_context_endpoint_regardless_of_order() {
     }
 }
 
+/// A slot between the pack floor and the ceiling is not enough: it holds the
+/// typical prompt but truncates a ceiling-sized one, so the card is held and
+/// the worker is reported as mismatched (#3749).
 #[test]
-fn a_65k_floor_fits_a_65536_slot() {
+fn a_slot_between_floor_and_ceiling_holds_the_card() {
     let class = parse_context_class(CARD_LINE).unwrap();
+    // 4 slots of 65,536 hold the 65,000 floor but not the 82,000 ceiling.
     let verdict = dispatch(&class, &[endpoint("4-slot", 4)]);
-    let g = grant(&verdict);
-    assert_eq!(g.endpoint, "4-slot");
-    assert_eq!(g.granted_context_tokens, 65_536);
-    assert!(g.fits_declared_floor(), "65,536 >= 65,000 floor");
+    let DispatchVerdict::Hold {
+        code, mismatched, ..
+    } = verdict
+    else {
+        panic!("expected Hold, got {verdict:?}");
+    };
+    assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
+    assert_eq!(mismatched.len(), 1);
+    assert_eq!(mismatched[0].name, "4-slot");
+    assert_eq!(mismatched[0].context_per_slot_tokens, 65_536);
+    assert_eq!(mismatched[0].required_tokens, 82_000);
 }
 
 #[test]
 fn a_fleet_with_no_fitting_slot_holds_the_issue() {
     let class = parse_context_class(CARD_LINE).unwrap();
     let verdict = dispatch(&class, &[endpoint("8-slot-a", 8), endpoint("8-slot-b", 8)]);
-    let DispatchVerdict::Hold { code, rationale } = verdict else {
+    let DispatchVerdict::Hold {
+        code, rationale, ..
+    } = verdict
+    else {
         panic!("expected Hold, got {verdict:?}");
     };
     assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
@@ -215,9 +234,16 @@ fn redispatch_holds_when_only_the_lost_class_remains() {
         &previous,
     );
     assert_eq!(held_code(&verdict), NO_ENDPOINT_LARGE_ENOUGH);
-    // A strictly larger slot does remain eligible even at the same floor.
+    // A strictly larger slot that is still below the ceiling is not
+    // eligible: it would truncate a ceiling-sized prompt (#3749).
     let verdict = redispatch(&class, &[endpoint("4-slot", 4)], &previous);
-    assert_eq!(grant(&verdict).granted_context_tokens, 65_536);
+    assert_eq!(held_code(&verdict), NO_ENDPOINT_LARGE_ENOUGH);
+    let DispatchVerdict::Hold { mismatched, .. } = &verdict else {
+        panic!("expected Hold, got {verdict:?}");
+    };
+    assert_eq!(mismatched.len(), 1);
+    assert_eq!(mismatched[0].name, "4-slot");
+    assert_eq!(mismatched[0].context_per_slot_tokens, 65_536);
 }
 
 #[test]
@@ -228,10 +254,11 @@ fn the_issue_correlation_table_holds_end_to_end() {
         held_code(&dispatch(&class, &[endpoint("8-slot", 8)])),
         NO_ENDPOINT_LARGE_ENOUGH
     );
-    // 65,536 context -> granted, fits the floor.
+    // 65,536 context -> held: it fits the 65,000 floor but truncates the
+    // 82,000 ceiling (#3749).
     assert_eq!(
-        grant(&dispatch(&class, &[endpoint("4-slot", 4)])).granted_context_tokens,
-        65_536
+        held_code(&dispatch(&class, &[endpoint("4-slot", 4)])),
+        NO_ENDPOINT_LARGE_ENOUGH
     );
     // 131,072 context -> granted, the largest slot wins.
     assert_eq!(
@@ -255,4 +282,168 @@ fn the_working_context_matches_the_issue_arithmetic() {
     assert_eq!(e4.context_per_slot(), 65_536);
     let e2 = endpoint("2-slot", 2);
     assert_eq!(e2.context_per_slot(), 131_072);
+}
+
+/// `--parallel` is derived from the workload's prompt ceiling, not chosen as
+/// a constant: `floor(window / ceiling)`, at least 1 (#3749).
+#[test]
+fn slots_for_prompt_derives_the_parallel_flag() {
+    let window = 262_144;
+    // A 256K window and a C75 ceiling of 82,000: floor(262144 / 82000) = 3
+    // slots of 87,381 — every slot holds the ceiling. Four slots of 65,536
+    // would truncate it, so 3 is the maximum that keeps every slot usable.
+    assert_eq!(slots_for_prompt(window, 82_000), 3);
+    // A 65,000 ceiling fits four slots of 65,536.
+    assert_eq!(slots_for_prompt(window, 65_000), 4);
+    // A ceiling larger than the window still yields 1 slot — the dispatch
+    // fit check, not the slot count, holds the card.
+    assert_eq!(slots_for_prompt(window, 262_145), 1);
+    // No known ceiling: the undivided window, the safe default.
+    assert_eq!(slots_for_prompt(window, 0), 1);
+}
+
+/// The consumer-side invariant of #3749: for every slot count the launcher
+/// might have chosen, dispatch grants exactly the slots that hold the
+/// ceiling and holds the card for the rest.
+#[test]
+fn the_consumer_never_dispatches_below_the_prompt_ceiling() {
+    let class = parse_context_class(CARD_LINE).unwrap();
+    for slots in 1..=8u32 {
+        let verdict = dispatch(&class, &[endpoint(&format!("{slots}-slot"), slots)]);
+        let per_slot = 262_144 / slots;
+        if per_slot >= class.ceiling_tokens() {
+            assert!(
+                matches!(verdict, DispatchVerdict::Grant(_)),
+                "a {slots}-slot endpoint ({per_slot} tokens/slot) holds the \
+                 82,000 ceiling and must be granted"
+            );
+        } else {
+            assert_eq!(
+                held_code(&verdict),
+                NO_ENDPOINT_LARGE_ENOUGH,
+                "a {slots}-slot endpoint ({per_slot} tokens/slot) is below \
+                 the ceiling and must hold"
+            );
+        }
+    }
+}
+
+/// Undersized capacity is reported as mismatched workers, not silently
+/// skipped or counted as capacity (#3749).
+#[test]
+fn mismatched_workers_report_the_unusable_capacity() {
+    let required = 82_000u32;
+    // fleet(): 8-slot 32,768 / 4-slot 65,536 / 2-slot 131,072.
+    let workers = mismatched_workers(&fleet(), required);
+    assert_eq!(
+        workers,
+        vec![
+            MismatchedWorker {
+                name: "4-slot".to_string(),
+                context_per_slot_tokens: 65_536,
+                required_tokens: required,
+            },
+            MismatchedWorker {
+                name: "8-slot".to_string(),
+                context_per_slot_tokens: 32_768,
+                required_tokens: required,
+            },
+        ]
+    );
+    // Nothing below the requirement: the whole fleet is usable capacity.
+    assert!(mismatched_workers(&[endpoint("2-slot", 2)], required).is_empty());
+    // The report is stable regardless of fleet ordering.
+    let reversed = mismatched_workers(&fleet().into_iter().rev().collect::<Vec<_>>(), required);
+    assert_eq!(workers, reversed);
+}
+
+/// A hold names every mismatched worker in the rationale so the unusable
+/// capacity is visible, not silently skipped (#3749).
+#[test]
+fn a_hold_names_every_mismatched_worker() {
+    let class = parse_context_class(CARD_LINE).unwrap();
+    let verdict = dispatch(&class, &[endpoint("8-slot-a", 8), endpoint("8-slot-b", 8)]);
+    let DispatchVerdict::Hold {
+        code,
+        rationale,
+        mismatched,
+    } = verdict
+    else {
+        panic!("expected Hold, got {verdict:?}");
+    };
+    assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
+    assert_eq!(mismatched.len(), 2);
+    assert!(
+        rationale.contains("8-slot-a (32768 tokens)"),
+        "rationale names every mismatched worker: {rationale}"
+    );
+    assert!(
+        rationale.contains("8-slot-b (32768 tokens)"),
+        "rationale names every mismatched worker: {rationale}"
+    );
+    assert!(
+        rationale.contains("82000"),
+        "rationale names the required ceiling: {rationale}"
+    );
+}
+
+/// A redispatch hold reports the mismatched workers over the caller's full
+/// fleet view, not just the (filtered) strictly-larger set (#3749).
+#[test]
+fn redispatch_hold_reports_mismatched_over_the_full_fleet() {
+    let class = parse_context_class(CARD_LINE).unwrap();
+    // The previous grant was the fleet's largest slot; nothing strictly
+    // larger remains.
+    let previous = ContextGrant::for_dispatch(&class, &endpoint("2-slot", 2));
+    let verdict = redispatch(&class, &fleet(), &previous);
+    let DispatchVerdict::Hold {
+        code, mismatched, ..
+    } = verdict
+    else {
+        panic!("expected Hold, got {verdict:?}");
+    };
+    assert_eq!(code, NO_ENDPOINT_LARGE_ENOUGH);
+    // The strictly-larger filter left zero endpoints, so the report must
+    // come from the full fleet: its two undersized workers.
+    assert_eq!(
+        mismatched
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["4-slot", "8-slot"]
+    );
+}
+
+/// The status file records the actual prompt size next to the granted slot
+/// context, so a zero-output run is auditable against the window it ran in
+/// (#3749).
+#[test]
+fn the_status_file_records_the_actual_prompt_next_to_the_slot_context() {
+    let class = parse_context_class(CARD_LINE).unwrap();
+    let record = ContextGrant::for_dispatch(&class, &endpoint("3-slot", 3));
+    let with_grant = status_json_with_grant(Some(r#"{"status":"running"}"#), &record)
+        .expect("valid existing status");
+    let with_prompt = status_json_with_prompt_size(Some(&with_grant), 81_500)
+        .expect("grant status is valid JSON");
+    let value: serde_json::Value = serde_json::from_str(&with_prompt).unwrap();
+    assert_eq!(value["status"], "running");
+    assert_eq!(value["context"]["declared_class"], "C75");
+    assert_eq!(value["context"]["granted_context_tokens"], 87_381);
+    assert_eq!(value["context"]["prompt_tokens"], 81_500);
+    // The measured prompt fits the granted window.
+    assert!(
+        value["context"]["prompt_tokens"].as_u64()
+            <= value["context"]["granted_context_tokens"].as_u64(),
+        "prompt 81,500 must fit the granted 87,381"
+    );
+    // Works with no existing status and a re-measurement overwrites the
+    // earlier one.
+    let fresh = status_json_with_prompt_size(None, 40_000).expect("no existing status");
+    let value: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+    assert_eq!(value["context"]["prompt_tokens"], 40_000);
+    let remeasured = status_json_with_prompt_size(Some(&fresh), 55_000).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&remeasured).unwrap();
+    assert_eq!(value["context"]["prompt_tokens"], 55_000);
+    // A non-object status is rejected, like the grant writer.
+    assert!(status_json_with_prompt_size(Some("[1,2]"), 100).is_err());
 }

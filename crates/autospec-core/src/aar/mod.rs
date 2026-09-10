@@ -58,8 +58,9 @@ pub use dashboard::{
     LIVE_CARD_FIELDS, MIN_SUCCESS_RATE,
 };
 pub use dispatch_fit::{
-    dispatch, parse_context_class, redispatch, status_json_with_grant, ContextClass, ContextGrant,
-    DispatchGrant, DispatchVerdict, Endpoint, NO_ENDPOINT_LARGE_ENOUGH,
+    dispatch, mismatched_workers, parse_context_class, redispatch, slots_for_prompt,
+    status_json_with_grant, status_json_with_prompt_size, ContextClass, ContextGrant,
+    DispatchGrant, DispatchVerdict, Endpoint, MismatchedWorker, NO_ENDPOINT_LARGE_ENOUGH,
 };
 pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,
