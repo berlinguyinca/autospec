@@ -227,6 +227,14 @@ to the monitor log. Terse and result-first. Canonical contract: AGENTS.md
 - **Scoped git status** — the files this issue touched.
 - **One likely hidden failure** — the most probable thing still wrong ("none" is a claim).
 
+Post-merge observation: merged and fixed are separate states. When your fix's
+effect is only observable after deployment (CI or control-plane changes), add
+`Post-merge observation: <query, log, or metric> — expected: <value>` and
+`Follow-up check: <what gets re-checked and when>` to the report, and say
+*merged* — not *fixed* or *resolved* — in the `Result:` line; the observation is
+unrecorded by definition until after the merge. A fix that declares no
+observable effect is flagged at review.
+
 ## Exit conditions
 
 - **Success** — PR opened, CI green, admin auto-merge complete; heartbeat removed.
