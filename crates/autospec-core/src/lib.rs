@@ -35,6 +35,7 @@ pub mod explore;
 pub mod failure_signatures;
 pub mod fix_surface;
 pub mod fleet_dispatch;
+pub mod gate_capture;
 pub mod gate_provenance;
 pub mod grading;
 pub mod graph;
