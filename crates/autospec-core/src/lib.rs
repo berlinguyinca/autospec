@@ -47,6 +47,7 @@ pub mod grading;
 pub mod graph;
 pub mod growth;
 pub mod heartbeat;
+pub mod host_set;
 pub mod initiative;
 pub mod insights;
 pub mod integration;
