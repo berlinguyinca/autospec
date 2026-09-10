@@ -6,6 +6,7 @@ pub mod gate_scope;
 pub mod patch_apply;
 pub mod patch_conflicts;
 pub mod patch_pipeline;
+pub mod publication;
 pub mod queue;
 mod queue_parser;
 mod queue_runtime;
