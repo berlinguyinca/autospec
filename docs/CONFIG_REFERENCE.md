@@ -497,6 +497,25 @@ The non-overridable set is therefore `lgtm-reviewer`, `verify-voter`,
 allowlist is pinned by `tests/route-decide-allowlist.bats`, which fails if a
 kind is added to it.
 
+**The structured-output gate (guardrail R7, default-deny).** A dispatch kind
+whose output is machine-parsed — `qa-sweep` and `explore-researcher` today —
+cannot be routed to a local profile until a schema validator for that kind is
+registered. `scripts/local-structured-output.sh` owns the declared
+`kind | schema | validator` mapping: a kind with a schema but an empty
+validator column is **not** local-eligible, and `route-decide.sh` strips the
+local candidates for it before the stack gate and cost scoring (denied locals
+that remove every candidate fall through to the baseline; the gate is silent
+for kinds that declare no schema). Where a validator is registered, the local
+dispatch is wrapped in a bounded retry loop (at most 5 retries after the
+initial attempt) that feeds the validator's stderr findings back into the
+local model's next attempt via the `AUTOSPEC_VALIDATION_DIRECTIVES`
+environment variable; retry exhaustion escalates **up** to the cloud
+fallback — never another local attempt. The retry count and final outcome
+(`lgtm_first_pass`, `retried_ok`, `escalated`) are recorded on the ledger row
+via `routing-ledger.sh`. The wrapper refuses to run a local dispatch for a
+schema-bearing kind with no resolvable validator (exit 4). The gate and its
+mapping are pinned by `tests/local-structured-output-gate.bats`.
+
 ### Cross-vendor verify voters
 `scripts/verify-voter-vendor.sh --proposer <vendor>` names the vendor for the next
 verify voter. Two dispatches to the same model family share training data and

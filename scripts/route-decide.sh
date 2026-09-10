@@ -345,6 +345,44 @@ _stack_gate_deny_reason() {
     printf "no local success evidence on stack '%s' -> local profiles denied (default deny)" "$STACK"
 }
 
+# ── the R7 structured-output gate (issue #3350; default-deny) ─────────────────
+# A kind whose output is a declared schema may only be routed to a local
+# profile if a validator command is registered for it: local models' structured
+# output degrades faster than their prose, and an unvalidated contract cannot be
+# distinguished from a good one after the fact. The mapping (kind -> schema ->
+# validator) lives in local-structured-output.sh, the single source of truth.
+# A kind with a declared schema but NO registered validator is denied local here
+# exactly as an unproven stack is denied below; a kind with no declared schema
+# is untouched (parity). A kind WITH a registered validator stays local-
+# eligible — its dispatch is then wrapped by `local-structured-output.sh
+# --dispatch`, which retries the local model with the validator's findings fed
+# back as directives (max 5 retries) and escalates to cloud on exhaustion,
+# recording the retry count and outcome on the routing ledger.
+# Same removal shape as the stack gate: it only ever REMOVES local options, so
+# parity on a host with no data is preserved by construction.
+if [ -n "$local_candidates" ]; then
+    bash "$SCRIPT_DIR/local-structured-output.sh" --local-eligible "$KIND" >/dev/null 2>&1
+    _so_rc=$?
+    if [ "$_so_rc" -eq 1 ]; then
+        _log "R7 gate: kind=$KIND declares a schema but no validator is registered -> local profiles denied (default deny)"
+        _kept=""
+        for _c in $(printf '%s' "$candidates" | tr ',' ' '); do
+            if ! _in_csv "$_c" "$local_candidates"; then
+                if [ -z "$_kept" ]; then _kept="$_c"; else _kept="$_kept,$_c"; fi
+            fi
+        done
+        candidates="$_kept"
+        if [ -z "$candidates" ]; then
+            _log "R7 gate: every candidate was local -> baseline $baseline_profile"
+            _emit_baseline
+        fi
+    elif [ "$_so_rc" -ne 0 ]; then
+        # A helper error is not a denial: fail open to the previous behavior
+        # rather than silently rewriting routing because of a broken gate.
+        _log "R7 gate: local-structured-output.sh exited $_so_rc; leaving candidates unchanged"
+    fi
+fi
+
 if [ -n "$local_candidates" ]; then
     _deny_reason="$( _stack_gate_deny_reason )"
     if [ -n "$_deny_reason" ]; then
