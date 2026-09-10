@@ -36,6 +36,16 @@
 //!    as one graded under an idle host. A verdict that recorded no host
 //!    conditions is unverifiable, fail-closed, like a verdict that recorded
 //!    no commit ([`RecordedVerdict::host`], [`RecordedVerdict::flaky_tests`]).
+//! 6. **A verdict records the gate environment it was graded in** (issue
+//!    #3705, point 4): how many targets the gate covered and whether
+//!    external dependencies were present. This is provenance for RE-TESTING,
+//!    not a validity condition. Unlike the commit and the host, a missing
+//!    environment never makes a verdict unverifiable: a legacy verdict that
+//!    recorded no environment still verifies by commit and baseline drift, it
+//!    simply cannot report one. The point is that a `HELD` whose commit has
+//!    drifted is a hypothesis to re-test — and the recorded environment says
+//!    under which conditions it was graded — not a decision to trust
+//!    ([`RecordedVerdict::environment`], [`GateEnvironment`]).
 //!
 //! Nothing here uses wall-clock time as a trust condition.
 //! [`RecordedVerdict::recorded_at`] is kept for audit only.
@@ -61,6 +71,45 @@ pub fn baseline_hash(baseline: &BTreeSet<String>) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The gate environment a verdict was graded in, carried as provenance so a
+/// stale `HELD` can be re-tested with the conditions it was graded under in
+/// view (issue #3705, point 4). Both fields are REPORTED, never a validity
+/// condition on their own: a legacy record that predates environment
+/// reporting decodes as `GateEnvironment::default()` and still verifies by
+/// commit and baseline drift.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateEnvironment {
+    /// How many build/test targets the gate covered. `0` means not recorded
+    /// (a legacy verdict). Reported, never a trust condition.
+    #[serde(default)]
+    pub target_count: u64,
+    /// Whether external dependencies (network, remote services) were present
+    /// at grading time. `None` means not recorded (a legacy verdict); a
+    /// recorded `false` is different from an unrecorded absence. Reported,
+    /// never a trust condition.
+    #[serde(default)]
+    pub external_dependencies: Option<bool>,
+}
+
+impl GateEnvironment {
+    /// The provenance report line: the target count and the external-
+    /// dependency presence, each distinguishing "unrecorded" from a recorded
+    /// value. Mirrors [`HostConditions::line`].
+    pub fn line(&self) -> String {
+        let targets = if self.target_count == 0 {
+            "target count unrecorded".to_string()
+        } else {
+            format!("{} target(s)", self.target_count)
+        };
+        let deps = match self.external_dependencies {
+            Some(true) => "external deps present",
+            Some(false) => "external deps absent",
+            None => "external deps unrecorded",
+        };
+        format!("{targets}, {deps}")
+    }
 }
 
 /// A verdict the runner recorded for one patch, as it must exist on disk:
@@ -92,6 +141,24 @@ pub struct RecordedVerdict {
     /// fail-closed, like a record that named no commit.
     #[serde(default)]
     pub host: Option<HostConditions>,
+    /// The gate environment the verdict was graded in (issue #3705, point 4):
+    /// how many targets the gate covered and whether external dependencies
+    /// were present. Unlike the host, a missing environment never makes the
+    /// verdict unverifiable — it is provenance for re-testing, reported by
+    /// [`RecordedVerdict::environment_line`], never a trust condition. A
+    /// legacy record decodes as [`GateEnvironment::default`].
+    #[serde(default)]
+    pub environment: GateEnvironment,
+}
+
+impl RecordedVerdict {
+    /// The gate-environment provenance line (issue #3705, point 4): the
+    /// target count and external-dependency presence the verdict was graded
+    /// under. A legacy verdict that recorded no environment reports both as
+    /// unrecorded; it is never treated as unverifiable because of that.
+    pub fn environment_line(&self) -> String {
+        self.environment.line()
+    }
 }
 
 /// Encode a recorded verdict for persistence.
@@ -371,6 +438,7 @@ mod tests {
             baseline_hash: Some(baseline_hash(baseline)),
             recorded_at: 1_700_000_000,
             host: Some(host()),
+            environment: GateEnvironment::default(),
         }
     }
 
@@ -630,5 +698,72 @@ mod tests {
         assert_eq!(decoded, v);
         assert_eq!(decoded.host, Some(host()));
         assert_eq!(decoded.flaky_tests, v.flaky_tests);
+    }
+
+    fn env(target_count: u64, external_dependencies: Option<bool>) -> GateEnvironment {
+        GateEnvironment {
+            target_count,
+            external_dependencies,
+        }
+    }
+
+    // issue #3705, point 4: a verdict records the gate environment it was
+    // graded in, and the record round-trips it.
+    #[test]
+    fn a_recorded_verdict_carries_the_gate_environment_it_was_graded_in() {
+        let mut v = verdict(Some("abc123"), &set(&["crate_a::tests::broken"]));
+        v.environment = env(3, Some(true));
+        let decoded = decode(&encode(&v)).expect("round-trips");
+        assert_eq!(decoded, v);
+        assert_eq!(decoded.environment, env(3, Some(true)));
+        assert_eq!(v.environment_line(), "3 target(s), external deps present");
+    }
+
+    // issue #3705, point 4: a legacy record that predates environment
+    // reporting decodes as unrecorded — never unverifiable. A drifted legacy
+    // HELD is still routed to re-verification, not rejected.
+    #[test]
+    fn a_legacy_recorded_verdict_without_environment_decodes_as_unrecorded() {
+        let v = verdict(Some("abc123"), &set(&["crate_a::tests::broken"]));
+        // Strip the environment field to simulate a pre-#3705 record.
+        let mut value: serde_json::Value = serde_json::from_str(&encode(&v)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("environment")
+            .expect("the record carried the field");
+        let legacy = decode(&value.to_string()).expect("a legacy record still decodes");
+        assert_eq!(legacy.environment, GateEnvironment::default());
+        assert_eq!(
+            legacy.environment_line(),
+            "target count unrecorded, external deps unrecorded"
+        );
+        // The missing environment never makes the verdict unverifiable: a
+        // drifted legacy HELD is still routed to re-verification.
+        let current = tree(Some("def456"), &set(&["crate_a::tests::broken"]));
+        assert!(matches!(route(&legacy, &current), PatchRoute::Reverify(_)));
+    }
+
+    // issue #3705, point 4: the environment line distinguishes a recorded
+    // value from an unrecorded absence, per field.
+    #[test]
+    fn environment_line_reports_each_condition_and_its_absence() {
+        assert_eq!(
+            env(3, Some(true)).line(),
+            "3 target(s), external deps present"
+        );
+        assert_eq!(
+            env(3, Some(false)).line(),
+            "3 target(s), external deps absent"
+        );
+        assert_eq!(env(3, None).line(), "3 target(s), external deps unrecorded");
+        assert_eq!(
+            env(0, None).line(),
+            "target count unrecorded, external deps unrecorded"
+        );
+        assert_eq!(
+            env(0, Some(true)).line(),
+            "target count unrecorded, external deps present"
+        );
     }
 }
