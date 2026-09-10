@@ -792,9 +792,21 @@ fn contains_production_destruction(text: &str) -> bool {
     })
 }
 
+/// Secret exfiltration keeps the line-scoped, word-boundary, ordered shape
+/// `contains_credential_printing` adopted in #3473: a disclosure verb must be
+/// a real word on the same line and precede the `secret` noun. The previous
+/// unordered whole-document substring test fired on `print` inside
+/// "fingerprint"/"prints" and `secret` inside "auth-secrets" (issues #3113,
+/// #3487). The qualified-artifact clause is unchanged and still fires
+/// unconditionally.
 fn contains_secret_exfiltration(text: &str) -> bool {
-    (contains_any(text, &["dump", "print", "exfiltrate", "send"]) && text.contains("secret"))
-        || contains_any(text, &["aws token", "github token", "stripe token"])
+    text.lines().any(|line| {
+        ["dump", "print", "exfiltrate", "send"].iter().any(|verb| {
+            ["secret", "secrets"]
+                .iter()
+                .any(|noun| ordered_pair_start(line, verb, noun).is_some())
+        })
+    }) || contains_any(text, &["aws token", "github token", "stripe token"])
 }
 
 /// Disclosure verbs, with the inflections the previous substring test already
