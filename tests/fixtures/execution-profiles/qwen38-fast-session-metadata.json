@@ -1,0 +1,10 @@
+{
+  "aar.execution_profile": "qwen38-fast",
+  "aar.execution_profile.budgets.hard_context_limit": "24000",
+  "aar.execution_profile.budgets.max_repairs": "1",
+  "aar.execution_profile.budgets.max_turns": "6",
+  "aar.execution_profile.budgets.reasoning_tokens": "512",
+  "aar.execution_profile.budgets.wall_clock_ms": "1800000",
+  "aar.execution_profile.family": "qwen3.8",
+  "aar.execution_profile.model": "qwen3.8-27b"
+}

@@ -1,0 +1,41 @@
+{
+  "version": "execution-profiles-v1",
+  "profiles": [
+    {
+      "name": "qwen38-fast",
+      "family": "qwen3.8",
+      "model": "qwen3.8-27b",
+      "budgets": {
+        "reasoning_tokens": 512,
+        "hard_context_limit": 24000,
+        "max_turns": 6,
+        "max_repairs": 1,
+        "wall_clock_ms": 1800000
+      }
+    },
+    {
+      "name": "qwen38-coding",
+      "family": "qwen3.8",
+      "model": "qwen3.8-27b",
+      "budgets": {
+        "reasoning_tokens": 4096,
+        "hard_context_limit": 32768,
+        "max_turns": 10,
+        "max_repairs": 2,
+        "wall_clock_ms": 3600000
+      }
+    },
+    {
+      "name": "qwen38-deep",
+      "family": "qwen3.8",
+      "model": "qwen3.8-27b",
+      "budgets": {
+        "reasoning_tokens": 8192,
+        "hard_context_limit": 65536,
+        "max_turns": 6,
+        "max_repairs": 2,
+        "wall_clock_ms": 7200000
+      }
+    }
+  ]
+}
