@@ -96,6 +96,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec dispatch beat --step <name> [--state-file <path>] [--at <epoch>] [--json]` | yes | one liveness stamp for one hop; the ledger is monotonic, an older beat is ignored |
 | `autospec dispatch status [--topology <path>] [--state-file <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | declared topology, credential-holding steps and their hosts, per-hop verdicts, static topology audit; exit 0 healthy / 1 any defect |
 | `autospec dispatch runs --runs <path> [--out <path>] [--duration-floor <secs>] [--quote-bytes <n>] [--fault-threshold <n>] [--json]` | yes | classify a dispatch batch (#3918): each run is `OK` / `NO-OUTPUT` / `INFRA-FAIL` (auth, endpoint, context — never consumes an attempt) / `LAUNCH-FAIL` (under the duration floor regardless of transcript); writes the `agent-status.tsv` record (transcripts at or below the quote threshold ride along verbatim), prints the batch summary plus a `FLEET-FAULT` line for any repeated identical failure and `SUBFLEET-IDLE` lines for sub-fleets with zero agents but open eligible work; exit 0 / 1 fleet fault |
+| `autospec dispatch tick [--queue <path>] [--state-file <path>] [--lifecycle <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | one dispatch tick over the queue (#3911): the liveness gate first (a hold prints its `LIVENESS FAILURE` line and exits 1), then a per-entry report — fresh work is `dispatch`, produced-but-unconverted re-enters as `convert`, converted entries are skipped and named, held entries carry their hold reason; exit 0 something dispatched / 1 liveness hold or nothing dispatched with skips to name / 2 diagnostic |
+| `autospec dispatch mark --action <produced\|converted\|hold\|release> --issue <N> [--reason <text>] [--at <epoch>] [--lifecycle <path>]` | no | move one queue entry through its lifecycle (#3911): `produced` (the agent produced a patch), `converted` (terminal), `hold` (record why it is blocked — `--reason` required — and preserve its state), `release` (clear the hold; a released produced entry re-enters the next tick as a convert, not a fresh dispatch); stamps are monotonic, so a backwards or terminal-entry stamp is refused with exit 1 and a usage error exits 2 |
 
 `autospec repair-loop` observes a self-healing loop so that a repair which keeps
 repairing the same identity reads as an alert, not a status line. `record` feeds one
@@ -150,6 +152,23 @@ instruction to extend rather than re-implement, because the re-dispatched agent'
 snapshot is the world before the sibling. The primitives are pure in
 `autospec_core::dispatch_pipeline` (`IssueWriteSurface`, `FilingOverlapCheck`,
 `DispatchWaves`, `SiblingLanding`).
+The lifecycle of a queue entry is the sixth concern in the chain, because it was
+born in it (#3911): a produced patch used to read as terminal — the entry left no
+record of where it was, so a dispatcher that had to wait for it saw "nothing to
+do" and the slot blocked forever. Entries now carry state in a consumer-owned
+ledger (`~/.autospec/dispatch-lifecycle.json`, `--lifecycle`): `queued` (the
+default, unknown entries), `produced` (mid-lifecycle, not terminal), `converted`
+(the only terminal state), with a hold — a reason on top of any state — for an
+entry that is blocked and must say why. `mark` moves one entry; stamps are
+monotonic, a backwards stamp is refused, a hold on a converted entry is refused,
+and `release` clears the hold so the entry re-enters the next tick as a
+conversion, never as a fresh dispatch. `produced`-but-unconverted entries are
+directly queryable — the ledger counts and lists them. `tick` is the dispatcher's
+per-tick report: after the liveness gate, every queue entry is named — dispatched
+fresh, converted, skipped (and why), or held (and why) — so a tick that dispatches
+nothing still says what it is waiting on. The primitives are pure in
+`autospec_core::dispatch_pipeline` (`LifecycleLedger`, `EntryState`,
+`DispatchTick`).
 `stamp` is what the refresh script calls after it repopulates the file: it rewrites the
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records

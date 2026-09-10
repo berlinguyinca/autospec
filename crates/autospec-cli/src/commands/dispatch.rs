@@ -25,6 +25,18 @@
 //!   record (the `agent-status.tsv` row), transcripts under the size
 //!   threshold are quoted verbatim, the batch is summarized, and repeated
 //!   identical failures raise a fleet-level fault. Exit 0 no fault, 1 fault.
+//! - `tick` — one dispatch tick over the queue (#3911): once the liveness
+//!   gate authorizes the queue, reports per entry which entries are
+//!   actionable (a fresh dispatch, or a conversion of a patch that is
+//!   already produced) and which are skipped, with a reason for each skip.
+//!   Exit 0 when anything is dispatched; 1 on a liveness hold or a stall
+//!   (non-empty queue, nothing dispatched — every skip is named).
+//! - `mark` — move one queue entry through its lifecycle (#3911):
+//!   `produced` (the agent produced a patch), `converted` (the patch became
+//!   a PR or commit — the only terminal state), `hold` (record why the
+//!   entry is blocked), or `release` (clear the hold; a released produced
+//!   entry re-enters the next tick as a conversion, not a fresh dispatch).
+//!   Exit 0 accepted, 1 refused, 2 usage error.
 //!
 //! A cron line for the refresh step is the intended deployment:
 //!
@@ -40,8 +52,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::dispatch_guard::{self, CheckId, CheckReport};
 use autospec_core::dispatch_pipeline::{
-    DispatchPipeline, FreshnessPolicy, LivenessLedger, PipelineReport, PipelineTopology, QueueFile,
-    SchedulingReconciliation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
+    DispatchPipeline, DispatchTick, EntryState, FreshnessPolicy, LifecycleLedger, LivenessLedger,
+    PipelineReport, PipelineTopology, QueueFile, SchedulingReconciliation, DEFAULT_INTERVAL_SECS,
+    DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
 use autospec_core::fleet_dispatch::{
     classify_run, idle_subfleet_lines, summarize_batch, BatchSummary, FleetDispatchPolicy,
@@ -84,6 +97,14 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "Gate on the staged spec matching the live issue revision (#3864)",
     ),
     ("runs", "Classify a dispatch batch and summarize it (#3918)"),
+    (
+        "tick",
+        "One dispatch tick over the queue: per-entry dispatch / convert / skip, every skip with a reason (#3911)",
+    ),
+    (
+        "mark",
+        "Move one queue entry through its lifecycle: produced / converted / hold / release (#3911)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -104,6 +125,8 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "beat" => beat(rest),
         "status" => status(rest),
         "runs" => runs(rest),
+        "tick" => tick(rest),
+        "mark" => mark(rest),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown dispatch subcommand: {other} (expected one of: {})",
             SUBCOMMANDS
@@ -131,7 +154,7 @@ fn print_help() {
     );
     println!("    --step <NAME>         Hop the beat is for (required for beat)");
     println!(
-        "    --issue <N>           Issue the guard, stage, or freshness command checks (required)"
+        "    --issue <N>           Issue the guard, stage, freshness, or mark command acts on (required for mark)"
     );
     println!("    --issue-json <PATH>   stage: `gh api` issue payload (body, updatedAt, comments)");
     println!("    --comments-json <PATH> stage: `gh api .../comments` payload merged into the discussion");
@@ -164,6 +187,9 @@ fn print_help() {
     println!("    --quote-bytes <N>     runs: transcripts of at most N bytes are quoted verbatim (default 4096)");
     println!("    --fault-threshold <N> runs: identical failures at/above N in one batch raise a fleet fault (default 3)");
     println!("    --out <PATH>          runs: where to write the agent-status.tsv record (default stdout)");
+    println!("    --lifecycle <PATH>    Lifecycle ledger (default $HOME/.autospec/dispatch-lifecycle.json)");
+    println!("    --action <A>          mark: produced / converted / hold / release (required)");
+    println!("    --reason <TEXT>       mark hold: why the entry is blocked (required for hold)");
     println!("    --at <EPOCH>          Beat timestamp in epoch seconds (default: current time)");
     println!("    --now <EPOCH>         Evaluate against this instant instead of the clock");
     println!("    --interval <SECONDS>  Interval for hops that declare none (default {DEFAULT_INTERVAL_SECS})");
@@ -174,6 +200,7 @@ fn print_help() {
     println!("EXIT CODES:");
     println!("    {OK_EXIT}  ok        queue fresh (proceed or genuinely idle) and every hop live");
     println!("    {HOLD_EXIT}  hold      queue missing/unstamped/stale, clock rewind, silent hop, or topology defect");
+    println!("    {HOLD_EXIT}  stall     tick: queue non-empty but nothing dispatched (every skip named); mark: stamp refused");
     println!("    2  diagnostic usage error, unreadable artifact, or unparseable ledger");
 }
 
@@ -455,6 +482,152 @@ fn print_human(report: &PipelineReport, pipeline: &DispatchPipeline) {
 }
 
 /// Assemble topology + ledger + policy from flags and on-disk state.
+/// `tick` — one dispatch tick over the queue (#3911).
+///
+/// Once the liveness gate authorizes the queue, report per entry which
+/// entries are actionable — a fresh dispatch, or a conversion of a patch
+/// that is already produced — and which are skipped, with a reason for each
+/// skip. A tick that dispatches nothing over a non-empty queue is a stall,
+/// exit 1: a skip without a reason is the silent version of the bug this
+/// reports. The tick is read-only: it never writes the lifecycle ledger.
+fn tick(args: &[String]) -> Result<(), CommandFailure> {
+    let pipeline = build_pipeline(args)?;
+    let queue = read_queue(&queue_path(args)?)?;
+    let now = eval_now(args)?;
+
+    if let Some(failure) = pipeline.authorize_queue(queue.as_ref(), now).failure() {
+        println!("{}", failure.line());
+        return verdict_exit(true);
+    }
+    let Some(queue) = queue else {
+        return Err(CommandFailure::diagnostic(
+            "the queue disappeared between the liveness check and the tick".to_string(),
+        ));
+    };
+
+    let report = DispatchTick::run(&queue, &load_lifecycle(&lifecycle_file(args)?)?);
+
+    if super::is_json(args) {
+        println!("{}", report.to_json());
+    } else {
+        for line in report.lines() {
+            println!("{line}");
+        }
+    }
+
+    verdict_exit(!report.dispatched_anything() && !report.skipped().is_empty())
+}
+
+/// `mark` — move one queue entry through its lifecycle (#3911).
+///
+/// `produced` (the agent produced a patch), `converted` (the patch became a
+/// PR or commit — the only terminal state), `hold` (record why the entry is
+/// blocked; the state is preserved), or `release` (clear the hold; a released
+/// produced entry re-enters the next tick as a conversion, not a fresh
+/// dispatch). A refused stamp — terminal entry, backwards timestamp — exits
+/// 1 and names why; a usage error exits 2.
+fn mark(args: &[String]) -> Result<(), CommandFailure> {
+    const USAGE: &str = "usage: autospec dispatch mark --action <produced|converted|hold|release> --issue <N> [--reason <TEXT>] [--at <EPOCH>] [--lifecycle <PATH>]";
+    let action = opt_string(args, "--action")?
+        .ok_or_else(|| CommandFailure::diagnostic(USAGE.to_string()))?;
+    let issue_text = opt_string(args, "--issue")?
+        .ok_or_else(|| CommandFailure::diagnostic(USAGE.to_string()))?;
+    let issue = validate_issue_number(&issue_text)?;
+    let reason = opt_string(args, "--reason")?;
+    let at = match opt_u64(args, "--at")? {
+        Some(at) => at,
+        None => now_epoch()?,
+    };
+    let path = lifecycle_file(args)?;
+    let mut ledger = load_lifecycle(&path)?;
+
+    let message = match action.as_str() {
+        "produced" => mark_state(&mut ledger, issue, EntryState::Produced, at)?,
+        "converted" => mark_state(&mut ledger, issue, EntryState::Converted, at)?,
+        "hold" => mark_hold(&mut ledger, issue, &hold_reason(reason)?, at)?,
+        "release" => mark_release(&mut ledger, issue, at)?,
+        other => {
+            return Err(CommandFailure::diagnostic(format!(
+                "unknown mark action {other:?} (expected produced, converted, hold, or release)"
+            )))
+        }
+    };
+
+    save_lifecycle(&path, &ledger)?;
+    println!("{message}");
+    Ok(())
+}
+
+/// A hold without a reason is a usage error (exit 2): a hold that cannot say
+/// why is the silence this feature exists to remove.
+fn hold_reason(reason: Option<String>) -> Result<String, CommandFailure> {
+    reason
+        .filter(|reason| !reason.trim().is_empty())
+        .ok_or_else(|| CommandFailure::diagnostic("mark hold needs a non-blank --reason <text>"))
+}
+
+/// A refused stamp is a verdict (exit 1), not a usage error: the ledger
+/// already knows the entry's true state, and the refusal names it.
+fn mark_state(
+    ledger: &mut LifecycleLedger,
+    issue: u64,
+    state: EntryState,
+    at: u64,
+) -> Result<String, CommandFailure> {
+    if !ledger.record(issue, state, at) {
+        let recorded = ledger
+            .record_of(issue)
+            .map_or(at, |record| record.recorded_at);
+        return Err(CommandFailure::status(
+            format!(
+                "mark: #{issue} refused — already stamped at {recorded} ({}); stamps are monotonic",
+                ledger.state_of(issue).as_str()
+            ),
+            HOLD_EXIT,
+        ));
+    }
+    Ok(format!("marked #{issue} as {} at {at}", state.as_str()))
+}
+
+fn mark_hold(
+    ledger: &mut LifecycleLedger,
+    issue: u64,
+    reason: &str,
+    at: u64,
+) -> Result<String, CommandFailure> {
+    if !ledger.hold(issue, reason, at) {
+        let message = if ledger.state_of(issue).is_terminal() {
+            format!("mark: #{issue} is already converted; a terminal entry cannot be held")
+        } else {
+            format!(
+                "mark: #{issue} hold refused — a later stamp already exists; stamps are monotonic"
+            )
+        };
+        return Err(CommandFailure::status(message, HOLD_EXIT));
+    }
+    Ok(format!(
+        "held #{issue} [{}]: {reason}",
+        ledger.state_of(issue).as_str()
+    ))
+}
+
+fn mark_release(
+    ledger: &mut LifecycleLedger,
+    issue: u64,
+    at: u64,
+) -> Result<String, CommandFailure> {
+    if !ledger.release(issue, at) {
+        return Err(CommandFailure::status(
+            format!("mark: #{issue} release refused — no non-terminal lifecycle record to release"),
+            HOLD_EXIT,
+        ));
+    }
+    Ok(format!(
+        "released #{issue} [{}]",
+        ledger.state_of(issue).as_str()
+    ))
+}
+
 fn build_pipeline(args: &[String]) -> Result<DispatchPipeline, CommandFailure> {
     let topology = load_topology(&topology_path(args)?)?;
     let liveness = load_ledger(&state_file(args)?)?;
@@ -517,6 +690,34 @@ fn load_ledger(path: &Path) -> Result<LivenessLedger, CommandFailure> {
 }
 
 fn save_ledger(path: &Path, ledger: &LivenessLedger) -> Result<(), CommandFailure> {
+    write_atomic(path, &ledger.to_json())
+}
+
+/// The lifecycle ledger is consumer-owned state, parallel to the liveness
+/// ledger: `--lifecycle <PATH>` or `$HOME/.autospec/dispatch-lifecycle.json`.
+fn lifecycle_file(args: &[String]) -> Result<PathBuf, CommandFailure> {
+    match opt_string(args, "--lifecycle")? {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(autospec_home()?.join("dispatch-lifecycle.json")),
+    }
+}
+
+/// A missing lifecycle ledger is not a fault: every entry is simply `queued`.
+fn load_lifecycle(path: &Path) -> Result<LifecycleLedger, CommandFailure> {
+    match fs::read_to_string(path) {
+        Ok(text) => LifecycleLedger::from_json(&text).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "lifecycle ledger {path:?} does not parse ({error}); refusing to start a fresh one over it"
+            ))
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(LifecycleLedger::new()),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "cannot read lifecycle ledger {path:?}: {error}"
+        ))),
+    }
+}
+
+fn save_lifecycle(path: &Path, ledger: &LifecycleLedger) -> Result<(), CommandFailure> {
     write_atomic(path, &ledger.to_json())
 }
 
@@ -940,5 +1141,213 @@ mod runs_tests {
         let failure = runs(&[]).expect_err("--runs is required");
         assert_eq!(failure.exit_code, 2);
         assert!(failure.message.starts_with("usage: autospec dispatch runs"));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn fixture_dir(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-dispatch-lifecycle-{label}-{}-{}",
+            std::process::id(),
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("fixture directory");
+        directory
+    }
+
+    /// A queue artifact the liveness gate will authorize: stamped by the
+    /// reference topology's producer within the freshness threshold.
+    fn live_queue(dir: &Path, entries: &[u64], stamped_at: u64) -> PathBuf {
+        let path = dir.join("queue.json");
+        let queue = QueueFile {
+            entries: entries.to_vec(),
+            refreshed_at: Some(stamped_at),
+            refreshed_by: Some("refresh-queue".to_string()),
+        };
+        fs::write(&path, queue.render()).expect("queue artifact");
+        path
+    }
+
+    fn lifecycle_path(dir: &Path) -> PathBuf {
+        dir.join("lifecycle.json")
+    }
+
+    fn mark_args(lifecycle: &Path, action: &str, issue: u64, at: u64) -> Vec<String> {
+        vec![
+            "--action".to_string(),
+            action.to_string(),
+            "--issue".to_string(),
+            issue.to_string(),
+            "--lifecycle".to_string(),
+            lifecycle.to_string_lossy().into_owned(),
+            "--at".to_string(),
+            at.to_string(),
+        ]
+    }
+
+    fn mark_hold_args(lifecycle: &Path, issue: u64, reason: &str, at: u64) -> Vec<String> {
+        let mut args = mark_args(lifecycle, "hold", issue, at);
+        args.extend(["--reason".to_string(), reason.to_string()]);
+        args
+    }
+
+    fn tick_args(queue: &Path, lifecycle: &Path, now: u64) -> Vec<String> {
+        vec![
+            "--queue".to_string(),
+            queue.to_string_lossy().into_owned(),
+            "--state-file".to_string(),
+            queue
+                .with_file_name("liveness.json")
+                .to_string_lossy()
+                .into_owned(),
+            "--lifecycle".to_string(),
+            lifecycle.to_string_lossy().into_owned(),
+            "--now".to_string(),
+            now.to_string(),
+        ]
+    }
+
+    fn read_lifecycle(path: &Path) -> serde_json::Value {
+        let text = fs::read_to_string(path).expect("lifecycle ledger written");
+        serde_json::from_str(&text).expect("lifecycle ledger parses")
+    }
+
+    #[test]
+    fn tick_reports_fresh_and_convert_per_entry() {
+        let dir = fixture_dir("mixed");
+        let queue = live_queue(&dir, &[101, 102, 110], NOW - 30);
+        let lifecycle = lifecycle_path(&dir);
+
+        // 102 has a patch waiting; 110 already converted (stale in the queue).
+        mark(&mark_args(&lifecycle, "produced", 102, NOW - 20)).expect("102 produced");
+        mark(&mark_args(&lifecycle, "converted", 110, NOW - 19)).expect("110 converted");
+        // A backwards stamp is refused, exit 1, naming the existing stamp.
+        let refused = mark(&mark_args(&lifecycle, "produced", 102, NOW - 30))
+            .expect_err("stamps are monotonic");
+        assert_eq!(refused.exit_code, 1);
+        assert!(refused.message.contains("monotonic"), "{}", refused.message);
+
+        tick(&tick_args(&queue, &lifecycle, NOW)).expect("something is dispatched");
+
+        let records = &read_lifecycle(&lifecycle)["records"];
+        assert_eq!(records["102"]["state"], "produced");
+        assert_eq!(records["110"]["state"], "converted");
+        assert!(
+            !records.get("101").is_some(),
+            "a tick is read-only: it must not invent lifecycle records"
+        );
+    }
+
+    #[test]
+    fn stall_tick_exits_nonzero_and_names_every_skip() {
+        let dir = fixture_dir("stall");
+        let queue = live_queue(&dir, &[108, 109, 110], NOW - 30);
+        let lifecycle = lifecycle_path(&dir);
+
+        mark(&mark_args(&lifecycle, "produced", 108, NOW - 25)).expect("108 produced");
+        mark(&mark_hold_args(
+            &lifecycle,
+            108,
+            "conversion blocked: branch dirty",
+            NOW - 24,
+        ))
+        .expect("108 held");
+        mark(&mark_args(&lifecycle, "produced", 109, NOW - 23)).expect("109 produced");
+        mark(&mark_hold_args(
+            &lifecycle,
+            109,
+            "target branch protected",
+            NOW - 22,
+        ))
+        .expect("109 held");
+        mark(&mark_args(&lifecycle, "converted", 110, NOW - 21)).expect("110 converted");
+
+        let stall = tick(&tick_args(&queue, &lifecycle, NOW))
+            .expect_err("nothing is dispatchable, so the tick is a stall");
+        assert_eq!(stall.exit_code, 1);
+
+        let records = &read_lifecycle(&lifecycle)["records"];
+        assert_eq!(
+            records["108"]["held_reason"],
+            "conversion blocked: branch dirty"
+        );
+        assert_eq!(records["109"]["held_reason"], "target branch protected");
+    }
+
+    #[test]
+    fn release_reenters_as_convert_not_fresh() {
+        let dir = fixture_dir("release");
+        let queue = live_queue(&dir, &[108], NOW - 30);
+        let lifecycle = lifecycle_path(&dir);
+
+        mark(&mark_args(&lifecycle, "produced", 108, NOW - 25)).expect("108 produced");
+        mark(&mark_hold_args(&lifecycle, 108, "branch dirty", NOW - 24)).expect("108 held");
+        mark(&mark_args(&lifecycle, "release", 108, NOW - 23)).expect("108 released");
+
+        tick(&tick_args(&queue, &lifecycle, NOW))
+            .expect("a released produced entry converts, so the tick dispatches");
+
+        let record = &read_lifecycle(&lifecycle)["records"]["108"];
+        assert_eq!(record["state"], "produced", "release preserves the state");
+        assert!(
+            record.get("held_reason").is_none(),
+            "release clears the hold: {record:?}"
+        );
+    }
+
+    #[test]
+    fn stale_queue_tick_holds_rather_than_reads_no_work() {
+        let dir = fixture_dir("stale");
+        // Four intervals of silence against a tolerance of three.
+        let queue = live_queue(&dir, &[7], NOW - 2_400);
+        let lifecycle = lifecycle_path(&dir);
+
+        let held = tick(&tick_args(&queue, &lifecycle, NOW))
+            .expect_err("a stale queue must hold, not read as 'no work'");
+        assert_eq!(held.exit_code, 1);
+        assert!(
+            !lifecycle.exists(),
+            "a hold must not touch the lifecycle ledger"
+        );
+    }
+
+    #[test]
+    fn hold_without_reason_is_a_usage_error() {
+        let dir = fixture_dir("usage");
+        let lifecycle = lifecycle_path(&dir);
+
+        let missing_reason =
+            mark(&mark_args(&lifecycle, "hold", 108, NOW)).expect_err("hold needs a reason");
+        assert_eq!(missing_reason.exit_code, 2);
+
+        let missing_action =
+            mark(&["--issue".to_string(), "108".to_string()]).expect_err("mark needs an action");
+        assert_eq!(missing_action.exit_code, 2);
+        assert!(missing_action
+            .message
+            .starts_with("usage: autospec dispatch mark"));
+    }
+
+    #[test]
+    fn mark_refuses_hold_on_converted_entry() {
+        let dir = fixture_dir("terminal");
+        let lifecycle = lifecycle_path(&dir);
+
+        mark(&mark_args(&lifecycle, "converted", 110, NOW - 20)).expect("110 converted");
+        // Re-marking converted at the same instant is an idempotent no-op.
+        mark(&mark_args(&lifecycle, "converted", 110, NOW - 20)).expect("idempotent");
+
+        let refused = mark(&mark_hold_args(&lifecycle, 110, "anything", NOW - 19))
+            .expect_err("a terminal entry cannot be held");
+        assert_eq!(refused.exit_code, 1);
+        assert!(refused.message.contains("converted"), "{}", refused.message);
     }
 }

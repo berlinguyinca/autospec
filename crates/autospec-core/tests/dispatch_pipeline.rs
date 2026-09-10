@@ -9,10 +9,10 @@
 //! topology is declared rather than assumed.
 
 use autospec_core::dispatch_pipeline::{
-    CredentialRequirement, DispatchOutcome, DispatchPipeline, FailureCode, FreshnessPolicy,
-    HostKind, LivenessLedger, LivenessVerdict, PipelineStep, PipelineTopology, QueueFile,
-    SchedulingReconciliation, StepSchedule, TopologyViolation, DEFAULT_INTERVAL_SECS,
-    DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
+    CredentialRequirement, DispatchOutcome, DispatchPipeline, DispatchTick, EntryState,
+    FailureCode, FreshnessPolicy, HostKind, LifecycleLedger, LivenessLedger, LivenessVerdict,
+    PipelineStep, PipelineTopology, QueueFile, SchedulingReconciliation, SkipReason, StepSchedule,
+    TopologyViolation, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_STALE_INTERVALS, QUEUE_ARTIFACT,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -700,4 +700,92 @@ fn populated_case_reports_a_fault_when_the_queue_is_empty() {
     assert_eq!(failure.code, FailureCode::AdmittedNotSchedulable);
     assert_eq!(failure.step, "refresh-queue");
     assert!(failure.message.contains("243, 244, 245, 246, 247, 248"));
+}
+
+// ── Entry lifecycle (#3911) ────────────────────────────────────────────────
+
+#[test]
+fn populated_lifecycle_case_moves_produced_entries_through_conversion() {
+    // A 20-entry queue moving through three lifecycle phases. The claim
+    // under test: produced is a state mid-lifecycle, not a terminal one —
+    // the tick converts it, reports every skip with a reason, and a cleared
+    // hold re-enters as conversion rather than fresh dispatch.
+    let entries: Vec<u64> = (3911..=3930).collect();
+    let populated = queue(Some(NOW), &entries);
+
+    // Phase 1 — nothing stamped: every entry is queued by default and the
+    // tick dispatches the whole queue fresh.
+    let ledger = LifecycleLedger::new();
+    let tick = DispatchTick::run(&populated, &ledger);
+    assert!(tick.dispatched_anything());
+    assert_eq!(tick.fresh_count(), 20);
+    assert_eq!(tick.convert_count(), 0);
+    assert!(tick.skipped().is_empty());
+
+    // Phase 2 — the lifecycle has moved: the first eight entries produced a
+    // patch, two of them converted, one of the produced held. Every one of
+    // the 20 entries is accounted for, and the skips are named.
+    let mut ledger = LifecycleLedger::new();
+    for issue in entries.iter().take(8) {
+        assert!(ledger.record(*issue, EntryState::Produced, NOW));
+    }
+    assert!(ledger.record(3911, EntryState::Converted, NOW));
+    assert!(ledger.record(3912, EntryState::Converted, NOW));
+    assert!(ledger.hold(3913, "conversion blocked: branch dirty", NOW));
+
+    // produced-but-unconverted is directly queryable: the six produced
+    // entries that have not converted — the held one still counts.
+    assert_eq!(
+        ledger.produced_but_unconverted(),
+        vec![3913, 3914, 3915, 3916, 3917, 3918]
+    );
+    assert_eq!(ledger.unconverted_count(), 6);
+
+    let tick = DispatchTick::run(&populated, &ledger);
+    assert_eq!(tick.fresh_count(), 12);
+    assert_eq!(tick.convert_count(), 5);
+    assert_eq!(tick.held_count(), 1);
+    assert_eq!(tick.converted_count(), 2);
+
+    let lines = tick.lines();
+    assert_eq!(
+        lines[0],
+        "dispatch tick: 17 dispatched (12 fresh, 5 convert), 3 skipped"
+    );
+    assert!(lines
+        .iter()
+        .any(|line| line == "#3911 converted [terminal]: should leave the queue"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "#3912 converted [terminal]: should leave the queue"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "#3913 held [produced]: conversion blocked: branch dirty"));
+    // a produced entry is converted, never re-dispatched fresh
+    assert!(lines.iter().any(|line| line == "#3914 convert [produced]"));
+    assert!(lines.iter().any(|line| line == "#3930 dispatch [queued]"));
+
+    // the hold carries its reason as structured data, not just text
+    let held = tick
+        .skipped()
+        .iter()
+        .find(|entry| entry.issue == 3913)
+        .expect("3913 is skipped");
+    assert_eq!(
+        held.reason,
+        SkipReason::Held {
+            reason: "conversion blocked: branch dirty".to_string(),
+            state: EntryState::Produced,
+        }
+    );
+
+    // Phase 3 — the hold clears: the entry resumes as conversion, not fresh
+    // dispatch, and the tick is back to acting on 18 of the 20 entries.
+    assert!(ledger.release(3913, NOW));
+    let tick = DispatchTick::run(&populated, &ledger);
+    assert_eq!(tick.convert_count(), 6);
+    assert_eq!(tick.held_count(), 0);
+    assert_eq!(tick.converted_count(), 2);
+    let lines = tick.lines();
+    assert!(lines.iter().any(|line| line == "#3913 convert [produced]"));
 }
