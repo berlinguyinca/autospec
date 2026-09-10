@@ -24,7 +24,9 @@
 #
 # Exit codes:
 #   0 — gate passed (or skipped)
-#   1 — one or more files below kill floor (mutation coverage gap)
+#   1 — one or more files below kill floor (mutation coverage gap), or an
+#       adapter hard failure (exit 2: MUTATION_NOT_APPLIED, MUTANT_WONT_BUILD,
+#       NAMED_TEST_NOT_FOUND) — a validation step that could not run
 #   2 — usage/setup error
 #
 # Directive emitted on failure (for adaptive-retry loop):
@@ -162,6 +164,7 @@ GOMUT_ADAPTER="$SCRIPT_DIR/../mutation-adapters/go-mutesting.sh"
 TOTAL_ALL=0
 KILLED_ALL=0
 FAIL=0
+adapter_failure=0
 DIRECTIVES=""
 
 _dispatch_adapter() {
@@ -177,7 +180,21 @@ _dispatch_adapter() {
     printf '[mutation] dispatching %s adapter for: %s\n' "$lang" "$file"
 
     local result
-    result="$(bash "$adapter" "$REPO_ROOT/$file" 2>/dev/null || true)"
+    local adapter_err
+    local adapter_exit=0
+    adapter_err="$(mktemp)"
+    result="$(bash "$adapter" "$REPO_ROOT/$file" 2>"$adapter_err")" || adapter_exit=$?
+    # Adapter exit 2 = a validation step that could not run (MUTATION_NOT_APPLIED,
+    # MUTANT_WONT_BUILD, NAMED_TEST_NOT_FOUND, missing tool). It must fail the
+    # gate loudly — never be swallowed as "0 mutants generated".
+    if [ "$adapter_exit" -eq 2 ]; then
+        printf '[mutation] ADAPTER FAILURE for %s (%s adapter) — validation step could not run:\n' "$file" "$lang" >&2
+        cat "$adapter_err" >&2
+        rm -f "$adapter_err"
+        FAIL=1
+        adapter_failure=1
+    fi
+    rm -f "$adapter_err"
 
     local total killed
     total="$(printf '%s' "$result" | grep -o '"total":[0-9]*' | grep -o '[0-9]*' || echo 0)"
@@ -234,7 +251,11 @@ else
 fi
 
 if [ "$FAIL" -eq 1 ]; then
-    printf '[mutation] GATE FAILED — mutation coverage below %d%% floor\n' "$MUTATION_KILL_FLOOR"
+    if [ "$adapter_failure" -eq 1 ]; then
+        printf '[mutation] GATE FAILED — adapter validation step could not run (see above)\n'
+    else
+        printf '[mutation] GATE FAILED — mutation coverage below %d%% floor\n' "$MUTATION_KILL_FLOOR"
+    fi
     exit 1
 fi
 

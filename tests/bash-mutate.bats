@@ -197,3 +197,96 @@ assert 'file' in d, 'Missing file key'
 assert d['total'] > 0, 'Expected mutants'
 "
 }
+
+# ── Apply assertions (issue #3677): a validation step that cannot run ─────────
+# must fail loudly, never look like a pass.
+
+_write_fake_mjs() {
+    # $1 = path to fake mjs, $2 = body of the mutants array literal
+    cat > "$1" <<FAKE_MJS
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+let file = '', emit = '';
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--file' && args[i + 1]) { file = args[++i]; }
+  else if (args[i] === '--emit' && args[i + 1]) { emit = args[++i]; }
+}
+fs.mkdirSync(emit, { recursive: true });
+const out = emit + '/fake.mut1.OP_TEST.sh';
+fs.writeFileSync(out, $2);
+process.stdout.write(JSON.stringify([
+  { id: 1, operator: 'OP_TEST', file: file, line: 1, original: 'x', mutant: 'y', out_file: out }
+]) + '\n');
+FAKE_MJS
+}
+
+@test "bash-mutate.sh: MUTATION_NOT_APPLIED when mutant is byte-identical to source (exit 2)" {
+    printf '#!/usr/bin/env bash\nif [ "$x" == "v" ]; then echo ok; fi\n' > "$WORK/ident.sh"
+    _write_fake_mjs "$WORK/ident-mutate.mjs" "fs.readFileSync(file, 'utf8')"
+    BASH_MUTATE_MJS="$WORK/ident-mutate.mjs" \
+        BASH_MUTATE_WORK="$WORK/adapter_work_ident" \
+        run bash "$ADAPTER" "$WORK/ident.sh" "$FIX/vacuous-test.bats"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "MUTATION_NOT_APPLIED"
+    # Source must be untouched
+    grep -q '== "v"' "$WORK/ident.sh"
+}
+
+@test "bash-mutate.sh: MUTANT_WONT_BUILD when mutant fails bash -n (exit 2)" {
+    printf '#!/usr/bin/env bash\nif [ "$x" == "v" ]; then echo ok; fi\n' > "$WORK/broken.sh"
+    _write_fake_mjs "$WORK/broken-mutate.mjs" "'#!/usr/bin/env bash\\nif [ 1; then\\n'"
+    BASH_MUTATE_MJS="$WORK/broken-mutate.mjs" \
+        BASH_MUTATE_WORK="$WORK/adapter_work_broken" \
+        run bash "$ADAPTER" "$WORK/broken.sh" "$FIX/vacuous-test.bats"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "MUTANT_WONT_BUILD"
+    # Source must be restored after the failed apply
+    grep -q '== "v"' "$WORK/broken.sh"
+}
+
+@test "bash-mutate.sh: NAMED_TEST_NOT_FOUND when no named bats file exists (exit 2)" {
+    printf '#!/usr/bin/env bash\nif [ "$x" == "v" ]; then echo ok; fi\n' > "$WORK/zz_no_named_test_3677.sh"
+    run bash "$ADAPTER" "$WORK/zz_no_named_test_3677.sh"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "NAMED_TEST_NOT_FOUND"
+}
+
+@test "bash-mutate.sh: NAMED_TEST_NOT_FOUND when test dir lacks <basename>.bats (exit 2)" {
+    cp "$SAMPLE" "$WORK/named_dir.sh"
+    mkdir -p "$WORK/empty_tests"
+    BASH_MUTATE_WORK="$WORK/adapter_work_named_dir" \
+        run bash "$ADAPTER" "$WORK/named_dir.sh" "$WORK/empty_tests"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "NAMED_TEST_NOT_FOUND"
+}
+
+@test "bash-mutate.sh: named test kills all mutants (exit 0, killed == total)" {
+    # A source whose single property is claimed by exactly one named test.
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'check_flag() {\n'
+        printf '    if [ "${FLAG:-off}" == "on" ]; then\n'
+        printf '        echo "enabled"\n'
+        printf '    fi\n'
+        printf '}\n'
+    } > "$WORK/killme.sh"
+    {
+        printf '#!/usr/bin/env bats\n'
+        printf '@test "check_flag: enabled when FLAG=on" {\n'
+        printf '    FLAG=on\n'
+        printf '    source "$BATS_TEST_DIRNAME/killme.sh"\n'
+        printf '    run check_flag\n'
+        printf '    [ "$status" -eq 0 ]\n'
+        printf '    [ "$output" = "enabled" ]\n'
+        printf '}\n'
+    } > "$WORK/killme.bats"
+    BASH_MUTATE_WORK="$WORK/adapter_work_killme" \
+        run bash "$ADAPTER" "$WORK/killme.sh" "$WORK"
+    [ "$status" -eq 0 ]
+    echo "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read().strip())
+assert d['total'] > 0, 'Expected mutants'
+assert d['killed'] == d['total'], 'Expected every mutant killed by the named test'
+"
+}
