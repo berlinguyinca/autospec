@@ -19,9 +19,16 @@ main_health:
 ```
 
 The selected branch is resolved as `--branch`, then `main_health.branch`, then
-GitHub default-branch metadata. Rust never silently substitutes `main`. A
-configured branch that does not exist therefore produces `branch-not-found`; it
-does not fall through to the default branch.
+GitHub default-branch metadata. Rust never silently substitutes `main`; a
+configured branch does not fall through to the default branch.
+
+Health reads fail safe: when a read cannot be evaluated (`gh` missing from
+PATH, API errors, or an empty response where a value is required), the guard
+logs a `WARN: mainline health:` line and records a retryable wait instead of a
+verdict the read cannot vouch for. A branch-existence read failure therefore
+produces `gh-api-failed` (wait), never a fabricated `branch-not-found` halt;
+a failed or empty default-branch read produces `default-branch-unreadable`
+(wait), never a fabricated `default-branch-missing` halt.
 
 `ignore_checks` compares exact, case-sensitive check names, not regular
 expressions, globs, or substrings. Matching checks remain in the persisted
@@ -51,7 +58,9 @@ Stale or unreadable baselines remain fail-closed and return a wait outcome.
 If no configured, explicit, or GitHub default branch can be resolved, the
 `default-branch-missing` receipt uses the reserved invalid-ref identity
 `autospec:unresolved-default-branch` for digest input while retaining an empty
-`branch` field as typed diagnostic evidence.
+`branch` field as typed diagnostic evidence. A `default-branch-unreadable`
+receipt (the default-branch read itself failed) uses the same reserved
+identity so the abstained wait still binds to the effective policy.
 
 `autospec autonomous run-foreground` completes this Rust admission gate before
 entering its bounded Rust conductor cycle, so missing branches or required

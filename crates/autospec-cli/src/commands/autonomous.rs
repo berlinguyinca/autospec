@@ -2073,7 +2073,14 @@ fn effective_main_health_policy_digest(
     config: &AutonomousConfig,
     health: &MainlineHealth,
 ) -> Result<String, String> {
-    let branch_identity = if health.diagnostic == MainlineHealthDiagnostic::DefaultBranchMissing {
+    // Both the genuine missing-branch halt and the abstaining
+    // unreadable-branch wait carry an empty branch; neither can be
+    // policy-digested against a branch, so both pin the unresolved sentinel.
+    let branch_identity = if matches!(
+        health.diagnostic,
+        MainlineHealthDiagnostic::DefaultBranchMissing
+            | MainlineHealthDiagnostic::DefaultBranchUnreadable
+    ) {
         UNRESOLVED_DEFAULT_BRANCH_POLICY_IDENTITY
     } else {
         &health.branch
@@ -2229,12 +2236,28 @@ fn load_main_health(
 ) -> Result<MainlineHealth, String> {
     let explicit_branch = options.health_branch.clone();
     let configured_branch = config.main_health.branch.clone();
-    let default_branch =
-        if has_non_empty_branch(&explicit_branch) || has_non_empty_branch(&configured_branch) {
-            None
-        } else {
-            gh_default_branch(&layout.repo)?
-        };
+    let default_branch = if has_non_empty_branch(&explicit_branch)
+        || has_non_empty_branch(&configured_branch)
+    {
+        None
+    } else {
+        // A failed or empty default-branch read must not answer "none":
+        // that would become DefaultBranchMissing, a permanent halt built
+        // on a read we cannot vouch for. Log and abstain instead.
+        match gh_default_branch(&layout.repo) {
+            Ok(branch) => Some(branch),
+            Err(error) => {
+                eprintln!(
+                        "WARN: mainline health: {error}; abstaining instead of recording a branch verdict"
+                    );
+                return Ok(MainlineHealth::diagnostic(
+                    "",
+                    MainlineHealthOutcome::Wait,
+                    MainlineHealthDiagnostic::DefaultBranchUnreadable,
+                ));
+            }
+        }
+    };
     let branch = match resolve_health_branch(&HealthBranchInput {
         explicit_branch,
         configured_branch,
@@ -2250,8 +2273,22 @@ fn load_main_health(
         }
     };
 
-    if !gh_branch_exists(&layout.repo, &branch.branch) {
-        return Ok(evaluate_health(&branch.branch, false, Vec::new()));
+    // A failed branch lookup must not answer "missing": that would become
+    // BranchNotFound, a permanent halt built on a read we cannot vouch for.
+    // Log and abstain instead.
+    match gh_branch_exists(&layout.repo, &branch.branch) {
+        Ok(true) => {}
+        Ok(false) => return Ok(evaluate_health(&branch.branch, false, Vec::new())),
+        Err(error) => {
+            eprintln!(
+                "WARN: mainline health: {error}; abstaining instead of recording the branch as missing"
+            );
+            return Ok(MainlineHealth::diagnostic(
+                &branch.branch,
+                MainlineHealthOutcome::Wait,
+                MainlineHealthDiagnostic::GhApiFailed,
+            ));
+        }
     }
 
     let status_raw = match gh_api(&format!(
@@ -2259,19 +2296,23 @@ fn load_main_health(
         layout.repo, branch.branch
     )) {
         Ok(raw) => raw,
-        Err(_) => {
+        Err(error) => {
+            eprintln!(
+                "WARN: mainline health: {error}; abstaining instead of recording a check verdict"
+            );
             return Ok(MainlineHealth::diagnostic(
                 branch.branch,
                 MainlineHealthOutcome::Wait,
                 MainlineHealthDiagnostic::GhApiFailed,
-            ))
+            ));
         }
     };
     let (state, has_total_count, legacy) = legacy_status_evidence(&status_raw)?;
     let evidence = if should_read_check_runs(&state, has_total_count, &legacy) {
         match check_run_evidence_for(&layout.repo, &branch.branch) {
             Ok(evidence) => evidence,
-            Err(_) => {
+            Err(error) => {
+                eprintln!("WARN: mainline health: {error}; abstaining instead of recording a check verdict");
                 return Ok(MainlineHealth::diagnostic(
                     branch.branch,
                     MainlineHealthOutcome::Wait,
@@ -2311,8 +2352,14 @@ fn check_run_evidence_for(repo: &str, branch: &str) -> Result<Vec<CheckEvidence>
     }
 }
 
-fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
-    // A failed read answering "none" becomes DefaultBranchMissing, a permanent halt.
+/// Read the repository's default branch.
+///
+/// Returns `Err` when the read fails **or comes back empty**: a GitHub
+/// repository always has a default branch, so empty output is a failed read
+/// (API shape drift, auth glitch, truncation), not a "no default branch"
+/// verdict. Callers must log and abstain, never record `DefaultBranchMissing`
+/// from it.
+fn gh_default_branch(repo: &str) -> Result<String, String> {
     let output = gh_read::run_gh_read_with_retry(
         &[
             "repo",
@@ -2325,33 +2372,38 @@ fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
         ],
         "resolve the default branch",
     )
-    .map_err(|error| format!("cannot resolve default branch: {error:?}"))?;
+    .map_err(|error| format!("cannot resolve default branch for {repo}: {error}"))?;
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if branch.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(branch))
+        return Err(format!(
+            "cannot resolve default branch for {repo}: the read returned no branch name"
+        ));
     }
+    Ok(branch)
 }
 
-fn gh_branch_exists(repo: &str, branch: &str) -> bool {
-    // A failed read answering "missing" becomes BranchNotFound, a permanent halt.
+/// Check whether the branch exists.
+///
+/// Returns `Err` when the read itself fails, so the caller can abstain instead
+/// of recording `BranchNotFound` from a read it cannot vouch for. A
+/// non-success exit from a read that did run is a genuine "missing" verdict.
+fn gh_branch_exists(repo: &str, branch: &str) -> Result<bool, String> {
     gh_read::run_gh_read_with_retry(
         &["api", &format!("repos/{repo}/branches/{branch}")],
-        "check the mainline branch",
+        &format!("check that branch {branch} exists"),
     )
     .map(|output| output.status.success())
-    .unwrap_or(false)
+    .map_err(|error| format!("cannot check that branch {branch} exists: {error}"))
 }
 
+/// Read a GitHub REST endpoint through the shared, retrying `gh` read.
+///
+/// Routed through `gh_read::run_gh_read_with_retry` (shared binary resolution
+/// + retry) so an intermittent or missing `gh` cannot masquerade as an
+/// authoritative empty API answer.
 fn gh_api(endpoint: &str) -> Result<String, String> {
-    let output = Command::new("gh")
-        .args(["api", endpoint])
-        .output()
-        .map_err(|error| format!("cannot run gh api {endpoint}: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("gh api {endpoint} exited with {}", output.status));
-    }
+    let output = gh_read::run_gh_read_with_retry(&["api", endpoint], &format!("read {endpoint}"))
+        .map_err(|error| error.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
