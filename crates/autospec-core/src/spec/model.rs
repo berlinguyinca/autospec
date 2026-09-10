@@ -69,14 +69,19 @@ pub struct SpecMetadata {
     pub dependencies: Vec<String>,
     pub acceptance_criteria: Vec<String>,
     pub validation_command: String,
+    pub blocking_gates: Vec<String>,
+    pub files_to_touch: Vec<String>,
+    pub run_budget: String,
 }
 
 impl SpecMetadata {
     pub fn to_json(&self) -> String {
         let dependencies = json_string_array(&self.dependencies);
         let acceptance_criteria = json_string_array(&self.acceptance_criteria);
+        let blocking_gates = json_string_array(&self.blocking_gates);
+        let files_to_touch = json_string_array(&self.files_to_touch);
         format!(
-            "{{\"id\":\"{}\",\"title\":\"{}\",\"version\":\"{}\",\"status\":\"{}\",\"objective\":\"{}\",\"dependencies\":{},\"acceptance_criteria\":{},\"validation_command\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"title\":\"{}\",\"version\":\"{}\",\"status\":\"{}\",\"objective\":\"{}\",\"dependencies\":{},\"acceptance_criteria\":{},\"validation_command\":\"{}\",\"blocking_gates\":{},\"files_to_touch\":{},\"run_budget\":\"{}\"}}",
             escape_json(self.id.as_str()),
             escape_json(&self.title),
             escape_json(self.version.as_str()),
@@ -84,7 +89,10 @@ impl SpecMetadata {
             escape_json(&self.objective),
             dependencies,
             acceptance_criteria,
-            escape_json(&self.validation_command)
+            escape_json(&self.validation_command),
+            blocking_gates,
+            files_to_touch,
+            escape_json(&self.run_budget)
         )
     }
 }

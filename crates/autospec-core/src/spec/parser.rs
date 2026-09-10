@@ -27,6 +27,9 @@ pub fn parse_spec(source: &str) -> Result<SpecMetadata, ParseError> {
     let dependencies = parse_dependencies(source)?;
     let acceptance_criteria = parse_acceptance_criteria(source);
     let validation_command = parse_validation_command(source).unwrap_or_default();
+    let blocking_gates = parse_blocking_gates(source);
+    let files_to_touch = parse_files_to_touch(source);
+    let run_budget = parse_run_budget(source).unwrap_or_default();
 
     Ok(SpecMetadata {
         id,
@@ -42,6 +45,9 @@ pub fn parse_spec(source: &str) -> Result<SpecMetadata, ParseError> {
         dependencies,
         acceptance_criteria,
         validation_command,
+        blocking_gates,
+        files_to_touch,
+        run_budget,
     })
 }
 
@@ -162,6 +168,62 @@ fn parse_acceptance_criteria(source: &str) -> Vec<String> {
                 .map(ToOwned::to_owned)
         })
         .collect()
+}
+
+fn parse_blocking_gates(source: &str) -> Vec<String> {
+    let Some(lines) = section_lines(source, "Blocking Gates") else {
+        return Vec::new();
+    };
+
+    lines
+        .into_iter()
+        .filter_map(|(_, line)| {
+            let item = line
+                .trim()
+                .strip_prefix("- ")
+                .unwrap_or(line.trim())
+                .trim_matches('`')
+                .trim();
+            (!item.is_empty()).then(|| item.to_string())
+        })
+        .collect()
+}
+
+fn parse_files_to_touch(source: &str) -> Vec<String> {
+    let Some(lines) = section_lines(source, "Files To Create/Modify") else {
+        return Vec::new();
+    };
+
+    lines
+        .into_iter()
+        .filter_map(|(_, line)| {
+            let item = line.trim();
+            let Some(item) = item.strip_prefix("- ") else {
+                return None;
+            };
+            let path = extract_file_path(item);
+            (!path.is_empty()).then(|| path)
+        })
+        .collect()
+}
+
+fn extract_file_path(item: &str) -> String {
+    if let Some((_, after_open)) = item.split_once('`') {
+        if let Some((path, _)) = after_open.split_once('`') {
+            let path = path.trim();
+            if !path.is_empty() {
+                return path.to_string();
+            }
+        }
+    }
+    item.split_once(':')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or(item.trim())
+        .to_string()
+}
+
+fn parse_run_budget(source: &str) -> Option<String> {
+    required_section(source, "Run Budget").and_then(first_nonblank)
 }
 
 fn parse_validation_command(source: &str) -> Option<String> {

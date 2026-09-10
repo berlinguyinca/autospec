@@ -14,6 +14,9 @@ fn spec(id: &str, version: &str, dependencies: &[&str]) -> SpecMetadata {
             .collect(),
         acceptance_criteria: Vec::new(),
         validation_command: "true".to_string(),
+        blocking_gates: Vec::new(),
+        files_to_touch: Vec::new(),
+        run_budget: String::new(),
     }
 }
 
