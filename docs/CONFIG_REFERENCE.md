@@ -671,6 +671,34 @@ application still blocks the merge.
 | `AUTOSPEC_WITH_DOCS` | (unset) | Include the docs dimension in sweeps/reviews. |
 | `AUTOSPEC_BASE_REF` | branch upstream | Base revision for commits-ahead counts (`scripts/verify-produced-work.sh`, `scripts/qa-phase4.sh`); overrides the branch's own upstream. |
 
+## Review finding reproduction gate
+`scripts/verify-finding.sh --finding-file <path>` turns a review finding into a
+checked claim instead of a reviewer's prior. A finding without a reproduction is
+not a verified defect and not a cleared one — it is unreportable. The script reads
+ONE finding, takes its reproduction from the first `repro: <command>` line (a leading
+`-`/`*` bullet and surrounding backticks are allowed), runs that command **inside the
+PR worktree** and prints one verdict plus the command's exit status and first output
+line as evidence:
+
+| Verdict | Meaning | Exit code |
+|---|---|---|
+| `reproduced` | the `repro:` command exited 0 — it demonstrated the finding | `0` |
+| `could-not-reproduce` | the `repro:` command exited non-zero — a **recorded result**, not a reviewer failure | `0` |
+| `no-repro-command` | the finding carries no `repro:` line and is not reportable | `4` |
+| *(no verdict)* | no PR worktree could be established; the command was **not run** | `3` |
+
+A non-zero repro exit is recorded rather than escalated: treating "could not
+reproduce" as a reviewer failure teaches the reviewer to assert instead of check, and
+a reviewer that asserts is worse than one that abstains. The exit status is printed
+either way, so a broken command (`127`, a missing binary) reads as "not reproduced,
+status 127" in the record rather than as a phantom reproduction. Exit `64` is a usage
+error (missing/unreadable `--finding-file`, unknown option).
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--finding-file <path>` | (required) | The file holding one finding; `repro:` is read from it. |
+| `--worktree <dir>` | worktree root containing the finding file | The PR worktree to run the repro in. Must itself be a git worktree root; never the caller's cwd, so a verdict always describes the PR tree. |
+
 ## Implementation size gates
 `scripts/lint-implementation-gates.sh` wraps `lint-implementation.sh` and corrects its
 size rules; the implementer pre-commit hook calls the wrapper, not the linter directly.
