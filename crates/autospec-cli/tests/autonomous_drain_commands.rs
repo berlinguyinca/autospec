@@ -362,26 +362,115 @@ fn unsupported_origin_is_rejected_before_state_or_child_creation() {
 }
 
 #[test]
-fn outside_env_artifact_path_is_rejected_before_child_creation() {
+fn declared_drain_log_growth_is_not_liveness_evidence() {
+    // issue #3988: log size/mtime change on 100% of healthy runs, so a declared
+    // validation log growing must NOT keep a silent child alive. The env var is
+    // no longer read at all; only heartbeat, child output, or the closeout
+    // artifact (.autospec/run-summary.md) count as progress.
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
-    let launched = fixture.root.join("launched");
-    let outside = fixture.root.join("outside").join("drain.log");
+    let log = fixture.repo_dir.join("validation.log");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(
         &bin.join("omx"),
-        "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
+        "#!/bin/sh\n\
+         i=0\n\
+         while [ \"$i\" -lt 30 ]; do\n\
+         i=$((i + 1))\n\
+         printf 'log %s\\n' \"$i\" >> \"$AUTOSPEC_TEST_DRAIN_LOG\"\n\
+         sleep 1\n\
+         done\n",
     );
+    write_executable(&bin.join("gh"), "#!/bin/sh\n[]\n");
 
     let output = fixture
         .command(&bin)
-        .env("AUTOSPEC_TEST_DRAIN_LAUNCHED", &launched)
-        .env("AUTOSPEC_AUTONOMOUS_DRAIN_LOG", &outside)
+        .env("AUTOSPEC_TEST_DRAIN_LOG", &log)
+        .env("AUTOSPEC_AUTONOMOUS_DRAIN_LOG", &log)
+        .env("AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE", &log)
+        .args(["--stall-secs", "2", "--poll-secs", "1", "--json"])
         .output()
-        .expect("reject outside drain artifact");
+        .expect("drain with a quiet child growing the declared log");
 
-    assert_eq!(output.status.code(), Some(2), "stderr={}", stderr(&output));
-    assert!(!launched.exists(), "validation must precede child creation");
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "log growth is not liveness: stderr={} stdout={}",
+        stderr(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        fs::metadata(&log).is_ok_and(|metadata| metadata.len() > 0),
+        "the child must have grown the declared log before termination"
+    );
+    let observation =
+        fs::read_to_string(fixture.drain_observation_path()).expect("read drain observation");
+    assert!(
+        observation.contains("\"decision\":\"terminate_stalled\""),
+        "observation={observation}"
+    );
+    assert!(
+        observation.contains("\"progress\":\"none\""),
+        "log growth must not register as progress: observation={observation}"
+    );
+}
+
+#[test]
+fn quiet_child_growing_the_closeout_artifact_is_not_stalled() {
+    // issue #3988 AC3: a healthy long-running agent that stays quiet but grows
+    // its real closeout artifact (.autospec/run-summary.md) must NOT be
+    // classified as stalled. Artifact growth is a liveness signal that differs
+    // between healthy and failed runs.
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\n\
+         mkdir -p \"$AUTOSPEC_TEST_REPO_DIR/.autospec\"\n\
+         i=0\n\
+         while [ \"$i\" -lt 6 ]; do\n\
+         i=$((i + 1))\n\
+         printf 'section %s\\n' \"$i\" >> \"$AUTOSPEC_TEST_REPO_DIR/.autospec/run-summary.md\"\n\
+         sleep 1\n\
+         done\n",
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\n[]\n");
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_REPO_DIR", &fixture.repo_dir)
+        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .output()
+        .expect("drain with a quiet child growing run-summary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "artifact growth keeps a healthy child alive: stderr={} stdout={}",
+        stderr(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"decision\":\"complete\""),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("\"exit_code\":0"), "stdout={stdout}");
+    assert!(
+        stdout.contains("\"last_progress\":\"artifact\""),
+        "artifact growth must register as progress: stdout={stdout}"
+    );
+    let observation =
+        fs::read_to_string(fixture.drain_observation_path()).expect("read drain observation");
+    assert!(
+        observation.contains("\"decision\":\"complete\""),
+        "observation={observation}"
+    );
+    assert!(
+        observation.contains("\"progress\":\"artifact\""),
+        "observation={observation}"
+    );
 }
 
 #[test]

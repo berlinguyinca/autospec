@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -1067,23 +1067,12 @@ fn artifact_paths(repo_dir: &str) -> Result<Vec<PathBuf>, CommandFailure> {
     let repo_root = fs::canonicalize(repo_dir).map_err(|error| {
         CommandFailure::diagnostic(format!("cannot resolve drain repository root: {error}"))
     })?;
-    let mut paths = vec![repo_root.join(".autospec/run-summary.md")];
-    for variable in [
-        "AUTOSPEC_AUTONOMOUS_DRAIN_LOG",
-        "AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE",
-    ] {
-        if let Some(path) = std::env::var_os(variable) {
-            let path = contained_path(&repo_root, &PathBuf::from(path)).ok_or_else(|| {
-                CommandFailure::diagnostic(format!(
-                    "{variable} must remain inside the canonical repository root"
-                ))
-            })?;
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
+    // issue #3988: the declared validation-log env vars
+    // (AUTOSPEC_AUTONOMOUS_DRAIN_LOG[_FILE]) are no longer liveness evidence. Log
+    // size/mtime change on 100% of healthy runs, so they cannot distinguish a
+    // stalled agent from a healthy quiet one. Only the closeout artifact
+    // (.autospec/run-summary.md) counts as an Artifact progress signal.
+    Ok(vec![repo_root.join(".autospec/run-summary.md")])
 }
 
 fn artifact_signature(paths: &[PathBuf]) -> String {
@@ -1092,46 +1081,6 @@ fn artifact_signature(paths: &[PathBuf]) -> String {
         .map(|path| file_signature(path))
         .collect::<Vec<_>>()
         .join("|")
-}
-
-fn contained_path(root: &Path, candidate: &Path) -> Option<PathBuf> {
-    let absolute = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        root.join(candidate)
-    };
-    let normalized = normalize_absolute(&absolute)?;
-    let resolved = resolve_existing_prefix(&normalized)?;
-    resolved.starts_with(root).then_some(resolved)
-}
-
-fn normalize_absolute(path: &Path) -> Option<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new("/")),
-            Component::CurDir => {}
-            Component::Normal(part) => normalized.push(part),
-            Component::ParentDir if normalized.pop() => {}
-            Component::ParentDir => return None,
-        }
-    }
-    normalized.is_absolute().then_some(normalized)
-}
-
-fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
-    let mut ancestor = path;
-    let mut suffix = Vec::new();
-    while !ancestor.exists() {
-        suffix.push(ancestor.file_name()?.to_owned());
-        ancestor = ancestor.parent()?;
-    }
-    let mut resolved = fs::canonicalize(ancestor).ok()?;
-    for component in suffix.into_iter().rev() {
-        resolved.push(component);
-    }
-    Some(resolved)
 }
 
 pub(crate) fn repository_progress_key(repo: &str) -> String {
@@ -1151,13 +1100,10 @@ fn file_signature(path: &Path) -> String {
     let Ok(metadata) = fs::metadata(path) else {
         return String::new();
     };
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
-    format!("{}:{}:{modified}", path.display(), metadata.len())
+    // issue #3988: liveness evidence never reads mtime. A `touch` or an equal-size
+    // rewrite must not masquerade as progress; only genuine growth of a real
+    // artifact counts.
+    format!("{}:{}", path.display(), metadata.len())
 }
 
 fn github_snapshot(

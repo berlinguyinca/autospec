@@ -495,8 +495,7 @@ Tier-1 drain watchdog controls:
 
 - `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` — no-output stall budget for one `$autospec-run` drain. Default 1800; set `0` to disable.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` — poll interval for drain output progress. Default 15.
-- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG` / `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE` — optional declared validation log file that counts as progress when long child validation redirects output.
-- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB` — optional shell glob for additional validation logs to count as progress.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG` / `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE` / `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB` — legacy shell-drain inputs only. The Rust `autospec autonomous drain` no longer reads them: log size/mtime change on every healthy run (base rate 100%), so they are not liveness evidence (issue #3988). Rust-drain liveness is child output, typed heartbeat updates, or `.autospec/run-summary.md` growth only.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE` / `AUTOSPEC_ISSUE_NUMBER` — optional issue number used to track closeout artifacts and write `/tmp/autospec-run-<issue>/closeout-hang.md` evidence.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_CLOSEOUT_ARTIFACTS` — optional whitespace-separated extra artifact paths whose mtime/size count as closeout progress.
 
