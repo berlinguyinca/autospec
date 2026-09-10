@@ -2351,6 +2351,146 @@ pub fn run_summary(
     lines.join("\n")
 }
 
+/// The evidence of one gate run against the unmodified base (#3793).
+///
+/// The cheapest test of a gate's soundness is the self-test the pipeline
+/// owes itself before spending worker time on real work: run each gate
+/// against the base the work was produced against and require that it
+/// reports *nothing*. A gate that flags the base as regressed is broken
+/// by definition — the tree it runs on and the baseline it compares
+/// against are the same commit, so any report it makes is a property of
+/// the gate (an unstable comparison key), not of the work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateBaseEvidence {
+    /// The gate's name (e.g. `build`, `validate`, `acceptance`), carried
+    /// so a broken gate can be named in the report.
+    pub gate: String,
+    /// Whether the gate command ran to completion. An incomplete run is
+    /// not evidence of cleanness: a gate that stopped without a verdict
+    /// cannot be read as "nothing reported" (#3768 — a timed-out gate
+    /// printed no failure lines, and the empty set was read as "all
+    /// fixed").
+    pub completed: bool,
+    /// What the gate reported against the base (new failures, holds,
+    /// flagged keys). Empty means the gate reports nothing.
+    pub findings: Vec<String>,
+}
+
+/// The self-check's verdict for the gate set (#3793).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseSelfCheck {
+    /// Every gate ran to completion and reported nothing against the
+    /// unmodified base: base → nothing. The pass may proceed to real
+    /// work.
+    Clean,
+    /// A gate did not run to completion, so its cleanness is unknown.
+    /// Unknown is not safe: the pass holds rather than proceeding on a
+    /// gate it cannot see.
+    NoVerdict {
+        /// The gate whose run did not complete.
+        gate: String,
+    },
+    /// A gate reported something against the unmodified base: the gate is
+    /// broken by definition, and no decision it makes about real work is
+    /// trustworthy until it is. The report names the gate and the finding.
+    FlagsBase {
+        /// The gate that flagged the base.
+        gate: String,
+        /// The finding the gate reported against the base, verbatim.
+        finding: String,
+    },
+}
+
+impl BaseSelfCheck {
+    /// Whether the pass may proceed to real work.
+    pub fn is_clean(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
+    /// The pass's report line for the self-check; `None` when clean — a
+    /// self-check that reports nothing has passed, mirroring the gates it
+    /// checks.
+    pub fn line(&self) -> Option<String> {
+        match self {
+            Self::Clean => None,
+            Self::NoVerdict { gate } => Some(format!(
+                "base self-check: gate {gate} did not complete — no verdict, not clean; holding the pass"
+            )),
+            Self::FlagsBase { gate, finding } => Some(format!(
+                "base self-check: gate {gate} reported against the unmodified base: {finding} — the gate is broken; holding the pass"
+            )),
+        }
+    }
+}
+
+/// Run the base self-check over the gate set (#3793): every gate must
+/// have completed and reported nothing against the unmodified base.
+///
+/// A concrete finding beats a missing verdict regardless of gate order:
+/// a named defect is reported rather than a vague one, so the operator
+/// fixes the broken gate instead of chasing an incomplete run that may
+/// have been incomplete because of it. An empty gate set is an error, not
+/// a silent pass: a self-check that checked nothing proves nothing, and
+/// reading it as clean is the same fold as reading a missing outcome as a
+/// passing check.
+pub fn base_gate_self_check(evidence: &[GateBaseEvidence]) -> Result<BaseSelfCheck, String> {
+    if evidence.is_empty() {
+        return Err(
+            "base self-check needs at least one gate: an empty gate set proves nothing".to_string(),
+        );
+    }
+    let mut incomplete: Option<&GateBaseEvidence> = None;
+    for ev in evidence {
+        if let Some(finding) = ev.findings.iter().next() {
+            return Ok(BaseSelfCheck::FlagsBase {
+                gate: ev.gate.clone(),
+                finding: finding.clone(),
+            });
+        }
+        if !ev.completed && incomplete.is_none() {
+            incomplete = Some(ev);
+        }
+    }
+    Ok(match incomplete {
+        Some(ev) => BaseSelfCheck::NoVerdict {
+            gate: ev.gate.clone(),
+        },
+        None => BaseSelfCheck::Clean,
+    })
+}
+
+/// The dry-run rendering of one pass plan (#3793): every decision the
+/// pass would make, printed without a git or cargo side effect.
+///
+/// The decision logic is pure, so CI can exercise it against fixture
+/// queues on every pipeline change: plan the pass, render this report,
+/// assert on it — no worker, no checkout, no compile. The report is a
+/// pure function of the plan, so a pipeline change whose dry-run report
+/// changes without a test change is a pipeline change that ran against
+/// real work ungated by its own tests.
+pub fn dry_run_report(schedule: &ConversionSchedule) -> String {
+    if schedule.assignments.is_empty() {
+        return "dry-run: nothing to convert".to_string();
+    }
+    let mut lines = vec![format!(
+        "dry-run: {} worker(s), {} patch(es)",
+        schedule.workers.len(),
+        schedule.assignments.len()
+    )];
+    for a in &schedule.assignments {
+        lines.push(format!(
+            "worker {}: {} class={} memo_hit={} stale_base={} superseded_verdict={}",
+            a.worker,
+            a.patch.identity,
+            a.patch.class.as_str(),
+            a.memo_hit,
+            a.stale_base,
+            a.superseded_verdict
+        ));
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4721,5 +4861,185 @@ mod tests {
         // version 3 are hypotheses the version-4 logic re-verifies, not
         // decisions.
         assert_eq!(CONVERSION_LOGIC_VERSION, 4);
+    }
+
+    // ---- #3793: base self-check and dry-run ----
+
+    fn gate_evidence(gate: &str, completed: bool, findings: &[&str]) -> GateBaseEvidence {
+        GateBaseEvidence {
+            gate: gate.to_string(),
+            completed,
+            findings: findings.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// base → nothing: every gate completed and reported nothing against
+    /// the unmodified base, so the self-check is clean and the pass may
+    /// proceed to real work.
+    #[test]
+    fn base_self_check_is_clean_when_every_gate_reports_nothing() {
+        let check = base_gate_self_check(&[
+            gate_evidence("build", true, &[]),
+            gate_evidence("validate", true, &[]),
+            gate_evidence("acceptance", true, &[]),
+        ])
+        .unwrap();
+        assert_eq!(check, BaseSelfCheck::Clean);
+        assert!(check.is_clean());
+        // A passed self-check reports nothing, mirroring the gates it
+        // checks.
+        assert_eq!(check.line(), None);
+    }
+
+    /// known-bad → fail: a gate that reports something against the
+    /// unmodified base is broken by definition; the self-check names the
+    /// gate and the finding so the operator fixes the gate, not the work.
+    #[test]
+    fn base_self_check_flags_a_gate_that_reports_on_the_base() {
+        let check = base_gate_self_check(&[
+            gate_evidence("build", true, &[]),
+            gate_evidence(
+                "validate",
+                true,
+                &["check_x: failed (baseline had no such failure)"],
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            check,
+            BaseSelfCheck::FlagsBase {
+                gate: "validate".to_string(),
+                finding: "check_x: failed (baseline had no such failure)".to_string(),
+            }
+        );
+        assert!(!check.is_clean());
+        let line = check.line().unwrap();
+        assert!(line.contains("validate"));
+        assert!(line.contains("check_x"));
+    }
+
+    /// A finding beats a missing verdict regardless of gate order: a
+    /// named defect is reported rather than a vague one.
+    #[test]
+    fn base_self_check_prefers_a_finding_over_a_missing_verdict() {
+        let check = base_gate_self_check(&[
+            gate_evidence("build", false, &[]),
+            gate_evidence("acceptance", true, &["unexpected hold"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            check,
+            BaseSelfCheck::FlagsBase {
+                gate: "acceptance".to_string(),
+                finding: "unexpected hold".to_string(),
+            }
+        );
+    }
+
+    /// Incomplete is not clean: a gate that did not run to completion
+    /// cannot be read as "nothing reported". Unknown is not safe; the
+    /// pass holds and names the gate (#3768 pattern — the timed-out gate
+    /// whose silence was read as "all fixed").
+    #[test]
+    fn base_self_check_incomplete_gate_is_no_verdict_not_clean() {
+        let check = base_gate_self_check(&[
+            gate_evidence("build", true, &[]),
+            gate_evidence("acceptance", false, &[]),
+        ])
+        .unwrap();
+        assert_eq!(
+            check,
+            BaseSelfCheck::NoVerdict {
+                gate: "acceptance".to_string(),
+            }
+        );
+        assert!(!check.is_clean());
+        assert!(check.line().unwrap().contains("acceptance"));
+    }
+
+    /// An empty gate set is an error, not a silent pass: a self-check
+    /// that checked nothing proves nothing.
+    #[test]
+    fn base_self_check_refuses_an_empty_gate_set() {
+        let err = base_gate_self_check(&[]).unwrap_err();
+        assert!(err.contains("empty gate set"));
+    }
+
+    /// The dry run prints every decision the pass would make — order,
+    /// class, memo hit, stale base, superseded verdict, worker — and
+    /// nothing it would do: the report is a pure render of the plan.
+    #[test]
+    fn dry_run_report_renders_every_decision_of_the_pass() {
+        let mut memo = ConversionMemo::new();
+        // A memo record for the existing-PR patch at the tip, under the
+        // running logic version: the plan flags it as a memo hit.
+        memo.record(
+            "pr-patch",
+            "tip-1",
+            ConversionClass::ExistingPr,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+
+        let patches = vec![
+            patch("pr-patch", "tip-1", ConversionClass::ExistingPr),
+            patch("hold-stale", "old-1", ConversionClass::MemoizedHold),
+            // A patch whose newest recorded decision is a superseded
+            // logic version: the plan must flag it for re-verification.
+            patch("hold-superseded", "tip-1", ConversionClass::MemoizedHold),
+        ];
+        memo.record("hold-superseded", "tip-1", ConversionClass::MemoizedHold, 1)
+            .unwrap();
+
+        let schedule = plan_pass(
+            &patches,
+            2,
+            "/scratch/convert",
+            &memo,
+            "tip-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        let report = dry_run_report(&schedule);
+        let mut lines = report.lines();
+        // Header: the pool and the queue sizes, decided by the pass.
+        assert_eq!(lines.next().unwrap(), "dry-run: 2 worker(s), 3 patch(es)");
+        // Cost order (ExistingPr before MemoizedHold), round-robin over
+        // the two workers; every decision flag the pass computes is
+        // printed, so CI can assert on the plan without running it.
+        assert_eq!(
+            lines.next().unwrap(),
+            "worker 0: pr-patch class=ExistingPr memo_hit=true stale_base=false superseded_verdict=false"
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "worker 1: hold-stale class=MemoizedHold memo_hit=false stale_base=true superseded_verdict=false"
+        );
+        // The superseded patch carries its flag in the dry run: the
+        // memo record exists but under a superseded logic version, so it
+        // is not a memo hit and must be re-verified.
+        assert_eq!(
+            lines.next().unwrap(),
+            "worker 0: hold-superseded class=MemoizedHold memo_hit=false stale_base=false superseded_verdict=true"
+        );
+        assert!(lines.next().is_none());
+    }
+
+    /// An empty queue renders as nothing-to-convert, not as an empty
+    /// report: a pass with no patches says so, instead of printing
+    /// nothing and looking like it never ran.
+    #[test]
+    fn dry_run_report_says_nothing_to_convert_for_an_empty_pass() {
+        let memo = ConversionMemo::new();
+        let schedule = plan_pass(
+            &[],
+            2,
+            "/scratch/convert",
+            &memo,
+            "tip-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert_eq!(dry_run_report(&schedule), "dry-run: nothing to convert");
     }
 }
