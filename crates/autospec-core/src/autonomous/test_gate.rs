@@ -32,7 +32,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::autonomous::regrade::HostConditions;
-use crate::autonomous::verdict_validity::{self, RecordedVerdict};
+use crate::autonomous::verdict_validity::{self, GateEnvironment, RecordedVerdict};
 
 /// A test that flakes at least this many times is reported as a defect, not as noise.
 pub const REPEATED_FLAKY_THRESHOLD: u64 = 3;
@@ -153,14 +153,25 @@ impl GateVerdict {
         }
     }
 
-    /// The recorded form this verdict must be persisted in (#4031, #4080):
-    /// the decision token plus the persistent failures (a flaky failure that
-    /// passed on re-run is not a failure the verdict stands on), the flaky
-    /// set, the validity conditions, and the host it was graded under.
-    /// `identity` is the patch the verdict is recorded for; `at` is Unix
-    /// epoch seconds, audit only; `host` is the load average and concurrent
-    /// agent count of the grading host (issue #4080).
-    pub fn recorded(&self, identity: &str, at: i64, host: &HostConditions) -> RecordedVerdict {
+    /// The recorded form this verdict must be persisted in (#4031, #4080,
+    /// #3705): the decision token plus the persistent failures (a flaky
+    /// failure that passed on re-run is not a failure the verdict stands on),
+    /// the flaky set, the validity conditions, the host it was graded under,
+    /// and the gate environment it was graded in. `identity` is the patch the
+    /// verdict is recorded for; `at` is Unix epoch seconds, audit only; `host`
+    /// is the load average and concurrent agent count of the grading host
+    /// (issue #4080); `target_count` is how many targets this gate covered
+    /// and `external_dependencies` is whether external dependencies were
+    /// present at grading (issue #3705, point 4) — provenance for re-testing,
+    /// reported, never a trust condition.
+    pub fn recorded(
+        &self,
+        identity: &str,
+        at: i64,
+        host: &HostConditions,
+        target_count: u64,
+        external_dependencies: Option<bool>,
+    ) -> RecordedVerdict {
         let mut failing_tests = BTreeSet::new();
         let mut flaky_tests = BTreeSet::new();
         for report in &self.failures {
@@ -179,6 +190,10 @@ impl GateVerdict {
             baseline_hash: Some(self.baseline_hash.clone()),
             recorded_at: at,
             host: Some(*host),
+            environment: GateEnvironment {
+                target_count,
+                external_dependencies,
+            },
         }
     }
 
