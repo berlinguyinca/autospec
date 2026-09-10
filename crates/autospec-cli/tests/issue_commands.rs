@@ -605,3 +605,580 @@ case "$method:$endpoint" in
     ;;
 esac
 "###;
+
+// ---------------------------------------------------------------------------
+// autospec handoff probe (issue #3440)
+// ---------------------------------------------------------------------------
+
+const HANDOFF_AUTOSPEC_FIXTURE: &str = r###"#!/bin/sh
+printf '%s\n' "$*" >> "${HANDOFF_PROBE_LOG:?}"
+if [ "$1" != "handoff" ] || [ "$2" != "capabilities" ]; then
+  exit 2
+fi
+case "${HANDOFF_FAKE_MODE:-healthy}" in
+  healthy)
+    printf '{"schema":"autospec.handoff-capabilities.v1","routes":["run","start","split_then_run","recover","none"]}\n'
+    exit 0
+    ;;
+  exit2)
+    printf 'unknown autospec command: handoff\n'
+    exit 2
+    ;;
+  wrong-schema)
+    printf '{"schema":"autospec.handoff-capabilities.v9","routes":["run"]}\n'
+    exit 0
+    ;;
+  transient)
+    printf 'boom\n' >&2
+    exit 3
+    ;;
+  partial-run)
+    printf '{"schema":"autospec.handoff-capabilities.v1","routes":["run"]}\n'
+    exit 0
+    ;;
+  *)
+    exit 127
+    ;;
+esac
+"###;
+
+const HANDOFF_GH_FIXTURE: &str = r###"#!/bin/sh
+printf 'gh %s\n' "$*" >> "${HANDOFF_GH_LOG:?}"
+exit 0
+"###;
+
+struct HandoffFixture {
+    root: PathBuf,
+    bin: PathBuf,
+    /// A PATH entry holding only the `gh` spy (no `autospec`), used to
+    /// simulate a host where the autospec CLI is missing entirely.
+    bare: PathBuf,
+    repo_dir: PathBuf,
+    probe_log: PathBuf,
+    gh_log: PathBuf,
+}
+
+impl HandoffFixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-handoff-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let bare = root.join("bin-bare");
+        let repo_dir = root.join("repo");
+        let probe_log = root.join("probe.log");
+        let gh_log = root.join("gh.calls");
+        fs::create_dir_all(&bin).expect("create fixture bin");
+        fs::create_dir_all(&bare).expect("create bare bin");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+        fs::write(&probe_log, "").expect("create probe log");
+        fs::write(&gh_log, "").expect("create gh log");
+        write_executable(&bin.join("autospec"), HANDOFF_AUTOSPEC_FIXTURE);
+        write_executable(&bin.join("gh"), HANDOFF_GH_FIXTURE);
+        write_executable(&bare.join("gh"), HANDOFF_GH_FIXTURE);
+        Self {
+            root,
+            bin,
+            bare,
+            repo_dir,
+            probe_log,
+            gh_log,
+        }
+    }
+
+    /// Build a command that runs the real autospec binary with the fixture
+    /// bin prepended to PATH (the fake `autospec` shadows any installed one)
+    /// and optional extra PATH entries. `path_only_fixture=true` restricts
+    /// PATH to the fixture bin so the probe cannot resolve any `autospec`.
+    fn command(&self, mode: &str, path_only_fixture: bool, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let first = if path_only_fixture {
+            self.bare.clone()
+        } else {
+            self.bin.clone()
+        };
+        let mut entries = vec![first];
+        if !path_only_fixture {
+            entries.extend(std::env::split_paths(&inherited));
+        }
+        let path = std::env::join_paths(entries).expect("join PATH");
+        command
+            .args(["handoff", "probe"])
+            .args(args)
+            .env("PATH", path)
+            .env("HANDOFF_PROBE_LOG", &self.probe_log)
+            .env("HANDOFF_GH_LOG", &self.gh_log)
+            .env("HANDOFF_FAKE_MODE", mode);
+        command
+    }
+
+    fn run_json(
+        &self,
+        mode: &str,
+        path_only_fixture: bool,
+        args: &[&str],
+    ) -> (Output, serde_json::Value) {
+        let output = self
+            .command(mode, path_only_fixture, args)
+            .output()
+            .expect("run autospec handoff probe");
+        let body: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+                .expect("parse handoff JSON");
+        (output, body)
+    }
+
+    fn write_run_state(&self, value: &str) {
+        let dir = self.repo_dir.join(".autospec/state/handoff");
+        fs::create_dir_all(&dir).expect("create run state dir");
+        fs::write(dir.join("runs.json"), value).expect("write runs.json");
+    }
+
+    fn tree_listing(&self, dir: &Path) -> Vec<String> {
+        let mut out = vec![];
+        fn walk(dir: &Path, out: &mut Vec<String>) {
+            if dir.is_dir() {
+                let mut entries: Vec<_> = fs::read_dir(dir)
+                    .expect("read dir")
+                    .map(|e| e.unwrap().path())
+                    .collect();
+                entries.sort();
+                for entry in entries {
+                    out.push(entry.to_string_lossy().into_owned());
+                    walk(&entry, out);
+                }
+            }
+        }
+        walk(dir, &mut out);
+        out
+    }
+
+    fn probe_calls(&self) -> u64 {
+        fs::read_to_string(&self.probe_log)
+            .expect("read probe log")
+            .lines()
+            .count() as u64
+    }
+
+    fn gh_calls(&self) -> String {
+        fs::read_to_string(&self.gh_log).expect("read gh log")
+    }
+}
+
+const HANDOFF_BASE_ARGS: &[&str] = &["--repo", "test/repo", "--intent", "ship the feature"];
+
+#[test]
+fn handoff_capabilities_lists_all_five_routes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args(["handoff", "capabilities"])
+        .output()
+        .expect("run autospec handoff capabilities");
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let body: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .expect("parse capabilities JSON");
+    assert_eq!(body["schema"], "autospec.handoff-capabilities.v1");
+    let routes: Vec<String> = body["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    for expected in ["run", "start", "split_then_run", "recover", "none"] {
+        assert!(
+            routes.contains(&expected.to_string()),
+            "missing route {expected}"
+        );
+    }
+}
+
+#[test]
+fn handoff_probe_routes_start_without_artifact_and_is_deterministic() {
+    let fixture = HandoffFixture::new();
+    let (output1, body1) = fixture.run_json("healthy", false, HANDOFF_BASE_ARGS);
+    assert!(
+        output1.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output1.stdout)
+    );
+    assert_eq!(body1["schema"], "autospec.implementation-handoff.v1");
+    assert_eq!(body1["availability"], "available");
+    assert_eq!(body1["unavailable_reason"], serde_json::Value::Null);
+    assert_eq!(body1["route"], "start");
+    assert_eq!(body1["artifact"], serde_json::Value::Null);
+    assert_eq!(body1["run"]["entry_point"], "autospec");
+    assert_eq!(body1["run"]["follow_up"], serde_json::Value::Null);
+    assert_eq!(body1["run"]["status"], "proposed");
+    assert!(body1["run"]["run_id"].as_str().unwrap().starts_with("run-"));
+    assert_eq!(body1["project"]["key"], "product.test__repo");
+    assert_eq!(body1["project"]["state"], "planned");
+    assert!(body1["stream"]["stream_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("stream-"));
+    assert!(body1["cancellation"]["token"]
+        .as_str()
+        .unwrap()
+        .starts_with("cancel-"));
+    assert_eq!(fixture.probe_calls(), 1);
+    assert_eq!(fixture.gh_calls(), "");
+
+    // A second identical request derives identical identities.
+    let (_output2, body2) = fixture.run_json("healthy", false, HANDOFF_BASE_ARGS);
+    assert_eq!(
+        body1, body2,
+        "identical requests must derive identical identities"
+    );
+}
+
+#[test]
+fn handoff_probe_routes_run_for_issue_artifact() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json(
+        "healthy",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "fix the bug",
+            "--artifact",
+            "issue:42",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(body["route"], "run");
+    assert_eq!(body["run"]["entry_point"], "autospec-run");
+    assert_eq!(body["artifact"]["kind"], "issue");
+    assert_eq!(body["artifact"]["ref"], "issue:42");
+    assert_eq!(body["run"]["status"], "proposed");
+}
+
+#[test]
+fn handoff_probe_routes_split_then_run_for_spec_artifact() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json(
+        "healthy",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "implement the spec",
+            "--artifact",
+            "spec:docs/specs/2026-08-31-design.md",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(body["route"], "split_then_run");
+    assert_eq!(body["run"]["entry_point"], "autospec-split");
+    assert_eq!(body["run"]["follow_up"], "autospec-run");
+    assert_eq!(body["artifact"]["kind"], "spec");
+}
+
+#[test]
+fn handoff_probe_routes_recover_for_interrupted_run() {
+    let fixture = HandoffFixture::new();
+    fixture.write_run_state(
+        "{\"schema\":\"autospec.handoff-run-state.v1\",\"runs\":[\n\
+         {\"run_id\":\"run-finished\",\"correlation_id\":\"other\",\"status\":\"completed\"},\n\
+         {\"run_id\":\"run-existing-1\",\"correlation_id\":\"corr-x\",\"status\":\"interrupted\"}\n\
+         ]}",
+    );
+    let repo_dir = fixture.repo_dir.to_string_lossy().into_owned();
+    let (output, body) = fixture.run_json(
+        "healthy",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "ship the feature",
+            "--repo-dir",
+            &repo_dir,
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(body["route"], "recover");
+    assert_eq!(body["availability"], "available");
+    assert_eq!(
+        body["run"]["run_id"], "run-existing-1",
+        "recovery keeps the interrupted run's identity"
+    );
+    assert_eq!(body["run"]["entry_point"], "autospec-resume");
+    assert_eq!(body["run"]["status"], "recovered");
+    assert_eq!(body["project"]["state"], "recovered");
+}
+
+#[test]
+fn handoff_probe_routes_none_for_read_only_intents() {
+    let fixture = HandoffFixture::new();
+    for kind in ["explain", "plan"] {
+        let (output, body) = fixture.run_json(
+            "healthy",
+            false,
+            &[
+                "--repo",
+                "test/repo",
+                "--intent",
+                "what is this",
+                "--intent-kind",
+                kind,
+            ],
+        );
+        assert!(output.status.success());
+        assert_eq!(body["route"], "none");
+        assert_eq!(body["availability"], "available");
+        assert_eq!(
+            body["run"],
+            serde_json::Value::Null,
+            "{kind}: read-only dispatches no run"
+        );
+        assert_eq!(
+            body["stream"],
+            serde_json::Value::Null,
+            "{kind}: read-only dispatches no stream"
+        );
+        assert_eq!(
+            body["cancellation"],
+            serde_json::Value::Null,
+            "{kind}: read-only dispatches no cancellation"
+        );
+    }
+}
+
+#[test]
+fn handoff_probe_read_only_wins_over_interrupted_run() {
+    let fixture = HandoffFixture::new();
+    fixture.write_run_state(
+        "{\"schema\":\"autospec.handoff-run-state.v1\",\"runs\":[\n\
+         {\"run_id\":\"run-existing-1\",\"correlation_id\":\"corr-x\",\"status\":\"interrupted\"}\n\
+         ]}",
+    );
+    let repo_dir = fixture.repo_dir.to_string_lossy().into_owned();
+    let (output, body) = fixture.run_json(
+        "healthy",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "what is this",
+            "--intent-kind",
+            "explain",
+            "--repo-dir",
+            &repo_dir,
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        body["route"], "none",
+        "read-only intent outranks an interrupted run"
+    );
+}
+
+fn assert_unavailable(body: &serde_json::Value, reason: &str) {
+    assert_eq!(body["availability"], "unavailable");
+    assert_eq!(body["unavailable_reason"], reason);
+    assert_eq!(body["route"], serde_json::Value::Null);
+    assert_eq!(body["run"], serde_json::Value::Null);
+    assert_eq!(body["stream"], serde_json::Value::Null);
+    assert_eq!(body["cancellation"], serde_json::Value::Null);
+    assert!(
+        body["guidance"]
+            .as_str()
+            .is_some_and(|g| g.contains("No mutating fallback")),
+        "guidance must state there is no mutating fallback: {}",
+        body["guidance"]
+    );
+}
+
+#[test]
+fn handoff_probe_unavailable_when_cli_missing() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json("healthy", true, HANDOFF_BASE_ARGS);
+    assert!(
+        output.status.success(),
+        "well-formed request still exits 0 when blocked"
+    );
+    assert_unavailable(&body, "cli_missing");
+    assert_eq!(fixture.probe_calls(), 0, "no probe call was possible");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn handoff_probe_unavailable_on_partial_install() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json("exit2", false, HANDOFF_BASE_ARGS);
+    assert!(output.status.success());
+    assert_unavailable(&body, "workflow_surface_missing");
+    assert_eq!(fixture.probe_calls(), 1);
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn handoff_probe_unavailable_on_incompatible_surface() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json("wrong-schema", false, HANDOFF_BASE_ARGS);
+    assert!(output.status.success());
+    assert_unavailable(&body, "workflow_surface_incompatible");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn handoff_probe_unavailable_when_required_route_missing() {
+    let fixture = HandoffFixture::new();
+    // Surface offers only `run`: a no-artifact request needs `start`.
+    let (output, body) = fixture.run_json("partial-run", false, HANDOFF_BASE_ARGS);
+    assert!(output.status.success());
+    assert_unavailable(&body, "workflow_surface_missing");
+    // But an issue artifact needs `run`, which the surface offers.
+    let (output2, body2) = fixture.run_json(
+        "partial-run",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "fix",
+            "--artifact",
+            "issue:7",
+        ],
+    );
+    assert!(output2.status.success());
+    assert_eq!(body2["availability"], "available");
+    assert_eq!(body2["route"], "run");
+}
+
+#[test]
+fn handoff_probe_fails_closed_to_recovery_on_transient_probe() {
+    let fixture = HandoffFixture::new();
+    let (output, body) = fixture.run_json("transient", false, HANDOFF_BASE_ARGS);
+    assert!(output.status.success());
+    assert_eq!(body["availability"], "unknown");
+    assert_eq!(body["unavailable_reason"], "probe_transient");
+    assert_eq!(body["route"], "recover");
+    assert_eq!(body["run"]["entry_point"], "autospec-resume");
+    assert_eq!(
+        fixture.gh_calls(),
+        "",
+        "recovery must not dispatch directly"
+    );
+}
+
+#[test]
+fn handoff_probe_fails_closed_on_ambiguous_run_state() {
+    let fixture = HandoffFixture::new();
+    fixture.write_run_state("this is not json");
+    let repo_dir = fixture.repo_dir.to_string_lossy().into_owned();
+    let (output, body) = fixture.run_json(
+        "healthy",
+        false,
+        &[
+            "--repo",
+            "test/repo",
+            "--intent",
+            "ship the feature",
+            "--repo-dir",
+            &repo_dir,
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(body["availability"], "unknown");
+    assert_eq!(body["unavailable_reason"], "run_state_ambiguous");
+    assert_eq!(body["route"], "recover");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn handoff_probe_unavailable_never_mutates() {
+    for mode in ["exit2", "wrong-schema", "partial-run"] {
+        let fixture = HandoffFixture::new();
+        let before = fixture.tree_listing(&fixture.root);
+        let (output, body) = fixture.run_json(mode, false, HANDOFF_BASE_ARGS);
+        assert!(output.status.success());
+        assert_eq!(body["availability"], "unavailable");
+        let after = fixture.tree_listing(&fixture.root);
+        assert_eq!(
+            before, after,
+            "mode {mode}: unavailable handoff must not create or change any file"
+        );
+        assert_eq!(
+            fixture.gh_calls(),
+            "",
+            "mode {mode}: zero gh calls permitted"
+        );
+    }
+    // cli_missing mode too (PATH restricted to the fixture bin).
+    let fixture = HandoffFixture::new();
+    let before = fixture.tree_listing(&fixture.root);
+    let (output, body) = fixture.run_json("healthy", true, HANDOFF_BASE_ARGS);
+    assert!(output.status.success());
+    assert_eq!(body["availability"], "unavailable");
+    assert_eq!(before, fixture.tree_listing(&fixture.root));
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn handoff_probe_usage_errors_exit_2() {
+    let fixture = HandoffFixture::new();
+    let missing_repo = fixture
+        .command("healthy", false, &["--intent", "x"])
+        .output()
+        .expect("run");
+    assert_eq!(
+        missing_repo.status.code(),
+        Some(2),
+        "missing --repo must exit 2"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_repo.stderr).contains("missing required --repo"),
+        "stderr: {}",
+        String::from_utf8_lossy(&missing_repo.stderr)
+    );
+
+    let bad_artifact = fixture
+        .command("healthy", false, &HANDOFF_BASE_ARGS)
+        .arg("--artifact")
+        .arg("issue:")
+        .output()
+        .expect("run");
+    assert_eq!(
+        bad_artifact.status.code(),
+        Some(2),
+        "empty issue number must exit 2"
+    );
+
+    let bad_repo = fixture
+        .command("healthy", false, &["--repo", "a/b/c", "--intent", "x"])
+        .output()
+        .expect("run");
+    assert_eq!(
+        bad_repo.status.code(),
+        Some(2),
+        "malformed --repo must exit 2"
+    );
+}
+
+#[test]
+fn handoff_probe_help_exits_0() {
+    let fixture = HandoffFixture::new();
+    let output = fixture
+        .command("healthy", false, &["--help"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("autospec handoff probe --repo OWNER/NAME"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
