@@ -53,7 +53,9 @@ quality_command_table() {
 }
 
 # A marker is either a glob (`*.sh`, satisfied by at least one matching file
-# anywhere outside .git/node_modules) or a repo-root file.
+# anywhere outside .git/node_modules) or a file marker. File markers resolve
+# the same way the stack detector counts them: at the repo root or in any
+# workspace-member subdirectory, under the detector's shared exclusion list.
 marker_present() {
     case "$1" in
         \**)
@@ -61,9 +63,60 @@ marker_present() {
                 -not -path './node_modules/*' -print -quit 2>/dev/null)" ]
             ;;
         *)
-            [ -f "$1" ]
+            [ -f "$1" ] || _member_marker_present "$1"
             ;;
     esac
+}
+
+# The directory holding this script, in pure bash (no `dirname`): the script
+# must keep running on a PATH that only provides `find`. Resolved lazily so
+# root-only marker checks never pay for it.
+_script_dir() {
+    case "$0" in
+        */*) cd -- "${0%/*}" && pwd -P ;;
+        *) printf '%s\n' "$PWD" ;;
+    esac
+}
+
+# True when $1 exists outside the repo root, per the detector's exclusions.
+# scripts/autospec_autonomy_stack.py owns the exclusion list; its directory is
+# put on PYTHONPATH so this script imports it instead of keeping a second copy
+# that can drift. python3 is optional: without it, or when the detector module
+# is unavailable, the check degrades to repo-root only with a warning, never a
+# failure.
+_member_marker_present() {
+    local status=0 detector_dir
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'discover-quality-commands: WARN: python3 not found; %s checked at the repo root only\n' "$1" >&2
+        return 1
+    fi
+    # Exit 0 = found, exit 3 = absent (a normal negative), anything else is an
+    # error. The `||` keeps an absent marker from tripping set -e and captures
+    # python's own exit status, which the `if` compound would mask.
+    detector_dir="$(_script_dir)"
+    PYTHONPATH="$detector_dir${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 - "$1" <<'PY' || status=$?
+import sys
+from pathlib import Path
+
+from autospec_autonomy_stack import FIXTURE_DIR_PARTS, is_skipped
+
+marker, root = sys.argv[1], Path.cwd()
+found = False
+for path in sorted(root.rglob(marker)):
+    rel = path.relative_to(root).as_posix()
+    if not path.is_file() or is_skipped(rel) or FIXTURE_DIR_PARTS.intersection(rel.split("/")[:-1]):
+        continue
+    found = True
+    break
+sys.exit(0 if found else 3)
+PY
+    case "$status" in
+        0) return 0 ;;
+        3) return 1 ;;
+    esac
+    printf 'discover-quality-commands: WARN: stack detector unavailable (exit %s); %s checked at the repo root only\n' "$status" "$1" >&2
+    return 1
 }
 
 REPO_ROOT="$(pwd)"
