@@ -27,6 +27,7 @@ pub mod escalation;
 pub mod execution_profile;
 pub mod guards;
 pub mod inferweave;
+pub mod isolation;
 pub mod knowledge;
 pub mod memory;
 pub mod outcome;
@@ -71,6 +72,10 @@ pub use guards::{
 };
 pub use inferweave::{
     route, CapabilityRequest, LatencyPriority, NodeOffer, RoutingDecision, SessionSeat,
+};
+pub use isolation::{
+    IsolationViolation, ObservedEdits, ReviewVerdict, SessionArtifact, SessionGrant,
+    SessionIsolation,
 };
 pub use knowledge::{
     digest_of, language_for, resolve_stages, scan_module, KnowledgeCache, Language, ModuleRecord,

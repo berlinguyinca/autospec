@@ -350,3 +350,15 @@ pub fn fold_events(
     }
     result
 }
+
+/// A folded session result is the observed-edit evidence the isolation
+/// registry checks at finish: a read-only role that produced any of it is a
+/// breach.
+impl From<&PiSessionResult> for super::isolation::ObservedEdits {
+    fn from(result: &PiSessionResult) -> Self {
+        Self {
+            files_edited: result.files_edited.len(),
+            lines_changed: result.lines_changed,
+        }
+    }
+}

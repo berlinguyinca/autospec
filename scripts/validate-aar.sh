@@ -36,7 +36,7 @@ require_grep() {
 # Spec sections 3-15: one module per responsibility.
 for module in \
   classify/mod.rs classify/rubric.rs context.rs dispatch_fit.rs escalation.rs guards.rs \
-  inferweave.rs memory.rs mod.rs outcome.rs pi.rs policy.rs profile.rs \
+  inferweave.rs isolation.rs memory.rs mod.rs outcome.rs pi.rs policy.rs profile.rs \
   reasoning.rs telemetry.rs topology.rs; do
   require_file "$CORE/$module"
 done
@@ -45,8 +45,8 @@ done
 for suite in \
   aar_classification.rs aar_context_memory.rs aar_dispatch_fit.rs aar_e2e_scenarios.rs \
   aar_escalation.rs aar_guards.rs aar_inferweave.rs aar_pi_adapter.rs \
-  aar_policy.rs aar_profiles.rs aar_reasoning.rs aar_telemetry_outcome.rs \
-  aar_topology.rs; do
+  aar_policy.rs aar_profiles.rs aar_reasoning.rs aar_session_isolation.rs \
+  aar_telemetry_outcome.rs aar_topology.rs; do
   require_file "$TESTS/$suite"
 done
 require_file "crates/autospec-cli/tests/aar_commands.rs"
@@ -78,6 +78,16 @@ require_grep 'pub fn enforce_separation' "$CORE/topology.rs" \
   "separation of duties must be enforced programmatically"
 require_grep 'preserves_separation_after_fallback' "$CORE/escalation.rs" \
   "escalation must re-check separation of duties on every fallback"
+
+# Issue #3324: planner/builder/reviewer run as separate sessions with
+# independent worktrees for modifying lanes; a second writer on one worktree
+# and a read-only session that reports edits both fail closed.
+require_grep 'WorktreeCollision' "$CORE/isolation.rs" \
+  "a second mutating session on one worktree must fail closed"
+require_grep 'ReadOnlyBreach' "$CORE/isolation.rs" \
+  "a read-only session reporting filesystem edits must fail closed"
+require_grep 'changes_required' "$CORE/isolation.rs" \
+  "reviewer output must validate as approve|changes_required|uncertain"
 
 # Issue #3694: a fleet with no slot large enough must hold the issue rather
 # than dispatch it truncated.
@@ -112,8 +122,8 @@ if [ "${AAR_SKIP_CARGO:-0}" != "1" ]; then
   if ! cargo test -p autospec-core --test aar_classification --test aar_context_memory \
     --test aar_dispatch_fit --test aar_e2e_scenarios --test aar_escalation \
     --test aar_guards --test aar_inferweave --test aar_pi_adapter --test aar_policy \
-    --test aar_profiles --test aar_reasoning --test aar_telemetry_outcome \
-    --test aar_topology -- --test-threads=1 >/dev/null 2>&1; then
+    --test aar_profiles --test aar_reasoning --test aar_session_isolation \
+    --test aar_telemetry_outcome --test aar_topology -- --test-threads=1 >/dev/null 2>&1; then
     fail "cargo test for the autospec-core aar suites failed"
   fi
   if ! cargo test -p autospec-cli --test aar_commands -- --test-threads=1 >/dev/null 2>&1; then
