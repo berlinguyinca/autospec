@@ -374,7 +374,13 @@ fn crate_for_path(path: &str, crates: &[String]) -> Option<String> {
     crates.iter().find(|c| c.as_str() == name).cloned()
 }
 
-fn reverse_closure(
+/// The reverse-dependency closure of `seed` under `depends_on` (crate ->
+/// the crates it directly depends on): the seed plus every crate that
+/// depends on a member of the set, transitively.
+///
+/// Shared by the attribution gate and the staged test scoping (#3767) so
+/// the blast radius is the same computation in both places.
+pub(crate) fn reverse_closure(
     seed: &BTreeSet<String>,
     depends_on: &BTreeMap<String, Vec<String>>,
 ) -> BTreeSet<String> {
