@@ -60,6 +60,7 @@ pub mod managed_project;
 pub mod not_reproducible;
 pub mod planning;
 pub mod post_merge;
+pub mod procedure;
 pub mod rag;
 pub mod rebaseline;
 pub mod repair_loop;
