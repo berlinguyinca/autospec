@@ -125,6 +125,8 @@ pub struct NodeOffer {
     pub affinity_session_id: Option<String>,
     /// 0.0 idle to 1.0 saturated.
     pub utilization: f64,
+    /// Live agent jobs running on this node; the first tiebreaker among
+    /// equally scored workers.
     pub queue_depth: u32,
     pub observed_prefill_tokens_per_second: f64,
     pub observed_decode_tokens_per_second: f64,
@@ -177,10 +179,13 @@ impl RoutingDecision {
 /// Score node offers against a capability request.
 ///
 /// Hard filters run first (model/class, overload, free context, exhausted fair
-/// share); only then does scoring order what remains.
+/// share); only then does scoring order what remains. Workers that tie on
+/// score go to the one with the fewest live agent jobs, and any remaining
+/// tie is broken at random, so simultaneous dispatches to identical workers
+/// spread across the fleet instead of converging on a single one.
 pub fn route(request: &CapabilityRequest, offers: &[NodeOffer]) -> RoutingDecision {
     let required_free = request.required_free_context();
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<(CandidateScore, u32)> = Vec::new();
     let mut rejected = Vec::new();
 
     for offer in offers {
@@ -261,32 +266,51 @@ pub fn route(request: &CapabilityRequest, offers: &[NodeOffer]) -> RoutingDecisi
             offer.observed_prefill_tokens_per_second, offer.observed_decode_tokens_per_second
         ));
 
-        candidates.push(CandidateScore {
-            node_id: offer.node_id.clone(),
-            score,
-            reasons,
-        });
+        candidates.push((
+            CandidateScore {
+                node_id: offer.node_id.clone(),
+                score,
+                reasons,
+            },
+            offer.queue_depth,
+        ));
     }
 
-    candidates.sort_by(|left, right| {
+    candidates.sort_by(|(left, left_jobs), (right, right_jobs)| {
         right
             .score
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.node_id.cmp(&right.node_id))
+            .then_with(|| left_jobs.cmp(right_jobs))
     });
 
-    let selected = candidates
-        .first()
-        .map(|candidate| candidate.node_id.clone());
+    let (selected, tie_size) = match candidates.first() {
+        Some((best, best_jobs)) => {
+            let tied: Vec<String> = candidates
+                .iter()
+                .filter(|(candidate, jobs)| candidate.score == best.score && *jobs == *best_jobs)
+                .map(|(candidate, _)| candidate.node_id.clone())
+                .collect();
+            (Some(pick_among_tied(&tied)), tied.len())
+        }
+        None => (None, 0),
+    };
+
+    let candidates: Vec<CandidateScore> = candidates
+        .into_iter()
+        .map(|(candidate, _)| candidate)
+        .collect();
     let mut rationale = vec![format!(
         "required_free_context={required_free} eligible={} rejected={}",
         candidates.len(),
         rejected.len()
     )];
-    match &selected {
-        Some(node) => rationale.push(format!("selected {node}")),
-        None => rationale.push("no eligible node".to_string()),
+    match (&selected, tie_size) {
+        (Some(node), tie_size) if tie_size > 1 => rationale.push(format!(
+            "{tie_size} candidates tied on score and live jobs; chose {node} among them at random"
+        )),
+        (Some(node), _) => rationale.push(format!("selected {node}")),
+        (None, _) => rationale.push("no eligible node".to_string()),
     }
 
     RoutingDecision {
@@ -294,6 +318,24 @@ pub fn route(request: &CapabilityRequest, offers: &[NodeOffer]) -> RoutingDecisi
         candidates,
         rejected,
         rationale,
+    }
+}
+
+/// Choose one node from a tied group of equally ranked workers.
+///
+/// A deterministic tiebreak (such as lexicographic node id) turns the
+/// selector into a constant: every simultaneous dispatch to a set of
+/// identical workers lands on the same one. A random pick spreads them.
+/// An entropy failure degrades to the first candidate rather than failing
+/// the whole routing decision.
+fn pick_among_tied(tied: &[String]) -> String {
+    if tied.len() == 1 {
+        return tied[0].clone();
+    }
+    let mut bytes = [0_u8; 4];
+    match getrandom::fill(&mut bytes) {
+        Ok(()) => tied[u32::from_le_bytes(bytes) as usize % tied.len()].clone(),
+        Err(_) => tied[0].clone(),
     }
 }
 
