@@ -1,0 +1,26 @@
+# cargo-audit configuration.
+#
+# RUSTSEC-2023-0071 (Marvin Attack, timing sidechannel in `rsa` 0.9.10) has
+# **no fixed upgrade available** upstream, so `cargo audit` fails on every run
+# and the audit job is permanently red. A gate that can only fail teaches its
+# readers to ignore the channel, and the next advisory — which may be both
+# fixable and severe — then arrives somewhere nobody looks.
+#
+# Reachability, checked rather than assumed:
+#   rsa 0.9.10  <-  sqlx-mysql 0.8.6  <-  sqlx
+# `sqlx` is declared in crates/autospec-core/Cargo.toml with
+# `default-features = false, features = ["any", "postgres", "runtime-tokio",
+# "sqlite"]`. The MySQL driver arrives only through `any`, which is load-bearing:
+# resources/db.rs uses `AnyPool` and `sqlx::any::install_default_drivers()`.
+# No MySQL connection is ever opened — db.rs's only `mysql` references are tests
+# asserting that a `mysql://` URL is REJECTED (db.rs:368, db.rs:425).
+#
+# So the vulnerable code is linked but unreachable. This ignore is therefore a
+# statement about reachability, not a decision to accept the risk.
+#
+# REVIEW: remove this entry when either
+#   (a) `rsa` ships a fixed release, or
+#   (b) resources/db.rs moves off `AnyPool` to explicit Postgres/SQLite pools,
+#       which drops `any` and with it sqlx-mysql and rsa entirely.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
