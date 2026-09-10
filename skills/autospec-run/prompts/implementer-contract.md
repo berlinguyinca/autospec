@@ -21,6 +21,11 @@ acting digest, not a replacement for the per-step prompt.
   first, implement, make it pass. Pure prose/docs changes skip TDD.
 - **Conventional commits** (`feat:` / `fix:` / `test:` / `docs:` / `refactor:`).
   Small commits as you go; the PR squashes.
+- **Changelog is a fragment, not an edit.** If the target repo has a `changelog.d/`
+  directory, write one new fragment named after the issue (`<issue>-<slug>.md`) and
+  commit it; never hand-edit `CHANGELOG.md`. Fragments are folded in at release by
+  `scripts/build-changelog.sh`, and one new file per issue is what keeps concurrent
+  agents from conflicting on the changelog (see `changelog.d/README.md`).
 - **NEVER** push to `main`, force-push, bypass hooks (`--no-verify`), or `amend`
   an already-pushed commit.
 - **Small-LLM target.** Keep changes self-contained and within the context /
