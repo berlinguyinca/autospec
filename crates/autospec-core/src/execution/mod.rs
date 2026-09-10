@@ -3,6 +3,7 @@ pub mod closure;
 pub mod endpoint;
 pub mod executor;
 pub mod gate;
+pub mod gate_reuse;
 pub mod gate_scope;
 pub mod patch_apply;
 pub mod patch_conflicts;
