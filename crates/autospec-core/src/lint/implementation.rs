@@ -38,6 +38,17 @@ pub enum ImplementationLintRule {
     /// that performs it is missing, or the comment lies. Doc-side twin of
     /// `DocOutOfSync`.
     UnperformedDocClaim,
+    /// A declared decision-rule fix (`Rule fix:` line) carries no
+    /// `## Call-site enumeration` section recording the other places that
+    /// make the same decision and their state (`fixed`, `checked-and-correct`,
+    /// or `out-of-scope: <reason>`). A correction that stops at its own call
+    /// site leaves the same broken decision in place everywhere else (#4125).
+    MissingCallsiteEnumeration,
+    /// A declared decision-rule fix states a rule that does not name the
+    /// specific tool or file the rule was applied to. A rule that does not
+    /// name its own call site is likely under-scoped: there are other call
+    /// sites, and the reviewer must be asked for the enumeration (#4125).
+    UnderScopedRule,
 }
 
 impl ImplementationLintRule {
@@ -63,6 +74,8 @@ impl ImplementationLintRule {
             Self::NewDepUnjustified => "NEW_DEP_UNJUSTIFIED",
             Self::NewAbstractionSingleCaller => "NEW_ABSTRACTION_SINGLE_CALLER",
             Self::UnperformedDocClaim => "UNPERFORMED_DOC_CLAIM",
+            Self::MissingCallsiteEnumeration => "MISSING_CALLSITE_ENUMERATION",
+            Self::UnderScopedRule => "UNDER_SCOPED_RULE",
         }
     }
 
@@ -88,6 +101,8 @@ impl ImplementationLintRule {
             "NEW_DEP_UNJUSTIFIED" => Self::NewDepUnjustified,
             "NEW_ABSTRACTION_SINGLE_CALLER" => Self::NewAbstractionSingleCaller,
             "UNPERFORMED_DOC_CLAIM" => Self::UnperformedDocClaim,
+            "MISSING_CALLSITE_ENUMERATION" => Self::MissingCallsiteEnumeration,
+            "UNDER_SCOPED_RULE" => Self::UnderScopedRule,
             _ => return None,
         })
     }
@@ -257,6 +272,7 @@ pub fn lint_implementation(
     detect_mock_db(diff, &mut collector);
     detect_doc_out_of_sync(diff, &mut collector);
     detect_unperformed_doc_claims(diff, context.repository, &mut collector);
+    detect_rule_fix_enumeration(context.issue_body, &mut collector);
 
     if context.options.enable_vacuous_assertions || context.options.pre_commit_mode {
         detect_vacuous_assertions(diff, &mut collector);
@@ -351,6 +367,12 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
         }
         ImplementationLintRule::UnperformedDocClaim => {
             "Find the code and the test that prove the behaviour this doc comment claims; if neither exists, implement the behaviour or delete the claim. A comment describing behaviour no code performs is a defect, not documentation."
+        }
+        ImplementationLintRule::MissingCallsiteEnumeration => {
+            "Add a `## Call-site enumeration` section recording every other place that makes the same decision as the rule being fixed, one `- <site>: <state>` line per site, with state `fixed`, `checked-and-correct`, or `out-of-scope: <reason>`; a correction that stops at its own call site leaves the same broken decision in place everywhere else."
+        }
+        ImplementationLintRule::UnderScopedRule => {
+            "Name the specific tool or file the rule was applied to in the `Rule fix:` statement — a path, a backtick-quoted command, or an UPPER_SNAKE constant — and provide the `## Call-site enumeration` for every other place that makes the same decision. A rule statement that does not name its own call site is under-scoped."
         }
     }
 }
@@ -1390,6 +1412,175 @@ fn has_assignment(contents: &str, identifier: &str) -> bool {
                 }
             }
             start = end;
+        }
+    }
+    false
+}
+
+/// A decision-rule fix must not stop at its own call site (#4125).
+///
+/// When the change under review declares that it fixes a decision rule (gate
+/// policy, guard, attribution) with a `Rule fix: <sentence>` line, review
+/// rejects the patch unless the body also carries a `## Call-site enumeration`
+/// section: one bullet per other place that makes the same decision, each
+/// recording its state — `fixed`, `checked-and-correct`, or
+/// `out-of-scope: <reason>`. A rule statement that does not name the specific
+/// tool or file it was applied to is additionally flagged as under-scoped.
+/// Bodies without a `Rule fix:` line (single-site fixes) are unaffected.
+fn detect_rule_fix_enumeration(issue_body: Option<&str>, collector: &mut FindingCollector) {
+    let Some(body) = issue_body else {
+        return;
+    };
+    let Some((rule_line, sentence)) = find_rule_fix_line(body) else {
+        return;
+    };
+    if !rule_sentence_names_tool_or_file(sentence) {
+        collector.emit(
+            ImplementationLintRule::UnderScopedRule,
+            "-",
+            Some(rule_line),
+            format!(
+                "rule statement does not name the specific tool or file it was applied to (\"{sentence}\") — likely under-scoped; name the call site and enumerate the others"
+            ),
+        );
+    }
+    match section(body, &["Call-site enumeration"]) {
+        None => collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            "patch fixes a decision rule but records no other place that makes the same decision; add a `## Call-site enumeration` section with one `- <site>: <state>` line per site, state being `fixed`, `checked-and-correct`, or `out-of-scope: <reason>`",
+        ),
+        Some(entries) => check_callsite_entries(entries, rule_line, collector),
+    }
+}
+
+/// The first `Rule fix: <sentence>` line in the body, if any. The line must
+/// start with the marker so the grammar is exact and grep-able.
+fn find_rule_fix_line(body: &str) -> Option<(usize, &str)> {
+    body.lines().enumerate().find_map(|(index, line)| {
+        let sentence = line.strip_prefix("Rule fix:")?.trim_start();
+        (!sentence.is_empty()).then_some((index + 1, sentence))
+    })
+}
+
+fn check_callsite_entries(entries: &str, rule_line: usize, collector: &mut FindingCollector) {
+    let mut listed = false;
+    for raw in entries.lines() {
+        let entry = raw.trim();
+        if !entry.starts_with("- ") {
+            continue;
+        }
+        listed = true;
+        check_callsite_entry(&entry[2..], entry, rule_line, collector);
+    }
+    if !listed {
+        collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            "`## Call-site enumeration` section lists no sites; record every other place that makes the same decision with one `- <site>: <state>` line each",
+        );
+    }
+}
+
+fn check_callsite_entry(
+    rest: &str,
+    entry: &str,
+    rule_line: usize,
+    collector: &mut FindingCollector,
+) {
+    let Some((site, state)) = rest.split_once(':') else {
+        collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            format!(
+                "call-site entry \"{entry}\" records no state; expected `- <site>: fixed | checked-and-correct | out-of-scope: <reason>`"
+            ),
+        );
+        return;
+    };
+    let site = site.trim();
+    let state = state.trim();
+    if site.is_empty() {
+        collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            format!("call-site entry \"{entry}\" names no site"),
+        );
+        return;
+    }
+    if state == "fixed" || state == "checked-and-correct" {
+        return;
+    }
+    if let Some(tail) = state.strip_prefix("out-of-scope") {
+        check_out_of_scope_reason(tail, entry, rule_line, collector);
+        return;
+    }
+    collector.emit(
+        ImplementationLintRule::MissingCallsiteEnumeration,
+        "-",
+        Some(rule_line),
+        format!(
+            "call-site entry \"{entry}\" has unrecognized state \"{state}\"; expected `fixed`, `checked-and-correct`, or `out-of-scope: <reason>`"
+        ),
+    );
+}
+
+/// The rule statement must name the specific tool or file the rule was applied
+/// to. A path-shaped token, a backtick-quoted span, or an UPPER_SNAKE constant
+/// names a call site; a bare lowercase word does not, which is the tell that
+/// the rule is under-scoped and has call sites the author never looked at.
+fn check_out_of_scope_reason(
+    tail: &str,
+    entry: &str,
+    rule_line: usize,
+    collector: &mut FindingCollector,
+) {
+    let Some(reason) = tail.strip_prefix(':') else {
+        collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            format!(
+                "call-site entry \"{entry}\" uses `out-of-scope` without a reason; expected `out-of-scope: <reason>`"
+            ),
+        );
+        return;
+    };
+    if reason.trim().is_empty() {
+        collector.emit(
+            ImplementationLintRule::MissingCallsiteEnumeration,
+            "-",
+            Some(rule_line),
+            format!(
+                "call-site entry \"{entry}\" is `out-of-scope` without a reason; the scope decision must be justified"
+            ),
+        );
+    }
+}
+
+fn rule_sentence_names_tool_or_file(sentence: &str) -> bool {
+    if sentence.matches('`').count() >= 2 {
+        return true;
+    }
+    for token in sentence.split_whitespace() {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '_');
+        if token.is_empty() {
+            continue;
+        }
+        if token.contains('/') && token.chars().any(|c| c.is_alphabetic() || c.is_numeric()) {
+            return true;
+        }
+        if token.len() >= 2
+            && token
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && token.chars().any(|c| c.is_ascii_uppercase())
+        {
+            return true;
         }
     }
     false
@@ -3093,5 +3284,143 @@ mod tests {
         ] {
             assert!(parse_blocking_hook_failure(&failure).is_err(), "{failure}");
         }
+    }
+
+    /// One-line shell diff whose sole file is declared by the body, so no
+    /// other rule fires; only the decision-rule enumeration rules can appear.
+    fn rule_fix_result(body: Option<&str>) -> ImplementationLintResult {
+        lint_implementation(
+            &UnifiedDiff {
+                files: vec![file("scripts/example.sh", 1)],
+            },
+            ImplementationLintContext {
+                issue_body: body,
+                repository: &EmptyRepository,
+                options: ImplementationLintOptions::default(),
+            },
+        )
+    }
+
+    fn rule_fix_rules(result: &ImplementationLintResult) -> Vec<ImplementationLintRule> {
+        result
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == ImplementationLintSeverity::Error)
+            .map(|finding| finding.rule)
+            .collect()
+    }
+
+    fn scoped_rule_fix_body() -> String {
+        "## Goal\n"
+            .to_string()
+            + "Fix the attribution rule for gate failures.\n\n"
+                + "Rule fix: a failure is the patch's fault only if the same check passes on the base in `scripts/lint-implementation.sh`\n\n"
+                + "## Files touched\n- scripts/example.sh\n"
+    }
+
+    #[test]
+    fn rule_fix_without_callsite_enumeration_is_rejected() {
+        let result = rule_fix_result(Some(&scoped_rule_fix_body()));
+        assert!(
+            rule_fix_rules(&result).contains(&ImplementationLintRule::MissingCallsiteEnumeration),
+            "review rejects a rule fix that does not enumerate the other call sites: {:?}",
+            result.findings
+        );
+        assert!(
+            rule_fix_rules(&result) != [ImplementationLintRule::UnderScopedRule],
+            "a statement that names its tool is not under-scoped: {:?}",
+            result.findings
+        );
+        assert!(result.exit_code() > 0);
+    }
+
+    #[test]
+    fn rule_fix_with_callsite_enumeration_passes() {
+        let body = scoped_rule_fix_body()
+            + "\n## Call-site enumeration\n"
+                + "- scripts/lint-implementation.sh: fixed\n"
+                + "- scripts/self-enforce-qa.sh: checked-and-correct\n"
+                + "- crates/autospec-cli/src/commands/autonomous/executor_bridge.rs: out-of-scope: shell-only gate, the Rust side has no equivalent decision\n";
+        let result = rule_fix_result(Some(&body));
+        assert!(
+            !rule_fix_rules(&result).contains(&ImplementationLintRule::MissingCallsiteEnumeration)
+                && !rule_fix_rules(&result).contains(&ImplementationLintRule::UnderScopedRule),
+            "a rule fix that enumerates every other call site with its state passes: {:?}",
+            result.findings
+        );
+        assert_eq!(result.blocking_count, 0);
+    }
+
+    #[test]
+    fn single_site_fix_without_rule_declaration_is_unaffected() {
+        let body = "## Goal\nFix the off-by-one in the queue sweep.\n\n## Files touched\n- scripts/example.sh\n";
+        let result = rule_fix_result(Some(body));
+        assert!(
+            !rule_fix_rules(&result).contains(&ImplementationLintRule::MissingCallsiteEnumeration)
+                && !rule_fix_rules(&result).contains(&ImplementationLintRule::UnderScopedRule),
+            "a single-site fix that declares no rule fix is unaffected: {:?}",
+            result.findings
+        );
+        assert_eq!(result.blocking_count, 0);
+    }
+
+    #[test]
+    fn rule_statement_not_naming_tool_or_file_is_under_scoped() {
+        let body = "## Goal\nFix the attribution rule.\n\n".to_string()
+            + "Rule fix: a failure is the patch's fault only if the same check passes on the base\n\n"
+            + "## Call-site enumeration\n"
+                + "- scripts/other-gate.sh: checked-and-correct\n\n"
+                + "## Files touched\n- scripts/example.sh\n";
+        let result = rule_fix_result(Some(&body));
+        assert!(
+            rule_fix_rules(&result).contains(&ImplementationLintRule::UnderScopedRule),
+            "a rule statement that names no tool or file is flagged under-scoped: {:?}",
+            result.findings
+        );
+        assert!(
+            !rule_fix_rules(&result).contains(&ImplementationLintRule::MissingCallsiteEnumeration),
+            "the enumeration itself is present and valid: {:?}",
+            result.findings
+        );
+        assert!(result.exit_code() > 0);
+    }
+
+    #[test]
+    fn enumeration_entry_missing_state_or_reason_is_rejected() {
+        for body in [
+            // state absent entirely
+            scoped_rule_fix_body() + "\n## Call-site enumeration\n- scripts/other-gate.sh\n",
+            // unrecognized state
+            scoped_rule_fix_body()
+                + "\n## Call-site enumeration\n- scripts/other-gate.sh: probably fine\n",
+            // out-of-scope without a reason
+            scoped_rule_fix_body()
+                + "\n## Call-site enumeration\n- scripts/other-gate.sh: out-of-scope\n",
+            // section present but empty
+            scoped_rule_fix_body() + "\n## Call-site enumeration\n",
+        ] {
+            assert_missing_enumeration(&body);
+        }
+    }
+
+    fn assert_missing_enumeration(body: &str) {
+        let result = rule_fix_result(Some(body));
+        assert!(
+            rule_fix_rules(&result).contains(&ImplementationLintRule::MissingCallsiteEnumeration),
+            "malformed enumeration is rejected: {body:?} -> {:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn enumeration_guardian_skip_downgrades_to_info() {
+        let body = scoped_rule_fix_body()
+            + "\nGuardian: skip-MISSING_CALLSITE_ENUMERATION # only one gate in this repo makes this decision\n";
+        let result = rule_fix_result(Some(&body));
+        assert_eq!(result.blocking_count, 0);
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == ImplementationLintRule::MissingCallsiteEnumeration
+                && finding.severity == ImplementationLintSeverity::Info
+        }));
     }
 }
