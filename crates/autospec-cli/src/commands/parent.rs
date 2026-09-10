@@ -12,10 +12,23 @@ use support::{
 mod options;
 mod support;
 
+// `admitted_children` is wired into the reconciliation below; the rest of the
+// checkpoint engine (Checkpoint / PortfolioItem / apply_order / canonical_issue_url)
+// is unit-tested here and wired to the `portfolio apply` CLI in a follow-up, so the
+// bin build legitimately does not construct it yet.
+#[allow(dead_code)]
+#[path = "managed_project/portfolio/apply.rs"]
+mod apply;
+
 const PARENT_MARKER_PREFIX: &str = "<!-- autospec-parent:";
 const DECOMPOSITION_MARKER: &str = "<!-- autospec-parent-decomposition:begin -->";
 const COMPLETE_MARKER: &str = "<!-- autospec-parent-complete:begin -->";
 const EXTENSION_STATE: &str = "append-only-parent-extension";
+/// Decomposition-comment marker that flags a parent as a *portfolio* parent. A
+/// portfolio parent records the complete child set at once and admits its
+/// children to `auto-implement` only as an all-or-nothing set once every child is
+/// terminal-success (portfolio mode in the automatic-spec-projects contract).
+const PORTFOLIO_STATE: &str = "portfolio-complete-parent";
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
@@ -230,6 +243,9 @@ struct Reconciliation {
     terminal: Vec<u64>,
     quarantined: bool,
     requires_merged_pr: bool,
+    /// Portfolio mode: the parent records a complete child set and admits its
+    /// children to `auto-implement` only as an all-or-nothing terminal set.
+    portfolio: bool,
 }
 
 impl Reconciliation {
@@ -252,7 +268,8 @@ fn read_reconciliation(
         )));
     }
 
-    let requires_merged_pr = decomposition.contains(EXTENSION_STATE);
+    let portfolio = decomposition.contains(PORTFOLIO_STATE);
+    let requires_merged_pr = decomposition.contains(EXTENSION_STATE) || portfolio;
     let mut terminal = Vec::new();
     for child in &children {
         let complete = if requires_merged_pr {
@@ -270,16 +287,28 @@ fn read_reconciliation(
         terminal,
         quarantined: decomposition.contains("quarantined-parent-decomposed"),
         requires_merged_pr,
+        portfolio,
     })
 }
 
 fn print_pending(reconciliation: &Reconciliation) {
-    println!(
-        "{{\"reconciled\":true,\"parent\":{},\"closed\":false,\"terminal\":{},\"total\":{}}}",
-        reconciliation.parent,
-        reconciliation.terminal.len(),
-        reconciliation.children.len()
-    );
+    if reconciliation.portfolio {
+        let admitted = apply::admitted_children(&reconciliation.children, &reconciliation.terminal);
+        println!(
+            "{{\"reconciled\":true,\"parent\":{},\"closed\":false,\"terminal\":{},\"total\":{},\"admitted\":{}}}",
+            reconciliation.parent,
+            reconciliation.terminal.len(),
+            reconciliation.children.len(),
+            render_numbers(&admitted)
+        );
+    } else {
+        println!(
+            "{{\"reconciled\":true,\"parent\":{},\"closed\":false,\"terminal\":{},\"total\":{}}}",
+            reconciliation.parent,
+            reconciliation.terminal.len(),
+            reconciliation.children.len()
+        );
+    }
 }
 
 fn update_local_state(
@@ -343,7 +372,15 @@ fn close_complete_parent(
     store
         .save(&options.state_root)
         .map_err(CommandFailure::diagnostic)?;
-    println!("{{\"reconciled\":true,\"parent\":{parent},\"closed\":true}}");
+    if reconciliation.portfolio {
+        let admitted = apply::admitted_children(&reconciliation.children, &reconciliation.terminal);
+        println!(
+            "{{\"reconciled\":true,\"parent\":{parent},\"closed\":true,\"admitted\":{}}}",
+            render_numbers(&admitted)
+        );
+    } else {
+        println!("{{\"reconciled\":true,\"parent\":{parent},\"closed\":true}}");
+    }
     Ok(())
 }
 

@@ -5,6 +5,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// The fake-gh fixtures mutate process-global environment (HOME, PATH) and write
+// executable scripts that other tests exec while cargo runs tests on parallel
+// threads, so the tests in this binary must not overlap. Every test holds this
+// guard for its whole duration; a poisoned lock means a prior test panicked while
+// holding it, which already failed the run, so recover and continue the rest.
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialize_tests() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
 }
@@ -46,7 +59,7 @@ fn path_with(bin: &Path) -> String {
 }
 
 fn has(text: &str, needle: &str) -> bool {
-    text.find(needle).is_some()
+    text.contains(needle)
 }
 
 const BASE_DECOMPOSITION: &str = "\
@@ -194,6 +207,7 @@ fn assert_success(output: &Output) {
 
 #[test]
 fn parent_extend_fake_gh_rejects_unexpected_mutations() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-harness-guard");
     let issue_edit = Command::new(root.join("bin/gh"))
         .args(["issue", "edit", "13"])
@@ -243,6 +257,7 @@ fn parent_extend_fake_gh_rejects_unexpected_mutations() {
 
 #[test]
 fn parent_extend_publishes_exact_markers_full_list_and_typed_output() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-first");
 
     let output = extend(&root, "11,12,13,14");
@@ -269,6 +284,7 @@ fn parent_extend_publishes_exact_markers_full_list_and_typed_output() {
 
 #[test]
 fn parent_extend_repeat_is_a_zero_mutation_noop() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-repeat");
     assert_success(&extend(&root, "11,12,13,14"));
     fs::write(root.join("gh.log"), "").expect("reset mutation log");
@@ -285,6 +301,7 @@ fn parent_extend_repeat_is_a_zero_mutation_noop() {
 
 #[test]
 fn parent_extend_prevalidates_every_new_child_before_mutation() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-conflict");
     write_remote(&root, 14, "comments", "<!-- autospec-parent:9 -->\n");
 
@@ -300,6 +317,7 @@ fn parent_extend_prevalidates_every_new_child_before_mutation() {
 
 #[test]
 fn parent_extend_recovers_a_preexisting_marker_without_reposting_it() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-recovery");
     write_remote(
         &root,
@@ -320,6 +338,7 @@ fn parent_extend_recovers_a_preexisting_marker_without_reposting_it() {
 
 #[test]
 fn parent_extend_reconciliation_keeps_manual_closure_pending() {
+    let _guard = serialize_tests();
     let root = stateful_parent_fixture("extend-manual-close");
     write_remote(&root, 10, "comments", EXTENDED_DECOMPOSITION);
     write_remote(
@@ -367,6 +386,7 @@ fn parent_extend_reconciliation_keeps_manual_closure_pending() {
 
 #[test]
 fn parent_record_posts_child_list_and_links_each_child_idempotently() {
+    let _guard = serialize_tests();
     let root = fixture("record");
     let bin = root.join("bin");
     let log = root.join("gh.log");
@@ -426,6 +446,7 @@ exit 0
 
 #[test]
 fn parent_record_rejects_a_child_already_linked_to_another_parent() {
+    let _guard = serialize_tests();
     let root = fixture("conflicting-parent");
     let bin = root.join("bin");
     let log = root.join("gh.log");
@@ -469,6 +490,7 @@ exit 0
 
 #[test]
 fn parent_reconcile_closes_parent_only_after_every_linked_child_is_closed() {
+    let _guard = serialize_tests();
     let root = fixture("reconcile");
     let bin = root.join("bin");
     let log = root.join("gh.log");
@@ -528,6 +550,7 @@ exit 0
 
 #[test]
 fn parent_reconcile_is_pending_when_a_sibling_is_open() {
+    let _guard = serialize_tests();
     let root = fixture("pending");
     let bin = root.join("bin");
     let log = root.join("gh.log");
@@ -569,6 +592,7 @@ exit 0
 
 #[test]
 fn parent_reconcile_is_idempotent_after_parent_is_already_closed() {
+    let _guard = serialize_tests();
     let root = fixture("already-closed");
     let bin = root.join("bin");
     let log = root.join("gh.log");
@@ -621,4 +645,144 @@ exit 0
     let calls = fs::read_to_string(log).expect("gh calls");
     assert!(!has(&calls, "issue\ncomment\n10"));
     assert!(!has(&calls, "issue\nclose\n10"));
+}
+
+fn reconcile_parent_child(root: &Path, bin: &Path, log: &Path) -> Output {
+    autospec()
+        .args([
+            "parent",
+            "reconcile-child",
+            "--repo",
+            "testorg/testrepo",
+            "--child",
+            "11",
+        ])
+        .current_dir(root)
+        .env("PATH", path_with(bin))
+        .env("AUTOSPEC_PARENT_GH_LOG", log)
+        .output()
+        .expect("parent reconciliation starts")
+}
+
+#[test]
+fn parent_portfolio_failure_admits_zero_children() {
+    let _guard = serialize_tests();
+    let root = fixture("portfolio-failure");
+    let bin = root.join("bin");
+    let log = root.join("gh.log");
+    write_gh(
+        &bin,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> "$AUTOSPEC_PARENT_GH_LOG"
+if [ "$1 $2 $3" = "issue view 11" ] && [ "$7" = comments ]; then printf '%s\n' '<!-- autospec-parent:10 -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = comments ] && printf '%s' "$9" | grep -q 'decomposition'; then printf '%s\n' '<!-- autospec-parent-decomposition:begin -->' 'Parent issue #10 was decomposed into child implementation issues:' '- #11' '- #12' 'State: `portfolio-complete-parent`.' '<!-- autospec-parent-decomposition:end -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = state ]; then printf 'OPEN\n'; fi
+if [ "$1 $2" = "api graphql" ]; then
+  case "${10}" in
+    number=11) printf '%s\n' '{"data":{"repository":{"issue":{"number":11,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[{"mergedAt":"2026-07-29T10:00:00Z"}]}}}}}' ;;
+    number=12) printf '%s\n' '{"data":{"repository":{"issue":{"number":12,"state":"OPEN","closedByPullRequestsReferences":{"nodes":[]}}}}}' ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let output = reconcile_parent_child(&root, &bin, &log);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"reconciled\":true,\"parent\":10,\"closed\":false,\"terminal\":1,\"total\":2,\"admitted\":[]}\n"
+    );
+    let calls = fs::read_to_string(&log).expect("gh calls");
+    // A failed portfolio parent closes nothing and admits nothing.
+    assert!(!has(&calls, "issue\nclose\n10"));
+    assert!(!has(&calls, "issue\ncomment\n10"));
+    assert!(!has(&calls, "issue\nreopen\n10"));
+}
+
+#[test]
+fn parent_portfolio_completion_admits_every_terminal_child() {
+    let _guard = serialize_tests();
+    let root = fixture("portfolio-complete");
+    let bin = root.join("bin");
+    let log = root.join("gh.log");
+    write_gh(
+        &bin,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> "$AUTOSPEC_PARENT_GH_LOG"
+if [ "$1 $2 $3" = "issue view 11" ] && [ "$7" = comments ]; then printf '%s\n' '<!-- autospec-parent:10 -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = comments ] && printf '%s' "$9" | grep -q 'decomposition'; then printf '%s\n' '<!-- autospec-parent-decomposition:begin -->' 'Parent issue #10 was decomposed into child implementation issues:' '- #11' '- #12' 'State: `portfolio-complete-parent`.' '<!-- autospec-parent-decomposition:end -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = state ]; then printf 'OPEN\n'; fi
+if [ "$1 $2" = "api graphql" ]; then
+  case "${10}" in
+    number=11) printf '%s\n' '{"data":{"repository":{"issue":{"number":11,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[{"mergedAt":"2026-07-29T10:00:00Z"}]}}}}}' ;;
+    number=12) printf '%s\n' '{"data":{"repository":{"issue":{"number":12,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[{"mergedAt":"2026-07-29T10:00:00Z"}]}}}}}' ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let output = reconcile_parent_child(&root, &bin, &log);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"reconciled\":true,\"parent\":10,\"closed\":true,\"admitted\":[11,12]}\n"
+    );
+    let calls = fs::read_to_string(&log).expect("gh calls");
+    // A completed portfolio parent closes itself and posts its completion summary.
+    assert!(has(&calls, "issue\nclose\n10"));
+    assert!(has(&calls, "issue\ncomment\n10"));
+}
+
+#[test]
+fn parent_portfolio_partial_resume_is_idempotent_and_withholds_admission() {
+    let _guard = serialize_tests();
+    let root = fixture("portfolio-partial-resume");
+    let bin = root.join("bin");
+    let log = root.join("gh.log");
+    write_gh(
+        &bin,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> "$AUTOSPEC_PARENT_GH_LOG"
+if [ "$1 $2 $3" = "issue view 11" ] && [ "$7" = comments ]; then printf '%s\n' '<!-- autospec-parent:10 -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = comments ] && printf '%s' "$9" | grep -q 'decomposition'; then printf '%s\n' '<!-- autospec-parent-decomposition:begin -->' 'Parent issue #10 was decomposed into child implementation issues:' '- #11' '- #12' '- #13' 'State: `portfolio-complete-parent`.' '<!-- autospec-parent-decomposition:end -->'; fi
+if [ "$1 $2 $3" = "issue view 10" ] && [ "$7" = state ]; then printf 'OPEN\n'; fi
+if [ "$1 $2" = "api graphql" ]; then
+  case "${10}" in
+    number=11) printf '%s\n' '{"data":{"repository":{"issue":{"number":11,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[{"mergedAt":"2026-07-29T10:00:00Z"}]}}}}}' ;;
+    number=12) printf '%s\n' '{"data":{"repository":{"issue":{"number":12,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[{"mergedAt":"2026-07-29T10:00:00Z"}]}}}}}' ;;
+    number=13) printf '%s\n' '{"data":{"repository":{"issue":{"number":13,"state":"OPEN","closedByPullRequestsReferences":{"nodes":[]}}}}}' ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    // Resume a partially-terminal portfolio parent twice: it reports the same
+    // exact partial state and makes no new mutations either time.
+    let first = reconcile_parent_child(&root, &bin, &log);
+    assert_success(&first);
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        "{\"reconciled\":true,\"parent\":10,\"closed\":false,\"terminal\":2,\"total\":3,\"admitted\":[]}\n"
+    );
+    fs::write(&log, "").expect("reset mutation log");
+
+    let second = reconcile_parent_child(&root, &bin, &log);
+    assert_success(&second);
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        "{\"reconciled\":true,\"parent\":10,\"closed\":false,\"terminal\":2,\"total\":3,\"admitted\":[]}\n"
+    );
+
+    let calls = fs::read_to_string(&log).expect("gh calls");
+    // Partial resume re-reads but mutates nothing: no close, no summary comment.
+    assert!(!has(&calls, "issue\nclose\n10"));
+    assert!(!has(&calls, "issue\ncomment\n10"));
 }
