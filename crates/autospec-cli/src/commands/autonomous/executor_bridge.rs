@@ -4624,6 +4624,7 @@ fn produce_repairable_integration_smoke_evidence(
 fn revalidate_full_suite_for_premerge(
     request: FullSuiteRevalidationRequest<'_>,
 ) -> Result<Vec<ObservedDirectCommand>, BridgeRunFailure> {
+    verify_tree_coherence(request.worktree)?;
     verify_full_suite_base(
         request.worktree,
         request.expected_base_ref,
@@ -4894,6 +4895,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
 pub(crate) fn revalidate_full_suite(
     request: FullSuiteRevalidationRequest<'_>,
 ) -> Result<Vec<ObservedDirectCommand>, String> {
+    verify_tree_coherence(request.worktree)?;
     verify_full_suite_base(
         request.worktree,
         request.expected_base_ref,
@@ -4975,6 +4977,100 @@ fn verify_full_suite_base(
         return Err("executor full-suite base is not an ancestor of HEAD".to_string());
     }
     Ok(())
+}
+
+/// Tree-coherence gate (#3642): the tree a gate set verifies must be a finished
+/// tree. A conflict marker left by a three-way apply, an `.orig`/`.rej`
+/// residue, or an unmerged index entry means the tree on disk is not the tree
+/// the slower compile-based gates (or their recorded, commit-bound evidence)
+/// would describe. Callers run this first: it is instant, and its failure
+/// invalidates every slower gate that would follow.
+fn verify_tree_coherence(worktree: &Path) -> Result<(), String> {
+    let unmerged = unmerged_paths(worktree)?;
+    if !unmerged.is_empty() {
+        return Err(format!(
+            "executor tree coherence: unmerged paths present: {}",
+            unmerged.join(", ")
+        ));
+    }
+    let leftovers = tree_leftover_files(worktree)?;
+    if !leftovers.is_empty() {
+        return Err(format!(
+            "executor tree coherence: .orig/.rej leftovers present: {}",
+            leftovers.join(", ")
+        ));
+    }
+    let conflicted = conflicted_marker_files(worktree)?;
+    if !conflicted.is_empty() {
+        return Err(format!(
+            "executor tree coherence: conflict markers in tracked files: {}",
+            conflicted.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Unmerged index entries: `git diff --diff-filter=U` must be empty in a
+/// finished tree.
+fn unmerged_paths(worktree: &Path) -> Result<Vec<String>, String> {
+    Ok(
+        git_stdout(worktree, &["diff", "--diff-filter=U", "--name-only"])?
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+/// `.orig`/`.rej` leftovers left behind by three-way applies and rejects.
+/// They are not part of the change, so tracked and untracked files alike are
+/// checked.
+fn tree_leftover_files(worktree: &Path) -> Result<Vec<String>, String> {
+    let mut leftovers = Vec::new();
+    for listing in [
+        git_stdout(worktree, &["ls-files"])?,
+        git_stdout(worktree, &["ls-files", "--others", "--exclude-standard"])?,
+    ] {
+        for path in listing
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            if path.ends_with(".orig") || path.ends_with(".rej") {
+                leftovers.push(path.to_string());
+            }
+        }
+    }
+    leftovers.sort();
+    leftovers.dedup();
+    Ok(leftovers)
+}
+
+/// Tracked files still carrying merge-conflict markers. The decisive markers
+/// are the `<<<<<<<` start and `>>>>>>>` end lines; a lone `=======` line is
+/// ambiguous with a documentation banner or rule, so it never fails a tree on
+/// its own. `git grep` exits 0 with the matching paths and 1 on a clean tree.
+fn conflicted_marker_files(worktree: &Path) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args(["grep", "-lE", "^<{7}( |$)|^>{7}( |$)"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| format!("search tracked files for conflict markers: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8(output.stdout)
+            .map_err(|error| format!("conflict marker paths are not UTF-8: {error}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()),
+        Some(1) => Ok(Vec::new()),
+        _ => Err(format!(
+            "search tracked files for conflict markers: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10836,6 +10932,16 @@ fn commit_sandboxed_executor_diff_inner(
         return Err(format!(
             "executor commit branch mismatch: expected {}, observed {branch}",
             state.identity.branch
+        ));
+    }
+    // (#3642) Refuse to commit a tree with unmerged paths rather than relying
+    // on the operator having read the three-way apply output: an unmerged tree
+    // is not the tree the recorded evidence would describe.
+    let unmerged = unmerged_paths(&state.identity.worktree)?;
+    if !unmerged.is_empty() {
+        return Err(format!(
+            "executor commit refused: unmerged paths present: {}",
+            unmerged.join(", ")
         ));
     }
     if sandboxed_executor_diff(state)?.is_empty() {

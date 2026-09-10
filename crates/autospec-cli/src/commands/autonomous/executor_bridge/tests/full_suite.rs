@@ -9,6 +9,7 @@ use crate::commands::autonomous::executor_bridge as bridge;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -439,4 +440,88 @@ fn autonomous_executor_bridge_cleanup_failure_cannot_publish_complete_marker() {
     assert!(!artifact_root.join("complete.json").exists());
     assert!(!artifact_root.join("qa.json").exists());
     assert!(!artifact_root.join("security.json").exists());
+}
+
+#[test]
+fn autonomous_executor_bridge_full_suite_revalidation_refuses_uncoherent_tree() {
+    let _environment = test_environment();
+    let fixture = GitFixture::new("full-suite-tree-coherence");
+    let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+    let env = BTreeMap::from([(
+        "AUTOSPEC_FULL_TEST_COMMAND".to_string(),
+        OsString::from("/usr/bin/true"),
+    )]);
+    let revalidate = |artifact_root: PathBuf, expected_commit: &str| {
+        bridge::revalidate_full_suite(bridge::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &artifact_root,
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit,
+        })
+    };
+
+    // Conflict markers in a tracked file: the gate set must fail before any
+    // gate command runs at all.
+    fs::write(
+        fixture.repo.join("README.md"),
+        "<<<<<<< ours\nfixture\n=======\nconflicted\n>>>>>>> theirs\n",
+    )
+    .expect("write conflicted tracked file");
+    let artifact_root = fixture.root.join("full-coherence-markers");
+    let error = revalidate(artifact_root.clone(), &commit)
+        .expect_err("conflict markers must fail the gate set");
+    assert!(error.contains("tree coherence"), "{error}");
+    assert!(error.contains("conflict markers"), "{error}");
+    assert!(error.contains("README.md"), "{error}");
+    assert!(
+        !artifact_root.exists(),
+        "coherence failure must precede every gate command"
+    );
+
+    // Resolved markers but a three-way apply .orig residue: still uncoherent.
+    fs::write(fixture.repo.join("README.md"), "fixture\n").expect("resolve markers");
+    fs::write(fixture.repo.join("CHANGELOG.md.orig"), "leftover\n").expect("write residue");
+    let error = revalidate(fixture.root.join("full-coherence-rejects"), &commit)
+        .expect_err(".orig residue must fail the gate set");
+    assert!(error.contains(".orig/.rej"), "{error}");
+    assert!(error.contains("CHANGELOG.md.orig"), "{error}");
+    fs::remove_file(fixture.repo.join("CHANGELOG.md.orig")).expect("remove residue");
+
+    // A real three-way conflict leaves unmerged paths: the gate set must fail
+    // on them even though no marker check would be reached first.
+    git(&fixture.repo, &["checkout", "-qb", "coherence-side"]);
+    fs::write(fixture.repo.join("README.md"), "side\n").expect("write side");
+    git(&fixture.repo, &["add", "README.md"]);
+    git(&fixture.repo, &["commit", "-m", "side"]);
+    git(&fixture.repo, &["checkout", "-q", "main"]);
+    fs::write(fixture.repo.join("README.md"), "main\n").expect("write main");
+    git(&fixture.repo, &["add", "README.md"]);
+    git(&fixture.repo, &["commit", "-m", "main"]);
+    let merged = Command::new("git")
+        .args(["merge", "--no-ff", "coherence-side"])
+        .current_dir(&fixture.repo)
+        .output()
+        .expect("run fixture merge");
+    assert!(!merged.status.success(), "fixture merge must conflict");
+    let error = revalidate(fixture.root.join("full-coherence-unmerged"), &commit)
+        .expect_err("unmerged paths must fail the gate set");
+    assert!(error.contains("unmerged paths"), "{error}");
+    assert!(error.contains("README.md"), "{error}");
+
+    // Resolve and re-run the whole gate set: the revalidation is commit-bound,
+    // so the new resolved tree is verified on its own commit.
+    fs::write(fixture.repo.join("README.md"), "both\n").expect("resolve conflict");
+    git(&fixture.repo, &["add", "README.md"]);
+    git(&fixture.repo, &["commit", "-m", "resolve coherence"]);
+    let resolved = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+    let observed = revalidate(fixture.root.join("full-coherence-resolved"), &resolved)
+        .expect("resolved tree must pass the re-run gate set");
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].commit_oid, resolved);
 }

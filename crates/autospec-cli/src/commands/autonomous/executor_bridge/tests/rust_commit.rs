@@ -529,3 +529,71 @@ fn rust_commit_rejects_model_selected_clean_filter_without_executing_it() {
     assert!(error.contains("filter"), "{error}");
     assert!(!marker.exists(), "clean filter escaped its sandbox");
 }
+
+#[test]
+fn rust_commit_refuses_tree_with_unmerged_paths() {
+    let (fixture, state, _snapshot, _closeout) =
+        implementation_proof_fixture("rust-commit-unmerged-refused");
+    fs::write(
+        state.identity.worktree.join("implementation.txt"),
+        "implemented by sandboxed harness\n",
+    )
+    .expect("write sandboxed diff");
+
+    // Leave a genuine three-way conflict on the worktree's own branch, the
+    // state `git apply --3way` leaves behind (#3642).
+    git(
+        &state.identity.worktree,
+        &["checkout", "-qb", "unmerged-side"],
+    );
+    fs::write(state.identity.worktree.join("README.md"), "side\n").expect("write side");
+    git(&state.identity.worktree, &["add", "README.md"]);
+    git(&state.identity.worktree, &["commit", "-m", "side"]);
+    git(
+        &state.identity.worktree,
+        &["checkout", "-q", "feat/autonomous-issue-42"],
+    );
+    fs::write(state.identity.worktree.join("README.md"), "main\n").expect("write main");
+    git(&state.identity.worktree, &["add", "README.md"]);
+    git(&state.identity.worktree, &["commit", "-m", "main"]);
+    let merged = Command::new("git")
+        .args(["merge", "--no-ff", "unmerged-side"])
+        .current_dir(&state.identity.worktree)
+        .output()
+        .expect("run fixture merge");
+    assert!(!merged.status.success(), "fixture merge must conflict");
+    let conflicted_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+
+    let error = bridge::commit_sandboxed_executor_diff(&state, "test: blocked unmerged", "")
+        .expect_err("unmerged paths must refuse the commit");
+    assert!(error.contains("unmerged paths"), "{error}");
+    assert!(error.contains("README.md"), "{error}");
+    assert_eq!(
+        git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+        conflicted_head,
+        "refused commit must not advance HEAD"
+    );
+    assert_eq!(
+        git_stdout(&state.identity.worktree, &["log", "-1", "--format=%s"]),
+        "main",
+        "refused commit must not create a commit"
+    );
+
+    // Resolve the conflict and the same commit path proceeds.
+    fs::write(state.identity.worktree.join("README.md"), "both\n").expect("resolve conflict");
+    git(&state.identity.worktree, &["add", "README.md"]);
+    git(&state.identity.worktree, &["commit", "-m", "resolve"]);
+    assert!(
+        bridge::commit_sandboxed_executor_diff(&state, "test: after resolve", "")
+            .expect("resolved tree must commit")
+    );
+    assert_ne!(
+        git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+        conflicted_head
+    );
+    assert_eq!(
+        git_stdout(&state.identity.worktree, &["log", "-1", "--format=%s"]),
+        "test: after resolve"
+    );
+    let _ = &fixture;
+}
