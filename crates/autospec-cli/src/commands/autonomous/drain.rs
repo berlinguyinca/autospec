@@ -213,6 +213,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
     }
 
     'attempt: loop {
+        let node = NodeLoad::snapshot();
         let mut child = spawn_child(&options)?;
         let output_progress = Arc::new(AtomicBool::new(false));
         let readers =
@@ -288,7 +289,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     last_activity = Instant::now();
                     last_progress = progress;
                     if is_external(progress) && !warning_emitted {
-                        warn_external_progress(&layout, &options, progress)?;
+                        warn_external_progress(&layout, &options, progress, &node)?;
                         warning_emitted = true;
                     }
                     continue;
@@ -308,7 +309,12 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                         last_activity = Instant::now();
                         last_progress = DrainProgress::Github;
                         if !warning_emitted {
-                            warn_external_progress(&layout, &options, DrainProgress::Github)?;
+                            warn_external_progress(
+                                &layout,
+                                &options,
+                                DrainProgress::Github,
+                                &node,
+                            )?;
                             warning_emitted = true;
                         }
                         continue;
@@ -347,6 +353,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     &mut attempt.readers,
                     &mut session_tracker,
                     startup_timeout,
+                    &node,
                 );
                 if successful || session_tracker.matched_reconciliation {
                     startup_retry.reset(&layout)?;
@@ -378,6 +385,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     DrainDecision::TerminateStalled,
                     last_progress,
                     false,
+                    &node,
                 )?;
                 emit_termination(&layout, &options, elapsed_secs);
                 join_readers(&mut attempt.readers);
@@ -700,6 +708,7 @@ fn complete(
     readers: &mut OutputReaders,
     session_tracker: &mut SessionStartupTracker,
     startup_timeout: Duration,
+    node: &NodeLoad,
 ) -> Result<(), CommandFailure> {
     join_readers(readers);
     record_session_events(
@@ -711,7 +720,7 @@ fn complete(
     )?;
     let exit_code = status.code().unwrap_or(1);
     let decision = DrainDecision::Complete { exit_code };
-    persist_observation(layout, decision, last_progress, false)?;
+    persist_observation(layout, decision, last_progress, false, node)?;
     if options.json {
         println!(
             "{{\"command\":\"autonomous\",\"subcommand\":\"drain\",\"decision\":\"complete\",\"exit_code\":{exit_code},\"last_progress\":\"{}\"}}",
@@ -734,6 +743,7 @@ fn warn_external_progress(
     layout: &RunLayout,
     options: &Options,
     progress: DrainProgress,
+    node: &NodeLoad,
 ) -> Result<(), CommandFailure> {
     let decision = decide(&DrainObservation::live(
         options.drain_stall_secs,
@@ -741,7 +751,7 @@ fn warn_external_progress(
         progress,
     ));
     debug_assert_eq!(decision, DrainDecision::WarnExternalProgress);
-    persist_observation(layout, decision, progress, true)?;
+    persist_observation(layout, decision, progress, true, node)?;
     if options.json {
         println!(
             "{{\"command\":\"autonomous\",\"subcommand\":\"drain\",\"warning\":\"quiet_stdout_external_progress\",\"progress\":\"{}\"}}",
@@ -770,6 +780,124 @@ fn emit_termination(layout: &RunLayout, options: &Options, elapsed_secs: u64) {
     }
 }
 
+/// Load and concurrency signals describing how trustworthy a verification run on this node is
+/// right now. Persisted alongside the drain observation so a stalled-agent kill can be told apart
+/// from a verification that merely ran on an already-busy node (orphaned compilers aside).
+#[derive(Debug, Clone, Copy)]
+struct NodeLoad {
+    load_avg_1min: Option<f64>,
+    compiler_procs: Option<u32>,
+}
+
+impl NodeLoad {
+    fn snapshot() -> Self {
+        Self {
+            load_avg_1min: load_average_1min(),
+            compiler_procs: compiler_process_count(),
+        }
+    }
+
+    /// A node is considered loaded when its one-minute load average meets or exceeds the number of
+    /// available cores, i.e. queued work is competing with a verification run.
+    fn loaded(self) -> bool {
+        self.load_avg_1min.is_some_and(|load| {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1) as f64;
+            load >= cores
+        })
+    }
+
+    fn json_fragment(self) -> String {
+        format!(
+            "\"node\":{{\"load_avg_1min\":{},\"compiler_procs\":{},\"loaded\":{}}}",
+            self.load_avg_1min
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "null".to_string()),
+            self.compiler_procs
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            self.loaded(),
+        )
+    }
+}
+
+fn load_average_1min() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string("/proc/loadavg").ok()?;
+        text.split_whitespace().next()?.parse().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn compiler_process_count() -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "comm="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut count = 0u32;
+    for line in stdout.lines() {
+        let comm = line.trim();
+        if comm == "cargo" || comm == "rustc" || comm == "go" {
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
+fn process_group_members(group_pgid: i32) -> Vec<u32> {
+    let output = match Command::new("ps").args(["-A", "-o", "pid=,pgid="]).output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut members = Vec::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            continue;
+        }
+        let pid: Option<i32> = fields[0].parse().ok();
+        let pgid: Option<i32> = fields[1].parse().ok();
+        if let (Some(pid), Some(pgid)) = (pid, pgid) {
+            if pgid == group_pgid && pid >= 0 {
+                members.push(pid as u32);
+            }
+        }
+    }
+    members
+}
+
+/// Distinguish "stopped a whole tree" from "signalled a single process" in the drain log so a
+/// verification run can be told apart from a stall that left children behind. `members` is the
+/// process-group snapshot taken just before the TERM, i.e. the tree we set out to stop.
+fn report_tree_stopped(pgid: i32, members: &[u32]) {
+    if members.len() <= 1 {
+        let pid = members
+            .first()
+            .map(u32::to_string)
+            .unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "autospec autonomous drain: process group {pgid} stopped; signalled single process {pid}"
+        );
+    } else {
+        let pids: Vec<String> = members.iter().map(|p| p.to_string()).collect();
+        eprintln!(
+            "autospec autonomous drain: process group {pgid} stopped; {}-process tree terminated: {}",
+            members.len(),
+            pids.join(", ")
+        );
+    }
+}
+
 fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure> {
     let pid = child.id();
     let process_group = format!("-{pid}");
@@ -779,6 +907,10 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
             .or(child.try_wait().map_err(child_status_error)?)
             .map_or(ChildTermination::Terminated, ChildTermination::Exited));
     }
+    // Snapshot the tree we are about to stop so the log can distinguish a whole process group
+    // (agent + cargo/rustc/go children) from a lone process.
+    let pgid = -(pid as i32);
+    let group_members = process_group_members(pgid);
     let status = Command::new("kill")
         .args(["-TERM", "--", &process_group])
         .status()
@@ -800,6 +932,7 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
         ));
     }
     if wait_for_process_group_exit(child, &process_group)? {
+        report_tree_stopped(pgid, &group_members);
         return Ok(leader_status.map_or(ChildTermination::Terminated, ChildTermination::Exited));
     }
     let status = Command::new("kill")
@@ -821,10 +954,18 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
         ));
     }
     if !wait_for_process_group_exit(child, &process_group)? {
-        return Err(CommandFailure::diagnostic(
-            "drain child process group did not exit".to_string(),
-        ));
+        let survivors = process_group_members(pgid);
+        return Err(CommandFailure::diagnostic(format!(
+            "drain child process group did not exit: {} process(es) survived: {}",
+            survivors.len(),
+            survivors
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )));
     }
+    report_tree_stopped(pgid, &group_members);
     Ok(leader_status.map_or(ChildTermination::Terminated, ChildTermination::Exited))
 }
 
@@ -1069,6 +1210,7 @@ fn persist_observation(
     decision: DrainDecision,
     progress: DrainProgress,
     warning: bool,
+    node: &NodeLoad,
 ) -> Result<(), CommandFailure> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1077,12 +1219,13 @@ fn persist_observation(
         })?
         .as_secs();
     let body = format!(
-        "{{\"schema\":1,\"repo\":\"{}\",\"timestamp\":{timestamp},\"child_state\":\"{}\",\"child_exit_code\":{},\"decision\":\"{}\",\"progress\":\"{}\",\"warning\":{warning}}}\n",
+        "{{\"schema\":1,\"repo\":\"{}\",\"timestamp\":{timestamp},\"child_state\":\"{}\",\"child_exit_code\":{},\"decision\":\"{}\",\"progress\":\"{}\",\"warning\":{warning},{}}}\n",
         json_escape(&layout.repo),
         child_state_name(decision),
         child_exit_code_json(decision),
         decision_name(decision),
         progress_name(progress),
+        node.json_fragment(),
     );
     let path = layout.state_dir.join("drain-observation.json");
     super::atomic_write(&path, &body).map_err(CommandFailure::diagnostic)
@@ -1176,5 +1319,63 @@ mod tests {
         tracker.record_start("child-1850", started_at, true);
 
         assert!(tracker.pending.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_group_members_lists_spawned_children() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+
+        let mut members = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            members = super::process_group_members(pid);
+            if members.contains(&child.id()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            members.contains(&child.id()),
+            "group leader must be listed in its own group, got {members:?}"
+        );
+
+        let status = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status()
+            .expect("kill group");
+        assert!(status.success());
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn node_load_json_fragment_shape() {
+        use super::NodeLoad;
+        let loaded = NodeLoad {
+            load_avg_1min: Some(10_000.0),
+            compiler_procs: Some(3),
+        };
+        assert_eq!(
+            loaded.json_fragment(),
+            "\"node\":{\"load_avg_1min\":10000.00,\"compiler_procs\":3,\"loaded\":true}"
+        );
+        let quiet = NodeLoad {
+            load_avg_1min: None,
+            compiler_procs: None,
+        };
+        assert_eq!(
+            quiet.json_fragment(),
+            "\"node\":{\"load_avg_1min\":null,\"compiler_procs\":null,\"loaded\":false}"
+        );
     }
 }
