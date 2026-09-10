@@ -42,6 +42,14 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
             fi
             printf '%s\n' "$ROLLUP"
             exit 0 ;;
+        *"--json headRefOid"*)
+            # Same no-default trap as ROLLUP above: a `}` inside the default
+            # value would close the parameter expansion early.
+            if [ -z "${HEAD_OID+x}" ]; then
+                HEAD_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            fi
+            printf '%s\n' "$HEAD_OID"
+            exit 0 ;;
     esac
 fi
 if [ "$1" = "pr" ] && [ "$2" = "comment" ]; then
@@ -250,4 +258,99 @@ teardown() { rm -rf "$TMP"; }
     [ "$status" -eq 1 ]
     grep -q "blocked checks_not_green" <<<"$output"
     ! grep -q "pr merge 19" "$GH_LOG"
+}
+
+# ── Full-suite evidence gate (issue #3523) ──────────────────────────────────
+# "The full suite passed, on the commit being merged" was prose-only. The
+# writer records head_sha/command/status/recorded_at; the gate refuses a merge
+# whose recorded evidence names a different commit, or a failing run. Silence
+# (absent file) warns and merges; staleness always refuses.
+
+RECORD="$REPO_ROOT/scripts/record-verify-evidence.sh"
+
+write_evidence() {
+    # $1 = path, $2 = head_sha, $3 = status
+    jq -n --arg head_sha "$2" --argjson status "$3" \
+        '{head_sha: $head_sha, command: "cargo test --workspace", status: $status, recorded_at: "2026-01-01T00:00:00Z"}' > "$1"
+}
+
+@test "evidence: a matching head_sha with status 0 merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    export HEAD_OID="abc123abc123abc123abc123abc123abc123abc1"
+    write_evidence "$TMP/ev.json" "$HEAD_OID" 0
+    run bash "$WRAPPER" --pr 30 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --verify-evidence "$TMP/ev.json"
+    [ "$status" -eq 0 ]
+    grep -q "pr merge 30" "$GH_LOG"
+}
+
+@test "evidence: stale head_sha refuses, NOT merged" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    export HEAD_OID="abc123abc123abc123abc123abc123abc123abc1"
+    write_evidence "$TMP/ev.json" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 0
+    run bash "$WRAPPER" --pr 31 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --verify-evidence "$TMP/ev.json"
+    [ "$status" -eq 1 ]
+    grep -q "blocked verify_evidence_stale" <<<"$output"
+    ! grep -q "pr merge 31" "$GH_LOG"
+}
+
+@test "evidence: non-zero recorded status refuses, NOT merged" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    export HEAD_OID="abc123abc123abc123abc123abc123abc123abc1"
+    write_evidence "$TMP/ev.json" "$HEAD_OID" 1
+    run bash "$WRAPPER" --pr 32 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --verify-evidence "$TMP/ev.json"
+    [ "$status" -eq 1 ]
+    grep -q "blocked verify_evidence_failing" <<<"$output"
+    ! grep -q "pr merge 32" "$GH_LOG"
+}
+
+@test "evidence: unparseable JSON exits 2 and never merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    printf 'this is { not json' > "$TMP/ev.json"
+    run bash "$WRAPPER" --pr 33 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --verify-evidence "$TMP/ev.json"
+    [ "$status" -eq 2 ]
+    ! grep -q "pr merge 33" "$GH_LOG"
+}
+
+@test "evidence: absent file warns verify-evidence-absent on stderr and merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    run --separate-stderr bash "$WRAPPER" --pr 34 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --verify-evidence "$TMP/absent.json"
+    [ "$status" -eq 0 ]
+    grep -q "pr merge 34" "$GH_LOG"
+    grep -q "verify-evidence-absent" <<<"$stderr"
+}
+
+@test "record-verify-evidence: writes the 4-key JSON at the current HEAD" {
+    EVREPO="$TMP/evrepo"
+    mkdir -p "$EVREPO"
+    git -C "$EVREPO" init -q
+    git -C "$EVREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    ( cd "$EVREPO" && bash "$RECORD" --pr 42 --command "cargo test --workspace" --status 0 )
+    OUT="$EVREPO/.autospec/verify-evidence/42.json"
+    [ -f "$OUT" ]
+    [ "$(jq -r '.head_sha' "$OUT")" = "$(git -C "$EVREPO" rev-parse HEAD)" ]
+    [ "$(jq -r '.command' "$OUT")" = "cargo test --workspace" ]
+    [ "$(jq -r '.status' "$OUT")" = "0" ]
+    [ -n "$(jq -r '.recorded_at' "$OUT")" ]
+}
+
+@test "record-verify-evidence: records a failing status as a JSON number" {
+    EVREPO="$TMP/evrepo"
+    mkdir -p "$EVREPO"
+    git -C "$EVREPO" init -q
+    git -C "$EVREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    ( cd "$EVREPO" && bash "$RECORD" --pr 43 --command "cargo test --workspace" --status 1 )
+    OUT="$EVREPO/.autospec/verify-evidence/43.json"
+    [ -f "$OUT" ]
+    [ "$(jq -r '.status' "$OUT")" = "1" ]
+}
+
+@test "record-verify-evidence: missing or non-integer arguments -> exit 2" {
+    # Argument validation fires before any git call or write, so these are
+    # safe to run from the test's own cwd.
+    run bash "$RECORD"
+    [ "$status" -eq 2 ]
+    run bash "$RECORD" --pr notanumber --command c --status 0
+    [ "$status" -eq 2 ]
+    run bash "$RECORD" --pr 44 --command c --status noexit
+    [ "$status" -eq 2 ]
 }
