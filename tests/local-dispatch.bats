@@ -222,3 +222,135 @@ EOF
         --capability-file "$CAP" --timeout-secs 1
     [ "$status" -eq 4 ]
 }
+
+# ── lock: the guard must not leak its lock (issue #3629) ──────────────────────
+#
+# A flock lives on the open file description, not on the process: every child
+# inherits fd 9 across fork, so a long-lived descendant of the executor could
+# hold the lock for hours after the dispatch exited. Each test below exercises
+# the guard rather than reading it, because all three historical failure modes
+# were found that way.
+
+needs_flock() {
+    [ -n "$(command -v flock 2>/dev/null)" ] || skip 'flock unavailable'
+}
+
+hanging_codex() {
+    cat > "$STUBS/codex" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--help" ]; then printf '      --oss\n      --local-provider <P>\n'; exit 0; fi
+sleep $1
+EOF
+    chmod +x "$STUBS/codex"
+}
+
+@test "the dispatched process does not inherit the lock descriptor" {
+    cap_with "qwen3:32b" true
+    cat > "$STUBS/codex" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--help" ]; then printf '      --oss\n      --local-provider <P>\n'; exit 0; fi
+if [ -e /proc/self/fd/9 ]; then printf 'inherited\n'; else printf 'closed\n'; fi > "$TMP/fd9-state"
+EOF
+    chmod +x "$STUBS/codex"
+    run bash "$SCRIPT" --model qwen3:32b --prompt-file "$PROMPT" \
+        --capability-file "$CAP"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$TMP/fd9-state")" = "closed" ]
+}
+
+@test "a lock timeout refusal names the holder pid and since-when" {
+    needs_flock
+    cap_with "qwen3:32b" true
+    hanging_codex 6
+    env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 9 \
+        >/dev/null 2>&1 &
+    local first=$!
+    local i
+    for i in {1..100}; do
+        [ -s "$TMP/locks/local-model.lock" ] && break
+        sleep 0.1
+    done
+    [ -s "$TMP/locks/local-model.lock" ]
+
+    run env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 1
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"local-model lock"* ]]
+    [[ "$output" == *"pid $first"* ]]
+    [[ "$output" == *"running local-dispatch"* ]]
+    [[ "$output" == *"since "* ]]
+    wait "$first"
+}
+
+@test "a failed lock wait is side-effect free: the live record survives and the holder still completes" {
+    needs_flock
+    cap_with "qwen3:32b" true
+    hanging_codex 6
+    env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 9 \
+        >/dev/null 2>&1 &
+    local first=$!
+    local i
+    for i in {1..100}; do
+        [ -s "$TMP/locks/local-model.lock" ] && break
+        sleep 0.1
+    done
+    [ -s "$TMP/locks/local-model.lock" ]
+
+    run env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 1
+    [ "$status" -eq 3 ]
+
+    # Asking did not change the answer: the record still names the live holder.
+    grep -q "pid=$first" "$TMP/locks/local-model.lock"
+    wait "$first"
+    [ "$?" -eq 0 ]
+    # And the holder cleared its own record on release.
+    [ ! -s "$TMP/locks/local-model.lock" ]
+}
+
+@test "a refusal on a leaked lock reports the holder gone, not a live competitor" {
+    needs_flock
+    cap_with "qwen3:32b" true
+    mkdir -p "$TMP/locks"
+    local lock="$TMP/locks/local-model.lock"
+    # A descendant that inherited the descriptor: holds the lock, wrote no record.
+    flock "$lock" -c 'sleep 4' &
+    local holder=$!
+    sleep 0.3
+    # The recorded holder is dead — the shape left behind by a killed dispatch.
+    sleep 0.05 &
+    local dead=$!
+    wait "$dead"
+    printf 'pid=%s since=%s prog=local-dispatch\n' "$dead" 1700000000 > "$lock"
+
+    run env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 1
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"pid $dead"* ]]
+    [[ "$output" == *"leaked"* ]]
+    wait "$holder"
+}
+
+@test "a refusal cross-checks holder identity, so a recycled pid cannot masquerade" {
+    needs_flock
+    cap_with "qwen3:32b" true
+    mkdir -p "$TMP/locks"
+    local lock="$TMP/locks/local-model.lock"
+    flock "$lock" -c 'sleep 4' &
+    local holder=$!
+    sleep 0.3
+    # A live process that is NOT local-dispatch, recorded as the holder.
+    sleep 30 &
+    local impostor=$!
+    printf 'pid=%s since=%s prog=local-dispatch\n' "$impostor" 1700000000 > "$lock"
+
+    run env AUTOSPEC_LOCAL_LOCK_DIR="$TMP/locks" bash "$SCRIPT" --model qwen3:32b \
+        --prompt-file "$PROMPT" --capability-file "$CAP" --timeout-secs 1
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"pid $impostor"* ]]
+    [[ "$output" == *"not running local-dispatch"* ]]
+    kill "$impostor"
+    wait "$holder"
+}
