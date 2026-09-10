@@ -17,6 +17,7 @@ pub mod report;
 pub mod result;
 pub mod sort_key;
 pub mod stage_throughput;
+pub mod status_triage;
 pub mod test_diff;
 pub mod verification;
 pub mod work;
