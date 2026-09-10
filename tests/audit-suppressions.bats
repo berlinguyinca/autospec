@@ -3,8 +3,10 @@
 #
 # Covers the AC5 checks: a suppressed advisory passes the gate, an
 # unsuppressed one fails it, and suppression entries missing their reason or
-# removal trigger are rejected. The cargo-audit invocation is stubbed with a
-# fake binary on PATH, so the suite needs no network access.
+# removal trigger are rejected. The cargo-audit invocation is stubbed with
+# strict fake `cargo` / `cargo-audit` binaries on PATH (both reject the calls
+# the real tools refuse, and record argv for assertions), so the suite needs
+# no network access.
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
@@ -12,6 +14,7 @@ setup() {
   TMP="$(mktemp -d)"
   SUP="$TMP/suppressions"
   FAKE_BIN="$TMP/bin"
+  AUDIT_ARGS="$TMP/audit-args.log"
   mkdir -p "$SUP" "$FAKE_BIN"
 }
 
@@ -41,27 +44,49 @@ full_entry() { # full_entry DIR ID SINCE
     "dependency_path" "vuln 0.1.0 <- lib 0.2.0 <- autospec-core"
 }
 
-# make_fake_audit OUT RC — a PATH stub for cargo-audit printing OUT, exiting RC.
-make_fake_audit() {
-  local out="$1" rc="$2"
+# make_audit_stub NAME OUT RC — a PATH stub named NAME printing OUT, exiting
+# RC. Every invocation is recorded to AUDIT_ARGS (binary name + args) so a
+# test can assert on exactly how the gate invoked the tool: recording argv
+# is the cheapest form of stub, and the default for every command stub.
+# A double must be at least as strict as the thing it replaces -- each stub
+# rejects the invocations the real binary refuses (#4164, #4165), so the suite
+# verifies the invocation the real tool would actually see.
+make_audit_stub() {
+  local name="$1" out="$2" rc="$3"
   {
     printf '%s\n' '#!/usr/bin/env bash'
-    # Behave like the real binary: a cargo subcommand invoked directly requires
-    # its own name as argv[1]. The previous stub ignored its arguments, so it
-    # accepted a bare `cargo-audit` that the real tool rejects with exit 2 and a
-    # usage message -- the tests passed while CI failed on every run. A double
-    # more permissive than the tool it stands in for cannot catch a misuse.
-    printf '%s\n' 'if [ "${1:-}" != "audit" ]; then'
-    printf '%s\n' '  echo "Audit Cargo.lock for crates with security vulnerabilities" >&2'
-    printf '%s\n' '  echo "Usage: cargo [OPTIONS] <COMMAND>" >&2'
-    printf '%s\n' '  exit 2'
-    printf '%s\n' 'fi'
+    printf '%s\n' "printf '%s %s\\n' '$name' \"\$@\" >> '$AUDIT_ARGS'"
+    if [ "$name" = "cargo-audit" ]; then
+      # The real cargo-audit invoked directly requires `audit` as argv[1]; a
+      # bare `cargo-audit` prints usage and exits 2. The old stub ignored its
+      # arguments, accepted the bare call the real tool rejects, and the suite
+      # was green while CI failed on every run.
+      printf '%s\n' 'if [ "${1:-}" != "audit" ]; then'
+      printf '%s\n' '  echo "Audit Cargo.lock for crates with security vulnerabilities" >&2'
+      printf '%s\n' '  echo "Usage: cargo [OPTIONS] <COMMAND>" >&2'
+      printf '%s\n' '  exit 2'
+      printf '%s\n' 'fi'
+    else
+      # The real cargo rejects an unknown subcommand.
+      printf '%s\n' 'if [ "${1:-}" != "audit" ]; then'
+      printf '%s\n' '  echo "error: no such command: ${1:-}" >&2'
+      printf '%s\n' '  exit 101'
+      printf '%s\n' 'fi'
+    fi
     printf '%s\n' 'cat <<FAKE_EOF'
     printf '%s\n' "$out"
     printf '%s\n' 'FAKE_EOF'
     printf 'exit %s\n' "$rc"
-  } > "$FAKE_BIN/cargo-audit"
-  chmod +x "$FAKE_BIN/cargo-audit"
+  } > "$FAKE_BIN/$name"
+  chmod +x "$FAKE_BIN/$name"
+}
+
+# make_audit_stubs OUT RC — install both stubs (cargo and cargo-audit) with the
+# same behavior, so `command -v cargo` selects the stub instead of a system
+# cargo and the gate's primary branch is exercised deterministically.
+make_audit_stubs() {
+  make_audit_stub cargo-audit "$1" "$2"
+  make_audit_stub cargo "$1" "$2"
 }
 
 run_gate() {
@@ -78,7 +103,7 @@ run_gate() {
 
 @test "gate passes when every failing advisory is suppressed" {
   full_entry "$SUP" RUSTSEC-2023-0071 2026-09-10
-  make_fake_audit "    Summary:      1 vulnerability found in 1 dependency crate!
+  make_audit_stubs "    Summary:      1 vulnerability found in 1 dependency crate!
         Crate: rsa
          Advisory: RUSTSEC-2023-0071
          Title: Marvin Attack
@@ -87,11 +112,14 @@ error: 1 vulnerability found in 1 dependency crate!" 1
   [ "$status" -eq 0 ]
   [[ "$output" == *AUDIT_SUPPRESSED:RUSTSEC-2023-0071* ]]
   [[ "$output" == *"removal_trigger"* ]]
+  # Assert the exact invocation the stub recorded: with cargo on PATH the
+  # gate must call `cargo audit`, and nothing else.
+  [ "$(cat "$AUDIT_ARGS")" = "cargo audit" ]
 }
 
 @test "gate fails when a failing advisory is not suppressed" {
   full_entry "$SUP" RUSTSEC-2023-0071 2026-09-10
-  make_fake_audit "        Crate: ring
+  make_audit_stubs "        Crate: ring
          Advisory: RUSTSEC-2020-0013
 error: 1 vulnerability found in 1 dependency crate!" 1
   run_gate
@@ -101,17 +129,36 @@ error: 1 vulnerability found in 1 dependency crate!" 1
 
 @test "gate passes when cargo-audit finds no vulnerabilities" {
   full_entry "$SUP" RUSTSEC-2023-0071 2026-09-10
-  make_fake_audit "    Summary: No vulnerabilities found." 0
+  make_audit_stubs "    Summary: No vulnerabilities found." 0
   run_gate
   [ "$status" -eq 0 ]
   [[ "$output" == *"no vulnerabilities found"* ]]
 }
 
 @test "gate fails closed when cargo-audit errors without naming an advisory" {
-  make_fake_audit "error: could not load the advisory database" 1
+  make_audit_stubs "error: could not load the advisory database" 1
   run_gate
   [ "$status" -eq 1 ]
   [[ "$output" == *"failing closed"* ]]
+}
+
+@test "gate falls back to cargo-audit audit when cargo is not installed" {
+  # Only the cargo-audit stub exists, and every PATH entry that provides a
+  # `cargo` executable is excluded: this deterministically selects the
+  # standalone-binary branch (the environment-selected branch #4164 broke and
+  # the suite previously never exercised). The stub rejects any call missing
+  # `audit` as argv[1], exactly like the real binary.
+  make_audit_stub cargo-audit "    Summary: No vulnerabilities found." 0
+  p=""
+  d=""
+  IFS=':' read -ra dirs <<<"$PATH"
+  for d in "${dirs[@]}"; do
+    [ -n "$d" ] && [ ! -x "$d/cargo" ] && p+="${p:+:}$d"
+  done
+  run env PATH="$FAKE_BIN:$p" bash "$LINT" gate --dir "$SUP" --today 2026-09-10
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no vulnerabilities found"* ]]
+  [ "$(cat "$AUDIT_ARGS")" = "cargo-audit audit" ]
 }
 
 @test "gate rejects a suppression missing its reason" {
@@ -120,7 +167,7 @@ error: 1 vulnerability found in 1 dependency crate!" 1
     "since" "2026-09-10" \
     "removal_trigger" "upstream fix lands" \
     "dependency_path" "rsa 0.9.10 <- sqlx-mysql 0.8.6"
-  make_fake_audit "         Advisory: RUSTSEC-2023-0071
+  make_audit_stubs "         Advisory: RUSTSEC-2023-0071
 error: 1 vulnerability found in 1 dependency crate!" 1
   run_gate
   [ "$status" -eq 2 ]
@@ -133,7 +180,7 @@ error: 1 vulnerability found in 1 dependency crate!" 1
     "since" "2026-09-10" \
     "reason" "vulnerable code path is unreachable" \
     "dependency_path" "rsa 0.9.10 <- sqlx-mysql 0.8.6"
-  make_fake_audit "         Advisory: RUSTSEC-2023-0071
+  make_audit_stubs "         Advisory: RUSTSEC-2023-0071
 error: 1 vulnerability found in 1 dependency crate!" 1
   run_gate
   [ "$status" -eq 2 ]
