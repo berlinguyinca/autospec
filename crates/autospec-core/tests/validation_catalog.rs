@@ -41,8 +41,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     // +2: the loud-failure verification gates (#3535); +1: pipeline-verdict
     // ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: the
     // generated-artifact consumer-drift ratchet (#3893).
-    assert_eq!(calls.len(), 163);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 158); // a call no gate repeats
+    assert_eq!(calls.len(), 164); // +1: shell-lint gate (#3856)
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 159); // a call no gate repeats
     assert_eq!(
         catalog
             .checks()
@@ -71,14 +71,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 174); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716; +1: #3893; +1: #3210
+    assert_eq!(frozen_catalog_ids().len(), 175); // +1: #3483; +2: #3485; +1: #3497; +2: #3535; +1: #3716; +1: #3893; +1: #3210; +1: #3856
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 174);
+    assert_eq!(ids.len(), 175);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 

@@ -14,7 +14,7 @@
 # It asserts CONSISTENCY, not any particular value -- bumping the catalog is
 # expected and fine; bumping it in some copies and not others is the defect.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 python3 - <<'PYCHK'
 import re, sys, collections
