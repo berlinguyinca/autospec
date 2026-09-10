@@ -115,6 +115,70 @@ impl CheckReport {
     }
 }
 
+/// Terminal run statuses that indicate the agent run failed irrecoverably.
+///
+/// A patch produced by a run with one of these statuses is permanently
+/// unconvertible: the conversion pass (`status_triage`) refuses it, and the
+/// dispatch guard would hold forever if the artifact were left in place
+/// (#3784). The guard archives the artifact to free the dispatch slot.
+///
+/// The set is **closed**: a status not listed here is assumed convertible
+/// (tolerant to growth). Only the statuses enumerated here — where the run
+/// failed in a way no amount of re-dispatch can fix without a fresh run —
+/// are archived.
+pub const FAILED_RUN_STATUSES: &[&str] = &[
+    "BUILD-FAIL",
+    "BUILD-FAILED",
+    "TIMEOUT",
+    "TIMEOUT-NO-OUTPUT",
+    "TEST-TIMEOUT",
+];
+
+/// The classified outcome of an unconverted artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactOutcome {
+    /// The run that produced the patch failed irrecoverably; the patch can
+    /// never be converted. The guard should archive it to free the dispatch
+    /// slot.
+    FailedRun { status: String },
+    /// The patch is convertible (or at least not known to be unconvertible);
+    /// the guard must hold so the conversion pass can process it. The
+    /// `status` names the recorded terminal status for operator visibility.
+    Convertible { status: String },
+    /// No terminal status was recorded next to the patch; the guard cannot
+    /// classify the outcome. Fail-closed: hold, never archive.
+    Unrecorded { detail: String },
+}
+
+/// Classify an unconverted artifact from its recorded terminal status.
+///
+/// `None` (no `status.txt`, or the file parsed with no status field) means
+/// the outcome is [`ArtifactOutcome::Unrecorded`]: the guard holds and
+/// never archives.
+///
+/// A status in [`FAILED_RUN_STATUSES`] means the run failed irrecoverably;
+/// the artifact is [`ArtifactOutcome::FailedRun`] and the guard archives it
+/// to free the dispatch slot.
+///
+/// Any other status is [`ArtifactOutcome::Convertible`]: the conversion pass
+/// can still act on the patch, so the guard holds with the status named.
+/// This is the tolerant-to-growth default: an unknown status is held, never
+/// destroyed.
+pub fn classify_artifact_outcome(status: Option<&str>) -> ArtifactOutcome {
+    match status {
+        None => ArtifactOutcome::Unrecorded {
+            detail: "no terminal status recorded next to the patch".to_string(),
+        },
+        Some(s) if FAILED_RUN_STATUSES.contains(&s) => ArtifactOutcome::FailedRun {
+            status: s.to_string(),
+        },
+        Some(s) => ArtifactOutcome::Convertible {
+            status: s.to_string(),
+        },
+    }
+}
+
 /// Why dispatch must not proceed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +187,23 @@ pub enum GuardReason {
     UnconvertedPatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+    },
+    /// An unconverted patch exists and its recorded terminal status makes it
+    /// convertible: the conversion pass must process it before dispatch can
+    /// proceed. The `status` names the recorded status for operator
+    /// visibility.
+    PatchAwaitingConversion {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+        status: String,
+    },
+    /// An unconverted patch exists but no terminal status was recorded next
+    /// to it; the guard cannot classify the outcome and holds (fail-closed).
+    /// The `detail` names what was missing.
+    PatchOutcomeUnrecorded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+        detail: String,
     },
     /// A runner process is already working the issue.
     RunningProcess,
@@ -224,6 +305,38 @@ fn reason_line(reason: &GuardReason) -> String {
         GuardReason::UnconvertedPatch { evidence: None } => {
             "an unconverted patch exists; dispatch would destroy it".to_string()
         }
+        GuardReason::PatchAwaitingConversion {
+            evidence: Some(evidence),
+            status,
+        } => {
+            format!(
+                "unconverted patch exists at {evidence} (status: {status}); awaiting conversion — dispatch would destroy it"
+            )
+        }
+        GuardReason::PatchAwaitingConversion {
+            evidence: None,
+            status,
+        } => {
+            format!(
+                "unconverted patch exists (status: {status}); awaiting conversion — dispatch would destroy it"
+            )
+        }
+        GuardReason::PatchOutcomeUnrecorded {
+            evidence: Some(evidence),
+            detail,
+        } => {
+            format!(
+                "unconverted patch exists at {evidence} but {detail}; cannot classify outcome — dispatch would destroy it"
+            )
+        }
+        GuardReason::PatchOutcomeUnrecorded {
+            evidence: None,
+            detail,
+        } => {
+            format!(
+                "unconverted patch exists but {detail}; cannot classify outcome — dispatch would destroy it"
+            )
+        }
         GuardReason::RunningProcess => "a runner process is already working the issue".to_string(),
         GuardReason::CheckMissing { check } => format!(
             "check {} was not run; a guard that cannot verify its precondition holds",
@@ -233,6 +346,39 @@ fn reason_line(reason: &GuardReason) -> String {
             "check {} failed ({detail}); a check that cannot answer is unsafe",
             check.as_str()
         ),
+    }
+}
+
+/// Build a [`GuardReport`] that holds because of a classified artifact
+/// outcome, carrying the evidence from the check.
+///
+/// Used by the CLI guard after it classifies a dangerous (patch-exists)
+/// check result: the hold reason names the specific outcome so an operator
+/// can see *why* dispatch is blocked (#3784 AC 3).
+pub fn classified_hold(issue: &str, check: CheckReport, outcome: ArtifactOutcome) -> GuardReport {
+    let reason = match outcome {
+        ArtifactOutcome::Convertible { status } => GuardReason::PatchAwaitingConversion {
+            evidence: check.evidence.clone(),
+            status,
+        },
+        ArtifactOutcome::Unrecorded { detail } => GuardReason::PatchOutcomeUnrecorded {
+            evidence: check.evidence.clone(),
+            detail,
+        },
+        // FailedRun is never a hold: the CLI archives the artifact instead.
+        // This arm exists so the match is exhaustive; it should not be
+        // reached in practice.
+        ArtifactOutcome::FailedRun { status } => GuardReason::UnconvertedPatch {
+            evidence: check
+                .evidence
+                .clone()
+                .or_else(|| Some(format!("status: {status}"))),
+        },
+    };
+    GuardReport {
+        issue: issue.to_string(),
+        decision: GuardDecision::Hold { reason },
+        checks: vec![check],
     }
 }
 

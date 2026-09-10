@@ -303,40 +303,180 @@ fn guard(args: &[String]) -> Result<(), CommandFailure> {
 
     let issue_dir = out_dir.join(format!("issue-{issue}"));
     let patch_path = issue_dir.join(&patch_name);
-    let report = dispatch_guard::decide(
-        &issue,
-        std::slice::from_ref(&check_unconverted_patch(&patch_path)),
-    );
+    let check = check_unconverted_patch(&patch_path);
 
-    if super::is_json(args) {
-        println!("{}", report.to_json());
-    } else if dry_run {
-        for line in report.lines() {
-            println!("{line}");
+    // Classify the artifact outcome when the check saw a dangerous state
+    // (the patch exists). A patch whose run failed irrecoverably is archived
+    // to free the dispatch slot (#3784); a patch that is convertible or
+    // unrecorded holds with a named reason.
+    let epoch = now_epoch()?;
+    let archive_performed: Option<PathBuf> = if check.outcome.dangerous() && !dry_run {
+        let outcome = classify_run_outcome(&issue_dir);
+        match outcome {
+            dispatch_guard::ArtifactOutcome::FailedRun { status } => {
+                println!("DISPATCH issue {issue} archiving failed run (status: {status})");
+                match archive_failed_run(&out_dir, &issue_dir, &issue, epoch) {
+                    Ok(archive_path) => {
+                        println!("  archived to {}", archive_path.display());
+                        Some(archive_path)
+                    }
+                    Err(error) => {
+                        return Err(CommandFailure::diagnostic(format!(
+                            "guard classified run as failed (status: {status}) but \
+                             archiving the artifact failed: {error}"
+                        )));
+                    }
+                }
+            }
+            other => {
+                // Convertible or Unrecorded: hold with a classified reason.
+                let report = dispatch_guard::classified_hold(&issue, check, other);
+                if super::is_json(args) {
+                    println!("{}", report.to_json());
+                } else {
+                    println!("{}", report.line());
+                }
+                return Err(CommandFailure::status(String::new(), HOLD_EXIT));
+            }
+        }
+    } else if check.outcome.dangerous() && dry_run {
+        let outcome = classify_run_outcome(&issue_dir);
+        match outcome {
+            dispatch_guard::ArtifactOutcome::FailedRun { status } => {
+                let candidate = candidate_archive_path(&out_dir, &issue, epoch);
+                println!(
+                    "DISPATCH issue {issue} would archive failed run (status: {status}) to {}",
+                    candidate.display()
+                );
+                // Dry-run + FailedRun: authorized, would archive.
+                None
+            }
+            other => {
+                let report = dispatch_guard::classified_hold(&issue, check, other);
+                for line in report.lines() {
+                    println!("{line}");
+                }
+                return Err(CommandFailure::status(String::new(), HOLD_EXIT));
+            }
         }
     } else {
-        println!("{}", report.line());
-        if !report.held() {
-            // The guard verified the directory holds no unconverted patch;
-            // whatever remains is stale debris, and removing it is what
-            // `rm -rf issue-<N>` was always for.
-            match fs::remove_dir_all(&issue_dir) {
-                Ok(()) => println!("removed stale output {}", issue_dir.display()),
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    println!("nothing to remove: {} is absent", issue_dir.display())
-                }
-                Err(error) => {
-                    return Err(CommandFailure::diagnostic(format!(
-                        "guard authorized dispatch but stale output could not be removed: {error}"
-                    )));
+        // Check is Clear or Failed (not Dangerous): normal decide path.
+        let report = dispatch_guard::decide(&issue, std::slice::from_ref(&check));
+        if super::is_json(args) {
+            println!("{}", report.to_json());
+        } else if dry_run {
+            for line in report.lines() {
+                println!("{line}");
+            }
+        } else {
+            println!("{}", report.line());
+            if !report.held() {
+                // The guard verified the directory holds no unconverted
+                // patch; whatever remains is stale debris, and removing it
+                // is what `rm -rf issue-<N>` was always for.
+                match fs::remove_dir_all(&issue_dir) {
+                    Ok(()) => println!("removed stale output {}", issue_dir.display()),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        println!("nothing to remove: {} is absent", issue_dir.display())
+                    }
+                    Err(error) => {
+                        return Err(CommandFailure::diagnostic(format!(
+                            "guard authorized dispatch but stale output could not be removed: {error}"
+                        )));
+                    }
                 }
             }
         }
-    }
-    if report.held() {
-        return Err(CommandFailure::status(String::new(), HOLD_EXIT));
+        if report.held() {
+            return Err(CommandFailure::status(String::new(), HOLD_EXIT));
+        }
+        return Ok(());
+    };
+
+    // We reached here with a patch that was classified as FailedRun and
+    // archived (or would-be in dry-run). The dispatch slot is now free.
+    // If we actually archived, the issue_dir is gone (it was moved);
+    // remove_dir_all will hit NotFound which is fine.
+    if archive_performed.is_some() {
+        match fs::remove_dir_all(&issue_dir) {
+            Ok(()) => println!("removed stale output {}", issue_dir.display()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // Expected: the archive moved the directory.
+            }
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "guard archived failed run but could not clean up {}: {error}",
+                    issue_dir.display()
+                )));
+            }
+        }
     }
     Ok(())
+}
+
+/// Read the `status.txt` next to the patch and classify the artifact
+/// outcome. Returns [`dispatch_guard::ArtifactOutcome`].
+fn classify_run_outcome(issue_dir: &Path) -> dispatch_guard::ArtifactOutcome {
+    let status_path = issue_dir.join("status.txt");
+    let content = match fs::read_to_string(&status_path) {
+        Ok(c) => c,
+        Err(_) => return dispatch_guard::classify_artifact_outcome(None),
+    };
+    let report = match autospec_core::execution::status_triage::parse_agent_report(&content) {
+        Ok(r) => r,
+        Err(error) => {
+            return dispatch_guard::ArtifactOutcome::Unrecorded {
+                detail: format!("status.txt is unparseable: {error}"),
+            }
+        }
+    };
+    dispatch_guard::classify_artifact_outcome(report.status.as_deref())
+}
+
+/// Move the entire `issue_dir` to an archive location under `out_dir` so the
+/// dispatch slot is freed. The archive path is
+/// `out_dir/archive/issue-<N>-<epoch>/` with a counter suffix for
+/// same-second collisions.
+fn archive_failed_run(
+    out_dir: &Path,
+    issue_dir: &Path,
+    issue: &str,
+    epoch: u64,
+) -> Result<PathBuf, String> {
+    let archive_root = out_dir.join("archive");
+    fs::create_dir_all(&archive_root)
+        .map_err(|e| format!("create archive dir {}: {e}", archive_root.display()))?;
+    let base = archive_root.join(format!("issue-{issue}-{epoch}"));
+    // If the candidate already exists (same-second collision), append a
+    // counter.
+    let final_path = if base.exists() {
+        let mut counter = 1u32;
+        loop {
+            let candidate = archive_root.join(format!("issue-{issue}-{epoch}-{counter}"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+        }
+    } else {
+        base
+    };
+    fs::rename(issue_dir, &final_path).map_err(|e| {
+        format!(
+            "rename {} -> {}: {e}",
+            issue_dir.display(),
+            final_path.display()
+        )
+    })?;
+    Ok(final_path)
+}
+
+/// The candidate archive path for a failed-run artifact: `out_dir/archive/
+/// issue-<N>-<epoch>/`.
+fn candidate_archive_path(out_dir: &Path, issue: &str, epoch: u64) -> PathBuf {
+    out_dir
+        .join("archive")
+        .join(format!("issue-{issue}-{epoch}"))
 }
 
 /// The unconverted-patch check, run against the local filesystem.
