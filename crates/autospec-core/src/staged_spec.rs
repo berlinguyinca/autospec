@@ -41,8 +41,10 @@
 //! caller fetches the issue, probes its own host, and calls
 //! [`IssueSnapshot::stage`] when staging and [`authorize`] when dispatching.
 
-use crate::grading::Gate;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::grading::Gate;
 
 /// Header recording the source issue number.
 pub const HEADER_ISSUE: &str = "# staged-spec issue:";
@@ -86,6 +88,12 @@ pub const NOT_PROBED: &str = "not probed";
 
 /// The value written for a capability that was checked and is not there.
 pub const ABSENT: &str = "absent";
+
+/// The status token for a dispatch refused because the worker was never
+/// handed a task (#3620): the staged spec is missing or empty. Distinct from
+/// a freshness hold — a run refused `NO-SPEC` spent no tokens on a task
+/// nobody defined, so it must not read as a baseline or staleness problem.
+pub const NO_SPEC_STATUS: &str = "NO-SPEC";
 
 /// One comment on the source issue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +332,11 @@ pub fn staged_at(text: &str) -> Option<u64> {
 pub enum RefuseReason {
     /// No staged spec on disk at the expected path.
     StagedSpecAbsent,
+    /// The staged file exists but is empty or whitespace-only. A worker
+    /// handed this file has no task at all: the #3620 run invented one from
+    /// the branch name and exited 0 after 17 minutes of work nobody asked
+    /// for. This is a refusal, never a "fill it in later" case.
+    NoSpec { bytes: usize },
     /// A staged spec predating the revision header cannot be aged at all.
     NoStagedRevision,
     /// The live issue could not be read — no credentials, no network, an
@@ -435,9 +448,12 @@ fn staged_at_line(staged_at: &Option<u64>) -> String {
 
 fn reason_line(reason: &RefuseReason) -> String {
     match reason {
-        RefuseReason::StagedSpecAbsent => {
-            "no staged spec on disk, and nothing was staged to compare against".to_string()
-        }
+        RefuseReason::StagedSpecAbsent => format!(
+            "{NO_SPEC_STATUS}: no staged spec on disk, and nothing was staged to compare against"
+        ),
+        RefuseReason::NoSpec { bytes } => format!(
+            "{NO_SPEC_STATUS}: the staged spec is empty ({bytes} bytes); a worker handed an empty spec invents its own task, so nothing is dispatched"
+        ),
         RefuseReason::NoStagedRevision => {
             "the staged spec records no source updatedAt, so it cannot be aged"
                 .to_string()
@@ -464,6 +480,16 @@ pub fn authorize(staged: Option<&str>, live: Option<u64>) -> DispatchVerdict {
             staged_at: None,
         };
     };
+    // The checked read's fail-closed half: a file that passes an existence
+    // check but carries no text is `NO-SPEC` (#3620), refused before the
+    // revision is even parsed — an empty spec is not an un-ageable one, it
+    // is no task at all.
+    if spec_is_empty(text) {
+        return DispatchVerdict::Refuse {
+            reason: RefuseReason::NoSpec { bytes: text.len() },
+            staged_at: None,
+        };
+    }
     let staged_at = staged_at(text);
     let Some(staged_revision) = staged_source_updated_at(text) else {
         return DispatchVerdict::Refuse {
@@ -491,6 +517,104 @@ pub fn authorize(staged: Option<&str>, live: Option<u64>) -> DispatchVerdict {
             staged_at,
         }
     }
+}
+
+/// True when the staged spec text carries no task: empty or whitespace only.
+/// A file that passes a bare existence check but fails this one is the
+/// `NO-SPEC` case (#3620) — the mechanism to catch it is a checked read
+/// (`[ -s "$f" ]` in shell, this predicate here), never a silently-swallowed
+/// failed read.
+pub fn spec_is_empty(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
+/// The receipt a run records in `status.txt` for the spec it actually saw
+/// (#3620): the byte count and the sha256, so "which spec did this run
+/// actually see" is answerable after the fact, not argued over from memory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecReceipt {
+    /// The spec's size in bytes.
+    pub bytes: usize,
+    /// The spec's sha256, lowercase hex.
+    pub sha256: String,
+}
+
+impl SpecReceipt {
+    /// The receipt of one spec's text.
+    pub fn of(text: &str) -> Self {
+        Self {
+            bytes: text.len(),
+            sha256: sha256_hex(text.as_bytes()),
+        }
+    }
+
+    /// Render as the `spec-bytes=… spec-sha256=…` tokens a run appends to
+    /// its `status.txt`.
+    pub fn line(&self) -> String {
+        format!("spec-bytes={} spec-sha256={}", self.bytes, self.sha256)
+    }
+}
+
+/// The verdict on a dispatch prompt before a single token is spent (#3620).
+/// A prompt whose issue section arrived empty is a programming error — the
+/// #3620 run's prompt was exactly `===== ISSUE #15 ===== / ===== END ISSUE
+/// =====` with nothing between — and it must be caught before dispatch, not
+/// discovered from the agent's first line of plausible work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptVerdict {
+    /// The prompt carries the staged spec's text.
+    CarriesSpec,
+    /// The prompt is empty: the caller assembled nothing to send.
+    EmptyPrompt,
+    /// The prompt is non-empty but the spec's text is not in it — the issue
+    /// section is blank and the agent would be working from nothing.
+    SpecMissingFromPrompt,
+}
+
+impl PromptVerdict {
+    /// True when the prompt may be handed to an agent.
+    pub fn ok(&self) -> bool {
+        matches!(self, Self::CarriesSpec)
+    }
+
+    /// The one-line verdict for dispatch logs. Both failures carry the
+    /// `NO-SPEC` token: the run that would have started is a no-spec run.
+    pub fn line(&self, issue: u64) -> String {
+        match self {
+            Self::CarriesSpec => format!(
+                "PROMPT issue {issue} OK: the prompt carries the staged spec text"
+            ),
+            Self::EmptyPrompt => format!(
+                "PROMPT issue {issue} REFUSED: {NO_SPEC_STATUS} — the dispatch prompt is empty; nothing was assembled to send"
+            ),
+            Self::SpecMissingFromPrompt => format!(
+                "PROMPT issue {issue} REFUSED: {NO_SPEC_STATUS} — the prompt carries no issue text; a prompt with no task is a programming error"
+            ),
+        }
+    }
+}
+
+/// Assert the prompt contains the issue text before dispatch. `spec` is the
+/// staged spec text the caller embeds between the prompt's issue markers.
+/// One containment test catches the empty-issue-section shape: a `cat` that
+/// failed into an unchecked command substitution leaves `$BODY` empty, and
+/// this is the check that notices before any token is spent.
+pub fn prompt_verdict(prompt: &str, spec: &str) -> PromptVerdict {
+    if spec_is_empty(prompt) {
+        return PromptVerdict::EmptyPrompt;
+    }
+    if !spec_is_empty(spec) && prompt.contains(spec.trim_end()) {
+        PromptVerdict::CarriesSpec
+    } else {
+        PromptVerdict::SpecMissingFromPrompt
+    }
+}
+
+/// Lowercase hex sha256 of one buffer.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The GitHub REST endpoint for one issue, `None` when `repo` is not a plain

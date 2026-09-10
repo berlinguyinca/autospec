@@ -96,6 +96,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "freshness",
         "Gate on the staged spec matching the live issue revision (#3864)",
     ),
+    (
+        "preflight",
+        "The single pre-dispatch gate: NO-SPEC (missing/empty spec), prompt assertion, freshness, spec receipt in status.txt (#3620)",
+    ),
     ("runs", "Classify a dispatch batch and summarize it (#3918)"),
     (
         "tick",
@@ -121,6 +125,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "guard" => guard(rest),
         "stage" => super::dispatch_spec::stage(rest),
         "freshness" => super::dispatch_spec::freshness(rest),
+        "preflight" => super::dispatch_spec::preflight(rest),
         "stamp" => stamp(rest),
         "beat" => beat(rest),
         "status" => status(rest),
@@ -161,7 +166,9 @@ fn print_help() {
     println!("    --body-file <PATH>    stage: verbatim body when no --issue-json is given");
     println!("    --source-updated-at <T> stage: live issue updatedAt (epoch or RFC 3339)");
     println!("    --out <PATH>          stage: staged spec to write (default $HOME/.autospec/dispatch/specs/<N>.md)");
-    println!("    --staged <PATH>       freshness: staged spec to check (same default)");
+    println!("    --staged <PATH>       freshness/preflight: staged spec to check (same default)");
+    println!("    --prompt-file <PATH>  preflight: the assembled prompt; the dispatch is refused if it carries no issue text");
+    println!("    --status-file <PATH>  freshness/preflight: append the spec receipt (byte count + sha256) to the run's status.txt");
     println!(
         "    --live-updated-at <T> freshness: the live issue updatedAt, when the caller read it"
     );
