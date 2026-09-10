@@ -1,0 +1,114 @@
+{
+  "baseline": {
+    "quantization": "Q4_K_M",
+    "runtime": "llama.cpp",
+    "node": "rtx-4090-01",
+    "profile": "coding-standard",
+    "median_success_seconds": 240
+  },
+  "rows": [
+    {
+      "candidate_id": "q4-k-m-mlx",
+      "quantization": "Q4_K_M",
+      "runtime": "mlx",
+      "node": "m13-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 180,
+      "quality": 0.91,
+      "cache_hit_ratio": 0.4,
+      "memory_gb": 12.1,
+      "gpu_utilization": 0.72,
+      "energy_wh": 96
+    },
+    {
+      "candidate_id": "q8-0-mlx",
+      "quantization": "Q8_0",
+      "runtime": "mlx",
+      "node": "m13-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 210,
+      "quality": 0.94,
+      "cache_hit_ratio": 0.41,
+      "memory_gb": 21.8,
+      "gpu_utilization": 0.69,
+      "energy_wh": 104
+    },
+    {
+      "candidate_id": "q3-k-s-llamacpp",
+      "quantization": "Q3_K_S",
+      "runtime": "llama.cpp",
+      "node": "rtx-4090-01",
+      "profile": "coding-standard",
+      "success": false
+    },
+    {
+      "candidate_id": "q4-k-m-vllm",
+      "quantization": "Q4_K_M",
+      "runtime": "vllm",
+      "node": "rtx-4090-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 195,
+      "quality": 0.9,
+      "cache_hit_ratio": 0.55,
+      "memory_gb": 24.3,
+      "gpu_utilization": 0.81,
+      "energy_wh": 118
+    },
+    {
+      "candidate_id": "q4-k-m-vllm",
+      "quantization": "Q4_K_M",
+      "runtime": "vllm",
+      "node": "rtx-4090-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 210,
+      "quality": 0.9,
+      "cache_hit_ratio": 0.52,
+      "memory_gb": 24.5,
+      "gpu_utilization": 0.8,
+      "energy_wh": 121
+    },
+    {
+      "candidate_id": "q4-k-m-mlx-spec",
+      "quantization": "Q4_K_M",
+      "runtime": "mlx",
+      "node": "m13-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 185,
+      "speculative": true,
+      "draft_tokens": 4,
+      "accepted_draft_tokens": 3,
+      "quality": 0.92,
+      "cache_hit_ratio": 0.39,
+      "memory_gb": 13.4,
+      "gpu_utilization": 0.74,
+      "energy_wh": 101
+    },
+    {
+      "candidate_id": "q4-k-m-sglang",
+      "quantization": "Q4_K_M",
+      "runtime": "sglang",
+      "node": "rtx-4090-01",
+      "profile": "coding-standard",
+      "success": true,
+      "success_seconds": 205,
+      "quality": 0.89,
+      "cache_hit_ratio": 0.58,
+      "memory_gb": 26.0,
+      "gpu_utilization": 0.77,
+      "energy_wh": 112
+    },
+    {
+      "candidate_id": "q2-k-trtllm",
+      "quantization": "Q2_K",
+      "runtime": "trtllm",
+      "node": "rtx-4090-01",
+      "profile": "coding-standard",
+      "success": false
+    }
+  ]
+}

@@ -5095,7 +5095,10 @@ fn cli_commands_require_explicit_input_or_report_the_remaining_stub() {
 
     let benchmark = autospec().arg("benchmark").output().expect("autospec runs");
     assert!(!benchmark.status.success());
-    assert!(String::from_utf8_lossy(&benchmark.stderr).contains("not yet implemented"));
+    assert!(
+        String::from_utf8_lossy(&benchmark.stderr).contains("usage: autospec benchmark"),
+        "benchmark without a subcommand must print its usage"
+    );
 }
 
 #[test]
