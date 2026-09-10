@@ -922,6 +922,15 @@ fn dependency_reaches(
         })
 }
 
+/// Extract the dependency numbers declared in the `## Dependencies` section.
+///
+/// Two line forms create edges, both scoped to that section (spec §27.6):
+/// the canonical phrase `Depends on issue #N` / `depends on #N`, and a list
+/// item whose first token is `#N` (e.g. `- #52 — gateway request path`),
+/// the form third-party trackers write under a plain `## Dependencies`
+/// heading with no phrase. A `#N` that is neither the target of a
+/// `depends on` phrase nor the first token of a list item declares no edge,
+/// so prose in the section cannot over-match.
 pub fn dependency_numbers(body: &str) -> Vec<u64> {
     let section = markdown_section(body, "Dependencies");
     let mut dependencies = BTreeSet::new();
@@ -935,17 +944,32 @@ pub fn dependency_numbers(body: &str) -> Vec<u64> {
                 candidate = candidate["issue".len()..].trim_start();
             }
             candidate = candidate.strip_prefix('#').unwrap_or(candidate);
-            let digits = candidate
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect::<String>();
-            if let Ok(dependency) = digits.parse::<u64>() {
+            if let Some(dependency) = leading_issue_number(candidate) {
                 dependencies.insert(dependency);
             }
             cursor += offset + "depends on".len();
         }
+
+        let item = line
+            .trim_start()
+            .strip_prefix("- ")
+            .or_else(|| line.trim_start().strip_prefix("* "))
+            .unwrap_or("");
+        if let Some(candidate) = item.strip_prefix('#') {
+            if let Some(dependency) = leading_issue_number(candidate) {
+                dependencies.insert(dependency);
+            }
+        }
     }
     dependencies.into_iter().collect()
+}
+
+fn leading_issue_number(candidate: &str) -> Option<u64> {
+    let digits = candidate
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    digits.parse::<u64>().ok()
 }
 
 fn target_tracks_issue(body: &str, dependent: u64) -> bool {

@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use autospec_core::coordination::{
-    parse_remote_pull_request_page_json, plan_ready_queue, CapabilityState, PullRequestEvidence,
-    QueuePolicy, ReadyQueueInput, RemoteIssue, RemotePullRequest, RemotePullRequestCheck,
+    dependency_numbers, parse_remote_pull_request_page_json, plan_ready_queue, CapabilityState,
+    PullRequestEvidence, QueuePolicy, ReadyQueueInput, RemoteIssue, RemotePullRequest,
+    RemotePullRequestCheck,
 };
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
@@ -807,6 +808,92 @@ fn withholds_the_dependent_of_a_hard_dependency_edge() {
     assert_eq!(plan.blocked[0].unmet_dependencies, vec![920]);
     assert!(plan.blocked[0].non_blocking_refs.is_empty());
     assert!(plan.conflicts.is_empty());
+}
+
+#[test]
+fn dependency_numbers_is_asserted_against_known_cases() {
+    // Issue #4135: a set-membership pattern that silently matches nothing is
+    // indistinguishable from "nothing is blocked". The dependency parser is
+    // therefore pinned to at least one issue known to carry dependencies and
+    // at least one known not to, in every line form it accepts.
+
+    // Known to carry dependencies — the bullet form third-party trackers
+    // (e.g. InferWeave) write under a plain `## Dependencies` heading.
+    let bullet_form = "## Dependencies\n\n- #52 — gateway request path\n- #61 — proxy streaming\n\n## Implementation outline\n\n- edit `src/a.rs`\n";
+    assert_eq!(dependency_numbers(bullet_form), vec![52, 61]);
+
+    // The same edges survive the canonical phrase form.
+    assert_eq!(
+        dependency_numbers("## Dependencies\n\nDepends on issue #201\n"),
+        vec![201]
+    );
+    assert_eq!(
+        dependency_numbers("## Dependencies\n\nDepends on #301\n"),
+        vec![301]
+    );
+
+    // Known not to carry dependencies.
+    assert!(dependency_numbers("## Dependencies\n\nnone\n").is_empty());
+    assert!(dependency_numbers("## Dependencies\n\nNo hard dependencies.\n").is_empty());
+    assert!(dependency_numbers("## Goal\nDo the thing.\n").is_empty());
+
+    // A `#N` in prose inside the section is not an edge: the parser must not
+    // over-match either, or it withholds work that is ready.
+    assert!(dependency_numbers("## Dependencies\n\nsee #7 for background context\n").is_empty());
+}
+
+#[test]
+fn withholds_a_candidate_on_bullet_list_dependencies() {
+    // The InferWeave shape from issue #4135: dependencies declared as bullet
+    // items under a plain `## Dependencies` heading. Before the fix the
+    // parser returned nothing for these bodies and reported every issue in
+    // a serial chain as ready.
+    let input = ready_input(vec![
+        issue(
+            940,
+            "## Implementation outline\n\n- edit `src/base.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            941,
+            "## Implementation outline\n\n- edit `src/mid.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            942,
+            "## Dependencies\n\n- #940 — base contract\n- #941 — mid surface\n\n## Implementation outline\n\n- edit `src/top.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![940, 941]);
+    assert_eq!(plan.blocked.len(), 1);
+    assert_eq!(plan.blocked[0].issue.number, 942);
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("blocked_dependencies")
+    );
+    assert_eq!(plan.blocked[0].unmet_dependencies, vec![940, 941]);
+}
+
+#[test]
+fn releases_a_candidate_when_a_bullet_list_dependency_closes() {
+    let mut input = ready_input(vec![issue(
+        951,
+        "## Dependencies\n\n- #950 — prerequisite surface\n\n## Implementation outline\n\n- edit `src/child.rs`\n",
+        &["auto-implement", "safety:reviewed"],
+    )]);
+    input.dependencies.insert(
+        950,
+        RemoteIssue::closed(950, "done", "", Vec::new(), "agent"),
+    );
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![951]);
+    assert!(plan.blocked.is_empty());
 }
 
 #[test]
