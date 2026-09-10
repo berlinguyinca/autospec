@@ -434,6 +434,39 @@ that output automatically yet.
 | `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
 | `AUTOSPEC_ROUTING_PREFIX_TOKENS` | `0` (unknown) | Prefix size this dispatch will stage, tested against each profile's `cache_min_tokens`. `0` fails open and scores exactly as before. |
 
+### Ledger record types
+
+The ledger is append-only JSONL carrying two row types, discriminated by
+`record_type`. A row without that key is read as `dispatch`, so every ledger on
+disk before #3319 keeps working unchanged.
+
+- **`dispatch`** -- one routing decision and its outcome: `dispatch_id`, `ts`,
+  `profile`, `model`, `harness`, `issue`, `cell_ctx`, `cell_reasoning`, token and
+  wall-clock telemetry, `retries`, `escalated`, `outcome`, `reason`. `--stats`,
+  `--show`, `--latest` and `--update-outcome` read dispatch rows only.
+- **`event`** -- one normalized Pi execution event, produced by the normalizer in
+  `crates/autospec-core/src/aar/pi_events.rs` and serialized with
+  `to_ledger_lines()`. Required keys: `record_type`, `schema_version`, `seq`,
+  `event`, `timestamp`, `session_id`, `work_item_id`, `agent_role`, `harness`.
+  `event` is one of `session_start`, `model_request`, `tool_call`, `file_edit`,
+  `test_run`, `compaction`, `failure`, `finish`; the shell vocabulary
+  (`ALLOWED_EVENT_KINDS`) and the Rust `EventKind::ALL` list are pinned equal by
+  `tests/routing-ledger.bats` and
+  `crates/autospec-core/tests/aar_pi_events_shell_bridge.rs`, so a kind added on
+  one side fails the other side's suite.
+
+Performance metrics on an event row (`ttft_ms`, `prefill_ms`, `decode_tok_s`,
+`queue_ms`, `cache_hit_tokens`, `cache_miss_tokens`, `context_used_tokens`,
+`context_window_tokens`, `turn_ms`, `tool_ms`, `tests_total`, `tests_failed`,
+`input_tokens`, `output_tokens`, `reasoning_tokens`) are emitted when measured and
+serialize as the string `"unknown"` when not -- never `0`, which a consumer would
+read as a perfect measurement. Event rows are invisible to dispatch aggregates and
+are never targeted by `--update-outcome`.
+
+`--validate` checks both types and rejects an unrecognized `record_type`. On
+`--append`, an event row is stored verbatim rather than run through the dispatch
+telemetry normalization that fills missing dispatch keys.
+
 **The stack gate (per-stack local eligibility, default-deny).** `route-decide.sh` takes
 `--deliverable <kind>` (default `code`) and `--stack <profile-id>`. Non-code
 deliverables (`document`, `latex`, `translation`, `research`, or any other non-`code`

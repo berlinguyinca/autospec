@@ -7,7 +7,7 @@
 # enum, --stats, --show, --validate, --rebuild-shaped reader semantics) so there
 # is one ledger idiom in the repo rather than two.
 #
-# Record schema (all keys required for --append):
+# Dispatch record schema (all keys required for --append):
 #   {dispatch_id, ts, dispatch_kind, profile, model, harness, issue,
 #    cell_ctx, cell_reasoning, input_tokens, output_tokens, cached_tokens,
 #    wall_clock_ms, retries, escalated, outcome, reason}
@@ -58,6 +58,40 @@
 #     row lacking the fields stays valid: --validate reads an absent key as
 #     "unknown" (REQUIRED_KEYS is NOT extended).
 #
+# Event records (issue #3319) share this file. A Pi session's raw lifecycle and
+# performance events are normalized by the Rust side
+# (autospec_core::aar::normalize_event / normalize_jsonl, which emit the rows via
+# to_ledger_lines) and appended here, so one ledger holds both the cost of each
+# dispatch and what happened inside it, correlated by session_id and dispatch_id.
+#   {record_type: "event", schema_version, seq, event, timestamp, session_id,
+#    work_item_id, agent_role, harness, <metrics>}
+#
+#     event           session_start | model_request | tool_call | file_edit |
+#                     test_run | compaction | failure | finish. Pi's own event
+#                     names are mapped onto these before the row is written, so
+#                     an unmapped name is an unknown producer and --validate
+#                     fails closed on it.
+#     seq             1-based position within the replayed session
+#     timestamp, session_id, work_item_id, agent_role, harness
+#                     mandatory non-empty strings. A row without identity cannot
+#                     be correlated back to a work item, so it is a finding, not
+#                     a row with a null column.
+#     <metrics>       everything else: input_tokens, output_tokens,
+#                     reasoning_tokens, cache_hit_tokens, cache_miss_tokens,
+#                     ttft_ms, prefill_ms, prefill_tok_s, decode_tok_s, queue_ms,
+#                     turn_ms, tool_ms, wall_ms, context_used_tokens,
+#                     context_window_tokens, dispatch_id, model, tool, tool_ok,
+#                     tests_total, tests_failed, repair_count, success,
+#                     failure_category. Each is a JSON number, boolean or string,
+#                     and the string "unknown" when Pi did not report it -- the
+#                     same rule as the §25 fields above, and the reason a row is
+#                     never written with 0 in place of a missing measurement.
+#
+# Event rows are NOT dispatch rows: --append writes them verbatim (the §25
+# normalization above is dispatch-only), --validate routes them to their own
+# contract, and --stats / --show / --rebuild skip them, because those group by
+# dispatch_id over rows that have a profile and a cell.
+#
 # --rebuild reconstructs the latest record per dispatch_id from the existing
 # ledger (§28: survive local loss where reconstructable from history) and
 # writes it to <ledger>.rebuilt for the operator to diff/promote. It NEVER
@@ -72,7 +106,7 @@
 #   routing-ledger.sh --update-outcome <dispatch_id> <outcome> [reason]
 #   routing-ledger.sh --stats [--json]
 #   routing-ledger.sh --show [--profile <name>] [--kind <dispatch_kind>] [--json]
-#   routing-ledger.sh --validate [<file>]
+#   routing-ledger.sh --validate [<file>]     (both record types)
 #   routing-ledger.sh --rebuild
 #   routing-ledger.sh -h | --help
 #
@@ -93,6 +127,14 @@ ALLOWED_OUTCOMES="pending merged_clean lgtm_first_pass retried_ok escalated qa_f
 ALLOWED_KINDS="implementer lgtm-reviewer explore-researcher verify-voter refine-lens qa-sweep secaudit-pass growth-lens spec-decompose spec-research spec-design broad-audit refine-scope"
 ALLOWED_CTX="32k 64k 120k"
 ALLOWED_REASONING="shallow medium deep"
+
+# Pi execution events (issue #3319): the canonical kind vocabulary after the
+# Rust normalizer maps Pi's own event names, and the keys every event row must
+# carry. Mirrors ALLOWED_EVENT_KINDS / EVENT_REQUIRED_KEYS in
+# autospec_core::aar::pi_events -- keep the two lists in step (the same
+# mirror discipline as learning/contracts.rs).
+ALLOWED_EVENT_KINDS="session_start model_request tool_call file_edit test_run compaction failure finish"
+EVENT_REQUIRED_KEYS="record_type schema_version seq event timestamp session_id work_item_id agent_role harness"
 
 REQUIRED_KEYS="dispatch_id ts dispatch_kind profile model harness issue cell_ctx cell_reasoning input_tokens output_tokens cached_tokens wall_clock_ms retries escalated outcome reason"
 
@@ -165,6 +207,19 @@ _validate_object() {
         printf 'not a JSON object\n'
         return 1
     fi
+    # Two record types share one append-only file (issue #3319): dispatch rows
+    # (this contract, record_type absent or "dispatch") and Pi execution event
+    # rows (record_type "event", contract in _validate_event_object). Readers
+    # that group by dispatch_id already skip event rows: _latest_records filters
+    # has("dispatch_id"), so --stats / --show / --rebuild see dispatches only.
+    if printf '%s' "$_obj" | jq -e '.record_type == "event"' >/dev/null 2>&1; then
+        _validate_event_object "$_obj"
+        return $?
+    fi
+    if printf '%s' "$_obj" | jq -e 'has("record_type") and (.record_type != "dispatch")' >/dev/null 2>&1; then
+        printf 'unknown record_type: %s\n' "$(printf '%s' "$_obj" | jq -r '.record_type')"
+        return 1
+    fi
     for _k in $REQUIRED_KEYS; do
         if ! printf '%s' "$_obj" | jq -e --arg k "$_k" 'has($k)' >/dev/null 2>&1; then
             printf 'missing required key: %s\n' "$_k"
@@ -204,6 +259,63 @@ _validate_object() {
         return 1
     fi
     _validate_telemetry "$_obj"
+}
+
+# _validate_event_object <json> — the Pi execution-event half of the record
+# contract (issue #3319). Written by the Rust normalizer
+# (autospec_core::aar::normalize_event); validated here so one --validate pass
+# checks every row of the file whoever appended it. Two rules mirror the Rust
+# side exactly:
+#
+#   identity is mandatory. timestamp, session_id, work_item_id, agent_role and
+#   harness must be non-empty strings: a row without identity cannot be
+#   correlated back to a work item and silently poisons every aggregate.
+#   the event name must be one of ALLOWED_EVENT_KINDS. Pi's own vocabulary is
+#   mapped to these canonical names before the row is written, so an unmapped
+#   name here means an unknown producer, not an unknown alias: fail closed.
+#
+# Every other key is a metric and must be a JSON number, boolean or string.
+# "unknown" (the string) is how an unobserved metric is stored; null, an object
+# or an array is a shape error, and 0 is a measurement, never a stand-in for
+# "not measured".
+_validate_event_object() {
+    _obj="$1"
+    for _k in $EVENT_REQUIRED_KEYS; do
+        if ! printf '%s' "$_obj" | jq -e --arg k "$_k" 'has($k)' >/dev/null 2>&1; then
+            printf 'event missing required key: %s\n' "$_k"
+            return 1
+        fi
+    done
+    for _k in timestamp session_id work_item_id agent_role harness; do
+        if ! printf '%s' "$_obj" | jq -e --arg k "$_k" '.[$k] | (type=="string") and (length>0)' >/dev/null 2>&1; then
+            printf 'event %s must be a non-empty string\n' "$_k"
+            return 1
+        fi
+    done
+    for _k in schema_version seq; do
+        if ! printf '%s' "$_obj" | jq -e --arg k "$_k" '.[$k] | (type=="number") and (.>=1)' >/dev/null 2>&1; then
+            printf 'event %s must be a number >= 1\n' "$_k"
+            return 1
+        fi
+    done
+    _ev="$(printf '%s' "$_obj" | jq -r '.event')"
+    if ! _in_list "$_ev" "$ALLOWED_EVENT_KINDS"; then
+        printf 'invalid event: %s\n' "$_ev"
+        return 1
+    fi
+    _bad="$(printf '%s' "$_obj" | jq -r --argjson ok '["number","string","boolean"]' '
+        . as $o
+        | (keys_unsorted - ["record_type","schema_version","seq","event","timestamp",
+              "session_id","work_item_id","agent_role","harness"])[]
+        | . as $k
+        | select(($ok | index($o[$k] | type)) == null)
+        | "\($k)=\($o[$k] | type)"' 2>/dev/null | head -1)"
+    if [ -n "$_bad" ]; then
+        printf 'event metric %s has invalid type %s (want number, boolean, or the string unknown)\n' \
+            "${_bad%%=*}" "${_bad##*=}"
+        return 1
+    fi
+    return 0
 }
 
 # _normalize_unknowns <json-object-or-array> — re-emit each record with every
@@ -303,7 +415,8 @@ _latest_records() {
         printf '[]'
         return 0
     fi
-    jq -s 'map(select(type=="object" and has("dispatch_id")))
+    jq -s 'map(select(type=="object" and has("dispatch_id")
+          and ((.record_type // "dispatch") == "dispatch")))
            | group_by(.dispatch_id)
            | map(.[-1])' "$LEDGER" 2>/dev/null || printf '[]'
 }
@@ -316,8 +429,16 @@ case "$MODE" in
         _dir="$(dirname "$LEDGER")"
         if [ ! -d "$_dir" ]; then mkdir -p "$_dir"; fi
         # Normalize absent optional fields (stack + §25 telemetry) to
-        # "unknown" so every row at rest carries the full contract.
-        printf '%s\n' "$(_normalize_unknowns "$ARG1")" >> "$LEDGER"
+        # "unknown" so every row at rest carries the full contract. Pi event
+        # rows (issue #3319) carry their own contract and are appended as
+        # compacted-but-otherwise-verbatim JSON: the dispatch telemetry keys are
+        # not part of an event, and injecting them would make every event row
+        # look like a dispatch row that measured nothing.
+        if printf '%s' "$ARG1" | jq -e '.record_type == "event"' >/dev/null 2>&1; then
+            printf '%s\n' "$(printf '%s' "$ARG1" | jq -c '.')" >> "$LEDGER"
+        else
+            printf '%s\n' "$(_normalize_unknowns "$ARG1")" >> "$LEDGER"
+        fi
         exit 0
         ;;
 
