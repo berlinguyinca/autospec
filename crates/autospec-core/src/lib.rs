@@ -60,6 +60,7 @@ pub mod spec;
 pub mod staged_spec;
 pub mod state;
 pub mod validation;
+pub mod verification;
 
 pub use error::AutospecError;
 pub use safety::{prepare_session_start_git_exclude, SessionStartGitExcludeOutcome};
