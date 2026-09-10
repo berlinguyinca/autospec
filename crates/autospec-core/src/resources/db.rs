@@ -570,6 +570,7 @@ mod tests {
     async fn insights_migrations_apply_on_postgres_16() {
         let Ok(url) = std::env::var("AUTOSPEC_TEST_DB_URL") else {
             eprintln!(
+                // autospec:allow-output — test SKIP notice
                 "SKIP insights_migrations_apply_on_postgres_16: \
                  AUTOSPEC_TEST_DB_URL is not set"
             );

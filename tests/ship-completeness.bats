@@ -183,6 +183,9 @@ is_shipped() {
   #     i.e. the TARGET repo's own validate.sh; in autospec-explore it is this repo's
   #     own lock-step gate run from the autospec checkout. It is never copied to
   #     ~/.autospec/scripts, so a ${AUTOSPEC_SCRIPTS_DIR} rewrite would be incorrect.
+  #   - inline-code (`backtick`) mentions: a prose reference to a script NAME (e.g.
+  #     "...section — `scripts/lint-issue.sh` reads that section") is documentation,
+  #     not an invocation, so a leading backtick excludes the match.
   offenders="$(
     surface_files | while read -r f; do
       grep -nE '(bash[[:space:]]+|\./|[^/A-Za-z._-])scripts/[A-Za-z0-9_./-]+\.(sh|mjs)' "$f" 2>/dev/null \
@@ -190,6 +193,7 @@ is_shipped() {
     done \
       | grep -v 'skills/autospec-test/scripts/run-gate.sh' \
       | grep -vE '(bash[[:space:]]+|\./)scripts/validate\.sh' \
+      | grep -vE '`scripts/' \
       || true
   )"
   if [ -n "$offenders" ]; then

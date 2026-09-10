@@ -52,7 +52,7 @@ pub fn observe_docker() -> Result<Vec<ObservedResource>, AutospecError> {
     match resolve_docker_binary() {
         Some(bin) => observe_docker_at(&bin),
         None => {
-            eprintln!(
+            eprintln!(// autospec:allow-output — documented fail-open stderr diagnostic (module docs)
                 "WARN: resources::docker: {REASON_DOCKER_UNAVAILABLE} — docker binary not found on PATH; returning empty list"
             );
             Ok(Vec::new())
@@ -85,7 +85,7 @@ pub(crate) fn find_in_path(name: &str, path_env: &OsStr) -> Option<PathBuf> {
 /// path is testable without mutating the process `PATH`.
 fn observe_docker_at(bin: &Path) -> Result<Vec<ObservedResource>, AutospecError> {
     if !bin.is_file() {
-        eprintln!(
+        eprintln!(// autospec:allow-output — documented fail-open stderr diagnostic (module docs)
             "WARN: resources::docker: {REASON_DOCKER_UNAVAILABLE} — docker binary missing at {:?}; returning empty list",
             bin.display()
         );
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn observe_docker_against_real_daemon_when_present() {
         if resolve_docker_binary().is_none() {
-            eprintln!("SKIP: docker not available in this environment");
+            eprintln!("SKIP: docker not available in this environment"); // autospec:allow-output — test SKIP notice
             return;
         }
         let resources = observe_docker().expect("observe_docker against real daemon");

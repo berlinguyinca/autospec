@@ -6036,10 +6036,10 @@ fn run_ux_ui_workstream(id: &str, required: bool, root: &Path) -> CheckResult {
             "light",
             "dark",
         ],
-        workflow: Some((
-            ".github/workflows/ux-ui-workstream.yml",
-            "ux-ui-workstream.sh gate",
-        )),
+        // .github/workflows/ux-ui-workstream.yml was retired in favor of the
+        // TeamCity gate (Autospec_UxUiWorkstream); the PR-workflow requirement
+        // goes with it, matching run_performance_workstream's workflow: None.
+        workflow: None,
     };
     run_workstream_contract(id, required, root, &CONTRACT)
 }
