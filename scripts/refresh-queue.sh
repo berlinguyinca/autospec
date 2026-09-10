@@ -68,6 +68,15 @@
 #     established (body missing/empty on GitHub), so a silent filter is
 #     surfaced instead of inferred.
 #
+# Background (issue #4002): this queue was once built from list calls capped
+# at a literal page limit — its sibling conversion script convert3.sh carried
+# the same cap, and the sibling call sites were enumerated repo-wide as part
+# of the fix. A truncated exclusion set silently re-queues issues whose PRs
+# already cover them. convert3.sh is superseded by the current conversion
+# pass; in this script every list fetch goes through fetch_pages, which owns
+# the page size in one place. A call site passes the endpoint's filters —
+# never its own per_page.
+#
 # Usage:
 #   refresh-queue.sh [refresh options]
 #   refresh-queue.sh [refresh options] --check N
@@ -210,17 +219,20 @@ verify_repos() {
 }
 
 # fetch_pages ENDPOINT PAGES_FILE
-# Paginate ENDPOINT (100 items per page), appending each page's JSON array to
-# PAGES_FILE (one array per line). Fails closed on any non-array response.
+# Paginate ENDPOINT, appending each page's JSON array to PAGES_FILE (one array
+# per line). The page size exists only here (issue #4002): ENDPOINT carries
+# the filters, and the per_page is appended by this helper, so a call site
+# cannot pass its own limit. Fails closed on any non-array response.
 fetch_pages() {
     local endpoint="$1"
     local pages_file="$2"
+    local page_size=100
     local page=1
     local max_pages=100
     : > "$pages_file"
     while [ "$page" -le "$max_pages" ]; do
         local out
-        if ! out="$(gh api "${endpoint}&page=${page}" 2>&1)"; then
+        if ! out="$(gh api "${endpoint}&per_page=${page_size}&page=${page}" 2>&1)"; then
             fail "gh api call failed (page ${page}): $out"
         fi
         if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out"; then
@@ -229,7 +241,7 @@ fetch_pages() {
         printf '%s\n' "$out" >> "$pages_file"
         local count
         count="$(jq 'length' <<<"$out")"
-        if [ "$count" -lt 100 ]; then
+        if [ "$count" -lt "$page_size" ]; then
             return 0
         fi
         page=$((page + 1))
@@ -288,8 +300,8 @@ refresh_repo() {
     local safe="${r//\//_}"
     local prs_file="$work_dir/pulls-${safe}.jsonl"
     local issues_file="$work_dir/issues-${safe}.jsonl"
-    fetch_pages "repos/${r}/pulls?state=open&per_page=100" "$prs_file"
-    fetch_pages "repos/${r}/issues?labels=auto-implement&state=open&per_page=100" "$issues_file"
+    fetch_pages "repos/${r}/pulls?state=open" "$prs_file"
+    fetch_pages "repos/${r}/issues?labels=auto-implement&state=open" "$issues_file"
     local issues_json prs_json excluded_json dispatchable_json
     issues_json="$(jq -s 'add // [] | map(select(.pull_request == null)) | map(.number)' "$issues_file")"
     prs_json="$(jq -s 'add // []' "$prs_file")"
@@ -405,7 +417,7 @@ trap 'rm -rf -- "$work_dir"' EXIT
 # path.
 if [ -n "$check_issue" ]; then
     prs_file="$work_dir/pulls.jsonl"
-    fetch_pages "repos/${repos[0]}/pulls?state=open&per_page=100" "$prs_file"
+    fetch_pages "repos/${repos[0]}/pulls?state=open" "$prs_file"
     run_check "$prs_file"
 fi
 

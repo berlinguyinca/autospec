@@ -30,6 +30,25 @@ setup() {
 #   repos/<owner>/<name>/labels/auto-implement -> label existence (fixture file)
 #   repos/<owner>/<name>/pulls?...         -> open PRs fixture (default: [])
 #   repos/<owner>/<name>/issues?...        -> open auto-implement issues fixture (default: [])
+# page_fixture FILE ENDPOINT — serve FILE's JSON array paged like the real
+# GitHub API: honour per_page (default 30) and page (default 1) from
+# ENDPOINT's query string, so a fixture larger than one page exercises the
+# caller's paging (issue #4002).
+page_fixture() {
+  file="$1"; ep="$2"
+  page=1; per_page=30
+  if [[ "$ep" == *\?* ]]; then
+    q="${ep#*\?}"
+    IFS='&' read -ra kv <<<"$q"
+    for p in "${kv[@]}"; do
+      case "$p" in
+        page=*) page="${p#page=}" ;;
+        per_page=*) per_page="${p#per_page=}" ;;
+      esac
+    done
+  fi
+  jq -c ".[(($page-1)*$per_page):(($page-1)*$per_page)+$per_page]" "$file"
+}
 if [ "$1" = "api" ]; then
   ep="$2"
   case "$ep" in
@@ -44,14 +63,14 @@ if [ "$1" = "api" ]; then
       safe="${safe//\//__}"
       case "$rest" in
         *pulls*)
-          if [ -f "$MOCK_PRS_DIR/$safe" ]; then cat "$MOCK_PRS_DIR/$safe"; exit 0; fi
+          if [ -f "$MOCK_PRS_DIR/$safe" ]; then page_fixture "$MOCK_PRS_DIR/$safe" "$ep"; exit 0; fi
           printf '[]\n'
           exit 0
           ;;
         *issues*)
           if [[ "$rest" == *\?* ]]; then
-            # open auto-implement issue list
-            if [ -f "$MOCK_ISSUES_DIR/$safe" ]; then cat "$MOCK_ISSUES_DIR/$safe"; exit 0; fi
+            # open auto-implement issue list (paged like the real API)
+            if [ -f "$MOCK_ISSUES_DIR/$safe" ]; then page_fixture "$MOCK_ISSUES_DIR/$safe" "$ep"; exit 0; fi
             printf '[]\n'
             exit 0
           else
@@ -378,4 +397,33 @@ assert_queue() {
     [ ! -e "$SPEC_DIR/100.md" ]
     [[ "$output" == *"no new spec staged; 1 queued issue(s) could not be established"* ]]
     [[ "$output" == *"eligible 0 of 1 queued issues; 1 without a spec (ineligible): 100"* ]]
+}
+
+@test "pagination: a fixture with more items than one page returns them all (issue #4002)" {
+    pin_repo me/repo
+    # 150 open issues: a fetch capped at one 100-item page would silently
+    # drop the last 50 from the queue. The mock gh honours per_page/page,
+    # so this only passes if the caller actually pages.
+    write_issues "$(jq -cn '[range(1;151)]')"
+    run_refresh
+    [ "$status" -eq 0 ]
+    grep -q 'queue: 0 -> 150, dropped 0 resolved, added 150 newly labelled' <<<"$output"
+    [ "$(jq 'length' "$WORK/q.json")" -eq 150 ]
+    # Tracker order is preserved across the page boundary.
+    [ "$(jq -r '.[0].number' "$WORK/q.json")" -eq 1 ]
+    [ "$(jq -r '.[100].number' "$WORK/q.json")" -eq 101 ]
+    [ "$(jq -r '.[149].number' "$WORK/q.json")" -eq 150 ]
+}
+
+@test "pagination: the PR-covered exclusion set reaches past the first page (issue #4002)" {
+    pin_repo me/repo
+    # 150 open issues, each covered by an open PR on fix/issue-<n>. A PR
+    # fetch capped at one 100-item page would miss the page-2 PRs and
+    # re-queue the issues those PRs already cover.
+    write_issues "$(jq -cn '[range(1;151)]')"
+    write_prs "$(jq -cn '[range(1;151) | {number: ., head: {ref: "fix/issue-\(tostring)"}, body: ""}]')"
+    run_refresh
+    [ "$status" -eq 0 ]
+    grep -q 'excluded 150 issues that already have an open PR' <<<"$output"
+    assert_queue '[]'
 }
