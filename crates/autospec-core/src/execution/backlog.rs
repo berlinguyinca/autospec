@@ -27,6 +27,7 @@
 //!    [`BacklogReport::discrepancies`] reports — rather than absorbs — any
 //!    drift between the authoritative backlog and the name heuristic.
 
+use super::closure::{reconcile_tracker, reconciled_open_count, TrackerDiscrepancy};
 use std::collections::BTreeSet;
 
 /// Conventional branch-name markers after which an issue number may appear.
@@ -228,6 +229,16 @@ pub struct BacklogReport {
     pub heuristic_outstanding: BTreeSet<u64>,
     /// The branch-name audit: matched count and the unmatched names.
     pub branch_audit: NameExtraction,
+    /// Tracker/merged-PR mismatches from reconciliation (#4044): open
+    /// issues a merged PR delivers, and merged PRs whose issue is open with
+    /// no closure decision. An empty list means the tracker and the merged
+    /// work agree.
+    pub tracker_discrepancies: Vec<TrackerDiscrepancy>,
+    /// Open issues after reconciliation (#4044): the tracker count minus
+    /// the issues a merged PR has already delivered. This — not
+    /// `issues_open` — is the count capacity/throughput metrics may use,
+    /// so a tracking lag cannot be misread as a backlog trend.
+    pub issues_open_effective: usize,
 }
 
 impl BacklogReport {
@@ -237,14 +248,16 @@ impl BacklogReport {
     }
 
     /// One line with every dispatch-relevant count, so the sums can be
-    /// checked by eye (#3924 invariant 4):
-    /// `backlog: convertible 215 (patches on disk 409, issues open 372, issues with a PR 194)`.
+    /// checked by eye (#3924 invariant 4), with the open count after
+    /// reconciliation (#4044) alongside the raw one:
+    /// `backlog: convertible 215 (patches on disk 409, issues open 372, open after reconcile 372, issues with a PR 194)`.
     pub fn summary_line(&self) -> String {
         format!(
-            "backlog: convertible {} (patches on disk {}, issues open {}, issues with a PR {})",
+            "backlog: convertible {} (patches on disk {}, issues open {}, open after reconcile {}, issues with a PR {})",
             self.convertible(),
             self.patches_on_disk,
             self.issues_open,
+            self.issues_open_effective,
             self.issues_with_pr.len()
         )
     }
@@ -280,6 +293,12 @@ impl BacklogReport {
                 authoritative_only.join(", ")
             ));
         }
+        // Tracker/merged-PR mismatches are reported, not absorbed (#4044).
+        found.extend(
+            self.tracker_discrepancies
+                .iter()
+                .map(TrackerDiscrepancy::line),
+        );
         found
     }
 }
@@ -347,13 +366,16 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
         .copied()
         .collect();
 
+    let tracker_discrepancies = reconcile_tracker(&snapshot.open_issues, &snapshot.prs);
     Ok(BacklogReport {
         outstanding,
         issues_with_pr,
         patches_on_disk: snapshot.patched_issues.len(),
         issues_open: snapshot.open_issues.len(),
+        issues_open_effective: reconciled_open_count(&snapshot.open_issues, &tracker_discrepancies),
         heuristic_outstanding,
         branch_audit,
+        tracker_discrepancies,
     })
 }
 

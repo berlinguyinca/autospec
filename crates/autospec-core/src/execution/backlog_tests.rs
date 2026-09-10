@@ -170,17 +170,132 @@ fn merged_this_session_never_appears_as_outstanding() {
 fn summary_line_reports_every_dispatch_count_together() {
     let report = compute_backlog(&evidence_snapshot()).unwrap();
     let line = report.summary_line();
-    // All four reconcilable counts on one line (#3924 invariant 4).
+    // Every reconcilable count on one line (#3924 invariant 4), the raw
+    // open count and the open count after reconciliation (#4044) side by
+    // side: the tracker lists 25 open, but 2 (3870, 3845) were delivered
+    // by merged PRs that the tracker never closed.
     assert!(line.contains("convertible 19"), "{line}");
     assert!(line.contains("patches on disk 27"), "{line}");
     assert!(line.contains("issues open 25"), "{line}");
+    assert!(line.contains("open after reconcile 23"), "{line}");
     assert!(line.contains("issues with a PR 6"), "{line}");
-    // This snapshot's PR branches all match, so nothing to reconcile.
+    // Branch names all match and the heuristic agrees, but reconciliation
+    // finds the tracker/merged-PR mismatches (#4044): 2 delivered-but-open
+    // (3870, 3845) and 3 no-closure-decision (3849, 3883, 3888).
+    assert_eq!(report.tracker_discrepancies.len(), 5);
+    assert_eq!(
+        report.discrepancies().len(),
+        5,
+        "{:?}",
+        report.discrepancies()
+    );
+    assert!(
+        report
+            .discrepancies()
+            .iter()
+            .any(|d| d.contains("#3870") && d.contains("conv/3870-fix")),
+        "{:?}",
+        report.discrepancies()
+    );
+    assert!(
+        report
+            .discrepancies()
+            .iter()
+            .any(|d| d.contains("#3888") && d.contains("conv/3888-retry-2")),
+        "{:?}",
+        report.discrepancies()
+    );
+}
+
+// ── tracker reconciliation: merged PR vs open issue (#4044) ────────────
+
+#[test]
+fn reconciliation_names_both_directions_of_the_mismatch() {
+    let report = compute_backlog(&evidence_snapshot()).unwrap();
+    let found = &report.tracker_discrepancies;
+    // Delivered but the tracker never closed: the Closes PR merged, the
+    // issue is still open.
+    let delivered: Vec<u64> = found
+        .iter()
+        .filter(|d| d.kind == super::super::closure::TrackerDiscrepancyKind::DeliveredButOpen)
+        .map(|d| d.issue)
+        .collect();
+    assert_eq!(delivered, vec![3845, 3870], "{found:?}");
+    // Merged with no closing decision: linked-only, or a bare Refs — the
+    // defect that left 51 issues open on delivered work.
+    let undecided: Vec<u64> = found
+        .iter()
+        .filter(|d| d.kind == super::super::closure::TrackerDiscrepancyKind::NoClosureDecision)
+        .map(|d| d.issue)
+        .collect();
+    assert_eq!(undecided, vec![3849, 3883, 3888], "{found:?}");
+    // The open PR is work in progress, never a mismatch.
+    assert!(found.iter().all(|d| d.issue != 3905), "{found:?}");
+}
+
+#[test]
+fn effective_open_count_subtracts_only_delivered_issues() {
+    let report = compute_backlog(&evidence_snapshot()).unwrap();
+    // Only tracking lag drops out: 3870 and 3845 are delivered. The
+    // no-decision issues still need work and stay in the count.
+    assert_eq!(report.issues_open, 25);
+    assert_eq!(report.issues_open_effective, 23);
+}
+
+#[test]
+fn explicit_partial_fix_is_neither_a_discrepancy_nor_a_closure() {
+    let snapshot = BacklogSnapshot {
+        open_issues: set(&[4050]),
+        patched_issues: set(&[4050]),
+        prs: vec![merged_pr(
+            "conv/4050-partial",
+            None,
+            "first slice\n\nRefs #4050 (does not close it)",
+        )],
+        known_merged: BTreeSet::new(),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    // The stated decision is respected: no mismatch reported.
+    assert!(
+        report.tracker_discrepancies.is_empty(),
+        "{:?}",
+        report.tracker_discrepancies
+    );
     assert!(
         report.discrepancies().is_empty(),
         "{:?}",
         report.discrepancies()
     );
+    // The merged PR still associates the issue for backlog purposes
+    // (#3924 invariant 1/2: a merged PR keeps its issue off the
+    // outstanding list); the next slice lands as new work. But the issue
+    // is not closed in the tracker, and the counts say so: raw and
+    // effective open counts agree.
+    assert!(report.outstanding.is_empty());
+    assert!(report.issues_with_pr.contains(&4050));
+    assert_eq!(report.issues_open, 1);
+    assert_eq!(report.issues_open_effective, 1);
+}
+
+#[test]
+fn generated_conversion_bodies_authorize_closure_partial_fixes_do_not() {
+    use super::super::closure::{conversion_pr_body, has_partial_fix_marker, partial_fix_pr_body};
+    use crate::evidence_fidelity::closure_authorized;
+    // AC1/AC4: every body the conversion pass generates carries a closing
+    // keyword; the partial-fix body states its decision explicitly instead.
+    for issue in [7u64, 3888, 4044] {
+        let full = conversion_pr_body(issue, "converted the patch");
+        assert!(
+            closure_authorized(&full, issue).is_authorized(),
+            "full: {full:?}"
+        );
+        let partial = partial_fix_pr_body(issue, "partial sweep");
+        assert!(
+            !closure_authorized(&partial, issue).is_authorized(),
+            "{partial:?}"
+        );
+        assert!(has_partial_fix_marker(&partial, issue), "{partial:?}");
+    }
 }
 
 #[test]
