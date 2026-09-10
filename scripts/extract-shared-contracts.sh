@@ -21,14 +21,29 @@
 # Usage:
 #   extract-shared-contracts.sh <body1.md> <body2.md> ...   # explicit bodies
 #   extract-shared-contracts.sh --dir <dir>                 # all *.md in <dir>
+#   extract-shared-contracts.sh --languages <csv> ...       # see below
 #   extract-shared-contracts.sh -h | --help
 #
-# Output (stdout): a `## Shared contracts` markdown block. Deterministic — the
-# same inputs always produce byte-identical output (every list is sorted).
+# --languages <csv> (issue #3210): comma-separated sibling language labels, e.g.
+#   --languages rust,typescript   or   --languages lang:rust,lang:mixed
+# When the labels span 2+ distinct languages (or any child carries `mixed`),
+# the emitted block additionally contains a `## Cross-language boundaries`
+# table. Rows are deterministic: one per `schemas/*.schema.json` path that
+# appears in >=2 distinct child bodies (the schema cell is the source of
+# truth; the other cells are `-` placeholders the orchestrator fills in). If
+# any row's schema file does not exist relative to the CWD, the script fails
+# closed — it prints one `PHASE_3_75_FAILED rule=boundary-schema-missing
+# path=<schema>` line per missing file to stderr, writes NOTHING to stdout,
+# and exits 1.
+#
+# Output (stdout): a `## Shared contracts` markdown block (plus the
+# boundaries block when triggered). Deterministic — the same inputs always
+# produce byte-identical output (every list is sorted).
 #
 # Exit codes:
 #   0  success (block emitted; may be "none" when there is no cross-issue overlap)
-#   2  usage error (no inputs, or an input path is missing/unreadable)
+#   1  fail-closed: a boundary row's schema file does not exist on disk
+#   2  usage error (no inputs, an unknown option, or an input path is missing/unreadable)
 #
 # Conventions: set -u (no -e — we branch explicitly); if/then/fi for one-sided
 # conditionals; no RETURN traps (repo bash 3.2 gotchas).
@@ -43,11 +58,18 @@ $PROG — deterministic shared-contract scanner across child issue bodies.
 Usage:
   $PROG <body1.md> <body2.md> ...   Scan the given issue body files.
   $PROG --dir <dir>                 Scan every *.md file in <dir>.
+  $PROG --languages <csv> ...       Sibling language labels (comma-separated;
+                                    'lang:' prefixes are normalized away). When
+                                    the labels span 2+ distinct languages or any
+                                    child carries 'mixed', also emit a
+                                    '## Cross-language boundaries' table.
   $PROG -h | --help                 Show this help.
 
 Emits a '## Shared contracts' markdown block listing every file path,
 function signature, and ALL-CAPS name token that appears in >=2 distinct
 issues. Deterministic: identical inputs -> byte-identical output.
+
+Exit codes: 0 success, 1 fail-closed boundary-schema-missing, 2 usage error.
 EOF
 }
 
@@ -58,33 +80,55 @@ die() {  # die <code> <message>
 }
 
 # ---- argument parsing -----------------------------------------------------
+# Options may appear in any position alongside the body files. `--` ends
+# option parsing (everything after it is a body file).
 FILES=()
-if [ "$#" -eq 0 ]; then
+LANG_CSV=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            for f in "$@"; do
+                FILES+=("$f")
+            done
+            break
+            ;;
+        --dir)
+            [ "$#" -ge 2 ] || die 2 "--dir requires a directory argument"
+            dir="$2"
+            [ -d "$dir" ] || die 2 "not a directory: $dir"
+            # Collect *.md deterministically (sorted).
+            while IFS= read -r f; do
+                FILES+=("$f")
+            done < <(find "$dir" -maxdepth 1 -type f -name '*.md' | sort)
+            [ "${#FILES[@]}" -gt 0 ] || die 2 "no *.md files in directory: $dir"
+            shift 2
+            ;;
+        --languages)
+            [ "$#" -ge 2 ] || die 2 "--languages requires a CSV argument"
+            LANG_CSV="$2"
+            shift 2
+            ;;
+        -*)
+            die 2 "unknown option: $1"
+            ;;
+        *)
+            FILES+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Bodies are optional when --languages is given (the boundaries frame can be
+# emitted standalone); but at least one of the two must be present.
+if [ "${#FILES[@]}" -eq 0 ] && [ -z "$LANG_CSV" ]; then
     usage >&2
     exit 2
 fi
-
-case "$1" in
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    --dir)
-        [ "$#" -ge 2 ] || die 2 "--dir requires a directory argument"
-        dir="$2"
-        [ -d "$dir" ] || die 2 "not a directory: $dir"
-        # Collect *.md deterministically (sorted).
-        while IFS= read -r f; do
-            FILES+=("$f")
-        done < <(find "$dir" -maxdepth 1 -type f -name '*.md' | sort)
-        [ "${#FILES[@]}" -gt 0 ] || die 2 "no *.md files in directory: $dir"
-        ;;
-    *)
-        for f in "$@"; do
-            FILES+=("$f")
-        done
-        ;;
-esac
 
 # Validate every input is a readable file.
 for f in "${FILES[@]}"; do
@@ -137,10 +181,62 @@ extract_names() {
         | awk '{ if (length($0) >= 4) print }'
 }
 
+# Boundary schemas (#3210): `schemas/*.schema.json` paths, backticks optional.
+# A path shared by >=2 distinct child bodies is a cross-language boundary.
+extract_schemas() {
+    grep -oE 'schemas/[A-Za-z0-9._/-]+\.schema\.json' "$1" 2>/dev/null
+}
+
+# ---- language labels -> boundary trigger ---------------------------------
+# Normalize the CSV: split on commas, trim whitespace, strip the optional
+# `lang:` prefix, drop empties, de-duplicate. The boundary block is triggered
+# by 2+ distinct languages OR any child carrying `mixed` (a mixed child IS a
+# boundary, even if it is the only one).
+DISTINCT_LANGS=""
+if [ -n "$LANG_CSV" ]; then
+    DISTINCT_LANGS="$(printf '%s' "$LANG_CSV" | tr ',' '\n' \
+        | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^lang://' \
+        | grep -v '^[[:space:]]*$' | sort -u)"
+fi
+BOUNDARIES=0
+if [ -n "$DISTINCT_LANGS" ]; then
+    n_langs="$(printf '%s\n' "$DISTINCT_LANGS" | wc -l | tr -d '[:space:]')"
+    if [ "$n_langs" -ge 2 ] || printf '%s\n' "$DISTINCT_LANGS" | grep -qx 'mixed'; then
+        BOUNDARIES=1
+    fi
+fi
+
 # ---- emit the block -------------------------------------------------------
-paths="$(shared_tokens extract_paths)"
-sigs="$(shared_tokens extract_signatures)"
-names="$(shared_tokens extract_names)"
+# bash 3.2 + set -u: expanding an empty array is an error, so only call the
+# token scanners when there is at least one body file.
+if [ "${#FILES[@]}" -gt 0 ]; then
+    paths="$(shared_tokens extract_paths)"
+    sigs="$(shared_tokens extract_signatures)"
+    names="$(shared_tokens extract_names)"
+    shared_schemas="$(shared_tokens extract_schemas)"
+else
+    paths=""
+    sigs=""
+    names=""
+    shared_schemas=""
+fi
+
+# Fail-closed schema check (#3210): every emitted boundary row must point at
+# a schema that exists relative to the CWD. This runs BEFORE any stdout is
+# written — a failed run must leave the orchestrator with nothing to splice.
+if [ "$BOUNDARIES" -eq 1 ] && [ -n "$shared_schemas" ]; then
+    schema_missing=0
+    while IFS= read -r schema; do
+        [ -n "$schema" ] || continue
+        if [ ! -f "$schema" ]; then
+            printf '%s: PHASE_3_75_FAILED rule=boundary-schema-missing path=%s\n' "$PROG" "$schema" >&2
+            schema_missing=1
+        fi
+    done <<EOF
+$shared_schemas
+EOF
+    [ "$schema_missing" -eq 0 ] || exit 1
+fi
 
 # The marker pair is load-bearing, not decoration: scripts/lint-issue.sh
 # exempts generated metadata from the authored word budget only between
@@ -159,7 +255,7 @@ emit_section() {  # emit_section <heading> <newline-list>
     fi
 }
 
-if [ -z "$paths" ] && [ -z "$sigs" ] && [ -z "$names" ]; then
+if [ -z "$paths" ] && [ -z "$sigs" ] && [ -z "$names" ] && [ "$BOUNDARIES" -ne 1 ]; then
     printf '_No cross-issue contracts detected (no token appears in >=2 issues)._\n'
     printf '<!-- autospec-shared-contracts:end -->\n'
     exit 0
@@ -168,6 +264,32 @@ fi
 emit_section 'File paths' "$paths"
 emit_section 'Signatures' "$sigs"
 emit_section 'Names / env vars' "$names"
+
+# The cross-language boundary table lives inside the marker region (so the
+# word-budget exemption covers it) and after the generic sections. Rows come
+# only from shared `schemas/*.schema.json` paths; the non-schema cells are `-`
+# placeholders the orchestrator fills from the child bodies (never empty).
+emit_boundaries() {  # emit_boundaries <newline-list of shared schema paths>
+    list="$1"
+    printf '## Cross-language boundaries\n\n'
+    printf '| Boundary | Transport | Schema (source of truth) | Owner | Golden fixture |\n'
+    printf '|---|---|---|---|---|\n'
+    if [ -n "$list" ]; then
+        printf '%s\n' "$list" | while IFS= read -r schema; do
+            [ -n "$schema" ] || continue
+            stem="${schema##*/}"
+            stem="${stem%.schema.json}"
+            printf '| %s | - | %s | - | - |\n' "$stem" "$schema"
+        done
+    else
+        printf '\n_No shared boundary schemas detected — no `schemas/*.schema.json` path appears in >=2 child bodies; fill in one row per interface before merging the spec._\n'
+    fi
+    printf '\n'
+}
+
+if [ "$BOUNDARIES" -eq 1 ]; then
+    emit_boundaries "$shared_schemas"
+fi
 
 printf '<!-- autospec-shared-contracts:end -->\n'
 

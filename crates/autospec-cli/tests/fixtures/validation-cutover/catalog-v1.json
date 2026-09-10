@@ -173,6 +173,7 @@
     "check_run_groom_preflight_contract",
     "check_pipeline_verdict_ratchet",
     "check_restore_visibility_ratchet",
-    "check_generated_artifact_integrity"
+    "check_generated_artifact_integrity",
+    "check_cross_language_boundaries"
   ]
 }
