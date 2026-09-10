@@ -972,3 +972,226 @@ fn implementation_lint_clean_fixture_has_no_findings() {
     assert!(result.findings.is_empty());
     assert_eq!(result.exit_code(), 0);
 }
+
+const UNPERFORMED_DIFF: &str = r#"
+diff --git a/internal/session/manager.go b/internal/session/manager.go
+--- a/internal/session/manager.go
++++ b/internal/session/manager.go
+@@ -1,3 +1,5 @@
+ package session
+ type Session struct {
++    // LastUsed is written on a coarse interval.
++    LastUsed time.Time
+ }
+"#;
+
+const UNPERFORMED_FILE: &str = r#"
+package session
+type Session struct {
+    // LastUsed is written on a coarse interval.
+    LastUsed time.Time
+}
+"#;
+
+fn unperformed_repository(contents: &str) -> TestRepository {
+    let mut repository = TestRepository::default();
+    repository.file_contents.insert(
+        "internal/session/manager.go".to_string(),
+        contents.to_string(),
+    );
+    repository
+}
+
+#[test]
+fn implementation_lint_exposes_the_unperformed_doc_claim_rule_identity() {
+    assert_eq!(
+        ImplementationLintRule::UnperformedDocClaim.id(),
+        "UNPERFORMED_DOC_CLAIM"
+    );
+    assert_eq!(
+        ImplementationLintRule::from_id("UNPERFORMED_DOC_CLAIM"),
+        Some(ImplementationLintRule::UnperformedDocClaim)
+    );
+    assert!(directive_for(ImplementationLintRule::UnperformedDocClaim)
+        .contains("implement the behaviour or delete the claim"));
+}
+
+#[test]
+fn implementation_lint_flags_a_doc_claim_the_file_never_performs() {
+    let result = lint(
+        UNPERFORMED_DIFF,
+        None,
+        &unperformed_repository(UNPERFORMED_FILE),
+        ImplementationLintOptions::default(),
+    );
+
+    assert_eq!(rules(&result), ["UNPERFORMED_DOC_CLAIM"]);
+    assert_eq!(result.blocking_count, 1);
+    let finding = &result.findings[0];
+    assert_eq!(finding.severity, ImplementationLintSeverity::Error);
+    assert_eq!(finding.path, "internal/session/manager.go");
+    assert_eq!(finding.line, Some(3));
+    assert!(finding.message.contains("LastUsed"));
+    assert!(finding.message.contains("is written"));
+}
+
+#[test]
+fn implementation_lint_does_not_flag_a_doc_claim_the_file_performs() {
+    let contents = format!(
+        "{}\nfunc (s *Session) Touch() {{\n\ts.LastUsed = time.Now()\n}}\n",
+        UNPERFORMED_FILE
+    );
+    let result = lint(
+        UNPERFORMED_DIFF,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert!(result.findings.is_empty());
+}
+
+#[test]
+fn implementation_lint_ignores_doc_claims_with_comparisons_only() {
+    let contents = format!(
+        "{}\nfunc stale(s Session) bool {{\n\treturn s.LastUsed == time.Unix(0, 0) || s.LastUsed <= time.Now()\n}}\n",
+        UNPERFORMED_FILE
+    );
+    let result = lint(
+        UNPERFORMED_DIFF,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert_eq!(rules(&result), ["UNPERFORMED_DOC_CLAIM"]);
+}
+
+#[test]
+fn implementation_lint_ignores_doc_comments_without_a_behaviour_claim() {
+    let diff = UNPERFORMED_DIFF
+        .replace(
+            "+    // LastUsed is written on a coarse interval.",
+            "+    // LastUsed records when the session was last seen.",
+        )
+        .replace(
+            "    // LastUsed is written on a coarse interval.",
+            "    // LastUsed records when the session was last seen.",
+        );
+    let contents = UNPERFORMED_FILE.replace(
+        "    // LastUsed is written on a coarse interval.",
+        "    // LastUsed records when the session was last seen.",
+    );
+    let result = lint(
+        &diff,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert!(result.findings.is_empty());
+}
+
+#[test]
+fn implementation_lint_ignores_unexported_identifiers_in_doc_claims() {
+    let diff = UNPERFORMED_DIFF.replace("LastUsed", "lastUsed");
+    let contents = UNPERFORMED_FILE.replace("LastUsed", "lastUsed");
+    let result = lint(
+        &diff,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert!(result.findings.is_empty());
+}
+
+#[test]
+fn implementation_lint_flags_exported_rust_fields_in_doc_claims() {
+    let diff = r#"
+diff --git a/src/cache.rs b/src/cache.rs
+--- a/src/cache.rs
++++ b/src/cache.rs
+@@ -0,0 +1,3 @@
++/// The timestamp is updated on every read.
++pub last_read: Option<Instant>,
++
+"#;
+    let contents = "/// The timestamp is updated on every read.\npub last_read: Option<Instant>,\n";
+    let mut repository = TestRepository::default();
+    repository
+        .file_contents
+        .insert("src/cache.rs".to_string(), contents.to_string());
+
+    let result = lint(
+        diff,
+        None,
+        &repository,
+        ImplementationLintOptions::default(),
+    );
+
+    assert_eq!(rules(&result), ["UNPERFORMED_DOC_CLAIM"]);
+    assert_eq!(result.findings[0].line, Some(1));
+    assert!(result.findings[0].message.contains("last_read"));
+}
+
+#[test]
+fn implementation_lint_honors_the_unperformed_doc_claim_escape_hatch() {
+    let diff = UNPERFORMED_DIFF.replace(
+        "+    // LastUsed is written on a coarse interval.",
+        "+    // linter:allow-UNPERFORMED_DOC_CLAIM populated by the external indexer\n+    // LastUsed is written on a coarse interval.",
+    );
+    let contents = UNPERFORMED_FILE.replace(
+        "    // LastUsed is written on a coarse interval.",
+        "    // linter:allow-UNPERFORMED_DOC_CLAIM populated by the external indexer\n    // LastUsed is written on a coarse interval.",
+    );
+    let result = lint(
+        &diff,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert_eq!(result.blocking_count, 0);
+    assert_eq!(rules(&result), ["UNPERFORMED_DOC_CLAIM"]);
+    assert_eq!(
+        result.findings[0].severity,
+        ImplementationLintSeverity::Info
+    );
+}
+
+#[test]
+fn implementation_lint_requires_a_reason_for_the_unperformed_doc_claim_escape_hatch() {
+    let diff = UNPERFORMED_DIFF.replace(
+        "+    // LastUsed is written on a coarse interval.",
+        "+    // linter:allow-UNPERFORMED_DOC_CLAIM\n+    // LastUsed is written on a coarse interval.",
+    );
+    let contents = UNPERFORMED_FILE.replace(
+        "    // LastUsed is written on a coarse interval.",
+        "    // linter:allow-UNPERFORMED_DOC_CLAIM\n    // LastUsed is written on a coarse interval.",
+    );
+    let result = lint(
+        &diff,
+        None,
+        &unperformed_repository(&contents),
+        ImplementationLintOptions::default(),
+    );
+
+    assert_eq!(rules(&result), ["UNPERFORMED_DOC_CLAIM"]);
+    assert_eq!(
+        result.findings[0].severity,
+        ImplementationLintSeverity::Error
+    );
+}
+
+#[test]
+fn implementation_lint_unperformed_doc_claim_fails_open_without_a_snapshot() {
+    let result = lint(
+        UNPERFORMED_DIFF,
+        None,
+        &TestRepository::default(),
+        ImplementationLintOptions::default(),
+    );
+
+    assert!(result.findings.is_empty());
+}

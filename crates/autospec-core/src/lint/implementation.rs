@@ -33,6 +33,11 @@ pub enum ImplementationLintRule {
     ReinventRepoUtil,
     NewDepUnjustified,
     NewAbstractionSingleCaller,
+    /// A doc comment claims runtime behaviour about an exported identifier the
+    /// post-change file never assigns to. The claim is a defect: either the code
+    /// that performs it is missing, or the comment lies. Doc-side twin of
+    /// `DocOutOfSync`.
+    UnperformedDocClaim,
 }
 
 impl ImplementationLintRule {
@@ -57,6 +62,7 @@ impl ImplementationLintRule {
             Self::ReinventRepoUtil => "REINVENT_REPO_UTIL",
             Self::NewDepUnjustified => "NEW_DEP_UNJUSTIFIED",
             Self::NewAbstractionSingleCaller => "NEW_ABSTRACTION_SINGLE_CALLER",
+            Self::UnperformedDocClaim => "UNPERFORMED_DOC_CLAIM",
         }
     }
 
@@ -81,6 +87,7 @@ impl ImplementationLintRule {
             "REINVENT_REPO_UTIL" => Self::ReinventRepoUtil,
             "NEW_DEP_UNJUSTIFIED" => Self::NewDepUnjustified,
             "NEW_ABSTRACTION_SINGLE_CALLER" => Self::NewAbstractionSingleCaller,
+            "UNPERFORMED_DOC_CLAIM" => Self::UnperformedDocClaim,
             _ => return None,
         })
     }
@@ -249,6 +256,7 @@ pub fn lint_implementation(
     detect_todo_left(diff, &mut collector);
     detect_mock_db(diff, &mut collector);
     detect_doc_out_of_sync(diff, &mut collector);
+    detect_unperformed_doc_claims(diff, context.repository, &mut collector);
 
     if context.options.enable_vacuous_assertions || context.options.pre_commit_mode {
         detect_vacuous_assertions(diff, &mut collector);
@@ -340,6 +348,9 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
         }
         ImplementationLintRule::NewAbstractionSingleCaller => {
             "Inline this abstraction — with only one caller, the named wrapper adds indirection without value."
+        }
+        ImplementationLintRule::UnperformedDocClaim => {
+            "Find the code and the test that prove the behaviour this doc comment claims; if neither exists, implement the behaviour or delete the claim. A comment describing behaviour no code performs is a defect, not documentation."
         }
     }
 }
@@ -1137,6 +1148,162 @@ fn detect_doc_out_of_sync(diff: &UnifiedDiff, collector: &mut FindingCollector) 
             }
         }
     }
+}
+
+/// Present-tense passive phrases that turn a doc comment into a runtime
+/// behaviour claim about the identifier it documents.
+const UNPERFORMED_CLAIM_PHRASES: [&str; 4] =
+    ["is written", "is updated", "is refreshed", "is pruned"];
+
+/// A doc comment that claims runtime behaviour about an exported identifier is a
+/// claim, not documentation: the identifier must be assigned somewhere in the
+/// post-change file, or the comment is a defect (implement the behaviour or
+/// delete the claim). Deliberately cheap and heuristic — a capitalized field in
+/// Go, a `pub` field in Rust, an `export`ed binding in JS; `# linter:allow-
+/// UNPERFORMED_DOC_CLAIM <reason>` is the escape hatch for a genuine false
+/// positive.
+fn detect_unperformed_doc_claims(
+    diff: &UnifiedDiff,
+    repository: &dyn RepositoryIndex,
+    collector: &mut FindingCollector,
+) {
+    for file in &diff.files {
+        if is_test_file(&file.path) || is_doc_file(&file.path) || is_binaryish(&file.path) {
+            continue;
+        }
+        let Some(contents) = repository.post_change_file(&file.path) else {
+            continue;
+        };
+        let lines: Vec<&str> = contents.lines().collect();
+        for line in file.added_lines() {
+            if collector.stopped() {
+                return;
+            }
+            let Some(comment) = line.content.trim_start().strip_prefix("//") else {
+                continue;
+            };
+            if comment.starts_with('!') {
+                continue;
+            }
+            let lower = comment.to_ascii_lowercase();
+            let Some(phrase) = UNPERFORMED_CLAIM_PHRASES
+                .into_iter()
+                .find(|phrase| lower.contains(phrase))
+            else {
+                continue;
+            };
+            let Some(new_line) = line.new_line else {
+                continue;
+            };
+            let Some((identifier, exported)) = documented_identifier(&lines, new_line - 1) else {
+                continue;
+            };
+            if !exported || has_assignment(&contents, &identifier) {
+                continue;
+            }
+            let message = format!(
+                "doc comment claims {identifier} {phrase} but no assignment to {identifier} exists in the file — implement the behaviour or delete the claim"
+            );
+            let rule = ImplementationLintRule::UnperformedDocClaim;
+            if inline_allow(repository, &file.path, Some(new_line), rule) {
+                collector.info(rule, &file.path, Some(new_line), message);
+            } else {
+                collector.emit(rule, &file.path, Some(new_line), message);
+            }
+        }
+    }
+}
+
+/// The identifier declared on the first code line after the comment at
+/// `comment_line` (0-based), with a flag for whether it is exported —
+/// capitalized (Go convention) or preceded by a `pub`/`export` token (Rust/JS).
+/// Returns `None` when the documented line is not a plain field/const
+/// declaration (methods, calls, prose), in which case the claim is left to a
+/// human reviewer.
+fn documented_identifier(lines: &[&str], comment_line: usize) -> Option<(String, bool)> {
+    let mut index = comment_line + 1;
+    loop {
+        let line = lines.get(index)?.trim_start();
+        index += 1;
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+        {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let mut offset = 0;
+        let mut exported = false;
+        while offset < tokens.len().min(3) {
+            match tokens[offset] {
+                "pub" | "export" => {
+                    exported = true;
+                    offset += 1;
+                }
+                "static" | "final" | "const" | "let" | "var" | "fn" | "func" | "type" => {
+                    offset += 1;
+                }
+                _ => break,
+            }
+        }
+        let raw = tokens.get(offset)?;
+        let name = raw
+            .strip_suffix(',')
+            .or_else(|| raw.strip_suffix(':'))
+            .unwrap_or(raw);
+        if name.is_empty()
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        return Some((
+            name.to_string(),
+            exported || name.chars().next().is_some_and(|c| c.is_ascii_uppercase()),
+        ));
+    }
+}
+
+/// True when `identifier` is assigned anywhere in `contents` (`=`, `+=`, …).
+/// Comparisons and match arms never count: `==` is rejected outright, `<=` /
+/// `>=` / `!=` do not put `=` adjacent to the identifier, and Rust's `=>`
+/// keeps `>` in the way.
+fn has_assignment(contents: &str, identifier: &str) -> bool {
+    let is_boundary = |byte: u8| !(byte.is_ascii_alphanumeric() || byte == b'_');
+    for line in contents.lines() {
+        let bytes = line.as_bytes();
+        let mut start = 0;
+        while let Some(rel) = line[start..].find(identifier) {
+            let begin = start + rel;
+            let end = begin + identifier.len();
+            if begin == 0 || is_boundary(bytes[begin - 1]) {
+                if end >= bytes.len() || is_boundary(bytes[end]) {
+                    let mut i = end;
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    let assigns = match bytes.get(i) {
+                        Some(b'=') => bytes
+                            .get(i + 1)
+                            .is_some_and(|next| *next != b'=' && *next != b'>'),
+                        Some(b'+' | b'-' | b'*' | b'/' | b'|' | b'&' | b'^' | b'%') => {
+                            bytes.get(i + 1) == Some(&b'=') && bytes.get(i + 2) != Some(&b'=')
+                        }
+                        _ => false,
+                    };
+                    if assigns {
+                        return true;
+                    }
+                }
+            }
+            start = end;
+        }
+    }
+    false
 }
 
 fn detect_vacuous_assertions(diff: &UnifiedDiff, collector: &mut FindingCollector) {
