@@ -1,4 +1,5 @@
 pub mod aar;
+pub mod anchor;
 pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
@@ -87,6 +88,10 @@ impl std::fmt::Display for CommandFailure {
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("aar", "Inspect adaptive agent runtime policy"),
+    (
+        "anchor",
+        "Register and verify protected evaluator anchor suites",
+    ),
     ("initiative", "Inspect cross-repository initiatives"),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
@@ -150,6 +155,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
         [command, rest @ ..] => match command.as_str() {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
             "aar" => aar::run(rest),
+            "anchor" => anchor::run(rest),
             "initiative" => initiative::run(rest),
             "issue" => issue::run(rest),
             "insights" => insights::run(rest)
