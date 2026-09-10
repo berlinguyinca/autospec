@@ -125,21 +125,25 @@ pub fn append_synced_line(path: &Path, line: &[u8], fail_after: Option<usize>) -
     let length = file.metadata().map(|metadata| metadata.len())?;
     file.seek(SeekFrom::End(0))?;
 
-    let torn = match fail_after.map(|limit| limit.min(line.len())) {
-        Some(limit) => {
-            file.write_all(&line[..limit])?;
-            Some(limit)
-        }
-        None => {
-            file.write_all(line)?;
-            None
-        }
+    // Both the injected fault and a genuine short/failed write land in the
+    // same `write_result`, so both take the same rollback path (the
+    // `managed_project.rs` `append_synced_line` body).
+    let write_result = match fail_after.map(|limit| limit.min(line.len())) {
+        Some(limit) => file
+            .write_all(&line[..limit])
+            .and_then(|()| Err(std::io::Error::other("injected partial append"))),
+        None => file.write_all(line),
     };
 
-    if let Some(limit) = torn {
-        rollback(file, path, length)?;
+    if let Err(error) = write_result {
+        if let Err(rollback_error) = rollback(file, path, length) {
+            return Err(EvaluationError::io(format!(
+                "append to {} failed ({error}) and rollback failed ({rollback_error})",
+                path.display()
+            )));
+        }
         return Err(EvaluationError::io(format!(
-            "injected partial write of {limit} bytes before rollback: {}",
+            "append to {} rolled back to {length} bytes: {error}",
             path.display()
         )));
     }
