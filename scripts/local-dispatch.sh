@@ -26,14 +26,31 @@
 # Local GPU is capacity-1: two concurrent dispatches to one runtime thrash into
 # swap and both blow their ceiling. A host-scoped lock serializes them.
 #
+# Post-dispatch check (R8, tracker #3344) — verbatim-anchor verification:
+# a local model can silently substitute one word in the source text it
+# paraphrases ("persistent agent" written as "persistence agent") with no
+# tell. Every claim a local dispatch makes about source text must carry a
+# `file:line` anchor AND a verbatim quote span, and `--verify-anchors` checks
+# the quote against the named source: a claim is kept only when the span
+# exists verbatim at the named location (that exact line when one is given,
+# anywhere in the file otherwise). Unanchored, unresolvable, and non-matching
+# claims — including one-word near-misses — are DROPPED, never escalated: a
+# human triaging fabricated quotes is the cost this rule avoids. Exit stays
+# 0; stdout is the kept-claims JSON array and stderr carries one line per
+# drop plus the summary `local-dispatch: anchor-verify kept=N dropped=M
+# total=T` so the caller can record the drop count on the routing ledger
+# (`routing-ledger.sh` optional `anchor_drops` key).
+#
 # Usage:
 #   local-dispatch.sh --model <tag> --prompt-file <path>
 #                     [--provider ollama|lmstudio] [--cwd <dir>]
 #                     [--timeout-secs N] [--skip-capability-check] [--dry-run]
+#   local-dispatch.sh --verify-anchors <claims.json|-> [--root <dir>]
 #
 # Exit codes:
 #   0  dispatch completed (stdout is the executor's output)
 #   1  bad arguments
+#   2  --verify-anchors: jq missing (fail-closed)
 #   3  precondition failed — caller MUST fall back to its cloud tier
 #   4  dispatch exceeded the wall-clock ceiling
 #   >4 the executor's own non-zero status
@@ -55,6 +72,8 @@ SKIP_CAP=0
 DRY_RUN=0
 CAPABILITY="${AUTOSPEC_MODEL_CAPABILITY:-$HOME/.autospec/model-capability.json}"
 LOCK_DIR="${AUTOSPEC_LOCAL_LOCK_DIR:-$HOME/.autospec/locks}"
+VERIFY_CLAIMS=""
+ROOT_DIR="."
 
 _die() { printf 'local-dispatch: %s\n' "$1" >&2; exit "${2:-1}"; }
 _refuse() { printf 'local-dispatch: %s\n' "$1" >&2; exit 3; }
@@ -70,13 +89,19 @@ while [ $# -gt 0 ]; do
         --capability-file) CAPABILITY="${2:-}"; shift 2 ;;
         --skip-capability-check) SKIP_CAP=1; shift ;;
         --dry-run)      DRY_RUN=1; shift ;;
+        --verify-anchors) VERIFY_CLAIMS="${2:-}"; shift 2 ;;
+        --root)         ROOT_DIR="${2:-}"; shift 2 ;;
         *) _die "unknown option: $1" ;;
     esac
 done
 
-if [ -z "$MODEL" ]; then _die '--model is required'; fi
-if [ -z "$PROMPT_FILE" ]; then _die '--prompt-file is required'; fi
-if [ ! -f "$PROMPT_FILE" ]; then _die "prompt file not found: $PROMPT_FILE"; fi
+# --model/--prompt-file are dispatch-mode requirements only; --verify-anchors
+# is a standalone post-dispatch check and needs neither.
+if [ -z "$VERIFY_CLAIMS" ]; then
+    if [ -z "$MODEL" ]; then _die '--model is required'; fi
+    if [ -z "$PROMPT_FILE" ]; then _die '--prompt-file is required'; fi
+    if [ ! -f "$PROMPT_FILE" ]; then _die "prompt file not found: $PROMPT_FILE"; fi
+fi
 case "$PROVIDER" in
     ollama|lmstudio) ;;
     *) _die "unsupported provider: $PROVIDER (ollama|lmstudio)" ;;
@@ -84,6 +109,117 @@ esac
 case "$TIMEOUT_SECS" in
     ''|*[!0-9]*) _die "--timeout-secs must be an integer: $TIMEOUT_SECS" ;;
 esac
+
+# ── R8: verbatim-anchor verification of local paraphrase output ─────────────
+
+_trim() {
+    _t="$1"
+    _t="${_t#"${_t%%[![:space:]]*}"}"
+    _t="${_t%"${_t##*[![:space:]]}"}"
+    printf '%s' "$_t"
+}
+
+# _verify_one_claim <claim-json> — print a drop reason; empty means keep.
+# A claim is kept only when BOTH `quote` and `anchor` are non-empty AND the
+# quote exists verbatim at the named location. The match is exact: case- and
+# whitespace-sensitive, line-bound when a line is given — a one-word
+# near-miss never matches.
+_verify_one_claim() {
+    if ! printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf 'claim is not a JSON object'
+        return 0
+    fi
+    _q="$(_trim "$(printf '%s' "$1" | jq -r '(.quote // "") | tostring')")"
+    _a="$(_trim "$(printf '%s' "$1" | jq -r '(.anchor // "") | tostring')")"
+    if [ -z "$_q" ] || [ -z "$_a" ]; then
+        printf 'unanchored claim (needs both a file:line anchor and a verbatim quote): %s' \
+            "$(printf '%s' "$1" | jq -r '(.claim // "") | tostring | .[0:120]')"
+        return 0
+    fi
+    case "$_a" in
+        *:*) _path="${_a%:*}"; _line="${_a##*:}" ;;
+        *)   _path="$_a"; _line="" ;;
+    esac
+    case "$_path" in
+        ''|/*|.|..)
+            printf 'unresolvable anchor path: %s' "$_a"
+            return 0 ;;
+    esac
+    case "$_path" in
+        ../*|*/../*|*/..)
+            printf 'unresolvable anchor path (traversal): %s' "$_a"
+            return 0 ;;
+    esac
+    if [ -n "$_line" ]; then
+        case "$_line" in
+            *[!0-9]*)
+                printf 'anchor line is not a positive integer: %s' "$_a"
+                return 0 ;;
+        esac
+    fi
+    _src="$ROOT_DIR/$_path"
+    if [ ! -f "$_src" ]; then
+        printf 'source not found at %s' "$_path"
+        return 0
+    fi
+    if [ -n "$_line" ]; then
+        if ! printf '%s\n' "$(sed -n "${_line}p" "$_src" 2>/dev/null)" | grep -F -q -e "$_q"; then
+            printf 'quote not verbatim at %s:%s (near-miss or wrong line)' "$_path" "$_line"
+            return 0
+        fi
+    else
+        if ! grep -F -q -e "$_q" "$_src" 2>/dev/null; then
+            printf 'quote not verbatim in %s' "$_path"
+            return 0
+        fi
+    fi
+    return 0
+}
+
+# _run_verify_anchors — the --verify-anchors mode. Dropped claims never fail
+# the run: exit 0 with the kept array on stdout, so the caller records the
+# drop count on the ledger instead of escalating fabricated quotes to a human.
+_run_verify_anchors() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf 'local-dispatch: jq is required for --verify-anchors (fail-closed)\n' >&2
+        exit 2
+    fi
+    if [ "$VERIFY_CLAIMS" = "-" ]; then
+        _claims="$(cat)"
+    else
+        _claims="$(cat "$VERIFY_CLAIMS")"
+    fi
+    if ! printf '%s' "$_claims" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        _die "claims input must be a JSON array of {claim, anchor, quote} objects"
+    fi
+    _total="$(printf '%s' "$_claims" | jq 'length')"
+    _kept='[]'
+    _dropped=0
+    _i=0
+    while [ "$_i" -lt "$_total" ]; do
+        _claim="$(printf '%s' "$_claims" | jq -c ".[$_i]")"
+        _reason="$(_verify_one_claim "$_claim")"
+        if [ -z "$_reason" ]; then
+            _kept="$(printf '%s' "$_kept" | jq -c --argjson c "$_claim" '. + [$c]')"
+        else
+            _dropped=$((_dropped + 1))
+            printf 'local-dispatch: anchor-verify drop: %s\n' "$_reason" >&2
+        fi
+        _i=$((_i + 1))
+    done
+    printf 'local-dispatch: anchor-verify kept=%s dropped=%s total=%s\n' \
+        "$(printf '%s' "$_kept" | jq 'length')" "$_dropped" "$_total" >&2
+    printf '%s' "$_kept"
+}
+
+if [ -n "$VERIFY_CLAIMS" ]; then
+    if [ ! -d "$ROOT_DIR" ]; then _die "root directory not found: $ROOT_DIR"; fi
+    if [ "$VERIFY_CLAIMS" != "-" ] && [ ! -f "$VERIFY_CLAIMS" ]; then
+        _die "claims file not found: $VERIFY_CLAIMS"
+    fi
+    _run_verify_anchors
+    exit $?
+fi
 
 # ── precondition 1: an executor that really supports local models ─────────────
 if ! command -v codex >/dev/null 2>&1; then

@@ -28,6 +28,12 @@
 #     cached_tokens   prompt-cache hits; feeds the cache-penalty term, which is
 #                     the difference between a cheap model and a cheap dispatch
 #     escalated       true when the dispatch pulled in a stronger advisor/tier
+#     anchor_drops    OPTIONAL non-negative number (R8, tracker #3344): count
+#                     of unanchored or non-verbatim claims dropped by
+#                     local-dispatch.sh --verify-anchors on this dispatch.
+#                     Absent when no anchor check ran. --stats totals it per
+#                     (kind, profile, cell) so a profile that fabricates often
+#                     becomes visible; --show prints it as drops=N.
 #     outcome         pending | merged_clean | lgtm_first_pass | retried_ok |
 #                     escalated | qa_failed | reverted | abandoned
 #     stack           OPTIONAL. The detected stack-profile id this dispatch ran
@@ -199,6 +205,15 @@ _validate_counters() {
         printf 'cached_tokens may not exceed input_tokens\n'
         return 1
     fi
+    # anchor_drops (R8) is optional: absent means no verbatim-anchor check ran.
+    # Present, it must be a non-negative number — it is the fabrication signal
+    # the ledger exists to make visible, and a string would poison the total.
+    if printf '%s' "$_obj" | jq -e 'has("anchor_drops")' >/dev/null 2>&1; then
+        if ! printf '%s' "$_obj" | jq -e '(.anchor_drops|type=="number") and (.anchor_drops>=0)' >/dev/null 2>&1; then
+            printf 'anchor_drops must be a non-negative number\n'
+            return 1
+        fi
+    fi
     return 0
 }
 
@@ -279,7 +294,7 @@ case "$MODE" in
             printf '%s' "$_recs" | jq '.'
         else
             printf '%s' "$_recs" | jq -r '.[] |
-                "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\t\(.outcome)\tretries=\(.retries)\tms=\(.wall_clock_ms)"'
+                "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\t\(.outcome)\tretries=\(.retries)\tms=\(.wall_clock_ms)\tdrops=\(.anchor_drops // 0)"'
         fi
         exit 0
         ;;
@@ -304,6 +319,7 @@ case "$MODE" in
                 input_tokens:  (map(.input_tokens) | add // 0),
                 output_tokens: (map(.output_tokens) | add // 0),
                 cached_tokens: (map(.cached_tokens) | add // 0),
+                anchor_drops:  (map(.anchor_drops // 0) | add // 0),
                 wall_clock_ms: (map(.wall_clock_ms) | add // 0)
               })
             | map(. + {
@@ -318,7 +334,7 @@ case "$MODE" in
             printf '%s' "$_stats" | jq '.'
         else
             printf '%s' "$_stats" | jq -r '.[] |
-                "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\tn=\(.dispatches)\tfirst_pass=\(.first_pass_rate)\tesc=\(.escalation_rate)\tcache=\(.cache_hit_ratio)"'
+                "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\tn=\(.dispatches)\tfirst_pass=\(.first_pass_rate)\tesc=\(.escalation_rate)\tcache=\(.cache_hit_ratio)\tdrops=\(.anchor_drops)"'
         fi
         exit 0
         ;;

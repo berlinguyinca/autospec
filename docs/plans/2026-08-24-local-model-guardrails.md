@@ -141,3 +141,29 @@ R3 needs no separate implementation — it is the policy R1 and R2 encode.
   freezes them.
 - No local planning or review lane, including a "cheap review" lane. The
   ledger rewards what it measures; measure review quality before routing it.
+
+## 7. R8 as built (#3351)
+
+R8 lands as a post-dispatch mode of `scripts/local-dispatch.sh` rather than a
+separate script: the check runs where the dispatch output is, after the
+executor returns and before the caller trusts the paraphrase (spec → issue
+body, diff → review finding).
+
+- **Invocation:** `local-dispatch.sh --verify-anchors <claims.json|-> [--root <dir>]`.
+  Input is a JSON array of claims; each claim needs a `file:line` `anchor`
+  **and** a verbatim `quote` span (a `file`-only anchor searches the whole
+  file). A claim is kept only when the quote exists verbatim at the named
+  location — case- and whitespace-sensitive, line-bound when a line is given.
+  Unanchored, unresolvable, and non-matching claims (including one-word
+  near-misses) are **dropped**, never escalated: the exit stays 0, stdout is
+  the kept-claims array, and stderr carries the machine-readable summary
+  `local-dispatch: anchor-verify kept=N dropped=M total=T`.
+- **Ledger:** the caller records `dropped` on the `routing-ledger.sh` row as
+  the optional non-negative `anchor_drops` key (absent = no anchor check
+  ran; a present value that is not a non-negative number is rejected).
+  `--stats` totals it per (kind, profile, cell) and `--show` prints
+  `drops=N`, so a profile that fabricates often becomes visible.
+- **Scope:** local dispatches only. Cloud dispatches are unchanged, and the
+  review-finding schema gains only the anchor field, nothing more.
+- **Tests:** `tests/local-anchor-verification.bats` (real scripts, no mocks;
+  the one-word-substitution near-miss is a first-class test).
