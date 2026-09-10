@@ -40,6 +40,23 @@
 //!    write time, and [`parse_status_file`] surfaces the flag (re-deriving it
 //!    for files written before the flag existed) so downstream consumers see
 //!    the `build_rc=0` claim for what it is.
+//!
+//! 4. **An absolute-green run is its own status (issue #3798).** A baseline
+//!    answers the weaker question — did the patch make things *worse*? — and
+//!    a run whose gates all ran and returned zero does not need it. Two
+//!    incompatible situations used to collapse into one label: "we could not
+//!    measure the code" and "we measured everything; we could not compare
+//!    the delta". They are now separate statuses. `VERIFIED-ABSOLUTE`
+//!    records that every gate ran and returned zero with no baseline to
+//!    compare against, and it admits to the conversion queue exactly as
+//!    `PASS` does. `UNKNOWN-NO-BASELINE` holds only when the test stage
+//!    failed at run time with no baseline to attribute the failures to — a
+//!    report that the harness did not prepare a baseline, not a judgement
+//!    about the patch. A status file that claims `UNKNOWN-NO-BASELINE` while
+//!    recording every gate green is mislabeled: its recorded rcs are
+//!    positive evidence that every gate ran and passed, and
+//!    [`StatusFile::effective_status`] re-derives the status the evidence
+//!    supports, so such a green artifact is never terminal.
 
 use std::fs;
 use std::io;
@@ -153,8 +170,17 @@ pub enum GateStatus {
     /// the failures to this change.
     NewTestFailures,
     /// The test stage built and failed at run time, with no baseline to
-    /// attribute the failures to. Holds only when the tests actually built.
+    /// attribute the failures to. Holds only when the tests actually built:
+    /// a green run with no baseline is [`GateStatus::VerifiedAbsolute`],
+    /// not this. A missing baseline is a harness fault (the run was not
+    /// prepared with one), not a property of the patch (issue #3798).
     UnknownNoBaseline,
+    /// Build and test stages ran and returned zero, with no baseline to
+    /// compare against: absolute green (issue #3798). A baseline only
+    /// answers the weaker question of whether the patch made things worse;
+    /// "every gate passed" is meaningful without one. Admits to the
+    /// conversion queue as `PASS` does.
+    VerifiedAbsolute,
     /// Build and test stages passed; the patch may enter the conversion queue.
     Pass,
 }
@@ -168,6 +194,7 @@ impl GateStatus {
             Self::NoTestDb => "NO-TEST-DB",
             Self::NewTestFailures => "NEW-TEST-FAILURES",
             Self::UnknownNoBaseline => "UNKNOWN-NO-BASELINE",
+            Self::VerifiedAbsolute => "VERIFIED-ABSOLUTE",
             Self::Pass => "PASS",
         }
     }
@@ -180,6 +207,7 @@ impl GateStatus {
             "NO-TEST-DB" => Ok(Self::NoTestDb),
             "NEW-TEST-FAILURES" => Ok(Self::NewTestFailures),
             "UNKNOWN-NO-BASELINE" => Ok(Self::UnknownNoBaseline),
+            "VERIFIED-ABSOLUTE" => Ok(Self::VerifiedAbsolute),
             "PASS" => Ok(Self::Pass),
             other => Err(format!("unknown gate status: {other}")),
         }
@@ -195,10 +223,13 @@ impl GateStatus {
     }
 
     /// Only a green build *and* a green test stage admit a patch to the
-    /// conversion queue. `TESTS-DO-NOT-COMPILE`, `UNKNOWN-NO-BASELINE`,
-    /// `NEW-TEST-FAILURES`, and `BUILD-FAILED` never do.
+    /// conversion queue — with or without a baseline: `PASS` (green, a
+    /// baseline existed and was compared) and `VERIFIED-ABSOLUTE` (green,
+    /// no baseline to compare against). `TESTS-DO-NOT-COMPILE`,
+    /// `UNKNOWN-NO-BASELINE`, `NEW-TEST-FAILURES`, and `BUILD-FAILED`
+    /// never do.
     pub const fn admits_to_conversion_queue(self) -> bool {
-        matches!(self, Self::Pass)
+        matches!(self, Self::Pass | Self::VerifiedAbsolute)
     }
 }
 
@@ -218,7 +249,11 @@ impl GateStatus {
 /// 4. `test_rc != 0` — the tests built and failed at run time; a baseline
 ///    attributes the failures (`NEW-TEST-FAILURES`), its absence does not
 ///    (`UNKNOWN-NO-BASELINE`).
-/// 5. otherwise — `PASS`.
+/// 5. otherwise — every gate ran and returned zero: `PASS` when a baseline
+///    existed and was compared, `VERIFIED-ABSOLUTE` when it did not (issue
+///    #3798). Absolute green needs no baseline — a baseline only answers
+///    the weaker question of whether the patch made things worse, and a
+///    green run has already answered the stronger one.
 pub fn classify_gate_run(run: &GateRun) -> GateStatus {
     if run.test_build_failed {
         return GateStatus::TestsDoNotCompile;
@@ -236,7 +271,11 @@ pub fn classify_gate_run(run: &GateRun) -> GateStatus {
             GateStatus::UnknownNoBaseline
         };
     }
-    GateStatus::Pass
+    if run.has_baseline {
+        GateStatus::Pass
+    } else {
+        GateStatus::VerifiedAbsolute
+    }
 }
 
 /// The write-time contradiction check.
@@ -301,6 +340,30 @@ impl StatusFile {
     pub fn is_contradictory(&self) -> bool {
         self.contradiction.is_some()
             || (self.build_rc == 0 && self.status == GateStatus::TestsDoNotCompile)
+    }
+
+    /// True when the file claims `UNKNOWN-NO-BASELINE` while every recorded
+    /// gate returned zero — the mislabel from issue #3798, where a fully
+    /// green run was labelled as if it had been unmeasurable. The recorded
+    /// rcs are positive evidence that every gate ran and passed; the status
+    /// line is the one field that is wrong.
+    pub fn is_mislabeled_no_baseline(&self) -> bool {
+        self.status == GateStatus::UnknownNoBaseline
+            && self.build_rc == 0
+            && self.test_rc == 0
+            && self.fmt_rc == 0
+    }
+
+    /// The status the recorded evidence actually supports (issue #3798).
+    /// A mislabeled no-baseline file with every gate green is
+    /// [`GateStatus::VerifiedAbsolute`] and admits to the conversion queue;
+    /// every other file keeps its written status.
+    pub fn effective_status(&self) -> GateStatus {
+        if self.is_mislabeled_no_baseline() {
+            GateStatus::VerifiedAbsolute
+        } else {
+            self.status
+        }
     }
 }
 
@@ -497,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn a_green_run_passes() {
+    fn a_green_run_with_a_baseline_passes() {
         let run = GateRun {
             build_rc: 0,
             test_rc: 0,
@@ -510,6 +573,27 @@ mod tests {
         assert_eq!(classify_gate_run(&run), GateStatus::Pass);
     }
 
+    #[test]
+    fn a_green_run_without_a_baseline_is_verified_absolute() {
+        // Issue #3798: "all gates pass absolutely" is strictly more
+        // information than a baseline comparison, not less. A green run
+        // with no baseline is its own status, and it admits.
+        let run = GateRun {
+            build_rc: 0,
+            test_rc: 0,
+            test_build_failed: false,
+            fmt_rc: 0,
+            has_baseline: false,
+            node: "hive-as-11-3-51".to_string(),
+            test_db_reachable: true,
+        };
+        let status = classify_gate_run(&run);
+        assert_eq!(status, GateStatus::VerifiedAbsolute);
+        assert_eq!(status.as_str(), "VERIFIED-ABSOLUTE");
+        assert!(status.admits_to_conversion_queue());
+        assert!(!status.is_terminal());
+    }
+
     // --- conversion queue admission ----------------------------------------
 
     #[test]
@@ -519,6 +603,7 @@ mod tests {
         assert!(!GateStatus::NewTestFailures.admits_to_conversion_queue());
         assert!(!GateStatus::BuildFailed.admits_to_conversion_queue());
         assert!(GateStatus::Pass.admits_to_conversion_queue());
+        assert!(GateStatus::VerifiedAbsolute.admits_to_conversion_queue());
         assert!(!classify_gate_run(&incident_run()).admits_to_conversion_queue());
     }
 
@@ -597,6 +682,7 @@ mod tests {
             GateStatus::NoTestDb,
             GateStatus::NewTestFailures,
             GateStatus::UnknownNoBaseline,
+            GateStatus::VerifiedAbsolute,
             GateStatus::Pass,
         ] {
             assert_eq!(
@@ -738,5 +824,61 @@ mod tests {
         assert!(
             parse_status_file("status=PASS node=a node=b build_rc=0 test_rc=0 fmt_rc=0").is_err()
         );
+    }
+
+    // --- mislabeled no-baseline green (issue #3798) ----------------------
+
+    /// The exact evidence shape from the incident: a fully green run labelled
+    /// `UNKNOWN-NO-BASELINE` because no baseline existed to compare against.
+    #[test]
+    fn a_mislabeled_no_baseline_green_file_is_effectively_verified_absolute() {
+        let text = "status=UNKNOWN-NO-BASELINE build_rc=0 test_rc=0 fmt_rc=0\n";
+        let parsed = parse_status_file(text).expect("parses");
+        // The written status is preserved; the recorded evidence is what
+        // the effective status is derived from.
+        assert_eq!(parsed.status, GateStatus::UnknownNoBaseline);
+        assert!(parsed.is_mislabeled_no_baseline());
+        assert_eq!(parsed.effective_status(), GateStatus::VerifiedAbsolute);
+        assert!(parsed.effective_status().admits_to_conversion_queue());
+    }
+
+    #[test]
+    fn a_genuine_unknown_no_baseline_file_is_not_mislabeled() {
+        // The test stage failed at run time with no baseline: the label is
+        // what the evidence says, and the run does not admit.
+        let text = "status=UNKNOWN-NO-BASELINE build_rc=0 test_rc=101 fmt_rc=0\n";
+        let parsed = parse_status_file(text).expect("parses");
+        assert!(!parsed.is_mislabeled_no_baseline());
+        assert_eq!(parsed.effective_status(), GateStatus::UnknownNoBaseline);
+        assert!(!parsed.effective_status().admits_to_conversion_queue());
+    }
+
+    #[test]
+    fn a_no_baseline_file_with_a_nonzero_fmt_rc_is_not_absolute_green() {
+        // Every gate must have returned zero: a failing fmt stage is a
+        // recorded negative, not a missing comparison.
+        let text = "status=UNKNOWN-NO-BASELINE build_rc=0 test_rc=0 fmt_rc=1\n";
+        let parsed = parse_status_file(text).expect("parses");
+        assert!(!parsed.is_mislabeled_no_baseline());
+        assert_eq!(parsed.effective_status(), GateStatus::UnknownNoBaseline);
+    }
+
+    #[test]
+    fn files_written_after_the_split_round_trip_their_status() {
+        let run = GateRun {
+            build_rc: 0,
+            test_rc: 0,
+            test_build_failed: false,
+            fmt_rc: 0,
+            has_baseline: false,
+            node: "hive-as-11-3-51".to_string(),
+            test_db_reachable: true,
+        };
+        let line = render_status_file(&run);
+        assert!(line.starts_with("status=VERIFIED-ABSOLUTE"), "{line}");
+        let parsed = parse_status_file(&line).expect("parses");
+        assert_eq!(parsed.status, GateStatus::VerifiedAbsolute);
+        assert!(!parsed.is_mislabeled_no_baseline());
+        assert_eq!(parsed.effective_status(), GateStatus::VerifiedAbsolute);
     }
 }

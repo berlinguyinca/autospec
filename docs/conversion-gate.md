@@ -1,6 +1,6 @@
 # Conversion-pipeline gate contract
 
-Issue #3748. Rust core: `crates/autospec-core/src/conversion_gate.rs`
+Issues #3748 and #3798. Rust core: `crates/autospec-core/src/conversion_gate.rs`
 (module `autospec_core::conversion_gate`).
 
 Agent-generated patches pass through a build gate before they may be emitted
@@ -42,12 +42,13 @@ Statuses written to the status file (`GateStatus`):
 
 | Status | Meaning | Terminal | Admits to queue |
 |---|---|---|---|
-| `PASS` | Build and test stages green | no | yes |
+| `PASS` | Build and test stages green; a baseline existed and was compared | no | yes |
+| `VERIFIED-ABSOLUTE` | Every gate ran and returned zero; no baseline to compare against | no | yes |
 | `TESTS-DO-NOT-COMPILE` | Test stage failed to build | **yes** | no |
 | `BUILD-FAILED` | Build stage failed | **yes** | no |
 | `NO-TEST-DB` | Declared test database unreachable; test stage's runtime results void | **yes** | no |
 | `NEW-TEST-FAILURES` | Tests built; ran; failed; baseline attributes the failures | no | no |
-| `UNKNOWN-NO-BASELINE` | Tests built; ran; failed; no baseline to attribute them | no | no |
+| `UNKNOWN-NO-BASELINE` | Tests built; ran; failed; no baseline to attribute them — a harness fault (missing baseline preparation), not a property of the patch | no | no |
 
 Classification precedence (most specific evidence first):
 
@@ -64,11 +65,38 @@ Classification precedence (most specific evidence first):
    baseline cannot demote it.
 4. `test_rc != 0` → `NEW-TEST-FAILURES` when a baseline exists,
    `UNKNOWN-NO-BASELINE` when it does not. `UNKNOWN-NO-BASELINE` therefore
-   holds **only when the test stage actually built**.
-5. otherwise → `PASS`.
+   holds **only when the test stage actually built and failed**.
+5. otherwise → every gate ran and returned zero: `PASS` when a baseline
+   existed and was compared, `VERIFIED-ABSOLUTE` when it did not (issue
+   #3798).
 
-Only `PASS` admits a patch to the conversion queue; in particular a patch
-whose tests do not compile never reaches it.
+Only `PASS` and `VERIFIED-ABSOLUTE` admit a patch to the conversion queue;
+in particular a patch whose tests do not compile never reaches it.
+
+### The #3798 split: absolute green is not "unknown"
+
+A baseline answers the weaker question — did the patch make things *worse*?
+— and a run whose gates all ran and returned zero does not need it. Before
+this split, one label covered two incompatible situations: *we could not
+measure the code* and *we measured everything; we could not compare the
+delta*. Collapsing the second into the first threw away a stronger result
+because a weaker one was unavailable, and it stalled the serial chain behind
+a fully green patch while every loop logged a healthy line.
+
+- `VERIFIED-ABSOLUTE` records absolute green: every gate emitted positive
+  evidence of having run and returned zero, with no baseline to compare
+  against. It admits to the conversion queue exactly as `PASS` does, so a
+  green patch with no baseline reaches the conversion pass without human
+  intervention.
+- `UNKNOWN-NO-BASELINE` is reserved for a test stage that genuinely failed
+  at run time with no baseline to attribute the failures to. It reads as a
+  report that the **harness** did not prepare a baseline — a fault in
+  preparation, not a judgement about the work — so it is actionable by the
+  right party.
+- The absolute-green shortcut is the rare path, not a workaround: the
+  remedy for a routinely missing baseline is to capture it as part of
+  preparing the run (the base commit is already checked out; measuring it
+  is the same command the patch is measured with).
 
 ### 3. Contradictory signals are flagged at write time
 
@@ -91,3 +119,26 @@ admission. `node` records the scheduler-assigned node the run happened on, so
 a reader comparing two runs' failures can see whether they ran in the same
 world; it is always written, but optional when parsing files written before it
 existed (they parse with an empty node).
+
+### 4. A green run labelled `UNKNOWN-NO-BASELINE` is re-derived at read time
+
+Files written by classifiers before the split (or by a mislabelled one) can
+claim `status=UNKNOWN-NO-BASELINE` while recording `build_rc=0 test_rc=0
+fmt_rc=0` — the exact shape of the #3798 incident, where two fully green
+patches sat invisible to every loop because the one field every downstream
+consumer reads asserted *unknown*. The recorded rcs are positive evidence
+that every gate ran and passed; the status line is the one wrong field.
+
+`parse_status_file` keeps the written status, and
+`StatusFile::is_mislabeled_no_baseline` flags the case (status is
+`UNKNOWN-NO-BASELINE` while all of `build_rc`, `test_rc`, and `fmt_rc` are
+zero). `StatusFile::effective_status` returns the status the recorded
+evidence actually supports — `VERIFIED-ABSOLUTE` for a mislabeled green
+file, the written status for everything else — so consumers that check
+`effective_status().admits_to_conversion_queue()` admit the green artifact
+instead of holding it. A file with any nonzero recorded gate keeps
+`UNKNOWN-NO-BASELINE`: a recorded negative is evidence, not a missing
+comparison. Together the two mechanisms keep a finished artifact from being
+invisible to every consumer at once: the conversion pass reads the
+re-derived status, and the dispatch guard (#3764) names the artifact by
+path whenever it refuses to destroy it.
