@@ -25,6 +25,7 @@ pub mod autonomous_lifecycle;
 pub mod ci_gate_promotion;
 pub mod claim;
 pub mod code_intel;
+pub mod config_fidelity;
 pub mod conflict_resolution;
 pub mod context;
 pub mod conversion_gate;
