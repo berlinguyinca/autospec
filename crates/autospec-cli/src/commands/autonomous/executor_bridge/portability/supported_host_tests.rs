@@ -260,7 +260,6 @@ fn supported_host_admission_helper() {
         42,
         "worker-successor",
         "feat/autonomous-issue-42",
-        "main",
     )
     .unwrap_or_else(|error| match error {
         crate::commands::claim::ConductorClaimError::Diagnostic(error) => {
