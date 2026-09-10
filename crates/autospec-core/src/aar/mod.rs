@@ -34,6 +34,7 @@ pub mod policy;
 pub mod profile;
 pub mod reasoning;
 pub mod result_target;
+pub mod scheduling_contract;
 pub mod telemetry;
 pub mod topology;
 
@@ -92,6 +93,12 @@ pub use reasoning::{
 };
 pub use result_target::{
     evaluate_result_target, median_wall_ms, GateStatus, GateVerdict, ResultTarget,
+};
+pub use scheduling_contract::{
+    admit, admit_interactive, cancellation_release_status, order_queue, ActiveDispatch, Admission,
+    AffinityBinding, AffinityTable, CancellationReleaseStatus, CapacityLimits, DispatchPriority,
+    EventKind, EventLog, InteractiveRefusal, NodeCapacity, PendingDispatch, RefusalReason,
+    SchedulingEvent,
 };
 pub use telemetry::{ExecutionTelemetry, FailureCategory, ReviewOutcome};
 pub use topology::{
