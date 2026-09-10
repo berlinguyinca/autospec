@@ -3,6 +3,7 @@ pub mod closure;
 pub mod conversion_claim;
 pub mod endpoint;
 pub mod executor;
+pub mod fast_lane;
 pub mod gate;
 pub mod gate_reuse;
 pub mod gate_scope;
@@ -34,6 +35,10 @@ pub use endpoint::{
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,
     FailureClass, Role,
+};
+pub use fast_lane::{
+    FastLanePolicy, FastLanePolicyError, GateSet, ImprovementError, ImprovementLedger,
+    ImprovementRate, Schedule, Work, WorkClass, FAST_LANE_CONFIG_PATH,
 };
 pub use patch_apply::{captured_error, classify_apply, ApplyOutcome, ConflictObservation};
 pub use patch_conflicts::{
