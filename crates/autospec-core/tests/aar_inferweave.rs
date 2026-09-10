@@ -217,15 +217,64 @@ fn the_request_renders_the_specification_yaml_shape() {
     assert!(yaml.contains("latency_priority: balanced"));
 }
 
+/// The worker with fewer live agent jobs wins over a busier equally capable
+/// one, every time the selector is asked.
 #[test]
-fn routing_is_deterministic_when_scores_tie() {
-    let offers = [node("b-node", 40_000, 50.0), node("a-node", 40_000, 50.0)];
+fn fewer_live_agent_jobs_win_over_a_busier_worker() {
+    let mut busy = node("busy", 40_000, 50.0);
+    busy.queue_depth = 3;
+    let idle = node("idle", 40_000, 50.0);
+    let offers = [busy, idle];
 
-    let first = route(&request(), &offers);
-    let second = route(&request(), &offers);
+    for _ in 0..16 {
+        let decision = route(&request(), &offers);
+        assert_eq!(decision.selected.as_deref(), Some("idle"));
+    }
+}
 
-    assert_eq!(first.selected, second.selected);
-    assert_eq!(first.selected.as_deref(), Some("a-node"));
+/// The bug this selector used to have: a constant tiebreak sent every
+/// simultaneous dispatch to the same worker. Repeated calls over identical
+/// workers must not be constant.
+#[test]
+fn repeated_routing_over_identical_workers_is_not_constant() {
+    let offers = [node("w1", 40_000, 50.0), node("w2", 40_000, 50.0)];
+
+    let mut chosen = std::collections::BTreeSet::new();
+    for _ in 0..64 {
+        let decision = route(&request(), &offers);
+        chosen.insert(decision.selected.clone().expect("routed"));
+    }
+
+    assert!(
+        chosen.len() > 1,
+        "selection was constant across 64 calls: {chosen:?}"
+    );
+}
+
+/// N simultaneous dispatches spread across N identical workers instead of
+/// converging on one of them.
+#[test]
+fn simultaneous_dispatches_distribute_across_workers() {
+    let offers = [
+        node("w1", 40_000, 50.0),
+        node("w2", 40_000, 50.0),
+        node("w3", 40_000, 50.0),
+        node("w4", 40_000, 50.0),
+    ];
+
+    let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for _ in 0..128 {
+        let decision = route(&request(), &offers);
+        *counts
+            .entry(decision.selected.clone().expect("routed"))
+            .or_insert(0) += 1;
+    }
+
+    assert_eq!(
+        counts.len(),
+        4,
+        "every worker must receive at least one dispatch in 128: {counts:?}"
+    );
 }
 
 #[test]
