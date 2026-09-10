@@ -198,3 +198,126 @@ rec() {
     [ "$status" -eq 1 ]
     [[ "$output" == *":2:"* ]]
 }
+
+# ── §25 telemetry: present fields must be typed, absent fields become unknown ──
+
+@test "--append normalizes absent §25 fields to unknown, never 0" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(rec d1 implementer haiku shallow 100 0 10 0 false pending)"
+    [ "$status" -eq 0 ]
+    row="$(head -n 1 "$LEDGER")"
+    [ "$(printf '%s' "$row" | jq -r '.role')" = "unknown" ]
+    [ "$(printf '%s' "$row" | jq -r '.decode_tok_s')" = "unknown" ]
+    [ "$(printf '%s' "$row" | jq -r '.merged')" = "unknown" ]
+    [ "$(printf '%s' "$row" | jq -r '.ttft_ms')" = "unknown" ]
+    # Every one of the 21 new fields must be unknown, and none of them 0.
+    [ "$(printf '%s' "$row" | jq '[.role,.model_version,.hardware_fingerprint,.runtime,.quantization,
+        .context_requested,.context_reserved,.context_used,.concurrency_at_start,
+        .queue_depth_at_start,.prompt_tok_s,.decode_tok_s,.aggregate_decode_tok_s,
+        .ttft_ms,.retry_index,.previous_model,.review_outcome,.tests_outcome,
+        .merged,.reverted,.stack] | map(select(. != "unknown")) | length')" -eq 0 ]
+}
+
+@test "--append accepts a record with fully typed §25 fields" {
+    full=$(rec d1 implementer haiku shallow 100 0 10 0 false pending | jq -c \
+        '. + {role:"implementer",model_version:"qwen3-32b",hardware_fingerprint:"rtx4090",
+              runtime:"ollama",quantization:"q4_k_m",context_requested:8192,
+              context_reserved:8192,context_used:1000,concurrency_at_start:2,
+              queue_depth_at_start:0,prompt_tok_s:120.5,decode_tok_s:45.5,
+              aggregate_decode_tok_s:90.2,ttft_ms:120,retry_index:1,
+              previous_model:"qwen3-14b",review_outcome:"lgtm",
+              tests_outcome:"passed",merged:true,reverted:false}')
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$full"
+    [ "$status" -eq 0 ]
+    run bash "$SCRIPT" --ledger "$LEDGER" --validate
+    [ "$status" -eq 0 ]
+    [ "$(head -n 1 "$LEDGER" | jq -r '.decode_tok_s')" = "45.5" ]
+    [ "$(head -n 1 "$LEDGER" | jq -r '.merged')" = "true" ]
+}
+
+@test "--append rejects a fabricated string metric" {
+    bad=$(rec d1 implementer haiku shallow 100 0 10 0 false pending | jq -c '. + {decode_tok_s:"fast"}')
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$bad"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"decode_tok_s"* ]]
+    [[ "$output" == *"non-negative number"* ]]
+}
+
+@test "--append rejects a negative telemetry number" {
+    bad=$(rec d1 implementer haiku shallow 100 0 10 0 false pending | jq -c '. + {ttft_ms:-5}')
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$bad"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ttft_ms"* ]]
+}
+
+@test "--append rejects a mistyped telemetry boolean" {
+    bad=$(rec d1 implementer haiku shallow 100 0 10 0 false pending | jq -c '. + {merged:"yes"}')
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$bad"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"merged must be"* ]]
+}
+
+@test "--append rejects an empty string where unknown-or-nonempty is required" {
+    bad=$(rec d1 implementer haiku shallow 100 0 10 0 false pending | jq -c '. + {runtime:""}')
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$bad"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"runtime"* ]]
+    [[ "$output" == *"non-empty string"* ]]
+}
+
+@test "--validate accepts a legacy ledger row lacking the §25 keys" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 100 0 10 0 false merged_clean)" > "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --validate
+    [ "$status" -eq 0 ]
+}
+
+@test "--validate rejects a row with a mistyped §25 field" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 100 0 10 0 false merged_clean)" > "$LEDGER"
+    bad=$(rec d2 implementer haiku shallow 100 0 10 0 false merged_clean | jq -c '. + {prompt_tok_s:"lots"}')
+    printf '%s\n' "$bad" >> "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --validate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *":2:"* ]]
+    [[ "$output" == *"prompt_tok_s"* ]]
+}
+
+@test "--update-outcome normalizes the appended record" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(rec d1 implementer haiku shallow 100 0 10 0 false pending)"
+    run bash "$SCRIPT" --ledger "$LEDGER" --update-outcome d1 merged_clean "ok"
+    [ "$status" -eq 0 ]
+    run grep -c . "$LEDGER"
+    [ "$output" = "2" ]
+    last="$(tail -n 1 "$LEDGER")"
+    [ "$(printf '%s' "$last" | jq -r '.role')" = "unknown" ]
+    [ "$(printf '%s' "$last" | jq -r '.outcome')" = "merged_clean" ]
+}
+
+@test "--rebuild writes a .rebuilt sidecar without touching the live ledger" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(rec d1 implementer haiku shallow 100 0 10 0 false pending)"
+    run bash "$SCRIPT" --ledger "$LEDGER" --update-outcome d1 merged_clean "ok"
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(rec d2 lgtm-reviewer sonnet medium 100 0 10 0 false lgtm_first_pass)"
+    before="$(cat "$LEDGER")"
+    run bash "$SCRIPT" --ledger "$LEDGER" --rebuild
+    [ "$status" -eq 0 ]
+    [ -f "$LEDGER.rebuilt" ]
+    # The live ledger is untouched: byte-identical after the rebuild.
+    [ "$(cat "$LEDGER")" = "$before" ]
+    # The sidecar keeps exactly one (latest) row per dispatch_id.
+    run grep -c . "$LEDGER.rebuilt"
+    [ "$output" = "2" ]
+    [ "$(jq -s 'length' "$LEDGER.rebuilt")" -eq 2 ]
+    [ "$(jq -s '[.[] | select(.dispatch_id=="d1")][0].outcome' "$LEDGER.rebuilt")" = '"merged_clean"' ]
+    run bash "$SCRIPT" --ledger "$LEDGER.rebuilt" --validate
+    [ "$status" -eq 0 ]
+}
+
+@test "--rebuild on a missing ledger fails" {
+    run bash "$SCRIPT" --ledger "$TMP/absent.jsonl" --rebuild
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no ledger"* ]]
+}
+
+@test "--help mentions --rebuild" {
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--rebuild"* ]]
+}

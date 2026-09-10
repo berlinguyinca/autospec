@@ -43,6 +43,26 @@
 #                     rest carries the field. route-decide.sh reads this as the
 #                     per-stack local-eligibility evidence (the stack gate).
 #
+# Telemetry fields (all OPTIONAL — the §25 per-dispatch telemetry extension):
+#   role, model_version, hardware_fingerprint, runtime, quantization,
+#   context_requested, context_reserved, context_used, concurrency_at_start,
+#   queue_depth_at_start, prompt_tok_s, decode_tok_s, aggregate_decode_tok_s,
+#   ttft_ms, retry_index, previous_model, review_outcome, tests_outcome,
+#   merged, reverted
+#
+#     Each is the string "unknown" when the provider/harness did not report the
+#     metric (unknown is preferable to a fabricated value — never 0) or a typed
+#     value: a non-empty string, a non-negative number, or a boolean.
+#     --append and --update-outcome normalize an absent field to "unknown" so
+#     every row at rest carries the full §25 contract. A pre-extension legacy
+#     row lacking the fields stays valid: --validate reads an absent key as
+#     "unknown" (REQUIRED_KEYS is NOT extended).
+#
+# --rebuild reconstructs the latest record per dispatch_id from the existing
+# ledger (§28: survive local loss where reconstructable from history) and
+# writes it to <ledger>.rebuilt for the operator to diff/promote. It NEVER
+# clobbers the live ledger: history is never rewritten.
+#
 # Append-only audit trail: --update-outcome appends a NEW copy of the record with
 # an updated outcome/reason/ts rather than rewriting history. Readers (--show /
 # --stats) take the LATEST line per dispatch_id.
@@ -53,6 +73,7 @@
 #   routing-ledger.sh --stats [--json]
 #   routing-ledger.sh --show [--profile <name>] [--kind <dispatch_kind>] [--json]
 #   routing-ledger.sh --validate [<file>]
+#   routing-ledger.sh --rebuild
 #   routing-ledger.sh -h | --help
 #
 # Ledger path (precedence): --ledger <path> > $AUTOSPEC_ROUTING_LEDGER
@@ -114,6 +135,7 @@ while [ $# -gt 0 ]; do
             fi ;;
         --stats)    MODE="stats"; shift ;;
         --show)     MODE="show"; shift ;;
+        --rebuild)  MODE="rebuild"; shift ;;
         --validate)
             MODE="validate"
             shift
@@ -178,7 +200,65 @@ _validate_object() {
             return 1
         fi
     fi
-    _validate_counters "$_obj"
+    if ! _validate_counters "$_obj"; then
+        return 1
+    fi
+    _validate_telemetry "$_obj"
+}
+
+# _normalize_unknowns <json-object-or-array> — re-emit each record with every
+# optional field (stack + the 20 §25 telemetry fields) that is absent
+# normalized to "unknown", so every row at rest carries the full contract.
+# Absent means "the provider reported nothing": unknown, never 0. Input an
+# array to normalize each element (emitted one compact record per line).
+_normalize_unknowns() {
+    _n_in="${1:-}"
+    [ -n "$_n_in" ] || _n_in="$(cat)"
+    printf '%s' "$_n_in" | jq -c '
+        def norm: reduce (["stack","role","model_version","hardware_fingerprint",
+                           "runtime","quantization","context_requested","context_reserved",
+                           "context_used","concurrency_at_start","queue_depth_at_start",
+                           "prompt_tok_s","decode_tok_s","aggregate_decode_tok_s",
+                           "ttft_ms","retry_index","previous_model","review_outcome",
+                           "tests_outcome","merged","reverted"][]) as $k
+        (. ; if has($k) then . else . + {($k): "unknown"} end);
+        if type == "array" then map(norm) | .[] else norm end'
+}
+
+# _validate_telemetry <json> — the §25 telemetry half of the record contract.
+# All 20 fields are OPTIONAL: a pre-extension legacy row lacking them reads as
+# "unknown" and stays valid. When present, each field must be the string
+# "unknown" (the provider reported nothing) or a properly typed value — a
+# non-empty string, a non-negative number, or a boolean. A fabricated or
+# mistyped value fails closed: unknown is preferable to a fabricated metric.
+_validate_telemetry() {
+    _obj="$1"
+    _bad="$(printf '%s' "$_obj" | jq -r '
+        . as $o
+        | ([ ["role","model_version","hardware_fingerprint","runtime","quantization",
+             "previous_model","review_outcome","tests_outcome"][]
+            | . as $k
+            | select(($o|has($k)) and ((((($o[$k]|type)=="string") and ((($o[$k]=="unknown") or (($o[$k]|length)>0)))) | not)))
+            | {k:$k, t:"\"unknown\" or a non-empty string"} ]
+          + [ ["context_requested","context_reserved","context_used","concurrency_at_start",
+              "queue_depth_at_start","prompt_tok_s","decode_tok_s","aggregate_decode_tok_s",
+              "ttft_ms","retry_index"][]
+            | . as $k
+            | select(($o|has($k)) and ((((($o[$k]=="unknown") or (((($o[$k]|type)=="number") and ($o[$k]>=0))))) | not)))
+            | {k:$k, t:"\"unknown\" or a non-negative number"} ]
+          + [ ["merged","reverted"][]
+            | . as $k
+            | select(($o|has($k)) and ((($o[$k]=="unknown") or (($o[$k]|type)=="boolean")) | not))
+            | {k:$k, t:"\"unknown\" or a boolean"} ]
+        ) as $bad
+        | if ($bad|length) > 0 then $bad[0] | "\(.k) / \(.t)" else empty end')"
+    if [ -n "$_bad" ]; then
+        _k="${_bad%% /*}"
+        _t="${_bad#* / }"
+        printf 'telemetry field %s must be %s\n' "$_k" "$_t"
+        return 1
+    fi
+    return 0
 }
 
 # _validate_counters <json> — numeric/boolean half of the record contract.
@@ -235,9 +315,9 @@ case "$MODE" in
         fi
         _dir="$(dirname "$LEDGER")"
         if [ ! -d "$_dir" ]; then mkdir -p "$_dir"; fi
-        # Normalize the optional stack field on the way in so the invariant
-        # "every row at rest carries stack" holds for --show readers.
-        printf '%s\n' "$(printf '%s' "$ARG1" | jq -c 'if has("stack") then . else . + {stack: "unknown"} end')" >> "$LEDGER"
+        # Normalize absent optional fields (stack + §25 telemetry) to
+        # "unknown" so every row at rest carries the full contract.
+        printf '%s\n' "$(_normalize_unknowns "$ARG1")" >> "$LEDGER"
         exit 0
         ;;
 
@@ -258,8 +338,8 @@ case "$MODE" in
         printf '%s' "$_prev" | jq -c \
             --arg oc "$ARG2" --arg rs "$ARG3" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '.outcome=$oc | .ts=$ts | (if $rs != "" then .reason=$rs else . end)
-             | (if has("stack") then . else . + {stack: "unknown"} end)' >> "$LEDGER"
+            '.outcome=$oc | .ts=$ts | (if $rs != "" then .reason=$rs else . end)' \
+            | _normalize_unknowns >> "$LEDGER"
         exit 0
         ;;
 
@@ -337,5 +417,20 @@ case "$MODE" in
                 "\(.dispatch_kind)\t\(.profile)\t\(.cell_ctx)/\(.cell_reasoning)\tn=\(.dispatches)\tfirst_pass=\(.first_pass_rate)\tesc=\(.escalation_rate)\tcache=\(.cache_hit_ratio)\tdrops=\(.anchor_drops)"'
         fi
         exit 0
+        ;;
+    rebuild)
+        # §28: survive local loss where reconstructable from history — but
+        # history is never rewritten: the rebuild writes <ledger>.rebuilt for
+        # the operator to diff/promote, and never clobbers the live ledger.
+        if [ ! -f "$LEDGER" ]; then
+            _die "no ledger at $LEDGER; nothing to reconstruct"
+        fi
+        _out="${LEDGER}.rebuilt"
+        if [ ! -d "$(dirname "$_out")" ]; then
+            mkdir -p "$(dirname "$_out")"
+        fi
+        _normalize_unknowns "$(_latest_records)" > "$_out"
+        printf 'rebuilt: %s latest record(s) from %s -> %s\n' \
+            "$(grep -c . "$_out" 2>/dev/null || true)" "$LEDGER" "$_out"
         ;;
 esac
