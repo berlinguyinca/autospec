@@ -420,6 +420,28 @@ The Testing section MUST include desktop and mobile visual QA that reports
 spacing, alignment, overflow, table density, toolbar grouping, and chart defaults
 as explicit checks.
 
+### Threat model, before mechanism (authentication, signing, encryption, credentials)
+
+When any requirement touches authentication, token or signature verification,
+encryption, or credential handling, the design spec MUST state the threat
+model before choosing a mechanism. State what property is needed, who the
+untrusted party is, and which existing layer already provides it. If TLS to a
+named host, a process boundary, or an existing gate already establishes the
+property, say so and do not re-establish it. A token signature exists so a
+third party handed a token by an untrusted caller can establish the issuer
+produced it; a confidential client that receives tokens as the response body
+of a request it made, to a host it named, over a connection TLS already
+authenticated has already had the property established, and adding JWKS
+fetch plus signature verification protects against nothing (identity can
+instead come from the provider's `userinfo` endpoint). Only then choose a
+mechanism.
+
+The same reasoning cuts the other way and the spec must state it too: if a
+token could ever arrive by another route — forwarded by a client, read from a
+header — none of that holds and the token must be verified properly. That
+boundary belongs in a comment at the code, so a later reader cannot copy the
+pattern somewhere it is wrong.
+
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it.
