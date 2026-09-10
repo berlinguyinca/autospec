@@ -321,3 +321,144 @@ rec() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"--rebuild"* ]]
 }
+
+# ── Pi execution events (issue #3319): the second record type in one file ────
+#
+# Event rows are WRITTEN by the Rust normalizer
+# (autospec_core::aar::normalize_event / to_ledger_lines in
+# crates/autospec-core/src/aar/pi_events.rs), whose side is covered by the
+# integration test aar_pi_events_ledger.rs. These cases cover the shell side:
+# --append and --validate must accept exactly the rows the Rust side emits, and
+# the dispatch readers must keep ignoring them.
+
+RUST_EVENTS="${BATS_TEST_DIRNAME}/../crates/autospec-core/src/aar/pi_events.rs"
+
+# evrec <seq> <event> — a normalized event row with full identity and three
+# measured metrics (the fixture metrics from the issue's acceptance criteria).
+evrec() {
+    printf '{"record_type":"event","schema_version":1,"seq":%s,"event":"%s","timestamp":"2026-08-21T10:00:00Z","session_id":"pi-s1","work_item_id":"3319","agent_role":"implementer","harness":"pi","ttft_ms":412,"decode_tok_s":61.5,"cache_hit_tokens":18944}' "$1" "$2"
+}
+
+@test "--append accepts a valid event row" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request)"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.event' "$LEDGER")" = "model_request" ]
+}
+
+@test "--append leaves an event row out of the dispatch telemetry contract" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request)"
+    [ "$status" -eq 0 ]
+    # §25 normalization is dispatch-only: padding an event with profile/outcome
+    # would make every event look like a dispatch that measured nothing.
+    [ "$(jq -r 'has("profile") or has("outcome") or has("cell_ctx")' "$LEDGER")" = "false" ]
+}
+
+@test "--validate accepts a ledger holding both record types" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 100 0 10 0 false merged_clean)" > "$LEDGER"
+    printf '%s\n' "$(evrec 1 session_start)" >> "$LEDGER"
+    printf '%s\n' "$(evrec 2 model_request)" >> "$LEDGER"
+    printf '%s\n' "$(evrec 3 finish)" >> "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --validate
+    [ "$status" -eq 0 ]
+}
+
+@test "--validate rejects an event row missing an identity key" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request | jq -c 'del(.work_item_id)')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"event missing required key: work_item_id"* ]]
+}
+
+@test "--validate rejects an event row with an empty agent_role" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request | jq -c '.agent_role=""')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"agent_role must be a non-empty string"* ]]
+}
+
+@test "--validate rejects an event row without a timestamp" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request | jq -c 'del(.timestamp)')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"timestamp"* ]]
+}
+
+@test "--validate rejects an event row with seq 0" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 0 model_request | jq -c '.seq=0')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"event seq must be a number >= 1"* ]]
+}
+
+@test "--validate rejects an unmapped event kind" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 tool_invocation)"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid event: tool_invocation"* ]]
+}
+
+@test "--validate rejects a null metric on an event row" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request | jq -c '. + {ttft_ms:null}')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ttft_ms"* ]]
+    [[ "$output" == *"invalid type"* ]]
+}
+
+@test "--validate accepts the unknown sentinel on an event metric" {
+    # Pi reports nothing for a streamed request's prefill: "unknown", never 0.
+    run bash "$SCRIPT" --ledger "$LEDGER" --append \
+        "$(evrec 1 model_request | jq -c '. + {prefill_ms:"unknown", success:"unknown"}')"
+    [ "$status" -eq 0 ]
+}
+
+@test "--validate rejects an unknown record_type" {
+    run bash "$SCRIPT" --ledger "$LEDGER" --append "$(evrec 1 model_request | jq -c '.record_type="telemetry"')"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"unknown record_type: telemetry"* ]]
+}
+
+@test "--stats ignores an event row sharing a dispatch_id" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 1000 800 5000 0 false merged_clean)" > "$LEDGER"
+    # The event arrives after the dispatch and carries the same dispatch_id: if
+    # it entered the aggregate, its null cell would poison the derived weights.
+    printf '%s\n' "$(evrec 1 model_request | jq -c '. + {dispatch_id:"d1"}')" >> "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --stats --json
+    [ "$status" -eq 0 ]
+    [ "$(jq -r 'length' <<<"$output")" -eq 1 ]
+    [ "$(jq -r '.[0].dispatches' <<<"$output")" = "1" ]
+    [ "$(jq -r '.[0].input_tokens' <<<"$output")" = "1000" ]
+    [ "$(jq -r '.[0].cell_ctx' <<<"$output")" = "64k" ]
+}
+
+@test "--show ignores event rows" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 1000 800 5000 0 false merged_clean)" > "$LEDGER"
+    printf '%s\n' "$(evrec 1 session_start)" >> "$LEDGER"
+    printf '%s\n' "$(evrec 2 model_request)" >> "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --show --json
+    [ "$status" -eq 0 ]
+    [ "$(jq -r 'length' <<<"$output")" -eq 1 ]
+    [ "$(jq -r '.[0].dispatch_id' <<<"$output")" = "d1" ]
+}
+
+@test "--update-outcome cannot target an event row" {
+    printf '%s\n' "$(evrec 1 model_request | jq -c '. + {dispatch_id:"d1"}')" > "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --update-outcome d1 merged_clean
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "--rebuild sidecar holds dispatch rows only" {
+    printf '%s\n' "$(rec d1 implementer haiku shallow 100 0 10 0 false pending)" > "$LEDGER"
+    printf '%s\n' "$(evrec 1 model_request | jq -c '. + {dispatch_id:"d1"}')" >> "$LEDGER"
+    printf '%s\n' "$(rec d2 lgtm-reviewer sonnet medium 100 0 10 0 false lgtm_first_pass)" >> "$LEDGER"
+    run bash "$SCRIPT" --ledger "$LEDGER" --rebuild
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.record_type == "event")] | length' "$LEDGER.rebuilt")" -eq 0 ]
+    [ "$(jq -s 'length' "$LEDGER.rebuilt")" -eq 2 ]
+}
+
+@test "the shell event vocabulary mirrors the Rust canonical kinds" {
+    shell_kinds="$(sed -n 's/^ALLOWED_EVENT_KINDS="\(.*\)"$/\1/p' "$SCRIPT" | tr ' ' '\n' | sort)"
+    # EventKind is serialized with rename_all = "snake_case", so the Rust
+    # variant names are the wire names: SessionStart -> session_start.
+    rust_kinds="$(sed -n '/^pub enum EventKind/,/^}/p' "$RUST_EVENTS" \
+        | grep -oE '^    [A-Z][A-Za-z]+,$' | tr -d ' ,' \
+        | sed -E 's/([a-z0-9])([A-Z])/\1_\2/' | tr 'A-Z' 'a-z' | sort)"
+    [ -n "$rust_kinds" ]
+    [ "$shell_kinds" = "$rust_kinds" ]
+}
