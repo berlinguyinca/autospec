@@ -1,0 +1,1044 @@
+# Clippy warning baseline — ratcheted gate (issue #3999).
+#
+# One line per individual `warning:` from
+# `cargo clippy --workspace --all-targets` (cargo's per-target
+# "generated N warnings" summaries excluded):
+#   <warning text> <TAB> <file>
+# Lines are sorted; duplicates are preserved. The gate's count is
+# the number of non-comment lines below.
+#
+# Consumers(config/clippy-warnings.baseline): scripts/clippy-baseline.sh
+#
+# Regenerate only downward:
+#   bash scripts/clippy-baseline.sh --rebaseline
+# refuses to record a higher count; a change that raises this
+# baseline is a review rejection, not a rebaseline.
+#
+# Carve-out tracked as a SEPARATE issue (not baselined away as
+# lint noise): the dead-code findings (`function ... is never
+# used`, `struct ... is never constructed`) are correctness
+# signals — see the follow-up issue filed from #3999.
+#
+# Last rebaseline: 2026-09-10 (1022 warnings)
+`format!` in `format!` args	crates/autospec-cli/tests/autonomous_conductor_commands.rs
+`to_string` applied to a type that implements `Display` in `println!` args	crates/autospec-cli/src/commands/handoff.rs
+`to_string` applied to a type that implements `Display` in `println!` args	crates/autospec-cli/src/commands/handoff.rs
+`to_string` applied to a type that implements `Display` in `println!` args	crates/autospec-cli/tests/../src/commands/handoff.rs
+`to_string` applied to a type that implements `Display` in `println!` args	crates/autospec-cli/tests/../src/commands/handoff.rs
+all variants have the same prefix: `PrimaryScope`	crates/autospec-cli/src/commands/managed_project/portfolio.rs
+all variants have the same prefix: `PrimaryScope`	crates/autospec-cli/tests/../src/commands/managed_project/portfolio.rs
+associated function `from_store` is never used	crates/autospec-cli/tests/../src/commands/status.rs
+associated function `hard` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+associated function `open_read_only` is never used	crates/autospec-cli/tests/../src/commands/managed_project/store.rs
+associated function `purge_owned_prefix` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/maven.rs
+associated items `create` and `configure` are never used	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+associated items `from_diff` and `populate_reuse_evidence` are never used	crates/autospec-cli/tests/../src/commands/lint.rs
+associated items `parse` and `as_str` are never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+associated items `parse` and `suite_path` are never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+called `is_some()` after calling `find()` on a string	crates/autospec-cli/tests/parent_concurrency_commands.rs
+called `is_some()` after calling `find()` on a string	crates/autospec-cli/tests/parent_security_commands.rs
+called `is_some()` after calling `find()` on a string	crates/autospec-cli/tests/runtime_session_security.rs
+casting to the same type is unnecessary (`u32` -> `u32`)	crates/autospec-core/src/insights/correlate.rs
+casting to the same type is unnecessary (`u64` -> `u64`)	crates/autospec-cli/src/commands/claim/heartbeat_publication.rs
+casting to the same type is unnecessary (`u64` -> `u64`)	crates/autospec-cli/src/commands/claim/heartbeat_publication.rs
+casting to the same type is unnecessary (`u64` -> `u64`)	crates/autospec-cli/tests/../src/commands/claim/heartbeat_publication.rs
+casting to the same type is unnecessary (`u64` -> `u64`)	crates/autospec-cli/tests/../src/commands/claim/heartbeat_publication.rs
+constant `CAPABILITIES_SCHEMA` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `CLASSES` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+constant `COMMANDS` is never used	crates/autospec-cli/tests/../src/commands/mod.rs
+constant `CONTAINER_RUNTIMES` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+constant `DEFAULT_CAPACITY` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+constant `DEFAULT_INPUT` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+constant `DEFAULT_RETRY_LIMIT` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+constant `ENTRY_AUTOSPEC_RESUME` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `ENTRY_AUTOSPEC_RUN` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `ENTRY_AUTOSPEC_SPLIT` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `ENTRY_AUTOSPEC` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `HELP` is never used	crates/autospec-cli/tests/../src/commands/cost.rs
+constant `HIGH_FAN_THRESHOLD` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+constant `IDLE_EXIT` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+constant `ISSUE_FIELDS` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+constant `NODE_USAGE` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+constant `OK_EXIT` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+constant `PERSISTENT_EXIT` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+constant `PHASE4_ADAPTER_FILES` is never used	crates/autospec-core/src/validation/structural.rs
+constant `PLATFORM_ROOTS` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+constant `PORTFOLIO_USAGE` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+constant `READY_OPTION_SETTERS` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+constant `REASON_SURFACE_INCOMPATIBLE` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `REPAIRED_EXIT` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+constant `RESUME_COMMAND_ENV` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+constant `RESUME_COMMAND_FILE` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+constant `REVIEW_OPTION_SETTERS` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+constant `RUN_STATE_SCHEMA` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `SESSION_HANDOFF_PREFIX` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+constant `SKIPPED_DIRECTORIES` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+constant `STARTUP_FAILURE_FILE` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+constant `SUBCOMMANDS` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+constant `SUBCOMMANDS` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+constant `SUBCOMMANDS` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+constant `SUBCOMMANDS` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+constant `SUITE_SCHEMA_VERSION` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+constant `SUMMARY_LABEL_WIDTH` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+constant `SYSTEMIC_EXIT_CODE` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+constant `THRESHOLD_ERROR` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+constant `USAGE` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+constant `USAGE` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+constant `USAGE` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+constant `USAGE` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+constant `VERIFY_FAILED_EXIT` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+constant `VIEW_FIELD_DISPATCHERS` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+constant `WAVE_IDS_PER_LINE` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+deref which would be done by auto-deref	crates/autospec-core/tests/aar_dispatch_fit.rs
+doc list item without indentation	crates/autospec-cli/src/commands/autonomous.rs
+doc list item without indentation	crates/autospec-cli/tests/../src/commands/autonomous.rs
+enclosing `Ok` and `?` operator are unneeded	crates/autospec-core/src/execution/relocation.rs
+enum `AccessRole` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+enum `AnchorVisibility` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+enum `ImplementationSource` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+enum `ManifestError` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+enum `ManifestKind` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+enum `ManifestSection` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+enum `Mode` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+enum `NormalizeMode` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+enum `OutputFormat` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+enum `Output` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+enum `ProtectedLabel` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+enum `RunStatus` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+enum `Severity` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+field `reason` is never read	crates/autospec-cli/tests/../src/commands/claim.rs
+field `whole_environment_disabled` is never read	crates/autospec-cli/tests/../src/commands/runtime/env/isolation.rs
+field assignment outside of initializer for an instance created with Default::default()	crates/autospec-core/src/evaluation/policy.rs
+field assignment outside of initializer for an instance created with Default::default()	crates/autospec-core/src/evaluation/policy.rs
+field assignment outside of initializer for an instance created with Default::default()	crates/autospec-core/src/evaluation/policy.rs
+field assignment outside of initializer for an instance created with Default::default()	crates/autospec-core/tests/native_session_recovery.rs
+fields `reconciled`, `pr`, and `reason` are never read	crates/autospec-cli/tests/../src/commands/claim.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability.rs`	crates/autospec-cli/tests/support/autonomous_accountability_acquisition.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/domain.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/github.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/github/managed.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/github.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/github/transport.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/github.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/render.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store/accessors.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store/fs.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store/journal.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store/manifest.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store/retry.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/store.rs
+file is loaded as a module multiple times: `crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/tests.rs`	crates/autospec-cli/tests/support/../../src/commands/autonomous/accountability/domain.rs
+for loop over a single element	crates/autospec-core/src/validation/external.rs
+found call to `str::trim` before `str::split_whitespace`	crates/autospec-core/src/lint/evidence.rs
+found call to `str::trim` before `str::split_whitespace`	crates/autospec-core/src/staged_spec.rs
+function `absolute_repo_candidate` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `abstraction_stem` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `acquire` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `active_claim_state` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `add_issue_label` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `add_remove_label` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `ambiguous` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `append_blocked_capabilities_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_blocked_label_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_conflicts_with_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_cycle_dependency_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_duplicate_of_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_linked_pr_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_parallel_safety_fields` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_path_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_reason_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_safety_gate_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_unblocks_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_unmet_dependency_fields` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `append_zero_output_streak_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `application_name` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `archive_failed_run` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `argument_value` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `argument_value` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `argument_value` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `atomic_rename_exclusive` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `audit_root` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `author_of` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `beat` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `blocked_portfolio_outcome` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `broken` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `build_config` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `build_response` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `candidate_archive_path` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `canonical_case` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `canonical_target_json` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `capabilities_json` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `cell_candidate_id` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `cell_outcome` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `cell_reason` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `changed_paths_from_git` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `check_unconverted_patch` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `check` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `classify_command` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `classify_run_outcome` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `cleanup_rollback_after_error` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `clear_marked_state` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `clear` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `collect_candidate` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `collect_files` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `collect_spec_paths` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `collect` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `combine_failures` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `comments_from_value` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `config_json` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `config` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `config` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `consume_option` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `consume_session_worker_handoff` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+function `contained_snapshot_path` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `count_fans` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `coverage` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `create_private_directory` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/directory.rs
+function `create_private_file_relative` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `create_queue` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `create_unique_stage` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `current_generation` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `default_batch_size` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `delete_comment` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `delete_docker_resources` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `delete_owned` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `detached_retirement_evidence` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `diagnostic_value` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `discovery_filed_issue` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `discovery_missing_safety_diagnostic_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `do_not_file_json` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `docker_owner_keys` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `docker_volume_exists` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `down` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `ensure_needs_human_label` is never used	crates/autospec-cli/tests/../src/commands/queue/issue_writes.rs
+function `ensure_private_directory_with_hook` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/directory.rs
+function `ensure_private_directory` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/directory.rs
+function `entry_point_for` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `environment_flag` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `equals_option_value` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `equals_value` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/resume.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/runtime.rs
+function `escape_json` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `evaluate_and_collect` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `evaluate` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `exec` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `execute_portfolio_command` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `existing_generation` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `existing_unmounted_volume` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `failure` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `failures_command` is never used	crates/autospec-cli/tests/../src/commands/doctor.rs
+function `file_link_count` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `finish` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `first_runtime` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `flag_value` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `flag_value` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `flag_values` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `foreign_live_owners` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `gate_counts_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `gate` is never used	crates/autospec-cli/tests/../src/commands/doctor.rs
+function `gh_api_json` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `guard` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `guidance_for` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `has_label` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `has_label` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `help_option_conflict` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `hostname` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable.rs
+function `hostname` is never used	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable.rs
+function `implementation_contract_diagnostic` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `implementation_contract_failure` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `implementation_diagnostic` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `implementation_failure` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `in_repository_diff_source` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `inactive_claim_state` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `inactive` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `infer_repo` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `ingest_result` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `init_manifest` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `init` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `initialize` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `inspect_anonymous_owner` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `inspect_owner` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `integrity` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `invariant` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `inventories_overlap` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `io_err` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `io_failure` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `is_symlink` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `issue_fields` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `issue_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `issues_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `journal_record` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `json_array` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `json_bool` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `json_bool` is never used	crates/autospec-cli/tests/../src/commands/issue/output.rs
+function `json_bool` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `json_field` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `json_string_array` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `json_string_array` is never used	crates/autospec-cli/tests/../src/commands/issue/output.rs
+function `json_string` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `json_string` is never used	crates/autospec-cli/tests/../src/commands/issue/output.rs
+function `json_usize_map` is never used	crates/autospec-cli/tests/../src/commands/issue/output.rs
+function `label_set` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `latest` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `lease_probe` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `legacy_recovery_handoff_failpoint` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `list_row` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `list` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `load_or_new` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `load_specs` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `load_tracker` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `load` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `load` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `local_diagnostics_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `manifest_scalar_value` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `matches_requested_repo` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `memory_command` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `merge_spec_findings` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `mode_error` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `next_value` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `node_arguments` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `non_passing_decision` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `non_passing_result` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `normalize_compose` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `now_seconds` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `now` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `numbers_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `observed_remote_decision` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `open_or_create_private_child` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/directory.rs
+function `open_staged_file_relative` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `opt_strings` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `option_value` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `option_value` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `option_value` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `owned_host_ports` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `owner_is_live` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `parse_acquire_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_args` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `parse_clear_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_down_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_err` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `parse_exec_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_gates` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `parse_implementation_contract_options` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `parse_implementation_options` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `parse_init_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_input` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `parse_issue_options` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `parse_issue_safety_options` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `parse_limit` is never used	crates/autospec-cli/tests/../src/commands/status.rs
+function `parse_manifest_kind` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_normalize_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/init.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/resume.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `parse_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_outcome` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `parse_plan_manifest` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `parse_portfolio_options` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `parse_positive_number` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `parse_positive` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `parse_probe_options` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `parse_promote_options` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `parse_quoted_scalar` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `parse_read_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_ready_options` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `parse_reconcile_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_recover_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_refresh_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_release_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_repository_options` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `parse_review_safety_options` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `parse_session_options` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `parse_spec_input` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `parse_specialist_limit` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `parse_specialist_options` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `parse_target` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `parse_threshold` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `parse_upsert_options` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `parse_verifier_outcome_options` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `parse` is never used	crates/autospec-cli/tests/../src/commands/cost.rs
+function `parse` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `persist_inventory` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `persist_resume_command` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `plan_command` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `plan_diagnostic` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `plan_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `policy_json` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `policy` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `portfolio_outcome` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `preflight` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `print_classification` is never used	crates/autospec-cli/tests/../src/commands/runtime.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/mod.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/runtime.rs
+function `print_help` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `print_human` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `print_implementation_contract_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_implementation_directives` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_implementation_findings` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_implementation_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_issue_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_issue_safety_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_issue_safety_json` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_json` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `print_json` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_json` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `print_promote_help` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `print_protocol` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `print_reconcile_result` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `print_recovery_result` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `print_repositories_help` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `print_spec_help` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_spec_json` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_spec_text` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_specialists_help` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `print_state_help` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `print_state_value` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `print_text` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `print_text` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `print_usage` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `print_verifier_outcome_help` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `private_directory_metadata` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/directory.rs
+function `private_file_handle` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `private_stage_metadata` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `probe_capabilities` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `probe_environment` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `probe_run_state` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `process_identity` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable.rs
+function `process_identity` is never used	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable.rs
+function `project` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `promote_remote_issue` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `promote` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `promotion_conflict` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `promotion_decision_json` is never used	crates/autospec-cli/tests/../src/commands/issue/output.rs
+function `provision` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `publish_exact` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `publish_with_hooks` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `publish` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `purge_maven_prefix` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `read_admitted` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `read_body` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `read_dir_all` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `read_implementation_contract_file` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `read_implementation_input` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `read_issue` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `read_optional` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `read_spec` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `read` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `read` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `readiness_report` is never used	crates/autospec-cli/tests/../src/commands/doctor.rs
+function `ready` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `ready` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `reconcile_issue` is never used	crates/autospec-cli/src/commands/managed_project/github.rs
+function `reconcile_linked_pr` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `reconcile_staged_publications` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `reconcile` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `record_startup_failure` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `record` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `recover_stale_startup_record` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `recover_stale_startup` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `redact` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `references_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `refresh` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `register` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `release` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `remove_issue_label` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `remove_owned_labels` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `render_counts` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `render_json` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `render_json` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `render_json` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `render_json` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `render_portfolio_outcome` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `render_shadow_json` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `render_shadow_results` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `render_shadow_text` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `render_summary_line` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `render_summary` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `render_telemetry` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `render_text` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `render_text` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `render_text` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `render_waves` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `render` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `replace_once` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `report_json` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `repositories` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `repository_relative_path` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `require_gh_success` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `require_title` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `required_flag` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `required_plan` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `required_value` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `resolve_runs_dir` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `resource_is_absent` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `resume_command_path` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `retire_exact_issue` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_orphaned_session_bindings` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `retire_released_at_with_boundary_hooks` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_released_at_with_hook` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_released_at` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_released` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_released` is never used	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_session_bindings_at` is never used	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+function `retire_terminal` is never used	crates/autospec-cli/tests/../src/commands/claim/heartbeat_predecessor.rs
+function `review_safety_help_error` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `review_safety_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `review_safety` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `reviewable_issue` is never used	crates/autospec-cli/src/commands/queue/accountability.rs
+function `ripgrep_matching_paths` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `ripgrep_paths` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `ripgrep_script_paths` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `role_argument` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `rollback_after_error` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `rollback_cleanup_labels` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `rollback_failure` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `rollback_owned_labels` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `route_zero_output_reviews` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `route` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `routed_finding_json` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `run_analyze` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `run_checked_command` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_delete` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `run_direct_command` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `run_direct` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `run_directory` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `run_gc` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `run_gh` is never used	crates/autospec-cli/tests/../src/commands/issue/promotion.rs
+function `run_implementation_contract` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_implementation` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_issue_safety` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_issue` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_portfolio` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `run_probe` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `run_session_supervisor` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+function `run_spec` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run_state_path` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `run_state` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/cost.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/doctor.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/growth_report.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/handoff.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/init.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/mod.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/plan.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/report.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/resume.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/runtime.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/showcase.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/status.rs
+function `run` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `runtime_failure` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `safe_relative_path` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `safety_input` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `same_file_identity` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `same_generation` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `save_ledger` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `save_tracker` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `scope_diagnostic` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `session` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `set_body_path` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `set_fingerprint` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `set_mode` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `set_number_option` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `set_once` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `set_once` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `set_once` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `set_portfolio_value` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `set_ready_batch_size` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_ready_repo` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_repo` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+function `set_review_issue` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_review_limit` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_review_recheck` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_review_repo` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `set_spec_path` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `shared` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/gc.rs
+function `should_skip_directory` is never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+function `slugify` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `snapshot_from_args` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `snapshot_from_github` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `snapshot_from_payload` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `snapshot_matches` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `sources` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `spec_diagnostic` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `specialists` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `stage` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `staged_document_targets` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `staged_publication_names` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+function `stamp` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `startup_failure_path` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `state_file_for` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `state_from_word` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `status` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `status` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `status` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `store` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `strings_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `suite_digest` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `summarize` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `supervise_session_worker` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+function `take_value` is never used	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+function `task_argument` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `teardown_plan` is never used	crates/autospec-cli/tests/../src/commands/runtime/env/isolation.rs
+function `telemetry_counters` is never used	crates/autospec-cli/tests/../src/commands/graph.rs
+function `test_hard_cap` is never used	crates/autospec-cli/tests/../src/commands/lint.rs
+function `timestamp_flag` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `transaction_portfolio_command` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `unknown_promote_option` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `unknown_repository_option` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `unknown_review_safety_option` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `unknown_specialist_option` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `unlink_staged_file` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/file.rs
+function `unmeasured_or_failed` is never used	crates/autospec-cli/tests/../src/commands/validate.rs
+function `unresolved_issue_url` is never used	crates/autospec-cli/src/commands/managed_project/github.rs
+function `up` is never used	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+function `upsert` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+function `validate_loop_name` is never used	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+function `validate_matrix` is never used	crates/autospec-cli/tests/../src/commands/benchmark.rs
+function `validate_patch_name` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `validate_portfolio_command` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `validate_portfolio_options` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+function `validate_step_name` is never used	crates/autospec-cli/tests/../src/commands/dispatch.rs
+function `validate` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `validate` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `value_of` is never used	crates/autospec-cli/tests/../src/commands/rag.rs
+function `value` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `verifier_outcome_json` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `verifier_outcome` is never used	crates/autospec-cli/tests/../src/commands/explore.rs
+function `verify_artifacts` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `verify_managed_marker` is never used	crates/autospec-cli/src/commands/managed_project/github.rs
+function `verify_managed_marker` is never used	crates/autospec-cli/src/commands/managed_project/github/parse.rs
+function `verify_owned_cleanup` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `verify` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+function `view_field_dispatchers` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `view_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `views_json` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+function `which` is never used	crates/autospec-cli/tests/../src/commands/dispatch_spec.rs
+function `whoami` is never used	crates/autospec-cli/tests/../src/commands/anchor.rs
+function `with_label` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `without_label` is never used	crates/autospec-cli/tests/../src/commands/issue.rs
+function `write_atomic` is never used	crates/autospec-cli/tests/../src/commands/run.rs
+function `write_new` is never used	crates/autospec-cli/tests/../src/commands/aar.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+initializer for `thread_local` value can be made `const`	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+large size difference between variants	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+large size difference between variants	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+large size difference between variants	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+large size difference between variants	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+manual `!RangeInclusive::contains` implementation	crates/autospec-cli/src/commands/cost.rs
+manual `!RangeInclusive::contains` implementation	crates/autospec-cli/tests/../src/commands/cost.rs
+manual `!RangeInclusive::contains` implementation	crates/autospec-core/src/execution/stage_throughput.rs
+manual check for common ascii range	crates/autospec-cli/src/commands/managed_project/portfolio.rs
+manual check for common ascii range	crates/autospec-cli/tests/../src/commands/managed_project/portfolio.rs
+manual implementation of `.is_multiple_of()`	crates/autospec-cli/src/commands/graph.rs
+manual implementation of `.is_multiple_of()`	crates/autospec-cli/tests/../src/commands/graph.rs
+manual implementation of `.is_multiple_of()`	crates/autospec-core/src/execution/endpoint.rs
+manual implementation of `.is_multiple_of()`	crates/autospec-core/src/execution/endpoint.rs
+method `coverage` is never used	crates/autospec-cli/tests/../src/commands/initiative.rs
+method `into_command_failure` is never used	crates/autospec-cli/tests/../src/commands/claim.rs
+method `into_draft` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+method `into_facts` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+method `into_item` is never used	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+methods `add` and `paths` are never used	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+methods `record_portfolio_item_binding` and `transition_portfolio_operation` are never used	crates/autospec-cli/src/commands/managed_project/store.rs
+methods `record_portfolio_item_binding`, `transition_portfolio_operation`, `fail_next_append_after`, and `fail_next_portfolio_persist` are never used	crates/autospec-cli/src/commands/managed_project/store.rs
+redundant closure	crates/autospec-core/src/execution/patch_pipeline.rs
+redundant closure	crates/autospec-core/src/execution/patch_pipeline.rs
+redundant slicing of the whole range	crates/autospec-core/src/deadline_ratchet.rs
+returning the result of a `let` binding from a block	crates/autospec-cli/src/commands/handoff.rs
+returning the result of a `let` binding from a block	crates/autospec-cli/tests/../src/commands/handoff.rs
+spawned process is never `wait()`ed on	crates/autospec-cli/tests/autonomous_conductor_commands.rs
+static `NEXT_STAGE` is never used	crates/autospec-cli/src/commands/claim/heartbeat_portable/publication.rs
+stripping a prefix manually	crates/autospec-core/src/lint/mod.rs
+struct `AnalyzeOptions` is never constructed	crates/autospec-cli/tests/../src/commands/graph.rs
+struct `AnalyzeReport` is never constructed	crates/autospec-cli/tests/../src/commands/graph.rs
+struct `AnchorCase` is never constructed	crates/autospec-cli/tests/../src/commands/anchor.rs
+struct `AnchorSuite` is never constructed	crates/autospec-cli/tests/../src/commands/anchor.rs
+struct `Arguments` is never constructed	crates/autospec-cli/tests/../src/commands/anchor.rs
+struct `AuditGroups` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/audit.rs
+struct `ClearOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `Counts` is never constructed	crates/autospec-cli/tests/../src/commands/status.rs
+struct `DownOptions` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+struct `ExecOptions` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+struct `FilesystemRepositoryIndex` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `ImplementationInput` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `ImplementationOptions` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `InitOptions` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+struct `IssueOptions` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `IssueSafetyOptions` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `ItemEntry` is never constructed	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+struct `Loaded` is never constructed	crates/autospec-cli/tests/../src/commands/initiative.rs
+struct `NormalizeOptions` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/aar.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/cost.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/init.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/initiative.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/plan.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/run.rs
+struct `Options` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+struct `Outcome` is never constructed	crates/autospec-cli/tests/../src/commands/doctor/failures.rs
+struct `ParseState` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env/options.rs
+struct `PlanDraftValue` is never constructed	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+struct `PortfolioOptions` is never constructed	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+struct `PortfolioOutcome` is never constructed	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+struct `ProbeRequest` is never constructed	crates/autospec-cli/tests/../src/commands/handoff.rs
+struct `PromoteOptions` is never constructed	crates/autospec-cli/tests/../src/commands/issue.rs
+struct `PromotionResult` is never constructed	crates/autospec-cli/tests/../src/commands/issue.rs
+struct `ProtectedSubset` is never constructed	crates/autospec-cli/tests/../src/commands/anchor.rs
+struct `Provenance` is never constructed	crates/autospec-cli/tests/../src/commands/anchor.rs
+struct `ReadOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `ReadyOptions` is never constructed	crates/autospec-cli/tests/../src/commands/queue.rs
+struct `ReconcileOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `RecoverOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `RefreshOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `ReleaseOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `RepositoryEntry` is never constructed	crates/autospec-cli/tests/../src/commands/managed_project/cli.rs
+struct `RepositoryOptions` is never constructed	crates/autospec-cli/tests/../src/commands/explore.rs
+struct `ReviewSafetyOptions` is never constructed	crates/autospec-cli/tests/../src/commands/queue.rs
+struct `Saturation` is never constructed	crates/autospec-cli/tests/../src/commands/graph.rs
+struct `SessionOptions` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env.rs
+struct `SessionWorkerHandoff` is never constructed	crates/autospec-cli/tests/../src/commands/runtime/env/worker.rs
+struct `SpecInput` is never constructed	crates/autospec-cli/tests/../src/commands/run.rs
+struct `SpecLintEntry` is never constructed	crates/autospec-cli/tests/../src/commands/lint.rs
+struct `SpecialistOptions` is never constructed	crates/autospec-cli/tests/../src/commands/explore.rs
+struct `Telemetry` is never constructed	crates/autospec-cli/tests/../src/commands/graph.rs
+struct `UpsertOptions` is never constructed	crates/autospec-cli/tests/../src/commands/claim.rs
+struct `VerifierOutcomeOptions` is never constructed	crates/autospec-cli/tests/../src/commands/explore.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/continuation_children.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/src/commands/autonomous/executor_bridge/review_receipt.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/accountability_lifecycle.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/continuation_children.rs
+the `Err`-variant returned from this function is very large	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge/review_receipt.rs
+the `Err`-variant returned from this function is very large	crates/autospec-core/src/coordination/dispatch_eligibility.rs
+the `Err`-variant returned from this function is very large	crates/autospec-core/src/coordination/dispatch_eligibility.rs
+the `Err`-variant returned from this function is very large	crates/autospec-core/src/validation/external.rs
+the borrowed expression implements the required traits	crates/autospec-core/src/insights/events.rs
+the borrowed expression implements the required traits	crates/autospec-core/src/insights/proposals/schema.rs
+the borrowed expression implements the required traits	crates/autospec-core/src/safe_publish.rs
+the borrowed expression implements the required traits	crates/autospec-core/src/safe_publish.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/context.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/context.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/context.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/correlate.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/correlate.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/enrich/queue.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/quality.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/summarize/store.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/summarize/store.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/summarize/store.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/summarize/store.rs
+this `MutexGuard` is held across an await point	crates/autospec-core/src/insights/summarize/store.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/src/commands/autonomous/executor_bridge.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+this `else { if .. }` block can be collapsed	crates/autospec-cli/tests/../src/commands/autonomous/executor_bridge.rs
+this `if` statement can be collapsed	crates/autospec-core/src/insights/correlate.rs
+this `if` statement can be collapsed	crates/autospec-core/src/insights/correlate.rs
+this `if` statement can be collapsed	crates/autospec-core/src/lint/implementation.rs
+this `impl` can be derived	crates/autospec-core/src/aar/scheduling_contract.rs
+this `impl` can be derived	crates/autospec-core/src/initiative/dispatch.rs
+this `let...else` may be rewritten with the `?` operator	crates/autospec-core/src/spec/parser.rs
+this `map_or` can be simplified	crates/autospec-cli/src/commands/handoff.rs
+this `map_or` can be simplified	crates/autospec-cli/tests/../src/commands/handoff.rs
+this `map_or` can be simplified	crates/autospec-core/src/gate_provenance.rs
+this `map_or` can be simplified	crates/autospec-core/src/gate_provenance.rs
+this boolean expression can be simplified	crates/autospec-cli/src/commands/dispatch.rs
+this boolean expression can be simplified	crates/autospec-cli/src/commands/managed_project/github/parse.rs
+this boolean expression can be simplified	crates/autospec-cli/src/commands/managed_project/github/parse.rs
+this boolean expression can be simplified	crates/autospec-cli/tests/../src/commands/dispatch.rs
+this boolean expression can be simplified	crates/autospec-cli/tests/../src/commands/managed_project/github/parse.rs
+this call to `clone` can be replaced with `std::slice::from_ref`	crates/autospec-cli/src/commands/managed_project/portfolio/apply.rs
+this call to `clone` can be replaced with `std::slice::from_ref`	crates/autospec-cli/tests/../src/commands/managed_project/portfolio/apply.rs
+this call to `clone` can be replaced with `std::slice::from_ref`	crates/autospec-core/src/insights/proposals/draft.rs
+this call to `clone` can be replaced with `std::slice::from_ref`	crates/autospec-core/src/insights/quality.rs
+this call to `clone` can be replaced with `std::slice::from_ref`	crates/autospec-core/tests/patch_apply.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/src/commands/repair_loop.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable/retirement.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/../src/commands/repair_loop.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/cli_commands.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/cli_commands.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/cli_commands.rs
+this expression creates a reference which is immediately dereferenced by the compiler	crates/autospec-cli/tests/issue_commands.rs
+this function has too many arguments (8/7)	crates/autospec-cli/src/commands/autonomous/drain.rs
+this function has too many arguments (8/7)	crates/autospec-cli/tests/../src/commands/autonomous/drain.rs
+type alias `ReadyOptionSetter` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+type alias `ReviewOptionSetter` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+type alias `ViewFieldDispatcher` is never used	crates/autospec-cli/tests/../src/commands/queue.rs
+unnecessary closure used to substitute value for `Option::None`	crates/autospec-core/src/resources/dry_run.rs
+unnecessary closure used with `bool::then`	crates/autospec-core/src/spec/parser.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary parentheses around function argument	crates/autospec-core/src/insights/summarize/mod.rs
+unnecessary use of `get(gate).is_none()`	crates/autospec-core/src/execution/gate_reuse.rs
+unneeded `return` statement	crates/autospec-cli/tests/support/autonomous_conductor_process.rs
+unneeded `return` statement	crates/autospec-cli/tests/support/autonomous_conductor_process.rs
+unneeded `return` statement	crates/autospec-cli/tests/support/claim_process_fixture.rs
+unneeded `return` statement	crates/autospec-cli/tests/support/claim_process_fixture.rs
+unused import: `ExecutionStatus`	crates/autospec-core/src/execution/endpoint.rs
+unused import: `Executor`	crates/autospec-core/src/insights/quality.rs
+unused import: `RepositoryCapability`	crates/autospec-cli/src/commands/managed_project/portfolio/manifest/tests.rs
+unused import: `RepositoryCapability`	crates/autospec-cli/tests/../src/commands/managed_project/portfolio/manifest/tests.rs
+unused import: `Row`	crates/autospec-core/src/insights/quality.rs
+unused import: `cli::run_with_transport`	crates/autospec-cli/src/commands/managed_project.rs
+unused import: `github::verify_managed_marker`	crates/autospec-cli/src/commands/managed_project.rs
+unused import: `publication::publish`	crates/autospec-cli/src/commands/claim/heartbeat_portable.rs
+unused import: `retirement::retire_released`	crates/autospec-cli/src/commands/claim/heartbeat_portable.rs
+unused import: `retirement::retire_released`	crates/autospec-cli/src/commands/claim/heartbeat_portable.rs
+unused import: `retirement::retire_released`	crates/autospec-cli/tests/../src/commands/claim/heartbeat_portable.rs
+unused import: `std::fs`	crates/autospec-core/tests/validation_unmeasured.rs
+unused import: `std::path::PathBuf`	crates/autospec-core/tests/validation_unmeasured.rs
+unused imports: `CheckModes`, `CheckOwner`, `CheckReachability`, `CheckResult`, `ExternalCheck`, `Jobs`, `StructuralCheck`, `ValidationCatalog`, `ValidationCheck`, `ValidationExecutionReport`, `ValidationOptions`, `ValidationPlan`, `ValidationRunner`, and `ValidationStatus`	crates/autospec-core/tests/validation_unmeasured.rs
+unused imports: `DiagnosticSet`, `Diagnostic`, `Location`, and `Severity`	crates/autospec-cli/src/commands/doctor/code_intel.rs
+unused imports: `PortfolioRecoveryCapsule` and `reconcile_issue`	crates/autospec-cli/src/commands/managed_project.rs
+unused imports: `run_portfolio` and `run`	crates/autospec-cli/tests/../src/commands/managed_project.rs
+unused variable: `base_branch`	crates/autospec-cli/src/commands/autonomous.rs
+unused variable: `base_branch`	crates/autospec-cli/tests/../src/commands/autonomous.rs
+used `assert_eq!` with a literal bool	crates/autospec-cli/src/commands/managed_project/portfolio/tests.rs
+used `assert_eq!` with a literal bool	crates/autospec-cli/tests/../src/commands/managed_project/portfolio/tests.rs
+used `assert_eq!` with a literal bool	crates/autospec-core/src/execution/patch_pipeline.rs
+used `assert_eq!` with a literal bool	crates/autospec-core/src/execution/patch_pipeline.rs
+used `assert_eq!` with a literal bool	crates/autospec-core/src/execution/verification.rs
+useless conversion to the same type: `std::path::PathBuf`	crates/autospec-core/src/conversion_gate.rs
+useless use of `format!`	crates/autospec-cli/tests/dispatch_spec_commands.rs
+useless use of `format!`	crates/autospec-core/tests/insights_goldens.rs
+useless use of `vec!`	crates/autospec-core/tests/aar_session_isolation.rs
+useless use of `vec!`	crates/autospec-core/tests/heartbeat.rs
+using `contains()` instead of `iter().any()` is more efficient	crates/autospec-core/src/post_merge.rs
+using `contains()` instead of `iter().any()` is more efficient	crates/autospec-core/src/resources/git.rs
+using `print!()` with a format string that ends in a single newline	crates/autospec-cli/src/commands/graph.rs
+using `print!()` with a format string that ends in a single newline	crates/autospec-cli/tests/../src/commands/graph.rs
+you seem to be trying to use `match` for an equality check. Consider using `if`	crates/autospec-core/src/host_set.rs
