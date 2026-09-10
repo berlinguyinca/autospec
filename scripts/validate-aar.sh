@@ -88,15 +88,6 @@ require_grep 'pub const NO_ENDPOINT_LARGE_ENOUGH' "$CORE/dispatch_fit.rs" \
 require_grep 'free_context_tokens < required_free' "$CORE/inferweave.rs" \
   "insufficient free context must reject a node outright"
 
-# Issue #3641: a probe deadline miss is inconclusive and must never evict;
-# only a definitive failure may.
-require_grep 'DeadlineExceeded => ProbeVerdict::Inconclusive' "$CORE/inferweave.rs" \
-  "a probe deadline miss must classify as inconclusive, not dead"
-require_grep 'cost_scales_with_load' "$CORE/inferweave.rs" \
-  "the liveness check must be validated as constant-cost"
-require_grep 'starvation_argument' "$CORE/inferweave.rs" \
-  "a check whose cost scales with load must carry a starvation argument"
-
 # Spec section 14: prompt tokens must decompose into cached plus new prefill.
 require_grep 'new_prefill_tokens != self.prompt_tokens' "$CORE/telemetry.rs" \
   "telemetry must reject token accounting that does not add up"

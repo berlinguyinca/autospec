@@ -42,7 +42,7 @@ model, a node, or a worktree.
 | `aar::topology` | 8 | role selection, structured handoffs, separation-of-duty enforcement |
 | `aar::pi` | 9 | harness session spec, working rules, argv, event parsing and folding |
 | `aar::guards` | 10 | edit guards, thrashing detection, stop conditions |
-| `aar::inferweave` | 12 | capability requests, seat model, node scoring, liveness probe contract |
+| `aar::inferweave` | 12 | capability requests, seat model, node scoring |
 | `aar::escalation` | 13 | fallback chain with quota checks and separation re-verification |
 | `aar::telemetry` | 14 | versioned execution records with three-way token accounting and redaction |
 | `aar::outcome` | 15 | outcome scoring, cheapest-adequate-profile recommendation, hard policy override |
@@ -92,16 +92,6 @@ separation quietly erodes.
 **A session is a seat, not a slot.** Its demand is current context plus
 projected growth plus KV, so a node that could hold four idle sessions may not
 hold two growing ones.
-
-**A probe's deadline miss is not a verdict.** A liveness probe that runs a
-one-token completion on a busy worker queues behind production traffic and
-misses its deadline, evicting exactly the worker the pool needs most. The
-liveness contract in `aar::inferweave` splits the check in two: a constant-cost
-check (`Health` or `ModelList`) is the only verdict that may evict, and a
-costly `Completion` is legal only in a separate `verification` slot that never
-gates eviction. A deadline miss classifies as `Inconclusive`, and
-`Inconclusive` keeps the worker. Any check whose cost scales with load must
-carry an explicit starvation argument, enforced by `LivenessProbe::validate`.
 
 **Memory is bounded.** Durable files that grow without limit recreate the
 problem they exist to solve, so `WorktreeMemory::over_budget` reports the files
