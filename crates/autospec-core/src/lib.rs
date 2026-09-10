@@ -25,6 +25,7 @@ pub mod claim;
 pub mod code_intel;
 pub mod conflict_resolution;
 pub mod context;
+pub mod conversion_gate;
 pub mod coordination;
 pub mod cost;
 pub mod dispatch_guard;
