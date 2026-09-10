@@ -48,7 +48,7 @@ pub const DEFAULT_DEFECT_MAP: &[(&str, &str)] = &[
 
 pub use record::{Disposition, RunRecord};
 pub use report::{
-    CostReport, CostSummary, DefectCost, DispositionBucket, StatusBucket, ThresholdFlag,
+    CostReport, CostSummary, DefectCost, DispositionBucket, IssueCost, StatusBucket, ThresholdFlag,
 };
 pub use scan::{scan_out_dir, CostScan, MalformedRecord};
 pub use time::parse_iso8601;
@@ -284,6 +284,73 @@ mod tests {
         assert_eq!(report.cumulative.by_status, Vec::<StatusBucket>::new());
         let text = report.to_text();
         assert!(text.contains("no costed run records under out"), "{text}");
+    }
+
+    /// Issue #3983, AC2: the per-issue cost table ranks by cumulative hours
+    /// but shows each issue's most recent outcome beside it, so a costly issue
+    /// whose latest run succeeded is not misread as "failing now".
+    #[test]
+    fn by_issue_ranks_cumulative_hours_beside_latest_outcome() {
+        fn run(issue: &str, status: &str, seconds: u64, finished_at: Option<i64>) -> RunRecord {
+            let mut record = RunRecord::new(issue);
+            record.status = Some(status.to_string());
+            record.agent_secs = Some(seconds);
+            record.finished_at = finished_at;
+            record
+        }
+        // issue-3192: two early timeouts, then a recent success.
+        // issue-3805: three consecutive timeouts, the latest run silent.
+        let records = vec![
+            run("issue-3192", "TIMEOUT", 7200, Some(100)),
+            run("issue-3192", "TIMEOUT", 7200, Some(200)),
+            run("issue-3192", "VERIFIED", 3600, Some(300)),
+            run("issue-3805", "TIMEOUT", 7200, Some(100)),
+            run("issue-3805", "TIMEOUT", 7200, Some(200)),
+            run("issue-3805", "TIMEOUT", 7200, Some(300)),
+        ];
+        let report = build_report("out", 6, &records, &[], &[], None, 10.0);
+        let by_issue = &report.cumulative.by_issue;
+        // Ranked by cumulative hours, largest first: 3805 (6.0h) above 3192 (5.0h).
+        assert_eq!(by_issue[0].issue, "issue-3805");
+        assert_eq!(by_issue[0].runs, 3);
+        assert!((by_issue[0].gpu_hours - 6.0).abs() < 0.001);
+        assert_eq!(by_issue[0].latest_status.as_deref(), Some("TIMEOUT"));
+        assert_eq!(by_issue[1].issue, "issue-3192");
+        assert_eq!(by_issue[1].runs, 3);
+        assert!((by_issue[1].gpu_hours - 5.0).abs() < 0.001);
+        // The latest outcome is the success, not the earlier timeouts.
+        assert_eq!(by_issue[1].latest_status.as_deref(), Some("VERIFIED"));
+        let text = report.to_text();
+        assert!(
+            text.contains("issues (ranked by cumulative hours)"),
+            "{text}"
+        );
+        assert!(text.contains("issue-3192"), "{text}");
+        assert!(text.contains("VERIFIED"), "{text}");
+    }
+
+    /// A stamped run always outranks an untimestamped one for "latest"; the
+    /// cost table must not let a missing stamp hide the true most-recent run.
+    #[test]
+    fn by_issue_prefers_the_most_recent_stamped_run_for_latest() {
+        fn run(issue: &str, status: &str, seconds: u64, finished_at: Option<i64>) -> RunRecord {
+            let mut record = RunRecord::new(issue);
+            record.status = Some(status.to_string());
+            record.agent_secs = Some(seconds);
+            record.finished_at = finished_at;
+            record
+        }
+        // An untimestamped success listed first, then a stamped timeout that
+        // finished later: the timeout is the latest outcome.
+        let records = vec![
+            run("issue-1", "VERIFIED", 1800, None),
+            run("issue-1", "TIMEOUT", 3600, Some(500)),
+        ];
+        let report = build_report("out", 2, &records, &[], &[], None, 10.0);
+        let by_issue = &report.cumulative.by_issue;
+        assert_eq!(by_issue.len(), 1);
+        assert_eq!(by_issue[0].latest_status.as_deref(), Some("TIMEOUT"));
+        assert!((by_issue[0].gpu_hours - 1.5).abs() < 0.001);
     }
 
     #[test]

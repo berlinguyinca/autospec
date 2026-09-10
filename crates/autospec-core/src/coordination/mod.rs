@@ -4,6 +4,7 @@ mod dispatch_eligibility;
 mod ready_queue;
 mod repositories;
 mod review_routing;
+mod withdrawal;
 
 pub use conductor::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
@@ -27,6 +28,8 @@ pub use capabilities::{
 };
 
 pub use review_routing::{review_routing, ReviewRouting, REVIEW_ROUTING_THRESHOLD};
+
+pub use withdrawal::{dispatch_withdrawal, WithdrawalDecision, WITHDRAWAL_THRESHOLD};
 
 pub use ready_queue::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,

@@ -52,6 +52,23 @@ pub struct ThresholdFlag {
     pub share_percent: f64,
 }
 
+/// One issue's cumulative cost beside its most recent outcome.
+///
+/// `gpu_hours` is the sum over every costed run the issue has — a reporting
+/// metric for where GPU went. It is deliberately shown next to
+/// [`latest_status`], the terminal status of the issue's most recent run: a
+/// high cumulative total says the issue failed before, not that it is failing
+/// now, so the two are always read together (issue #3983).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IssueCost {
+    pub issue: String,
+    pub runs: u64,
+    /// Cumulative GPU-hours across all of the issue's costed runs.
+    pub gpu_hours: f64,
+    /// Terminal status of the issue's most recent run, when recorded.
+    pub latest_status: Option<String>,
+}
+
 /// The numbers for one scope (the window or the full history).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CostSummary {
@@ -70,6 +87,9 @@ pub struct CostSummary {
     pub defects: Vec<DefectCost>,
     /// Buckets whose share exceeded the threshold.
     pub flags: Vec<ThresholdFlag>,
+    /// Cumulative cost per issue beside its most recent outcome, largest
+    /// first. A reporting metric only — never an input to dispatch.
+    pub by_issue: Vec<IssueCost>,
 }
 
 /// The full report: cumulative always, window only when `--since` was given.
@@ -153,6 +173,7 @@ fn build_summary(records: &[RunRecord], threshold_percent: f64) -> CostSummary {
     }
     let by_status = finish_status_buckets(status_hours, total_hours, threshold_percent);
     let by_disposition = finish_disposition_buckets(disposition_hours);
+    let by_issue = issue_costs(records);
     let productive = by_disposition
         .iter()
         .find(|bucket| bucket.disposition == Disposition::Productive.as_str())
@@ -169,7 +190,60 @@ fn build_summary(records: &[RunRecord], threshold_percent: f64) -> CostSummary {
         by_disposition,
         defects,
         flags,
+        by_issue,
     }
+}
+
+/// Group costed records by issue, summing their GPU-hours (the cumulative
+/// total) and recording the most recent run's terminal status beside it.
+///
+/// "Most recent" is the record with the greatest finish (or start) stamp; a
+/// stamped run always wins over an untimestamped one, and between two
+/// untimestamped records the later one in input order wins. Deterministic for
+/// a given input order, matching the report's other fixed-order guarantees.
+fn issue_costs(records: &[RunRecord]) -> Vec<IssueCost> {
+    struct Acc {
+        runs: u64,
+        hours: f64,
+        latest_stamp: Option<i64>,
+        latest_status: Option<String>,
+    }
+    let mut by_issue: BTreeMap<String, Acc> = BTreeMap::new();
+    for record in records.iter().filter(|record| record.is_costed()) {
+        let acc = by_issue.entry(record.issue.clone()).or_insert(Acc {
+            runs: 0,
+            hours: 0.0,
+            latest_stamp: None,
+            latest_status: None,
+        });
+        acc.runs += 1;
+        acc.hours += record.gpu_hours().unwrap_or(0.0);
+        let newer = match (acc.latest_stamp, record.window_stamp()) {
+            (Some(best), Some(next)) => next >= best,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => true,
+        };
+        if newer {
+            acc.latest_stamp = record.window_stamp();
+            acc.latest_status = record.status.clone();
+        }
+    }
+    let mut out: Vec<IssueCost> = by_issue
+        .into_iter()
+        .map(|(issue, acc)| IssueCost {
+            issue,
+            runs: acc.runs,
+            gpu_hours: round2(acc.hours),
+            latest_status: acc.latest_status,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.gpu_hours
+            .total_cmp(&a.gpu_hours)
+            .then_with(|| a.issue.cmp(&b.issue))
+    });
+    out
 }
 
 fn finish_status_buckets(
@@ -360,6 +434,7 @@ fn render_sections(summary: &CostSummary, threshold_percent: f64) -> String {
     out.push_str(&status_table(&summary.by_status));
     out.push_str(&disposition_line(summary));
     out.push_str(&defect_lines(summary));
+    out.push_str(&issue_table(&summary.by_issue));
     out.push_str(&flag_line(summary, threshold_percent));
     out
 }
@@ -411,6 +486,37 @@ fn disposition_line(summary: &CostSummary) -> String {
         fmt_hours(summary.productive_gpu_hours),
         fmt_hours(summary.rework_gpu_hours)
     )
+}
+
+fn issue_table(by_issue: &[IssueCost]) -> String {
+    if by_issue.is_empty() {
+        return String::new();
+    }
+    let width = by_issue
+        .iter()
+        .map(|issue| issue.issue.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = format!(
+        "  issues (ranked by cumulative hours)\n    {:width$}   runs  GPU-hours  latest\n",
+        "issue",
+        width = width
+    );
+    for issue in by_issue {
+        let latest = issue
+            .latest_status
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "    {:width$}   {:>4}   {:>9.1}  {latest}\n",
+            issue.issue,
+            issue.runs,
+            issue.gpu_hours,
+            width = width
+        ));
+    }
+    out
 }
 
 fn defect_lines(summary: &CostSummary) -> String {
