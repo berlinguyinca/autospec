@@ -2296,6 +2296,9 @@ struct AutomaticReviewerArtifacts {
 pub(crate) enum FullSuiteSource {
     Environment,
     Declared,
+    /// The repository's declared gate set in `.autospec/gates.yml`: the
+    /// complete verification plan, authoritative over ecosystem defaults.
+    GateManifest,
     Ecosystem,
 }
 
@@ -5202,6 +5205,17 @@ pub(crate) fn resolve_full_suite(
 
     let worktree = fs::canonicalize(worktree)
         .map_err(|error| format!("canonicalize full-suite worktree: {error}"))?;
+    let gate_manifest = worktree.join(".autospec/gates.yml");
+    if gate_manifest.is_file() {
+        // The repository's declared gate set is authoritative: the manifest
+        // IS the complete verification plan, so no ecosystem default is
+        // assumed on top of it (issue #3622).
+        let commands = gate_manifest_commands(&gate_manifest)?;
+        return Ok(ResolvedFullSuite {
+            source: FullSuiteSource::GateManifest,
+            plan: DirectCommandPlan { commands },
+        });
+    }
     let commands = detected_full_suite(&worktree)?;
     if commands.is_empty() {
         return Err(
@@ -5401,7 +5415,126 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
             commands.extend(parse_direct_command_plan(command)?.commands);
         }
     }
+
+    // A declared Makefile gate target is part of the repository's gate set.
+    // It is additive to the test suite, not a replacement: a target typically
+    // covers a subset of the gates a change must clear (issue #3622).
+    let makefile_gate = makefile_gate_target(worktree)?;
+    if let Some(ref target) = makefile_gate {
+        commands.push(DirectCommand::success(vec![
+            "make".to_string(),
+            target.clone(),
+        ]));
+    }
+
+    // A repository that declares its gates only in CI workflows has no
+    // executable gate set to fall back on. Refusing the assumed ecosystem
+    // default is what keeps "the tests I ran passed" from clearing a merge
+    // (issue #3622): the operator must declare the gates in
+    // .autospec/gates.yml, a Makefile target, or the issue body.
+    if makefile_gate.is_none() && ci_workflow_declarations_present(worktree) {
+        return Err(
+            "executor declares gates in .github/workflows without an executable gate set: \
+             add a .autospec/gates.yml commands list or a Makefile check/test target, \
+             or declare the commands under the issue's Operator/full verification"
+                .to_string(),
+        );
+    }
+
     Ok(commands)
+}
+
+fn gate_manifest_commands(path: &Path) -> Result<Vec<DirectCommand>, String> {
+    let body = fs::read_to_string(path)
+        .map_err(|error| format!("read gate manifest {}: {error}", path.display()))?;
+    let document = Document::from_str(&body).map_err(|error| {
+        format!(
+            "gate manifest {} is not valid YAML: {error}",
+            path.display()
+        )
+    })?;
+    let root = document.as_mapping().ok_or_else(|| {
+        format!(
+            "gate manifest {} must contain a YAML mapping",
+            path.display()
+        )
+    })?;
+    let entries = root
+        .get("commands")
+        .ok_or_else(|| format!("gate manifest {} declares no commands list", path.display()))?;
+    let entries = entries.as_sequence().ok_or_else(|| {
+        format!(
+            "gate manifest {} commands must be a sequence of command lines",
+            path.display()
+        )
+    })?;
+    if entries.is_empty() {
+        return Err(format!(
+            "gate manifest {} commands must not be empty",
+            path.display()
+        ));
+    }
+    let mut commands = Vec::new();
+    for entry in entries {
+        let line = entry
+            .as_scalar()
+            .map(|value| value.as_string())
+            .ok_or_else(|| {
+                format!(
+                    "gate manifest {} commands entries must be non-empty strings",
+                    path.display()
+                )
+            })?;
+        if line.trim().is_empty() {
+            return Err(format!(
+                "gate manifest {} commands entries must not be blank",
+                path.display()
+            ));
+        }
+        let plan = parse_direct_command_plan(&line)
+            .map_err(|error| format!("gate manifest {} command {line}: {error}", path.display()))?;
+        commands.extend(plan.commands);
+    }
+    Ok(commands)
+}
+
+fn makefile_gate_target(worktree: &Path) -> Result<Option<String>, String> {
+    for name in ["Makefile", "GNUmakefile", "makefile"] {
+        let path = worktree.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let body = fs::read_to_string(&path)
+            .map_err(|error| format!("read {name} for full suite: {error}"))?;
+        return Ok(if makefile_declares_target(&body, "check") {
+            Some("check".to_string())
+        } else if makefile_declares_target(&body, "test") {
+            Some("test".to_string())
+        } else {
+            None
+        });
+    }
+    Ok(None)
+}
+
+fn makefile_declares_target(body: &str, name: &str) -> bool {
+    body.lines().any(|line| {
+        line.strip_prefix(name)
+            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+    })
+}
+
+fn ci_workflow_declarations_present(worktree: &Path) -> bool {
+    let directory = worktree.join(".github/workflows");
+    fs::read_dir(&directory)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                (name.ends_with(".yml") || name.ends_with(".yaml")) && entry.path().is_file()
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn inventory_ecosystem_manifests(worktree: &Path) -> Result<Vec<PathBuf>, String> {
