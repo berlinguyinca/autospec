@@ -861,3 +861,192 @@ fn check_without_admitted_file_still_reads_an_empty_queue_as_idle() {
         stdout(&output)
     );
 }
+
+// ── #3784: failed-run artifact archiving and classified holds ─────────────
+
+#[test]
+fn guard_archives_failed_run_and_frees_the_dispatch_slot() {
+    let harness = Harness::new("autospec-dispatch-guard-archive-build-fail");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-5678");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff --git a/x b/x\n+fix\n").expect("patch written");
+    // Gate-shape status.txt recording a failed build.
+    std::fs::write(issue_dir.join("status.txt"), "status=BUILD-FAIL\n").expect("status.txt");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "5678",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains("archiving failed run (status: BUILD-FAIL)"),
+        "{report}"
+    );
+    assert!(report.contains("  archived to "), "{report}");
+    // The issue directory is moved (renamed) to the archive: it must be gone.
+    assert!(
+        !issue_dir.exists(),
+        "archived issue dir must no longer exist"
+    );
+    assert!(!patch.exists(), "patch inside archived dir must be gone");
+    // The archive root must exist with something in it.
+    let archive = out.join("archive");
+    assert!(archive.exists(), "archive dir created");
+    let entries: Vec<_> = std::fs::read_dir(&archive)
+        .expect("archive readable")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "one archive entry");
+}
+
+#[test]
+fn guard_holds_for_fmt_dirty_with_awaiting_conversion_reason() {
+    let harness = Harness::new("autospec-dispatch-guard-fmt-dirty");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-5679");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+    // FMT-DIRTY is convertible (#3775): it must NOT be archived.
+    std::fs::write(issue_dir.join("status.txt"), "status=FMT-DIRTY\n").expect("status.txt");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "5679",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(report.contains("DISPATCH issue 5679 HELD"), "{report}");
+    assert!(report.contains("FMT-DIRTY"), "{report}");
+    assert!(report.contains("awaiting conversion"), "{report}");
+    // The patch must survive: it is convertible, not a failed run.
+    assert!(patch.exists(), "FMT-DIRTY patch must not be archived");
+    assert!(issue_dir.exists());
+}
+
+#[test]
+fn guard_holds_when_status_file_is_absent() {
+    let harness = Harness::new("autospec-dispatch-guard-no-status");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-5680");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+    // No status.txt: unrecorded outcome, fail closed.
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "5680",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(report.contains("DISPATCH issue 5680 HELD"), "{report}");
+    assert!(report.contains("unconverted patch exists"), "{report}");
+    assert!(report.contains("cannot classify outcome"), "{report}");
+    // The patch must survive: unknown provenance means never archive.
+    assert!(patch.exists(), "patch without status must not be archived");
+    assert!(issue_dir.exists());
+}
+
+#[test]
+fn guard_dry_run_reports_would_archive_for_failed_run() {
+    let harness = Harness::new("autospec-dispatch-guard-dryrun-archive");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-5681");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+    std::fs::write(issue_dir.join("status.txt"), "status=BUILD-FAIL\n").expect("status.txt");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "5681",
+        "--out-dir",
+        &out.display().to_string(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains("would archive failed run (status: BUILD-FAIL)"),
+        "{report}"
+    );
+    // Dry-run must not mutate: the patch and its directory survive.
+    assert!(patch.exists(), "--dry-run must not archive the patch");
+    assert!(issue_dir.exists());
+}
+
+#[test]
+fn guard_archives_fleet_shaped_status_file() {
+    let harness = Harness::new("autospec-dispatch-guard-fleet-shape");
+    let out = guard_out_dir(&harness);
+    let issue_dir = out.join("issue-5682");
+    std::fs::create_dir_all(&issue_dir).expect("issue dir");
+    let patch = issue_dir.join("changes.patch");
+    std::fs::write(&patch, "diff\n").expect("patch written");
+    // Fleet shape: one `key: value` per line.
+    std::fs::write(
+        issue_dir.join("status.txt"),
+        "status: TIMEOUT\nagent_secs: 3600\n",
+    )
+    .expect("fleet status.txt");
+
+    let output = harness.dispatch(&[
+        "guard",
+        "--issue",
+        "5682",
+        "--out-dir",
+        &out.display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains("archiving failed run (status: TIMEOUT)"),
+        "{report}"
+    );
+    assert!(report.contains("  archived to "), "{report}");
+    assert!(!issue_dir.exists(), "archived issue dir must be gone");
+}

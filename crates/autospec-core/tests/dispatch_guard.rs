@@ -8,7 +8,8 @@
 //! answer is unsafe, not clear.
 
 use autospec_core::dispatch_guard::{
-    decide, CheckId, CheckOutcome, CheckReport, GuardDecision, GuardReason,
+    classified_hold, classify_artifact_outcome, decide, ArtifactOutcome, CheckId, CheckOutcome,
+    CheckReport, GuardDecision, GuardReason, FAILED_RUN_STATUSES,
 };
 
 fn patch_check(outcome: CheckOutcome, evidence: Option<&str>) -> CheckReport {
@@ -264,4 +265,143 @@ fn the_report_round_trips_through_json() {
     let back: autospec_core::dispatch_guard::GuardReport =
         serde_json::from_str(&json).expect("guard report deserializes");
     assert_eq!(back, report);
+}
+
+// --- #3784: classify_artifact_outcome regression tests ---
+
+#[test]
+fn classify_missing_status_is_unrecorded() {
+    let outcome = classify_artifact_outcome(None);
+    match &outcome {
+        ArtifactOutcome::Unrecorded { detail } => {
+            assert!(detail.contains("no terminal status"), "detail: {detail}");
+        }
+        other => panic!("expected Unrecorded, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_each_failed_status_is_failed_run() {
+    for status in FAILED_RUN_STATUSES {
+        let outcome = classify_artifact_outcome(Some(status));
+        match &outcome {
+            ArtifactOutcome::FailedRun { status: s } => {
+                assert_eq!(s, status);
+            }
+            other => panic!("status {status}: expected FailedRun, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn classify_fmt_dirty_is_convertible_not_archivable() {
+    let outcome = classify_artifact_outcome(Some("FMT-DIRTY"));
+    assert_eq!(
+        outcome,
+        ArtifactOutcome::Convertible {
+            status: "FMT-DIRTY".to_string(),
+        }
+    );
+}
+
+#[test]
+fn classify_unknown_status_defaults_to_convertible() {
+    let outcome = classify_artifact_outcome(Some("SOME-NEW-STATUS"));
+    assert_eq!(
+        outcome,
+        ArtifactOutcome::Convertible {
+            status: "SOME-NEW-STATUS".to_string(),
+        }
+    );
+}
+
+#[test]
+fn classify_pass_is_convertible() {
+    let outcome = classify_artifact_outcome(Some("PASS"));
+    assert_eq!(
+        outcome,
+        ArtifactOutcome::Convertible {
+            status: "PASS".to_string(),
+        }
+    );
+}
+
+#[test]
+fn classify_new_test_failures_is_convertible() {
+    let outcome = classify_artifact_outcome(Some("NEW-TEST-FAILURES"));
+    assert_eq!(
+        outcome,
+        ArtifactOutcome::Convertible {
+            status: "NEW-TEST-FAILURES".to_string(),
+        }
+    );
+}
+
+#[test]
+fn classified_hold_convertible_renders_status() {
+    let check = CheckReport::dangerous(
+        CheckId::UnconvertedPatch,
+        Some("out/issue-42/changes.patch".to_string()),
+    );
+    let outcome = ArtifactOutcome::Convertible {
+        status: "FMT-DIRTY".to_string(),
+    };
+    let report = classified_hold("42", check, outcome);
+    assert!(report.held());
+    let line = report.line();
+    assert!(line.contains("unconverted patch exists"), "line: {line}");
+    assert!(line.contains("FMT-DIRTY"), "line: {line}");
+}
+
+#[test]
+fn classified_hold_unrecorded_renders_detail() {
+    let check = CheckReport::dangerous(
+        CheckId::UnconvertedPatch,
+        Some("out/issue-99/changes.patch".to_string()),
+    );
+    let outcome = ArtifactOutcome::Unrecorded {
+        detail: "status.txt is missing".to_string(),
+    };
+    let report = classified_hold("99", check, outcome);
+    assert!(report.held());
+    let line = report.line();
+    assert!(line.contains("unconverted patch exists"), "line: {line}");
+    assert!(line.contains("status.txt is missing"), "line: {line}");
+}
+
+#[test]
+fn classified_hold_failed_run_is_unreachable_but_exhaustive() {
+    // The CLI archives before calling classified_hold, so this variant
+    // should never be reached in practice. We test it for exhaustiveness.
+    let check = CheckReport::dangerous(
+        CheckId::UnconvertedPatch,
+        Some("out/issue-7/changes.patch".to_string()),
+    );
+    let outcome = ArtifactOutcome::FailedRun {
+        status: "BUILD-FAIL".to_string(),
+    };
+    let report = classified_hold("7", check, outcome);
+    assert!(report.held());
+    let line = report.line();
+    assert!(line.contains("unconverted patch exists"), "line: {line}");
+}
+
+#[test]
+fn artifact_outcome_round_trips_through_json() {
+    let outcomes = vec![
+        ArtifactOutcome::FailedRun {
+            status: "TIMEOUT".to_string(),
+        },
+        ArtifactOutcome::Convertible {
+            status: "FMT-DIRTY".to_string(),
+        },
+        ArtifactOutcome::Unrecorded {
+            detail: "no status".to_string(),
+        },
+    ];
+    for outcome in outcomes {
+        let json = serde_json::to_string(&outcome).expect("serialize");
+        let back: ArtifactOutcome = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, outcome);
+    }
 }
