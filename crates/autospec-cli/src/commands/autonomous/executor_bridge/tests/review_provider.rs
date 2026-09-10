@@ -123,6 +123,115 @@ fn review_provider_critical_without_an_alternate_fails_closed() {
 }
 
 #[test]
+fn review_provider_pi_undeclared_keeps_the_critical_error() {
+    // Break caught: an undeclared Pi provider inventing independence at critical risk.
+    for value in ["", "  "] {
+        let env = BTreeMap::from([("AUTOSPEC_PI_PROVIDER".to_string(), OsString::from(value))]);
+        let error = bridge::resolve_review_policy(
+            &harness_config(&[bridge::HarnessKind::Pi]),
+            requirements(ReviewPolicyInput {
+                critical_boundary: true,
+                ..ReviewPolicyInput::default()
+            }),
+            bridge::HarnessKind::Pi,
+            &env,
+        )
+        .expect_err("an undeclared Pi provider cannot satisfy critical diversity");
+
+        assert_eq!(
+            error,
+            "critical review requires an alternate provider; none is configured and available"
+        );
+    }
+}
+
+#[test]
+fn review_provider_pi_declared_local_diversifies_against_claude() {
+    let env = BTreeMap::from([("AUTOSPEC_PI_PROVIDER".to_string(), OsString::from("local"))]);
+    let policy = bridge::resolve_review_policy(
+        &harness_config(&[bridge::HarnessKind::Pi, bridge::HarnessKind::Claude]),
+        requirements(ReviewPolicyInput {
+            logical_component_count: 2,
+            ..ReviewPolicyInput::default()
+        }),
+        bridge::HarnessKind::Pi,
+        &env,
+    )
+    .expect("provider-diverse review for a locally provisioned Pi host");
+
+    assert_eq!(policy.reviewer_harness, bridge::HarnessKind::Claude);
+    assert!(policy.provider_diversified);
+    assert_eq!(policy.selection_reason, "risk:provider-diversified");
+}
+
+#[test]
+fn review_provider_pi_declared_anthropic_is_not_diverse_from_claude() {
+    let env = BTreeMap::from([(
+        "AUTOSPEC_PI_PROVIDER".to_string(),
+        OsString::from("anthropic"),
+    )]);
+    let policy = bridge::resolve_review_policy(
+        &harness_config(&[bridge::HarnessKind::Claude]),
+        requirements(ReviewPolicyInput {
+            logical_component_count: 2,
+            ..ReviewPolicyInput::default()
+        }),
+        bridge::HarnessKind::Pi,
+        &env,
+    )
+    .expect("same-provider review for an anthropic-backed Pi host");
+
+    assert_eq!(policy.reviewer_harness, bridge::HarnessKind::Claude);
+    assert!(!policy.provider_diversified);
+}
+
+#[test]
+fn review_provider_pi_pi_never_reports_diversity() {
+    for value in ["local", "anthropic", "openai", "", "  "] {
+        let env = BTreeMap::from([("AUTOSPEC_PI_PROVIDER".to_string(), OsString::from(value))]);
+        let policy = bridge::resolve_review_policy(
+            &harness_config(&[bridge::HarnessKind::Pi]),
+            requirements(ReviewPolicyInput {
+                logical_component_count: 2,
+                ..ReviewPolicyInput::default()
+            }),
+            bridge::HarnessKind::Pi,
+            &env,
+        )
+        .expect("same-provider Pi fallback");
+
+        assert_eq!(policy.reviewer_harness, bridge::HarnessKind::Pi);
+        assert!(
+            !policy.provider_diversified,
+            "Pi vs Pi must never be diverse for {value:?}"
+        );
+    }
+}
+
+#[test]
+fn review_provider_selection_reason_names_the_pi_provider() {
+    let env = BTreeMap::from([(
+        "AUTOSPEC_PI_PROVIDER".to_string(),
+        OsString::from("  Local "),
+    )]);
+    let policy = bridge::resolve_review_policy(
+        &harness_config(&[bridge::HarnessKind::Pi]),
+        requirements(ReviewPolicyInput {
+            logical_component_count: 2,
+            ..ReviewPolicyInput::default()
+        }),
+        bridge::HarnessKind::Pi,
+        &env,
+    )
+    .expect("same-provider Pi fallback");
+
+    assert_eq!(
+        policy.selection_reason,
+        "risk:same-provider-high-reasoning-fallback:local"
+    );
+}
+
+#[test]
 fn review_provider_unstructured_command_cannot_authorize_production_review() {
     // Break caught: arbitrary stdout containing LGTM bypassing the structured reviewer adapter.
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("review-override");

@@ -27,6 +27,7 @@ pub(crate) fn resolve_review_policy(
         &available,
         implementer_harness,
         implementer_available,
+        environment,
     )? {
         return Ok(ResolvedReviewPolicy {
             requirements,
@@ -52,8 +53,16 @@ pub(crate) fn resolve_review_policy(
     Ok(ResolvedReviewPolicy {
         requirements,
         reviewer_harness,
-        provider_diversified: providers_are_diverse(reviewer_harness, implementer_harness),
-        selection_reason: selection_reason.to_string(),
+        provider_diversified: providers_are_diverse(
+            reviewer_harness,
+            implementer_harness,
+            environment,
+        ),
+        selection_reason: selection_reason_with_pi_provider(
+            reviewer_harness,
+            selection_reason,
+            environment,
+        ),
     })
 }
 
@@ -62,12 +71,17 @@ fn risk_review_selection(
     available: &[HarnessKind],
     implementer: HarnessKind,
     implementer_available: bool,
-) -> Result<Option<(HarnessKind, bool, &'static str)>, String> {
+    environment: &BTreeMap<String, OsString>,
+) -> Result<Option<(HarnessKind, bool, String)>, String> {
     if !requirements.prefer_provider_diversity {
         return Ok(None);
     }
-    if let Some(alternate) = alternate_provider_harness(available, implementer) {
-        return Ok(Some((alternate, true, "risk:provider-diversified")));
+    if let Some(alternate) = alternate_provider_harness(available, implementer, environment) {
+        return Ok(Some((
+            alternate,
+            true,
+            selection_reason_with_pi_provider(alternate, "risk:provider-diversified", environment),
+        )));
     }
     if requirements.require_provider_diversity {
         return Err(
@@ -79,7 +93,11 @@ fn risk_review_selection(
         return Ok(Some((
             implementer,
             false,
-            "risk:same-provider-high-reasoning-fallback",
+            selection_reason_with_pi_provider(
+                implementer,
+                "risk:same-provider-high-reasoning-fallback",
+                environment,
+            ),
         )));
     }
     Ok(None)
@@ -88,31 +106,62 @@ fn risk_review_selection(
 fn alternate_provider_harness(
     available: &[HarnessKind],
     implementer: HarnessKind,
+    environment: &BTreeMap<String, OsString>,
 ) -> Option<HarnessKind> {
     available
         .iter()
         .copied()
-        .find(|kind| providers_are_diverse(*kind, implementer))
+        .find(|kind| providers_are_diverse(*kind, implementer, environment))
 }
 
-fn providers_are_diverse(left: HarnessKind, right: HarnessKind) -> bool {
-    match (known_provider(left), known_provider(right)) {
+fn providers_are_diverse(
+    left: HarnessKind,
+    right: HarnessKind,
+    environment: &BTreeMap<String, OsString>,
+) -> bool {
+    match (
+        known_provider(left, environment),
+        known_provider(right, environment),
+    ) {
         (Some(left), Some(right)) => left != right,
         _ => false,
     }
 }
 
-fn known_provider(kind: HarnessKind) -> Option<&'static str> {
+fn known_provider(kind: HarnessKind, environment: &BTreeMap<String, OsString>) -> Option<String> {
     match kind {
-        HarnessKind::Claude => Some("anthropic"),
-        HarnessKind::Codex => Some("openai"),
+        HarnessKind::Claude => Some("anthropic".to_string()),
+        HarnessKind::Codex => Some("openai".to_string()),
         // OpenCode is a harness, not a provider. Its configured model can be
         // backed by either provider, so treating it as independent would invent
         // evidence the runtime does not possess.
         HarnessKind::OpenCode => None,
-        // Pi's provider is configurable; we cannot assume one.
-        HarnessKind::Pi => None,
+        // Pi's provider is configurable; trust only the host's own declaration
+        // via AUTOSPEC_PI_PROVIDER. Unset or blank means undeclared.
+        HarnessKind::Pi => declared_pi_provider(environment),
     }
+}
+
+fn declared_pi_provider(environment: &BTreeMap<String, OsString>) -> Option<String> {
+    environment
+        .get("AUTOSPEC_PI_PROVIDER")
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn selection_reason_with_pi_provider(
+    reviewer: HarnessKind,
+    base: &str,
+    environment: &BTreeMap<String, OsString>,
+) -> String {
+    if reviewer == HarnessKind::Pi {
+        if let Some(provider) = declared_pi_provider(environment) {
+            return format!("{base}:{provider}");
+        }
+    }
+    base.to_string()
 }
 
 fn available_review_harnesses(
