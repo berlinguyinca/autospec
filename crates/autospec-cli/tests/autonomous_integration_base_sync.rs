@@ -187,10 +187,24 @@ fi
 if [ "$1" = pr ] && [ "${2:-}" = list ] && [ "${AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS:-0}" = 1 ] && [ "$(cat "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")" != "[]" ]; then
   exit 42
 fi
+labels_json() {
+  case "$mode" in
+    claimed) labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]' ;;
+    terminal) labels='[]' ;;
+    *) labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]' ;;
+  esac
+}
+labels_flat() {
+  case "$mode" in
+    claimed) labels='["in-progress-by-bot","safety:reviewed"]' ;;
+    terminal) labels='[]' ;;
+    *) labels='["auto-implement","safety:reviewed"]' ;;
+  esac
+}
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
-    if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
-    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
+    labels_json
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
   elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   else
@@ -200,9 +214,9 @@ issue() {
 claim_issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     case " $* " in
-      *"{labels: [.labels[] | {name: .name}]}"*) if [ "$mode" = claimed ]; then labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi ;;
-      *" --jq "*) if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='["auto-implement","safety:reviewed"]'; fi ;;
-      *) if [ "$mode" = claimed ]; then labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi ;;
+      *"{labels: [.labels[] | {name: .name}]}"*) labels_json ;;
+      *" --jq "*) labels_flat ;;
+      *) labels_json ;;
     esac
     if [ "$mode" = terminal ] && [ -n "${AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE:-}" ] && [ ! -e "$AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE" ]; then
       : > "$AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE"
@@ -211,7 +225,7 @@ claim_issue() {
     printf '%s\n' "{\"labels\":$labels}"
     return
   fi
-  if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
+  labels_flat
   printf '%s\n' "{\"labels\":$labels,\"title\":\"Add Rust foreground\",\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\",\"author\":\"agent\"}"
 }
 steal_claim() {
