@@ -1,0 +1,5 @@
+advisory: RUSTSEC-2023-0071
+since: 2026-09-10
+dependency_path: rsa 0.9.10 <- sqlx-mysql 0.8.6 <- sqlx 0.8.6 (feature "any") <- autospec-core, consumed at crates/autospec-core/src/resources/db.rs
+reason: No fixed upgrade is available (cargo audit reports "No fixed upgrade is available!" for this advisory). Reachability argument: sqlx-mysql is pulled in only via sqlx's "any" feature, and resources/db.rs never opens a MySQL connection — its only mysql:// references are tests asserting that such URLs are rejected — so the vulnerable rsa PKCS#1 v1.5 padding path is never executed by this workspace.
+removal_trigger: Remove when any of these becomes true: (a) an upstream rsa release fixing RUSTSEC-2023-0071 lands and Cargo.lock moves off rsa 0.9.10; (b) crates/autospec-core/src/resources/db.rs or any other workspace code opens a MySQL connection or adds a sqlx backend that links rsa; (c) the "any" feature is dropped from the sqlx dependency in crates/autospec-core/Cargo.toml; (d) the advisory is withdrawn from RUSTSEC.
