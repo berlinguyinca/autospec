@@ -21,7 +21,7 @@
 #
 # Per-harness invocation table (issue #723):
 #   Claude Code → claude "/autospec" "--autonomous" "$PROMPT"
-#   Codex CLI   → codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"
+#   Codex CLI   → codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT" </dev/null
 #   OpenCode    → opencode "/autospec" "--autonomous" "$PROMPT"
 #
 # Path-safety (mirrors PR #693): rejects relative paths and any binary under
@@ -237,10 +237,13 @@ autospec_harness_invoke() {
             ;;
         codex)
             # Codex CLI takes the full slash-command + args as a single string.
+            # </dev/null is load-bearing (issue #3380): with a prompt argument
+            # codex exec appends stdin as a <stdin> block, so an inherited open
+            # pipe makes it hang forever on "Reading additional input from stdin...".
             if [ "$mode" = "interactive" ]; then
-                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec $prompt"
+                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec $prompt" </dev/null
             else
-                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec --autonomous $prompt"
+                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec --autonomous $prompt" </dev/null
             fi
             return $?
             ;;

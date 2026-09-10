@@ -340,7 +340,7 @@ resolve the active AI harness and pick the canonical `/autospec --autonomous`
 invocation form:
 
 - Claude Code → `claude "/autospec" "--autonomous" "$PROMPT"`.
-- Codex CLI → `codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"`.
+- Codex CLI → `codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT" </dev/null` (the </dev/null closes stdin — without it codex exec hangs on an open stdin, issue #3380).
 - OpenCode → `opencode "/autospec" "--autonomous" "$PROMPT"` (best-effort).
 
 Detection order: `AUTOSPEC_HANDOFF_DISPATCHER_KIND` env override → skill-mount

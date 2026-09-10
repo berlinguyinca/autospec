@@ -247,7 +247,10 @@ case "$DISPATCHER_KIND" in
         OUTPUT="$("$DISPATCHER" -p "$FULL_INPUT" 2>/dev/null)" || RC=$?
         ;;
     codex)
-        OUTPUT="$("$DISPATCHER" exec --reasoning-effort medium "$FULL_INPUT" 2>/dev/null)" || RC=$?
+        # </dev/null is load-bearing (issue #3380): with a prompt argument codex
+        # exec appends stdin as a <stdin> block, so an inherited open stdin would
+        # hang it on "Reading additional input from stdin...".
+        OUTPUT="$("$DISPATCHER" exec --reasoning-effort medium "$FULL_INPUT" </dev/null 2>/dev/null)" || RC=$?
         ;;
 esac
 
