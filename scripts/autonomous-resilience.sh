@@ -672,6 +672,24 @@ cmd_main_health() {
                     say "CI_STATE:failure"
                     say "CHECK_RUNS:${check_count:-0}"
                     say "IGNORED_CHECK_RUN_FAILURES:${ignored_failure_count:-0}"
+
+                    # Automated first-failing-commit report (issue #4108): which
+                    # main commit first broke the per-commit main-builds check.
+                    # Fail-open — a broken report must never mask the halt.
+                    local _ffc_script _ffc_report _ffc_line
+                    _ffc_script="$(cd "$(dirname "$0")" && pwd)/first-failing-commit.sh"
+                    if [ -x "$_ffc_script" ]; then
+                        if _ffc_report="$("$_ffc_script" --repo "$repo" 2>/dev/null)"; then
+                            while IFS= read -r _ffc_line; do
+                                if [ -n "$_ffc_line" ]; then
+                                    say "FFC:$_ffc_line"
+                                fi
+                            done <<< "$_ffc_report"
+                        else
+                            say "FFC:STATE:unknown"
+                        fi
+                    fi
+
                     exit 1
                 fi
                 if [ "${incomplete_count:-1}" -gt 0 ] || [ "${unknown_count:-1}" -gt 0 ]; then
