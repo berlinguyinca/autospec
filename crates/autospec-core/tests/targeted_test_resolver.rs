@@ -8,11 +8,11 @@
 //!
 //! The Rust, shell, and documentation fixture mappings are exercised.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use autospec_core::aar::knowledge::{
-    digest_of, language_for, resolve_stages, scan_module, KnowledgeCache, Stage, StageProgress,
-    REPOSITORY_TEST_COMMAND,
+    affected_test_crates, digest_of, language_for, resolve_stages, scan_module, KnowledgeCache,
+    Stage, StageProgress, REPOSITORY_TEST_COMMAND,
 };
 
 // --- acceptance criterion 1 ----------------------------------------------------
@@ -355,4 +355,140 @@ fn targeted_test_resolver_scan_module_maps_documentation_fixture() {
         record.test_commands,
         vec![REPOSITORY_TEST_COMMAND.to_string()]
     );
+}
+
+// --- issue #3767: scoping is the reverse-dependency closure ---------------------
+
+/// A workspace where `autospec-cli` depends on `autospec-core`.
+fn closure_cache() -> KnowledgeCache {
+    let mut cache = KnowledgeCache::new();
+    cache.set_crate_dependencies(BTreeMap::from([(
+        "autospec-cli".to_string(),
+        vec!["autospec-core".to_string()],
+    )]));
+    cache
+}
+
+#[test]
+fn targeted_test_resolver_library_change_scopes_dependent_crates() {
+    let cache = closure_cache();
+    let plan = resolve_stages(&["crates/autospec-core/src/lib.rs"], &cache);
+
+    assert_eq!(
+        plan.commands(Stage::One),
+        &["cargo test -p autospec-core".to_string()],
+        "Stage 1 stays targeted to the changed crate"
+    );
+    assert_eq!(
+        plan.commands(Stage::Two),
+        &[
+            "cargo test -p autospec-core".to_string(),
+            "cargo test -p autospec-cli".to_string()
+        ],
+        "Stage 2 must cover the reverse-dependency closure, not just the changed crate"
+    );
+    assert_eq!(
+        plan.commands(Stage::Three),
+        &[REPOSITORY_TEST_COMMAND.to_string()]
+    );
+}
+
+#[test]
+fn targeted_test_resolver_closure_is_transitive() {
+    let mut cache = KnowledgeCache::new();
+    cache.set_crate_dependencies(BTreeMap::from([
+        (
+            "autospec-cli".to_string(),
+            vec!["autospec-core".to_string()],
+        ),
+        (
+            "autospec-tool".to_string(),
+            vec!["autospec-cli".to_string()],
+        ),
+    ]));
+    let plan = resolve_stages(&["crates/autospec-core/src/aar/knowledge.rs"], &cache);
+    assert_eq!(
+        plan.commands(Stage::Two),
+        &[
+            "cargo test -p autospec-core".to_string(),
+            "cargo test -p autospec-cli".to_string(),
+            "cargo test -p autospec-tool".to_string()
+        ],
+        "the closure is transitive: tool -> cli -> core"
+    );
+}
+
+#[test]
+fn targeted_test_resolver_closure_is_reverse_not_forward() {
+    let cache = closure_cache(); // autospec-cli depends on autospec-core
+    let plan = resolve_stages(&["crates/autospec-cli/src/main.rs"], &cache);
+    assert_eq!(
+        plan.commands(Stage::Two),
+        &["cargo test -p autospec-cli".to_string()],
+        "a change to a dependent crate does not scope its dependencies"
+    );
+}
+
+#[test]
+fn targeted_test_resolver_scoping_without_graph_data_stays_on_changed_crates() {
+    let cache = KnowledgeCache::new(); // no graph data
+    let plan = resolve_stages(&["crates/demo/src/thing.rs"], &cache);
+    assert_eq!(
+        plan.commands(Stage::Two),
+        &["cargo test -p demo".to_string()],
+        "without graph data scoping stays on the changed crate; Stage 3 covers the rest"
+    );
+}
+
+#[test]
+fn targeted_test_resolver_cached_record_path_also_scopes_closure() {
+    let mut cache = closure_cache();
+    cache.record(scan_module(
+        "crates/autospec-core/src/aar/knowledge.rs",
+        "pub fn do_thing() {}\n",
+    ));
+    let plan = resolve_stages(&["crates/autospec-core/src/aar/knowledge.rs"], &cache);
+    assert_eq!(
+        plan.commands(Stage::Two),
+        &[
+            "cargo test -p autospec-core".to_string(),
+            "cargo test -p autospec-cli".to_string()
+        ],
+        "closure scoping applies to cache-derived records too"
+    );
+}
+
+#[test]
+fn targeted_test_resolver_affected_test_crates_returns_reverse_closure() {
+    let cache = closure_cache();
+    assert_eq!(
+        affected_test_crates(&["crates/autospec-core/src/lib.rs"], &cache),
+        BTreeSet::from(["autospec-core".to_string(), "autospec-cli".to_string()])
+    );
+    assert!(
+        affected_test_crates(&["scripts/autospec-explore.sh", "docs/guide.md"], &cache).is_empty(),
+        "non-Rust paths scope no crates by the dependency graph"
+    );
+}
+
+#[test]
+fn targeted_test_resolver_cache_round_trip_preserves_crate_graph() {
+    let mut cache = closure_cache();
+    cache.record(scan_module(
+        "crates/demo/src/thing.rs",
+        "pub fn do_thing() {}\n",
+    ));
+    let bytes = cache.render();
+    let mut loaded = KnowledgeCache::new();
+    loaded.load(&bytes).expect("cache loads");
+    assert_eq!(loaded, cache);
+}
+
+#[test]
+fn targeted_test_resolver_load_tolerates_cache_files_without_crate_graph() {
+    let mut loaded = KnowledgeCache::new();
+    loaded
+        .load(r#"{"records":{}}"#)
+        .expect("a pre-#3767 cache file parses");
+    assert!(loaded.crate_dependencies().is_empty());
 }

@@ -83,9 +83,9 @@ pub use isolation::{
     SessionIsolation,
 };
 pub use knowledge::{
-    digest_of, language_for, resolve_stages, scan_module, KnowledgeCache, Language, ModuleRecord,
-    RefreshReport, Stage, StagePlan, StageProgress, StageStatus, KNOWLEDGE_DIR, KNOWLEDGE_FILE,
-    REPOSITORY_TEST_COMMAND,
+    affected_test_crates, digest_of, language_for, resolve_stages, scan_module, KnowledgeCache,
+    Language, ModuleRecord, RefreshReport, Stage, StagePlan, StageProgress, StageStatus,
+    KNOWLEDGE_DIR, KNOWLEDGE_FILE, REPOSITORY_TEST_COMMAND,
 };
 pub use memory::{MemoryEntry, MemoryFile, WorktreeMemory};
 pub use metric::{Metric, MetricValue, UNKNOWN};

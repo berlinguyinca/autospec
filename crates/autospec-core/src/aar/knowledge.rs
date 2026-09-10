@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::autonomous::test_gate::reverse_closure;
+
 /// Directory, relative to the worktree root, holding the knowledge cache.
 pub const KNOWLEDGE_DIR: &str = ".autospec/knowledge";
 
@@ -170,6 +172,11 @@ pub fn scan_module(path: &str, contents: &str) -> ModuleRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnowledgeCache {
     records: BTreeMap<String, ModuleRecord>,
+    /// Workspace crate dependency graph: crate -> the crates it directly
+    /// depends on. Test scoping closes over this map in reverse, so a
+    /// change to a library crate also runs the tests of every crate that
+    /// depends on it, transitively (#3767).
+    crate_dependencies: BTreeMap<String, Vec<String>>,
 }
 
 /// What a refresh did: which entries were re-derived, kept, or dropped.
@@ -212,24 +219,45 @@ impl KnowledgeCache {
         #[derive(Serialize)]
         struct CacheFile<'a> {
             records: &'a BTreeMap<String, ModuleRecord>,
+            crate_dependencies: &'a BTreeMap<String, Vec<String>>,
         }
         serde_json::to_string_pretty(&CacheFile {
             records: &self.records,
+            crate_dependencies: &self.crate_dependencies,
         })
         .expect("cache serializes")
     }
 
     /// Parse a rendered cache file back into entries.
+    ///
+    /// Cache files written before #3767 carry no `crate_dependencies`
+    /// field; those load with an empty graph, and scoping then stays on
+    /// the changed crates while Stage 3 covers the rest.
     pub fn load(&mut self, contents: &str) -> Result<(), String> {
         #[derive(Deserialize)]
         struct CacheFile {
             #[serde(default)]
             records: BTreeMap<String, ModuleRecord>,
+            #[serde(default)]
+            crate_dependencies: BTreeMap<String, Vec<String>>,
         }
         let file: CacheFile =
             serde_json::from_str(contents).map_err(|error| format!("bad cache file: {error}"))?;
         self.records = file.records;
+        self.crate_dependencies = file.crate_dependencies;
         Ok(())
+    }
+
+    /// Set the workspace crate dependency graph (crate -> the crates it
+    /// directly depends on). An empty graph means "no graph data": scoping
+    /// stays on the changed crates and Stage 3 covers the rest.
+    pub fn set_crate_dependencies(&mut self, graph: BTreeMap<String, Vec<String>>) {
+        self.crate_dependencies = graph;
+    }
+
+    /// The workspace crate dependency graph.
+    pub fn crate_dependencies(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.crate_dependencies
     }
 
     /// Re-derive the entries for a repository's current sources.
@@ -390,7 +418,40 @@ pub fn resolve_stages(changed: &[&str], cache: &KnowledgeCache) -> StagePlan {
             }
         }
     }
+    // Widen Stage 2 to the reverse-dependency closure of the changed
+    // crates (#3767): a patch that touches only a library crate can break
+    // a dependent crate's tests, so scoping to the changed crates alone
+    // could go green over a broken dependent. The changed crates' own
+    // Stage 2 commands are already present and dedupe. The closure is the
+    // same computation the attribution gate uses for blast radius.
+    for crate_name in affected_test_crates(changed, cache) {
+        plan.add(Stage::Two, &format!("cargo test -p {crate_name}"));
+    }
     plan
+}
+
+/// The set of crates whose tests must run for a set of changed paths: the
+/// changed crates plus every crate that depends on them, transitively —
+/// the reverse-dependency closure (#3767).
+///
+/// The closure is computed by the same function the attribution gate uses
+/// for its blast radius (`test_gate::reverse_closure`), so a change is
+/// graded against the same set of crates its tests were scoped to. Non-Rust
+/// paths contribute nothing: a patch that touches no compiled code cannot
+/// break a compiled test by the dependency graph. With no graph data in the
+/// cache the set is just the changed crates, and the Stage 3 repository
+/// check covers the rest.
+pub fn affected_test_crates(changed: &[&str], cache: &KnowledgeCache) -> BTreeSet<String> {
+    let mut seed = BTreeSet::new();
+    for path in changed {
+        if language_for(path) != Language::Rust {
+            continue;
+        }
+        if let Some(crate_name) = crate_package(path) {
+            seed.insert(crate_name.to_string());
+        }
+    }
+    reverse_closure(&seed, cache.crate_dependencies())
 }
 
 /// Outcome of a started stage.
