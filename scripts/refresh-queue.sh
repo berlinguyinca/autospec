@@ -52,6 +52,22 @@
 #   * `--check` covers exactly one repo: the dispatcher passes the repo it is
 #     dispatching into, taken from the queue entry.
 #
+# Background (issue #3736): the dispatcher also requires a staged spec at
+# <spec-dir>/<n>.md (non-empty) for every queued issue, and that check was a
+# bare `|| continue` with no producer that ever established it — a queue of 146
+# advertised 146 items of work but could dispatch six, the other 69 (the newest,
+# i.e. exactly the work filed to fix the pipeline) silently unrunnable. This
+# script is now the component that establishes that precondition:
+#
+#   * For every queued issue whose staged spec is missing or empty, fetch its
+#     body from GitHub (where gh is authenticated) and write it to
+#     <spec-dir>/<n>.md, so an issue that enters the queue is dispatchable
+#     within one refresh cycle.
+#   * The queue reports *eligibility*, not just membership: how many queued
+#     issues now have a spec, and — when nonzero — which ones could not be
+#     established (body missing/empty on GitHub), so a silent filter is
+#     surfaced instead of inferred.
+#
 # Usage:
 #   refresh-queue.sh [refresh options]
 #   refresh-queue.sh [refresh options] --check N
@@ -60,12 +76,19 @@
 #   --repo OWNER/REPO   target repo, repeatable to cover a set of repos
 #                       (default: current repo, via `gh api repo`)
 #   --out FILE          queue file to write (default: ~/.autospec/queue.json)
+#   --spec-dir DIR      staged-spec directory the dispatcher reads (default:
+#                       autospec/issues); a queued issue is dispatchable only
+#                       when DIR/<n>.md exists and is non-empty (issue #3736)
 #
 # Output:
-#   refresh: the two report lines above on stdout (plus one per-repo line when
-#            several repos are covered); the queue file is a JSON array of the
-#            surviving {"repo","number"} objects — previous order kept for entries
-#            still live, newly dispatchable issues appended in tracker order.
+#   refresh: the report lines above on stdout (plus one per-repo line when
+#            several repos are covered) — a spec-staging line ("staged N spec(s)"
+#            or "all queued issues have a spec") and an eligibility line ("eligible
+#            E of Q queued issues", naming any without a spec); the queue file is a
+#            JSON array of the surviving {"repo","number"} objects — previous order
+#            kept for entries still live, newly dispatchable issues appended in
+#            tracker order. Each queued issue's staged spec is written to
+#            <spec-dir>/<n>.md when missing (issue #3736).
 #   check:   silent on pass; one refusal line on stderr on refuse.
 #
 # Exit codes:
@@ -101,6 +124,7 @@ fail() {
 
 repos_list=""
 out_file="$HOME/.autospec/queue.json"
+spec_dir="autospec/issues"
 check_issue=""
 
 while [ $# -gt 0 ]; do
@@ -117,6 +141,11 @@ while [ $# -gt 0 ]; do
         --out)
             [ $# -ge 2 ] || die_usage "option $1 needs a value"
             out_file="$2"
+            shift 2
+            ;;
+        --spec-dir)
+            [ $# -ge 2 ] || die_usage "option $1 needs a value"
+            spec_dir="$2"
             shift 2
             ;;
         --check)
@@ -317,6 +346,52 @@ write_queue() {
     fi
 }
 
+# stage_specs
+# Issue #3736: establish the dispatcher's spec precondition. For every entry in
+# $kept_json (the final dispatchable queue), if <spec_dir>/<n>.md is missing or
+# empty, fetch the issue body from GitHub and write it. A body that cannot be
+# fetched or is empty cannot be established and is surfaced as ineligible rather
+# than silently dropped. Sets queue_total, eligible_total, staged_total,
+# ineligible_total and ineligible_list.
+stage_specs() {
+    queue_total=0
+    eligible_total=0
+    staged_total=0
+    ineligible_total=0
+    ineligible_list=""
+    if ! mkdir -p -- "$spec_dir" 2>/dev/null; then
+        fail "cannot create spec directory: $spec_dir"
+    fi
+    local entry repo number spec_file out body
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        queue_total=$((queue_total + 1))
+        repo="$(jq -r '.repo' <<<"$entry")"
+        number="$(jq -r '.number' <<<"$entry")"
+        spec_file="$spec_dir/$number.md"
+        if [ -s "$spec_file" ]; then
+            eligible_total=$((eligible_total + 1))
+            continue
+        fi
+        if ! out="$(gh api "repos/${repo}/issues/${number}" 2>&1)"; then
+            ineligible_total=$((ineligible_total + 1))
+            ineligible_list="${ineligible_list:+$ineligible_list,}$number"
+            continue
+        fi
+        body="$(jq -r '.body // empty' <<<"$out")"
+        if [ -z "$body" ]; then
+            ineligible_total=$((ineligible_total + 1))
+            ineligible_list="${ineligible_list:+$ineligible_list,}$number"
+            continue
+        fi
+        if ! printf '%s\n' "$body" > "$spec_file"; then
+            fail "cannot write spec file: $spec_file"
+        fi
+        staged_total=$((staged_total + 1))
+        eligible_total=$((eligible_total + 1))
+    done < <(jq -c '.[]' <<<"$kept_json")
+}
+
 resolve_repos
 if [ -n "$check_issue" ] && [ ${#repos[@]} -gt 1 ]; then
     die_usage "check mode covers exactly one repo: the dispatcher passes the repo it is dispatching into, taken from the queue entry"
@@ -404,5 +479,22 @@ if [ ${#repos[@]} -gt 1 ]; then
 fi
 printf 'queue: %s -> %s, dropped %s resolved, added %s newly labelled\n' \
     "$old_count" "$new_count" "$dropped_count" "$added_count"
+
+# Issue #3736: establish the spec precondition for every queued issue, then
+# report eligibility (not just membership) so a silent filter is surfaced.
+stage_specs
+if [ "$staged_total" -gt 0 ]; then
+    printf 'staged %s spec(s) for queued issues that lacked one\n' "$staged_total"
+elif [ "$ineligible_total" -eq 0 ]; then
+    printf 'all queued issues have a spec\n'
+else
+    printf 'no new spec staged; %s queued issue(s) could not be established\n' "$ineligible_total"
+fi
+if [ "$ineligible_total" -gt 0 ]; then
+    printf 'eligible %s of %s queued issues; %s without a spec (ineligible): %s\n' \
+        "$eligible_total" "$queue_total" "$ineligible_total" "$ineligible_list"
+else
+    printf 'eligible %s of %s queued issues\n' "$eligible_total" "$queue_total"
+fi
 
 write_queue "$out_file"
