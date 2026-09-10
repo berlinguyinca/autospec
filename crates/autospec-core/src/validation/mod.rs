@@ -7,6 +7,7 @@ pub mod options;
 pub mod output_macros;
 pub mod plan;
 pub mod reference_pointer;
+pub mod repair;
 pub mod results;
 pub mod runner;
 pub mod structural;
@@ -51,6 +52,9 @@ pub use external::ExternalCheck;
 pub use measurement::{require_tool, resolve_tool, Measurement};
 pub use options::{Jobs, ValidationOptions};
 pub use plan::{PlannedValidationCheck, ValidationPlan};
+pub use repair::{
+    DefectClass, GateDefect, GateVerdict, RepairBudget, RepairPass, RepairStep, SkippedCheck,
+};
 pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,
     ValidationObservation, ValidationReport,
