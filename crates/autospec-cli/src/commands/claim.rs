@@ -6958,14 +6958,19 @@ fn branch_attempt_is_live(repo: &str, branch: &str) -> Result<bool, CommandFailu
     if local_branch_checked_out(&format!("refs/heads/{branch}"))? {
         return Ok(true);
     }
+    // A branch that does not exist cannot be a live attempt, so answer locally
+    // and do not ask GitHub. Asking anyway made this predicate depend on network
+    // reachability for a question git already answers: with an unreachable repo
+    // the lookup errored, callers' `unwrap_or(true)` read that as "live", and an
+    // abandoned generation was never requeued (#4123). It also spends a `gh` call
+    // per stale record in production for branches that are provably gone.
+    if !branch_ref_exists(branch) {
+        return Ok(false);
+    }
     if branch_has_live_pr(repo, branch)? {
         return Ok(true);
     }
-    if branch_ref_exists(branch) {
-        eprintln!(
-            "WARN: branch {branch} has no open or merged PR; treating the attempt as abandoned"
-        );
-    }
+    eprintln!("WARN: branch {branch} has no open or merged PR; treating the attempt as abandoned");
     Ok(false)
 }
 
