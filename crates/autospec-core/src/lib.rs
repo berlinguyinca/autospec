@@ -55,6 +55,7 @@ pub mod resources;
 pub mod runtime_env;
 pub mod runtime_policy;
 pub mod safety;
+pub mod service_timeout;
 pub mod spec;
 pub mod staged_spec;
 pub mod state;
