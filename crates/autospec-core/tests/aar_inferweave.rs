@@ -1,7 +1,8 @@
 //! AAR spec section 12: the InferWeave capability contract and routing.
 
 use autospec_core::aar::inferweave::{
-    route, CapabilityRequest, LatencyPriority, NodeOffer, SessionSeat,
+    classify_probe, route, CapabilityRequest, LatencyPriority, LivenessProbe, NodeOffer,
+    PoolAction, ProbeCheck, ProbeSignal, ProbeVerdict, SessionSeat,
 };
 
 fn node(node_id: &str, free_context: u64, decode_tps: f64) -> NodeOffer {
@@ -286,4 +287,173 @@ fn every_latency_priority_round_trips_through_its_string_form() {
     ] {
         assert_eq!(LatencyPriority::parse(priority.as_str()), Some(priority));
     }
+}
+
+// Liveness probe contract: a probe must not evict a worker it merely failed
+// to reach in time.
+
+fn cheap_probe() -> LivenessProbe {
+    LivenessProbe {
+        interval_secs: 300,
+        deadline_secs: 30,
+        liveness: ProbeCheck::Health,
+        verification: None,
+        expected_identity: Some("worker-7".to_string()),
+    }
+}
+
+/// AC1: a liveness check must not consume the very resource whose exhaustion
+/// it is supposed to survive. A completion runs the model, so it is rejected
+/// from the eviction-gating slot.
+#[test]
+fn a_completion_check_cannot_gate_eviction() {
+    let probe = LivenessProbe {
+        liveness: ProbeCheck::Completion {
+            starvation_argument: "why not".to_string(),
+        },
+        ..cheap_probe()
+    };
+
+    let err = probe.validate().unwrap_err();
+
+    assert!(err.contains("constant-cost"), "got: {err}");
+}
+
+/// AC2: a timeout is not a failure verdict. A deadline miss is inconclusive,
+/// and an inconclusive verdict keeps the worker in the pool.
+#[test]
+fn a_deadline_miss_is_inconclusive_and_keeps_the_worker() {
+    let probe = cheap_probe();
+
+    let verdict = classify_probe(&probe, &ProbeSignal::DeadlineExceeded);
+
+    assert_eq!(verdict, ProbeVerdict::Inconclusive);
+    assert_eq!(verdict.pool_action(), PoolAction::Keep);
+}
+
+/// AC2: the failures that are a definitive statement about the worker still
+/// evict: refused, reset, error status, and identity mismatch.
+#[test]
+fn every_definitive_failure_evicts() {
+    let probe = cheap_probe();
+    let definitive = [
+        (ProbeSignal::Refused, "refused"),
+        (ProbeSignal::Reset, "reset"),
+        (ProbeSignal::ErrorStatus { status: 503 }, "error status"),
+        (
+            ProbeSignal::Live {
+                identity: Some("worker-9".to_string()),
+            },
+            "identity mismatch",
+        ),
+    ];
+
+    for (signal, what) in definitive {
+        let verdict = classify_probe(&probe, &signal);
+        assert_eq!(
+            verdict.pool_action(),
+            PoolAction::Evict,
+            "{what} must evict, got {verdict:?}"
+        );
+        assert!(matches!(verdict, ProbeVerdict::Dead { .. }), "{what}");
+    }
+}
+
+#[test]
+fn an_alive_worker_that_reports_the_expected_identity_is_kept() {
+    let probe = cheap_probe();
+
+    let verdict = classify_probe(
+        &probe,
+        &ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+    );
+
+    assert_eq!(verdict, ProbeVerdict::Alive);
+    assert_eq!(verdict.pool_action(), PoolAction::Keep);
+}
+
+/// No identity reported is not an identity mismatch: the worker answered,
+/// and only a contradiction is definitive.
+#[test]
+fn an_absent_identity_is_not_a_mismatch() {
+    let probe = cheap_probe();
+
+    let verdict = classify_probe(&probe, &ProbeSignal::Live { identity: None });
+
+    assert_eq!(verdict, ProbeVerdict::Alive);
+}
+
+/// AC3: if a check needs to be costly, it is separated from the cheap check,
+/// and only the cheap one gates eviction. A completion is legal in the
+/// verification slot, and a deadline miss on the liveness check still keeps
+/// the worker even while the costly check is configured.
+#[test]
+fn a_completion_check_is_legal_only_in_the_verification_slot() {
+    let probe = LivenessProbe {
+        verification: Some(ProbeCheck::Completion {
+            starvation_argument:
+                "on a busy worker the probe queues behind production traffic, so its \
+                 deadline miss measures the queue, not the worker; it must not evict."
+                    .to_string(),
+        }),
+        ..cheap_probe()
+    };
+
+    probe
+        .validate()
+        .expect("completion is legal as verification");
+
+    let verdict = classify_probe(&probe, &ProbeSignal::DeadlineExceeded);
+    assert_eq!(verdict.pool_action(), PoolAction::Keep);
+}
+
+/// AC4: a check whose cost scales with load must carry an explicit
+/// starvation argument alongside it.
+#[test]
+fn a_load_scaling_check_requires_a_starvation_argument() {
+    let without_argument = LivenessProbe {
+        verification: Some(ProbeCheck::Completion {
+            starvation_argument: "   ".to_string(),
+        }),
+        ..cheap_probe()
+    };
+    let err = without_argument.validate().unwrap_err();
+    assert!(err.contains("starvation argument"), "got: {err}");
+
+    let with_argument = LivenessProbe {
+        verification: Some(ProbeCheck::Completion {
+            starvation_argument: "cost scales with load; must not gate eviction".to_string(),
+        }),
+        ..cheap_probe()
+    };
+    with_argument
+        .validate()
+        .expect("a non-blank starvation argument is accepted");
+}
+
+#[test]
+fn a_probe_needs_positive_interval_and_deadline() {
+    let no_interval = LivenessProbe {
+        interval_secs: 0,
+        ..cheap_probe()
+    };
+    assert!(no_interval.validate().is_err());
+
+    let no_deadline = LivenessProbe {
+        deadline_secs: 0,
+        ..cheap_probe()
+    };
+    assert!(no_deadline.validate().is_err());
+}
+
+#[test]
+fn the_model_list_check_is_constant_cost_and_legal_in_the_liveness_slot() {
+    let probe = LivenessProbe {
+        liveness: ProbeCheck::ModelList,
+        ..cheap_probe()
+    };
+
+    probe.validate().expect("model list is constant-cost");
 }
