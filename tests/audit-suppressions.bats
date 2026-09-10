@@ -46,6 +46,16 @@ make_fake_audit() {
   local out="$1" rc="$2"
   {
     printf '%s\n' '#!/usr/bin/env bash'
+    # Behave like the real binary: a cargo subcommand invoked directly requires
+    # its own name as argv[1]. The previous stub ignored its arguments, so it
+    # accepted a bare `cargo-audit` that the real tool rejects with exit 2 and a
+    # usage message -- the tests passed while CI failed on every run. A double
+    # more permissive than the tool it stands in for cannot catch a misuse.
+    printf '%s\n' 'if [ "${1:-}" != "audit" ]; then'
+    printf '%s\n' '  echo "Audit Cargo.lock for crates with security vulnerabilities" >&2'
+    printf '%s\n' '  echo "Usage: cargo [OPTIONS] <COMMAND>" >&2'
+    printf '%s\n' '  exit 2'
+    printf '%s\n' 'fi'
     printf '%s\n' 'cat <<FAKE_EOF'
     printf '%s\n' "$out"
     printf '%s\n' 'FAKE_EOF'
