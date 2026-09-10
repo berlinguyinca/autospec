@@ -7,7 +7,7 @@
 //! died before emitting output. Every one of those reaches the same string,
 //! so a predicate that matches on absence passes all of them.
 //!
-//! Two gates live here:
+//! Three gates live here:
 //!
 //! * [`judge_test_run`] — the pass/fail predicate for `cargo test`-style
 //!   output. It sums every `test result:` line (one per target), requires
@@ -17,6 +17,13 @@
 //! * [`judge_completion`] — the same rule for the other gates that grep for
 //!   absence (build, clippy, fmt): passing requires positive evidence the
 //!   command ran to completion, not merely that no error text was printed.
+//! * [`record_gate`] / [`review_gate_claim`] — the mechanical record of a
+//!   gate execution (the exit status, the parsed summary, the
+//!   failure-marker count, all taken from the full output) and the review
+//!   that rejects a reported outcome disagreeing with that record: a gate
+//!   reported as passing with a non-zero exit status, or with a failure
+//!   count above zero, is a defect, and a claim with no recorded exit
+//!   status is rejected rather than trusted (issue #4007).
 //!
 //! The same doctrine applies to *failing* runs: a count from a run that
 //! aborted is a **lower bound**, not a measurement. Cargo's default is
@@ -381,5 +388,8 @@ pub fn judge_completion(evidence: &CompletionEvidence) -> CompletionVerdict {
     }
 }
 
+mod gate_record;
+
+pub use gate_record::*;
 #[cfg(test)]
 mod tests;
