@@ -30,10 +30,19 @@
 //! has no worker horizon: the gateway is stable infrastructure, not a
 //! scheduler-managed resource.
 //!
+//! **The agent's budget is derived from the allocation.** The agent's
+//! wall-clock budget and the scheduler's allocation are one decision, not
+//! two independent limits where the smaller one wins invisibly
+//! (issue #3613): [`plan_agent_budget`] derives the budget from the grant's
+//! `valid_until` minus a flush margin, and fails closed when an explicit
+//! budget would outlive the allocation. [`startup_limits_line`] names both
+//! limits at dispatch start. There is no default budget constant.
+//!
 //! **Statuses are recorded distinctly.** [`classify_status`] maps a finished
-//! dispatch to a [`StatusReason`] for `status.txt`, where `connection-error`
-//! and `no-output` are separate stable tokens: a run that lost its endpoint
-//! is not a run that produced no output.
+//! dispatch to a [`StatusReason`] for `status.txt`, where `connection-error`,
+//! `no-output`, and `timeout-partial` are separate stable tokens: a run that
+//! lost its endpoint is not a run that produced no output, and a timeout
+//! that produced partial work is not a provider error.
 //!
 //! Everything here is pure: the pool and the driver hold in-memory state and
 //! callers perform I/O with the grants and steps they return.
@@ -294,10 +303,16 @@ pub enum StatusReason {
     /// preempted). Distinct from [`StatusReason::NoOutput`].
     ConnectionError,
     /// The endpoint was reachable but the run produced neither output nor a
-    /// patch.
+    /// patch — including a timeout that spent its budget without producing
+    /// anything.
     NoOutput,
-    /// The dispatch failed at or beyond a live endpoint: provider error,
-    /// timeout, or unclassified failure.
+    /// The dispatch hit its wall-clock budget after producing output or a
+    /// patch. The partial work must be preserved — and the run is not a
+    /// `provider-error`: the endpoint was alive, the budget simply ran out
+    /// (issue #3613).
+    TimeoutPartial,
+    /// The dispatch failed at or beyond a live endpoint: provider error or
+    /// unclassified failure.
     ProviderError,
 }
 
@@ -307,6 +322,7 @@ impl StatusReason {
             Self::Completed => "completed",
             Self::ConnectionError => "connection-error",
             Self::NoOutput => "no-output",
+            Self::TimeoutPartial => "timeout-partial",
             Self::ProviderError => "provider-error",
         }
     }
@@ -317,6 +333,7 @@ impl StatusReason {
             "completed" => Ok(Self::Completed),
             "connection-error" => Ok(Self::ConnectionError),
             "no-output" => Ok(Self::NoOutput),
+            "timeout-partial" => Ok(Self::TimeoutPartial),
             "provider-error" => Ok(Self::ProviderError),
             other => Err(format!("unknown status reason: {other}")),
         }
@@ -327,21 +344,99 @@ impl StatusReason {
 ///
 /// A connection-level failure takes precedence over everything else: once
 /// the endpoint is lost, the (possibly empty) output says nothing about the
-/// run. An unclassified dispatch that produced neither output nor a patch is
-/// `no-output`, never `completed`.
+/// run. A timeout is not a provider error: it is classified by what the
+/// agent managed to produce before its budget ran out — partial output is
+/// recorded as `timeout-partial` so the work is preserved, and a budget
+/// spent without any output is `no-output` (issue #3613). An unclassified
+/// dispatch that produced neither output nor a patch is `no-output`, never
+/// `completed`.
 pub fn classify_status(result: &ExecutorResult) -> StatusReason {
+    let produced = !result.output.trim().is_empty()
+        || result
+            .patch
+            .as_deref()
+            .is_some_and(|patch| !patch.trim().is_empty());
     match result.failure_class {
         Some(FailureClass::ProviderUnavailable) => StatusReason::ConnectionError,
+        Some(FailureClass::Timeout) if produced => StatusReason::TimeoutPartial,
+        Some(FailureClass::Timeout) => StatusReason::NoOutput,
         Some(_) => StatusReason::ProviderError,
-        None if result.output.trim().is_empty()
-            && result
-                .patch
-                .as_deref()
-                .map_or(true, |patch| patch.trim().is_empty()) =>
-        {
-            StatusReason::NoOutput
-        }
+        None if !produced => StatusReason::NoOutput,
         None => StatusReason::Completed,
+    }
+}
+
+/// The agent's wall-clock budget for a dispatch against `grant` at `now`
+/// (issue #3613).
+///
+/// `explicit_secs` is the operator's budget (`ExecutorRequest::timeout_secs`);
+/// `margin_secs` is the headroom the dispatcher needs between the agent
+/// stopping and the scheduler killing the allocation, so partial output can
+/// be flushed before the job dies. The budget and the allocation are related
+/// by construction:
+///
+/// - `None` derives the budget from the allocation: the seconds between
+///   `now` and the grant's `valid_until`, minus the margin. There is no
+///   default budget constant — a budget that is not derived from the
+///   allocation does not exist.
+/// - `Some(budget)` is used as-is when it fits inside the derived budget, and
+///   is a fail-closed [`PoolError::Invalid`] naming both numbers when it
+///   outlives the allocation or eats the flush margin.
+///
+/// Gateway grants carry no allocation horizon, so neither derivation nor
+/// checking is possible; a budget against a gateway grant is the operator's
+/// to own, and this function fails closed rather than guessing (spec §15).
+pub fn plan_agent_budget(
+    grant: &Grant,
+    now: u64,
+    explicit_secs: Option<u64>,
+    margin_secs: u64,
+) -> Result<u64, PoolError> {
+    let Grant::Direct { valid_until, .. } = grant else {
+        return Err(PoolError::Invalid(
+            "gateway grants carry no allocation horizon; the agent budget must be owned by the operator, not derived"
+                .into(),
+        ));
+    };
+    if *valid_until <= now {
+        return Err(PoolError::Invalid(format!(
+            "allocation horizon {valid_until} is at or before now {now}; no budget can be planned"
+        )));
+    }
+    let remaining = valid_until - now;
+    let derived = remaining.saturating_sub(margin_secs);
+    if derived == 0 {
+        return Err(PoolError::Invalid(format!(
+            "allocation has {remaining}s remaining and the {margin_secs}s flush margin leaves no agent budget"
+        )));
+    }
+    match explicit_secs {
+        Some(budget) if budget <= derived => Ok(budget),
+        Some(budget) => Err(PoolError::Invalid(format!(
+            "explicit agent budget {budget}s outlives the allocation: {remaining}s remaining minus a {margin_secs}s flush margin leaves {derived}s"
+        ))),
+        None => Ok(derived),
+    }
+}
+
+/// The startup log line naming both limits, e.g.
+/// `walltime=4h agent_limit=45m` (issue #3613): the allocation the
+/// scheduler owns and the budget the agent is actually given.
+pub fn startup_limits_line(remaining_secs: u64, agent_budget_secs: u64) -> String {
+    format!(
+        "walltime={} agent_limit={}",
+        format_limits_duration(remaining_secs),
+        format_limits_duration(agent_budget_secs)
+    )
+}
+
+fn format_limits_duration(secs: u64) -> String {
+    if secs % 3600 == 0 {
+        format!("{}h", secs / 3600)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}s", secs)
     }
 }
 
@@ -878,14 +973,34 @@ mod tests {
     }
 
     #[test]
-    fn classify_timeout_is_not_a_connection_error() {
-        let timed_out = executor_result(
+    fn classify_timeout_splits_partial_from_no_output() {
+        // A timeout that produced work is not a provider error and not
+        // completed: the partial work is preserved under its own token.
+        let partial = executor_result(
+            ExecutionStatus::TimedOut,
+            Some(FailureClass::Timeout),
+            "half-done",
+            None,
+        );
+        assert_eq!(classify_status(&partial), StatusReason::TimeoutPartial);
+        let partial_patch = executor_result(
             ExecutionStatus::TimedOut,
             Some(FailureClass::Timeout),
             "",
+            Some("diff"),
+        );
+        assert_eq!(
+            classify_status(&partial_patch),
+            StatusReason::TimeoutPartial
+        );
+        // A timeout that spent its budget without output is no-output.
+        let timed_out = executor_result(
+            ExecutionStatus::TimedOut,
+            Some(FailureClass::Timeout),
+            "   ",
             None,
         );
-        assert_eq!(classify_status(&timed_out), StatusReason::ProviderError);
+        assert_eq!(classify_status(&timed_out), StatusReason::NoOutput);
     }
 
     #[test]
@@ -894,6 +1009,7 @@ mod tests {
             StatusReason::Completed,
             StatusReason::ConnectionError,
             StatusReason::NoOutput,
+            StatusReason::TimeoutPartial,
             StatusReason::ProviderError,
         ] {
             assert_eq!(StatusReason::parse(reason.as_str()).unwrap(), reason);
@@ -901,6 +1017,93 @@ mod tests {
         assert!(StatusReason::parse("NO-OUTPUT").is_err());
         assert!(StatusReason::parse("bogus").is_err());
         assert!(StatusReason::parse("").is_err());
+    }
+
+    #[test]
+    fn budget_is_derived_from_the_allocation() {
+        let direct = Grant::Direct {
+            worker_id: "w1".into(),
+            endpoint: "http://w1".into(),
+            valid_until: 10_000,
+        };
+        // Derived: remaining minus the flush margin.
+        assert_eq!(plan_agent_budget(&direct, 7_300, None, 300).unwrap(), 2_400);
+        // An explicit budget that fits inside the derived budget is
+        // used as-is.
+        assert_eq!(
+            plan_agent_budget(&direct, 7_300, Some(1_000), 300).unwrap(),
+            1_000
+        );
+    }
+
+    #[test]
+    fn explicit_budget_outrunning_the_allocation_fails_closed() {
+        let direct = Grant::Direct {
+            worker_id: "w1".into(),
+            endpoint: "http://w1".into(),
+            valid_until: 10_000,
+        };
+        // 45 m explicit on a job with 25 m left: the error names both
+        // numbers.
+        let err = plan_agent_budget(&direct, 8_500, Some(2_700), 300).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2700s"), "{msg}");
+        assert!(msg.contains("1500s remaining"), "{msg}");
+        // Eating the flush margin also fails: the margin is the window
+        // partial output gets flushed before the scheduler kills the job.
+        assert!(matches!(
+            plan_agent_budget(&direct, 8_500, Some(1_300), 300),
+            Err(PoolError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn budget_planning_fails_closed_on_dead_allocations_and_gateways() {
+        let dead = Grant::Direct {
+            worker_id: "w1".into(),
+            endpoint: "http://w1".into(),
+            valid_until: 1_000,
+        };
+        assert!(matches!(
+            plan_agent_budget(&dead, 1_000, None, 300),
+            Err(PoolError::Invalid(_))
+        ));
+        // A margin consuming the whole remainder leaves no budget.
+        let tight = Grant::Direct {
+            worker_id: "w1".into(),
+            endpoint: "http://w1".into(),
+            valid_until: 1_300,
+        };
+        assert!(matches!(
+            plan_agent_budget(&tight, 1_000, None, 300),
+            Err(PoolError::Invalid(_))
+        ));
+        // Gateway grants carry no horizon: derivation is impossible, so
+        // the plan fails closed whether or not a budget was given.
+        let gateway = Grant::Gateway {
+            url: "http://gw".into(),
+        };
+        assert!(matches!(
+            plan_agent_budget(&gateway, 1_000, None, 300),
+            Err(PoolError::Invalid(_))
+        ));
+        assert!(matches!(
+            plan_agent_budget(&gateway, 1_000, Some(600), 300),
+            Err(PoolError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn startup_line_names_both_limits() {
+        assert_eq!(
+            startup_limits_line(4 * 3600, 45 * 60),
+            "walltime=4h agent_limit=45m"
+        );
+        assert_eq!(startup_limits_line(90, 45), "walltime=90s agent_limit=45s");
+        assert_eq!(
+            startup_limits_line(3_967, 95),
+            "walltime=3967s agent_limit=95s"
+        );
     }
 
     #[test]

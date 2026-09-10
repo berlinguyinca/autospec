@@ -11,9 +11,9 @@ shapes below.
 - **Implementation:** [`crates/autospec-core/src/execution/endpoint.rs`](../../crates/autospec-core/src/execution/endpoint.rs)
   (pure module: no I/O, no wall-clock reads — callers supply `now`).
 - **Scope of this doc:** the grant shape, the pool resolution rules, the
-  re-resolution protocol, and the `status.txt` reason tokens. Worker
-  registration, Slurm accounting, and the gateway deployment itself are out
-  of scope.
+  agent-budget rule, the re-resolution protocol, and the `status.txt`
+  reason tokens. Worker registration, Slurm accounting, and the gateway
+  deployment itself are out of scope.
 
 ## Why
 
@@ -30,6 +30,10 @@ it supports:
    connection loss the dispatcher records the dead worker as unreachable
    and re-dispatches against *another healthy worker of the same model*,
    bounded by attempt count.
+3. **Budget derived from the allocation**: the agent's wall-clock budget
+   is derived from the grant's `valid_until` minus a flush margin, and an
+   explicit budget that would outlive the allocation fails at submit time
+   (issue #3613).
 
 Re-resolution is **not** provider fallback. Spec §15's fail-closed rule
 still binds at the executor: an executor never re-routes between providers
@@ -62,6 +66,35 @@ resource's guarantee. `EndpointPool::resolve` refuses to mint a direct
 grant for a worker whose `guaranteed_until <= now` (fails closed with
 `NoCapacity`). Gateway grants carry no worker horizon: the gateway is
 stable infrastructure, not a scheduler-managed resource.
+
+## Agent budget and allocation (issue #3613)
+
+The agent's wall-clock budget (`ExecutorRequest::timeout_secs`) and the
+scheduler's allocation are **one decision, not two independent limits**
+where the smaller one wins invisibly. `plan_agent_budget(grant, now,
+explicit_secs, margin_secs) -> Result<u64, PoolError>`:
+
+- `explicit_secs = None` **derives** the budget from the allocation:
+  `valid_until - now - margin_secs`. There is no default budget constant —
+  a budget that is not derived from the allocation does not exist.
+- `explicit_secs = Some(b)` is used as-is when `b <= valid_until - now -
+  margin_secs`; otherwise the dispatch fails at submit time with a
+  `PoolError::Invalid` naming the explicit budget, the remaining
+  allocation, and the margin. Eating the flush margin is a failure, not a
+  rounding: the margin is the window in which partial output is flushed
+  before the scheduler kills the job.
+- `margin_secs` is the headroom between the agent stopping and the
+  allocation ending; it is an explicit caller argument, never a hidden
+  default.
+- A **gateway grant** carries no allocation horizon, so neither derivation
+  nor checking is possible: `plan_agent_budget` fails closed for it,
+  explicit budget or not (spec §15).
+- A direct grant whose `valid_until <= now` fails closed: there is no
+  budget left to plan.
+
+At dispatch start the dispatcher logs both limits via
+`startup_limits_line(remaining_secs, agent_budget_secs)`, e.g.
+`walltime=4h agent_limit=45m`.
 
 ## Pool resolution rules
 
@@ -98,7 +131,7 @@ count, not wall clock** (anti-loop guardrail, per AGENTS.md):
 - `on_outcome(pool, outcome, now)`:
   - `AttemptOutcome::Settled(status)` → `Step::Halt { status }`
     immediately. A live worker's failure (provider error, timeout,
-    no-output) is never re-resolved.
+    timeout-partial, no-output) is never re-resolved.
   - `AttemptOutcome::ConnectionLost` on a **direct** grant → re-resolve
     against the same model excluding the dead worker; dispatch again while
     `attempts < max_attempts` and capacity exists; otherwise
@@ -121,8 +154,9 @@ is the distinct fact the old "Connection error" death hid.
 | token | meaning | precedence |
 |---|---|---|
 | `connection-error` | `FailureClass::ProviderUnavailable`: the connection to the granted endpoint died (e.g. the worker was preempted), or re-resolution exhausted its budget/capacity | wins over empty output — a lost endpoint is not a no-output run |
-| `no-output` | no failure class, and neither output nor patch was produced | distinct from `connection-error` (issue #3746 acceptance) |
-| `provider-error` | `FailureClass::ProviderError` \| `Timeout` \| `Unknown`: the dispatch failed at or beyond a live endpoint | — |
+| `timeout-partial` | `FailureClass::Timeout` and output or a patch was produced: the budget ran out with work to preserve (issue #3613) | a timeout is not a provider error and not `completed` |
+| `no-output` | no failure class and neither output nor patch was produced, or `FailureClass::Timeout` without output or a patch | distinct from `connection-error` (issue #3746 acceptance) and from `timeout-partial` (issue #3613) |
+| `provider-error` | `FailureClass::ProviderError` \| `Unknown`: the dispatch failed at or beyond a live endpoint | — |
 | `completed` | no failure class and output or a patch was produced | — |
 
 `StatusReason::parse` fails closed on unknown tokens: a reader never
@@ -134,7 +168,7 @@ guesses a meaning for an unrecognized line.
 |---|---|
 | `PoolError::NoCapacity { model }` | no healthy worker with a live guarantee serves `model` at resolve time |
 | `PoolError::UnknownWorker(id)` | `mark_unreachable` / re-resolution named a worker that was never registered |
-| `PoolError::Invalid(msg)` | malformed entry or driver state: empty id/endpoint/model/url, duplicate worker id, `max_attempts < 1` |
+| `PoolError::Invalid(msg)` | malformed entry or driver state: empty id/endpoint/model/url, duplicate worker id, `max_attempts < 1`; also budget planning failures: an explicit budget outrunning the allocation, a margin consuming the whole remainder, a dead allocation horizon, or a gateway grant (issue #3613) |
 
 All failure paths are fail-closed: the pool never returns a stale or
 cross-model grant, and the driver never dispatches without a grant.
