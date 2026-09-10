@@ -861,3 +861,376 @@ fn check_without_admitted_file_still_reads_an_empty_queue_as_idle() {
         stdout(&output)
     );
 }
+
+// ---------------------------------------------------------------------------
+// `dispatch lane` (#3795): the bounded fast lane and the improvement rate.
+//
+// The failure this pins is the fixed point: most of the open issues fix the
+// delivery pipeline, and every one of them is queued behind that pipeline's
+// full per-candidate gate. The lane is the declared exception, so the tests
+// assert the three things an operator reads: who got a lane slot, which gate
+// that slot runs, and whether the mechanism is actually improving.
+// ---------------------------------------------------------------------------
+
+/// A temp workspace for the lane: a manifest, a ledger, and no path into the
+/// operator's real `~/.autospec`.
+struct LaneHarness {
+    temp: PathBuf,
+    worklist: PathBuf,
+    ledger: PathBuf,
+}
+
+impl LaneHarness {
+    fn new(tag: &str) -> Self {
+        let temp = temp_dir(tag);
+        Self {
+            worklist: temp.join("worklist.tsv"),
+            ledger: temp.join("improvements.json"),
+            temp,
+        }
+    }
+
+    fn write_worklist(&self, text: &str) {
+        std::fs::write(&self.worklist, text).expect("worklist written");
+    }
+
+    /// `args[0]` is `lane`; `--worklist`, `--ledger` and `--now` are appended.
+    fn lane(&self, args: &[&str]) -> Output {
+        let mut argv: Vec<String> = vec!["dispatch".to_string()];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        argv.extend(
+            [
+                "--worklist",
+                &self.worklist.display().to_string(),
+                "--ledger",
+                &self.ledger.display().to_string(),
+                "--now",
+                &NOW.to_string(),
+            ]
+            .iter()
+            .map(|arg| arg.to_string()),
+        );
+        run(&argv)
+    }
+
+    fn read_ledger(&self) -> String {
+        std::fs::read_to_string(&self.ledger).expect("ledger readable")
+    }
+}
+
+const MECHANISM_MANIFEST: &str = "3795\tdelivery-mechanism\tcrates/autospec-core/src/dispatch_pipeline.rs\n3796\tpriority:high\tsrc/app.py\n";
+
+#[test]
+fn lane_reports_a_fixed_point_when_no_mechanism_change_has_landed() {
+    let harness = LaneHarness::new("autospec-lane-fixed-point");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    let output = harness.lane(&["lane"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("lane  #3795 mechanism [pipeline] — gate mechanism-fixture"),
+        "{text}"
+    );
+    assert!(
+        text.contains("queue #3796 payload — gate full-candidate"),
+        "{text}"
+    );
+    assert!(text.contains("fixed-point"), "{text}");
+}
+
+#[test]
+fn lane_states_its_capacity_as_policy_and_holds_slots_for_payload() {
+    let harness = LaneHarness::new("autospec-lane-policy");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    let output = harness.lane(&["lane", "--lane-capacity", "1", "--payload-reserve", "1"]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("lane: up to 1 slot(s) per batch, 1 reserved for payload"),
+        "{text}"
+    );
+    assert!(text.contains("1/1 slot(s) used"), "{text}");
+}
+
+#[test]
+fn lane_defers_mechanism_work_that_exceeds_its_capacity() {
+    let harness = LaneHarness::new("autospec-lane-deferred");
+    harness.write_worklist(
+        "3795\t\tcrates/autospec-core/src/dispatch_pipeline.rs\n3796\t\tcrates/autospec-core/src/execution/gate_scope.rs\n3797\t\tsrc/app.py\n",
+    );
+
+    let output = harness.lane(&["lane", "--lane-capacity", "1"]);
+    let text = stdout(&output);
+    assert!(text.contains("lane  #3795"), "{text}");
+    assert!(text.contains("lane not admitted: mechanism 3796"), "{text}");
+    assert!(text.contains("not starved, not lost"), "{text}");
+}
+
+#[test]
+fn lane_records_a_landed_change_and_counts_it_in_the_rate() {
+    let harness = LaneHarness::new("autospec-lane-record");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    let output = harness.lane(&["lane", "--record-landed", "3790"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("recorded #3790 as mechanism landed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("improvement rate: 1 mechanism change(s)"),
+        "{text}"
+    );
+    assert!(
+        harness.read_ledger().contains("3790") && harness.read_ledger().contains("mechanism"),
+        "ledger journal"
+    );
+
+    // The reservation is 2/hour; one landing does not fill it.
+    assert!(text.contains("reservation-unused"), "{text}");
+}
+
+#[test]
+fn lane_reports_improving_when_the_reserved_capacity_is_used() {
+    let harness = LaneHarness::new("autospec-lane-improving");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    let first = harness.lane(&["lane", "--record-landed", "3790"]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&first),
+        stdout(&first)
+    );
+    assert!(
+        stdout(&first).contains("reservation-unused"),
+        "{}",
+        stdout(&first)
+    );
+
+    // The second landing fills the reservation: the lane reports improvement,
+    // and its slot budget is spent, so this batch's mechanism work waits.
+    let second = harness.lane(&["lane", "--record-landed", "3791"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&second),
+        stdout(&second)
+    );
+    let text = stdout(&second);
+    assert!(text.contains("improving"), "{text}");
+    assert!(!text.contains("fixed-point"), "{text}");
+    assert!(text.contains("lane not admitted"), "{text}");
+}
+
+#[test]
+fn lane_refuses_to_reclassify_work_already_recorded_as_landed() {
+    let harness = LaneHarness::new("autospec-lane-record-twice");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    assert_eq!(
+        harness
+            .lane(&["lane", "--record-landed", "3790"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let again = harness.lane(&["lane", "--record-landed", "3790:payload"]);
+    assert_eq!(again.status.code(), Some(1), "{}", stdout(&again));
+    assert!(
+        stderr(&again).contains("already recorded as mechanism landed"),
+        "{}",
+        stderr(&again)
+    );
+}
+
+#[test]
+fn lane_records_without_a_manifest() {
+    let harness = LaneHarness::new("autospec-lane-record-only");
+    let output = harness.lane_record_only(&["--record-landed", "3790:payload"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("recorded #3790 as payload landed"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(stdout(&output).contains("backlog 0"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("no-backlog"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+impl LaneHarness {
+    /// `lane` with no `--worklist`: the record-only path.
+    fn lane_record_only(&self, args: &[&str]) -> Output {
+        let mut argv: Vec<String> = vec!["dispatch".to_string(), "lane".to_string()];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        argv.extend(
+            [
+                "--ledger",
+                &self.ledger.display().to_string(),
+                "--now",
+                &NOW.to_string(),
+            ]
+            .iter()
+            .map(|arg| arg.to_string()),
+        );
+        run(&argv)
+    }
+}
+
+#[test]
+fn lane_treats_an_unreadable_manifest_line_as_a_fault_not_a_warning() {
+    let harness = LaneHarness::new("autospec-lane-malformed");
+    harness.write_worklist(&format!("{MECHANISM_MANIFEST}notanumber\tbroken line\n"));
+
+    assert_eq!(
+        harness
+            .lane(&["lane", "--record-landed", "3790"])
+            .status
+            .code(),
+        Some(1)
+    );
+    let output = harness.lane(&["lane", "--record-landed", "3791"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{} {}",
+        stderr(&output),
+        stdout(&output)
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("line(s) unreadable and NOT scheduled"),
+        "{text}"
+    );
+    assert!(text.contains("3: notanumber"), "{text}");
+}
+
+#[test]
+fn lane_json_reports_policy_plan_and_rate() {
+    let harness = LaneHarness::new("autospec-lane-json");
+    // Three entries: the lane gets 2 slots (batch 3 - 1 payload reserve), one of
+    // which the just-recorded landing has already spent.
+    harness.write_worklist(&format!(
+        "{MECHANISM_MANIFEST}3797\t\tsrc/more_payload.py\n"
+    ));
+
+    let output = harness.lane(&["lane", "--json", "--record-landed", "3790"]);
+    let body: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("lane --json parses");
+    assert_eq!(body["policy"]["capacity"], 2);
+    assert_eq!(body["policy"]["payload_reserve"], 1);
+    assert_eq!(body["plan"]["lane"][0]["issue"], 3795);
+    assert_eq!(body["plan"]["lane"][0]["gate"]["name"], "mechanism-fixture");
+    assert_eq!(body["plan"]["queue"][0]["gate"]["name"], "full-candidate");
+    assert_eq!(body["rate"]["mechanism_landed"], 1);
+    assert_eq!(body["rate"]["backlog"], 3);
+    assert_eq!(body["plan"]["lane_slots"], 2);
+    // 2 slots, one spent by the landing just recorded, one taken by #3795.
+    assert_eq!(body["plan"]["lane_remaining"], 0);
+    assert_eq!(body["recorded"]["issue"], 3790);
+    assert_eq!(body["recorded"]["class"], "mechanism");
+}
+
+#[test]
+fn lane_without_a_manifest_or_a_record_is_a_usage_error() {
+    let harness = LaneHarness::new("autospec-lane-no-input");
+    let output = harness.lane_record_only(&[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("lane needs --worklist"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn lane_refuses_to_overwrite_an_unparseable_ledger() {
+    let harness = LaneHarness::new("autospec-lane-corrupt-ledger");
+    harness.write_worklist(MECHANISM_MANIFEST);
+    std::fs::write(&harness.ledger, "not json at all").expect("ledger written");
+
+    let output = harness.lane(&["lane"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("refusing to start a fresh one over it"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn lane_rejects_a_policy_that_reserves_nothing() {
+    let harness = LaneHarness::new("autospec-lane-zero-capacity");
+    harness.write_worklist(MECHANISM_MANIFEST);
+
+    let output = harness.lane(&["lane", "--lane-capacity", "0"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("lane capacity is 0"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn lane_reads_a_declared_surface_from_a_file() {
+    let harness = LaneHarness::new("autospec-lane-surface");
+    let surface_path = harness.temp.join("surface.json");
+    std::fs::write(
+        &surface_path,
+        r#"{"components":[{"name":"gate","prefixes":["tools/gate/"],"fixture_commands":["make gate-test"]}]}"#,
+    )
+    .expect("surface written");
+    harness.write_worklist("3800\t\ttools/gate/run.sh\n3801\t\tsrc/app.py\n");
+
+    let output = harness.lane(&["lane", "--surface", &surface_path.display().to_string()]);
+    let text = stdout(&output);
+    assert!(text.contains("lane  #3800 mechanism [gate]"), "{text}");
+    assert!(text.contains("gate mechanism-fixture"), "{text}");
+    assert!(text.contains("queue #3801 payload"), "{text}");
+}
+
+#[test]
+fn lane_defers_mechanism_work_whose_component_names_no_fixture() {
+    let harness = LaneHarness::new("autospec-lane-no-fixture");
+    let surface_path = harness.temp.join("surface.json");
+    std::fs::write(
+        &surface_path,
+        r#"{"components":[{"name":"pipeline","prefixes":["tools/pipeline/"],"fixture_commands":[]}]}"#,
+    )
+    .expect("surface written");
+    harness.write_worklist("3802\t\ttools/pipeline/main.sh\n");
+
+    // The component declares no fixture tests, so its change stays on the
+    // full gate and is deferred rather than given a lane it cannot gate.
+    let output = harness.lane(&["lane", "--surface", &surface_path.display().to_string()]);
+    let text = stdout(&output);
+    assert!(text.contains("lane not admitted: mechanism 3802"), "{text}");
+    assert!(text.contains("lane  #") == false, "{text}");
+}

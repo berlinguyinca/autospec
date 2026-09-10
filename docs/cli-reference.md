@@ -98,6 +98,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec dispatch runs --runs <path> [--out <path>] [--duration-floor <secs>] [--quote-bytes <n>] [--fault-threshold <n>] [--json]` | yes | classify a dispatch batch (#3918): each run is `OK` / `NO-OUTPUT` / `INFRA-FAIL` (auth, endpoint, context — never consumes an attempt) / `LAUNCH-FAIL` (under the duration floor regardless of transcript); writes the `agent-status.tsv` record (transcripts at or below the quote threshold ride along verbatim), prints the batch summary plus a `FLEET-FAULT` line for any repeated identical failure and `SUBFLEET-IDLE` lines for sub-fleets with zero agents but open eligible work; exit 0 / 1 fleet fault |
 | `autospec dispatch tick [--queue <path>] [--state-file <path>] [--lifecycle <path>] [--topology <path>] [--now <epoch>] [--interval <secs>] [--max-intervals <n>] [--json]` | yes | one dispatch tick over the queue (#3911): the liveness gate first (a hold prints its `LIVENESS FAILURE` line and exits 1), then a per-entry report — fresh work is `dispatch`, produced-but-unconverted re-enters as `convert`, converted entries are skipped and named, held entries carry their hold reason; exit 0 something dispatched / 1 liveness hold or nothing dispatched with skips to name / 2 diagnostic |
 | `autospec dispatch mark --action <produced\|converted\|hold\|release> --issue <N> [--reason <text>] [--at <epoch>] [--lifecycle <path>]` | no | move one queue entry through its lifecycle (#3911): `produced` (the agent produced a patch), `converted` (terminal), `hold` (record why it is blocked — `--reason` required — and preserve its state), `release` (clear the hold; a released produced entry re-enters the next tick as a convert, not a fresh dispatch); stamps are monotonic, so a backwards or terminal-entry stamp is refused with exit 1 and a usage error exits 2 |
+| `autospec dispatch lane [--worklist <PATH>] [--ledger <PATH>] [--surface <PATH>] [--lane-capacity <N>] [--payload-reserve <N>] [--window <SECS>] [--backlog <N>] [--record-landed <ISSUE[:CLASS]>] [--now <epoch>] [--json]` | yes | the bounded fast lane for changes to the delivery mechanism (#3795): classify each manifest entry against the declared mechanism surface, admit mechanism work into its reserved slots (gated by the mechanism's own fixture tests, seconds, not the full per-candidate gate), defer mechanism work with no fixture gate, and report the improvement rate — mechanism changes landed per window against the rate the reservation entitles; exit 0 plan built (`improving` / `reservation-unused` / `no-backlog`) / 1 `fixed-point` (backlog, zero mechanism landings) or unreadable manifest lines / 2 diagnostic (no input, unusable ledger, a policy that reserves nothing) |
 
 `autospec repair-loop` observes a self-healing loop so that a repair which keeps
 repairing the same identity reads as an alert, not a status line. `record` feeds one
@@ -169,6 +170,31 @@ fresh, converted, skipped (and why), or held (and why) — so a tick that dispat
 nothing still says what it is waiting on. The primitives are pure in
 `autospec_core::dispatch_pipeline` (`LifecycleLedger`, `EntryState`,
 `DispatchTick`).
+The seventh concern in the chain is the fixed point (#3795): when most of the open
+work is work *on the delivery mechanism itself* — the pipeline, the dispatcher, the
+gate, the agent runner — that work waits behind the queue its own fix would shorten,
+and the queue can only shorten by waiting. `lane` breaks the loop by reserving
+capacity for it rather than hoping it wins a fair fight. `--worklist <PATH>` is a
+manifest of candidates (`issue<TAB>labels<TAB>paths` per line); each entry is
+classified against the *declared mechanism surface* (the four components' path
+prefixes, built into `MechanismSurface::repository()`, or `--surface <PATH>` for a
+JSON surface of your own) and mechanism work is admitted up to `--lane-capacity`
+slots per batch — with `--payload-reserve` slots the lane may *never* take, so the
+lane shortens the queue instead of inverting it. An admitted mechanism entry is
+gated by the mechanism's **own fixture tests** (`mechanism-fixture`, a seconds-long
+budget) instead of the full per-candidate gate; mechanism work that names no fixture
+gate is deferred rather than quietly promoted to the fast path. `--record-landed
+<ISSUE[:CLASS]>` appends to the landed-change ledger (`~/.autospec/dispatch-improvements.json`,
+`--ledger`) — append-only, one record per issue, re-recording a landed change as a
+different class is refused — and every run prints the **improvement rate**: mechanism
+changes landed per window against the rate the reservation entitles it to. The verdict
+is `improving`, `reservation-unused` (backlog exists, some mechanism work landed, less
+than the reservation), `no-backlog`, or `fixed-point` — backlog and a mechanism class
+waiting on itself with zero landings — and only `fixed-point` (with unreadable
+manifest lines) exits 1; a policy that reserves nothing, reserves no payload, or names
+no window is a diagnostic exit 2. The primitives are pure in
+`autospec_core::mechanism_lane` (`MechanismSurface`, `Classification`, `LanePolicy`,
+`schedule`, `ImprovementLedger`, `ImprovementRate`).
 `stamp` is what the refresh script calls after it repopulates the file: it rewrites the
 headers through a temp file and rename, then records a beat for the producing hop, so a
 script cannot refresh the artifact and forget to say so. `beat --step <name>` records

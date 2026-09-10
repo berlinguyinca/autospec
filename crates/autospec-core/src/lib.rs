@@ -56,6 +56,7 @@ pub mod integration;
 pub mod issue_lock;
 pub mod lint;
 pub mod managed_project;
+pub mod mechanism_lane;
 pub mod not_reproducible;
 pub mod planning;
 pub mod post_merge;

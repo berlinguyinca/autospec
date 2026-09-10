@@ -834,6 +834,33 @@ Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no senti
 
 Default `AUTOSPEC_BATCH_SIZE=1`; force batch=1 when the next ready issue is `reasoning:deep` (high blast-radius work runs one-at-a-time per monitor session). This only ends the current monitor batch: `autospec-run` must automatically relaunch fresh monitor batches until the queue is `ALL_DONE`.
 
+## Mechanism fast lane (bounded, issue #3795)
+
+When a large share of the open queue fixes the pipeline that runs the queue, fair
+scheduling is a fixed point: the work that would shorten the wait waits behind the
+wait. The remedy is a **declared, bounded** lane, not an ad-hoc jump of the queue.
+
+- **Mechanism work is work on the delivery mechanism**: the pipeline, the dispatcher,
+  the gates, the agent runner. It is identified by the declared surface in
+  `mechanism_lane::MechanismSurface::repository()` (path prefixes per component) or a
+  `--surface <PATH>` JSON, plus the `delivery-mechanism` label. Everything else is
+  payload; payload keeps the queue and is never starved by the lane.
+- **The reservation is policy and is bounded**: `--lane-capacity` (default 2) mechanism
+  entries per batch, and `--payload-reserve` (default 1) slots the lane may never take.
+  A policy that reserves nothing, reserves no payload, or names no window is rejected —
+  "a lane with no ceiling is the queue with the safety removed".
+- **The lane is gated by the mechanism's own tests, not the candidate gate**: an
+  admitted entry runs its component's fixture tests (seconds) instead of the full
+  per-candidate gate, which is what makes a self-fix cheap enough to iterate on.
+  Mechanism work that names **no fixture gate** is deferred, never promoted.
+- **The improvement rate is reported every run** (`dispatch lane`): mechanism changes
+  landed per window against the rate the reservation entitles. `reservation-unused`
+  means the budget is idle while work waits; `fixed-point` means backlog exists and no
+  mechanism change has landed, and is the one verdict that exits 1. Landings are an
+  append-only ledger (`~/.autospec/dispatch-improvements.json`): one record per issue,
+  never reclassified after the fact — a landing that can be re-labelled to change a
+  metric is not a metric.
+
 ## Memory inventory
 
 Persistent cross-session memory lives at [`docs/memory/`](docs/memory/).

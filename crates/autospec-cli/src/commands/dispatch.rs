@@ -37,6 +37,18 @@
 //!   entry is blocked), or `release` (clear the hold; a released produced
 //!   entry re-enters the next tick as a conversion, not a fresh dispatch).
 //!   Exit 0 accepted, 1 refused, 2 usage error.
+//! - `lane` — the bounded fast lane for changes to the delivery mechanism
+//!   itself (#3795). Reads a worklist manifest, classifies each candidate as
+//!   mechanism or payload against the declared mechanism surface, admits at
+//!   most `--lane-capacity` mechanism entries (minus what this window already
+//!   used) to the lane, and gates each admitted entry by the mechanism's own
+//!   fixture tests instead of the full per-candidate gate. Payload keeps its
+//!   order and its share: `--payload-reserve` slots are never taken by the
+//!   lane. Then reports the improvement rate — mechanism changes landed per
+//!   unit time against the backlog — and names the fixed point when work is
+//!   waiting and nothing mechanism-side has landed. Exit 0 planned, 1
+//!   fixed-point verdict, refused record, or unreadable manifest line, 2
+//!   usage error.
 //!
 //! A cron line for the refresh step is the intended deployment:
 //!
@@ -59,6 +71,9 @@ use autospec_core::dispatch_pipeline::{
 use autospec_core::fleet_dispatch::{
     classify_run, idle_subfleet_lines, summarize_batch, BatchSummary, FleetDispatchPolicy,
     RunRecord, RunStatusRecord, SubfleetState, TSV_HEADER,
+};
+use autospec_core::mechanism_lane::{
+    self, ImprovementLedger, LandedClass, LanePolicy, MechanismSurface, Worklist,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +120,10 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
         "mark",
         "Move one queue entry through its lifecycle: produced / converted / hold / release (#3911)",
     ),
+    (
+        "lane",
+        "Schedule the bounded mechanism fast lane and report the improvement rate (#3795)",
+    ),
 ];
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -127,6 +146,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "runs" => runs(rest),
         "tick" => tick(rest),
         "mark" => mark(rest),
+        "lane" => lane(rest),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown dispatch subcommand: {other} (expected one of: {})",
             SUBCOMMANDS
@@ -194,6 +214,18 @@ fn print_help() {
     println!("    --now <EPOCH>         Evaluate against this instant instead of the clock");
     println!("    --interval <SECONDS>  Interval for hops that declare none (default {DEFAULT_INTERVAL_SECS})");
     println!("    --max-intervals <N>   Missed intervals tolerated before a hold (default {DEFAULT_MAX_STALE_INTERVALS})");
+    println!("    --worklist <PATH>     lane: manifest of candidates, `issue<TAB>labels<TAB>paths` per line");
+    println!("    --ledger <PATH>       lane: landed-change ledger (default $HOME/.autospec/dispatch-improvements.json)");
+    println!("    --surface <PATH>      lane: mechanism surface JSON (default: the built-in declared surface)");
+    println!("    --lane-capacity <N>   lane: mechanism slots a batch may take (default 2)");
+    println!("    --payload-reserve <N> lane: slots the lane may never take (default 1)");
+    println!(
+        "    --window <SECONDS>    lane: window the reservation is stated over (default 3600)"
+    );
+    println!(
+        "    --backlog <N>         lane: changes waiting (default: the manifest's own length)"
+    );
+    println!("    --record-landed <N[:CLASS]> lane: record issue N as landed (class mechanism|payload, default mechanism)");
     println!("    --json                Emit JSON");
     println!("    -h, --help            Print help");
     println!();
@@ -626,6 +658,210 @@ fn mark_release(
         "released #{issue} [{}]",
         ledger.state_of(issue).as_str()
     ))
+}
+
+/// `lane` — classify the worklist, admit mechanism work into its reserved
+/// slots, and report the improvement rate. Scheduling only: the caller runs
+/// the gate commands the plan names.
+fn lane(args: &[String]) -> Result<(), CommandFailure> {
+    let now = eval_now(args)?;
+    let at = opt_u64(args, "--at")?.unwrap_or(now);
+    let policy = lane_policy(args)?;
+    policy
+        .validate()
+        .map_err(|problem| CommandFailure::diagnostic(format!("lane: {problem}")))?;
+
+    let ledger_path = improvements_path(args)?;
+    let mut ledger = load_improvements(&ledger_path)?;
+
+    // A landed change is recorded before the rate is measured: the record is
+    // the evidence the rate is computed from, not a footnote to it.
+    let recorded = match opt_string(args, "--record-landed")? {
+        Some(spec) => {
+            let (issue, class) = parse_landed_spec(&spec)?;
+            if let Some(prior) = ledger.class_of(issue) {
+                return Err(CommandFailure::status(
+                    format!(
+                        "lane: #{issue} is already recorded as {} landed; landed work is not reclassified",
+                        prior.as_str()
+                    ),
+                    HOLD_EXIT,
+                ));
+            }
+            ledger.record(issue, class, at);
+            save_improvements(&ledger_path, &ledger)?;
+            Some((issue, class))
+        }
+        None => None,
+    };
+
+    let mut worklist = match opt_string(args, "--worklist")? {
+        Some(path) => {
+            let text = fs::read_to_string(&path).map_err(|error| {
+                CommandFailure::diagnostic(format!("lane: cannot read worklist {path}: {error}"))
+            })?;
+            Some(Worklist::parse(&text))
+        }
+        None => None,
+    };
+    let plan = match &worklist {
+        Some(items) => Some(mechanism_lane::schedule(
+            items,
+            &load_surface(args)?,
+            &policy,
+            &ledger,
+            now,
+        )),
+        None if recorded.is_some() => None,
+        None => {
+            return Err(CommandFailure::diagnostic(
+                "lane needs --worklist <PATH>, --record-landed <ISSUE[:CLASS]>, or both",
+            ))
+        }
+    };
+
+    // Backlog defaults to the manifest's own length: the work in front of the
+    // lane is the backlog unless the caller says the queue is longer.
+    let backlog = match opt_u64(args, "--backlog")? {
+        Some(explicit) => to_count(explicit, "--backlog")?,
+        None => worklist.as_ref().map(Worklist::len).unwrap_or(0),
+    };
+    let rate = ledger.improvement_rate(&policy, backlog, now);
+    let malformed = worklist
+        .as_mut()
+        .map(|items| std::mem::take(&mut items.malformed))
+        .unwrap_or_default();
+
+    if super::is_json(args) {
+        let payload = serde_json::json!({
+            "policy": policy,
+            "plan": plan,
+            "rate": rate,
+            "malformed": malformed,
+            "recorded": recorded.map(|(issue, class)| {
+                serde_json::json!({ "issue": issue, "class": class.as_str() })
+            }),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .map_err(|error| CommandFailure::diagnostic(format!("lane: {error}")))?
+        );
+    } else {
+        println!("{}", policy.line());
+        if let Some((issue, class)) = recorded {
+            println!("recorded #{issue} as {} landed", class.as_str());
+        }
+        if let Some(plan) = &plan {
+            for line in plan.lines() {
+                println!("{line}");
+            }
+        }
+        println!("{}", rate.line());
+        if !malformed.is_empty() {
+            println!(
+                "lane: manifest: {} line(s) unreadable and NOT scheduled",
+                malformed.len()
+            );
+            for line in &malformed {
+                println!("  {line}");
+            }
+        }
+    }
+
+    // A silently dropped candidate is the failure #3927 named: an unreadable
+    // manifest line is a fault, not a warning.
+    verdict_exit(rate.verdict.is_fault() || !malformed.is_empty())
+}
+
+/// The lane policy from flags. The defaults are the stated policy (AC2):
+/// two slots per batch, one held back for payload, over an hour.
+fn lane_policy(args: &[String]) -> Result<LanePolicy, CommandFailure> {
+    let capacity = match opt_u64(args, "--lane-capacity")? {
+        Some(value) => to_count(value, "--lane-capacity")?,
+        None => mechanism_lane::DEFAULT_LANE_CAPACITY,
+    };
+    let payload_reserve = match opt_u64(args, "--payload-reserve")? {
+        Some(value) => to_count(value, "--payload-reserve")?,
+        None => mechanism_lane::DEFAULT_PAYLOAD_RESERVE,
+    };
+    let window_secs = opt_u64(args, "--window")?.unwrap_or(mechanism_lane::DEFAULT_WINDOW_SECS);
+    Ok(LanePolicy::new(capacity, payload_reserve, window_secs))
+}
+
+fn to_count(value: u64, flag: &str) -> Result<usize, CommandFailure> {
+    usize::try_from(value)
+        .map_err(|_| CommandFailure::diagnostic(format!("lane: {flag} must be a small count")))
+}
+
+fn improvements_path(args: &[String]) -> Result<PathBuf, CommandFailure> {
+    match opt_string(args, "--ledger")? {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(autospec_home()?.join("dispatch-improvements.json")),
+    }
+}
+
+fn load_improvements(path: &Path) -> Result<ImprovementLedger, CommandFailure> {
+    match fs::read_to_string(path) {
+        Ok(text) => ImprovementLedger::from_json(&text).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "lane: improvement ledger {} does not parse: {error} — refusing to start a fresh one over it",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ImprovementLedger::new()),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "lane: cannot read improvement ledger {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn save_improvements(path: &Path, ledger: &ImprovementLedger) -> Result<(), CommandFailure> {
+    write_atomic(path, &ledger.to_json())
+}
+
+/// `ISSUE[:CLASS]` — the class defaults to `mechanism`, which is what the
+/// lane exists for.
+fn parse_landed_spec(spec: &str) -> Result<(u64, LandedClass), CommandFailure> {
+    let (issue_raw, class_raw) = match spec.split_once(':') {
+        Some((issue, class)) => (issue, Some(class)),
+        None => (spec, None),
+    };
+    let issue = issue_raw.trim().parse::<u64>().map_err(|_| {
+        CommandFailure::diagnostic(format!(
+            "lane: --record-landed expects ISSUE[:CLASS], got {spec}"
+        ))
+    })?;
+    let class = match class_raw {
+        Some(value) => LandedClass::parse(value.trim()).ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "lane: unknown landed class {value}; expected mechanism or payload"
+            ))
+        })?,
+        None => LandedClass::Mechanism,
+    };
+    Ok((issue, class))
+}
+
+/// No surface file means the declared surface of this repository.
+fn load_surface(args: &[String]) -> Result<MechanismSurface, CommandFailure> {
+    let Some(path) = opt_string(args, "--surface")? else {
+        return Ok(MechanismSurface::repository());
+    };
+    let path = PathBuf::from(path);
+    let text = fs::read_to_string(&path).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "lane: cannot read surface {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "lane: surface {} does not parse: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn build_pipeline(args: &[String]) -> Result<DispatchPipeline, CommandFailure> {
