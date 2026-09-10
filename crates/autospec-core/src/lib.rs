@@ -40,6 +40,7 @@ pub mod evaluation;
 pub mod evidence;
 pub mod evidence_fidelity;
 pub mod execution;
+pub mod exit_guard;
 pub mod explore;
 pub mod failure_signatures;
 pub mod fix_surface;
