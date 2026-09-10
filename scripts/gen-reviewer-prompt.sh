@@ -228,7 +228,8 @@ You are the independent verifier lane, not the author lane. Stay independent of 
 
 **Part 2 — LGTM (correctness review):**
 5. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits).
-6. Collect findings as a numbered list.
+6. For anything touching authentication, signing, encryption, or credential handling: ask "Is this crypto/dependency defending against a party who can actually reach this data path, or is it re-proving what the transport already proved?" If TLS to a named host, a process boundary, or an existing gate already establishes the property, flag the re-establishment. The reverse also holds: if a token could arrive by another route (forwarded by a client, read from a header), it must be verified properly, and that boundary must be pinned by a comment at the code.
+7. Collect findings as a numbered list.
 
 **Hard limit:** max 25 tool calls total (Parts 1 + 2 combined). If budget exhausted, append \`RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review\` and proceed to verdict.
 

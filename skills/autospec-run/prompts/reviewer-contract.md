@@ -97,7 +97,15 @@ The issue body MAY declare per-RULE_ID opt-outs with mandatory justification:
 
 5. Check correctness, edge cases, missing tests, and AGENTS.md compliance (TDD,
    no mocks, conventional commits).
-6. Collect findings as a numbered list.
+6. For anything touching authentication, signing, encryption, or credential
+   handling: ask "Is this crypto/dependency defending against a party who can
+   actually reach this data path, or is it re-proving what the transport
+   already proved?" If TLS to a named host, a process boundary, or an existing
+   gate already establishes the property, flag the re-establishment. The
+   reverse also holds: if a token could arrive by another route (forwarded by
+   a client, read from a header), it must be verified properly, and that
+   boundary must be pinned by a comment at the code.
+7. Collect findings as a numbered list.
 
 ## Verdict
 
