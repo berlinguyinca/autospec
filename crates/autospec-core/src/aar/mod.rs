@@ -42,6 +42,7 @@ pub mod result_target;
 pub mod scheduling_contract;
 pub mod telemetry;
 pub mod topology;
+pub mod vertical_slice;
 
 pub use capsule::{RolePolicy, TaskCapsule};
 pub use classify::{
@@ -126,4 +127,8 @@ pub use telemetry::{ExecutionTelemetry, FailureCategory, ReviewOutcome};
 pub use topology::{
     enforce_separation, select_topology, AgentRole, AgentTopology, Handoff, RoleAssignment,
     SeparationPolicy, SeparationVerdict,
+};
+pub use vertical_slice::{
+    SliceBudget, SliceLedger, SliceRequest, SliceRun, Termination, LEDGER_FIELDS, LEDGER_FILE_NAME,
+    MANDATORY_LEDGER_FIELDS, SLICE_LEDGER_SCHEMA_VERSION,
 };
