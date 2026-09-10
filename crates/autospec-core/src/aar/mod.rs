@@ -26,6 +26,7 @@ pub mod dispatch_fit;
 pub mod escalation;
 pub mod guards;
 pub mod inferweave;
+pub mod knowledge;
 pub mod memory;
 pub mod outcome;
 pub mod pi;
@@ -64,6 +65,11 @@ pub use guards::{
 };
 pub use inferweave::{
     route, CapabilityRequest, LatencyPriority, NodeOffer, RoutingDecision, SessionSeat,
+};
+pub use knowledge::{
+    digest_of, language_for, resolve_stages, scan_module, KnowledgeCache, Language, ModuleRecord,
+    RefreshReport, Stage, StagePlan, StageProgress, StageStatus, KNOWLEDGE_DIR, KNOWLEDGE_FILE,
+    REPOSITORY_TEST_COMMAND,
 };
 pub use memory::{MemoryEntry, MemoryFile, WorktreeMemory};
 pub use outcome::{
