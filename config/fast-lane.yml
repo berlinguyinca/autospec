@@ -1,0 +1,64 @@
+# Fast lane for delivery-mechanism changes (#3795).
+#
+# Work that changes the delivery mechanism (pipeline, dispatcher, gates,
+# agent runner) must not wait behind the per-candidate gate it is trying
+# to improve: it is classified separately, scheduled on a bounded fast
+# lane, gated by the mechanism's own tests, and its landing rate is
+# reported so the fixed point is a number.
+#
+# `mechanism.path_prefixes`: a changed path under any prefix marks the
+# work as a mechanism change. Directory prefixes end in `/` and match
+# descendants; any other entry matches the exact path. Entry order has no
+# meaning.
+#
+# `mechanism.label`: work carrying this label is a mechanism change even
+# when none of its paths match (for example a change to gate-set policy
+# docs).
+#
+# `mechanism.cap_per_cycle`: the lane's reserved capacity, stated as
+# bounded policy. The fast lane processes at most this many mechanism
+# changes per dispatch cycle; the excess returns to the head of the
+# normal queue, so the lane can never starve the work it serves.
+#
+# `gates.mechanism`: the mechanism's own tests — the fixture tests that
+# exercise the mechanism directly. Seconds, not the per-candidate gate.
+# `gates.full`: the full per-candidate gate, applied to work that merely
+# passes through the mechanism.
+#
+# `report.window_hours`: the unit of time the improvement rate is
+# reported over.
+
+version: 1
+
+mechanism:
+  label: autospec:mechanism
+  cap_per_cycle: 3
+  path_prefixes:
+    - crates/autospec-core/src/execution/
+    - crates/autospec-core/src/dispatch_pipeline.rs
+    - crates/autospec-core/src/dispatch_guard.rs
+    - crates/autospec-core/src/fleet_dispatch.rs
+    - crates/autospec-core/src/conversion_gate.rs
+    - crates/autospec-core/src/gate_verdict.rs
+    - crates/autospec-core/src/gate_provenance.rs
+    - crates/autospec-core/src/gate_serialization.rs
+    - crates/autospec-core/src/grading.rs
+    - crates/autospec-core/src/staged_spec.rs
+    - crates/autospec-cli/src/commands/dispatch.rs
+    - crates/autospec-cli/src/commands/dispatch_spec.rs
+    - crates/autospec-cli/src/commands/queue.rs
+    - crates/autospec-cli/src/commands/queue/
+    - scripts/
+    - .github/workflows/
+    - config/
+
+gates:
+  mechanism:
+    - cargo test -p autospec-core
+  full:
+    - cargo fmt --all --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo test --workspace
+
+report:
+  window_hours: 24
