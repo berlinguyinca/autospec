@@ -22,8 +22,8 @@ pub mod work;
 pub mod yaml_config;
 
 pub use endpoint::{
-    classify_status, AttemptOutcome, EndpointPool, Grant, PoolError, ReResolution, StatusReason,
-    Step, Worker, WorkerState,
+    classify_status, plan_agent_budget, startup_limits_line, AttemptOutcome, EndpointPool, Grant,
+    PoolError, ReResolution, StatusReason, Step, Worker, WorkerState,
 };
 pub use executor::{
     ExecutionStatus, Executor, ExecutorError, ExecutorRegistry, ExecutorRequest, ExecutorResult,

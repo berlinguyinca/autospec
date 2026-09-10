@@ -138,7 +138,11 @@ pub struct ExecutorRequest {
     pub workspace: String,
     /// The acceptance contract the dispatch is judged against.
     pub acceptance_criteria: String,
-    /// Wall-clock limit in seconds; `None` means the provider default.
+    /// Wall-clock limit in seconds. `None` means the dispatcher derives the
+    /// budget from the allocation horizon via
+    /// [`crate::execution::endpoint::plan_agent_budget`] — never a default
+    /// constant. An explicit value must fit inside the allocation or the
+    /// dispatch fails at submit time (issue #3613).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
