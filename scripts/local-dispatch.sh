@@ -24,7 +24,10 @@
 #      dispatch can occupy the single GPU for the rest of the run.
 #
 # Local GPU is capacity-1: two concurrent dispatches to one runtime thrash into
-# swap and both blow their ceiling. A host-scoped lock serializes them.
+# swap and both blow their ceiling. A host-scoped lock serializes them. The
+# lock's lifetime is exactly the dispatch process's (the executor never inherits
+# the lock descriptor), and the lock records its holder (pid + start time) so a
+# refusal names who holds it and since when instead of dead-ending.
 #
 # Post-dispatch check (R8, tracker #3344) — verbatim-anchor verification:
 # a local model can silently substitute one word in the source text it
@@ -278,21 +281,66 @@ if [ ! -d "$LOCK_DIR" ]; then mkdir -p "$LOCK_DIR"; fi
 LOCK="$LOCK_DIR/local-model.lock"
 
 _run_dispatch() {
+    # 9>&-: the lock lives on the open file description, and every child
+    # inherits fd 9 across fork. A long-lived descendant of the executor
+    # (a preview server, an agent subprocess) would otherwise keep the lock
+    # held long after this dispatch — and after this process — is gone.
+    # Closing it here makes the lock's lifetime exactly this process's.
     # shellcheck disable=SC2086
     timeout --preserve-status "$TIMEOUT_SECS" \
-        codex $CODEX_ARGS --cd "$WORKDIR" < "$PROMPT_FILE"
+        codex $CODEX_ARGS --cd "$WORKDIR" < "$PROMPT_FILE" 9>&-
+}
+
+# Side-effect free: it reads the holder record and /proc only and never
+# acquires the lock, so asking "who holds it" cannot change the answer.
+describe_lock_holder() {
+    local line pid since cmdline note
+    line="$(sed -n '$p' "$LOCK" 2>/dev/null || true)"
+    pid="${line#pid=}"; pid="${pid%% *}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    since="${line##*since=}"; since="${since%% *}"
+    note="held by recorded pid $pid"
+    if [ -r "/proc/$pid/cmdline" ]; then
+        # Liveness AND identity: a recycled pid must not be mistaken for
+        # the holder just because it happens to be alive.
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')"
+        if [[ "$cmdline" == *local-dispatch* ]]; then
+            note="$note (running local-dispatch)"
+        else
+            note="$note, but that pid is not running local-dispatch (cmdline: ${cmdline:-unknown}); the record may name a recycled pid"
+        fi
+    elif kill -0 "$pid" 2>/dev/null; then
+        note="$note (alive; identity unverifiable without /proc)"
+    else
+        note="$note is gone; the lock leaked through a descriptor its descendant inherited — find the holder with: lsof $LOCK"
+    fi
+    [[ "$since" =~ ^[0-9]+$ ]] && note="$note since $since"
+    printf '%s' "$note"
+    return 0
 }
 
 # Serialize on the single local runtime when flock is available; without it, run
 # unserialized rather than refusing (the ceiling still bounds the damage).
+#
+# The lock's lifetime must be exactly this process's: the file is appended
+# (a truncate would erase the LIVE holder's record before we know whether we
+# can take the lock), the holder is recorded with its pid and start time only
+# after the lock is held, and the record is cleared on release so a dead
+# holder cannot outlive the dispatch.
 if command -v flock >/dev/null 2>&1; then
-    exec 9>"$LOCK"
+    exec 9>>"$LOCK"
     if ! flock -w "$TIMEOUT_SECS" 9; then
+        holder="$(describe_lock_holder)"
+        if [ -n "$holder" ]; then
+            _refuse "timed out waiting for the local-model lock (capacity-1): $holder"
+        fi
         _refuse 'timed out waiting for the local-model lock (capacity-1)'
     fi
+    printf 'pid=%s since=%s prog=local-dispatch\n' "$$" "$(date +%s)" >&9
     _run_dispatch
     _rc=$?
     flock -u 9
+    : > "$LOCK"
 else
     _run_dispatch
     _rc=$?
