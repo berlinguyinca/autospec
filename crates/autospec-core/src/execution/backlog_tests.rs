@@ -138,6 +138,7 @@ fn evidence_snapshot() -> BacklogSnapshot {
             open_pr("conv/3905-fix", Some(3905), ""),
         ],
         known_merged: merged,
+        in_flight: BTreeSet::new(),
     }
 }
 
@@ -253,6 +254,7 @@ fn explicit_partial_fix_is_neither_a_discrepancy_nor_a_closure() {
             "first slice\n\nRefs #4050 (does not close it)",
         )],
         known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
     };
     let report = compute_backlog(&snapshot).unwrap();
     // The stated decision is respected: no mismatch reported.
@@ -358,6 +360,7 @@ fn closed_pr_does_not_associate_the_issue_stays_outstanding() {
         patched_issues: set(&[4001]),
         prs: vec![closed_pr("conv/4001-fix", Some(4001))],
         known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
     };
     let report = compute_backlog(&snapshot).unwrap();
     assert_eq!(report.outstanding, set(&[4001]));
@@ -377,6 +380,7 @@ fn discrepancy_surfaces_unmatched_branches_and_heuristic_drift() {
             open_pr("chore/manual-kickoff-8080", Some(4100), ""),
         ],
         known_merged: BTreeSet::new(),
+        in_flight: BTreeSet::new(),
     };
     let report = compute_backlog(&snapshot).unwrap();
     assert_eq!(report.outstanding, set(&[4101]));
@@ -393,6 +397,75 @@ fn discrepancy_surfaces_unmatched_branches_and_heuristic_drift() {
         discrepancies
             .iter()
             .any(|d| d.contains("heuristic-only: [4100]")),
+        "{discrepancies:?}"
+    );
+}
+
+// ── in-flight conversion claims: "is anyone working on this?" (#4214) ──
+
+#[test]
+fn a_claimed_issue_is_excluded_from_outstanding_and_reported_in_flight() {
+    let snapshot = BacklogSnapshot {
+        open_issues: set(&[4200, 4201, 4202]),
+        patched_issues: set(&[4200, 4201, 4202]),
+        prs: Vec::new(),
+        known_merged: BTreeSet::new(),
+        // A running pass holds 4201's patch: no PR yet, work in progress.
+        in_flight: set(&[4201]),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    // The claim outranks the PR check: 4201 is not convertible by anyone
+    // else, even though nothing on GitHub says so.
+    assert_eq!(report.outstanding, set(&[4200, 4202]));
+    assert_eq!(report.in_flight, set(&[4201]));
+    assert!(report.stale_claims.is_empty(), "{:?}", report.stale_claims);
+    // The count is visible on the summary line, next to convertible.
+    let line = report.summary_line();
+    assert!(line.contains("convertible 2"), "{line}");
+    assert!(line.contains("in flight 1"), "{line}");
+}
+
+#[test]
+fn a_claim_on_an_issue_with_an_open_pr_is_not_in_flight_and_not_stale() {
+    // The pass finished and opened the PR but the trap did not fire yet: the
+    // claim is subsumed by the PR. It is not "in flight" (the PR says so)
+    // and it is not stale (the patch is still open and patched); it is
+    // simply reported neither way.
+    let snapshot = BacklogSnapshot {
+        open_issues: set(&[4203]),
+        patched_issues: set(&[4203]),
+        prs: vec![open_pr("conv/4203-fix", Some(4203), "")],
+        known_merged: BTreeSet::new(),
+        in_flight: set(&[4203]),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    assert!(report.outstanding.is_empty());
+    assert!(report.in_flight.is_empty(), "{:?}", report.in_flight);
+    assert!(report.stale_claims.is_empty(), "{:?}", report.stale_claims);
+    let line = report.summary_line();
+    assert!(line.contains("in flight 0"), "{line}");
+}
+
+#[test]
+fn a_claim_naming_an_issue_with_no_open_patch_is_reported_as_stale() {
+    // The pass is gone or the patch moved: the claim is evidence of drift,
+    // reported rather than absorbed.
+    let snapshot = BacklogSnapshot {
+        open_issues: set(&[4204]),
+        patched_issues: set(&[4204]),
+        prs: Vec::new(),
+        known_merged: BTreeSet::new(),
+        in_flight: set(&[4204, 9999]),
+    };
+    let report = compute_backlog(&snapshot).unwrap();
+    assert_eq!(report.outstanding, BTreeSet::new());
+    assert_eq!(report.in_flight, set(&[4204]));
+    assert_eq!(report.stale_claims, set(&[9999]));
+    let discrepancies = report.discrepancies();
+    assert!(
+        discrepancies
+            .iter()
+            .any(|d| d.contains("stale claims") && d.contains("9999")),
         "{discrepancies:?}"
     );
 }

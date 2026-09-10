@@ -1,5 +1,6 @@
 pub mod backlog;
 pub mod closure;
+pub mod conversion_claim;
 pub mod endpoint;
 pub mod executor;
 pub mod gate;
@@ -24,6 +25,7 @@ pub mod verification;
 pub mod work;
 pub mod yaml_config;
 
+pub use conversion_claim::{in_flight, ConversionClaim, ConversionClaimError};
 pub use endpoint::{
     classify_status, classify_watchdog_termination, plan_agent_budget, startup_limits_line,
     AttemptOutcome, EndpointPool, Grant, PoolError, QueueState, ReResolution, StatusReason, Step,

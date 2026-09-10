@@ -26,6 +26,13 @@
 //!    `issues with a PR` and `convertible` together, and
 //!    [`BacklogReport::discrepancies`] reports — rather than absorbs — any
 //!    drift between the authoritative backlog and the name heuristic.
+//! 5. **Eligibility is "is anyone working on this?", not "has anyone
+//!    worked on this?"** (issue #4214). A patch held by an in-flight
+//!    conversion pass has no PR yet and would otherwise read as convertible
+//!    to the next overlapping pass. The claimed set
+//!    ([`BacklogSnapshot::in_flight`], fed by
+//!    [`crate::execution::conversion_claim::in_flight`]) is excluded from the
+//!    outstanding set and reported — stale claims included — never absorbed.
 
 use super::closure::{reconcile_tracker, reconciled_open_count, TrackerDiscrepancy};
 use std::collections::BTreeSet;
@@ -210,6 +217,10 @@ pub struct BacklogSnapshot {
     /// is known to the caller — e.g. merged in the current session. They
     /// must not appear in the outstanding set.
     pub known_merged: BTreeSet<u64>,
+    /// Issue numbers claimed by in-flight conversion passes (issue #4214):
+    /// a claim under `state/converting/` means a pass is converting the
+    /// issue right now and it is not convertible by anyone else, PR or no PR.
+    pub in_flight: BTreeSet<u64>,
 }
 
 /// The computed backlog, with its reconciliation and audit output.
@@ -227,6 +238,13 @@ pub struct BacklogReport {
     /// What the name heuristic would have produced, kept as a cross-check
     /// only; never used for dispatch.
     pub heuristic_outstanding: BTreeSet<u64>,
+    /// Claimed at snapshot time: issues a pass is converting right now,
+    /// excluded from [`outstanding`](BacklogReport::outstanding) (issue
+    /// #4214).
+    pub in_flight: BTreeSet<u64>,
+    /// Claims that name an issue with no open patch to convert: stale
+    /// claims, reported rather than absorbed.
+    pub stale_claims: BTreeSet<u64>,
     /// The branch-name audit: matched count and the unmatched names.
     pub branch_audit: NameExtraction,
     /// Tracker/merged-PR mismatches from reconciliation (#4044): open
@@ -250,15 +268,16 @@ impl BacklogReport {
     /// One line with every dispatch-relevant count, so the sums can be
     /// checked by eye (#3924 invariant 4), with the open count after
     /// reconciliation (#4044) alongside the raw one:
-    /// `backlog: convertible 215 (patches on disk 409, issues open 372, open after reconcile 372, issues with a PR 194)`.
+    /// `backlog: convertible 215 (patches on disk 409, issues open 372, open after reconcile 372, issues with a PR 194, in flight 3)`.
     pub fn summary_line(&self) -> String {
         format!(
-            "backlog: convertible {} (patches on disk {}, issues open {}, open after reconcile {}, issues with a PR {})",
+            "backlog: convertible {} (patches on disk {}, issues open {}, open after reconcile {}, issues with a PR {}, in flight {})",
             self.convertible(),
             self.patches_on_disk,
             self.issues_open,
             self.issues_open_effective,
-            self.issues_with_pr.len()
+            self.issues_with_pr.len(),
+            self.in_flight.len()
         )
     }
 
@@ -299,6 +318,20 @@ impl BacklogReport {
                 .iter()
                 .map(TrackerDiscrepancy::line),
         );
+        // Stale conversion claims are reported, not absorbed (#4214):
+        // a claim with no open patch to convert names a pass that is gone
+        // or a patch that moved, and the queue must see that.
+        if !self.stale_claims.is_empty() {
+            found.push(format!(
+                "{} conversion claim(s) name issue(s) with no open patch to convert (stale claims): {}",
+                self.stale_claims.len(),
+                self.stale_claims
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         found
     }
 }
@@ -331,9 +364,12 @@ pub fn known_answer_check(
 
 /// Compute the conversion backlog from authoritative issue identity.
 ///
-/// An issue is outstanding when it is open, has a patch on disk, and has no
-/// open or merged PR associated by [`PrRecord::authoritative_issue`].
-/// Closed-unmerged PRs do not associate: the work did not land, so the
+/// An issue is outstanding when it is open, has a patch on disk, has no
+/// open or merged PR associated by [`PrRecord::authoritative_issue`], and is
+/// not claimed by an in-flight conversion pass ([`BacklogSnapshot::in_flight`],
+/// issue #4214 — the claim is the "is anyone working on this?" check and it
+/// outranks the PR check, because a patch held by a running pass has no PR
+/// yet). Closed-unmerged PRs do not associate: the work did not land, so the
 /// issue stays on the list.
 ///
 /// The branch-name heuristic runs alongside — as an audit and a
@@ -353,7 +389,27 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
         .intersection(&snapshot.patched_issues)
         .copied()
         .collect();
-    let outstanding: BTreeSet<u64> = open_patched.difference(&issues_with_pr).copied().collect();
+    // In-flight (issue #4214): a claim means a pass is converting the issue
+    // right now — open, patched, no PR yet. A claim that a PR already
+    // covers is subsumed by that PR (the pass finished; the release may lag
+    // it) and is reported neither way. A claim naming an issue with no open
+    // patch to convert is stale and is reported, never absorbed.
+    let claimed_and_patched: BTreeSet<u64> = snapshot
+        .in_flight
+        .intersection(&open_patched)
+        .copied()
+        .collect();
+    let in_flight: BTreeSet<u64> = claimed_and_patched
+        .difference(&issues_with_pr)
+        .copied()
+        .collect();
+    let stale_claims: BTreeSet<u64> = snapshot
+        .in_flight
+        .difference(&open_patched)
+        .copied()
+        .collect();
+    let prless: BTreeSet<u64> = open_patched.difference(&issues_with_pr).copied().collect();
+    let outstanding: BTreeSet<u64> = prless.difference(&in_flight).copied().collect();
     known_answer_check(&outstanding, &snapshot.known_merged)?;
 
     // The audit covers every branch name, whatever the PR state: it is a
@@ -370,6 +426,8 @@ pub fn compute_backlog(snapshot: &BacklogSnapshot) -> Result<BacklogReport, Stri
     Ok(BacklogReport {
         outstanding,
         issues_with_pr,
+        in_flight,
+        stale_claims,
         patches_on_disk: snapshot.patched_issues.len(),
         issues_open: snapshot.open_issues.len(),
         issues_open_effective: reconciled_open_count(&snapshot.open_issues, &tracker_discrepancies),
