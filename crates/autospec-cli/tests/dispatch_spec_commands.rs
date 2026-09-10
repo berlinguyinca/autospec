@@ -900,9 +900,279 @@ fn dispatch_help_lists_the_staged_spec_subcommands() {
 
     assert_eq!(output.status.code(), Some(0));
     let text = stdout(&output);
-    for token in ["stage", "freshness", "updatedAt"] {
+    for token in ["stage", "freshness", "preflight", "updatedAt"] {
         assert!(text.contains(token), "{text}");
     }
+}
+
+// ------------------------------------------------------- #3620: no-spec ----
+
+#[test]
+fn staging_refuses_an_empty_issue_body_before_writing_any_spec() {
+    // The #3620 root cause at the source: the staged spec for the issue did
+    // not exist, so nothing read its absence. Staging an empty body is the
+    // same fact one step earlier, and it is a staging-host fault (exit 2),
+    // never a written spec with no task in it.
+    let harness = Harness::new("stage-empty-body");
+    harness.gh_failing();
+    let body = harness.write("empty.md", "   \n\t\n");
+    let out = harness.temp.join("empty-staged.md").display().to_string();
+
+    let output = harness.stage(&[
+        "--issue",
+        "15",
+        "--body-file",
+        &body,
+        "--source-updated-at",
+        SOURCE_UPDATED_AT,
+        "--out",
+        &out,
+        "--no-probe",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("empty body"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !harness.temp.join("empty-staged.md").exists(),
+        "nothing may be staged from an empty body"
+    );
+}
+
+#[test]
+fn staging_reports_the_receipt_of_what_it_wrote() {
+    let harness = Harness::new("stage-receipt");
+    let out = harness.temp.join("receipt.md").display().to_string();
+
+    let output = harness.stage(&[
+        "--issue",
+        "50",
+        "--issue-json",
+        &harness.write("issue2.json", &issue_payload()),
+        "--out",
+        &out,
+        "--staged-at",
+        STAGED_AT,
+        "--no-probe",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // The sha256 the staging host reports is the sha256 of the bytes on disk.
+    let text = read(&out);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("stage --json parses");
+    let sha = json["sha256"].as_str().expect("receipt carries sha256");
+    assert_eq!(sha.len(), 64, "sha256 hex: {sha}");
+    assert_eq!(json["bytes"].as_u64(), Some(text.len() as u64));
+}
+
+#[test]
+fn freshness_refuses_an_empty_staged_spec_as_no_spec() {
+    // A file that exists but carries no text: a bare existence check passes,
+    // the checked read refuses. The status reads NO-SPEC, not a baseline or
+    // revision problem.
+    let harness = Harness::new("fresh-empty");
+    let empty = harness.write("empty.md", "");
+
+    let output = harness.freshness(&[
+        "--issue",
+        "15",
+        "--staged",
+        &empty,
+        "--live-updated-at",
+        SOURCE_UPDATED_AT,
+    ]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NO-SPEC"), "{text}");
+    assert!(text.contains("REFUSED"), "{text}");
+    assert!(text.contains("issue 15"), "{text}");
+}
+
+#[test]
+fn freshness_appends_the_spec_receipt_to_the_status_file() {
+    // Which spec did this run actually see: the gate that lets it start
+    // records the byte count and checksum in the run's status.txt.
+    let harness = Harness::new("fresh-receipt");
+    let out = stage_issue(&harness);
+    let spec = read(&out);
+    let status = harness.temp.join("status.txt").display().to_string();
+
+    let output = harness.freshness(&[
+        "--issue",
+        "50",
+        "--staged",
+        &out,
+        "--live-updated-at",
+        SOURCE_UPDATED_AT,
+        "--status-file",
+        &status,
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    let record = std::fs::read_to_string(&status).expect("status.txt written");
+    assert!(record.contains("spec-bytes="), "{record}");
+    assert!(
+        record.contains(&format!("spec-bytes={}", spec.len())),
+        "{record}"
+    );
+    let sha = record
+        .split("spec-sha256=")
+        .nth(1)
+        .expect("checksum token")
+        .trim();
+    assert_eq!(sha.len(), 64, "sha256 hex: {record}");
+}
+
+// ----------------------------------------------------------- preflight ----
+
+/// The #3620 incident shape: the markers are there, nothing between.
+const HOLLOW_PROMPT: &str = "===== ISSUE #15 =====\n\n===== END ISSUE =====\n";
+
+#[test]
+fn preflight_refuses_a_missing_staged_spec_as_no_spec() {
+    let harness = Harness::new("pre-missing");
+    let missing = harness.temp.join("absent.md").display().to_string();
+
+    let output = harness.run(
+        "preflight",
+        &[
+            "--issue",
+            "15",
+            "--staged",
+            &missing,
+            "--live-updated-at",
+            SOURCE_UPDATED_AT,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NO-SPEC"), "{text}");
+    assert!(text.contains("issue 15"), "{text}");
+}
+
+#[test]
+fn preflight_refuses_an_empty_staged_spec_as_no_spec() {
+    let harness = Harness::new("pre-empty");
+    let empty = harness.write("empty.md", "  \n");
+
+    let output = harness.run(
+        "preflight",
+        &[
+            "--issue",
+            "15",
+            "--staged",
+            &empty,
+            "--live-updated-at",
+            SOURCE_UPDATED_AT,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NO-SPEC"), "{text}");
+    // A whitespace file is not zero bytes: the refusal says which, so the
+    // operator can tell "never written" from "written empty".
+    assert!(text.contains("3 bytes"), "{text}");
+}
+
+#[test]
+fn preflight_refuses_a_prompt_that_carrys_no_issue_text() {
+    // The #3620 run: a plausible-looking prompt whose ISSUE section arrived
+    // empty. The refusal lands before a single token is spent, and it reads
+    // NO-SPEC so a status file cannot dress it up as a baseline problem.
+    let harness = Harness::new("pre-hollow-prompt");
+    let out = stage_issue(&harness);
+    let prompt = harness.write("prompt.txt", HOLLOW_PROMPT);
+
+    let output = harness.run(
+        "preflight",
+        &[
+            "--issue",
+            "50",
+            "--staged",
+            &out,
+            "--prompt-file",
+            &prompt,
+            "--live-updated-at",
+            SOURCE_UPDATED_AT,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NO-SPEC"), "{text}");
+    assert!(text.contains("PROMPT"), "{text}");
+}
+
+#[test]
+fn preflight_passes_and_records_the_receipt_when_the_prompt_carrys_the_spec() {
+    let harness = Harness::new("pre-ok");
+    let out = stage_issue(&harness);
+    let spec = read(&out);
+    let prompt = harness.write(
+        "prompt.txt",
+        &format!("===== ISSUE #50 =====\n{spec}===== END ISSUE ====="),
+    );
+    let status = harness.temp.join("status.txt").display().to_string();
+
+    let output = harness.run(
+        "preflight",
+        &[
+            "--issue",
+            "50",
+            "--staged",
+            &out,
+            "--prompt-file",
+            &prompt,
+            "--live-updated-at",
+            SOURCE_UPDATED_AT,
+            "--status-file",
+            &status,
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    let stdout_text = stdout(&output);
+    assert!(stdout_text.contains("current"), "{stdout_text}");
+    assert!(stdout_text.contains("SPEC-RECEIPT"), "{stdout_text}");
+    let record = std::fs::read_to_string(&status).expect("status.txt written");
+    assert!(
+        record.contains(&format!("spec-bytes={}", spec.len())),
+        "{record}"
+    );
+    assert!(record.contains("spec-sha256="), "{record}");
+}
+
+#[test]
+fn preflight_still_holds_a_stale_spec() {
+    // Preflight is one operation, not a weaker gate: the freshness arm still
+    // holds a moved issue for re-staging.
+    let harness = Harness::new("pre-stale");
+    let out = stage_issue(&harness);
+
+    let output = harness.run(
+        "preflight",
+        &[
+            "--issue",
+            "50",
+            "--staged",
+            &out,
+            "--live-updated-at",
+            "2026-09-08T09:30:00Z",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("STALE"), "{text}");
+    assert!(text.contains("re-stage"), "{text}");
 }
 
 /// The header parser only reads the leading block, so a comment quoting the

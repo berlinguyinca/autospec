@@ -38,8 +38,9 @@ use std::process::Command;
 use autospec_core::grading::{Gate, GateSet};
 use autospec_core::spec::authority;
 use autospec_core::staged_spec::{
-    authorize, format_timestamp, issue_endpoint, parse_timestamp, EnvironmentProbe, IssueComment,
-    IssueSnapshot, ProbeState, KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY,
+    authorize, format_timestamp, issue_endpoint, parse_timestamp, prompt_verdict, spec_is_empty,
+    EnvironmentProbe, IssueComment, IssueSnapshot, ProbeState, SpecReceipt, KEY_ABSENT,
+    KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY, NO_SPEC_STATUS,
 };
 
 use super::dispatch::{
@@ -74,8 +75,19 @@ pub fn stage(args: &[String]) -> Result<(), CommandFailure> {
         None => now_epoch()?,
     };
 
+    // A spec staged with an empty body is the #3620 incident at the source:
+    // the dispatch worker would be handed a document with no task and do the
+    // work anyway. Refuse it here, where the staging host can still fix the
+    // input, instead of shipping it for a NO-SPEC refusal on the cluster.
+    if spec_is_empty(&snapshot.body) {
+        return Err(CommandFailure::diagnostic(format!(
+            "dispatch stage: issue {issue} has an empty body; a spec staged without its issue text is {NO_SPEC_STATUS} and no dispatch would ever start on it"
+        )));
+    }
+
     let included = snapshot.comments_since_body_edit().len();
     let text = snapshot.stage(&environment, staged_at);
+    let receipt = SpecReceipt::of(&text);
     let parent = out
         .parent()
         .map(Path::to_path_buf)
@@ -101,6 +113,7 @@ pub fn stage(args: &[String]) -> Result<(), CommandFailure> {
                 "comments_total": snapshot.comments.len(),
                 "gates": snapshot.gates.len(),
                 "bytes": text.len(),
+                "sha256": receipt.sha256,
             }))
             .map_err(|error| CommandFailure::diagnostic(format!("serialise: {error}")))?
         );
@@ -114,6 +127,9 @@ pub fn stage(args: &[String]) -> Result<(), CommandFailure> {
             out.display(),
             text.len()
         );
+        // The receipt is the answer to "which spec did the run see" (#3620);
+        // the runner appends it to its status.txt.
+        println!("SPEC-RECEIPT {}", receipt.line());
     }
     Ok(())
 }
@@ -150,6 +166,16 @@ pub fn freshness(args: &[String]) -> Result<(), CommandFailure> {
     let verdict = authorize(staged.as_deref(), live.value);
     let rendered = path.display().to_string();
 
+    // The receipt of the spec this gate just judged: with `--status-file` the
+    // runner appends it to its `status.txt`, so "which spec did this run
+    // actually see" is answerable afterwards (#3620). It is recorded only for
+    // a spec that is on disk — the NO-SPEC refusals record nothing, because
+    // there was nothing to see.
+    if let (Some(text), Some(status_file)) = (staged.as_deref(), opt_string(args, "--status-file")?)
+    {
+        append_receipt(&status_file, text)?;
+    }
+
     if is_json(args) {
         println!("{}", verdict.to_json(issue, &rendered));
     } else {
@@ -168,6 +194,118 @@ pub fn freshness(args: &[String]) -> Result<(), CommandFailure> {
     }
     // The verdict line above already names the issue and the last staging time,
     // so the held status carries no message and nothing prints twice.
+    verdict_exit(verdict.held())
+}
+
+/// Append the spec's receipt line to the run's `status.txt`.
+fn append_receipt(status_file: &str, spec: &str) -> Result<(), CommandFailure> {
+    let receipt = SpecReceipt::of(spec);
+    let mut text = match fs::read_to_string(status_file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "cannot read --status-file {status_file}: {error}"
+            )))
+        }
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&receipt.line());
+    text.push('\n');
+    write_atomic(Path::new(status_file), &text)?;
+    Ok(())
+}
+
+/// `autospec dispatch preflight` — the single pre-dispatch gate (#3620).
+///
+/// Dispatch and staging must be one operation: a wrapper that ran two dispatches
+/// against a missing spec before this surfaced had staging as a separate manual
+/// step it could forget. `preflight` is that one operation. It fails, before a
+/// single token is spent, with the `NO-SPEC` refusal when the staged file is
+/// missing or empty, when the prompt carries no issue text, or when the
+/// freshness verdict holds — and it records the spec receipt in the run's
+/// `status.txt` on the way.
+///
+/// Exit 0 authorizes the dispatch; exit 1 holds it (the refusal line names
+/// which check stopped it); exit 2 is a caller fault (an unreadable prompt
+/// file the caller pointed at by mistake).
+pub fn preflight(args: &[String]) -> Result<(), CommandFailure> {
+    let issue = issue_arg(args, "preflight")?;
+    let path = staged_path(args, "--staged", issue)?;
+
+    // 1. The checked read: a missing or empty spec is NO-SPEC, refused before
+    // the live read is even asked for. `read_to_string` into a checked result
+    // replaces the `BODY=$(cat …)` pattern whose silent failure started the
+    // #3620 run.
+    let staged = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "dispatch preflight: cannot read {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    // No spec to hand over — missing or empty — is a hard exit here, before
+    // the live read and before a single token is spent. The refusal is the
+    // verdict, and it reads `NO-SPEC`, not a baseline or staleness problem.
+    if staged.is_none() || staged.as_deref().is_some_and(spec_is_empty) {
+        let verdict = authorize(staged.as_deref(), None);
+        println!("{}", verdict.line(issue, &path.display().to_string()));
+        return verdict_exit(true);
+    }
+
+    // 2. The prompt assertion: a prompt whose issue section is empty is a
+    // programming error, caught here instead of by the agent's first line of
+    // invented work.
+    if let Some(prompt_file) = opt_string(args, "--prompt-file")? {
+        let prompt = fs::read_to_string(&prompt_file).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "dispatch preflight: cannot read --prompt-file {prompt_file}: {error}"
+            ))
+        })?;
+        let verdict = prompt_verdict(&prompt, staged.as_deref().expect("staged read above"));
+        if !verdict.ok() {
+            println!("{}", verdict.line(issue));
+            return verdict_exit(true);
+        }
+    }
+
+    // 3. The freshness gate, the way `freshness` runs it: the authority
+    // refusal first, then the revision verdict.
+    if let Some(text) = &staged {
+        if let Some(failure) = authority_refusal(args, issue, text) {
+            return Err(failure);
+        }
+    }
+    let live = live_updated_at(args, issue)?;
+    let verdict = authorize(staged.as_deref(), live.value);
+
+    // 4. The receipt: which spec this run actually saw, in its status.txt.
+    if let Some(status_file) = opt_string(args, "--status-file")? {
+        append_receipt(&status_file, staged.as_deref().expect("staged read above"))?;
+    }
+
+    if is_json(args) {
+        println!("{}", verdict.to_json(issue, &path.display().to_string()));
+    } else {
+        println!("{}", verdict.line(issue, &path.display().to_string()));
+        if let Some(text) = &staged {
+            println!("SPEC-RECEIPT {}", SpecReceipt::of(text).line());
+        }
+        if verdict.needs_restage() {
+            println!(
+                "re-stage with: autospec dispatch stage --issue {issue} --out {}",
+                path.display()
+            );
+        }
+    }
+    if let Some(detail) = live.detail {
+        eprintln!("dispatch preflight: live revision unknown — {detail}");
+    }
     verdict_exit(verdict.held())
 }
 

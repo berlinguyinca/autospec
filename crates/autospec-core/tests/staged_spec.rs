@@ -13,11 +13,11 @@
 
 use autospec_core::grading::{staged_gates, GateSet, GATES_SECTION};
 use autospec_core::staged_spec::{
-    authorize, format_timestamp, parse_timestamp, staged_at, staged_source_updated_at,
-    DispatchVerdict, EnvironmentProbe, IssueComment, IssueSnapshot, ProbeState, RefuseReason,
-    ABSENT, BODY_SECTION, DISCUSSION_SECTION, ENVIRONMENT_SECTION, HEADER_COMMENTS, HEADER_ISSUE,
-    HEADER_SOURCE_UPDATED_AT, HEADER_STAGED_AT, KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE,
-    KEY_REGISTRY, NOT_PROBED,
+    authorize, format_timestamp, parse_timestamp, prompt_verdict, spec_is_empty, staged_at,
+    staged_source_updated_at, DispatchVerdict, EnvironmentProbe, IssueComment, IssueSnapshot,
+    ProbeState, PromptVerdict, RefuseReason, SpecReceipt, ABSENT, BODY_SECTION, DISCUSSION_SECTION,
+    ENVIRONMENT_SECTION, HEADER_COMMENTS, HEADER_ISSUE, HEADER_SOURCE_UPDATED_AT, HEADER_STAGED_AT,
+    KEY_ABSENT, KEY_CONTAINER_RUNTIME, KEY_DATABASE, KEY_REGISTRY, NOT_PROBED, NO_SPEC_STATUS,
 };
 
 const STAGED_AT: u64 = 1_757_000_000; // 2025-09-04T15:33:20Z
@@ -319,6 +319,73 @@ fn no_staged_spec_at_all_is_a_refusal() {
 }
 
 #[test]
+fn a_missing_staged_spec_reads_as_no_spec_not_a_baseline_problem() {
+    // The #3620 run's status read like a baseline problem even though the
+    // real fact was simpler: the agent was never told what to do. The
+    // refusal carries its own status token for exactly this.
+    let verdict = authorize(None, Some(SOURCE_UPDATED_AT));
+
+    let line = verdict.line(15, "iw/issues/15.md");
+    assert!(line.contains(NO_SPEC_STATUS), "{line}");
+    assert!(line.contains("issue 15"), "{line}");
+}
+
+#[test]
+fn an_empty_staged_spec_is_no_spec_and_is_refused() {
+    let verdict = authorize(Some(""), Some(SOURCE_UPDATED_AT));
+
+    assert_eq!(
+        verdict,
+        DispatchVerdict::Refuse {
+            reason: RefuseReason::NoSpec { bytes: 0 },
+            staged_at: None,
+        }
+    );
+    assert!(verdict.held());
+    // An empty spec is refused before the revision is even parsed: the
+    // verdict does not pretend the file was aged and found un-ageable.
+    assert!(!matches!(
+        verdict,
+        DispatchVerdict::Refuse {
+            reason: RefuseReason::NoStagedRevision,
+            ..
+        }
+    ));
+    let line = verdict.line(15, "iw/issues/15.md");
+    assert!(line.contains(NO_SPEC_STATUS), "{line}");
+    assert!(line.contains("0 bytes"), "{line}");
+    assert!(line.contains("REFUSED"), "{line}");
+}
+
+#[test]
+fn a_whitespace_only_staged_spec_is_no_spec_and_is_refused() {
+    // A bare existence check (`[ -f "$f" ]`) passes on this file; only the
+    // checked read (`[ -s "$f" ]`, here `spec_is_empty`) sees through it.
+    let whitespace = "\n  \n\t\n";
+    assert!(spec_is_empty(whitespace), "sanity: whitespace is empty");
+
+    let verdict = authorize(Some(whitespace), Some(SOURCE_UPDATED_AT));
+
+    assert_eq!(
+        verdict,
+        DispatchVerdict::Refuse {
+            reason: RefuseReason::NoSpec {
+                bytes: whitespace.len(),
+            },
+            staged_at: None,
+        }
+    );
+    assert!(verdict.line(15, "iw/issues/15.md").contains(NO_SPEC_STATUS));
+}
+
+#[test]
+fn spec_is_empty_catches_the_swallowed_cat() {
+    assert!(spec_is_empty(""));
+    assert!(spec_is_empty("   \n\t  "));
+    assert!(!spec_is_empty("anything"));
+}
+
+#[test]
 fn a_spec_recording_no_revision_cannot_be_aged_and_is_refused() {
     // The pre-#3864 staged spec: faithful, complete-looking, and un-ageable.
     let legacy = "# Issue #50: Run the batch on the cluster\n\nDispatch the batch.\n";
@@ -387,6 +454,58 @@ fn the_json_verdict_carries_the_exit_code_a_wrapper_branches_on() {
     assert!(json.contains("\"needs_restage\": true"), "{json}");
     assert!(json.contains("\"restage\""), "{json}");
     assert!(json.contains("\"issue\": 50"), "{json}");
+}
+
+// ---------------------------------------------------------- no-spec gate --
+
+#[test]
+fn the_spec_receipt_records_the_bytes_and_checksum_a_run_saw() {
+    let text = staged();
+    let receipt = SpecReceipt::of(&text);
+
+    assert_eq!(receipt.bytes, text.len());
+    // A known hash pins the algorithm and the casing.
+    assert_eq!(
+        SpecReceipt::of("hello").sha256,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    let line = receipt.line();
+    assert!(line.starts_with("spec-bytes="), "{line}");
+    assert!(line.contains("spec-sha256="), "{line}");
+    assert_eq!(
+        line.len(),
+        "spec-bytes= spec-sha256=".len() + text.len().to_string().len() + 64
+    );
+}
+
+#[test]
+fn the_prompt_assertion_catches_an_empty_issue_section() {
+    let spec = staged();
+
+    // The happy path: the prompt embeds the staged spec between its markers.
+    let prompt = format!("===== ISSUE #50 =====\n{spec}===== END ISSUE =====");
+    assert_eq!(prompt_verdict(&prompt, &spec), PromptVerdict::CarriesSpec);
+
+    // The #3620 shape: the cat failed into an unchecked command substitution,
+    // $BODY became empty, and the prompt arrived with nothing between.
+    let hollow = "===== ISSUE #15 =====\n\n===== END ISSUE =====\n";
+    assert_eq!(
+        prompt_verdict(hollow, &spec),
+        PromptVerdict::SpecMissingFromPrompt
+    );
+
+    // An empty prompt assembled from nothing at all.
+    assert_eq!(prompt_verdict("   ", &spec), PromptVerdict::EmptyPrompt);
+
+    // A spec nobody has — even with a fat prompt — is still no task.
+    assert_eq!(
+        prompt_verdict(hollow, ""),
+        PromptVerdict::SpecMissingFromPrompt
+    );
+
+    let refusal = PromptVerdict::SpecMissingFromPrompt.line(15);
+    assert!(refusal.contains(NO_SPEC_STATUS), "{refusal}");
+    assert!(refusal.contains("issue 15"), "{refusal}");
 }
 
 // ------------------------------------------------------------ timestamps --
