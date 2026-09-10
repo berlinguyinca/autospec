@@ -26,6 +26,7 @@
 #       [--no-require-checks]        # skip the CI-conclusion gate (default: on)
 #       [--checks-timeout SECS]      # default: 1800
 #       [--checks-poll SECS]         # default: 30
+#       [--verify-evidence FILE]     # full-suite evidence gate (issue #3523)
 #
 # CI-conclusion gate (issue #3220). `main` carries no branch protection, so no
 # check is "required" and a PR whose checks are pending or failing reports
@@ -41,11 +42,20 @@
 # defaulting to AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS — the same regex the
 # conductor main-health gate honors, so there is one definition, not two.
 #
+# Full-suite evidence gate (issue #3523). "The full suite passed, on the
+# commit being merged" was enforced only by prose; nothing recorded that the
+# suite ran, and nothing at merge time read which commit it ran against. This
+# gate closes that: with --verify-evidence FILE, a file whose head_sha no
+# longer names the PR head OID, or whose status is non-zero, always refuses
+# the merge. An ABSENT file warns on stderr (verify-evidence-absent) and
+# merges, so the gate ships inert until Phase 4 records evidence — silence and
+# staleness must not read alike. An unparseable file fails closed (exit 2).
+
 # Exit codes:
 #   0  merged (allowed, or fenced-but-overridden)
-#   1  refused — NOT merged (fenced surface without override, or non-advisory
-#      checks not green)
-#   2  invocation / classifier error — fail-closed, NOT merged
+#   1  refused — NOT merged (fenced surface without override, non-advisory
+#      checks not green, or stale / failing full-suite evidence)
+#   2  invocation / classifier / evidence-parse error — fail-closed, NOT merged
 #
 # Engineering rules (AGENTS.md): set -euo pipefail; if/then/fi (no one-sided
 # && short-circuits); no RETURN traps (inline cleanup).
@@ -61,6 +71,7 @@ MERGE_ARGS="--admin --squash --delete-branch"
 REQUIRE_CHECKS=1
 CHECKS_TIMEOUT=1800
 CHECKS_POLL=30
+VERIFY_EVIDENCE=""
 
 _die() {
     printf 'autospec-guarded-merge: %s\n' "$1" >&2
@@ -91,6 +102,7 @@ while [ "$#" -gt 0 ]; do
         --no-require-checks) REQUIRE_CHECKS=0; shift 1 ;;
         --checks-timeout) CHECKS_TIMEOUT="${2:-}"; shift 2 ;;
         --checks-poll) CHECKS_POLL="${2:-}"; shift 2 ;;
+        --verify-evidence) VERIFY_EVIDENCE="${2:-}"; shift 2 ;;
         -h|--help) sed -n 's/^# \?//p' "$0" | head -40; exit 0 ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -243,7 +255,49 @@ if [ "$REQUIRE_CHECKS" = "1" ]; then
     done
 fi
 
-# 5. Allowed (or overridden) and green: perform the admin merge.
+# 5. Full-suite evidence gate (issue #3523): refuse when the recorded
+#    full-suite evidence names a different commit, or a failing run. An absent
+#    file warns and merges (inert until Phase 4 records); a present file is
+#    binding. An unparseable file fails closed like every other read failure.
+if [ -n "$VERIFY_EVIDENCE" ]; then
+    if [ ! -f "$VERIFY_EVIDENCE" ]; then
+        _warn "verify-evidence-absent: $VERIFY_EVIDENCE does not exist; merging without full-suite evidence"
+    elif ! jq -e . "$VERIFY_EVIDENCE" >/dev/null 2>&1; then
+        printf 'guarded-merge: PR #%s verify-evidence file %s is not valid JSON; not merged\n' "$PR" "$VERIFY_EVIDENCE"
+        printf 'blocked verify_evidence_unparseable\n'
+        _cleanup
+        _die "verify-evidence file is unparseable (fail-closed, not merged): $VERIFY_EVIDENCE"
+    else
+        _ev_sha="$(jq -r '.head_sha // empty' "$VERIFY_EVIDENCE")"
+        _ev_status="$(jq -r '.status // empty' "$VERIFY_EVIDENCE")"
+        if [ -z "$_ev_status" ] || ! printf '%s' "$_ev_status" | grep -qE '^[0-9]+$'; then
+            printf 'guarded-merge: PR #%s verify-evidence status is missing or non-numeric; not merged\n' "$PR"
+            printf 'blocked verify_evidence_failing\n'
+            _cleanup
+            exit 1
+        fi
+        if [ "$_ev_status" != "0" ]; then
+            printf 'guarded-merge: PR #%s verify-evidence records a failing full suite (status %s); not merged\n' "$PR" "$_ev_status"
+            printf 'blocked verify_evidence_failing\n'
+            _cleanup
+            exit 1
+        fi
+        if ! _head_oid="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)"; then
+            _cleanup
+            _die "could not read the PR head OID for PR #$PR (fail-closed, not merged)"
+        fi
+        if [ "$_ev_sha" != "$_head_oid" ]; then
+            printf 'guarded-merge: PR #%s verify-evidence head_sha %s != PR head %s (stale); not merged\n' \
+                "$PR" "${_ev_sha:-<missing>}" "$_head_oid"
+            printf 'blocked verify_evidence_stale\n'
+            _cleanup
+            exit 1
+        fi
+        printf 'guarded-merge: PR #%s verify-evidence fresh (head %s, status 0)\n' "$PR" "$_head_oid"
+    fi
+fi
+
+# 6. Allowed (or overridden) and green: perform the admin merge.
 _cleanup
 # shellcheck disable=SC2086
 gh pr merge "$PR" --repo "$REPO" $MERGE_ARGS

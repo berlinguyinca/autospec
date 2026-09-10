@@ -668,6 +668,26 @@ are excluded from both the pending and the failing counts.
 The genuinely unbypassable fence is still branch protection with a required
 status check; this wrapper is the strongest per-diff gate available without it.
 
+### Full-suite evidence gate
+
+`autospec-guarded-merge.sh --verify-evidence FILE` (issue #3523) refuses a
+merge whose recorded full-suite evidence names a different commit than the PR
+head. This is the local-suite half of the CI-conclusion gate above: previously
+"the full suite passed, on the commit being merged" was enforced only by prose.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--verify-evidence FILE` | gate off | Read the evidence JSON; refuse (exit 1, `blocked verify_evidence_stale`) when its `head_sha` != the PR head OID, refuse (exit 1, `blocked verify_evidence_failing`) when its `status` is non-zero, and fail closed (exit 2, never merges) when the file is not valid JSON. |
+
+An **absent** file prints `verify-evidence-absent` to stderr and merges — the
+gate ships inert until Phase 4 records evidence; a present-but-stale file
+always refuses. Silence and staleness must not read alike.
+
+`scripts/record-verify-evidence.sh --pr N --command CMD --status EXIT` writes
+`.autospec/verify-evidence/<PR>.json` (worktree-relative, atomic) with exactly
+the keys `head_sha` (`git rev-parse HEAD` of the recording worktree),
+`command`, `status` (JSON number), and `recorded_at` (UTC RFC 3339).
+
 ### Quarantine labeling
 
 When the blast-radius domain fence quarantines a PR (`blocked fenced_surface`,
