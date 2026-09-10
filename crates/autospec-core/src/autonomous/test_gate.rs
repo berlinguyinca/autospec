@@ -132,15 +132,48 @@ pub struct GateVerdict {
 }
 
 impl GateVerdict {
-    /// The one-line verdict. A hold always names its attribution:
-    /// `HELD: tests failed -- caused | pre-existing | unattributable`.
+    /// The one-line verdict. A hold names its attribution **and** the tests it
+    /// stands on:
+    /// `HELD: tests failed -- caused | pre-existing | unattributable -- N failing: <names>`.
+    ///
+    /// The attribution alone is not enough (#3747): a reader cannot re-run, or
+    /// compare against a baseline, a hold that says only "caused". The names
+    /// listed are the **persistent** failures — a test that passed on its
+    /// isolated re-run is flaky, is reported by [`Self::flaky`], and must not
+    /// be named in a hold as though it still failed. When the suite reported
+    /// failures the verdict holds on without naming any (an empty
+    /// `failures` list under a `Hold`), the line says so in words rather than
+    /// silently degrading to the class alone.
     pub fn message(&self) -> String {
         match self.decision {
             GateDecision::Pass => format!("PASS: {} passed; {}", self.passed, self.flaky_summary()),
-            GateDecision::Hold { attribution } => {
-                format!("HELD: tests failed -- {}", attribution.token())
-            }
+            GateDecision::Hold { attribution } => match self.hold_test_names() {
+                Some(names) => format!(
+                    "HELD: tests failed -- {} -- {} failing: {}",
+                    attribution.token(),
+                    names.len(),
+                    names.join(", ")
+                ),
+                None => format!(
+                    "HELD: tests failed -- {} -- failing test names unavailable",
+                    attribution.token()
+                ),
+            },
         }
+    }
+
+    /// The names the hold stands on: every failure that did **not** pass its
+    /// isolated re-run, in suite order. `None` when the verdict holds on
+    /// failures it cannot name (an empty failure list), which the message
+    /// reports in words instead of as an empty list.
+    fn hold_test_names(&self) -> Option<Vec<&str>> {
+        let names: Vec<&str> = self
+            .failures
+            .iter()
+            .filter(|r| r.class != FailureClass::Flaky)
+            .map(|r| r.name.as_str())
+            .collect();
+        (!names.is_empty()).then_some(names)
     }
 
     /// The decision token the runner records per patch: `pass`, or

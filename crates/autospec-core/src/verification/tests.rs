@@ -77,6 +77,63 @@ fn a_target_that_never_built_fails_the_run() {
 }
 
 #[test]
+fn a_failing_run_records_the_failing_test_by_name() {
+    // Issue #3747: the count is not the record. Whatever named the failure in
+    // the output must appear in the verdict and in its evidence.
+    let output = "test core::tests::parses_input ... ok\n\
+test core::tests::rejects_negative ... FAILED\n\
+\nfailures:\n    core::tests::rejects_negative\n\n\
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n";
+    let verdict = judge_test_run(output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert_eq!(
+        verdict.failing_tests,
+        vec!["core::tests::rejects_negative".to_string()]
+    );
+    assert!(
+        verdict.evidence().contains("core::tests::rejects_negative"),
+        "{}",
+        verdict.evidence()
+    );
+}
+
+#[test]
+fn a_named_failure_without_a_summary_line_still_fails_the_run() {
+    // The log was cut before `test result:`; the progress line is evidence.
+    let output = "test core::tests::rejects_negative ... FAILED\n";
+    let verdict = judge_test_run(output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(!verdict.is_passed());
+}
+
+#[test]
+fn a_test_logging_an_error_line_does_not_fail_a_clean_run() {
+    // The bare `error:` prefix the gate used to match is also what a passing
+    // test prints about a socket it expected to be closed (issue #3747).
+    let output = format!(
+        "error: connection refused (expected, peer closed)\n{}\n",
+        result_line(3, 0)
+    );
+    let verdict = judge_test_run(&output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Passed);
+    assert!(verdict.is_passed());
+}
+
+#[test]
+fn a_test_run_error_line_still_fails_the_run() {
+    // Cargo's test-run summary is a hard error too: no `test result:` line
+    // means nothing in scope reported, which is not a pass.
+    let output = "running 3 tests\nerror: test failed, to rerun pass `-p core --lib`\n";
+    let verdict = judge_test_run(output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(!verdict.is_passed());
+}
+
+#[test]
 fn ignored_only_run_is_no_tests_ran() {
     let output = "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
     let verdict = judge_test_run(output);

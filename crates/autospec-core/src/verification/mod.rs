@@ -112,25 +112,47 @@ impl TestRunOutcome {
     }
 }
 
-/// The verdict of [`judge_test_run`]: the outcome plus what was measured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The verdict of [`judge_test_run`]: the outcome, what was measured, and
+/// which tests failed.
+///
+/// The aggregate is a count, and a count is not a record: a hold that says
+/// "2 failed" cannot be compared against a baseline, re-run, or read by the
+/// next session. The names come from the same output the counts come from
+/// ([`crate::conversion_gate::failing_test_names`]) so no second source can
+/// disagree with them (issue #3747).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestRunVerdict {
     pub outcome: TestRunOutcome,
     pub aggregate: TestRunAggregate,
+    /// The failing tests by name, deduplicated and sorted. Empty when the
+    /// output named none — a killed binary or a truncated log — which is
+    /// itself worth seeing, so it is not filled in with a count.
+    pub failing_tests: Vec<String>,
 }
 
 impl TestRunVerdict {
     /// The evidence a completion report must record for this verdict.
     ///
     /// States the aggregate and the target count so a reader can see the run
-    /// had scope; the zero-tests outcome carries its distinct label.
+    /// had scope; the zero-tests outcome carries its distinct label; and when
+    /// the output named the failing tests, the evidence names them too
+    /// (issue #3747).
     pub fn evidence(&self) -> String {
         let aggregate = self.aggregate.evidence();
-        if self.outcome == TestRunOutcome::NoTestsRan {
+        let base = if self.outcome == TestRunOutcome::NoTestsRan {
             format!("NO-TESTS-RAN — {aggregate}")
         } else {
             aggregate
+        };
+        match self.failure_names() {
+            Some(names) => format!("{base} — failing: {names}"),
+            None => base,
         }
+    }
+
+    /// The failing tests by name, or `None` when the output named none.
+    pub fn failure_names(&self) -> Option<String> {
+        (!self.failing_tests.is_empty()).then(|| self.failing_tests.join(", "))
     }
 
     /// Whether this verdict may be reported as a green run.
@@ -147,29 +169,45 @@ impl TestRunVerdict {
 /// Requires `failed == 0` across **all** targets as well as `passed > 0`.
 /// Reading only the last `test result:` line, or only the absence of
 /// failures, is how a run that executed zero tests gets recorded as a pass.
+///
+/// A test named as failed in the progress lines fails the run even when the
+/// `test result:` summary it belongs to never reached the log, and the names
+/// ride along on the verdict so the failure is recorded as a set of tests
+/// rather than as a number (issue #3747).
 pub fn judge_test_run(output: &str) -> TestRunVerdict {
     let aggregate = parse_test_run(output);
-    let outcome = if aggregate.failed > 0 || reports_hard_error(output) {
+    let failing_tests = crate::conversion_gate::failing_test_names(output);
+    let outcome = if aggregate.failed > 0 || !failing_tests.is_empty() || reports_hard_error(output)
+    {
         TestRunOutcome::Failed
     } else if aggregate.passed == 0 {
         TestRunOutcome::NoTestsRan
     } else {
         TestRunOutcome::Passed
     };
-    TestRunVerdict { outcome, aggregate }
+    TestRunVerdict {
+        outcome,
+        aggregate,
+        failing_tests,
+    }
 }
 
-/// Whether the output carries a hard error: a line starting with `error:`
-/// or `error[` (a compile failure, or `error: test failed, to rerun pass`).
+/// Whether the output carries a hard error: a **compile** failure
+/// ([`crate::conversion_gate::compile_failure_line`]) or a **test-run**
+/// failure ([`crate::conversion_gate::test_failure_line`]).
 ///
 /// A target that did not build emits no `test result:` line, so without
 /// this check its death is indistinguishable from a run that simply had no
 /// tests in scope.
+///
+/// The two shapes are matched separately rather than by a bare `error:`
+/// prefix (issue #3747). That prefix is shared by cargo's compile failures,
+/// its test-run failures, and whatever a passing test happens to print to its
+/// own stdout: matched bare it both held compiling patches as "build error"
+/// and failed clean runs whose tests logged an error line.
 fn reports_hard_error(output: &str) -> bool {
-    output.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("error:") || trimmed.starts_with("error[")
-    })
+    crate::conversion_gate::output_reports_compile_failure(output)
+        || crate::conversion_gate::output_reports_test_failure(output)
 }
 
 /// The evidence a completion gate holds about one command run.

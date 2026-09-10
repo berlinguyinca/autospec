@@ -1,7 +1,8 @@
 # Conversion-pipeline gate contract
 
-Issue #3748. Rust core: `crates/autospec-core/src/conversion_gate.rs`
-(module `autospec_core::conversion_gate`).
+Issues #3748 and #3747. Rust core: `crates/autospec-core/src/conversion_gate.rs`
+(module `autospec_core::conversion_gate`); the run-level judge in
+`crates/autospec-core/src/verification/mod.rs` consumes the same classifiers.
 
 Agent-generated patches pass through a build gate before they may be emitted
 as **conversion candidates**: the gate runs a build stage, a test stage, and a
@@ -91,3 +92,138 @@ admission. `node` records the scheduler-assigned node the run happened on, so
 a reader comparing two runs' failures can see whether they ran in the same
 world; it is always written, but optional when parsing files written before it
 existed (they parse with an empty node).
+
+## #3747: a hold must say which stage failed, and which tests
+
+The status *classification* above was correct about the incident. The **hold
+reason** emitted for the same class of runs was not, and a hold reason is what
+the next session reads. Four defects, four rules.
+
+### 4. Exit codes decide the stage; the output only names it
+
+The gate classified a run by grepping `^error:` and calling any match a build
+failure. Cargo prints `error:` for compile failures **and** for test failures
+(`error: test failed, to rerun pass …`, `error: N targets failed`), so a patch
+that compiled cleanly and failed tests was held as a *build error*. A bare
+`error:` prefix is not a classifier: it matches three different events and
+names none of them.
+
+The stage comes from the exit codes, which cargo does not confuse:
+
+```text
+failed_stage(build_rc, test_rc) ->  Some(Build) | Some(Tests) | None
+```
+
+`build_rc != 0` is a build failure; `build_rc == 0 && test_rc != 0` is a test
+failure; both zero is no failure. Output text may **name** what the exit codes
+established and may never flip a stage they established: a line matching
+`^error[E…` seen with `build_rc=0` produces no build hold.
+
+The two output shapes are matched separately, by the parts that distinguish
+them (`compile_failure_line` / `test_failure_line`):
+
+| Shape | Matches | Does not match |
+|---|---|---|
+| compile failure | `error[E0425]: …`, `error: could not compile …` | `error: test failed`, a test's own `error:` log line |
+| test failure | `error: test failed …`, `error: 2 targets failed` | `error[E0425]`, `error: could not compile` |
+
+`output_reports_compile_failure` / `output_reports_test_failure` apply those
+patterns per line, and `verification::reports_hard_error` — the check that
+keeps a target which never built from reading as "no tests in scope" — is now
+their disjunction instead of the bare prefix. A passing test that prints
+`error: connection refused` about a socket it closed no longer fails the run.
+
+### 5. Every test hold names its failing tests
+
+One code path recorded failing test *names*; the other recorded a count
+(`HELD: tests failed -- 2`). A count cannot be compared against a baseline,
+cannot be re-run, and cannot be read by the next session, so both paths now
+carry names, collected by one parser from the two places cargo prints them
+(the `test <path> ... FAILED` progress lines and the `failures:` block that
+follows them):
+
+```text
+failing_test_names(output) -> Vec<String>   // deduplicated, sorted
+```
+
+`classify_hold(build_rc, test_rc, output)` returns a `GateHold` whose rendered
+line is the hold record:
+
+```text
+HELD: build error -- error[E0425]: cannot find function `x` in this scope
+HELD: test failure -- 2 failing tests: a::one, b::two
+HELD: tests do not compile -- error: could not compile `crate` (test "it")
+```
+
+A test hold line never contains the word *build*, and a test hold with no
+names in the output says so explicitly —
+`HELD: test failure -- failing test names unavailable (test_rc=101)` — rather
+than degrading to a count or borrowing the build wording. `hold_for_run` takes
+the `GateRun` itself, where `test_build_failed` (#3748) outranks the exit
+codes.
+
+The other hold path, `autonomous::test_gate`'s `GateVerdict::message()`, named
+only its *attribution* (`HELD: tests failed -- caused`). An attribution is not
+a name either, so it now appends the persistent failures:
+
+```text
+HELD: tests failed -- caused -- 2 failing: a::one, b::two
+```
+
+Tests that failed in the suite and passed on their isolated re-run are flaky,
+are reported by `GateVerdict::flaky`, and are deliberately **not** named in
+the hold line — naming them would assert a failure the gate just retracted.
+
+### 6. The test gate compares names against the baseline, not a count against zero
+
+The test gate asked "is the failing count greater than zero?". The validate
+gate (#3715, #3727) asks "which failures were not in the baseline?", and only
+that question distinguishes a regression from a known-broken trunk:
+
+```text
+compare_tests(failing, baseline) -> Passed | PreExisting | NewFailures | NoBaseline
+```
+
+| Baseline | Failing | Result | Holds |
+|---|---|---|---|
+| any | none | `Passed` | no |
+| `Some(set)`, superset of failing | subset | `PreExisting` | no |
+| `Some(set)`, any name not in it | overlap allowed | `NewFailures` | **yes** |
+| `None` (no comparison performed) | any | `NoBaseline` | **yes** (fail-closed) |
+
+Two consequences the count comparison got wrong, both pinned by tests:
+
+- **Equal count, different set is a regression.** Baseline `[a, b]`, failing
+  `[b, c]`: the count says "nothing changed", the set difference names `c`
+  and holds.
+- **An empty baseline is not the absence of one.** `Some(&[])` is a baseline
+  that was measured and found nothing failing, so any failure is new and
+  holds. Only `None` means no comparison was performed.
+
+### 7. The base sha a hold records is the one the tests ran against
+
+A base sha read *before* the per-patch `git fetch origin/main` is one merge
+behind by construction: the hold names a commit the patch was never tested
+on, and the reader cannot tell. `BaseRevision` records the fetch as part of
+the capture instead of hoping the caller ordered it right:
+
+```text
+BaseRevision::capture(sha, fetch_completed) -> Current | PreFetch | Unknown
+```
+
+- `Current` — captured after the fetch; `tested_base()` returns the sha.
+- `PreFetch` — captured before it; `tested_base()` returns `None` and the log
+  field reads `base=unrecorded pre_fetch_sha=<sha>`, so the value survives as
+  evidence without being asserted as the base.
+- `Unknown` — nothing captured; the field reads `base=unknown`.
+
+`hold_log_line(&hold, &base)` composes the record, e.g.
+
+```text
+HELD: test failure -- 2 failing tests: a::one, b::two base=3f2a1c9
+```
+
+The same discipline already governs the schedule itself
+(`execution::patch_pipeline::plan_pass`, #3698: a verdict computed against a
+base that is no longer the trunk tip is a hypothesis, never a memo hit); this
+closes the reporting side of it.

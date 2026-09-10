@@ -114,7 +114,11 @@ fn an_unknown_component_is_classified_fail_closed() {
         }
     );
     assert_eq!(verdict.failures[0].class, FailureClass::Caused);
-    assert_eq!(verdict.message(), "HELD: tests failed -- caused");
+    assert_eq!(
+        verdict.message(),
+        "HELD: tests failed -- caused -- 1 failing: mystery",
+        "a hold names the test it stands on, not only its attribution (#3747)"
+    );
 }
 
 /// AC1: a persistent failure outside the blast radius is reported as
@@ -144,7 +148,10 @@ fn persistent_failure_outside_blast_radius_is_unattributable() {
         "the hold names its attribution; a verdict that cannot say which is not a verdict"
     );
     assert_eq!(verdict.unattributable, ["some_deterministic_failure"]);
-    assert_eq!(verdict.message(), "HELD: tests failed -- unattributable");
+    assert_eq!(
+        verdict.message(),
+        "HELD: tests failed -- unattributable -- 1 failing: some_deterministic_failure"
+    );
 }
 
 /// AC3: a hold names caused / pre-existing / unattributable; the three
@@ -188,7 +195,43 @@ fn hold_attribution_follows_the_signals() {
         },
         "the strongest attributable class names the hold"
     );
-    assert_eq!(verdict.message(), "HELD: tests failed -- caused");
+    assert_eq!(
+        verdict.message(),
+        "HELD: tests failed -- caused -- 3 failing: caused_one, pre_existing_one, unattributable_one"
+    );
+}
+
+/// AC (#3747): a hold names the failing tests, and names only the persistent
+/// ones. A test that passed on its isolated re-run is flaky and stays out of
+/// the hold line.
+#[test]
+fn a_hold_names_its_persistent_failing_tests_and_no_flaky_ones() {
+    let affected = BTreeSet::from(["autospec-core".to_string()]);
+    let suite = SuiteOutcome {
+        passed: 900,
+        failures: vec![
+            SuiteFailure {
+                name: "flaky_one".to_string(),
+                component: Some("autospec-core".to_string()),
+            },
+            SuiteFailure {
+                name: "real_one".to_string(),
+                component: Some("autospec-core".to_string()),
+            },
+        ],
+    };
+    let reruns = BTreeMap::from([
+        ("flaky_one".to_string(), true),
+        ("real_one".to_string(), false),
+    ]);
+
+    let verdict = evaluate(&suite, &reruns, &BTreeSet::new(), &affected, None).expect("verdict");
+
+    let message = verdict.message();
+    assert_eq!(
+        message, "HELD: tests failed -- caused -- 1 failing: real_one",
+        "the hold names the persistent failure and not the flaky one"
+    );
 }
 
 /// A failing test with no isolated re-run is not a verdict.
