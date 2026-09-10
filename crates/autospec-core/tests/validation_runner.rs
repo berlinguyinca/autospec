@@ -182,8 +182,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 162); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: generated-artifact ratchet (#3893)
-    assert_eq!(full.unique_ids().len(), 157); // reached directly, duplicated by nothing
+    assert_eq!(full.ids().len(), 163); // +9: orphaned-suite ratchet (#3360); +1: code intelligence; +2: #3485 orphan owners; +1: deferral-ref lint (#3497); +2: loud-failure gates (#3535); +1: pipeline-verdict ratchet (#3716); +1: restore-visibility ratchet (#3878); +1: generated-artifact ratchet (#3893); +1: cross-language boundaries (#3210)
+    assert_eq!(full.unique_ids().len(), 158); // reached directly, duplicated by nothing
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -2091,6 +2091,11 @@ fn runner_executes_the_newly_registered_bats_suites() {
         (
             "check_generated_artifact_integrity",
             "tests/lint/test_generated_artifact_integrity_checker.bats",
+        ),
+        // Registered by #3210: the Phase 3.75 cross-language boundary table.
+        (
+            "check_cross_language_boundaries",
+            "tests/unit/test_cross_language_boundaries.bats",
         ),
     ] {
         let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {

@@ -957,19 +957,29 @@ signatures / file paths / naming tokens is not reasoning work — a grep does it
 exactly and for free.
 
 1. **Deterministic extract (no LLM).** Dump each child issue body
-   (skip the umbrella/tracker) to a temp dir, then run the shared scanner:
+   (skip the umbrella/tracker) to a temp dir, read every child's `lang:*`
+   label into a CSV (one value per child), then run the shared scanner with
+   `--languages`:
 
    ```bash
-   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/extract-shared-contracts.sh" --dir "$bodies_dir" > /tmp/shared-contracts.md
+   langs="$(for n in "${children[@]}"; do
+     gh issue view "$n" --repo {repo} --json labels -q '.labels[].name | select(startswith("lang:"))'
+   done | paste -sd, -)"
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/extract-shared-contracts.sh" --dir "$bodies_dir" --languages "$langs" > /tmp/shared-contracts.md
    ```
 
    It greps every file path, `name(...)` signature, and ALL-CAPS naming/env-var
    token that appears in **≥2 distinct** issues and emits a `## Shared
    contracts` block (file paths, signatures, names). Identical inputs produce
-   byte-identical output. If it reports
-   `_No cross-issue contracts detected_`, there is no cross-issue interface —
-   skip the rest of Phase 3.75 and log
-   `"Phase 3.75: skipped (no cross-issue contracts)"`.
+   byte-identical output. `--languages` normalizes its values (trims,
+   strips the `lang:` prefix, de-dupes) and decides the boundary trigger:
+   when the labels span **2 or more distinct `lang:*` labels**, or when a
+   child carries `lang:mixed`, the emitted block also contains the
+   `## Cross-language boundaries` table (step 4) and the script runs its
+   own fail-closed schema check before writing anything to stdout. If it
+   reports `_No cross-issue contracts detected_` and no boundary table was
+   triggered, there is no cross-issue interface — skip the rest of Phase 3.75
+   and log `"Phase 3.75: skipped (no cross-issue contracts)"`.
 
 2. **Tier-B reconcile (small, only for genuine conflicts).** Skip unless the
    scan surfaced an actual contradiction — the same path/name used with
@@ -994,36 +1004,60 @@ notes inserted before its closing marker>
    reads that section until the next `## ` heading and reports `DEPS_MALFORMED`
    for every line that is not `Depends on issue #N` or `none` (that append
    placement is what broke the 13 `#3112`-generation bodies). Write the block to
-   `/tmp/shared-contracts-<N>.md`, insert deterministically, and apply:
+   `/tmp/shared-contracts-<N>.md`, splice it in deterministically, and apply:
 
    ```bash
    body="$(gh issue view <N> --json body -q .body)"
-   printf '%s\n' "$body" | awk -v f=/tmp/shared-contracts-<N>.md '
-     !done && /^## Dependencies$/ { while ((getline line < f) > 0) print line; print ""; close(f); done = 1 }
-     { print }
-     END { if (!done) while ((getline line < f) > 0) print line }
-   ' > /tmp/body-<N>.md
+   printf '%s\n' "$body" > /tmp/body-<N>.orig
+   if grep -q '<!-- autospec-shared-contracts:begin -->' /tmp/body-<N>.orig; then
+     # Case B: the body already carries the marker region — replace the whole
+     # region (from `:begin -->` to `:end -->`, inclusive of both marker lines)
+     # with the freshly generated block so re-runs never stack a second heading.
+     awk -v f=/tmp/shared-contracts-<N>.md '
+       !replaced && /^<!-- autospec-shared-contracts:begin -->$/ {
+         while ((getline line < f) > 0) print line
+         skip = 1
+         replaced = 1
+         close(f)
+         next
+       }
+       skip && /^<!-- autospec-shared-contracts:end -->$/ { skip = 0; next }
+       !skip { print }
+     ' /tmp/body-<N>.orig > /tmp/body-<N>.md
+   else
+     # Case A: no marker yet — insert before the first `## Dependencies` line
+     # (append at end of body only when there is no `## Dependencies` heading).
+     awk -v f=/tmp/shared-contracts-<N>.md '
+       !done && /^## Dependencies$/ { while ((getline line < f) > 0) print line; print ""; close(f); done = 1 }
+       { print }
+       END { if (!done) while ((getline line < f) > 0) print line }
+     ' /tmp/body-<N>.orig > /tmp/body-<N>.md
+   fi
    gh issue edit <N> --body-file /tmp/body-<N>.md
    ```
 
    After the patch, `Depends on issue #N` must remain the last line under
    `## Dependencies`.
-   The patch is idempotent — skip if `<!-- autospec-shared-contracts:begin -->` is already
-   present in the body.
+   The patch is idempotent in the strong sense: **re-running it replaces the
+   entire marker region** with the freshly generated block — it never stacks a
+   second `## Shared contracts` heading, a second boundary table, or a second
+   marker pair.
 
    Do NOT add your own `<!-- autospec-shared-contracts:begin -->` wrapper or
    `## Shared contracts` heading: the script emits both. Nesting a second pair
    leaves the outer marker and heading outside the region
     `lint-issue.sh` strips, so they count against the word budget.
 
-4. **Cross-language boundaries (conditional, fail closed).** Read the `lang:*`
-   label of every child (`gh issue view <N> --repo {repo} --json labels -q
-   '.labels[].name | select(startswith("lang:"))'`). When the children span **2 or
-   more distinct `lang:*` labels**, or **any** child carries `lang:mixed`, append a
-   `## Cross-language boundaries` table **between the
-   `<!-- autospec-shared-contracts:begin -->` / `:end -->` markers** of each affected
-   child body — one row per interface between children with different `lang:*`
-   labels (write it once, before the closing marker, as part of the same block):
+4. **Cross-language boundaries (conditional, fail closed).** The scanner
+   decides the trigger from `--languages`: when the siblings span 2 or
+   more distinct `lang:*` labels (after the `lang:` prefixes are normalized
+   away) — or when any child carries `lang:mixed` — the block already
+   contains a `## Cross-language boundaries` table **between the
+   `<!-- autospec-shared-contracts:begin -->` / `:end -->` markers**. It has
+   one row per `schemas/*.schema.json` path shared by ≥2 child bodies — the
+   scanner fills the `Schema (source of truth)` column with that path and
+   leaves every other cell as `-`; it never invents boundary names, and it
+   never emits an empty `Schema` cell or a `TBD` placeholder:
 
    ```markdown
    ## Cross-language boundaries
@@ -1033,18 +1067,24 @@ notes inserted before its closing marker>
    | cli→worker | subprocess + JSON stdout | schemas/autospec-x.schema.json | lang:rust | tests/fixtures/boundary/x.json |
    ```
 
-   `Owner` is the `lang:*` label of the side that owns the schema. The table
+   Fill the `-` cells (Boundary, Transport, Owner, Golden fixture) in each
+   affected child body from the child bodies before you edit. `Owner` is the
+   `lang:*` label of the side that owns the schema. The completed table
    encodes three rules: the owning side lands the schema **first**; the consuming
    issue carries `Depends on issue #N` against it; each boundary gets one golden
    fixture under `tests/fixtures/` asserted by **both** sides' own test runners —
    that two-sided assertion is the only thing that catches drift.
 
    **Fail-closed schema rule.** Every `Schema` cell must name a file that exists
-   under `schemas/`. A declared boundary whose schema file is missing fails Phase
-   3.75 rather than emitting an unbacked table:
+   under `schemas/`. The scanner enforces this before it writes anything: when
+   a row's schema file is missing, it prints
+   `PHASE_3_75_FAILED rule=boundary-schema-missing path=<schema>` to stderr,
+   writes nothing to stdout, and exits 1. Re-run the same check on the
+   **filled** block before editing (a filled cell may point at a path the
+   scanner did not see) rather than emitting an unbacked table:
 
    ```bash
-   boundaries=/tmp/boundaries.md   # the table drafted in this step
+   boundaries=/tmp/shared-contracts.md   # the block, after filling the cells
    missing=0
    while read -r schema; do
      [ -f "$schema" ] || { echo "PHASE_3_75_FAILED rule=boundary-schema-missing path=$schema"; missing=1; }
@@ -1054,8 +1094,7 @@ notes inserted before its closing marker>
 
    On failure: do not patch any child body with the boundary table, leave
    `auto-implement` off the children of that boundary, and comment the missing
-   schema paths on the owning issue so the schema can land first. Never emit an
-   empty `Schema` cell or a `TBD` placeholder to satisfy the table — an unbacked
+   schema paths on the owning issue so the schema can land first. An unbacked
    row is the exact failure this rule exists to prevent. When the check passes,
    log `"Phase 3.75: cross-language boundaries verified (<count>)"`.
 

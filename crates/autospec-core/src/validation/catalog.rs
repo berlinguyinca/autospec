@@ -152,6 +152,11 @@ impl ValidationCheck {
             "check_generated_artifact_integrity" => {
                 bats_suite("tests/lint/test_generated_artifact_integrity_checker.bats")
             }
+            // #3210: Phase 3.75 cross-language boundary table (emission +
+            // fail-closed schema check via the extract-shared-contracts scanner).
+            "check_cross_language_boundaries" => {
+                bats_suite("tests/unit/test_cross_language_boundaries.bats")
+            }
             "check_code_intelligence_contract" => {
                 bats_suite("tests/code-intel/code-intelligence.bats")
             }

@@ -166,6 +166,7 @@ pub(super) const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_pipeline_verdict_ratchet",
     "check_restore_visibility_ratchet",
     "check_generated_artifact_integrity",
+    "check_cross_language_boundaries",
 ];
 
 pub(super) const STANDARD_CHECK_IDS: &[&str] = &[
@@ -342,4 +343,5 @@ pub(super) const STANDARD_CHECK_IDS: &[&str] = &[
     "check_pipeline_verdict_ratchet",
     "check_restore_visibility_ratchet",
     "check_generated_artifact_integrity",
+    "check_cross_language_boundaries",
 ];
