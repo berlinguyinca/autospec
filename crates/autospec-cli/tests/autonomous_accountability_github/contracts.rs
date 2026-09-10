@@ -1,8 +1,6 @@
 use super::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -457,7 +455,9 @@ impl CliResumeFixture {
         let bin = self.root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let gh = bin.join("gh");
-        fs::write(&gh, r#"#!/bin/sh
+        autospec_core::test_support::write_executable(
+            &gh,
+            r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$AUTOSPEC_TEST_GH_CALLS"
 case "$1 $2 $3" in
@@ -469,8 +469,8 @@ case "$1 $2 $3" in
   "issue edit 12") cat > "$AUTOSPEC_TEST_ISSUE_BODY" ;;
   *) printf 'unexpected gh invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
-"#).unwrap();
-        fs::set_permissions(gh, fs::Permissions::from_mode(0o755)).unwrap();
+"#,
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -478,8 +478,7 @@ esac
         let bin = self.root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let autospec = bin.join("autospec");
-        fs::write(&autospec, "#!/bin/sh\nexec sleep 300\n").unwrap();
-        fs::set_permissions(&autospec, fs::Permissions::from_mode(0o755)).unwrap();
+        autospec_core::test_support::write_executable(&autospec, "#!/bin/sh\nexec sleep 300\n");
         let conductor = Command::new(&autospec)
             .arg("run-foreground")
             .process_group(0)

@@ -272,10 +272,7 @@ fn git_stdout(repo_dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 fn write_executable(path: &Path, contents: &[u8]) {
-    fs::write(path, contents).expect("executable fixture");
-    let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("fixture permissions");
+    autospec_core::test_support::write_executable_bytes(path, contents);
 }
 fn qa(lane: &PremergeLaneIdentity, verdict: EvidenceVerdict) -> QaEvidence {
     QaEvidence {

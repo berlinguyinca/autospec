@@ -77,8 +77,6 @@ fn claim_ref_rejects_a_stale_terminal_transition_after_takeover() {
 #[cfg(unix)]
 #[test]
 fn claim_ref_keeps_an_unchanged_failed_push_transient() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = ClaimRefFixture::new("unchanged-push-failure");
     let original = claim_record("worker-a", "claim-a", "claimed");
     let ClaimRefAdvance::Won(parent) = advance_claim_ref_in(
@@ -94,13 +92,10 @@ fn claim_ref_keeps_an_unchanged_failed_push_transient() {
         panic!("seed claim must win");
     };
     let wrapper = fixture.root.join("git-fail-push");
-    std::fs::write(
+    autospec_core::test_support::write_executable(
         &wrapper,
         "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = push ]; then echo outage >&2; exit 75; fi; done\nexec git \"$@\"\n",
-    )
-    .expect("git wrapper");
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-        .expect("git wrapper mode");
+    );
     let refreshed = claim_record("worker-a", "claim-a", "claimed");
 
     let error = advance_claim_ref_in(
@@ -205,8 +200,6 @@ fn claim_ref_takeover_and_renewal_each_win_when_received_first() {
 #[test]
 fn claim_ref_ambiguous_push_rereads_without_a_second_mutation() {
     // Break caught: retrying a POST/push after receive-pack committed but the response vanished.
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = ClaimRefFixture::new("ambiguous-push");
     let wrapper = fixture.root.join("ambiguous-git");
     let push_log = fixture.root.join("push.log");
@@ -214,12 +207,7 @@ fn claim_ref_ambiguous_push_rereads_without_a_second_mutation() {
         "#!/bin/sh\nif [ \"$1\" = push ]; then\n  /usr/bin/git \"$@\"\n  status=$?\n  printf 'push\\n' >> '{}'\n  [ \"$status\" -eq 0 ] && exit 73\n  exit \"$status\"\nfi\nexec /usr/bin/git \"$@\"\n",
         push_log.display()
     );
-    std::fs::write(&wrapper, script).expect("write git wrapper");
-    let mut permissions = std::fs::metadata(&wrapper)
-        .expect("git wrapper metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&wrapper, permissions).expect("make git wrapper executable");
+    autospec_core::test_support::write_executable(&wrapper, &script);
 
     let record = claim_record("worker-a", "claim-a", "claimed");
     assert!(matches!(

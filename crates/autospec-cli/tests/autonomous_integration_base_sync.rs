@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -544,8 +543,7 @@ fn git_fixture(directory: &Path, args: &[&str]) -> String {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write fake executable");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make fake executable");
+    autospec_core::test_support::write_executable(path, contents);
 }
 
 fn path_with(bin: &Path) -> String {

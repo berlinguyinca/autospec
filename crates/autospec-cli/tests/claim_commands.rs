@@ -41,24 +41,7 @@ fn write_executable(path: &std::path::Path, contents: &str) {
 }
 
 fn publish_executable(path: &std::path::Path, contents: &[u8]) {
-    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .expect("fake command temporary");
-    file.write_all(contents).expect("fake command");
-    drop(file);
-    let mut permissions = std::fs::metadata(&temporary)
-        .expect("fake command metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
-    std::fs::rename(temporary, path).expect("fake command publish");
-    // Atomic rename prevents inode clashes; 30-run stress showed this ZFS host
-    // still needs 10 ms after close before exec stops returning ETXTBSY.
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    autospec_core::test_support::write_executable_bytes(path, contents);
 }
 
 fn path_with(bin: &std::path::Path) -> String {

@@ -69,6 +69,13 @@ pub mod state;
 pub mod validation;
 pub mod verification;
 
+// Test-only fixture-executable publisher (issue #3500). Compiled only when the
+// `test-support` feature is enabled, which happens solely in `autospec-cli`
+// test builds via its `[dev-dependencies]`; it is never part of the production
+// `autospec` binary.
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use error::AutospecError;
 pub use safety::{prepare_session_start_git_exclude, SessionStartGitExcludeOutcome};
 

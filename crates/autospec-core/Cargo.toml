@@ -8,6 +8,12 @@ repository.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Enables the shared test-only fixture-executable publisher (src/test_support.rs).
+# Only `autospec-cli` test builds turn this on (via its [dev-dependencies]); the
+# production `autospec` binary never compiles the module.
+test-support = []
+
 [dependencies]
 getrandom = "=0.4.3"
 serde = { version = "=1.0.228", features = ["derive"] }
