@@ -16,7 +16,9 @@ use autospec_core::lint::{
     ImplementationLintOptions, ImplementationLintSeverity, IssueLintFinding, RepositoryIndex,
     UnifiedDiff,
 };
-use autospec_core::spec::{lint_spec_safety, SpecSafetyFinding};
+use autospec_core::spec::{
+    lint_consumed_signals, lint_spec_safety, SignalSemanticsFinding, SpecSafetyFinding,
+};
 use yaml_edit::Document;
 
 use super::CommandFailure;
@@ -741,22 +743,54 @@ fn run_spec(args: &[String]) -> Result<(), CommandFailure> {
         return Err(spec_diagnostic("autospec lint spec requires a spec path"));
     };
     let source = read_spec(&spec_path)?;
-    let findings = lint_spec_safety(&source);
+    let safety_findings = lint_spec_safety(&source);
+    let signal_findings = lint_consumed_signals(&source);
+    let merged = merge_spec_findings(&safety_findings, &signal_findings);
+    let count = merged.len();
 
     if json {
-        print_spec_json(&findings);
+        print_spec_json(&merged);
     } else {
-        print_spec_text(&findings);
+        print_spec_text(&merged);
     }
 
-    if findings.is_empty() {
+    if count == 0 {
         Ok(())
     } else {
-        Err(CommandFailure::status(
-            String::new(),
-            findings.len().min(64) as i32,
-        ))
+        Err(CommandFailure::status(String::new(), count.min(64) as i32))
     }
+}
+
+/// One output row of the merged spec review (safety phrases plus
+/// consumed-signal declarations), in source line order.
+struct SpecLintEntry {
+    line: usize,
+    rule: &'static str,
+    phrase: String,
+    description: String,
+}
+
+fn merge_spec_findings(
+    safety: &[SpecSafetyFinding],
+    signals: &[SignalSemanticsFinding],
+) -> Vec<SpecLintEntry> {
+    let mut merged: Vec<SpecLintEntry> = safety
+        .iter()
+        .map(|finding| SpecLintEntry {
+            line: finding.line,
+            rule: finding.rule_id(),
+            phrase: finding.phrase.clone(),
+            description: finding.message(),
+        })
+        .chain(signals.iter().map(|finding| SpecLintEntry {
+            line: finding.line,
+            rule: finding.rule_id(),
+            phrase: finding.signal.clone(),
+            description: finding.message(),
+        }))
+        .collect();
+    merged.sort_by_key(|entry| entry.line);
+    merged
 }
 
 fn set_spec_path(slot: &mut Option<String>, path: &str) -> Result<(), CommandFailure> {
@@ -784,13 +818,13 @@ fn spec_diagnostic(message: impl Into<String>) -> CommandFailure {
     CommandFailure::diagnostic(message)
 }
 
-fn print_spec_text(findings: &[SpecSafetyFinding]) {
+fn print_spec_text(findings: &[SpecLintEntry]) {
     for finding in findings {
-        eprintln!("{}: {}", finding.rule_id(), finding.message());
+        eprintln!("{}: {}", finding.rule, finding.description);
     }
 }
 
-fn print_spec_json(findings: &[SpecSafetyFinding]) {
+fn print_spec_json(findings: &[SpecLintEntry]) {
     if findings.is_empty() {
         println!("[]");
         return;
@@ -800,10 +834,10 @@ fn print_spec_json(findings: &[SpecSafetyFinding]) {
         let separator = if index + 1 == findings.len() { "" } else { "," };
         println!(
             "  {{\"rule\":\"{}\",\"line\":{},\"phrase\":\"{}\",\"description\":\"{}\"}}{}",
-            finding.rule_id(),
+            finding.rule,
             finding.line,
             escape_json(&finding.phrase),
-            escape_json(&finding.message()),
+            escape_json(&finding.description),
             separator
         );
     }

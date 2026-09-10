@@ -204,6 +204,7 @@ case "$CATEGORY" in
         if ! git cat-file -e "$COMMIT" 2>/dev/null; then
             exit 0  # named commit no longer exists in history → keep
         fi
+        # linter:allow-SIGNAL_SEMANTICS commit existence verified above via git cat-file -e, so a 0 count means "no newer commits" not "git failed"
         newer=$(git log --oneline "$COMMIT"..HEAD "${local_range_files[@]}" 2>/dev/null | wc -l | tr -d ' ')
         if [ "${newer:-0}" -gt 0 ]; then
             exit 1  # newer commits touched the area → likely resolved

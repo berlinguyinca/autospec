@@ -10,6 +10,22 @@ V62+ specs are parsed into a small metadata contract before any dependency order
 
 The parser is intentionally strict for dependency IDs: dependencies must use generated spec IDs like `v62-rust-core-workspace`. Broader Markdown compatibility is deferred until the generated package path is stable.
 
+## Signal Semantics
+
+A **signal** is any external state a spec reads to make a decision (a count, an exit code, a file's presence, a check's status). A signal that does not declare its semantics is a hole in the spec: a number the reader cannot interpret, because the spec never said what zero, absence, or failure each look like.
+
+Every consumed signal MUST declare three things, in a `## Consumed Signals` section with one `### <signal>` entry per signal:
+
+- `Empty/absent means:` — what zero, empty output, or a missing value says about the world (as opposed to about the measurement).
+- `Healthy value:` — the value (or range) the signal takes when the population being observed is healthy.
+- `Produced under:` — the conditions under which the signal is produced, so a reader can tell "produced nothing" from "never run".
+
+The spec lint (`autospec lint spec`, rule `CONSUMED_SIGNAL_INCOMPLETE`) is **blocking**: a spec with a consumed-signal entry missing any of the three fields is rejected, and the finding names the signal, the missing field, and the line. This is distinct from the advisory safety-phrase check in the same lint — an incomplete signal declaration fails the spec, while a safety phrase without a mechanism only warns.
+
+A rejection decision (failing a build, quarantining a host, blocking a release) MUST cite each signal it relied on together with the value that signal takes in the healthy population. The Rust helper `autospec_core::spec::validate_rejection` enforces the shape of that citation: a `Rejection` whose `cited_signals` list names a signal without a `healthy_population_value` is refused, and the refusal names the missing check. A rejection that cannot say "healthy looks like X and we observed Y" has not actually checked anything.
+
+On the shell side, `scripts/lint-signal-semantics.sh` flags pipelines that make an error indistinguishable from a zero result: a stderr discard to `/dev/null` (`2>/dev/null`, `2>>/dev/null`, optionally spaced) followed on the same line by a counting reducer (`| wc …` or `| grep -c…`). `cmd 2>/dev/null | wc -l` collapses "the command failed" and "the command found nothing" into the same `0`, and a downstream threshold check then reads the failure as healthy. Non-counting reducers (`head`, `tail`, plain `grep`, `awk`) are out of scope. The waiver is `# linter:allow-SIGNAL_SEMANTICS <reason>` on the same line or the line immediately above; the reason is mandatory and a bare marker is rejected. Default scan scope is `scripts/` and `.github/workflows/`.
+
 ## Issue Tree
 
 AutoSpec splits a spec into a parent issue and smaller child issues. Each child issue is meant to be independently understandable and reviewable.
