@@ -354,3 +354,144 @@ write_evidence() {
     run bash "$RECORD" --pr 44 --command c --status noexit
     [ "$status" -eq 2 ]
 }
+
+# ── Local buildability gate (issue #4108) ───────────────────────────────────
+# The gate builds the PR's exact head commit and reads the EXIT STATUS —
+# not test-line output. Fail-closed on a failed build; warn-skip only when
+# no local build of the head is possible. The cargo stub shadows the real
+# cargo (PATH order) and exits with $CARGO_RC.
+
+install_cargo_stub() {
+    cat > "$TMP/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+printf 'cargo %s\n' "$*" >> "${CARGO_LOG:?}"
+exit "${CARGO_RC:-0}"
+CARGO
+    chmod +x "$TMP/bin/cargo"
+    CARGO_LOG="$TMP/cargo.log"; export CARGO_LOG
+    : > "$CARGO_LOG"
+}
+
+make_build_repo() {
+    # $1 = path. A one-commit git repo with a Cargo.toml so the gate treats
+    # it as a buildable Rust workspace.
+    local _bp="$1"
+    mkdir -p "$_bp/src"
+    printf '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n' > "$_bp/Cargo.toml"
+    printf 'pub fn f() -> i32 { 0 }\n' > "$_bp/src/lib.rs"
+    git -C "$_bp" init -q
+    git -C "$_bp" add -A
+    git -C "$_bp" -c user.email=t@t -c user.name=t commit -q -m fixture
+}
+
+@test "local build: head commit builds -> merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="$(git -C "$TMP/brepo" rev-parse HEAD)"
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 50 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 0 ]
+    grep -q "local build of head ${HEAD_OID:0:12} ok" <<<"$output"
+    grep -q "cargo build --workspace --all-targets" "$CARGO_LOG"
+    grep -q "pr merge 50" "$GH_LOG"
+}
+
+@test "local build: head commit build fails -> blocked, NOT merged" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="$(git -C "$TMP/brepo" rev-parse HEAD)" CARGO_RC=101
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 51 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 1 ]
+    grep -q "local build of head ${HEAD_OID:0:12} failed (exit status 101)" <<<"$output"
+    grep -q "blocked local_build_failed" <<<"$output"
+    ! grep -q "pr merge 51" "$GH_LOG"
+}
+
+@test "local build: a failing build blocks even when CI reports green" {
+    # The exit status is read, not the CI verdict: green rollup, dead build.
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    export ROLLUP='[{"name":"build-test","conclusion":"SUCCESS"}]'
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="$(git -C "$TMP/brepo" rev-parse HEAD)" CARGO_RC=101
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 52 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 1 ]
+    grep -q "blocked local_build_failed" <<<"$output"
+    ! grep -q "pr merge 52" "$GH_LOG"
+}
+
+@test "local build: --no-require-local-build skips a failing build" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="$(git -C "$TMP/brepo" rev-parse HEAD)" CARGO_RC=101
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 53 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --no-require-local-build
+    [ "$status" -eq 0 ]
+    grep -q "pr merge 53" "$GH_LOG"
+    ! grep -q "cargo" "$CARGO_LOG"
+}
+
+@test "local build: head commit not present locally -> warn-skip, still merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" CARGO_RC=101
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 54 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 0 ]
+    grep -q "pr merge 54" "$GH_LOG"
+    ! grep -q "cargo" "$CARGO_LOG"
+}
+
+@test "local build: cwd without Cargo.toml -> warn-skip, still merges" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    mkdir -p "$TMP/plain"
+    export CARGO_RC=101
+    cd "$TMP/plain"
+    run bash "$WRAPPER" --pr 55 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 0 ]
+    grep -q "pr merge 55" "$GH_LOG"
+    ! grep -q "cargo" "$CARGO_LOG"
+}
+
+@test "local build: --build-dir at a non-worktree is an operator error (exit 2)" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    mkdir -p "$TMP/plain"
+    printf '[package]\nname = "x"\n' > "$TMP/plain/Cargo.toml"
+    run bash "$WRAPPER" --pr 56 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --build-dir "$TMP/plain"
+    [ "$status" -eq 2 ]
+    ! grep -q "pr merge 56" "$GH_LOG"
+}
+
+@test "local build: --build-dir missing the PR head is an operator error (exit 2)" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    export HEAD_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    run bash "$WRAPPER" --pr 57 --repo o/r --fenced-surfaces "$TMP/fenced.yml" --build-dir "$TMP/brepo"
+    [ "$status" -eq 2 ]
+    ! grep -q "pr merge 57" "$GH_LOG"
+}
+
+@test "local build: head behind HEAD builds in a detached worktree, then cleans up" {
+    export FILES="crates/backtesting/src/engine.rs" LABELS=""
+    install_cargo_stub
+    make_build_repo "$TMP/brepo"
+    git -C "$TMP/brepo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m second
+    export HEAD_OID="$(git -C "$TMP/brepo" rev-parse HEAD~1)"
+    cd "$TMP/brepo"
+    run bash "$WRAPPER" --pr 58 --repo o/r --fenced-surfaces "$TMP/fenced.yml"
+    [ "$status" -eq 0 ]
+    grep -q "local build of head ${HEAD_OID:0:12} ok" <<<"$output"
+    grep -q "cargo build --workspace --all-targets" "$CARGO_LOG"
+    grep -q "pr merge 58" "$GH_LOG"
+    # The throwaway worktree must not leak.
+    [ "$(git -C "$TMP/brepo" worktree list | wc -l)" -eq 1 ]
+}

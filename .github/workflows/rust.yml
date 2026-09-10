@@ -175,6 +175,46 @@ jobs:
         # These exact probes keep the portable ownership contract explicit
         # after the required full-workspace integration gate above.
 
+  # Dedicated "main builds" check (issue #4108). `build-test` mixes clippy +
+  # tests + catalog + validate + build into one 90-minute job, so "does main
+  # even compile" was buried under test results and a red build was only
+  # visible as a side effect of a red test job. This job is build-only and
+  # fast: it is the per-commit, per-check signal that
+  # scripts/first-failing-commit.sh (the automated first-failing-commit
+  # report) and docs/runbooks/compensating-controls-main-protection.md key
+  # off, and it is a non-advisory check the merge-time gates refuse to
+  # bypass. The job id doubles as the check name reported to the checks API
+  # (kebab-case, so `--check main-builds` needs no quoting).
+  main-builds:
+    name: main-builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (pinned toolchain)
+        # rust-toolchain.toml pins the workspace to `@stable` (issue #4098);
+        # install it explicitly before any cargo invocation, mirroring
+        # build-test, so the check can never depend on the runner's
+        # preinstalled toolchain.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+
+      - name: Build (workspace, all targets)
+        # --all-targets so test-harness breakage (the #3702 class) fails the
+        # check too, matching the AGENTS.md build-gate rule.
+        run: cargo build --workspace --all-targets
+
   macos-test:
     runs-on: macos-latest
     timeout-minutes: 30

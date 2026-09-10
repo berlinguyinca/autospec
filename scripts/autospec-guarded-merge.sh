@@ -27,6 +27,8 @@
 #       [--checks-timeout SECS]      # default: 1800
 #       [--checks-poll SECS]         # default: 30
 #       [--verify-evidence FILE]     # full-suite evidence gate (issue #3523)
+#       [--build-dir DIR]            # checkout the local-build gate builds (default: cwd)
+#       [--no-require-local-build]   # skip the local buildability gate (default: on)
 #
 # CI-conclusion gate (issue #3220). `main` carries no branch protection, so no
 # check is "required" and a PR whose checks are pending or failing reports
@@ -38,9 +40,22 @@
 # deliberately passing --no-require-checks rather than merely reaching the merge
 # by a path whose prose forgot to wait.
 #
-# Advisory checks are operator-declared via AUTOSPEC_PR_ADVISORY_CHECKS,
-# defaulting to AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS — the same regex the
-# conductor main-health gate honors, so there is one definition, not two.
+# Local buildability gate (issue #4108). The CI-conclusion gate above reads
+# what CI reports; this gate reads what the compiler says, locally, at merge
+# time: `cargo build --workspace --all-targets` against the PR's EXACT head
+# commit, with the exit status as the verdict — never a scan of output text
+# for "FAILED" (the #4105 failure mode, where a broken build was "counted" as
+# green because no line matched). Default-on; warn-skip (the CI gate remains
+# the authority) when no local build of the head is possible — no Cargo.toml
+# at the build dir, not a git worktree, no cargo on PATH, or the head commit
+# not present locally (no network fetch is attempted: in production the
+# monitor merges from the worktree the implementer pushed, so the head is
+# already there). An actual failed build of the head commit fails closed.
+# --build-dir DIR points the gate at a known checkout and makes those
+# prerequisites mandatory (an operator error then fails closed);
+# --no-require-local-build is the explicit opt-out. The compensating
+# controls that make "no branch protection on main" survivable are
+# documented in docs/runbooks/compensating-controls-main-protection.md.
 #
 # Full-suite evidence gate (issue #3523). "The full suite passed, on the
 # commit being merged" was enforced only by prose; nothing recorded that the
@@ -54,7 +69,8 @@
 # Exit codes:
 #   0  merged (allowed, or fenced-but-overridden)
 #   1  refused — NOT merged (fenced surface without override, non-advisory
-#      checks not green, or stale / failing full-suite evidence)
+#      checks not green, stale / failing full-suite evidence, or a local
+#      build failure of the PR head commit)
 #   2  invocation / classifier / evidence-parse error — fail-closed, NOT merged
 #
 # Engineering rules (AGENTS.md): set -euo pipefail; if/then/fi (no one-sided
@@ -72,6 +88,9 @@ REQUIRE_CHECKS=1
 CHECKS_TIMEOUT=1800
 CHECKS_POLL=30
 VERIFY_EVIDENCE=""
+BUILD_DIR="."
+_BUILD_DIR_EXPLICIT=0
+REQUIRE_LOCAL_BUILD=1
 
 _die() {
     printf 'autospec-guarded-merge: %s\n' "$1" >&2
@@ -103,6 +122,8 @@ while [ "$#" -gt 0 ]; do
         --checks-timeout) CHECKS_TIMEOUT="${2:-}"; shift 2 ;;
         --checks-poll) CHECKS_POLL="${2:-}"; shift 2 ;;
         --verify-evidence) VERIFY_EVIDENCE="${2:-}"; shift 2 ;;
+        --build-dir) BUILD_DIR="${2:-}"; _BUILD_DIR_EXPLICIT=1; shift 2 ;;
+        --no-require-local-build) REQUIRE_LOCAL_BUILD=0; shift 1 ;;
         -h|--help) sed -n 's/^# \?//p' "$0" | head -40; exit 0 ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -189,7 +210,112 @@ else
     fi
 fi
 
-# 4. CI-conclusion gate: refuse while any non-advisory check is pending or not
+# 4. Local buildability gate (issue #4108): build the PR's exact head commit
+#    and read the exit status before spending CI-gate time on it. Fail-closed
+#    on a failed build; warn-skip only when no local build of the head is
+#    possible (the CI-conclusion gate below then remains the authority).
+_local_build_gate() {
+    # Returns: 0 = build ok (or warn-skip), 1 = head build failed, 2 = hard
+    # error. Called in an `if` context, so set -e is inert inside and every
+    # probe is guarded explicitly.
+    if [ ! -f "$BUILD_DIR/Cargo.toml" ]; then
+        if [ "$_BUILD_DIR_EXPLICIT" = "1" ]; then
+            printf 'autospec-guarded-merge: --build-dir %s has no Cargo.toml (operator error)\n' "$BUILD_DIR" >&2
+            return 2
+        fi
+        _warn "local-build-skipped: no Cargo.toml in '$BUILD_DIR' (not a Rust workspace)"
+        return 0
+    fi
+    if ! git -C "$BUILD_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        if [ "$_BUILD_DIR_EXPLICIT" = "1" ]; then
+            printf 'autospec-guarded-merge: --build-dir %s is not a git worktree (operator error)\n' "$BUILD_DIR" >&2
+            return 2
+        fi
+        _warn "local-build-skipped: '$BUILD_DIR' is not a git worktree; building an unverified state would not be evidence"
+        return 0
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        if [ "$_BUILD_DIR_EXPLICIT" = "1" ]; then
+            printf 'autospec-guarded-merge: cargo not on PATH (operator error)\n' >&2
+            return 2
+        fi
+        _warn "local-build-skipped: cargo not on PATH"
+        return 0
+    fi
+    if ! _lb_oid="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null)"; then
+        return 2
+    fi
+    if [ -z "$_lb_oid" ]; then
+        return 2
+    fi
+    if ! git -C "$BUILD_DIR" cat-file -e "${_lb_oid}^{commit}" 2>/dev/null; then
+        if [ "$_BUILD_DIR_EXPLICIT" = "1" ]; then
+            printf 'autospec-guarded-merge: PR head %s is not present in --build-dir %s (operator error)\n' "${_lb_oid:0:12}" "$BUILD_DIR" >&2
+            return 2
+        fi
+        _warn "local-build-skipped: head commit ${_lb_oid:0:12} is not present in '$BUILD_DIR' (no network fetch attempted); the CI-conclusion gate remains the authority"
+        return 0
+    fi
+    # Build the exact commit being merged. When the checkout already sits at
+    # the head, build in place (reuses its incremental target/); otherwise
+    # materialize a detached throwaway worktree at the head, sharing the
+    # primary worktree's target dir when one exists so the incremental cache
+    # still pays.
+    _lb_rc=0
+    if [ "$(git -C "$BUILD_DIR" rev-parse HEAD 2>/dev/null || true)" = "$_lb_oid" ]; then
+        ( cd "$BUILD_DIR" && cargo build --workspace --all-targets ) || _lb_rc=$?
+    else
+        _lb_wt="$_TMPDIR/localbuild"
+        if ! git -C "$BUILD_DIR" worktree add --detach "$_lb_wt" "$_lb_oid" >/dev/null 2>&1; then
+            return 2
+        fi
+        _lb_target=""
+        _lb_common="$(cd "$BUILD_DIR" && git rev-parse --git-common-dir 2>/dev/null || true)"
+        if [ -n "$_lb_common" ]; then
+            case "$_lb_common" in
+                /*) _lb_root="$(dirname "$_lb_common")" ;;
+                *) _lb_root="$(cd "$BUILD_DIR/$_lb_common/.." && pwd)" ;;
+            esac
+            if [ -d "$_lb_root/target" ]; then
+                _lb_target="$_lb_root/target"
+            fi
+        fi
+        if [ -n "$_lb_target" ]; then
+            ( cd "$_lb_wt" && CARGO_TARGET_DIR="$_lb_target" cargo build --workspace --all-targets ) || _lb_rc=$?
+        else
+            ( cd "$_lb_wt" && cargo build --workspace --all-targets ) || _lb_rc=$?
+        fi
+        git -C "$BUILD_DIR" worktree remove --force "$_lb_wt" >/dev/null 2>&1 || true
+        git -C "$BUILD_DIR" worktree prune >/dev/null 2>&1 || true
+    fi
+    if [ "$_lb_rc" != "0" ]; then
+        printf 'guarded-merge: PR #%s local build of head %s failed (exit status %s)\n' "$PR" "${_lb_oid:0:12}" "$_lb_rc"
+        return 1
+    fi
+    printf 'guarded-merge: PR #%s local build of head %s ok (exit status 0)\n' "$PR" "${_lb_oid:0:12}"
+    return 0
+}
+
+_lb_gate_rc=0
+if [ "$REQUIRE_LOCAL_BUILD" = "1" ]; then
+    if _local_build_gate; then
+        _lb_gate_rc=0
+    else
+        # No '!' here: under 'if ! cmd', $? is the negated status (0).
+        _lb_gate_rc=$?
+    fi
+    if [ "$_lb_gate_rc" = "1" ]; then
+        gh pr comment "$PR" --repo "$REPO" --body "$(printf 'Refused by the merge-time local-build gate: `cargo build --workspace --all-targets` against the PR head commit exited non-zero. Not merged.\n\nFix the build, or re-run the merge with `--no-require-local-build` if the failure is known-unrelated and accepted.')" >/dev/null 2>&1 || true
+        printf 'blocked local_build_failed\n'
+        _cleanup
+        exit 1
+    elif [ "$_lb_gate_rc" = "2" ]; then
+        _cleanup
+        _die "local buildability gate error for PR #$PR (fail-closed, not merged)"
+    fi
+fi
+
+# 5. CI-conclusion gate: refuse while any non-advisory check is pending or not
 #    green. A null conclusion means "still running"; counting it as success is
 #    exactly how a merge races its own CI run.
 _ADVISORY="${AUTOSPEC_PR_ADVISORY_CHECKS:-${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^$}}"
@@ -255,7 +381,7 @@ if [ "$REQUIRE_CHECKS" = "1" ]; then
     done
 fi
 
-# 5. Full-suite evidence gate (issue #3523): refuse when the recorded
+# 6. Full-suite evidence gate (issue #3523): refuse when the recorded
 #    full-suite evidence names a different commit, or a failing run. An absent
 #    file warns and merges (inert until Phase 4 records); a present file is
 #    binding. An unparseable file fails closed like every other read failure.
@@ -297,7 +423,7 @@ if [ -n "$VERIFY_EVIDENCE" ]; then
     fi
 fi
 
-# 6. Allowed (or overridden) and green: perform the admin merge.
+# 7. Allowed (or overridden) and green: perform the admin merge.
 _cleanup
 # shellcheck disable=SC2086
 gh pr merge "$PR" --repo "$REPO" $MERGE_ARGS
