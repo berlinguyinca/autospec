@@ -222,3 +222,132 @@ run_rust() {
   run_rust commands::managed_project::portfolio::tests::every_documented_exit_code_is_distinct
   [ "$RUST_TESTS_RAN" -eq 1 ]
 }
+
+# Builds a minimal lock-step trio (SKILL.md + opencode/agent.md + codex/prompt.md)
+# for one workflow skill under $1. $3 = wrong puts `gh issue create` ahead of
+# `portfolio apply` in the shared body; good puts the transaction first.
+write_workflow_trio() {
+  local root="$1" skill="$2" order="$3"
+  local dir="$root/skills/$skill"
+  mkdir -p "$dir/codex" "$dir/opencode"
+  if [ "$order" = "wrong" ]; then
+    BODY="File the issues first with gh issue create --label needs-classify.
+Then provision the primary portfolio with autospec portfolio apply --manifest planned.yml."
+  else
+    BODY="Provision the primary portfolio first with autospec portfolio apply --manifest planned.yml.
+Then file the issues with gh issue create --label needs-classify."
+  fi
+  printf -- '---\nname: %s\n---\n%s\n' "$skill" "$BODY" > "$dir/SKILL.md"
+  printf -- '---\nname: %s\nmode: primary\n---\n%s\n' "$skill" "$BODY" > "$dir/opencode/agent.md"
+  printf '%s\n' "$BODY" > "$dir/codex/prompt.md"
+}
+
+@test "v54 workflow validator enforces portfolio-first ordering on every decomposition path" {
+  cd "$REPO_ROOT"
+  local script="$REPO_ROOT/scripts/autospec-validate-state.sh"
+  local skill root
+
+  # Uniform enforcement: the validator names every workflow entry point in one
+  # list, so no definition path can opt out of the order and lock-step checks.
+  grep -qF '"autospec", "autospec-define", "autospec-split", "autospec-explore", "autospec-run"' "$script"
+
+  # A wrong-order body fails on every decomposition path, not just one skill.
+  for skill in autospec autospec-define autospec-split autospec-explore autospec-run; do
+    root="$BATS_TEST_TMPDIR/order-$skill"
+    write_workflow_trio "$root" "$skill" wrong
+    run bash "$script" --repo-root "$root"
+    if [ "$status" -ne 1 ]; then
+      echo "$skill: wrong-order fixture unexpectedly passed" >&3
+      return 1
+    fi
+    grep -qF 'portfolio provisioning after first gh issue create' \
+      "$root/.autospec/reports/state-validation.md"
+  done
+
+  # The same body in the right order is clean.
+  root="$BATS_TEST_TMPDIR/order-good"
+  write_workflow_trio "$root" "autospec-define" good
+  run bash "$script" --repo-root "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"state validation: pass"* ]]
+  [ "$RUST_TESTS_RAN" -eq 0 ]
+}
+
+@test "v54 workflow validator fails a generated lock-step body that diverges" {
+  cd "$REPO_ROOT"
+  local script="$REPO_ROOT/scripts/autospec-validate-state.sh"
+  local root="$BATS_TEST_TMPDIR/lockstep-diverged"
+
+  write_workflow_trio "$root" "autospec-split" good
+  echo "divergent codex-only line" >> "$root/skills/autospec-split/codex/prompt.md"
+  run bash "$script" --repo-root "$root"
+  [ "$status" -eq 1 ]
+  grep -qF 'lock-step body diverges from codex/prompt.md' \
+    "$root/.autospec/reports/state-validation.md"
+
+  write_workflow_trio "$BATS_TEST_TMPDIR/lockstep-diverged-2" "autospec-run" good
+  echo "divergent opencode-only line" >> \
+    "$BATS_TEST_TMPDIR/lockstep-diverged-2/skills/autospec-run/opencode/agent.md"
+  run bash "$script" --repo-root "$BATS_TEST_TMPDIR/lockstep-diverged-2"
+  [ "$status" -eq 1 ]
+  grep -qF 'lock-step body diverges from opencode/agent.md' \
+    "$BATS_TEST_TMPDIR/lockstep-diverged-2/.autospec/reports/state-validation.md"
+  [ "$RUST_TESTS_RAN" -eq 0 ]
+}
+
+@test "v54 dry-run report proves zero mutation and keeps capabilities tri-state" {
+  cd "$REPO_ROOT"
+  local script="$REPO_ROOT/scripts/autospec-validate-state.sh"
+
+  # A dry-run report by itself is clean: plan shape plus tri-state capabilities,
+  # no transaction behind it.
+  local clean="$BATS_TEST_TMPDIR/dry-clean"
+  mkdir -p "$clean/.autospec/state"
+  cat > "$clean/.autospec/state/portfolio-dry-run.json" <<'JSON'
+{
+  "schema": "autospec.portfolio-plan.v1",
+  "dry_run": true,
+  "portfolio_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "capabilities": {"projects": "unavailable", "issue_create": "unknown", "coord_ref": "verified"}
+}
+JSON
+  run bash "$script" --repo-root "$clean"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"state validation: pass"* ]]
+
+  # The same dry run with a transaction left behind for its portfolio_id is a
+  # mutation, and a dry run must never claim one.
+  local dirty="$BATS_TEST_TMPDIR/dirty"
+  mkdir -p "$dirty/.autospec/state"
+  cp "$clean/.autospec/state/portfolio-dry-run.json" "$dirty/.autospec/state/"
+  cat > "$dirty/.autospec/state/portfolio-transaction.json" <<'JSON'
+{
+  "schema": "autospec.portfolio-transaction.v1",
+  "portfolio_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "project_owner": "org",
+  "plan_digest": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "state": "blocked"
+}
+JSON
+  run bash "$script" --repo-root "$dirty"
+  [ "$status" -eq 1 ]
+  grep -qF 'dry run left a portfolio transaction' \
+    "$dirty/.autospec/reports/state-validation.md"
+
+  # A capability outside the tri-state set is a guessed permission, refused.
+  local badcap="$BATS_TEST_TMPDIR/badcap"
+  mkdir -p "$badcap/.autospec/state"
+  cat > "$badcap/.autospec/state/portfolio-dry-run.json" <<'JSON'
+{
+  "schema": "autospec.portfolio-plan.v1",
+  "dry_run": true,
+  "portfolio_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "capabilities": {"projects": "granted"}
+}
+JSON
+  run bash "$script" --repo-root "$badcap"
+  [ "$status" -eq 1 ]
+  grep -qF 'must be verified, unavailable or unknown' \
+    "$badcap/.autospec/reports/state-validation.md"
+  [ "$RUST_TESTS_RAN" -eq 0 ]
+}
