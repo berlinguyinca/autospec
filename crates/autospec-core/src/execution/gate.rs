@@ -26,6 +26,17 @@
 //!    contracts) run before the expensive nondeterministic ones (the test
 //!    suite, which can flake), so a flaky suite cannot mask a definite
 //!    defect ([`GatePlan::new`]).
+//! 4. **Normalise before judging.** A gate must not reject work for a
+//!    defect it could repair deterministically ([`Normaliser`]): fourteen of
+//!    twenty held patches carried one identical reason — unformatted at
+//!    source, never tested — a single mechanical defect outweighing every
+//!    real defect combined. Any defect the gate can detect with a
+//!    deterministic tool, it can also fix with no judgement and no risk of
+//!    altering behaviour, so [`evaluate_gate`] repairs it first and judges
+//!    what remains. Formatting alone is never a terminal verdict; the
+//!    repair is recorded in the verdict ([`Normalised`]) so the patch that
+//!    lands is the normalised one and the log says so, and a hold names
+//!    only the defects that survive normalisation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -222,17 +233,49 @@ pub struct NotEvaluated {
     pub because: String,
 }
 
+/// A deterministic repair the pipeline can apply to a candidate patch
+/// before judging it: the formatter (`cargo fmt`), an import-ordering
+/// pass, trailing-whitespace stripping.
+///
+/// A normaliser is registered against the single check whose blocking
+/// findings it repairs. Because it is deterministic, total, and semantically
+/// neutral, a finding it repairs is a property of the *submission*, not of
+/// the *work* — the gate must not hold work over it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Normaliser {
+    /// The normaliser's own name, e.g. `cargo fmt`.
+    pub name: String,
+    /// The check whose blocking findings this normaliser repairs,
+    /// e.g. `format`.
+    pub repairs: String,
+}
+
+/// One repair the gate applied before judging: the check that would have
+/// blocked, and the normaliser that repaired it. The patch that lands is
+/// the normalised one, and the verdict says so — nothing is silently
+/// rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Normalised {
+    /// The check that found the defect.
+    pub check: String,
+    /// The normaliser that repaired it.
+    pub by: String,
+}
+
 /// The gate's decision for one patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateVerdict {
-    /// Every evaluated check was clean; the patch may convert.
-    Convert,
-    /// At least one blocking finding. The record names *all* of them,
-    /// most confident first, plus every check a prior failure made
-    /// impossible to evaluate.
+    /// Every evaluated check was clean — after normalisation; the patch may
+    /// convert. `normalised` names every repair applied, so the patch that
+    /// lands is the normalised one and the record says so.
+    Convert { normalised: Vec<Normalised> },
+    /// At least one blocking finding that *survives normalisation*. The
+    /// record names all of them, most confident first, plus every repair
+    /// applied and every check a prior failure made impossible to evaluate.
     Hold {
         findings: Vec<HoldFinding>,
         not_evaluated: Vec<NotEvaluated>,
+        normalised: Vec<Normalised>,
     },
 }
 
@@ -243,27 +286,50 @@ impl GateVerdict {
     }
 
     /// The names of the checks behind the blocking findings, record order.
+    /// A finding here always survived normalisation.
     pub fn finding_checks(&self) -> Vec<&str> {
         match self {
-            Self::Convert => Vec::new(),
+            Self::Convert { .. } => Vec::new(),
             Self::Hold { findings, .. } => findings.iter().map(|f| f.check.as_str()).collect(),
         }
     }
 
-    /// The durable hold record: every blocking finding, most confident
-    /// first, followed by every recorded skip. An actor reading this line
-    /// hours later finds the real blocker at the front, not the flake.
+    /// Every repair applied before judging, in plan order.
+    pub fn normalised(&self) -> &[Normalised] {
+        match self {
+            Self::Convert { normalised } => normalised,
+            Self::Hold { normalised, .. } => normalised,
+        }
+    }
+
+    /// The durable record: every blocking finding, most confident first,
+    /// followed by every recorded repair and every recorded skip. An actor
+    /// reading this line hours later finds the real blocker at the front,
+    /// not the flake — and can tell a repaired defect from a held one.
     pub fn line(&self) -> String {
         match self {
-            Self::Convert => "gate clean: every evaluated check found nothing".to_string(),
+            Self::Convert { normalised } => {
+                if normalised.is_empty() {
+                    "gate clean: every evaluated check found nothing".to_string()
+                } else {
+                    format!(
+                        "gate clean: every evaluated check found nothing; {}",
+                        normalised_clause(normalised)
+                    )
+                }
+            }
             Self::Hold {
                 findings,
                 not_evaluated,
+                normalised,
             } => {
                 let mut parts = findings
                     .iter()
                     .map(|finding| format!("{}: {}", finding.check, finding.detail))
                     .collect::<Vec<_>>();
+                if !normalised.is_empty() {
+                    parts.push(normalised_clause(normalised));
+                }
                 for skipped in not_evaluated {
                     parts.push(format!(
                         "not evaluated: {} (blocked by {})",
@@ -276,6 +342,18 @@ impl GateVerdict {
     }
 }
 
+/// The record clause for applied repairs: `normalised: format by cargo fmt`.
+fn normalised_clause(normalised: &[Normalised]) -> String {
+    format!(
+        "normalised: {}",
+        normalised
+            .iter()
+            .map(|record| format!("{} by {}", record.check, record.by))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// The internal decision recorded for one check while walking the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decision {
@@ -286,22 +364,77 @@ enum Decision {
     Blocked(String),
 }
 
-/// Evaluate a gate run.
+/// Validate the normalisers and map each repaired check to the normaliser
+/// that repairs it.
 ///
-/// `outcomes` holds the result of every check the pipeline actually ran, in
-/// no particular order. Every check in the plan either has an outcome or is
-/// recorded as not evaluated against the first blocking finding (in plan
-/// order) that makes it impossible — including transitively, through a
-/// dependency that was itself skipped. A check with no outcome *and* no
-/// such prior failure is a pipeline that stopped without a reason, which is
-/// an error, not a silent pass or a silent skip.
+/// A normaliser may only repair a *deterministic* check: a deterministic,
+/// semantically neutral rewrite cannot undo a measured failure, so
+/// registering one against the flaky suite would turn a real defect into a
+/// silent pass. Fails closed on empty names, unknown checks, and two
+/// normalisers claiming the same check.
+fn normaliser_map<'a>(
+    plan: &GatePlan,
+    normalisers: &'a [Normaliser],
+) -> Result<BTreeMap<&'a str, &'a str>, String> {
+    let mut map: BTreeMap<&str, &str> = BTreeMap::new();
+    for normaliser in normalisers {
+        if normaliser.name.trim().is_empty() || normaliser.repairs.trim().is_empty() {
+            return Err("normaliser names and repaired checks must be nonempty".to_string());
+        }
+        let check = plan.check(&normaliser.repairs).ok_or_else(|| {
+            format!(
+                "normaliser {} repairs unknown check {}",
+                normaliser.name, normaliser.repairs
+            )
+        })?;
+        if check.cost != CheckCost::Deterministic {
+            return Err(format!(
+                "normaliser {} cannot repair {}: a deterministic rewrite cannot undo a measured failure",
+                normaliser.name,
+                normaliser.repairs
+            ));
+        }
+        if map
+            .insert(normaliser.repairs.as_str(), normaliser.name.as_str())
+            .is_some()
+        {
+            return Err(format!("two normalisers repair {}", normaliser.repairs));
+        }
+    }
+    Ok(map)
+}
+
+/// Evaluate a gate run, normalising before judging.
 ///
-/// The hold record collects every blocking finding, ordered by confidence
-/// (deterministic first, plan order within a tier).
+/// `normalisers` are the deterministic repairs the pipeline can apply to a
+/// candidate patch (formatter, import ordering, trailing whitespace), each
+/// registered against the check it repairs. `outcomes` holds the result of
+/// every check the pipeline actually ran, in no particular order.
+///
+/// The walk is the same as before, with one difference at the heart of the
+/// invariant: a blocking finding on a check that has a normaliser is a
+/// property of the *submission*, not of the *work*. It is repaired, recorded
+/// as a [`Normalised`] entry in the verdict, and the check resolves clean —
+/// so the checks that depend on it (the test stage) still run, instead of
+/// being discarded along with the whitespace. Formatting alone is therefore
+/// never a terminal verdict.
+///
+/// Every check in the plan either has an outcome or is recorded as not
+/// evaluated against the first surviving blocking finding (in plan order)
+/// that makes it impossible — including transitively, through a dependency
+/// that was itself skipped. A check with no outcome *and* no such prior
+/// failure is a pipeline that stopped without a reason, which is an error,
+/// not a silent pass or a silent skip.
+///
+/// The hold record collects every blocking finding that *survives*
+/// normalisation, ordered by confidence (deterministic first, plan order
+/// within a tier), followed by the repair record and every recorded skip.
 pub fn evaluate_gate(
     plan: &GatePlan,
+    normalisers: &[Normaliser],
     outcomes: &BTreeMap<String, CheckOutcome>,
 ) -> Result<GateVerdict, String> {
+    let repaired = normaliser_map(plan, normalisers)?;
     for name in outcomes.keys() {
         if plan.check(name).is_none() {
             return Err(format!("gate outcome for unknown check: {name}"));
@@ -310,18 +443,33 @@ pub fn evaluate_gate(
     let mut decided: BTreeMap<&str, Decision> = BTreeMap::new();
     let mut findings: Vec<HoldFinding> = Vec::new();
     let mut not_evaluated: Vec<NotEvaluated> = Vec::new();
+    let mut normalised: Vec<Normalised> = Vec::new();
     for check in plan.checks() {
         match outcomes.get(&check.name) {
             Some(CheckOutcome::Clean) => {
                 decided.insert(check.name.as_str(), Decision::Clean);
             }
             Some(CheckOutcome::Blocking { detail }) => {
-                findings.push(HoldFinding {
-                    check: check.name.clone(),
-                    confidence: check.cost.confidence(),
-                    detail: detail.clone(),
-                });
-                decided.insert(check.name.as_str(), Decision::Blocked(check.name.clone()));
+                match repaired.get(check.name.as_str()) {
+                    Some(by) => {
+                        // The defect is one the gate can repair
+                        // deterministically: repair it, record it, and judge
+                        // the rest of the patch as normal.
+                        normalised.push(Normalised {
+                            check: check.name.clone(),
+                            by: (*by).to_string(),
+                        });
+                        decided.insert(check.name.as_str(), Decision::Clean);
+                    }
+                    None => {
+                        findings.push(HoldFinding {
+                            check: check.name.clone(),
+                            confidence: check.cost.confidence(),
+                            detail: detail.clone(),
+                        });
+                        decided.insert(check.name.as_str(), Decision::Blocked(check.name.clone()));
+                    }
+                }
             }
             None => {
                 let because = skip_reason(check, &decided)?;
@@ -336,11 +484,12 @@ pub fn evaluate_gate(
     // Stable: plan order (and thus declared order) is preserved within a tier.
     findings.sort_by_key(|finding| finding.confidence);
     if findings.is_empty() {
-        Ok(GateVerdict::Convert)
+        Ok(GateVerdict::Convert { normalised })
     } else {
         Ok(GateVerdict::Hold {
             findings,
             not_evaluated,
+            normalised,
         })
     }
 }
@@ -435,12 +584,14 @@ mod tests {
                 },
             ),
         ]);
-        let verdict = evaluate_gate(&plan, &outcome).unwrap();
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
         match &verdict {
             GateVerdict::Hold {
                 findings,
                 not_evaluated,
+                normalised,
             } => {
+                assert!(normalised.is_empty(), "nothing is normalised here");
                 assert!(not_evaluated.is_empty(), "every check ran here");
                 assert_eq!(findings.len(), 2);
                 assert_eq!(findings[0].check, "lint");
@@ -477,12 +628,14 @@ mod tests {
                 detail: "workspace build failed: E0425".to_string(),
             },
         )]);
-        let verdict = evaluate_gate(&plan, &outcome).unwrap();
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
         match &verdict {
             GateVerdict::Hold {
                 findings,
                 not_evaluated,
+                normalised,
             } => {
+                assert!(normalised.is_empty(), "nothing is normalised here");
                 assert_eq!(findings.len(), 1);
                 assert_eq!(findings[0].check, "build");
                 assert_eq!(
@@ -518,7 +671,7 @@ mod tests {
                 detail: "workspace build failed: E0425".to_string(),
             },
         )]);
-        let verdict = evaluate_gate(&plan, &outcome).unwrap();
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
         match &verdict {
             GateVerdict::Hold { not_evaluated, .. } => {
                 assert_eq!(
@@ -551,8 +704,8 @@ mod tests {
             ("lint", CheckOutcome::Clean),
             ("tests", CheckOutcome::Clean),
         ]);
-        let verdict = evaluate_gate(&plan, &outcome).unwrap();
-        assert_eq!(verdict, GateVerdict::Convert);
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
+        assert_eq!(verdict, GateVerdict::Convert { normalised: vec![] });
         assert!(!verdict.is_hold());
         assert!(verdict.line().starts_with("gate clean"));
     }
@@ -585,7 +738,7 @@ mod tests {
                 },
             ),
         ]);
-        let verdict = evaluate_gate(&plan, &outcome).unwrap();
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
         assert_eq!(
             verdict.finding_checks(),
             vec!["lint", "format", "tests"],
@@ -601,7 +754,7 @@ mod tests {
         ])
         .unwrap();
         let outcome = outcomes(&[("lint", CheckOutcome::Clean)]);
-        let error = evaluate_gate(&plan, &outcome).unwrap_err();
+        let error = evaluate_gate(&plan, &[], &outcome).unwrap_err();
         assert!(error.contains("tests"), "{error}");
         assert!(error.contains("not evaluated"), "{error}");
     }
@@ -610,7 +763,7 @@ mod tests {
     fn an_outcome_for_an_unknown_check_is_an_error() {
         let plan = GatePlan::new(vec![check("lint", CheckCost::Deterministic)]).unwrap();
         let outcome = outcomes(&[("typos", CheckOutcome::Clean)]);
-        let error = evaluate_gate(&plan, &outcome).unwrap_err();
+        let error = evaluate_gate(&plan, &[], &outcome).unwrap_err();
         assert!(error.contains("unknown check"), "{error}");
     }
 
@@ -667,7 +820,7 @@ mod tests {
                 detail: "1 error".to_string(),
             },
         )]);
-        let line = evaluate_gate(&plan, &outcome).unwrap().line();
+        let line = evaluate_gate(&plan, &[], &outcome).unwrap().line();
         let skipped = line
             .find("not evaluated: tests (blocked by build)")
             .unwrap();
@@ -676,5 +829,210 @@ mod tests {
             !findings_prefix.contains("tests"),
             "the skipped check is not reported as a finding: {line}"
         );
+    }
+    // ---- Normalise before judging ----------------------------------------
+
+    #[test]
+    fn an_unformatted_but_correct_patch_reaches_the_test_stage_and_passes() {
+        // Regression: fourteen of twenty held patches carried one identical
+        // reason — "unformatted at source, no local run". The patch was never
+        // evaluated; the gate declined to test it over whitespace. The test
+        // stage depends on the format check, so without normalisation it never
+        // runs; with it, the repair is recorded and the verdict is convert.
+        let plan = GatePlan::new(vec![
+            GateCheck::independent("format", CheckCost::Deterministic),
+            GateCheck::requires_all("tests", CheckCost::Nondeterministic, ["format"]),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "format",
+                CheckOutcome::Blocking {
+                    detail: "diff is not rustfmt-clean".to_string(),
+                },
+            ),
+            ("tests", CheckOutcome::Clean),
+        ]);
+        let normalisers = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let verdict = evaluate_gate(&plan, &normalisers, &outcome).unwrap();
+        assert!(
+            !verdict.is_hold(),
+            "formatting alone is never a terminal verdict: {}",
+            verdict.line()
+        );
+        assert_eq!(
+            verdict,
+            GateVerdict::Convert {
+                normalised: vec![Normalised {
+                    check: "format".to_string(),
+                    by: "cargo fmt".to_string(),
+                }]
+            }
+        );
+        let line = verdict.line();
+        assert!(line.contains("cargo fmt"), "{line}");
+    }
+
+    #[test]
+    fn a_hold_names_only_defects_that_survive_normalisation() {
+        let plan = GatePlan::new(vec![
+            GateCheck::independent("format", CheckCost::Deterministic),
+            GateCheck::independent("lint", CheckCost::Deterministic),
+            GateCheck::independent("tests", CheckCost::Nondeterministic),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "format",
+                CheckOutcome::Blocking {
+                    detail: "diff is not rustfmt-clean".to_string(),
+                },
+            ),
+            (
+                "lint",
+                CheckOutcome::Blocking {
+                    detail: "DOC_OUT_OF_SYNC: README".to_string(),
+                },
+            ),
+            ("tests", CheckOutcome::Clean),
+        ]);
+        let normalisers = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let verdict = evaluate_gate(&plan, &normalisers, &outcome).unwrap();
+        assert!(verdict.is_hold());
+        // The format defect was repaired, so it is not a finding — the hold
+        // names only the lint defect that survived normalisation.
+        assert_eq!(verdict.finding_checks(), vec!["lint"]);
+        let line = verdict.line();
+        assert!(line.contains("lint: DOC_OUT_OF_SYNC: README"), "{line}");
+        assert!(line.contains("normalised: format by cargo fmt"), "{line}");
+        assert!(
+            !line.contains("format: diff is not rustfmt-clean"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_clean_check_is_not_recorded_as_normalised() {
+        let plan = GatePlan::new(vec![GateCheck::independent(
+            "format",
+            CheckCost::Deterministic,
+        )])
+        .unwrap();
+        let outcome = outcomes(&[("format", CheckOutcome::Clean)]);
+        let normalisers = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let verdict = evaluate_gate(&plan, &normalisers, &outcome).unwrap();
+        // Nothing was repaired, so nothing is recorded: the record names
+        // repairs actually applied, not normalisers merely available.
+        assert_eq!(verdict, GateVerdict::Convert { normalised: vec![] });
+    }
+
+    #[test]
+    fn a_normalised_patch_still_blocks_dependent_checks_on_a_real_defect() {
+        // Format is repaired, but the test stage it unblocks fails for a real
+        // reason: the hold names the surviving defect, and the record still
+        // says the format repair happened.
+        let plan = GatePlan::new(vec![
+            GateCheck::independent("format", CheckCost::Deterministic),
+            GateCheck::requires_all("tests", CheckCost::Nondeterministic, ["format"]),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "format",
+                CheckOutcome::Blocking {
+                    detail: "diff is not rustfmt-clean".to_string(),
+                },
+            ),
+            (
+                "tests",
+                CheckOutcome::Blocking {
+                    detail: "2 failures: gate_eval".to_string(),
+                },
+            ),
+        ]);
+        let normalisers = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let verdict = evaluate_gate(&plan, &normalisers, &outcome).unwrap();
+        assert!(verdict.is_hold());
+        assert_eq!(verdict.finding_checks(), vec!["tests"]);
+        let line = verdict.line();
+        assert!(line.contains("tests: 2 failures: gate_eval"), "{line}");
+        assert!(line.contains("normalised: format by cargo fmt"), "{line}");
+    }
+
+    #[test]
+    fn a_normaliser_cannot_repair_a_nondeterministic_check() {
+        // A deterministic, semantically neutral rewrite cannot undo a measured
+        // failure. Registering one against the flaky suite would turn a real
+        // defect into a silent pass — the exact failure mode this module exists
+        // to prevent, so the configuration is rejected, fail-closed.
+        let plan = GatePlan::new(vec![GateCheck::independent(
+            "tests",
+            CheckCost::Nondeterministic,
+        )])
+        .unwrap();
+        let outcome = outcomes(&[(
+            "tests",
+            CheckOutcome::Blocking {
+                detail: "flake".to_string(),
+            },
+        )]);
+        let normalisers = [Normaliser {
+            name: "retry".to_string(),
+            repairs: "tests".to_string(),
+        }];
+        let error = evaluate_gate(&plan, &normalisers, &outcome).unwrap_err();
+        assert!(error.contains("cannot repair tests"), "{error}");
+    }
+
+    #[test]
+    fn normaliser_configuration_fails_closed() {
+        let plan = GatePlan::new(vec![
+            GateCheck::independent("format", CheckCost::Deterministic),
+            GateCheck::independent("imports", CheckCost::Deterministic),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            ("format", CheckOutcome::Clean),
+            ("imports", CheckOutcome::Clean),
+        ]);
+
+        let unknown = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "lint".to_string(),
+        }];
+        let error = evaluate_gate(&plan, &unknown, &outcome).unwrap_err();
+        assert!(error.contains("unknown check lint"), "{error}");
+
+        let ambiguous = [
+            Normaliser {
+                name: "cargo fmt".to_string(),
+                repairs: "format".to_string(),
+            },
+            Normaliser {
+                name: "import-order".to_string(),
+                repairs: "format".to_string(),
+            },
+        ];
+        let error = evaluate_gate(&plan, &ambiguous, &outcome).unwrap_err();
+        assert!(error.contains("two normalisers repair format"), "{error}");
+
+        let empty = [Normaliser {
+            name: "  ".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let error = evaluate_gate(&plan, &empty, &outcome).unwrap_err();
+        assert!(error.contains("nonempty"), "{error}");
     }
 }
