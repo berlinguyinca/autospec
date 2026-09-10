@@ -30,6 +30,19 @@ On the shell side, `scripts/lint-signal-semantics.sh` flags pipelines that make 
 
 AutoSpec splits a spec into a parent issue and smaller child issues. Each child issue is meant to be independently understandable and reviewable.
 
+### Readiness-edge parsing
+
+The ready queue reads dependency edges from the `## Dependencies` section of an
+issue body (`autospec_core::coordination::dependency_numbers`). Two line forms
+create edges, scoped to that section: the canonical phrase
+`Depends on issue #N` (or `depends on #N`), and a list item whose first token
+is `#N` — the bullet form third-party trackers write under a plain
+`## Dependencies` heading with no phrase. A `#N` in prose inside the section
+creates no edge. Because an under-matching parser is indistinguishable from
+"nothing is blocked", the parser is pinned by tests to at least one issue known
+to carry dependencies (must return non-empty) and at least one known not to
+(must return empty) for each accepted line form.
+
 ## Parallel decomposition
 
 Decomposition produces an **issue DAG**: a directed acyclic graph whose edges are *hard dependencies only*. The DAG is a scheduling artifact, not a fixed work order. The executor schedules from a dynamic ready queue (an issue is ready when all of its hard predecessors have merged), and the analyzer projects **execution waves** — a diagnostic view of which issues would run together wave by wave — without replacing that dynamic scheduling.
