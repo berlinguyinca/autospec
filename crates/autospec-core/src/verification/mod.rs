@@ -17,6 +17,20 @@
 //! * [`judge_completion`] — the same rule for the other gates that grep for
 //!   absence (build, clippy, fmt): passing requires positive evidence the
 //!   command ran to completion, not merely that no error text was printed.
+//!
+//! The same doctrine applies to *failing* runs: a count from a run that
+//! aborted is a **lower bound**, not a measurement. Cargo's default is
+//! fail-fast — the run stops at the first failing target, and every target
+//! after it never ran, so `2 failed` can mean "the suite has at least two
+//! failures" while looking identical to a completed run's "exactly two". A
+//! build failure truncates even earlier. [`TestRunVerdict::completed`] says
+//! which kind a run was: the only positive evidence that every target ran is
+//! the `--no-fail-fast` summary (`error: N targets failed:`), emitted after
+//! the last target. A truncated verdict's [`TestRunVerdict::evidence`]
+//! labels the aggregate as a lower bound, and
+//! [`failure_count_delta`] refuses to compare two runs when either was
+//! truncated, so a baseline captured from an aborted run cannot silently
+//! omit the failures that come after the first failing target.
 
 /// Counts summed across every `test result:` line in a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,19 +131,33 @@ impl TestRunOutcome {
 pub struct TestRunVerdict {
     pub outcome: TestRunOutcome,
     pub aggregate: TestRunAggregate,
+    /// Whether the run is known to have executed every target.
+    ///
+    /// `false` means the run aborted (fail-fast at the first failing target,
+    /// or a build failure) and `aggregate` is a **lower bound** on the
+    /// failure count: the targets after the abort never ran. The only
+    /// positive evidence of completeness on a failing run is the
+    /// `--no-fail-fast` summary (`error: N targets failed:`).
+    pub completed: bool,
 }
 
 impl TestRunVerdict {
     /// The evidence a completion report must record for this verdict.
     ///
     /// States the aggregate and the target count so a reader can see the run
-    /// had scope; the zero-tests outcome carries its distinct label.
+    /// had scope; the zero-tests outcome carries its distinct label; a
+    /// truncated run labels its aggregate as a lower bound, because a count
+    /// from an aborted run must not read as a measurement.
     pub fn evidence(&self) -> String {
         let aggregate = self.aggregate.evidence();
         if self.outcome == TestRunOutcome::NoTestsRan {
             format!("NO-TESTS-RAN — {aggregate}")
-        } else {
+        } else if self.completed {
             aggregate
+        } else {
+            format!(
+                "{aggregate} (lower bound — run aborted before all targets ran; re-run without fail-fast for the full failure set)"
+            )
         }
     }
 
@@ -147,6 +175,12 @@ impl TestRunVerdict {
 /// Requires `failed == 0` across **all** targets as well as `passed > 0`.
 /// Reading only the last `test result:` line, or only the absence of
 /// failures, is how a run that executed zero tests gets recorded as a pass.
+///
+/// The verdict also reports whether the run is known to have executed every
+/// target ([`TestRunVerdict::completed`]). A failing run is complete only
+/// when the `--no-fail-fast` summary is present; anything else is a lower
+/// bound, because cargo's fail-fast default stops at the first failing
+/// target and a build failure stops it before any later target runs.
 pub fn judge_test_run(output: &str) -> TestRunVerdict {
     let aggregate = parse_test_run(output);
     let outcome = if aggregate.failed > 0 || reports_hard_error(output) {
@@ -156,7 +190,103 @@ pub fn judge_test_run(output: &str) -> TestRunVerdict {
     } else {
         TestRunOutcome::Passed
     };
-    TestRunVerdict { outcome, aggregate }
+    TestRunVerdict {
+        outcome,
+        aggregate,
+        completed: run_completed(&aggregate, output),
+    }
+}
+
+/// Whether the run is known to have executed every target, i.e. whether the
+/// aggregate is a measurement rather than a lower bound.
+///
+/// Positive evidence only: a run without a hard error and without failures
+/// reached its end (fail-fast stops only on failure); a run with a hard
+/// error is complete only if the `--no-fail-fast` summary is present, since
+/// that summary is printed only after the last target has run. A failing
+/// run with no summary is not *known* to have run every target, and
+/// unknown scope is treated as truncated: the count is labelled a lower
+/// bound rather than allowed to masquerade as a measurement.
+fn run_completed(aggregate: &TestRunAggregate, output: &str) -> bool {
+    if reports_hard_error(output) {
+        reports_all_targets_summary(output)
+    } else {
+        aggregate.failed == 0
+    }
+}
+
+/// Whether the output carries the `--no-fail-fast` completion summary:
+/// `error: N targets failed:` (or `error: 1 target failed:`), which cargo
+/// prints only after every target has run and lists the failing ones.
+///
+/// The singular `error: test failed, to rerun pass …` line is *not* this
+/// marker: it is printed per failing target in both modes, and in fail-fast
+/// mode it is the last line of the output. The numbered summary is.
+fn reports_all_targets_summary(output: &str) -> bool {
+    output.lines().any(|line| {
+        let rest = match line.trim_start().strip_prefix("error:") {
+            Some(rest) => rest.trim_start(),
+            None => return false,
+        };
+        let Some((count, remainder)) = rest.split_once(' ') else {
+            return false;
+        };
+        count.parse::<u64>().is_ok()
+            && matches!(remainder.trim_end(), "target failed:" | "targets failed:")
+    })
+}
+
+/// Why two test runs cannot be compared: one or both were truncated, so
+/// their counts are lower bounds rather than measurements of the same set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncomparableRuns {
+    /// The baseline count is a lower bound, not a measurement.
+    pub baseline_truncated: bool,
+    /// The current count is a lower bound, not a measurement.
+    pub current_truncated: bool,
+}
+
+impl std::fmt::Display for IncomparableRuns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let which = if self.baseline_truncated && self.current_truncated {
+            "both runs were truncated"
+        } else if self.baseline_truncated {
+            "the baseline run was truncated"
+        } else {
+            "the current run was truncated"
+        };
+        write!(
+            f,
+            "a count from a truncated run is a lower bound, not a measurement; {which}"
+        )
+    }
+}
+
+impl std::error::Error for IncomparableRuns {}
+
+/// The difference in failure counts between two runs: `current - baseline`.
+///
+/// Rejected when either run was truncated ([`IncomparableRuns`]). A count
+/// from an aborted run is a lower bound, so the delta between a lower bound
+/// and a measurement (or between two lower bounds) measures nothing: fixing
+/// the first failure of a truncated baseline reveals the failures that were
+/// always there, and reading that as `current - baseline > 0` is how a
+/// correct fix presents as a regression.
+pub fn failure_count_delta(
+    baseline: &TestRunVerdict,
+    current: &TestRunVerdict,
+) -> Result<i64, IncomparableRuns> {
+    let error = IncomparableRuns {
+        baseline_truncated: !baseline.completed,
+        current_truncated: !current.completed,
+    };
+    if error.baseline_truncated || error.current_truncated {
+        return Err(error);
+    }
+    // Count values fit in an `i64`; a run that exceeds i64::MAX failures
+    // has already defeated every other gate in this module.
+    Ok(i64::try_from(current.aggregate.failed).unwrap_or(i64::MAX)
+        - i64::try_from(baseline.aggregate.failed).unwrap_or(i64::MAX))
 }
 
 /// Whether the output carries a hard error: a line starting with `error:`
