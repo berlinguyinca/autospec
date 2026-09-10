@@ -403,19 +403,42 @@ links it, then decomposes it into linked auto-implement issues. Per round:
    `git push origin HEAD:<sandbox-branch>`). This ordering guarantees no child
    issue links a dangling `spec_url` blob; the spec blob resolves under the
    sandbox base before any issue references it.
-3. **Decompose via `/autospec-define --base <sandbox-branch>`** (NOT raw
-   `gh issue create`). `--base` is always the sandbox branch, never `main`, so
-   the spec-tracking gate resolves the spec and child-issue `spec_url` links
-   against the sandbox and no PR or issue targets `main`.
-4. **Fallback — never stall**: if the `/autospec-define` handoff is unavailable
-   or exits non-zero, log `code_health:explore_define_unavailable`, KEEP the
+3. **Decompose through the portfolio-aware split path** (the Phase 3 spec
+   portfolio transaction — NOT raw `gh issue create` and NOT a handoff that
+   bypasses the primary Project). The round design spec is an **existing
+   tracked spec** on the sandbox base, so it routes through the same
+   spec-portfolio split path the other decomposition trios use, binding it to
+   one primary delivery Project before any child issue exists. Pass `--base
+   <sandbox-branch>` (always the sandbox branch, never `main`) and
+   `--project-owner <login>` **unchanged** into both steps so the frozen plan
+   carries the sandbox base and owner:
+   - **Plan (pure, no mutation):** run `autospec portfolio validate` over the
+     round's frozen `autospec.portfolio-plan.v1` manifest (stable `item_key`s,
+     target repositories, local parent sets, edges,
+     `plan_digest = sha256(canonical_plan)`). It reports tri-state capability
+     and creates nothing.
+   - **Apply (the only provisioning/materialization entry point):** run
+     `autospec portfolio apply` with the same `--base <sandbox-branch>` and
+     `--project-owner <login>`. It creates or adopts exactly one verified
+     primary Project, then files the round's children into it in `item_key`
+     order.
+   - **Preserve non-main targeting.** Because `--base` is the sandbox branch,
+     the spec-tracking gate, every child-issue `spec_url` link, and each
+     implementer PR target the sandbox; no PR or issue targets `main`.
+   - **Block implementation until the binding verifies.** The `/autospec-run`
+     drain (Phase 4 claim) MUST NOT start until `apply` reports a verified
+     primary Project binding (exactly one, established before issue admission).
+     A `blocked` or ambiguous binding stops the round's drain with a resumable
+     diagnostic; never claim or dispatch implementers around a missing binding.
+4. **Fallback — never stall**: if the split-path handoff is unavailable or
+   exits non-zero, log `code_health:explore_define_unavailable`, KEEP the
    already-committed round spec, and fall back to raw filing for that round
    only. Each resulting issue `<N>` invokes the exact Rust admission command
    before it can count as filed:
    ```bash
    "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
    ```
-   The loop continues; a round never blocks on define availability, and only
+   The loop continues; a round never blocks on handoff availability, and only
    JSON `pass: 1` is a filing success.
 
 ## Discovery enhancement (researcher roster + verify/ROI/synthesis stages + severity)
