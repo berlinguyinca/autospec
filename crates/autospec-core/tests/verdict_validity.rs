@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use autospec_core::autonomous::regrade::HostConditions;
 use autospec_core::autonomous::test_gate::{evaluate, GateDecision, SuiteFailure, SuiteOutcome};
 use autospec_core::autonomous::verdict_validity::{
     baseline_hash, decode, encode, fixed_causes, guard_destructive, route, verify, CurrentTree,
@@ -24,6 +25,13 @@ fn rerun_fails(name: &str) -> BTreeMap<String, bool> {
     BTreeMap::from([(name.to_string(), false)])
 }
 
+fn host() -> HostConditions {
+    HostConditions {
+        load_average: 0.5,
+        concurrent_agents: 1,
+    }
+}
+
 /// AC1: the verdict records the commit and the baseline hash it was graded
 /// under, and the recorded form persists both through encode/decode.
 #[test]
@@ -41,7 +49,7 @@ fn a_verdict_records_the_conditions_it_was_graded_under() {
     assert_eq!(verdict.tree_commit.as_deref(), Some("abc123"));
     assert_eq!(verdict.baseline_hash, baseline_hash(&baseline));
 
-    let recorded = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let recorded = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
     assert_eq!(recorded.patch_identity, "issue-42/0001-fix.patch");
     assert_eq!(recorded.verdict, "new-test-failures");
     assert_eq!(recorded.failing_tests, baseline);
@@ -69,7 +77,7 @@ fn a_commit_mismatch_is_stale_and_refuses_destructive_actions() {
         Some("abc123"),
     )
     .expect("verdict");
-    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
 
     let current = CurrentTree {
         commit: Some("def456".to_string()),
@@ -127,7 +135,7 @@ fn a_baseline_move_sends_the_patch_back_to_the_gate() {
         Some("abc123"),
     )
     .expect("verdict");
-    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
 
     // The tree did not move, but the failing baseline did: the cause was
     // fixed on main.
@@ -172,7 +180,7 @@ fn an_unverifiable_verdict_refuses_destructive_actions_with_a_reason() {
     )
     .expect("verdict");
     // The runner could not read the commit: the persisted verdict has none.
-    let mut record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let mut record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
     record.tree_commit = None;
 
     let readable = CurrentTree {
@@ -203,7 +211,7 @@ fn an_unverifiable_verdict_refuses_destructive_actions_with_a_reason() {
     );
 
     // The other unreadable side: the current tree's commit cannot be read.
-    let full = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let full = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
     let unreadable = CurrentTree {
         commit: None,
         failing_baseline: BTreeSet::new(),
@@ -231,7 +239,7 @@ fn a_pre_fix_verdict_is_not_trusted_after_the_cause_is_fixed() {
         Some("pre-fix"),
     )
     .expect("verdict");
-    let record = pre_fix.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let record = pre_fix.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
 
     let post_fix = CurrentTree {
         commit: Some("post-fix".to_string()),
@@ -287,10 +295,15 @@ fn recorded_names_only_persistent_failures() {
             attribution: autospec_core::autonomous::test_gate::FailureClass::Caused
         }
     );
-    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000);
+    let record = verdict.recorded("issue-42/0001-fix.patch", 1_700_000_000, &host());
     assert_eq!(
         record.failing_tests,
         BTreeSet::from(["persistent".to_string()])
+    );
+    assert_eq!(
+        record.flaky_tests,
+        BTreeSet::from(["flaky".to_string()]),
+        "the flaky set rides along in the recorded verdict"
     );
 
     let passing = SuiteOutcome {
@@ -311,7 +324,7 @@ fn recorded_names_only_persistent_failures() {
     .expect("verdict");
     assert_eq!(pass.verdict_token(), "pass");
     assert!(pass
-        .recorded("issue-42/0002-fix.patch", 1_700_000_000)
+        .recorded("issue-42/0002-fix.patch", 1_700_000_000, &host())
         .failing_tests
         .is_empty());
 }
