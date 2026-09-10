@@ -148,7 +148,15 @@ use std::collections::BTreeMap;
 /// ([`plan_retirement`]) are new decision logic in this module, so
 /// results recorded under version 1 are hypotheses the version-2 logic
 /// re-verifies, not decisions.
-pub const CONVERSION_LOGIC_VERSION: u32 = 2;
+/// Bumped to 3 in #3715: agent-reported hold reasons
+/// ([`HoldReason::AgentReportedUnformatted`],
+/// [`HoldReason::AgentReportedUnbuilt`], triaged by the `status_triage`
+/// module) join the retirement decision — an agent-reported unformatted
+/// hold is retired on re-dispatch (the unformatted state is a property
+/// of the submission a fresh agent fixes), an agent-reported unbuilt hold
+/// is not (a re-run reproduces it). Results recorded under version 2 are
+/// hypotheses the version-3 logic re-verifies, not decisions.
+pub const CONVERSION_LOGIC_VERSION: u32 = 3;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -1081,6 +1089,16 @@ pub enum HoldReason {
     RuleFixed,
     /// A genuine build or test failure the agent reproduces.
     BuildFailure,
+    /// The agent's own report held the patch unformatted (`fmt_rc != 0`,
+    /// #3715). A deterministic signal the pass trusts without re-running:
+    /// a fresh agent formats its submission, so a re-run differs.
+    AgentReportedUnformatted,
+    /// The agent's own report held the patch unbuilt (`build_rc != 0` or
+    /// `status=BUILD-FAILED` / `TESTS-DO-NOT-COMPILE`, #3715). A
+    /// deterministic signal the pass trusts without re-running; a re-run
+    /// reproduces the failure, so it is retired only like a
+    /// [`BuildFailure`]: it is not.
+    AgentReportedUnbuilt,
 }
 
 impl HoldReason {
@@ -1088,11 +1106,14 @@ impl HoldReason {
     /// the retirement question, and it is a judgement about *why* the
     /// patch was held, not about the hold itself: a deterministic rule
     /// the agent has learned since, yes — a re-run meets the fixed rule;
-    /// a genuine build failure the agent reproduces, no — a re-run
-    /// reproduces it, and retiring would discard paid-for work with no
-    /// chance of a different outcome.
+    /// an agent-reported unformatted hold, yes — a fresh agent formats
+    /// its submission; a genuine build failure the agent reproduces, no
+    /// — a re-run reproduces it, and retiring would discard paid-for
+    /// work with no chance of a different outcome (the same applies to
+    /// an agent-reported unbuilt hold: the failure is a property of the
+    /// submission, not of the run).
     pub fn rerun_plausibly_differs(self) -> bool {
-        matches!(self, Self::RuleFixed)
+        matches!(self, Self::RuleFixed | Self::AgentReportedUnformatted)
     }
 }
 
@@ -4169,12 +4190,17 @@ mod tests {
     }
 
     #[test]
-    fn only_rule_fixed_holds_rerun_plausibly_differ() {
+    fn only_rule_fixed_and_agent_unformatted_holds_rerun_plausibly_differ() {
         // A deterministic rule the agent has learned since: a re-run
         // differs. A genuine build failure the agent reproduces: it does
-        // not.
+        // not. An agent-reported unformatted hold (#3715): a fresh agent
+        // formats its submission, so it differs. An agent-reported
+        // unbuilt hold: the failure is a property of the submission, so
+        // it does not.
         assert!(HoldReason::RuleFixed.rerun_plausibly_differs());
         assert!(!HoldReason::BuildFailure.rerun_plausibly_differs());
+        assert!(HoldReason::AgentReportedUnformatted.rerun_plausibly_differs());
+        assert!(!HoldReason::AgentReportedUnbuilt.rerun_plausibly_differs());
     }
 
     #[test]
@@ -4190,10 +4216,22 @@ mod tests {
         // The reason travels with the patch: a repeat hold is visible.
         assert_eq!(plan.reason, HoldReason::RuleFixed);
 
+        // An agent-reported unformatted hold is retired like a
+        // rule-fixed one: a fresh agent fixes the formatting.
+        let plan =
+            plan_retirement(&held, HoldReason::AgentReportedUnformatted, "/scratch/out").unwrap();
+        assert_eq!(plan.reason, HoldReason::AgentReportedUnformatted);
+
         // A build-failure hold is not retired: a re-run would reproduce
         // it, so retiring discards paid-for work for nothing.
         let error = plan_retirement(&held, HoldReason::BuildFailure, "/scratch/out").unwrap_err();
         assert!(error.contains("BuildFailure"));
+        // An agent-reported unbuilt hold is not retired either: the
+        // agent already ran the build and it failed — a re-run reproduces
+        // it.
+        let error =
+            plan_retirement(&held, HoldReason::AgentReportedUnbuilt, "/scratch/out").unwrap_err();
+        assert!(error.contains("AgentReportedUnbuilt"));
         // A patch the pass did not hold is not retired.
         let error = plan_retirement(&converted, HoldReason::RuleFixed, "/scratch/out").unwrap_err();
         assert!(error.contains("only held"));
@@ -4245,6 +4283,9 @@ mod tests {
         // #3674 added new decision logic (the re-dispatch verdict and
         // retirement planning): results recorded under version 1 are
         // hypotheses the version-2 logic re-verifies, not decisions.
-        assert_eq!(CONVERSION_LOGIC_VERSION, 2);
+        // #3715 added the agent-reported hold reasons to the retirement
+        // decision: results recorded under version 2 are hypotheses the
+        // version-3 logic re-verifies, not decisions.
+        assert_eq!(CONVERSION_LOGIC_VERSION, 3);
     }
 }
