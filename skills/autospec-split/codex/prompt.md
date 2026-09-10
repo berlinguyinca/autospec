@@ -70,6 +70,12 @@ classification path as the normal pipeline.
      explore passes a sandbox branch as `--base <sandbox-branch>`.
    - The selected file must be tracked on `<base>` before Phase 3. Verify with:
      `git fetch origin` and `git cat-file -e <base>:<spec-path>`.
+   - Resolve the immutable spec blob identity after the tracked check:
+     `SPEC_BLOB_OID=$(git rev-parse <base>:<spec-path>)`. This is the
+     `source_spec_blob_oid` half of the portfolio identity
+     `sha256(canonical_source_repo || <spec-path> || $SPEC_BLOB_OID)`; if
+     `<base>` moves and the blob changes, that is a different portfolio —
+     never rebind the run to a new blob silently.
    - If the selected file is missing from `<base>`, stop and tell the user:
      `Selected spec is not on <base> yet: <spec-path>. Land the spec first,
      or run /autospec-define so Phase 2 can create and merge the spec PR.`
@@ -209,7 +215,9 @@ For an existing repo, land the spec via a short-lived PR so CI can validate it:
 ## Phase 3 — Decompose into linked GitHub issues (delegate)
 
 If Existing spec mode is active, use `{selected_spec_path}` and its GitHub URL.
-Otherwise use the spec path written and merged in Phase 2.
+Otherwise use the spec path written and merged in Phase 2. The decomposer
+drafts issue bodies and plan inputs only; no issue may be created until the
+portfolio admission gate below verifies the primary portfolio binding.
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
@@ -225,9 +233,9 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > 5. **Legacy/refactor** — architect, maintainer, backend/frontend developer as needed, test engineer, documentation owner.
 > Derive the Review counter-team with a different emphasis that will challenge likely blind spots while staying inside the issue scope.
 >
-> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
+> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then draft exactly N issue bodies — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children. Do NOT create the issues: the portfolio admission gate below freezes these drafts into the plan and the apply transaction files every issue as `needs-classify`. After the gate files them, the umbrella body gains a checklist linking the children. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only for label creation and read-back. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
-> **Label guard — Phase 3 ONLY:** Children receive `auto-implement` plus any domain labels. Do NOT apply `needs-autospec-template`, `ctx:*`, or `reasoning:*` at child-create time. Those labels are applied exclusively by Phase 3.5 after it evaluates the child body. Applying them in Phase 3 causes Phase 3.5 to skip those children entirely, defeating classification.
+> **Label guard — Phase 3 ONLY:** Children are filed by the apply transaction with `needs-classify` plus any domain labels; `auto-implement` arrives only through final admission. Do NOT apply `needs-autospec-template`, `ctx:*`, or `reasoning:*` at child-create time. Those labels are applied exclusively by Phase 3.5 after it evaluates the child body. Applying them in Phase 3 causes Phase 3.5 to skip those children entirely, defeating classification.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
@@ -257,7 +265,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
 >
-> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to `gh issue create` as normal.
+> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), include the child in the plan manifest as normal.
 
 > **Managed Project projection (mandatory):** Immediately after every successful issue
 > creation or issue edit, capture the verified URL as `ISSUE_URL` and run:
@@ -287,6 +295,67 @@ Children are written assuming the implementer is a 32B-class local model with **
 - Acceptance criteria are checkbox-only so the model can self-verify line-by-line.
 - One **Primary smoke test** runs in the inner loop; the heavier verification list runs once at the end.
 - If the work fans out across many tables/packages, split it. Two 3 KB children chained by `Depends on` beat one 7 KB child a 32B model garbles at 60k tokens of working context.
+
+## Phase 3 portfolio admission gate
+
+Phase 3 files issues only through the typed portfolio transaction. One
+verified primary Project must exist before any issue is admitted; the apply
+transaction is the sole provisioning/materialization entry point — there are
+no separate public record or add commands, and no bare `gh issue create`
+fallback for planned issues.
+
+1. **Freeze the plan (pure validation).** Render the planned YAML manifest —
+   the immutable source spec identity (canonical source repo, the Phase 3
+   spec path — `{selected_spec_path}` in Existing spec mode, otherwise the
+   spec written and merged in Phase 2 — and its `SPEC_BLOB_OID`, resolved
+   per Existing spec mode step 4), `project_owner`, target repositories,
+   local parent sets,
+   planned children, audit node, and dependency edges — then run the
+   read-only validation before any remote mutation:
+
+   ```bash
+   "${AUTOSPEC_BIN:-autospec}" portfolio validate --manifest "$MANIFEST"
+   ```
+
+   The default `project_owner` is the source repository owner. An explicit
+   `--project-owner <login>` from the request is passed into the typed
+   command unchanged — never derive, infer, or substitute a different owner
+   after planning; an explicit or inferred owner never falls back.
+
+   Validation is pure: manifest lint, safety lint, DAG validation, and
+   per-repository read/write capability probes. A non-zero exit blocks
+   Phase 3 — fix the manifest and re-run. A repository that cannot accept
+   issues is a blocking prerequisite, never a silently omitted lane.
+2. **Apply before filing.** The apply transaction then files, in order: the
+   primary umbrella; secondary repository trackers; implementation and
+   prerequisite children; the source-repository audit. Every issue starts as
+   `needs-classify`, never `auto-implement`, and blocked prerequisites keep
+   their blocking label:
+
+   ```bash
+   APPLY_JSON=$("${AUTOSPEC_BIN:-autospec}" portfolio apply --manifest "$MANIFEST") || {
+     printf '%s\n' 'ERROR: primary portfolio provisioning failed; no issue is admitted' >&2
+     exit 1
+   }
+   ```
+   No issue creation may precede this verified binding.
+3. **JSON handoff.** Parse `APPLY_JSON` with `jq`; hand the verified
+   portfolio ID and canonical Project URL into every child's
+   `## Delivery portfolio` section and into the pre-impl gate below. Pass
+   the plan's `project_owner` through unchanged.
+4. **Blocked failure handling.** Any apply failure, parent-record or
+   cross-repository graph persistence failure, or unacknowledged Project
+   projection blocks admission: stop, leave the filed issues unadmitted, and
+   report the exact blocker. Resume with the frozen manifest and its
+   checkpoints; never re-decompose a partially applied plan.
+5. **Final admission ordering.** Only after every body mutation finishes
+   (Phase 3.5 model-fit labels, shared contracts, and the post-filing
+   quality audit) does final lint and Rust safety admission transition
+   eligible nodes from `needs-classify` to `auto-implement`. Only
+   classified, lint-passing children are admitted; a child that fails the
+   post-filing quality lint stays `needs-classify` under `needs-quality-bar`.
+   The audit stays dependency-blocked until every deliverable is
+   terminal-success.
 
 Capture the umbrella + child issue numbers.
 
@@ -539,10 +608,10 @@ defaults to `defer`).
 No daemon auto-detection — always ask explicitly.
 
 After all decomposition issues are filed (and before asking the gate question),
-file one additional child issue titled
-`"Phase 5.5 audit + remediation — <feature-name>"` with labels
-`auto-implement,priority:high,audit`, then post a comment on the umbrella issue
-linking it: `"Phase 5.5 audit tracker: #<N>"`.
+verify the Phase 5.5 audit child — part of the frozen plan, titled
+`"Phase 5.5 audit + remediation — <feature-name>"` and filed by the apply
+transaction with labels `priority:high,audit` — is present, then post a
+comment on the umbrella issue linking it: `"Phase 5.5 audit tracker: #<N>"`.
 
 ## Handoff
 
