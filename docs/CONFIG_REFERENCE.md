@@ -151,6 +151,50 @@ marker that flips an issue's provenance from `self` to `operator` pre-dispatch).
 The remaining tables list older operator-facing env knobs that do not yet have
 dedicated config keys.
 
+## Planning parallelism (`planning.parallelism`)
+
+Concurrency policy for capacity-aware decomposition. Defaults are the
+recommended policy from
+[`docs/specs/2026-09-08-parallel-decomposition-fleet-saturation.md`](specs/2026-09-08-parallel-decomposition-fleet-saturation.md) §43.
+The DAG analyzer and the `AS-DAG` lint rules consume these values; the metric
+contract is documented in the Graph analyzer section of
+[`API_REFERENCE.md`](API_REFERENCE.md).
+
+```yaml
+planning:
+  parallelism:
+    target_agents: 32
+    min_supported_agents: 10
+    max_supported_agents: 100
+
+    target_initial_width_ratio: 0.60
+    optimization_retry_threshold: 65
+    max_optimization_retries: 1
+
+    max_dependency_fan_in_before_warning: 5
+    shared_write_hotspot_threshold: 3
+
+    require_dependency_justification: true
+    size_split_implies_dependency: false
+    parent_relationship_implies_dependency: false
+    conflict_risk_implies_dependency: false
+```
+
+| Config key | Type | Default | Valid range | Effect |
+|---|---|---|---|---|
+| `planning.parallelism.target_agents` | int | `32` | `10`–`100` (between `min_supported_agents` and `max_supported_agents`) | Fleet capacity C the decomposition targets; fleet-saturation metrics are computed against it. |
+| `planning.parallelism.min_supported_agents` | int | `10` | integer `1`–`max_supported_agents` | Lower bound of the supported fleet size. |
+| `planning.parallelism.max_supported_agents` | int | `100` | integer `>= min_supported_agents` | Upper bound of the supported fleet size. |
+| `planning.parallelism.target_initial_width_ratio` | float | `0.60` | `0.0`–`1.0` | Target share of the fleet that should be dependency-ready immediately after decomposition. |
+| `planning.parallelism.optimization_retry_threshold` | int | `65` | `0`–`100` | Parallelization score (0–100) below which one dedicated concurrency-optimization retry is triggered. |
+| `planning.parallelism.max_optimization_retries` | int | `1` | integer `>= 0` (`0` disables the automatic retry) | Cap on automatic concurrency-optimization passes; a second pass may be allowed via this key. |
+| `planning.parallelism.max_dependency_fan_in_before_warning` | int | `5` | integer `>= 1` | Fan-in above which `AS-DAG-004 EXCESSIVE_FAN_IN` requires explicit justification for each dependency edge. |
+| `planning.parallelism.shared_write_hotspot_threshold` | int | `3` | integer `>= 2` | Number of root issues whose overlapping primary write ownership raises `AS-DAG-007 SHARED_WRITE_HOTSPOT`. |
+| `planning.parallelism.require_dependency_justification` | bool | `true` | `true` / `false` | Every hard dependency edge must carry a recognized reason code or artifact, or `AS-DAG-001 UNJUSTIFIED_DEPENDENCY` fires. |
+| `planning.parallelism.size_split_implies_dependency` | bool | `false` | `true` / `false` | When `false`, splitting one oversized issue does not create a hard dependency between the siblings (`AS-DAG-008 SPLIT_CREATED_ORDERING`). |
+| `planning.parallelism.parent_relationship_implies_dependency` | bool | `false` | `true` / `false` | When `false`, issue parent/child grouping is not a readiness edge in the hard dependency graph. |
+| `planning.parallelism.conflict_risk_implies_dependency` | bool | `false` | `true` / `false` | When `false`, merge-conflict risk is not a readiness edge (spec §18: conflict risk is not dependency). |
+
 ## Root helper wrapper policy
 
 The supported command surface is the Rust `autospec` binary plus helpers
