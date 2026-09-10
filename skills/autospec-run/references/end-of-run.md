@@ -239,7 +239,7 @@ Configured by the `advisor:` block in `.autospec/autospec.yml` — a single `pol
 3. On `GO`, dispatch the advisor via the highest rung your context supports:
    - (1) the native advisor tool if your harness exposes it; else
    - (2) a read-only TIER_A subagent — Claude Code `Agent(model: opus)`, OpenCode `task` top-tier — this is the preferred path; else
-   - (3) the `cli_fallback` command from the precheck output (Codex `codex exec`; `claude -p` / `opencode run` are legacy). Use rung 3 only when your context lacks a subagent tool — e.g. a background-dispatched implementer does not inherit the `Agent` tool.
+   - (3) the `cli_fallback` command from the precheck output (Codex `codex exec` — append `< /dev/null` when you pass the prompt as an argument, or codex exec hangs on an open stdin, issue #3380; `claude -p` / `opencode run` are legacy). Use rung 3 only when your context lacks a subagent tool — e.g. a background-dispatched implementer does not inherit the `Agent` tool.
    Prompt the advisor with the curated payload and: "Return advice only as one JSON object `{verdict, guidance, confidence}`. You have no tools and produce no user-facing output. guidance <= 700 tokens."
 4. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-escalate.sh --phase record --issue <N> --repo <R> --gate <id> --response-file <resp> --json`. Act on the validated verdict: `plan`/`correction` → apply and continue; `stop` → soft-fail (return-to-queue + comment). An unparseable response is recorded as a fail-safe `stop`.
 

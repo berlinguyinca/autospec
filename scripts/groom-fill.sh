@@ -76,6 +76,10 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
   # (peer-review / advisor dispatcher). Without it `codex exec` refuses to run in
   # a non-trusted / non-git directory ("Not inside a trusted directory"), which
   # would fail-close every groom to hold on an otherwise-working codex install.
+  # The pipe is load-bearing (issue #3380): the prompt arrives via stdin and the
+  # pipe closes when printf exits, so codex never waits on an open stdin. Do not
+  # refactor this to a prompt argument without adding </dev/null — codex exec
+  # appends inherited stdin as a <stdin> block and would hang indefinitely.
   filled="$(printf '%s' "$prompt" | "$FILL_BIN" exec --skip-git-repo-check 2>/dev/null)"
   rc=$?
   set -e
