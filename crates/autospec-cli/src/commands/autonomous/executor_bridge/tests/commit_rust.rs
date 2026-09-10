@@ -324,13 +324,20 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
                 .output()
                 .is_ok_and(|output| output.status.success())
         };
-        let developer_tools_valid = Command::new("/usr/bin/xcode-select")
+        // Keep the resolved path: a probe that reports only "the path was
+        // wrong" cannot be acted on from a CI log. The first CI run with the
+        // named probes said this one failed and nothing more, which is one
+        // round-trip spent to learn a boolean.
+        let developer_dir = Command::new("/usr/bin/xcode-select")
             .arg("-p")
             .output()
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
-            .is_some_and(|path| Path::new(path.trim()).join("usr/bin/xcrun").is_file());
+            .map(|path| path.trim().to_string());
+        let developer_tools_valid = developer_dir
+            .as_deref()
+            .is_some_and(|path| Path::new(path).join("usr/bin/xcrun").is_file());
         let sandbox_runs = Command::new("/usr/bin/sandbox-exec")
             .env_clear()
             .env("HOME", "/tmp")
@@ -351,15 +358,24 @@ fn rust_commit_runs_trusted_validation_hook_inside_containment() {
             .is_ok_and(|output| output.status.success());
 
         if !developer_tools_valid {
-            Some("xcode-select -p does not point at a toolchain containing usr/bin/xcrun")
+            // `xcrun --find` below is the supported way to locate these tools;
+            // this hand-rolled path check is a stricter pre-filter that can
+            // reject a host the supported query would accept. Report what it
+            // actually saw so that can be judged rather than guessed.
+            Some(match developer_dir.as_deref() {
+                None => "xcode-select -p failed or printed non-UTF-8".to_string(),
+                Some(dir) => {
+                    format!("xcode-select -p = {dir:?}, but {dir:?}/usr/bin/xcrun is not a file")
+                }
+            })
         } else if !ok("/usr/bin/xcrun", &["--find", "sandbox-exec"]) {
-            Some("xcrun --find sandbox-exec failed")
+            Some("xcrun --find sandbox-exec failed".to_string())
         } else if !ok("/usr/bin/xcrun", &["--find", "git"]) {
-            Some("xcrun --find git failed")
+            Some("xcrun --find git failed".to_string())
         } else if !ok("/usr/bin/git", &["--version"]) {
-            Some("/usr/bin/git --version failed")
+            Some("/usr/bin/git --version failed".to_string())
         } else if !sandbox_runs {
-            Some("sandbox-exec refused a permissive (allow default) profile")
+            Some("sandbox-exec refused a permissive (allow default) profile".to_string())
         } else {
             None
         }
