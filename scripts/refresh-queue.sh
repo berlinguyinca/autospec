@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
-# refresh-queue.sh — refresh the Phase 4 dispatch queue with a solution-state filter.
+# refresh-queue.sh — regenerate the Phase 4 dispatch queue from the live tracker.
 #
-# Background (issue #3658): the dispatch queue was built from `open + auto-implement`
-# issues. On a live fleet 21% of queued issues already had an open PR (work done, in
-# review, awaiting merge) and the dispatcher re-dispatched them — pure duplicate work.
-# The queue filter looked only at the PROBLEM state (issue open, label present) and
-# ignored the SOLUTION state (an open PR already exists for that issue).
+# Background (issue #3655): the dispatch queue was a hand-maintained snapshot. It
+# drifted from the tracker — resolved issues stayed queued (dispatched as no-ops) and
+# newly labelled ones sat unqueued (never dispatched). The queue is now regenerated
+# from the live tracker (`open + auto-implement`) on every refresh:
 #
-# This script is the missing filter, applied at refresh time:
+#   * Regenerates from the tracker, not a snapshot: the fresh `open + auto-implement`
+#     set is the source of truth on every run.
+#   * Preserves the order of entries still live: surviving issues keep their position
+#     from the previous queue, and newly dispatchable ones are appended in tracker
+#     (fetch) order. Dispatch is in order, so reshuffling would starve whatever is
+#     near the front.
+#   * Prunes resolved issues: an entry that is no longer `open + auto-implement`
+#     (closed, or label removed) drops out of the queue.
+#   * Reports what it changed so operators see the delta instead of inferring it:
+#         excluded 29 issues that already have an open PR
+#         queue: 202 -> 134, dropped 86 resolved, added 18 newly labelled
+#
+# Background (issue #3658): the queue also carried issues whose work was already done
+# — on a live fleet 21% of queued issues had an open PR (in review, awaiting merge)
+# and the dispatcher re-dispatched them. The filter looked only at the PROBLEM state
+# (issue open, label present) and ignored the SOLUTION state (an open PR exists). This
+# script applies that filter at refresh time too:
 #
 #   * Excludes every issue that already has an open PR. An issue is "covered" when
 #     any open PR has head branch `fix/issue-N`, or its body references the issue
@@ -15,10 +30,6 @@
 #     no partial-number matches such as #36580).
 #   * Filtering, not deletion: the script never mutates GitHub state. If a PR is
 #     closed unmerged, its issue simply reappears on the next refresh.
-#   * Reports the exclusion count so operators see "29 excluded, already have PR"
-#     instead of inferring it:
-#         excluded 29 issues that already have an open PR
-#         queue: 135 -> 106
 #   * `--check N` is the dispatcher's second line of defense: the dispatcher calls
 #     it right before dispatch and refuses issues that already have an open PR
 #     (exit 2 — the same refusal channel `autospec claim acquire` uses for
@@ -34,7 +45,8 @@
 #
 # Output:
 #   refresh: the two report lines above on stdout; the queue file is a JSON array
-#            of the surviving issue numbers, sorted ascending.
+#            of the surviving issue numbers — previous order kept for entries still
+#            live, newly dispatchable issues appended in tracker order.
 #   check:   silent on pass; one refusal line on stderr on refuse.
 #
 # Exit codes:
@@ -225,11 +237,14 @@ issues_file="$work_dir/issues.jsonl"
 fetch_pages "repos/${repo}/issues?labels=auto-implement&state=open&per_page=100" "$issues_file"
 
 # /issues also returns pull requests; drop anything that is a PR, then keep numbers.
-issues_json="$(jq -s 'add // [] | map(select(.pull_request == null)) | map(.number) | sort' "$issues_file")"
+# Keep tracker (fetch) order — NOT sorted — because the queue is dispatched in order
+# and reshuffling would starve whatever is near the front (issue #3655).
+issues_json="$(jq -s 'add // [] | map(select(.pull_request == null)) | map(.number)' "$issues_file")"
 prs_json="$(jq -s 'add // []' "$prs_file")"
 printf '%s' "$issues_json" > "$work_dir/issues.json"
 printf '%s' "$prs_json" > "$work_dir/prs.json"
 
+# Issues that already have an open PR (the #4033 solution-state filter).
 excluded_json="$(jq -n '
     input as $issues
     | input as $prs
@@ -244,16 +259,42 @@ excluded_json="$(jq -n '
       ]' "$work_dir/issues.json" "$work_dir/prs.json")"
 printf '%s' "$excluded_json" > "$work_dir/excluded.json"
 
-kept_json="$(jq -n '
+# Dispatchable = open + auto-implement minus PR-covered, in tracker order.
+dispatchable_json="$(jq -n '
     input as $issues
     | input as $excluded
     | $issues - $excluded' "$work_dir/issues.json" "$work_dir/excluded.json")"
+printf '%s' "$dispatchable_json" > "$work_dir/dispatchable.json"
 
-before_count="$(jq 'length' <<<"$issues_json")"
-after_count="$(jq 'length' <<<"$kept_json")"
+# Previous queue, read from the same file we are about to rewrite. A missing, empty,
+# or malformed file counts as a first run (empty previous queue).
+old_queue_json="$(jq -c 'if type == "array" then map(tonumber) else [] end' "$out_file" 2>/dev/null || printf '[]')"
+printf '%s' "$old_queue_json" > "$work_dir/old.json"
+
+# Regenerate: surviving entries keep their previous position; newly dispatchable
+# entries are appended in tracker order. dropped = previous entries no longer live
+# (typically resolved); added = dispatchable entries new to the queue.
+report_json="$(jq -n '
+    input as $o
+    | input as $d
+    | [ $o[] | select(. as $n | $d | index($n) != null) ] as $surviving
+    | [ $d[] | select(. as $n | $o | index($n) == null) ] as $added
+    | ($surviving + $added) as $queue
+    | { queue: $queue,
+        old_count: ($o | length),
+        new_count: ($queue | length),
+        added: ($added | length),
+        dropped: ([ $o[] | select(. as $n | $d | index($n) == null) ] | length) }' "$work_dir/old.json" "$work_dir/dispatchable.json")"
+
+kept_json="$(jq -c '.queue' <<<"$report_json")"
+old_count="$(jq -r '.old_count' <<<"$report_json")"
+new_count="$(jq -r '.new_count' <<<"$report_json")"
+added_count="$(jq -r '.added' <<<"$report_json")"
+dropped_count="$(jq -r '.dropped' <<<"$report_json")"
 excluded_count="$(jq 'length' <<<"$excluded_json")"
 
 printf 'excluded %s issues that already have an open PR\n' "$excluded_count"
-printf 'queue: %s -> %s\n' "$before_count" "$after_count"
+printf 'queue: %s -> %s, dropped %s resolved, added %s newly labelled\n' \
+    "$old_count" "$new_count" "$dropped_count" "$added_count"
 
 write_queue "$out_file"
