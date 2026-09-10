@@ -19,11 +19,16 @@ setup() {
   )
   FIXTURE="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$FIXTURE"
-  # Stub PATH: only `find` (the single external the script needs) plus whatever
-  # a test explicitly stubs in. Everything else is genuinely absent.
+  # Stub PATH: `find` (the single required external) plus `python3`, which the
+  # script consults only for member-directory markers and degrades without.
+  # Both are the real binaries, not stubs: what must be genuinely absent here
+  # is the linters, and every test explicitly stubs the ones it needs.
   STUB_BIN="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUB_BIN"
   ln -sf "$(command -v find)" "$STUB_BIN/find"
+  if command -v python3 >/dev/null 2>&1; then
+    ln -sf "$(command -v python3)" "$STUB_BIN/python3"
+  fi
   TAB="$(printf '\t')"
   unset AUTOSPEC_FINAL_QUALITY_COMMAND
 }
@@ -47,6 +52,36 @@ stub_tool() {
   printf '%s\n' "$output" | grep -Fq "package.json${TAB}npm run lint"
   printf '%s\n' "$output" | grep -Fq "*.sh${TAB}"
   printf '%s\n' "$output" | grep -Fq "shellcheck"
+}
+
+@test "a monorepo marker in a workspace member subproject is discovered" {
+  # Fixture from the #3112 language-axis audit: a Rust crate at the root and a
+  # node subproject under web/. The detector reports rust + javascript; the
+  # gate must find the web/package.json member marker, not root-only.
+  : > "$FIXTURE/Cargo.toml"
+  mkdir -p "$FIXTURE/crates/foo/src"
+  seq 1 30 > "$FIXTURE/crates/foo/src/lib.rs"
+  mkdir -p "$FIXTURE/web"
+  : > "$FIXTURE/web/package.json"
+  seq 1 10 > "$FIXTURE/web/app.js"
+
+  run bash "$DISCOVER" --repo-root "$FIXTURE"
+
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  printf '%s\n' "$output" | grep -Fq "Cargo.toml${TAB}cargo clippy --workspace --all-targets -- -D warnings"
+  printf '%s\n' "$output" | grep -Fq "package.json${TAB}npm run lint"
+
+  # The stack detector reports exactly the two languages the gate now lints.
+  run env PYTHONPATH="$REPO_ROOT/scripts" python3 -c "
+import sys
+from pathlib import Path
+from autospec_autonomy_stack import _detect_profiles
+langs = sorted(p['id'] for p in _detect_profiles(Path('$FIXTURE'))['languages'])
+print(','.join(langs))
+"
+  [ "$status" -eq 0 ]
+  [ "$output" = "javascript,rust" ]
 }
 
 @test "a repo with no language markers discovers nothing and exits clean" {
