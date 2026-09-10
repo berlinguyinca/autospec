@@ -14,6 +14,7 @@ mod queue_storage;
 pub mod relocation;
 pub mod report;
 pub mod result;
+pub mod sort_key;
 pub mod stage_throughput;
 pub mod test_diff;
 pub mod verification;
