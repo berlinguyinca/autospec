@@ -94,6 +94,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner matches both `metadata.type:` (spec) and `type:` (real CC files); fixture both variants
 - [Harness session-id env vars](reference_harness_session_id_envs.md) — `CLAUDE_CODE_SESSION_ID` is the stable per-session id (ps -o sess=0, no tty under tool calls); fallback chain for harness-neutral per-session locks; PPID fallback is unreliable
 - [Worktree/main topology](reference_worktree_main_topology.md) — check `git worktree list` before assuming primary can hold `main`; sibling worktrees may own it, and stale N-ahead branches usually need fresh origin/main branches
+- [Worktree reset = guarded detached re-park](feedback_worktree_reset_guarded_detach.md) — never an unguarded checkout/reset/clean chain naming a shared branch (#3653: sibling held `main`, chain plowed on, moved a local branch off its base); use `worktree-guard.sh reset --path <wt> [--base] [--clean]` (detached at base tip, stop-at-first-failure, assert state after each step)
 
 # Active project state (review weekly; archive when shipped)
 

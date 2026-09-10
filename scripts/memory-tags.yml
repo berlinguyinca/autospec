@@ -48,3 +48,6 @@ feedback_roi_check_new_components.md:
 
 feedback_validate_sh_lockstep_checks.md:
   tags: [validate, lockstep, skill-authoring, prose, autospec-run]
+
+feedback_worktree_reset_guarded_detach.md:
+  tags: [worktree, git, reset, detach, worktree-guard]
