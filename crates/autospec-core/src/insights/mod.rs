@@ -22,8 +22,13 @@ pub mod pr;
 pub mod proposals;
 pub mod quality;
 pub mod summarize;
+pub mod tools;
 
 pub use models::{
     model_performance, recommend, ModelPerformance, RecommendationConfidence,
     RoutingRecommendation, Window, TASK_DIMENSIONS,
+};
+pub use tools::{
+    retirement_candidates, tool_roi, wrapper_candidates, InvocationRow, RetirementCandidate,
+    RetirementConfig, RetirementEvidence, ToolRoi, WrapperCandidate,
 };
