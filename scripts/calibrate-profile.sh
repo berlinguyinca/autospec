@@ -281,7 +281,11 @@ for _issue in $ISSUES; do
             '{dispatch_id:$id, ts:$ts, dispatch_kind:"implementer", profile:$p, model:$m,
               harness:"codex-oss", issue:$issue, cell_ctx:"32k", cell_reasoning:"shallow",
               input_tokens:0, output_tokens:0, cached_tokens:0, wall_clock_ms:$ms,
-              retries:0, escalated:false, outcome:$oc, reason:"calibration replay", stack:$st}')"
+              retries:0, escalated:false, outcome:$oc, reason:"calibration replay", stack:$st,
+              authoring_vendor:"local"}')"
+            # authoring_vendor:"local" (issue #3347, guardrails R4): a local model
+            # authored this replay, and "local" is never a dispatchable review
+            # harness, so any review of local-authored work must be cloud.
         bash "$SCRIPT_DIR/routing-ledger.sh" --append "$_rec" >/dev/null 2>&1 || true
     fi
     rm -rf "$_wt"

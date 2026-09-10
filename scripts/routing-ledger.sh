@@ -36,6 +36,17 @@
 #                     --update-outcome normalize it to "unknown" so every row at
 #                     rest carries the field. route-decide.sh reads this as the
 #                     per-stack local-eligibility evidence (the stack gate).
+#     authoring_vendor
+#                     OPTIONAL (issue #3347, guardrails R4). The VENDOR that
+#                     produced the dispatch: claude | codex | opencode | local.
+#                     Recorded on implementer rows so a PR reviewer can be held
+#                     to a different vendor than the PR author
+#                     (verify-voter-vendor.sh --role reviewer --author <v>).
+#                     "local" names a local-model dispatch, which has no cloud
+#                     harness to record in `harness`. Legacy rows predate the
+#                     field and stay valid (append-only ledger: no retrofit
+#                     key); when present it must be a string from that list.
+#                     --update-outcome copies it through on the appended row.
 #
 # Append-only audit trail: --update-outcome appends a NEW copy of the record with
 # an updated outcome/reason/ts rather than rewriting history. Readers (--show /
@@ -169,6 +180,16 @@ _validate_object() {
     if printf '%s' "$_obj" | jq -e 'has("stack")' >/dev/null 2>&1; then
         if ! printf '%s' "$_obj" | jq -e '.stack | (type=="string") and (length>0)' >/dev/null 2>&1; then
             printf 'stack must be a non-empty string when present\n'
+            return 1
+        fi
+    fi
+    # authoring_vendor is optional at rest (legacy rows predate it, issue
+    # #3347) but, when present, must be a string from the authoring vocabulary:
+    # a typo'd vendor would let the reviewer selector fail closed over a
+    # mismatch it cannot see, or worse, look independent when it is not.
+    if printf '%s' "$_obj" | jq -e 'has("authoring_vendor")' >/dev/null 2>&1; then
+        if ! printf '%s' "$_obj" | jq -e '.authoring_vendor | (type=="string") and (. as $v | ["claude","codex","opencode","local"] | index($v) != null)' >/dev/null 2>&1; then
+            printf 'authoring_vendor must be one of: claude codex opencode local\n'
             return 1
         fi
     fi

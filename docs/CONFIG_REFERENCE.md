@@ -477,6 +477,32 @@ The voter's *tier* is not chosen here — it is the selected harness's own `TIER
 allowlist: cost-ordering voters converges them onto one cheapest model, which is
 exactly the correlation this script exists to break.
 
+### Reviewer-vendor guardrail (`--role reviewer --author <vendor>`)
+The same script holds a second role for PR review (issue #3347, guardrails R4 in
+`docs/plans/2026-08-24-local-model-guardrails.md`): a PR reviewer must never share a
+vendor with the PR author. `verify-voter-vendor.sh --role reviewer --author <vendor>`
+returns a dispatchable **cloud** vendor different from the authoring vendor; the
+authoring vendor itself is recorded on the implementer ledger row as the optional
+`authoring_vendor` field (`claude | codex | opencode | local` — `local` names a
+local-model dispatch, which has no cloud harness to record in `harness`).
+
+The flags are role-scoped and strict: `--role` takes `voter` (default, the
+contract above is untouched) or `reviewer`; `--author` is required in reviewer
+mode and a usage error in voter mode; `--proposer` is required in voter mode and
+a usage error in reviewer mode. `AUTOSPEC_VOTER_VENDORS` applies to both roles.
+
+Reviewer narrowing is: installed cloud vendors (a `local` entry in an explicit
+list is dropped, never a dispatchable review harness) → minus `--unavailable` →
+minus the author's vendor (a `local` author removes nothing: a local model is
+never a review candidate, so a local-implemented PR must be reviewed by cloud) →
+if the author is `claude` and `codex` survives, return `codex` (autospec already
+relies on Codex for peer review and it is a genuinely different vendor) → else
+least ledger spend of what remains. Exit 3 means no *independent reviewer*
+vendor is available; the message is printed on stderr unconditionally (unlike
+voter mode, where the exit code is the pinned signal). The caller keeps its own
+`TIER_A` rather than degrading to a same-vendor review — independence is the
+property under test, not cost.
+
 Two properties are deliberate and worth relying on:
 
 - **No data means no change.** With an empty or thin ledger, `route-decide.sh` prints
