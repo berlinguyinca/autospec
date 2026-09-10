@@ -52,16 +52,76 @@ fn sums_across_all_targets_and_reports_the_aggregate() {
 
 #[test]
 fn a_failure_in_any_target_fails_the_run() {
+    // Real fail-fast output: the failing target's result line, then the
+    // abort. No `--no-fail-fast` summary, so the aggregate is a lower bound.
     let output = format!(
-            "{}\n{}\n",
-            result_line(100, 0),
-            "test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n"
-        );
+        "{}\n{}\n{}\n",
+        result_line(100, 0),
+        "test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "error: test failed, to rerun pass `--test failing`"
+    );
     let verdict = judge_test_run(&output);
 
     assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(!verdict.completed);
     assert!(!verdict.is_passed());
-    assert_eq!(verdict.evidence(), "103 passed; 2 failed across 2 targets");
+    assert!(
+        verdict
+            .evidence()
+            .starts_with("103 passed; 2 failed across 2 targets"),
+        "evidence must still carry the aggregate: {}",
+        verdict.evidence()
+    );
+    assert!(
+        verdict.evidence().contains("lower bound"),
+        "truncated run must label its count: {}",
+        verdict.evidence()
+    );
+}
+
+#[test]
+fn a_fail_fast_abort_is_labelled_a_lower_bound() {
+    // The #4131 shape: main's run stopped at its first failing target and
+    // the later failing targets never ran. The count must not read as a
+    // measurement.
+    let output = format!(
+        "{}\n{}\n",
+        result_line(989, 2),
+        "error: test failed, to rerun pass `-p autospec-cli --test conductor`"
+    );
+    let verdict = judge_test_run(&output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(!verdict.completed);
+    assert_eq!(verdict.aggregate.failed, 2);
+    assert!(
+        verdict
+            .evidence()
+            .contains("2 failed across 1 target (lower bound"),
+        "{}",
+        verdict.evidence()
+    );
+    assert!(
+        verdict.evidence().contains("without fail-fast"),
+        "the label must say how to make the count complete: {}",
+        verdict.evidence()
+    );
+}
+
+#[test]
+fn a_build_failure_truncates_the_run_too() {
+    // A target that never built produces no `test result:` line at all; the
+    // counts from the targets that did run are a lower bound.
+    let output = format!(
+        "{}\n{}\n",
+        result_line(511, 0),
+        "error: could not compile `crateb` (lib test) due to 1 previous error"
+    );
+    let verdict = judge_test_run(&output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(!verdict.completed);
+    assert!(verdict.evidence().contains("lower bound"));
 }
 
 #[test]
@@ -74,6 +134,113 @@ fn a_target_that_never_built_fails_the_run() {
 
     assert_eq!(verdict.outcome, TestRunOutcome::Failed);
     assert!(!verdict.is_passed());
+    assert!(
+        !verdict.completed,
+        "a build failure stops the run: the counts are a lower bound"
+    );
+}
+
+#[test]
+fn a_no_fail_fast_run_reports_every_target_and_is_complete() {
+    // A failure in an early target does not hide a later one: with
+    // `--no-fail-fast` every target runs and the numbered summary marks the
+    // failure set as the full failure set. The per-target singular abort
+    // lines are present but are not the completeness marker.
+    let mut output = String::new();
+    output.push_str("     Running unittests src/lib.rs (cratea)\n");
+    output.push_str(&result_line(500, 2));
+    output.push_str("error: test failed, to rerun pass `-p cratea --lib`\n");
+    output.push_str("     Running unittests src/lib.rs (crateb)\n");
+    output.push_str(&result_line(708, 2));
+    output.push_str("error: test failed, to rerun pass `-p crateb --lib`\n");
+    output.push_str("error: 2 targets failed:\n    `-p cratea --lib`\n    `-p crateb --lib`\n");
+
+    let verdict = judge_test_run(&output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(verdict.completed);
+    assert_eq!(verdict.aggregate.passed, 1208);
+    assert_eq!(verdict.aggregate.failed, 4);
+    assert_eq!(verdict.aggregate.targets, 2);
+    assert_eq!(verdict.evidence(), "1208 passed; 4 failed across 2 targets");
+}
+
+#[test]
+fn a_single_target_no_fail_fast_summary_is_complete() {
+    // Cargo prints the singular form for one failing target.
+    let output = format!(
+        "{}\n{}\n{}\n",
+        result_line(100, 1),
+        "error: test failed, to rerun pass `-p cratea --lib`",
+        "error: 1 target failed:\n    `-p cratea --lib`"
+    );
+    let verdict = judge_test_run(&output);
+
+    assert_eq!(verdict.outcome, TestRunOutcome::Failed);
+    assert!(verdict.completed);
+}
+
+#[test]
+fn comparing_a_truncated_run_to_a_complete_one_is_rejected() {
+    // AC4: a lower bound must not be compared with a measurement.
+    let truncated = judge_test_run(&format!(
+        "{}\nerror: test failed, to rerun pass `-p a --lib`\n",
+        result_line(989, 2)
+    ));
+    let complete = judge_test_run(&format!(
+        "{}\nerror: 1 target failed:\n    `-p a --lib`\n",
+        result_line(1208, 2)
+    ));
+
+    assert!(!truncated.completed);
+    assert!(complete.completed);
+
+    let err = failure_count_delta(&truncated, &complete).unwrap_err();
+    assert_eq!(
+        err,
+        IncomparableRuns {
+            baseline_truncated: true,
+            current_truncated: false,
+        }
+    );
+
+    let err = failure_count_delta(&complete, &truncated).unwrap_err();
+    assert_eq!(
+        err,
+        IncomparableRuns {
+            baseline_truncated: false,
+            current_truncated: true,
+        }
+    );
+
+    // Two lower bounds are equally incomparable.
+    let err = failure_count_delta(&truncated, &truncated).unwrap_err();
+    assert!(err.baseline_truncated && err.current_truncated);
+    assert!(err.to_string().contains("lower bound"));
+}
+
+#[test]
+fn a_delta_between_two_complete_runs_measures_the_change() {
+    let baseline = judge_test_run(&format!(
+        "{}\nerror: 1 target failed:\n    `-p a --lib`\n",
+        result_line(989, 4)
+    ));
+    let current = judge_test_run(&format!(
+        "{}\nerror: 1 target failed:\n    `-p a --lib`\n",
+        result_line(1208, 2)
+    ));
+
+    assert!(baseline.completed && current.completed);
+    assert_eq!(failure_count_delta(&baseline, &current), Ok(-2));
+}
+
+#[test]
+fn a_delta_between_two_passing_runs_is_zero() {
+    let baseline = judge_test_run(&result_line(989, 0));
+    let current = judge_test_run(&result_line(1208, 0));
+
+    assert!(baseline.completed && current.completed);
+    assert_eq!(failure_count_delta(&baseline, &current), Ok(0));
 }
 
 #[test]
