@@ -138,8 +138,9 @@ fn autonomous_executor_bridge_opencode_requires_and_uses_safe_adapter() {
             "implement issue 42",
         )
         .expect_err("OpenCode without an adapter must fail closed");
-    assert!(
-        error.contains("executor_harness_uncontained"),
+    assert_eq!(
+        error.split_once(':').map(|(code, _)| code),
+        Some("executor_harness_uncontained"),
         "unexpected error: {error}"
     );
 
