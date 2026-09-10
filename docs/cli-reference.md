@@ -239,7 +239,9 @@ one `incumbent:` and one `challenger:` line with `successes= failures= best_beli
 `subset <name>:` line per required subset, then
 `verdict: qualified | rejected (<reasons>) | inconclusive (<reasons>)`. `anchor show`
 defaults to the redacted `mutation` role: protected-holdout cases carry no `expected_label`
-and quarantine cases are dropped. See the [configuration reference](CONFIG_REFERENCE.md#evaluator-promotion-policy)
+and quarantine cases are dropped. `anchor verify` checks the *stored* suite, so quarantined
+cases still have their artifacts digested and suite invariants are re-checked; the redacted
+view is never validated, because a redacted label is legitimately absent rather than missing. See the [configuration reference](CONFIG_REFERENCE.md#evaluator-promotion-policy)
 for the policy fields.
 
 `autospec plan` only reads and parses Markdown from one generated package. It does not
