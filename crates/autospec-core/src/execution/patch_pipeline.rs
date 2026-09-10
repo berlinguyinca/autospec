@@ -20,7 +20,9 @@
 //! 3. **The queue is ordered by cost, not by name** ([`order_by_cost`]):
 //!    terminal, cheap cases — existing PRs, closed issues, memoized holds,
 //!    no-net-changes — run first, and compute is spent only on genuine
-//!    candidates.
+//!    candidates. Never lexicographic or filesystem order: the key is
+//!    expected value, and every item records the key that ordered it
+//!    ([`Patch::ordering_key`]) (#3783).
 //! 4. **A memo over (patch identity, base sha) covers every terminal
 //!    decision** ([`ConversionMemo`]), not just holds. Identity alone does
 //!    not determine the outcome: the same patch rebased onto a new trunk may
@@ -43,12 +45,19 @@
 //!    base — and is honored only while its base is still the tip. A `HELD`
 //!    computed against an old base is a hypothesis, not a decision:
 //!    [`plan_pass`] refuses to report it as a memo hit.
-//! 8. **Impact first, then newest.** Within each cost class the patch that
-//!    unblocks the most downstream issues goes first ([`order_by_cost`]): it
-//!    is the highest-leverage work and converting it promptly unblocks the
-//!    most dependents (#3799). Ties on impact fall back to newest-first:
-//!    the most recently produced patch sits on the youngest base and is the
-//!    one most likely to apply.
+//! 8. **Expected value: verified status, then impact, then newest.**
+//!    Within each cost class the agent's own verdict ranks first
+//!    ([`order_by_cost`]): a recorded `PASS` goes first — its
+//!    verification cost is already paid — no report is neutral, and a
+//!    recorded failure goes last, since it is evidence the patch carries
+//!    a defect the pass has not yet fixed. Ties on status go to the patch
+//!    that unblocks the most downstream issues: it is the
+//!    highest-leverage work and converting it promptly unblocks the most
+//!    dependents (#3799). Ties on impact fall back to newest-first: the
+//!    most recently produced patch sits on the youngest base and is the
+//!    one most likely to apply. Every item records its full ordering key
+//!    ([`Patch::ordering_key`]) and the pass reports it per item, so the
+//!    order of any pair is inspectable from the log alone (#3783).
 //! 9. **The worklist is a moving quantity** ([`Worklist`]). A pass that
 //!    enumerates its inputs once at startup and then works for hours
 //!    presents a snapshot as a queue: the newest work — precisely the work
@@ -59,7 +68,14 @@
 //!    absorbs mid-run arrivals into the remaining queue or explicitly names
 //!    them as deferred ([`Worklist::absorb`], [`Worklist::defer`]), and
 //!    reports considered / arrived / deferred so the summary adds up to
-//!    what was on disk at the end of the run, not the start (#3801).
+//!    what was on disk at the end of the run, not the start (#3801). A
+//!    defer carries a recorded reason and the summary names the deferred
+//!    items with it ([`Worklist::defer`], [`DeferredPatch`]) — a defer
+//!    nobody can explain is unrepresented work wearing a different label —
+//!    and the freeze line reports the worklist's age, `now` minus the
+//!    freeze stamp ([`Worklist::elapsed_since_freeze`]), so a worklist
+//!    that stopped being re-read is visible in the log, not only in
+//!    hindsight (#3783).
 //! 10. **A gate that could not run is not a failed assertion.** A pass
 //!     whose setup fails (the build died, the provisioning aborted) has not
 //!     evaluated the patch, and must not report it as if the patch were
@@ -171,7 +187,13 @@ use std::collections::BTreeMap;
 /// of the submission a fresh agent fixes), an agent-reported unbuilt hold
 /// is not (a re-run reproduces it). Results recorded under version 2 are
 /// hypotheses the version-3 logic re-verifies, not decisions.
-pub const CONVERSION_LOGIC_VERSION: u32 = 3;
+/// Bumped to 4 in #3783: the ordering comparator gained the agent-status
+/// dimension (recorded `PASS` first, no report neutral, recorded failures
+/// last) and every item records its full ordering key
+/// ([`Patch::ordering_key`]). Ordering decides which work a pass spends
+/// its compute on; results recorded under version 3 are hypotheses the
+/// version-4 logic re-verifies, not decisions.
+pub const CONVERSION_LOGIC_VERSION: u32 = 4;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -247,6 +269,20 @@ impl ConversionClass {
             Self::CouldNotEvaluate | Self::Candidate => None,
         }
     }
+
+    /// The class's stable display name in log lines and ordering keys
+    /// (#3783). [`CouldNotEvaluate`] keeps its all-caps form from #3866,
+    /// distinct from the PascalCase decided classes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExistingPr => "ExistingPr",
+            Self::ClosedIssue => "ClosedIssue",
+            Self::MemoizedHold => "MemoizedHold",
+            Self::NoNetChange => "NoNetChange",
+            Self::CouldNotEvaluate => "COULD-NOT-EVALUATE",
+            Self::Candidate => "Candidate",
+        }
+    }
 }
 
 /// The verdict of a terminal patch, as a re-dispatch gate must see it
@@ -297,6 +333,13 @@ pub struct Patch {
     /// publishes this value; missing entries default to 0, which degrades
     /// ordering to recency-only (today's behaviour).
     pub unblocks: usize,
+    /// The agent's own verdict on this patch, parsed from its status
+    /// report (the `status_triage` module): `PASS` when the agent's build
+    /// and tests were green, a failure token (`TIMEOUT`, `BUILD-FAILED`,
+    /// …) when they were not, `None` when no report exists. Drives the
+    /// expected-value dimension of the ordering key
+    /// ([`Patch::ordering_key`]) (#3783).
+    pub agent_status: Option<String>,
 }
 
 impl Patch {
@@ -323,6 +366,7 @@ impl Patch {
             class,
             produced_at,
             unblocks,
+            agent_status: None,
         })
     }
 
@@ -356,17 +400,51 @@ impl Patch {
     pub fn is_done(&self) -> bool {
         self.class.verdict().is_some_and(PatchVerdict::is_done)
     }
+
+    /// Set the agent's own verdict on this patch, when one exists. Blank
+    /// input is treated as no report: an empty status line is not
+    /// evidence either way.
+    pub fn with_agent_status(mut self, status: impl Into<String>) -> Self {
+        let status = status.into();
+        self.agent_status = if status.trim().is_empty() {
+            None
+        } else {
+            Some(status.trim().to_string())
+        };
+        self
+    }
+
+    /// The patch's full ordering key, recorded for post-hoc inspection
+    /// (#3783): every dimension [`order_by_cost`] sorts by, in the order
+    /// it sorts them. Two items whose recorded keys differ are ordered by
+    /// the first dimension on which they differ, so the order of any pair
+    /// is reproducible from the log lines alone.
+    pub fn ordering_key(&self) -> String {
+        format!(
+            "class={},status={},unblocks={},produced_at={}",
+            self.class.as_str(),
+            self.agent_status.as_deref().unwrap_or("none"),
+            self.unblocks,
+            self.produced_at
+        )
+    }
 }
 
-/// Order a pass by cost, then by downstream impact, then by recency: every
-/// terminal (cheap) patch before every candidate (expensive) patch, and
-/// within each cost class the highest-impact patch first (most downstream
-/// issues unblocked), with recency as tiebreak. A patch that unblocks many
-/// issues is the highest-leverage work: converting it promptly unblocks the
-/// most downstream dependents (#3799). Patches tied on impact fall back to
-/// newest-first, which keeps the previous behaviour when no impact data is
-/// present (all unblocks = 0). The sort is stable, so patches tied on all
-/// keys keep their queue order and two passes over the same queue agree.
+/// Order a pass by expected value: cost, then verified agent status, then
+/// downstream impact, then recency. Every terminal (cheap) patch goes
+/// before every candidate (expensive) patch; within each cost class a
+/// patch with a recorded agent `PASS` goes first (its verification cost
+/// is already paid), then patches with no report, then patches with a
+/// recorded failure (evidence the patch carries a defect the pass has not
+/// yet fixed); within each status group the highest-impact patch goes
+/// first (most downstream issues unblocked), with recency as tiebreak. A
+/// patch that unblocks many issues is the highest-leverage work:
+/// converting it promptly unblocks the most downstream dependents
+/// (#3799). Patches tied on impact fall back to newest-first, which keeps
+/// the previous behaviour when no impact data is present (all unblocks =
+/// 0). The sort is by expected value, never lexicographic or filesystem
+/// order (#3783). The sort is stable, so patches tied on all keys keep
+/// their queue order and two passes over the same queue agree.
 pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
     let mut ordered: Vec<&Patch> = patches.iter().collect();
     ordered.sort_by(|a, b| cost_then_impact(a, b));
@@ -383,17 +461,37 @@ pub fn order_by_cost(patches: &[Patch]) -> Vec<&Patch> {
 fn cost_then_impact(a: &Patch, b: &Patch) -> std::cmp::Ordering {
     a.class
         .cmp(&b.class)
+        .then(
+            agent_status_rank(a.agent_status.as_deref())
+                .cmp(&agent_status_rank(b.agent_status.as_deref())),
+        )
         .then(b.unblocks.cmp(&a.unblocks))
         .then(b.produced_at.cmp(&a.produced_at))
 }
 
+/// The agent-status dimension of the ordering key (#3783), ascending =
+/// higher expected value. A recorded `PASS` means the verification cost
+/// is already paid — first. No report is neutral. A recorded failure
+/// (timeout, build failure, …) is evidence the patch carries a defect
+/// the pass has not yet fixed — last.
+fn agent_status_rank(status: Option<&str>) -> u8 {
+    match status {
+        Some("PASS") => 0,
+        None => 1,
+        Some(_) => 2,
+    }
+}
+
 /// Produce a one-line ordering summary for the top candidates in the pass.
 ///
-/// Shows the leading `top_n` patches with their unblock counts so an inert
-/// or degenerate impact key is visible in the log rather than only
-/// discoverable by measuring it. Also reports the number of distinct
-/// unblocks values across all candidates, mirroring the "recency key has N
-/// distinct values" diagnostic that caught the degenerate-mtime bug (#3791).
+/// Shows the leading `top_n` patches with their full ordering key
+/// ([`Patch::ordering_key`]) so the order of any pair is inspectable from
+/// the log alone (#3783). Also reports the number of distinct unblocks
+/// values across the population the key was measured on — the population
+/// is stated with the number (the baseline), not assumed from an absolute
+/// bar — mirroring the "recency key has N distinct values" diagnostic
+/// that caught the degenerate-mtime bug (#3791). A single distinct value
+/// is degenerate at any baseline: the key separates no pair.
 pub fn order_summary(ordered: &[&Patch], top_n: usize) -> String {
     if ordered.is_empty() {
         return "phase 1 ordered: 0 candidates".to_string();
@@ -406,22 +504,20 @@ pub fn order_summary(ordered: &[&Patch], top_n: usize) -> String {
     let top: Vec<String> = ordered
         .iter()
         .take(top_n)
-        .map(|p| format!("{}(unblocks:{})", p.identity, p.unblocks))
+        .map(|p| format!("{}({})", p.identity, p.ordering_key()))
         .collect();
-    format!(
-        "phase 1 ordered: {} first, then impact desc, then newest first — {} leads {} candidates (impact key has {} distinct values)",
-        match ordered[0].class {
-            ConversionClass::ExistingPr => "ExistingPr",
-            ConversionClass::ClosedIssue => "ClosedIssue",
-            ConversionClass::MemoizedHold => "MemoizedHold",
-            ConversionClass::NoNetChange => "NoNetChange",
-            ConversionClass::CouldNotEvaluate => "COULD-NOT-EVALUATE",
-            ConversionClass::Candidate => "Candidate",
-        },
+    let mut summary = format!(
+        "phase 1 ordered: {} first, then status, then impact desc, then newest first — {} leads {} candidates (impact key has {} distinct values, baseline: {} items)",
+        ordered[0].class.as_str(),
         top.join(", "),
         ordered.len(),
         distinct_unblocks,
-    )
+        ordered.len(),
+    );
+    if distinct_unblocks < 2 {
+        summary.push_str(" — degenerate: the key separates no pair");
+    }
+    summary
 }
 
 /// Read an `issue<TAB>unblocks` file produced by the frontier loop.
@@ -519,6 +615,18 @@ pub struct WorklistSummary {
     pub on_disk: usize,
 }
 
+/// A patch named as deferred to the next run, with its recorded reason
+/// (#3783). A defer with no reason is unrepresented work wearing a
+/// different label; the run summary names deferred items with their
+/// reason, so the defer is inspectable in the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredPatch {
+    /// The deferred patch.
+    pub patch: Patch,
+    /// Why the run deferred it, recorded at the defer.
+    pub reason: String,
+}
+
 /// A live view of the conversion pass's worklist: the queue as a moving
 /// quantity, not a startup snapshot (#3801).
 ///
@@ -542,7 +650,9 @@ pub struct WorklistSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worklist {
     remaining: Vec<Patch>,
-    deferred: Vec<Patch>,
+    /// Patches explicitly named as deferred to the next run, each with
+    /// its recorded reason (#3783).
+    deferred: Vec<DeferredPatch>,
     frozen_at: u64,
     initial: usize,
     considered: usize,
@@ -580,8 +690,9 @@ impl Worklist {
         &self.remaining
     }
 
-    /// The patches explicitly named as deferred to the next run.
-    pub fn deferred(&self) -> &[Patch] {
+    /// The patches explicitly named as deferred to the next run, each
+    /// with its recorded reason (#3783).
+    pub fn deferred(&self) -> &[DeferredPatch] {
         &self.deferred
     }
 
@@ -625,23 +736,40 @@ impl Worklist {
     }
 
     /// Name a patch as explicitly deferred to the next run instead of
-    /// converting it in this one. A patch that is still in the remaining
-    /// queue is going to be converted in this run, and the same patch may
-    /// only be deferred once: both are bookkeeping errors.
-    pub fn defer(&mut self, patch: Patch) -> Result<(), String> {
+    /// converting it in this one, with the reason recorded at the defer
+    /// (#3783). A patch that is still in the remaining queue is going to
+    /// be converted in this run, the same patch may only be deferred
+    /// once, and a defer without a reason is unrepresented work wearing a
+    /// different label: all three are bookkeeping errors.
+    pub fn defer(&mut self, patch: Patch, reason: &str) -> Result<(), String> {
         if self.remaining.iter().any(|p| p.identity == patch.identity) {
             return Err(format!(
                 "refusing to defer {}: already in the remaining worklist",
                 patch.identity
             ));
         }
-        if self.deferred.iter().any(|p| p.identity == patch.identity) {
+        if reason.trim().is_empty() {
+            return Err(format!(
+                "refusing to defer {} without a reason: a defer nobody can \
+                 explain is unrepresented work wearing a different label \
+                 (#3783)",
+                patch.identity
+            ));
+        }
+        if self
+            .deferred
+            .iter()
+            .any(|p| p.patch.identity == patch.identity)
+        {
             return Err(format!(
                 "refusing to defer {}: already named as deferred",
                 patch.identity
             ));
         }
-        self.deferred.push(patch);
+        self.deferred.push(DeferredPatch {
+            patch,
+            reason: reason.trim().to_string(),
+        });
         Ok(())
     }
 
@@ -660,17 +788,36 @@ impl Worklist {
         }
     }
 
-    /// The freeze window and the moving counts as one log line, e.g. `worklist
-    /// frozen at 1022; 2 patches arrived since freeze; 84 considered, 51
-    /// remaining, 2 deferred to the next run [iw-49, iw-50]`.
-    pub fn summary_line(&self) -> String {
+    /// The worklist's age: `now` minus the freeze stamp, in the same
+    /// monotonic-stamp space as [`Patch::produced_at`]. Reported so a
+    /// worklist that stopped being re-read is visible in the log, not
+    /// only in hindsight (#3783).
+    pub fn elapsed_since_freeze(&self, now: u64) -> u64 {
+        now.saturating_sub(self.frozen_at)
+    }
+
+    /// The freeze window (with the elapsed time at `now`) and the moving
+    /// counts as one log line, e.g. `worklist frozen at 1022 (elapsed
+    /// 1440); 2 patches arrived since freeze; 84 considered, 51 remaining,
+    /// 2 deferred to the next run [iw-49: base stale beyond the run's
+    /// re-baseline window, iw-50: held by the agent's report]`.
+    pub fn summary_line(&self, now: u64) -> String {
         let s = self.summary();
         let mut line = format!(
-            "worklist frozen at {}; {} patches arrived since freeze; {} considered, {} remaining, {} deferred to the next run",
-            s.frozen_at, s.arrived, s.considered, s.remaining, s.deferred
+            "worklist frozen at {} (elapsed {}); {} patches arrived since freeze; {} considered, {} remaining, {} deferred to the next run",
+            s.frozen_at,
+            now.saturating_sub(s.frozen_at),
+            s.arrived,
+            s.considered,
+            s.remaining,
+            s.deferred
         );
         if !self.deferred.is_empty() {
-            let names: Vec<&str> = self.deferred.iter().map(|p| p.identity.as_str()).collect();
+            let names: Vec<String> = self
+                .deferred
+                .iter()
+                .map(|d| format!("{}: {}", d.patch.identity, d.reason))
+                .collect();
             line.push_str(&format!(" [{}]", names.join(", ")));
         }
         line
@@ -2333,12 +2480,21 @@ mod tests {
         let ordered = order_by_cost(&patches);
         let summary = order_summary(&ordered, 3);
 
-        assert!(summary.contains("#46(unblocks:79)"), "got: {summary}");
-        assert!(summary.contains("#47(unblocks:3)"), "got: {summary}");
-        assert!(summary.contains("#99(unblocks:0)"), "got: {summary}");
+        assert!(
+            summary.contains("#46(class=Candidate,status=none,unblocks=79,produced_at=100)"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("#47(class=Candidate,status=none,unblocks=3,produced_at=200)"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("#99(class=Candidate,status=none,unblocks=0,produced_at=300)"),
+            "got: {summary}"
+        );
         assert!(summary.contains("3 candidates"), "got: {summary}");
         assert!(
-            summary.contains("impact key has 3 distinct values"),
+            summary.contains("impact key has 3 distinct values, baseline: 3 items"),
             "got: {summary}"
         );
     }
@@ -2353,7 +2509,11 @@ mod tests {
         let summary = order_summary(&ordered, 5);
 
         assert!(
-            summary.contains("impact key has 1 distinct values"),
+            summary.contains("impact key has 1 distinct values, baseline: 2 items"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("degenerate: the key separates no pair"),
             "got: {summary}"
         );
     }
@@ -2916,9 +3076,13 @@ mod tests {
         assert_eq!(arrived, 1);
         assert!(!wl.rescan_due(2));
 
-        // A patch the run will not convert is named, not unrepresented.
-        wl.defer(patch_at("e", "s", ConversionClass::Candidate, 310))
-            .unwrap();
+        // A patch the run will not convert is named, not unrepresented,
+        // and carries the reason it was deferred (#3783).
+        wl.defer(
+            patch_at("e", "s", ConversionClass::Candidate, 310),
+            "base is stale beyond the run's rebaseline window",
+        )
+        .unwrap();
 
         let s = wl.summary();
         assert_eq!(s.initial, 3);
@@ -2930,11 +3094,17 @@ mod tests {
         // The counts add up to what was on disk at the end of the run.
         assert_eq!(s.considered + s.remaining + s.deferred, s.on_disk);
 
-        let line = wl.summary_line();
-        assert!(line.starts_with("worklist frozen at 1000; "), "{}", line);
+        let line = wl.summary_line(2000);
+        assert!(
+            line.starts_with("worklist frozen at 1000 (elapsed 1000); "),
+            "{}",
+            line
+        );
         assert!(line.contains("1 patches arrived since freeze"), "{}", line);
         assert!(
-            line.contains("2 considered, 2 remaining, 1 deferred to the next run [e]"),
+            line.contains(
+                "2 considered, 2 remaining, 1 deferred to the next run [e: base is stale beyond the run's rebaseline window]"
+            ),
             "{}",
             line
         );
@@ -2977,14 +3147,17 @@ mod tests {
         );
 
         let err = wl
-            .defer(patch_at("queued", "s", ConversionClass::Candidate, 1))
+            .defer(patch_at("queued", "s", ConversionClass::Candidate, 1), "r")
             .unwrap_err();
         assert!(err.contains("already in the remaining worklist"), "{}", err);
 
-        wl.defer(patch_at("later", "s", ConversionClass::Candidate, 2))
-            .unwrap();
+        wl.defer(
+            patch_at("later", "s", ConversionClass::Candidate, 2),
+            "held by the agent's report",
+        )
+        .unwrap();
         let err = wl
-            .defer(patch_at("later", "s", ConversionClass::Candidate, 2))
+            .defer(patch_at("later", "s", ConversionClass::Candidate, 2), "r")
             .unwrap_err();
         assert!(err.contains("already named as deferred"), "{}", err);
     }
@@ -3003,6 +3176,133 @@ mod tests {
         let identities: Vec<_> = wl.remaining().iter().map(|p| p.identity.as_str()).collect();
         assert_eq!(identities, vec!["terminal", "new", "old"]);
         assert_eq!(wl.frozen_at(), 1000);
+    }
+
+    #[test]
+    fn ordering_key_records_each_dimension() {
+        let mut p = patch_unblocks("#46", "s1", ConversionClass::Candidate, 100, 79);
+        p = p.with_agent_status("PASS");
+        assert_eq!(
+            p.ordering_key(),
+            "class=Candidate,status=PASS,unblocks=79,produced_at=100"
+        );
+        // A blank status is no report, like the absence of one.
+        let p = patch_at("#47", "s2", ConversionClass::Candidate, 200).with_agent_status("   ");
+        assert_eq!(
+            p.ordering_key(),
+            "class=Candidate,status=none,unblocks=0,produced_at=200"
+        );
+    }
+
+    #[test]
+    fn ordering_key_distinguishes_the_class_strings() {
+        // CouldNotEvaluate is all-caps: it must not be confusable with a
+        // PascalCase variant name in the log.
+        assert_eq!(
+            ConversionClass::CouldNotEvaluate.as_str(),
+            "COULD-NOT-EVALUATE"
+        );
+        assert_eq!(ConversionClass::Candidate.as_str(), "Candidate");
+    }
+
+    #[test]
+    fn verified_status_orders_before_unverified_at_equal_cost_and_impact() {
+        let verified =
+            patch_at("verified", "s", ConversionClass::Candidate, 100).with_agent_status("PASS");
+        let unverified = patch_at("unverified", "s", ConversionClass::Candidate, 100);
+        let failing = patch_at("failing", "s", ConversionClass::Candidate, 100)
+            .with_agent_status("BUILD-FAILED");
+        let patches = [failing.clone(), unverified.clone(), verified.clone()];
+        let ordered = order_by_cost(&patches);
+        assert_eq!(ordered[0].identity, "verified");
+        assert_eq!(ordered[1].identity, "unverified");
+        assert_eq!(ordered[2].identity, "failing");
+
+        // The status dimension ranks before impact: a verified patch with
+        // zero unblocks still leads an unverified patch with 99.
+        let high = patch_unblocks("high", "s", ConversionClass::Candidate, 100, 99)
+            .with_agent_status("TIMEOUT");
+        let low = patch_unblocks("low", "s", ConversionClass::Candidate, 100, 0)
+            .with_agent_status("PASS");
+        let patches = [high.clone(), low.clone()];
+        let ordered = order_by_cost(&patches);
+        assert_eq!(ordered[0].identity, "low");
+        assert_eq!(ordered[1].identity, "high");
+    }
+
+    #[test]
+    fn order_summary_records_the_per_item_key() {
+        let p = patch_unblocks("#46", "s1", ConversionClass::Candidate, 100, 79)
+            .with_agent_status("PASS");
+        let ordered = order_by_cost(std::slice::from_ref(&p));
+        let summary = order_summary(&ordered, 5);
+        assert!(
+            summary.contains("#46(class=Candidate,status=PASS,unblocks=79,produced_at=100)"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn order_summary_reports_degenerate_key_relative_to_baseline() {
+        let patches = vec![
+            patch_at("a", "s1", ConversionClass::Candidate, 100),
+            patch_at("b", "s2", ConversionClass::Candidate, 200),
+            patch_at("c", "s3", ConversionClass::Candidate, 300),
+        ];
+        let summary = order_summary(&order_by_cost(&patches), 3);
+        assert!(
+            summary.contains("impact key has 1 distinct values, baseline: 3 items"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("degenerate: the key separates no pair"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn defer_records_the_reason_and_summary_line_reports_age() {
+        let mut wl = Worklist::new(
+            vec![
+                patch_at("a", "s", ConversionClass::Candidate, 1),
+                patch_at("b", "s", ConversionClass::Candidate, 2),
+            ],
+            1000,
+        );
+        wl.take_next().unwrap();
+        wl.defer(
+            patch_at("b", "s", ConversionClass::Candidate, 2),
+            "held by the agent's report",
+        )
+        .unwrap();
+
+        // The deferred entry keeps its recorded reason (#3783).
+        assert_eq!(wl.deferred().len(), 1);
+        assert_eq!(wl.deferred()[0].patch.identity, "b");
+        assert_eq!(wl.deferred()[0].reason, "held by the agent's report");
+
+        // A defer without a reason is refused, not defaulted.
+        let err = wl
+            .defer(patch_at("c", "s", ConversionClass::Candidate, 3), "   ")
+            .unwrap_err();
+        assert!(err.contains("without a reason"), "{}", err);
+
+        // The age of the worklist is now minus the frozen stamp, and
+        // saturates instead of underflowing.
+        assert_eq!(wl.elapsed_since_freeze(2440), 1440);
+        assert_eq!(wl.elapsed_since_freeze(500), 0);
+
+        let line = wl.summary_line(2440);
+        assert!(
+            line.starts_with("worklist frozen at 1000 (elapsed 1440); "),
+            "{}",
+            line
+        );
+        assert!(
+            line.contains("1 deferred to the next run [b: held by the agent's report]"),
+            "{}",
+            line
+        );
     }
 
     #[test]
@@ -4416,6 +4716,10 @@ mod tests {
         // #3715 added the agent-reported hold reasons to the retirement
         // decision: results recorded under version 2 are hypotheses the
         // version-3 logic re-verifies, not decisions.
-        assert_eq!(CONVERSION_LOGIC_VERSION, 3);
+        // #3783 added the agent-status dimension to the ordering key and
+        // the baseline-relative key diagnostic: results recorded under
+        // version 3 are hypotheses the version-4 logic re-verifies, not
+        // decisions.
+        assert_eq!(CONVERSION_LOGIC_VERSION, 4);
     }
 }
