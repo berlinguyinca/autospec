@@ -500,6 +500,271 @@ impl<'de> Deserialize<'de> for ManagedProjectNamespace {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryProjectPolicy {
+    SpecPortfolio,
+    ManagedProduct,
+    CreateManagedProduct,
+}
+
+impl PrimaryProjectPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpecPortfolio => "spec_portfolio",
+            Self::ManagedProduct => "managed_product",
+            Self::CreateManagedProduct => "create_managed_product",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimaryProjectBinding {
+    policy: PrimaryProjectPolicy,
+    identity: ManagedProjectIdentity,
+    owner: String,
+}
+
+impl PrimaryProjectBinding {
+    pub fn new(
+        policy: PrimaryProjectPolicy,
+        identity: ManagedProjectIdentity,
+        owner: String,
+    ) -> Result<Self, String> {
+        validate_project_owner(&owner)?;
+        Ok(Self {
+            policy,
+            identity,
+            owner,
+        })
+    }
+
+    pub fn policy(&self) -> PrimaryProjectPolicy {
+        self.policy
+    }
+
+    pub fn identity(&self) -> &ManagedProjectIdentity {
+        &self.identity
+    }
+
+    pub fn namespace(&self) -> ManagedProjectNamespace {
+        self.identity.namespace()
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn product_key(&self) -> Option<&ProductKey> {
+        match &self.identity {
+            ManagedProjectIdentity::Product { product_key } => Some(product_key),
+            ManagedProjectIdentity::SpecPortfolio(_) => None,
+        }
+    }
+
+    pub fn portfolio_identity(&self) -> Option<&SpecPortfolioIdentity> {
+        match &self.identity {
+            ManagedProjectIdentity::Product { .. } => None,
+            ManagedProjectIdentity::SpecPortfolio(identity) => Some(identity),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimaryProjectFacts {
+    canonical_source_repo: String,
+    source_spec: Option<SourceSpecIdentity>,
+    verified_portfolio: Option<SpecPortfolioIdentity>,
+    verified_portfolio_owner: Option<String>,
+    product: Option<ProductKey>,
+    product_mode: ProjectMode,
+    planned_issue_count: u64,
+    cross_repository_edges: u64,
+    requested_owner: Option<String>,
+}
+
+impl PrimaryProjectFacts {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        canonical_source_repo: &str,
+        source_spec: Option<SourceSpecIdentity>,
+        verified_portfolio: Option<SpecPortfolioIdentity>,
+        verified_portfolio_owner: Option<&str>,
+        product: Option<ProductKey>,
+        product_mode: ProjectMode,
+        planned_issue_count: u64,
+        cross_repository_edges: u64,
+        requested_owner: Option<&str>,
+    ) -> Result<Self, String> {
+        let verified_portfolio_owner = match verified_portfolio_owner {
+            Some(owner) => {
+                let owner = owner.trim().to_owned();
+                validate_project_owner(&owner)?;
+                Some(owner)
+            }
+            None => None,
+        };
+        let requested_owner = match requested_owner {
+            Some(owner) => {
+                let owner = owner.trim().to_owned();
+                validate_project_owner(&owner)?;
+                Some(owner)
+            }
+            None => None,
+        };
+        if let Some(verified) = verified_portfolio.as_ref() {
+            let source = source_spec.as_ref().ok_or_else(|| {
+                "verified spec portfolio binding requires the source spec identity".to_string()
+            })?;
+            if verified.source() != source {
+                return Err(
+                    "verified spec portfolio binding does not match the source spec identity"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(Self {
+            canonical_source_repo: canonical_repository(canonical_source_repo)?,
+            source_spec,
+            verified_portfolio,
+            verified_portfolio_owner,
+            product,
+            product_mode,
+            planned_issue_count,
+            cross_repository_edges,
+            requested_owner,
+        })
+    }
+
+    pub fn canonical_source_repo(&self) -> &str {
+        &self.canonical_source_repo
+    }
+
+    pub fn source_spec(&self) -> Option<&SourceSpecIdentity> {
+        self.source_spec.as_ref()
+    }
+
+    pub fn verified_portfolio(&self) -> Option<&SpecPortfolioIdentity> {
+        self.verified_portfolio.as_ref()
+    }
+
+    pub fn product(&self) -> Option<&ProductKey> {
+        self.product.as_ref()
+    }
+
+    pub fn product_mode(&self) -> ProjectMode {
+        self.product_mode
+    }
+
+    pub fn planned_issue_count(&self) -> u64 {
+        self.planned_issue_count
+    }
+
+    pub fn cross_repository_edges(&self) -> u64 {
+        self.cross_repository_edges
+    }
+
+    pub fn requested_owner(&self) -> Option<&str> {
+        self.requested_owner.as_deref()
+    }
+
+    pub fn resolved_owner(&self) -> Result<String, String> {
+        if let Some(owner) = self.requested_owner.clone() {
+            return Ok(owner);
+        }
+        let owner = self
+            .canonical_source_repo
+            .split_once('/')
+            .map(|(owner, _)| owner)
+            .unwrap_or_default()
+            .to_owned();
+        validate_project_owner(&owner)?;
+        Ok(owner)
+    }
+
+    pub fn resolve_primary_project(&self) -> Result<PrimaryProjectBinding, String> {
+        let owner = self.resolved_owner()?;
+        if let Some(verified) = self.verified_portfolio.clone() {
+            let expected = self
+                .verified_portfolio_owner
+                .clone()
+                .ok_or_else(|| "verified spec portfolio binding has no owner".to_string())?;
+            if owner != expected {
+                return Err(format!(
+                    "project owner {owner} conflicts with verified spec portfolio owner {expected}"
+                ));
+            }
+            return PrimaryProjectBinding::new(
+                PrimaryProjectPolicy::SpecPortfolio,
+                ManagedProjectIdentity::SpecPortfolio(verified),
+                owner,
+            );
+        }
+        match self.source_spec.clone() {
+            Some(source) => PrimaryProjectBinding::new(
+                PrimaryProjectPolicy::SpecPortfolio,
+                ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(source)),
+                owner,
+            ),
+            None => self.bounded_product_binding(owner),
+        }
+    }
+
+    fn bounded_product_binding(&self, owner: String) -> Result<PrimaryProjectBinding, String> {
+        if self.planned_issue_count > 1 || self.cross_repository_edges > 0 {
+            return Err(
+                "multi-issue or cross-repository scope requires a source spec identity for the primary spec portfolio"
+                    .to_string(),
+            );
+        }
+        let (policy, product) = match (self.product.clone(), self.product_mode) {
+            (Some(product), ProjectMode::Managed) => {
+                (PrimaryProjectPolicy::ManagedProduct, product)
+            }
+            (Some(product), ProjectMode::External) => {
+                (PrimaryProjectPolicy::CreateManagedProduct, product)
+            }
+            (None, _) => (
+                PrimaryProjectPolicy::CreateManagedProduct,
+                repository_product_key(&self.canonical_source_repo)?,
+            ),
+        };
+        PrimaryProjectBinding::new(
+            policy,
+            ManagedProjectIdentity::Product {
+                product_key: product,
+            },
+            owner,
+        )
+    }
+}
+
+pub fn validate_project_owner(owner: &str) -> Result<(), String> {
+    if !(1..=39).contains(&owner.len())
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || owner.starts_with('-')
+        || owner.ends_with('-')
+        || owner.contains("--")
+    {
+        return Err(
+            "project owner must be a GitHub login of 1-39 ASCII letters, digits, or single hyphens that does not start or end with a hyphen"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn repository_product_key(canonical_source_repo: &str) -> Result<ProductKey, String> {
+    let (owner, repository) = canonical_source_repo.split_once('/').ok_or_else(|| {
+        "source repository must be a canonical owner/repository identity".to_string()
+    })?;
+    ProductKey::new(format!("repo.{owner}__{repository}"))
+}
+
 fn canonical_repository(value: &str) -> Result<String, String> {
     let value = value.trim().trim_end_matches('/').to_ascii_lowercase();
     let mut segments = value.split('/');
@@ -847,8 +1112,10 @@ impl<'de> Deserialize<'de> for ManagedProjectBinding {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedProjectBinding, ProductKey, RelationshipEdge, RelationshipEvidence,
-        RelationshipKind, RelationshipState, BINDING_SCHEMA_VERSION,
+        ManagedProjectBinding, ManagedProjectIdentity, ManagedProjectNamespace, PortfolioId,
+        PrimaryProjectBinding, PrimaryProjectFacts, PrimaryProjectPolicy, ProductKey, ProjectMode,
+        RelationshipEdge, RelationshipEvidence, RelationshipKind, RelationshipState,
+        SourceSpecIdentity, SpecPortfolioIdentity, BINDING_SCHEMA_VERSION,
     };
 
     #[test]
@@ -906,5 +1173,386 @@ mod tests {
             edge("source|segment", "target").dedupe_key(),
             edge("source", "segment|target").dedupe_key()
         );
+    }
+
+    const OID40: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn demo_source() -> SourceSpecIdentity {
+        SourceSpecIdentity::new("berlinguyinca/autospec", "docs/specs/demo-design.md", OID40)
+            .expect("valid source spec identity")
+    }
+
+    #[test]
+    fn primary_project_selection_adopts_verified_spec_lineage() {
+        let source = demo_source();
+        let verified = SpecPortfolioIdentity::new(source.clone());
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(source),
+            Some(verified.clone()),
+            Some("berlinguyinca"),
+            None,
+            ProjectMode::External,
+            12,
+            3,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts
+            .resolve_primary_project()
+            .expect("verified lineage resolves");
+        assert_eq!(binding.policy(), PrimaryProjectPolicy::SpecPortfolio);
+        assert_eq!(
+            binding.identity(),
+            &ManagedProjectIdentity::SpecPortfolio(verified)
+        );
+        assert_eq!(binding.owner(), "berlinguyinca");
+        assert!(binding.product_key().is_none());
+        assert!(binding.portfolio_identity().is_some());
+    }
+
+    #[test]
+    fn primary_project_selection_creates_spec_portfolio_for_new_spec() {
+        let source = demo_source();
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(source.clone()),
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts
+            .resolve_primary_project()
+            .expect("spec-sized scope resolves");
+        assert_eq!(binding.policy(), PrimaryProjectPolicy::SpecPortfolio);
+        assert_eq!(
+            binding.identity(),
+            &ManagedProjectIdentity::SpecPortfolio(SpecPortfolioIdentity::new(source))
+        );
+    }
+
+    #[test]
+    fn primary_project_selection_prefers_spec_portfolio_over_managed_product() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(demo_source()),
+            None,
+            None,
+            Some(ProductKey::new("autospec").expect("valid key")),
+            ProjectMode::Managed,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        assert_eq!(
+            facts.resolve_primary_project().expect("resolves").policy(),
+            PrimaryProjectPolicy::SpecPortfolio
+        );
+    }
+
+    #[test]
+    fn primary_project_selection_bounded_work_uses_managed_product() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            Some(ProductKey::new("autospec").expect("valid key")),
+            ProjectMode::Managed,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts
+            .resolve_primary_project()
+            .expect("bounded scope resolves");
+        assert_eq!(binding.policy(), PrimaryProjectPolicy::ManagedProduct);
+        assert_eq!(
+            binding.product_key().map(ProductKey::as_str),
+            Some("autospec")
+        );
+        assert_eq!(binding.namespace().to_string(), "product.autospec");
+        assert!(binding.portfolio_identity().is_none());
+    }
+
+    #[test]
+    fn primary_project_selection_external_mode_is_never_primary() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            Some(ProductKey::new("autospec").expect("valid key")),
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts
+            .resolve_primary_project()
+            .expect("bounded scope resolves");
+        assert_eq!(binding.policy(), PrimaryProjectPolicy::CreateManagedProduct);
+        assert_eq!(
+            binding.product_key().map(ProductKey::as_str),
+            Some("autospec")
+        );
+    }
+
+    #[test]
+    fn primary_project_selection_creates_repository_product_for_untracked_work() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts
+            .resolve_primary_project()
+            .expect("bounded scope resolves");
+        assert_eq!(binding.policy(), PrimaryProjectPolicy::CreateManagedProduct);
+        assert_eq!(
+            binding.product_key().map(ProductKey::as_str),
+            Some("repo.berlinguyinca__autospec")
+        );
+        assert_eq!(
+            binding.namespace().to_string(),
+            "product.repo.berlinguyinca__autospec"
+        );
+    }
+
+    #[test]
+    fn primary_project_selection_rejects_multi_issue_scope_without_spec() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            2,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let error = facts
+            .resolve_primary_project()
+            .expect_err("multi-issue scope without spec must block");
+        assert!(error.contains("source spec identity"), "{error}");
+    }
+
+    #[test]
+    fn primary_project_selection_rejects_cross_repository_scope_without_spec() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            1,
+            1,
+            None,
+        )
+        .expect("valid facts");
+        let error = facts
+            .resolve_primary_project()
+            .expect_err("cross-repository scope without spec must block");
+        assert!(error.contains("source spec identity"), "{error}");
+    }
+
+    #[test]
+    fn primary_project_facts_reject_verified_binding_without_spec() {
+        let verified = SpecPortfolioIdentity::new(demo_source());
+        assert!(PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            Some(verified),
+            Some("berlinguyinca"),
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn primary_project_facts_reject_verified_binding_lineage_mismatch() {
+        let source = demo_source();
+        let foreign = SourceSpecIdentity::new(
+            "berlinguyinca/autospec",
+            "docs/specs/other-design.md",
+            OID40,
+        )
+        .expect("valid identity");
+        let verified = SpecPortfolioIdentity::new(foreign);
+        assert!(PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(source),
+            Some(verified),
+            Some("berlinguyinca"),
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn primary_project_selection_blocks_owner_conflict_with_verified_portfolio() {
+        let source = demo_source();
+        let verified = SpecPortfolioIdentity::new(source.clone());
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(source),
+            Some(verified),
+            Some("berlinguyinca"),
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            Some("other-org"),
+        )
+        .expect("valid facts");
+        let error = facts
+            .resolve_primary_project()
+            .expect_err("owner conflict must block adoption");
+        assert!(error.contains("other-org"), "{error}");
+        assert!(error.contains("berlinguyinca"), "{error}");
+    }
+
+    #[test]
+    fn primary_project_owner_grammar_accepts_logins_and_rejects_unsafe_values() {
+        for owner in ["berlinguyinca", "My-Org", "a1-b2", "x".repeat(39).as_str()] {
+            assert!(
+                PrimaryProjectFacts::new(
+                    "berlinguyinca/autospec",
+                    None,
+                    None,
+                    None,
+                    None,
+                    ProjectMode::External,
+                    1,
+                    0,
+                    Some(owner)
+                )
+                .is_ok(),
+                "{owner} must be accepted"
+            );
+        }
+        for owner in [
+            "",
+            "-",
+            "a--b",
+            "a-".repeat(20).as_str(),
+            "bad owner",
+            "owner_1",
+            "owner/1",
+        ] {
+            assert!(
+                PrimaryProjectFacts::new(
+                    "berlinguyinca/autospec",
+                    None,
+                    None,
+                    None,
+                    None,
+                    ProjectMode::External,
+                    1,
+                    0,
+                    Some(owner)
+                )
+                .is_err(),
+                "{owner:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn primary_project_owner_defaults_to_source_repository_owner() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            None,
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        assert_eq!(
+            facts.resolved_owner().expect("owner resolves"),
+            "berlinguyinca"
+        );
+    }
+
+    #[test]
+    fn primary_project_binding_round_trips_through_serde() {
+        let facts = PrimaryProjectFacts::new(
+            "berlinguyinca/autospec",
+            Some(demo_source()),
+            None,
+            None,
+            None,
+            ProjectMode::External,
+            1,
+            0,
+            None,
+        )
+        .expect("valid facts");
+        let binding = facts.resolve_primary_project().expect("resolves");
+        let decoded: PrimaryProjectBinding =
+            serde_json::from_str(&serde_json::to_string(&binding).expect("binding serializes"))
+                .expect("binding deserializes");
+        assert_eq!(decoded, binding);
+    }
+
+    #[test]
+    fn managed_project_namespaces_round_trip_and_resist_portfolio_product_collision() {
+        let id =
+            PortfolioId::from_source("berlinguyinca/autospec", "docs/specs/demo-design.md", OID40)
+                .expect("valid portfolio id");
+        let portfolio = ManagedProjectNamespace::portfolio(id.clone());
+        assert_eq!(
+            portfolio
+                .to_string()
+                .parse::<ManagedProjectNamespace>()
+                .expect("portfolio namespace round trip"),
+            portfolio
+        );
+        let product =
+            ManagedProjectNamespace::product(ProductKey::new("autospec").expect("valid key"));
+        assert_eq!(
+            product
+                .to_string()
+                .parse::<ManagedProjectNamespace>()
+                .expect("product namespace round trip"),
+            product
+        );
+        let disguised =
+            ProductKey::new(format!("portfolio.{id}")).expect("grammatically valid product key");
+        let parsed = ManagedProjectNamespace::product(disguised)
+            .to_string()
+            .parse::<ManagedProjectNamespace>()
+            .expect("round trip");
+        assert!(matches!(parsed, ManagedProjectNamespace::Product(_)));
     }
 }
