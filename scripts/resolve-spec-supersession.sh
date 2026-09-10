@@ -133,7 +133,7 @@ fi
 RANK_FILE="$(mktemp -t resolve-spec-supersession.XXXXXX)"
 trap 'rm -f "$RANK_FILE"' EXIT
 
-while IFS= read -r f; do
+while IFS= read -r f <&3; do
     [ -n "$f" ] || continue
     ctime=""
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -157,7 +157,7 @@ while IFS= read -r f; do
     # Zero-pad ctime to 12 digits so lexical sort matches numeric sort, append
     # path as deterministic secondary key.
     printf '%012d\t%s\n' "$ctime" "$f" >> "$RANK_FILE"
-done <<EOF
+done 3<<EOF
 $candidates
 EOF
 

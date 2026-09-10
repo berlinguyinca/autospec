@@ -347,11 +347,11 @@ process.stdout.write(d.src_globs.join('\n'));
                     # holds the matching NUL stream consumed by `git log`/xargs.
                     : > "$WORK_DIR/example_srcfiles_${idx}.txt"
                     : > "$WORK_DIR/example_srcfiles_${idx}.z"
-                    while IFS= read -r glob; do
+                    while IFS= read -r glob <&3; do
                         [ -z "$glob" ] && continue
                         git -C "$AUTOSPEC_REPO_ROOT" ls-files -z -- "$glob" 2>/dev/null \
                             >> "$WORK_DIR/example_srcfiles_${idx}.z" || true
-                    done <<< "$src_globs_str"
+                    done 3<<< "$src_globs_str"
                     # Derive the newline list (dedup) for JSON from the NUL stream.
                     tr '\0' '\n' < "$WORK_DIR/example_srcfiles_${idx}.z" \
                         | grep -v '^$' | sort -u > "$WORK_DIR/example_srcfiles_${idx}.txt" 2>/dev/null || true

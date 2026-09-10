@@ -45,7 +45,7 @@ closing_pr_of() {
 tmp="$(mktemp "${TELE}.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 # Process line-by-line; malformed lines are passed through unchanged.
-while IFS= read -r line || [ -n "$line" ]; do
+while IFS= read -r line <&3 || [ -n "$line" ]; do
   if [ -z "$line" ]; then continue; fi
   # Only touch well-formed records with outcome==null.
   need="$(printf '%s' "$line" | jq -r 'if (type=="object" and (.outcome==null) and (.issue!=null)) then .issue else "skip" end' 2>/dev/null || printf 'skip')"
@@ -79,6 +79,6 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
   printf '%s' "$line" | jq -c --arg oc "$oc" --argjson pr "$pr" \
     '.outcome=$oc | .closing_pr=$pr' >> "$tmp"
-done < "$TELE"
+done 3< "$TELE"
 mv "$tmp" "$TELE"
 exit 0

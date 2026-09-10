@@ -244,7 +244,7 @@ recover_green_in_progress_pr() {
 
     _candidates="$(green_issue_pr_candidates "$_repo")"
     [ -n "$_candidates" ] || return 1
-    while read -r _pr _issue; do
+    while read -r _pr _issue <&3; do
         [ -n "${_pr:-}" ] && [ -n "${_issue:-}" ] || continue
         if ! issue_has_in_progress_label "$_repo" "$_issue"; then
             continue
@@ -255,7 +255,7 @@ recover_green_in_progress_pr() {
             printf 'autospec-autonomous-run-drain: stale wait handle recovery merged PR #%s for issue #%s\n' "$_pr" "$_issue"
             return 0
         fi
-    done <<EOF
+    done 3<<EOF
 $_candidates
 EOF
     return 1

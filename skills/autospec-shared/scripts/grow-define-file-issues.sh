@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LEDGER_SH="$HERE/growth-ledger.sh"
 PROJECT_SYNC_SH="$HERE/project-sync-issue.sh"
 
-while IFS= read -r line; do
+while IFS= read -r line <&3; do
   [ -n "$line" ] || continue
   lens="$(echo "$line" | jq -r '.lens')"
   kind="$(echo "$line" | jq -r '.kind')"
@@ -74,4 +74,4 @@ while IFS= read -r line; do
      '{round:1,source:$s,title:$t,norm_title:$n,channel:$c,kind:$k,issue:$i,outcome:"pending",reason:"",ts:"1970-01-01T00:00:00Z"}')"
   "$LEDGER_SH" --append "$ledline"
   echo "$num"
-done < "$RANKED"
+done 3< "$RANKED"

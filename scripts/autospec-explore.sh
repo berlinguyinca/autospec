@@ -989,7 +989,7 @@ for p in d.get('proposals', []):
     print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
 " > "$props_file" 2>/dev/null || : > "$props_file"
 
-    while IFS="$(printf '\t')" read -r title src complexity conf; do
+    while IFS="$(printf '\t')" read -r title src complexity conf <&3; do
         [ -z "$title" ] && continue
         [ -n "$src" ] || src="unknown"
         [ -n "$complexity" ] || complexity="medium"
@@ -1041,7 +1041,7 @@ $marker"
                 2>/dev/null)" || rec=""
             [ -n "$rec" ] && _ledger_append "$rec"
         fi
-    done < "$props_file"
+    done 3< "$props_file"
 }
 
 # Resolve + run the /autospec-define existing-spec decompose for the committed
