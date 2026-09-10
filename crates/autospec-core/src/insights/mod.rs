@@ -14,6 +14,7 @@
 pub mod config;
 pub mod correlate;
 pub mod events;
+pub mod metrics;
 pub mod models;
 pub mod proposals;
 pub mod summarize;
