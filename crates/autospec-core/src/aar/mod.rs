@@ -24,12 +24,15 @@ pub mod context;
 pub mod dashboard;
 pub mod dispatch_fit;
 pub mod escalation;
+pub mod event_ledger;
 pub mod guards;
 pub mod inferweave;
 pub mod knowledge;
 pub mod memory;
+pub mod metric;
 pub mod outcome;
 pub mod pi;
+pub mod pi_events;
 pub mod policy;
 pub mod profile;
 pub mod reasoning;
@@ -59,6 +62,7 @@ pub use escalation::{
     next_attempt, Attempt, EscalationContext, EscalationOutcome, EscalationPolicy, EscalationStep,
     QuotaState,
 };
+pub use event_ledger::{audit_ledger, to_ledger_lines, LedgerAudit, DISPATCH_RECORD_TYPE};
 pub use guards::{
     evaluate_stop, EditAction, EditGuard, EditGuardViolation, EditPolicy, ExecutionProgress,
     StepEvent, StopPolicy, StopReason, ThrashDetector, ThrashFinding, ThrashResponse, ThrashSignal,
@@ -72,12 +76,17 @@ pub use knowledge::{
     REPOSITORY_TEST_COMMAND,
 };
 pub use memory::{MemoryEntry, MemoryFile, WorktreeMemory};
+pub use metric::{Metric, MetricValue, UNKNOWN};
 pub use outcome::{
     apply_policy_override, recommend, score_outcome, ExecutionOutcome, HardPolicy, OutcomeScore,
     ProfileStats, QualityThreshold, Recommendation,
 };
 pub use pi::{
     build_pi_argv, fold_events, parse_pi_event, pi_tools_for, PiEvent, PiSessionSpec, WORKING_RULES,
+};
+pub use pi_events::{
+    normalize_event, normalize_jsonl, EventKind, PiEventRecord, SessionIdentity, EVENT_ALIASES,
+    EVENT_RECORD_TYPE, EVENT_SCHEMA_VERSION, PI_HARNESS, ROUTING_LEDGER,
 };
 pub use policy::{
     decide, decide_for_classification, DecisionRecord, ExecutionPolicy, PolicyConfig,

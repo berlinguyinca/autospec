@@ -1,0 +1,10 @@
+{"type":"session_start","timestamp":"2026-08-21T09:14:02.113Z","session_id":"pi-7f3a","work_item_id":"3319","agent_role":"implementer","harness":"pi","dispatch_id":"d-2261","model":"qwen3.8-27b","context_window_tokens":131072,"queue_ms":37}
+{"type":"model_request","timestamp":"2026-08-21T09:14:05.884Z","input_tokens":20480,"output_tokens":512,"reasoning_tokens":128,"cache_hit_tokens":18944,"cache_miss_tokens":1536,"ttft_ms":412,"prefill_ms":2360,"prefill_tok_s":8677.9,"decode_tok_s":61.5,"turn_ms":8734,"context_used_tokens":20992,"model":"qwen3.8-27b"}
+{"type":"tool_execution_start","timestamp":"2026-08-21T09:14:09.001Z","tool":"read"}
+{"type":"tool_call","timestamp":"2026-08-21T09:14:09.418Z","tool":"read","tool_ok":true,"tool_ms":417}
+{"type":"file_edit","timestamp":"2026-08-21T09:16:41.507Z","tool":"edit","tool_ok":true,"tool_ms":93}
+{"type":"test_run","timestamp":"2026-08-21T09:18:02.770Z","tool":"bash","tool_ms":81204,"tests_total":18,"tests_failed":0,"repair_count":0}
+{"type":"model_request","timestamp":"2026-08-21T09:19:44.020Z","input_tokens":21504,"output_tokens":301,"cache_hit_tokens":21504,"ttft_ms":388,"decode_tok_s":63.2,"context_used_tokens":21805}
+{"type":"compaction","timestamp":"2026-08-21T09:20:10.662Z","context_used_tokens":98304,"context_window_tokens":131072,"tool_ms":1740}
+{"type":"failure","timestamp":"2026-08-21T09:22:31.998Z","failure_category":"test_failure","success":false,"repair_count":1}
+{"type":"finish","timestamp":"2026-08-21T09:25:07.225Z","wall_ms":665112,"input_tokens":41984,"output_tokens":813,"success":true,"tests_total":18,"tests_failed":0}
