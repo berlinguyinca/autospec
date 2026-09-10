@@ -18,6 +18,7 @@ pub mod events;
 pub mod metrics;
 pub mod models;
 pub mod proposals;
+pub mod quality;
 pub mod summarize;
 
 pub use models::{
