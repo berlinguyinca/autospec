@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::issue_cost::{build_issue_costs, issue_table, IssueCost};
 use super::record::{Disposition, RunRecord};
 use super::scan::MalformedRecord;
 use super::DEFAULT_DEFECT_MAP;
@@ -66,6 +67,10 @@ pub struct CostSummary {
     pub by_status: Vec<StatusBucket>,
     /// Buckets by disposition, fixed order.
     pub by_disposition: Vec<DispositionBucket>,
+    /// Issues ranked by cumulative GPU-hours, largest first, each carrying the
+    /// latest run outcome and trailing zero-output streak the retry decision
+    /// reads beside those hours.
+    pub by_issue: Vec<IssueCost>,
     /// Hours mapped onto known defect issues.
     pub defects: Vec<DefectCost>,
     /// Buckets whose share exceeded the threshold.
@@ -153,6 +158,7 @@ fn build_summary(records: &[RunRecord], threshold_percent: f64) -> CostSummary {
     }
     let by_status = finish_status_buckets(status_hours, total_hours, threshold_percent);
     let by_disposition = finish_disposition_buckets(disposition_hours);
+    let by_issue = build_issue_costs(records);
     let productive = by_disposition
         .iter()
         .find(|bucket| bucket.disposition == Disposition::Productive.as_str())
@@ -167,6 +173,7 @@ fn build_summary(records: &[RunRecord], threshold_percent: f64) -> CostSummary {
         rework_gpu_hours: round2(total_hours - productive),
         by_status,
         by_disposition,
+        by_issue,
         defects,
         flags,
     }
@@ -271,7 +278,7 @@ fn share_percent(hours: f64, total_hours: f64) -> f64 {
     }
 }
 
-fn round2(value: f64) -> f64 {
+pub(crate) fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
@@ -359,6 +366,7 @@ fn render_sections(summary: &CostSummary, threshold_percent: f64) -> String {
     let mut out = String::new();
     out.push_str(&status_table(&summary.by_status));
     out.push_str(&disposition_line(summary));
+    out.push_str(&issue_table(&summary.by_issue));
     out.push_str(&defect_lines(summary));
     out.push_str(&flag_line(summary, threshold_percent));
     out

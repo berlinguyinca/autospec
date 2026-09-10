@@ -104,3 +104,92 @@ fn missing_directory_is_an_empty_report() {
     let stdout = std::str::from_utf8(&output.stdout).expect("utf-8");
     assert!(stdout.contains("nothing to cost"), "text: {stdout}");
 }
+
+/// #3983: the per-issue ranking shows the latest run outcome and the trailing
+/// zero-output streak beside the cumulative hours, so hours are never mistaken
+/// for a hold.
+#[test]
+fn per_issue_ranking_shows_latest_outcome_beside_hours() {
+    let out = out_dir_with(&[
+        (
+            "issue-3192-attempt-1",
+            &[
+                ("status", "TIMEOUT"),
+                ("agent_secs", "7200"),
+                ("changed_files", "0"),
+                ("finished_at", "2026-09-01T00:00:00Z"),
+            ],
+        ),
+        (
+            "issue-3192-attempt-2",
+            &[
+                ("status", "TIMEOUT"),
+                ("agent_secs", "7200"),
+                ("changed_files", "0"),
+                ("finished_at", "2026-09-01T02:00:00Z"),
+            ],
+        ),
+        (
+            "issue-3192-attempt-3",
+            &[
+                ("status", "VERIFIED"),
+                ("agent_secs", "1800"),
+                ("changed_files", "6"),
+                ("finished_at", "2026-09-01T04:00:00Z"),
+            ],
+        ),
+        (
+            "issue-3805-attempt-1",
+            &[
+                ("status", "NO-OUTPUT"),
+                ("agent_secs", "900"),
+                ("changed_files", "0"),
+                ("finished_at", "2026-09-01T02:00:00Z"),
+            ],
+        ),
+        (
+            "issue-3805-attempt-2",
+            &[
+                ("status", "NO-OUTPUT"),
+                ("agent_secs", "900"),
+                ("changed_files", "0"),
+                ("finished_at", "2026-09-01T03:00:00Z"),
+            ],
+        ),
+    ]);
+    let out_arg = out.to_str().expect("utf-8 path");
+    let cwd = temp_dir("cost-cwd");
+
+    let stdout = std::str::from_utf8(&run_cost(&cwd, &["--out-dir", out_arg]).stdout)
+        .expect("utf-8")
+        .to_string();
+    let held = stdout
+        .lines()
+        .find(|line| line.starts_with("    issue-3805 "))
+        .unwrap_or_else(|| panic!("no per-issue row for issue-3805 in:\n{stdout}"));
+    assert!(held.contains("NO-OUTPUT"), "row: {held}");
+    assert!(held.contains("zero-output"), "row: {held}");
+    assert!(held.contains("review"), "row: {held}");
+    assert!(
+        stdout.contains("issues by cumulative GPU-hours"),
+        "{stdout}"
+    );
+
+    let json = std::str::from_utf8(&run_cost(&cwd, &["--out-dir", out_arg, "--json"]).stdout)
+        .expect("utf-8")
+        .to_string();
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let rows = value["cumulative"]["by_issue"]
+        .as_array()
+        .expect("by_issue array");
+    assert_eq!(rows.len(), 2);
+    let recovered = rows
+        .iter()
+        .find(|row| row["issue"] == "issue-3192")
+        .expect("issue-3192 row");
+    assert_eq!(recovered["latest_status"], "VERIFIED");
+    assert_eq!(recovered["latest_outcome"], "produced");
+    assert_eq!(recovered["trailing_zero_output_streak"], 0);
+    assert_eq!(recovered["zero_output_runs"], 2);
+    assert_eq!(recovered["dispatchable"], true);
+}

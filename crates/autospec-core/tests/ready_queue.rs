@@ -1140,3 +1140,31 @@ fn hold_view_names_the_missing_capability_for_the_hold_message() {
         Some("blocked_capabilities")
     );
 }
+
+/// #3983: the gate reads the streak that ends at the most recent run, so an
+/// issue held for a trailing pair comes back to the frontier as soon as one run
+/// produces an artifact — the same issue, the same history, a shorter chain.
+#[test]
+fn a_producing_run_returns_a_held_issue_to_the_frontier() {
+    let held = ready_input_with(
+        vec![issue(2000, "## Goal\nDo the thing.\n", CAPABILITY_LABELS)],
+        BTreeMap::new(),
+        BTreeMap::from([(2000, 2)]),
+    );
+    assert_eq!(
+        plan_ready_queue(&held).blocked[0].reason.as_deref(),
+        Some("zero_output_review")
+    );
+
+    // The producing run clears the trailing chain; the two earlier zero-output
+    // runs stay in the issue's history but do not re-arm the gate.
+    let recovered = ready_input_with(
+        vec![issue(2000, "## Goal\nDo the thing.\n", CAPABILITY_LABELS)],
+        BTreeMap::new(),
+        BTreeMap::from([(2000, 0)]),
+    );
+
+    let plan = plan_ready_queue(&recovered);
+    assert_eq!(plan.ready_numbers(), vec![2000]);
+    assert_eq!(plan.gate_counts.zero_output_review, 0);
+}

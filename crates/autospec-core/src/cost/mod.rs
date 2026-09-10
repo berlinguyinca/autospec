@@ -34,6 +34,7 @@
 //! never finished) is at or after the instant. Records with no timestamp
 //! count toward the cumulative total only.
 
+mod issue_cost;
 mod record;
 mod report;
 mod scan;
@@ -46,6 +47,7 @@ pub const DEFAULT_DEFECT_MAP: &[(&str, &str)] = &[
     ("NO-OUTPUT", "#3936"),
 ];
 
+pub use issue_cost::{IssueCost, TEXT_ISSUE_ROWS};
 pub use record::{Disposition, RunRecord};
 pub use report::{
     CostReport, CostSummary, DefectCost, DispositionBucket, StatusBucket, ThresholdFlag,

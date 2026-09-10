@@ -546,7 +546,12 @@ issue→issue dependencies (issue #3908):
   the issue is blocked with reason `zero_output_review` (the
   `zero_output_review` gate count) and `queue ready` applies the
   `autospec:needs-human` label to it. Any successful completion clears the
-  streak.
+  streak. The count is a **trailing** streak (consecutive zero-output runs
+  ending at the most recent run, `trailing_zero_output_streak`), not a total:
+  the decision is `retry_decision(latest_outcome, trailing_streak)`, so an issue
+  with early timeouts and a recent producing run stays dispatchable. Cumulative
+  GPU-hours are a reporting metric only and never gate a retry; `autospec cost`
+  prints the latest outcome and trailing streak beside the hours.
 
 ## Restore-visibility contract
 

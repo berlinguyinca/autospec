@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::coordination::capabilities::{unmet_capabilities, CapabilityState};
 use crate::coordination::dispatch_eligibility::{is_dispatch_eligible, DispatchEligibilityPolicy};
-use crate::coordination::review_routing::{review_routing, ReviewRouting};
+use crate::coordination::review_routing::{retry_decision, LatestRunOutcome, ReviewRouting};
 use crate::state::json::{JsonParser, JsonValue};
 
 mod labels;
@@ -581,10 +581,16 @@ pub fn plan_ready_queue_with_trusted_actors(
         }
         // A second consecutive zero-output run means re-dispatch is burning
         // compute on an impossible run; hold the issue for review instead.
-        if let Some(zero_output_streak) = input.no_output_streaks.get(&view.issue.number) {
-            if let ReviewRouting::Review { zero_output_streak } =
-                review_routing(*zero_output_streak)
-            {
+        // The hold reads the trailing streak and the most recent run's outcome,
+        // never the issue's cumulative hours or run count (#3983): the streak
+        // in state is trailing by construction, because a run that produces an
+        // artifact clears it.
+        if let Some(trailing_zero_output_streak) = input.no_output_streaks.get(&view.issue.number) {
+            let decision = retry_decision(
+                LatestRunOutcome::from_trailing_streak(*trailing_zero_output_streak),
+                *trailing_zero_output_streak,
+            );
+            if let ReviewRouting::Review { zero_output_streak } = decision.routing {
                 view.reason = Some("zero_output_review".to_string());
                 view.zero_output_streak = Some(zero_output_streak);
                 blocked.push(view);

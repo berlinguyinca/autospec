@@ -26,7 +26,10 @@ pub use capabilities::{
     required_capabilities, unmet_capabilities, CapabilityState, REQUIRES_SECTION,
 };
 
-pub use review_routing::{review_routing, ReviewRouting, REVIEW_ROUTING_THRESHOLD};
+pub use review_routing::{
+    retry_decision, review_routing, total_zero_output_runs, trailing_zero_output_streak,
+    LatestRunOutcome, RetryDecision, ReviewRouting, RunOutcome, REVIEW_ROUTING_THRESHOLD,
+};
 
 pub use ready_queue::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,

@@ -230,3 +230,202 @@ fn json_report_is_an_object_with_schema_version() {
     assert_eq!(value["cumulative"]["records"], 1);
     assert!(value["window"].is_null());
 }
+
+/// #3983: a retry decision must be read off the trailing zero-output streak and
+/// the most recent run's outcome, never off the issue's cumulative hours.
+///
+/// `issue-3192` is the biggest spender in the scan: two early timeouts, then
+/// runs that produced artifacts, ending in a `VERIFIED` run that changed files.
+/// The report shows its latest outcome beside its hours and keeps it
+/// dispatchable. `issue-3805` spent far less but ends on two zero-output runs,
+/// and that is what routes it to review.
+#[test]
+fn early_timeouts_with_a_recent_success_stay_dispatchable() {
+    let dir = Dir::new("3983");
+    // (run directory, status, agent_secs, changed_files, finished_at)
+    let runs: &[(&str, &str, &str, &str, i64)] = &[
+        (
+            "issue-3192-attempt-1",
+            "TIMEOUT",
+            "7200",
+            "0",
+            BASE - 6 * 3600,
+        ),
+        (
+            "issue-3192-attempt-2",
+            "TIMEOUT",
+            "7200",
+            "0",
+            BASE - 5 * 3600,
+        ),
+        (
+            "issue-3192-attempt-3",
+            "VERIFIED",
+            "1800",
+            "4",
+            BASE - 4 * 3600,
+        ),
+        (
+            "issue-3192-attempt-4",
+            "NO-OUTPUT",
+            "1800",
+            "0",
+            BASE - 3 * 3600,
+        ),
+        (
+            "issue-3192-attempt-5",
+            "VERIFIED",
+            "1800",
+            "6",
+            BASE - 2 * 3600,
+        ),
+        (
+            "issue-3805-attempt-1",
+            "NO-OUTPUT",
+            "900",
+            "0",
+            BASE - 2 * 3600,
+        ),
+        (
+            "issue-3805-attempt-2",
+            "NO-OUTPUT",
+            "900",
+            "0",
+            BASE - 1 * 3600,
+        ),
+    ];
+    for (name, status, agent_secs, changed_files, at) in runs {
+        let stamp = iso_z(*at);
+        dir.write(
+            name,
+            &[
+                ("status", status),
+                ("agent_secs", agent_secs),
+                ("changed_files", changed_files),
+                ("finished_at", stamp.as_str()),
+            ],
+        );
+    }
+    let scan = scan_out_dir(&dir.path).unwrap();
+    let report = summarize("out", &scan, None, 10.0);
+    let by_issue = &report.cumulative.by_issue;
+    assert_eq!(by_issue.len(), 2, "got {by_issue:?}");
+    // Ranked by cumulative GPU-hours, largest first.
+    assert_eq!(by_issue[0].issue, "issue-3192");
+    assert_eq!(by_issue[1].issue, "issue-3805");
+
+    // The biggest spender: 5.5 GPU-hours, two timeouts in its history, but the
+    // run at the end of the chain produced an artifact.
+    let early = &by_issue[0];
+    assert_eq!(early.runs, 5);
+    assert!(
+        (early.gpu_hours - 5.5).abs() < 0.01,
+        "hours: {}",
+        early.gpu_hours
+    );
+    assert_eq!(early.latest_status.as_deref(), Some("VERIFIED"));
+    assert_eq!(early.latest_outcome, "produced");
+    assert_eq!(
+        early.trailing_zero_output_streak, 0,
+        "the trailing streak stops at the producing run"
+    );
+    assert_eq!(
+        early.zero_output_runs, 3,
+        "the total counts every zero-output run in scope"
+    );
+    assert_ne!(
+        early.zero_output_runs, early.trailing_zero_output_streak,
+        "the total and the trailing streak are different numbers"
+    );
+    assert_eq!(early.retry_route, "redispatch");
+    assert!(early.dispatchable, "a recent success keeps the issue live");
+
+    // The cheap issue that ends on two zero-output runs is the one held.
+    let trailing = &by_issue[1];
+    assert_eq!(trailing.runs, 2);
+    assert!((trailing.gpu_hours - 0.5).abs() < 0.01);
+    assert_eq!(trailing.latest_status.as_deref(), Some("NO-OUTPUT"));
+    assert_eq!(trailing.latest_outcome, "zero-output");
+    assert_eq!(trailing.trailing_zero_output_streak, 2);
+    assert_eq!(trailing.retry_route, "review");
+    assert!(!trailing.dispatchable);
+
+    // Text output shows the latest outcome beside the cumulative hours, so an
+    // operator reading the ranking cannot mistake hours for a hold.
+    let text = report.to_text();
+    let row = text
+        .lines()
+        .find(|line| line.starts_with("    issue-3192 "))
+        .unwrap_or_else(|| panic!("no per-issue row for issue-3192 in:\n{text}"));
+    assert!(row.contains("VERIFIED"), "row: {row}");
+    assert!(row.contains("produced"), "row: {row}");
+    assert!(row.contains("redispatch"), "row: {row}");
+    assert!(row.contains("5.5"), "cumulative hours in row: {row}");
+    assert!(text.contains("issues by cumulative GPU-hours"), "{text}");
+
+    // JSON carries the same fields for machine consumers.
+    let value: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+    let first = &value["cumulative"]["by_issue"][0];
+    assert_eq!(first["issue"], "issue-3192");
+    assert_eq!(first["latest_status"], "VERIFIED");
+    assert_eq!(first["latest_outcome"], "produced");
+    assert_eq!(first["trailing_zero_output_streak"], 0);
+    assert_eq!(first["zero_output_runs"], 3);
+    assert_eq!(first["retry_route"], "redispatch");
+    assert_eq!(first["dispatchable"], true);
+}
+
+/// A run directory with no issue number is its own key; an issue whose only run
+/// produced nothing is held after the threshold, and a single zero-output run is
+/// not.
+#[test]
+fn per_issue_rollup_groups_attempts_and_holds_only_a_trailing_pair() {
+    let dir = Dir::new("3983-group");
+    let one = iso_z(BASE - 3600);
+    let two = iso_z(BASE - 1800);
+    dir.write(
+        "issue-4100-attempt-1",
+        &[
+            ("status", "NO-OUTPUT"),
+            ("agent_secs", "600"),
+            ("changed_files", "0"),
+            ("finished_at", one.as_str()),
+        ],
+    );
+    dir.write(
+        "issue-4100-attempt-2",
+        &[
+            ("status", "NO-OUTPUT"),
+            ("agent_secs", "600"),
+            ("changed_files", "0"),
+            ("finished_at", two.as_str()),
+        ],
+    );
+    dir.write(
+        "adhoc-run",
+        &[
+            ("status", "NO-OUTPUT"),
+            ("agent_secs", "600"),
+            ("changed_files", "0"),
+            ("finished_at", one.as_str()),
+        ],
+    );
+    let scan = scan_out_dir(&dir.path).unwrap();
+    let report = summarize("out", &scan, None, 10.0);
+    let by_issue = &report.cumulative.by_issue;
+    assert_eq!(by_issue.len(), 2, "got {by_issue:?}");
+    let grouped = by_issue
+        .iter()
+        .find(|row| row.issue == "issue-4100")
+        .expect("grouped issue row");
+    assert_eq!(grouped.runs, 2);
+    assert_eq!(grouped.trailing_zero_output_streak, 2);
+    assert!(!grouped.dispatchable);
+    let adhoc = by_issue
+        .iter()
+        .find(|row| row.issue == "adhoc-run")
+        .expect("unnumbered run keeps its own key");
+    assert_eq!(adhoc.runs, 1);
+    assert_eq!(adhoc.trailing_zero_output_streak, 1);
+    assert!(adhoc.dispatchable, "one zero-output run is a redispatch");
+}
