@@ -17,6 +17,7 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterRepair);
     let repair_crash = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("interrupt after repaired worktree");
+    bridge::ZERO_EFFECT_RECOVERY_FAILPOINT.with(|fp| fp.assert_reached());
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(repair_crash.contains("after repair"), "{repair_crash}");
     assert!(state.identity.worktree.is_dir());
@@ -30,6 +31,7 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterTransfer);
     let transfer_crash = bridge::prepare_zero_effect_retry(&state_path, &state, None)
         .expect_err("interrupt after available transfer");
+    bridge::ZERO_EFFECT_RECOVERY_FAILPOINT.with(|fp| fp.assert_reached());
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         transfer_crash.contains("after transfer"),
@@ -73,6 +75,7 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
     let runtime_crash =
         bridge::prepare_zero_effect_retry(&runtime_state_path, &runtime_state, None)
             .expect_err("interrupt after durable runtime close");
+    bridge::ZERO_EFFECT_RECOVERY_FAILPOINT.with(|fp| fp.assert_reached());
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         runtime_crash.contains("after runtime close"),
@@ -510,6 +513,7 @@ fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_cr
         },
     )
     .expect_err("interrupt after terminal claim transition");
+    bridge::ZERO_EFFECT_RECOVERY_FAILPOINT.with(|fp| fp.assert_reached());
     environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         interrupted.to_string().contains("after claim transition"),

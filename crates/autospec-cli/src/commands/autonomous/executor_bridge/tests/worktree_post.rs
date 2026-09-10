@@ -169,6 +169,7 @@ fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
             .expect_err("crash after durable worktree recreation"),
         "injected executor post-CI crash after worktree recreation"
     );
+    bridge::POST_CI_RECREATE_FAILPOINT.with(|fp| fp.assert_reached());
     let complete = bridge::cleanup_record_path(&state_path, "worktree-recreate-complete");
     assert!(!complete.exists());
     assert_eq!(git_stdout(&worktree.path, &["rev-parse", "HEAD"]), head);

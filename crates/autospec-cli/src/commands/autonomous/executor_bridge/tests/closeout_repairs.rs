@@ -366,6 +366,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
     let error =
         bridge::commit_sandboxed_executor_diff(&state, "test: persist implementation proof", "")
             .expect_err("interrupt after Rust commit");
+    bridge::IMPLEMENTATION_COMMIT_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(error.contains("after implementation commit"), "{error}");
     let durable = PersistedInvocation::from_json(
         &fs::read_to_string(&state_path).expect("read interrupted invocation"),

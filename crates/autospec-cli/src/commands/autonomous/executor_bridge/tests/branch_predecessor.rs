@@ -577,6 +577,7 @@ fn autonomous_executor_bridge_retry_fast_forwards_proven_empty_worktree_to_advan
     bridge::EMPTY_RETRY_BASE_FAILPOINT.with(|fp| fp.store(1));
     let interrupted = provision_issue_worktree(&fixture.repo, &scope, 43, &advanced)
         .expect_err("interrupt after proven-empty fast-forward");
+    bridge::EMPTY_RETRY_BASE_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(interrupted.contains("injected crash"), "{interrupted}");
     assert_eq!(
         git_stdout(&worktree.path, &["rev-parse", "HEAD"]),

@@ -469,6 +469,7 @@ fn autonomous_executor_bridge_recovers_crash_after_owned_base_merge() {
         Ok(bridge::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
     })
     .expect_err("injected crash");
+    bridge::BASE_DRIFT_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(error.contains("injected crash"), "{error}");
     let durable = bridge::PersistedInvocation::from_json(
         &fs::read_to_string(&state_path).expect("durable invocation"),

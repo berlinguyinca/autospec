@@ -53,6 +53,7 @@ fn autonomous_executor_bridge_runtime_close_recovers_after_receipt_gap() {
         "implementation failed",
     )
     .expect_err("injected failure-finalization receipt gap");
+    bridge::RUNTIME_CLOSE_FAILPOINT.with(|fp| fp.assert_reached());
     assert!(error.to_string().contains("injected crash"), "{error}");
     assert_eq!(
         bridge::read_failure_cleanup_intent(&state_path, &state)

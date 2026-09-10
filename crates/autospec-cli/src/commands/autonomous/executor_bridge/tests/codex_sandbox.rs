@@ -64,6 +64,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_r
     bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.store(1));
     let interrupted =
         bridge::run_executor_bridge(&request).expect_err("interrupt entrypoint repair");
+    bridge::WORKTREE_REPAIR_FAILPOINT.with(|fp| fp.assert_reached());
     let crash = interrupted.to_string();
     assert!(crash.contains("injected executor worktree repair crash"));
     let retry = bridge::run_executor_bridge(&request)
