@@ -1,3 +1,8 @@
+// `Permissions::mode` is a Unix extension trait method; without this import the
+// test file fails to compile with E0599 (it reached main because the conversion
+// gate counted failing tests, and a build error produces none).
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use autospec_core::claim::RunStateRecord;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
