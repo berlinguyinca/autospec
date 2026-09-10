@@ -1,11 +1,5 @@
 [
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/repair_implementation.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds harness-marker and command-output assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split path."
-  },
-  {
     "file": "crates/autospec-cli/src/commands/autonomous/accountability.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -18,28 +12,10 @@
     "justification": "This parser validates shell operators, owned artifact suffixes, and Closeout labels; serde is unrelated to those protocol strings."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_retirement.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
-  },
-  {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_permission.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "Test-only module: every substring match is an assertion on a codex argument vector or a permission string it must contain (\"permissions.autospec-network-executor.filesystem=\", \"danger-full-access\", per-path read/deny entries). Those are the CLI surface under test, not a domain representation."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/identity_reviewer.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/json_identity.rs",
@@ -48,34 +24,28 @@
     "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/pull_mutation.rs",
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/repair_implementation.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds harness-marker and command-output assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split path."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/snapshot_identity.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/worktree_post.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/launch.rs",
-    "function": "validate_launch_mode",
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/result_reviewer.rs",
+    "function": "autonomous_executor_bridge_reviewer_rejects_forged_github_comment",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The branches enforce distinct incompatible CLI option combinations and return different diagnostics; a table would obscure the validation contract."
+    "justification": "Test-only: the repeated rows are `git` argument vectors and arms of a shell `gh` stub that model GitHub protocol responses. They are fixture data for one forged-comment scenario, not production dispatch logic."
   },
   {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
+    "file": "crates/autospec-cli/src/commands/initiative.rs",
+    "function": "validate",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Each branch validates a different typed model (initiative, definition, workspace, plan, graph) whose validate() has its own signature and error shape; there is no common row type to tabulate, and the graph arm maps violations rather than extending directly."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/managed_project/cli.rs",
+    "function": "parse_plan_manifest",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Hand-rolled parser for the flat portfolio-manifest subset; each field is its own literal prefix (id:/capability:/path:) rather than a shared shape that a table could carry."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_accountability_github/contracts.rs",
@@ -84,16 +54,28 @@
     "justification": "This integration test asserts exact managed-marker and GitHub protocol strings; its substring checks validate the command contract rather than encode domain representation logic."
   },
   {
-    "file": "crates/autospec-cli/tests/autonomous_integration_base_sync.rs",
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
     "function": "new",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This test-only fixture dispatches exact fake GitHub CLI responses; the repeated shell case arms model protocol commands rather than production domain logic."
+    "justification": "Test-only fixture builder: the repeated rows are fake GitHub CLI responses keyed by command, the same shape already allowlisted for autonomous_integration_base_sync.rs. Attribution moved to this function when #3472 fixed function_ranges_brace()."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This integration test reads Rust source and asserts command output; std::time plus substring assertions trigger the file-scoped heuristic without encoding domain logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_integration_base_sync.rs",
+    "function": "new",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "This test-only fixture dispatches exact fake GitHub CLI responses; the repeated shell case arms model protocol commands rather than production domain logic."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_premerge_commands.rs",
@@ -120,10 +102,76 @@
     "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
   },
   {
-    "file": "crates/autospec-cli/tests/support/autonomous_recovery_accountability.rs",
+    "file": "crates/autospec-core/src/aar/guards.rs",
+    "function": "observe",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The arms match distinct EditAction variants with different bindings and different guard policies; the inner ifs each raise a differently named violation with its own message. A table would have to carry a closure per row and would hide which policy produced which violation id."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/knowledge.rs",
+    "function": "scan_shell",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Shell-source scanner branching on distinct bash syntax prefixes (function / source / export) to bucket symbols, dependencies, and interfaces; the branches have different payloads, not one repeated shape."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/outcome.rs",
+    "function": "score_outcome",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The genuinely uniform part \u2014 the four signal penalties \u2014 is already a table with a single dispatcher loop. The remaining branches each apply a different scoring formula (flat credit, clamped coverage ratio, cache-hit rate, churn ratio) to a different field, so they share no row shape."
+  },
+  {
+    "file": "crates/autospec-core/src/aar/topology.rs",
+    "function": "select_topology",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The branches are cumulative escalation thresholds, not parallel cases: each adds a different role set to the same accumulator, one arm removes a role, and one returns early. Order is semantic, so a predicate table would change behaviour."
+  },
+  {
+    "file": "crates/autospec-core/src/execution/verification.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "The test fixture asserts exact managed-marker and recovery-event protocol strings rather than encoding application domain meaning."
+    "justification": "Test assertions pinning the exact status-line wording (skip reasons, deficiency labels); the strings are the protocol under test, not domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/src/grading.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test assertions pinning the exact verdict-line wording (pass-load phrases); the strings are the protocol under test, not domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/src/insights/correlate.rs",
+    "function": "rfc3339_epoch_seconds",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Positional RFC3339 byte parser; the repeated branches check fixed-offset separator bytes ('-', 'T', ':') and are the format grammar, not copy-pasted logic."
+  },
+  {
+    "file": "crates/autospec-core/src/learning/contracts.rs",
+    "function": "validate",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Top-level contract validate() delegating to one validate() per optional nested field; each call names a distinct field, not a repeated structural branch."
+  },
+  {
+    "file": "crates/autospec-core/src/lint/mod.rs",
+    "function": "parse_autospec_metadata",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Metadata-block parser; each branch matches a distinct literal field prefix (issue:, ...) with its own payload handling, not one repeated shape."
+  },
+  {
+    "file": "crates/autospec-core/src/repair_loop.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test assertions pinning the exact repair-report line wording (missing counts, ALERT marker); the strings are the protocol under test, not domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/src/resources/dry_run.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test assertions on the wording of proposed-action safety reasons (invariant labels); the strings are the protocol under test, not domain encoding."
+  },
+  {
+    "file": "crates/autospec-core/src/review_checklist/classify.rs",
+    "function": "classify_file_type",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "Well-known-filename classifier; each branch names a distinct file name (Dockerfile, docker-compose.yml, ...) mapped to a distinct FileType, i.e. a name table in branch form."
   },
   {
     "file": "crates/autospec-core/src/validation/structural.rs",
@@ -132,45 +180,15 @@
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/result_reviewer.rs",
-    "function": "autonomous_executor_bridge_reviewer_rejects_forged_github_comment",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "Test-only: the repeated rows are `git` argument vectors and arms of a shell `gh` stub that model GitHub protocol responses. They are fixture data for one forged-comment scenario, not production dispatch logic."
+    "file": "crates/autospec-core/tests/failure_signatures.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test fixtures and assertions for signature normalization (path/number masking); the literals are test inputs and expected output, not domain logic."
   },
   {
-    "file": "crates/autospec-cli/src/commands/initiative.rs",
-    "function": "validate",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "Each branch validates a different typed model (initiative, definition, workspace, plan, graph) whose validate() has its own signature and error shape; there is no common row type to tabulate, and the graph arm maps violations rather than extending directly."
-  },
-  {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "new",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "Test-only fixture builder: the repeated rows are fake GitHub CLI responses keyed by command, the same shape already allowlisted for autonomous_integration_base_sync.rs. Attribution moved to this function when #3472 fixed function_ranges_brace()."
-  },
-  {
-    "file": "crates/autospec-cli/tests/cli_commands.rs",
-    "function": "autonomous_timeline_reports_forecast_and_planned_steps",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "CLI integration test: the repeated rows are JSON-field assertions over one timeline response fixture. Assertion data, not production branching. Attribution moved to this function when #3472 fixed function_ranges_brace()."
-  },
-  {
-    "file": "crates/autospec-core/src/aar/guards.rs",
-    "function": "observe",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The arms match distinct EditAction variants with different bindings and different guard policies; the inner ifs each raise a differently named violation with its own message. A table would have to carry a closure per row and would hide which policy produced which violation id."
-  },
-  {
-    "file": "crates/autospec-core/src/aar/outcome.rs",
-    "function": "score_outcome",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The genuinely uniform part — the four signal penalties — is already a table with a single dispatcher loop. The remaining branches each apply a different scoring formula (flat credit, clamped coverage ratio, cache-hit rate, churn ratio) to a different field, so they share no row shape."
-  },
-  {
-    "file": "crates/autospec-core/src/aar/topology.rs",
-    "function": "select_topology",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The branches are cumulative escalation thresholds, not parallel cases: each adds a different role set to the same accumulator, one arm removes a role, and one returns early. Order is semantic, so a predicate table would change behaviour."
+    "file": "crates/autospec-core/tests/insights_goldens.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test fixtures and assertions for event-log normalization (ISO-8601 error wording); the literals are test inputs and expected output, not domain logic."
   }
 ]
