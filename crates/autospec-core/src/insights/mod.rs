@@ -17,6 +17,7 @@ pub mod correlate;
 pub mod events;
 pub mod metrics;
 pub mod models;
+pub mod pr;
 pub mod proposals;
 pub mod quality;
 pub mod summarize;
