@@ -152,3 +152,28 @@ If no configured alias is usable, the executor reports
 review. When it is present, the executor fails closed and requires a configured
 structured harness alias so a free-form command cannot bypass semantic evidence
 or schema-5 receipt binding.
+
+## Timeout triage: decomposition, not bigger budgets
+
+A task that times out at maximal context and maximal budget is a
+decomposition problem, not a budget problem. The policy lives in
+`autospec_core::autonomous::timeout_triage` (pure rules; the monitor supplies
+the recorded numbers and acts on the returned decision):
+
+- **Escalate once, then decompose.** The first timeout raises the budget,
+  doubled and capped at the reservation. A second timeout on the same issue
+  with the budget already at the reservation marks the issue
+  `autospec:too-large` and stops re-dispatch — more wall time would not have
+  finished the task.
+- **Compare against the distribution, not a constant.** A run whose
+  `agent_secs` is at least twice the rolling mean (default window: the most
+  recent 20 fleet runs) is a decomposition candidate, not a "needs more time"
+  issue. A uniform fleet yields no candidates; a single run is not a
+  distribution.
+- **Report the resources in the timeout message.** The line carries both the
+  elapsed seconds and the context the run died in — `TIMEOUT after 25200s at
+  131072 context` — so "ran out of time" and "ran out of context" stay
+  distinguishable.
+- **Check the domain before splitting the issue.** When two or more
+  timed-out issues share a domain, the domain is the thing to check first:
+  splitting the issue is the wrong fix, and the domain is what is broken.
