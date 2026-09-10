@@ -49,9 +49,10 @@ use autospec_core::execution::ProducedWork;
 use autospec_core::lint::implementation::parse_blocking_hook_failure;
 use autospec_core::lint::implementation::{directive_for, ImplementationLintRule};
 use autospec_core::lint::{
-    evaluate_patch_size, lint_implementation, lint_issue_implementation_contract,
-    parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
-    ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits, RepositoryIndex,
+    commit_blocking_rules, evaluate_patch_size, lint_implementation,
+    lint_issue_implementation_contract, parse_unified_diff, ImplementationLintContext,
+    ImplementationLintOptions, ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits,
+    RepositoryIndex,
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
@@ -9479,6 +9480,11 @@ pub(crate) fn build_implementer_prompt(
     {
         return Err("executor Closeout artifact must be inside the exact worktree".to_string());
     }
+    let blocking_rules = commit_blocking_rules()
+        .iter()
+        .map(|rule| format!("- {} — {}", rule.rule_id, rule.acceptance))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(format!(
         "You are the local-only implementation worker for {repository} issue #{issue}.\n\
          \n\
@@ -9494,6 +9500,10 @@ pub(crate) fn build_implementer_prompt(
          - You MUST NOT mutate remote Git or GitHub state.\n\
          - You MUST NOT create local commits or replace the worktree's Git metadata.\n\
          - Autospec Rust owns local commits and all remote mutations after independently verifying your work.\n\
+         \n\
+         Commit-blocking lint rules — the pre-commit gate blocks on these, so satisfy them up front\n\
+         while you still have the context to fix them rather than discovering a failure at commit time:\n\
+         {blocking_rules}\n\
          \n\
          Implement the issue and run its required local tests. Leave the verified diff in the worktree.\n\
          Write exactly one Closeout report to {closeout} and make your final response byte-for-byte\n\
@@ -9520,6 +9530,7 @@ pub(crate) fn build_implementer_prompt(
         worktree = identity.worktree.display(),
         base_ref = identity.base_ref,
         base_oid = identity.base_oid,
+        blocking_rules = blocking_rules,
         closeout = closeout_path.display(),
         title = issue_title,
         body = issue_body,
