@@ -93,8 +93,36 @@
 //!     outcomes, never incremented beside a claim; and the pass
 //!     reconciles its converted claims against what the remote shows
 //!     before it finishes ([`reconcile_converted`]) (#3972).
+//! 13. **A result is attributable to the logic that produced it**
+//!     ([`CONVERSION_LOGIC_VERSION`]). A memo verdict or a publication
+//!     outcome is evidence about its inputs only under the version of the
+//!     decision logic that made it. When this module's logic changes,
+//!     results recorded under the old version stop being decisions and
+//!     become hypotheses the new logic must re-verify: every result
+//!     carries the version that produced it
+//!     ([`PublicationOutcome::Converted::logic_version`]), a verdict
+//!     recorded under a superseded version stays queryable but is never a
+//!     memo hit ([`ConversionMemo::records`],
+//!     [`superseded_verdict_report`]), and the pass re-reads its own
+//!     version when it finishes — a mid-run change to the logic is
+//!     reported in the run summary ([`logic_change_report`],
+//!     [`run_summary`]) instead of silently attributing results from two
+//!     logics to one (#4041).
 
 use std::collections::BTreeMap;
+
+/// The identity of the conversion-pass decision logic, for the version in
+/// force in this build (#4041).
+///
+/// A result of the pass — a memo verdict, a publication outcome, a run
+/// summary — is evidence about its inputs only under the version of the
+/// logic that computed it. When the logic changes, this constant must be
+/// bumped in the same change, and every result the old version produced
+/// remains attributable to it: stored verdicts keep the version they were
+/// recorded under ([`ConversionMemo::records`]) and the pass reports a
+/// mid-run change of logic instead of passing it off as one version's
+/// work ([`logic_change_report`], #3866 pattern).
+pub const CONVERSION_LOGIC_VERSION: u32 = 1;
 
 /// A conversion outcome class, ordered cheapest first.
 ///
@@ -548,15 +576,24 @@ impl Worklist {
 
 /// Memoized conversion decisions.
 ///
-/// Keyed by (patch identity, base sha): patch identity plus base sha
-/// already determines the outcome, so a re-walk of a memoized patch is a
-/// map lookup, not a re-walk of the whole set. Only decisions *about the
-/// patch* are stored: [`ConversionClass::CouldNotEvaluate`] is a state of
-/// the setup and is refused by [`ConversionMemo::record`], so the pass
-/// re-evaluates it on every run until the setup succeeds (#3866).
+/// Keyed by (patch identity, base sha, logic version): patch identity
+/// plus base sha already determines the outcome, so a re-walk of a
+/// memoized patch is a map lookup, not a re-walk of the whole set. Only
+/// decisions *about the patch* are stored:
+/// [`ConversionClass::CouldNotEvaluate`] is a state of the setup and is
+/// refused by [`ConversionMemo::record`], so the pass re-evaluates it on
+/// every run until the setup succeeds (#3866).
+///
+/// The key carries the logic version that produced the decision
+/// ([`CONVERSION_LOGIC_VERSION`]): a decision is evidence about its
+/// inputs only under the version of the logic that made it, so when the
+/// logic changes the old version's verdicts stay stored and queryable
+/// ([`ConversionMemo::records`]) but are no longer honored by
+/// [`ConversionMemo::lookup`] — the new logic must re-verify them
+/// (#4041).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConversionMemo {
-    entries: BTreeMap<(String, String), ConversionClass>,
+    entries: BTreeMap<(String, String, u32), ConversionClass>,
 }
 
 impl ConversionMemo {
@@ -573,11 +610,19 @@ impl ConversionMemo {
     }
 
     /// The recorded terminal decision for this exact (identity, base sha)
-    /// pair, if any. A different base sha is a different patch as far as the
-    /// memo is concerned.
-    pub fn lookup(&self, identity: &str, base_sha: &str) -> Option<ConversionClass> {
+    /// pair under the given logic version, if any. A different base sha
+    /// is a different patch as far as the memo is concerned; a decision
+    /// recorded under a different logic version is not honored here — it
+    /// is queryable via [`Self::records`] but the pass must re-derive the
+    /// decision itself (#4041).
+    pub fn lookup(
+        &self,
+        identity: &str,
+        base_sha: &str,
+        logic_version: u32,
+    ) -> Option<ConversionClass> {
         self.entries
-            .get(&(identity.to_string(), base_sha.to_string()))
+            .get(&(identity.to_string(), base_sha.to_string(), logic_version))
             .copied()
     }
 
@@ -592,6 +637,7 @@ impl ConversionMemo {
         identity: &str,
         base_sha: &str,
         class: ConversionClass,
+        logic_version: u32,
     ) -> Result<(), String> {
         if !class.is_memoizable() {
             return Err(match class {
@@ -606,10 +652,39 @@ impl ConversionMemo {
         if identity.trim().is_empty() || base_sha.trim().is_empty() {
             return Err("memo keys must have a non-empty identity and base sha".to_string());
         }
-        self.entries
-            .insert((identity.to_string(), base_sha.to_string()), class);
+        self.entries.insert(
+            (identity.to_string(), base_sha.to_string(), logic_version),
+            class,
+        );
         Ok(())
     }
+
+    /// Every recorded decision for this (identity, base sha) pair, across
+    /// all logic versions, highest version first (#4041). This is the
+    /// superseded-version query path: what an old version of the logic
+    /// decided stays visible to the operator, while [`Self::lookup`]
+    /// honors only the version the pass is running under.
+    pub fn records(&self, identity: &str, base_sha: &str) -> Vec<MemoRecord> {
+        self.entries
+            .iter()
+            .filter(|((id, base, _), _)| id == identity && base == base_sha)
+            .map(|((_, _, version), class)| MemoRecord {
+                class: *class,
+                logic_version: *version,
+            })
+            .rev()
+            .collect()
+    }
+}
+
+/// A memo record with the identity of the logic that produced it (#4041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoRecord {
+    /// The decision the recorded logic landed on.
+    pub class: ConversionClass,
+    /// The logic version that produced the decision
+    /// ([`CONVERSION_LOGIC_VERSION`]).
+    pub logic_version: u32,
 }
 
 /// The build gate a conversion worker must pass before a patch may be
@@ -752,12 +827,23 @@ pub struct ScheduledPatch<'a> {
     /// decision for this (identity, base sha) pair **and the base is still
     /// the trunk tip**; the worker applies the recorded decision without a
     /// compile. A verdict computed against an old base is a hypothesis, not
-    /// a decision, and is never reported as a hit.
+    /// a decision, and is never reported as a hit. A verdict recorded
+    /// under a superseded logic version is the same kind of stale
+    /// evidence — flagged by [`Self::superseded_verdict`] instead
+    /// (#4041).
     pub memo_hit: bool,
     /// True when the patch's base is no longer the trunk tip: the worker
     /// must fetch `origin/main` and re-test before acting, because every
     /// decision computed against the old base has decayed (#3698).
     pub stale_base: bool,
+    /// True when the memo holds a decision for this (identity, base sha)
+    /// pair that a **superseded logic version** recorded: the old verdict
+    /// is queryable ([`ConversionMemo::records`]) but is a hypothesis the
+    /// current logic must re-verify, not a decision it may act on
+    /// (#4041). The gate's report naming both versions is
+    /// [`superseded_verdict_report`]; a decision recorded under the
+    /// running version is never flagged.
+    pub superseded_verdict: bool,
 }
 
 /// The full plan for one pass over the queue.
@@ -782,13 +868,19 @@ pub struct ConversionSchedule<'a> {
 /// hypothesis, not a decision (#3698). A
 /// [`ConversionClass::CouldNotEvaluate`] patch can never be a memo hit: the
 /// memo cannot hold the state, so the pass re-evaluates the patch every run
-/// until the setup succeeds (#3866).
+/// until the setup succeeds (#3866). The same rule applies to the logic
+/// version the decision was recorded under (`logic_version`,
+/// [`CONVERSION_LOGIC_VERSION`]): a verdict a superseded version of the
+/// logic recorded is never a hit, and is flagged
+/// [`ScheduledPatch::superseded_verdict`] so the worker re-verifies it
+/// (#4041).
 pub fn plan_pass<'a>(
     patches: &'a [Patch],
     workers: usize,
     root: &str,
     memo: &ConversionMemo,
     current_tip: &str,
+    logic_version: u32,
 ) -> Result<ConversionSchedule<'a>, String> {
     if current_tip.trim().is_empty() {
         return Err(
@@ -811,9 +903,10 @@ pub fn plan_pass<'a>(
             worker: position % pool.len(),
             memo_hit: patch.base_sha == current_tip
                 && memo
-                    .lookup(&patch.identity, &patch.base_sha)
+                    .lookup(&patch.identity, &patch.base_sha, logic_version)
                     .is_some_and(|class| class == patch.class),
             stale_base: patch.base_sha != current_tip,
+            superseded_verdict: superseded_verdict_report(memo, patch, logic_version).is_some(),
         })
         .collect();
     Ok(ConversionSchedule {
@@ -824,17 +917,26 @@ pub fn plan_pass<'a>(
 
 /// The memo-hit gate's failure report. The gate asserts two equalities —
 /// the patch's base sha equals the trunk tip, and the recorded decision
-/// for `(identity, base sha)` equals the class the walk landed on. On
-/// failure the report names both operands of the equality that failed; a
-/// gate that cannot print the values it compared did not perform the
-/// comparison, and must not claim the property failed (#3866). `None` when
-/// the gate passed, or when nothing is recorded for the key (not yet
-/// evaluated, not failed).
-pub fn memo_gate_report(memo: &ConversionMemo, patch: &Patch, current_tip: &str) -> Option<String> {
+/// for `(identity, base sha)` under the running logic version equals the
+/// class the walk landed on. On failure the report names both operands
+/// of the equality that failed; a gate that cannot print the values it
+/// compared did not perform the comparison, and must not claim the
+/// property failed (#3866). The lookup is for the version the pass is
+/// running under (`logic_version`, [`CONVERSION_LOGIC_VERSION`]) — a
+/// verdict a superseded logic recorded is invisible to this gate and is
+/// the business of [`superseded_verdict_report`] instead (#4041). `None`
+/// when the gate passed, or when nothing is recorded for the key under
+/// this version (not yet evaluated, not failed).
+pub fn memo_gate_report(
+    memo: &ConversionMemo,
+    patch: &Patch,
+    current_tip: &str,
+    logic_version: u32,
+) -> Option<String> {
     if patch.base_sha != current_tip {
         return patch.stale_report(current_tip);
     }
-    match memo.lookup(&patch.identity, &patch.base_sha) {
+    match memo.lookup(&patch.identity, &patch.base_sha, logic_version) {
         None => None,
         Some(recorded) if recorded == patch.class => None,
         Some(recorded) => Some(format!(
@@ -842,6 +944,38 @@ pub fn memo_gate_report(memo: &ConversionMemo, patch: &Patch, current_tip: &str)
             recorded, patch.class, patch.identity, patch.base_sha
         )),
     }
+}
+
+/// The superseded-verdict gate's failure report (#4041, #3866 pattern).
+///
+/// The gate asserts one equality: the logic version that produced the
+/// newest recorded decision for this patch's (identity, base sha) pair
+/// equals the logic version the pass is running under (`logic_version`).
+/// A verdict a superseded logic computed is queryable —
+/// [`ConversionMemo::records`] keeps it — but not a decision: the current
+/// logic must re-verify it, and this report is what the pass prints
+/// instead of applying the old verdict. On failure the report names both
+/// operands — a gate that cannot print the values it compared did not
+/// perform the comparison, and must not claim the property failed
+/// (#3866). `None` when nothing is recorded for the pair, or when the
+/// newest record is the current logic's own — in which case the decision
+/// is live and the memo-hit gate's business, not this one's.
+pub fn superseded_verdict_report(
+    memo: &ConversionMemo,
+    patch: &Patch,
+    logic_version: u32,
+) -> Option<String> {
+    let newest = memo
+        .records(&patch.identity, &patch.base_sha)
+        .into_iter()
+        .next()?;
+    if newest.logic_version == logic_version {
+        return None;
+    }
+    Some(format!(
+        "superseded memo verdict: {}@{} was last decided under logic v{}, the pass is running v{} — the recorded decision requires re-verification, not a memo hit",
+        patch.identity, patch.base_sha, newest.logic_version, logic_version
+    ))
 }
 
 /// The platform's `mergeable` state for an open pull request.
@@ -1414,6 +1548,12 @@ impl VerifiedStep {
 
 /// What the pass may report for one patch, derived only from the
 /// verified steps and the PR the remote confirmed (#3972).
+///
+/// Every outcome also carries the `logic_version` of the decision logic
+/// that derived it ([`CONVERSION_LOGIC_VERSION`]): a result is evidence
+/// about its steps only under the version that computed it, so a result
+/// a superseded version derived is attributable — and re-verifiable —
+/// rather than indistinguishable from a current one (rule 13, #4041).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublicationOutcome {
     /// The PR exists and its number is the one `gh pr create` reported.
@@ -1424,6 +1564,9 @@ pub enum PublicationOutcome {
         pr: String,
         /// Whether the merge step was verified.
         merged: bool,
+        /// The logic version that derived this outcome
+        /// ([`CONVERSION_LOGIC_VERSION`]) (#4041).
+        logic_version: u32,
     },
     /// A step failed before the PR could exist. The hold names the step
     /// and quotes its captured output: the cause, not the consequence.
@@ -1432,6 +1575,9 @@ pub enum PublicationOutcome {
         step: PublishStep,
         /// The step's captured output, quoted in the claim line.
         output: String,
+        /// The logic version that derived this outcome
+        /// ([`CONVERSION_LOGIC_VERSION`]) (#4041).
+        logic_version: u32,
     },
 }
 
@@ -1439,18 +1585,22 @@ impl PublicationOutcome {
     /// The line the pass may print for this outcome. Every token in the
     /// line is derived from a verified field: the PR number is the one
     /// the remote reported, and the quoted text is the one the failed
-    /// step printed.
+    /// step printed. Every line also names the logic version that
+    /// derived the outcome — `[logic v{version}]` — so a claim a
+    /// superseded version of the logic produced is distinguishable in
+    /// the run summary at a glance (rule 13, #4041).
     pub fn claim_line(&self, patch_identity: &str) -> String {
         match self {
-            Self::Converted { pr, merged: true } => {
-                format!("CONVERTED (PR {pr} merged): {patch_identity}")
-            }
-            Self::Converted { pr, merged: false } => {
-                format!("CONVERTED (PR {pr} open, merge deferred): {patch_identity}")
-            }
-            Self::Held { step, output } => {
-                format!("HELD at {}: {patch_identity}: {output}", step.as_str())
-            }
+            Self::Converted { pr, merged: true, logic_version } => format!(
+                "CONVERTED (PR {pr} merged): {patch_identity} [logic v{logic_version}]"
+            ),
+            Self::Converted { pr, merged: false, logic_version } => format!(
+                "CONVERTED (PR {pr} open, merge deferred): {patch_identity} [logic v{logic_version}]"
+            ),
+            Self::Held { step, output, logic_version } => format!(
+                "HELD at {}: {patch_identity} [logic v{logic_version}]: {output}",
+                step.as_str()
+            ),
         }
     }
 }
@@ -1466,10 +1616,17 @@ impl PublicationOutcome {
 /// remote's own response (`gh pr create` prints the URL); a `Converted`
 /// outcome is refused without it — a pass that cannot point at a PR
 /// number cannot claim a PR.
+///
+/// The outcome the function derives carries `logic_version` — the logic
+/// version of this decision logic ([`CONVERSION_LOGIC_VERSION`]) — so a
+/// later reader can attribute the result to the version that produced
+/// it and re-verify results a superseded version derived (rule 13,
+/// #4041).
 pub fn decide_publication(
     patch_identity: &str,
     steps: &[VerifiedStep],
     verified_pr: Option<&str>,
+    logic_version: u32,
 ) -> Result<PublicationOutcome, String> {
     let expected = PublishStep::ALL;
     if steps.is_empty() {
@@ -1499,6 +1656,7 @@ pub fn decide_publication(
         return Ok(PublicationOutcome::Held {
             step: last.step(),
             output: last.output().to_string(),
+            logic_version,
         });
     }
     if steps.len() < expected.len() && last.ok() {
@@ -1518,6 +1676,7 @@ pub fn decide_publication(
     Ok(PublicationOutcome::Converted {
         pr,
         merged: last.ok(),
+        logic_version,
     })
 }
 
@@ -1642,6 +1801,28 @@ pub fn reconcile_converted(
     ))
 }
 
+/// The mid-run logic-change alarm (#4041, #3866 pattern).
+///
+/// The gate asserts one equality: the logic version the pass read when
+/// it started (`logic_started`) equals the one it read again when it
+/// finished (`logic_finished`), both readings of
+/// [`CONVERSION_LOGIC_VERSION`]. When the logic's source changed between
+/// the two readings — a hot rebuild, a version bump landing mid-pass —
+/// the results the pass recorded are a mix of two logics, and the
+/// summary must say so instead of attributing both to one. On failure
+/// the report names both operands: a gate that cannot print the values
+/// it compared did not perform the comparison, and must not claim the
+/// property failed (#3866). `None` when the two readings agree — the
+/// results are all one logic's work and need no alarm.
+pub fn logic_change_report(logic_started: u32, logic_finished: u32) -> Option<String> {
+    if logic_started == logic_finished {
+        return None;
+    }
+    Some(format!(
+        "conversion logic changed mid-run: started under v{logic_started}, finished under v{logic_finished} — results recorded under either version require re-verification"
+    ))
+}
+
 // ---- #3899: the pass run summary ----
 
 /// The run summary of one conversion pass (#3899).
@@ -1650,8 +1831,12 @@ pub fn reconcile_converted(
 /// from what the pass recorded — never from what it intended:
 ///
 /// 1. The converted/held counts, derived from the recorded outcomes
-///    (rule 12, #3972), followed by the per-patch claim lines in
-///    recorded order.
+///    (rule 12, #3972). Between the counts and the claim lines: the
+///    mid-run logic-change alarm ([`logic_change_report`]), present only
+///    when the logic version the pass started under differs from the one
+///    it finished under — results recorded under either version require
+///    re-verification (rule 13, #4041). Then the per-patch claim lines
+///    in recorded order, each naming the logic version that produced it.
 /// 2. One line per mergeability transition this pass observed, in
 ///    observation order. The caller collects the reports its
 ///    [`PrLedger::observe`] calls returned during this pass and passes
@@ -1668,17 +1853,29 @@ pub fn reconcile_converted(
 /// Deterministic, so the block is stable across runs and diff-able:
 /// the same recorded outcomes, observations, and ledger state produce
 /// the same summary at the same stamp.
+///
+/// The logic versions are passed in rather than read from
+/// [`CONVERSION_LOGIC_VERSION`] at the top and bottom: the pass reads
+/// the constant when it starts and again when it finishes, and a
+/// mid-run change to the logic's source is exactly the case this summary
+/// must report — comparing the two readings, not the one value the
+/// compiler inlined, is the detection (rule 13, #4041).
 pub fn run_summary(
     log: &PublicationLog,
     ledger: &PrLedger,
     transitions: &[String],
     now: u64,
+    logic_started: u32,
+    logic_finished: u32,
 ) -> String {
     let mut lines = vec![format!(
         "converted: {}, held: {}",
         log.converted_count(),
         log.held_count()
     )];
+    if let Some(report) = logic_change_report(logic_started, logic_finished) {
+        lines.push(report);
+    }
     lines.extend(log.claim_lines());
     lines.extend(transitions.iter().cloned());
     lines.push(ledger.summary_line(now));
@@ -2077,31 +2274,51 @@ mod tests {
     #[test]
     fn memo_key_requires_both_identity_and_base_sha() {
         let mut memo = ConversionMemo::new();
-        memo.record("p1", "base-1", ConversionClass::ExistingPr)
-            .unwrap();
+        memo.record(
+            "p1",
+            "base-1",
+            ConversionClass::ExistingPr,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         assert_eq!(
-            memo.lookup("p1", "base-1"),
+            memo.lookup("p1", "base-1", CONVERSION_LOGIC_VERSION),
             Some(ConversionClass::ExistingPr)
         );
         // Same patch rebased onto a new trunk: a different key.
-        assert_eq!(memo.lookup("p1", "base-2"), None);
+        assert_eq!(memo.lookup("p1", "base-2", CONVERSION_LOGIC_VERSION), None);
         // Same trunk, different patch: a different key.
-        assert_eq!(memo.lookup("p2", "base-1"), None);
+        assert_eq!(memo.lookup("p2", "base-1", CONVERSION_LOGIC_VERSION), None);
     }
 
     #[test]
     fn memo_rejects_non_terminal_and_empty_keys() {
         let mut memo = ConversionMemo::new();
         let error = memo
-            .record("p1", "base-1", ConversionClass::Candidate)
+            .record(
+                "p1",
+                "base-1",
+                ConversionClass::Candidate,
+                CONVERSION_LOGIC_VERSION,
+            )
             .unwrap_err();
         assert!(error.contains("non-terminal"));
         assert!(memo
-            .record("", "base", ConversionClass::ExistingPr)
+            .record(
+                "",
+                "base",
+                ConversionClass::ExistingPr,
+                CONVERSION_LOGIC_VERSION
+            )
             .is_err());
         assert!(memo
-            .record("id", "  ", ConversionClass::ExistingPr)
+            .record(
+                "id",
+                "  ",
+                ConversionClass::ExistingPr,
+                CONVERSION_LOGIC_VERSION
+            )
             .is_err());
         assert!(memo.is_empty());
     }
@@ -2109,8 +2326,13 @@ mod tests {
     #[test]
     fn plan_pass_orders_assigns_and_flags_memo_hits() {
         let mut memo = ConversionMemo::new();
-        memo.record("hold-patch", "base-h", ConversionClass::MemoizedHold)
-            .unwrap();
+        memo.record(
+            "hold-patch",
+            "base-h",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         let patches = vec![
             patch("candidate-1", "base-a", ConversionClass::Candidate),
@@ -2119,7 +2341,15 @@ mod tests {
             patch("pr-patch", "base-c", ConversionClass::ExistingPr),
         ];
 
-        let schedule = plan_pass(&patches, 2, "/scratch/convert", &memo, "base-h").unwrap();
+        let schedule = plan_pass(
+            &patches,
+            2,
+            "/scratch/convert",
+            &memo,
+            "base-h",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         assert_eq!(schedule.workers.len(), 2);
         let order: Vec<_> = schedule
@@ -2155,8 +2385,13 @@ mod tests {
         // decision: the (identity, base sha) pair matches, but the verdict
         // must be re-tested, not acted on (#3698).
         let mut memo = ConversionMemo::new();
-        memo.record("hold-patch", "263368c7", ConversionClass::MemoizedHold)
-            .unwrap();
+        memo.record(
+            "hold-patch",
+            "263368c7",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         let patches = vec![patch(
             "hold-patch",
@@ -2165,12 +2400,28 @@ mod tests {
         )];
 
         // main moved on; the verdict is stale.
-        let schedule = plan_pass(&patches, 1, "/root", &memo, "785447cf").unwrap();
+        let schedule = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &memo,
+            "785447cf",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert_eq!(schedule.assignments[0].memo_hit, false);
         assert!(schedule.assignments[0].stale_base);
 
         // Same verdict, base still the tip: honored.
-        let schedule = plan_pass(&patches, 1, "/root", &memo, "263368c7").unwrap();
+        let schedule = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &memo,
+            "263368c7",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(schedule.assignments[0].memo_hit);
         assert!(!schedule.assignments[0].stale_base);
     }
@@ -2183,7 +2434,15 @@ mod tests {
             patch_unblocks("high-impact", "base-c", ConversionClass::Candidate, 50, 79),
         ];
 
-        let schedule = plan_pass(&patches, 2, "/root", &ConversionMemo::new(), "base-b").unwrap();
+        let schedule = plan_pass(
+            &patches,
+            2,
+            "/root",
+            &ConversionMemo::new(),
+            "base-b",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         let identities: Vec<_> = schedule
             .assignments
             .iter()
@@ -2199,24 +2458,61 @@ mod tests {
         // (identity, base sha) pair has an entry: the recorded outcome no
         // longer describes this patch.
         let mut memo = ConversionMemo::new();
-        memo.record("p1", "base-1", ConversionClass::NoNetChange)
-            .unwrap();
+        memo.record(
+            "p1",
+            "base-1",
+            ConversionClass::NoNetChange,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         let patches = vec![patch("p1", "base-1", ConversionClass::Candidate)];
-        let schedule = plan_pass(&patches, 1, "/root", &memo, "base-1").unwrap();
+        let schedule = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &memo,
+            "base-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         assert_eq!(schedule.assignments[0].memo_hit, false);
     }
 
     #[test]
     fn plan_pass_with_no_patches_plans_no_workers_and_propagates_pool_errors() {
-        let schedule = plan_pass(&[], 4, "/root", &ConversionMemo::new(), "base-1").unwrap();
+        let schedule = plan_pass(
+            &[],
+            4,
+            "/root",
+            &ConversionMemo::new(),
+            "base-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(schedule.workers.is_empty());
         assert!(schedule.assignments.is_empty());
 
         let patches = vec![patch("p1", "base-1", ConversionClass::Candidate)];
-        assert!(plan_pass(&patches, 0, "/root", &ConversionMemo::new(), "base-1").is_err());
-        assert!(plan_pass(&patches, 1, "", &ConversionMemo::new(), "base-1").is_err());
+        assert!(plan_pass(
+            &patches,
+            0,
+            "/root",
+            &ConversionMemo::new(),
+            "base-1",
+            CONVERSION_LOGIC_VERSION
+        )
+        .is_err());
+        assert!(plan_pass(
+            &patches,
+            1,
+            "",
+            &ConversionMemo::new(),
+            "base-1",
+            CONVERSION_LOGIC_VERSION
+        )
+        .is_err());
     }
 
     #[test]
@@ -2225,7 +2521,15 @@ mod tests {
         // value means the re-baseline step was skipped, and a pass planned
         // without one would act on a snapshot.
         let patches = vec![patch("p1", "base-1", ConversionClass::Candidate)];
-        let error = plan_pass(&patches, 1, "/root", &ConversionMemo::new(), "  ").unwrap_err();
+        let error = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &ConversionMemo::new(),
+            "  ",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap_err();
         assert!(error.contains("current tip"));
     }
 
@@ -2407,17 +2711,27 @@ mod tests {
         // the patch (#3866).
         let mut memo = ConversionMemo::new();
         let err = memo
-            .record("p1", "base-1", ConversionClass::CouldNotEvaluate)
+            .record(
+                "p1",
+                "base-1",
+                ConversionClass::CouldNotEvaluate,
+                CONVERSION_LOGIC_VERSION,
+            )
             .unwrap_err();
         assert!(err.contains("CouldNotEvaluate"), "{err}");
         assert!(err.contains("p1"), "{err}");
         assert!(err.contains("base-1"), "{err}");
         assert!(memo.is_empty());
         // A held patch is a decision about the patch and stays memoizable.
-        memo.record("p1", "base-1", ConversionClass::MemoizedHold)
-            .unwrap();
+        memo.record(
+            "p1",
+            "base-1",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert_eq!(
-            memo.lookup("p1", "base-1"),
+            memo.lookup("p1", "base-1", CONVERSION_LOGIC_VERSION),
             Some(ConversionClass::MemoizedHold)
         );
     }
@@ -2433,23 +2747,57 @@ mod tests {
         // Run one: the build died before the patch was evaluated.
         let mut blocked = patch("p1", "base-1", ConversionClass::CouldNotEvaluate);
         let queue1 = [blocked.clone()];
-        let schedule = plan_pass(&queue1, 1, "/root", &memo, "base-1").unwrap();
+        let schedule = plan_pass(
+            &queue1,
+            1,
+            "/root",
+            &memo,
+            "base-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(!schedule.assignments[0].memo_hit);
         assert!(memo
-            .record("p1", "base-1", ConversionClass::CouldNotEvaluate)
+            .record(
+                "p1",
+                "base-1",
+                ConversionClass::CouldNotEvaluate,
+                CONVERSION_LOGIC_VERSION
+            )
             .is_err());
 
         // Run two: the setup succeeds and the walk lands on HELD.
         blocked.class = ConversionClass::MemoizedHold;
         let queue2 = [blocked.clone()];
-        let schedule = plan_pass(&queue2, 1, "/root", &memo, "base-1").unwrap();
+        let schedule = plan_pass(
+            &queue2,
+            1,
+            "/root",
+            &memo,
+            "base-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(!schedule.assignments[0].memo_hit);
-        memo.record("p1", "base-1", ConversionClass::MemoizedHold)
-            .unwrap();
+        memo.record(
+            "p1",
+            "base-1",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
 
         // Run three: now the decision is about the patch and memoizable.
         let queue3 = [blocked];
-        let schedule = plan_pass(&queue3, 1, "/root", &memo, "base-1").unwrap();
+        let schedule = plan_pass(
+            &queue3,
+            1,
+            "/root",
+            &memo,
+            "base-1",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(schedule.assignments[0].memo_hit);
     }
 
@@ -2470,31 +2818,55 @@ mod tests {
         // Base no longer the tip: the stale-base equality failed and the
         // report names both sides.
         let patch = patch("p1", "263368c7", ConversionClass::MemoizedHold);
-        let report = memo_gate_report(&ConversionMemo::new(), &patch, "785447cf").unwrap();
+        let report = memo_gate_report(
+            &ConversionMemo::new(),
+            &patch,
+            "785447cf",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
         assert!(report.contains("263368c7"), "{report}");
         assert!(report.contains("785447cf"), "{report}");
 
         // Nothing recorded for the key: not yet evaluated, not failed.
         assert_eq!(
-            memo_gate_report(&ConversionMemo::new(), &patch, "263368c7"),
+            memo_gate_report(
+                &ConversionMemo::new(),
+                &patch,
+                "263368c7",
+                CONVERSION_LOGIC_VERSION
+            ),
             None
         );
 
         // A recorded decision different from the walk: the class equality
         // failed and the report names both operands.
         let mut memo = ConversionMemo::new();
-        memo.record("p1", "263368c7", ConversionClass::NoNetChange)
-            .unwrap();
-        let report = memo_gate_report(&memo, &patch, "263368c7").unwrap();
+        memo.record(
+            "p1",
+            "263368c7",
+            ConversionClass::NoNetChange,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        let report = memo_gate_report(&memo, &patch, "263368c7", CONVERSION_LOGIC_VERSION).unwrap();
         assert!(report.contains("NoNetChange"), "{report}");
         assert!(report.contains("MemoizedHold"), "{report}");
         assert!(report.contains("p1"), "{report}");
         assert!(report.contains("263368c7"), "{report}");
 
         // Both equalities hold: the gate passed.
-        memo.record("p1", "263368c7", ConversionClass::MemoizedHold)
-            .unwrap();
-        assert_eq!(memo_gate_report(&memo, &patch, "263368c7"), None);
+        memo.record(
+            "p1",
+            "263368c7",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            memo_gate_report(&memo, &patch, "263368c7", CONVERSION_LOGIC_VERSION),
+            None
+        );
     }
 
     #[test]
@@ -2992,10 +3364,11 @@ mod tests {
         // Patch A: all four steps verified, the remote confirmed the
         // number, the merge landed.
         let a = green_steps("41", "42");
-        let outcome_a = decide_publication("#41", &a, Some("#42")).unwrap();
+        let outcome_a =
+            decide_publication("#41", &a, Some("#42"), CONVERSION_LOGIC_VERSION).unwrap();
         assert_eq!(
             outcome_a.claim_line("#41"),
-            "CONVERTED (PR #42 merged): #41"
+            "CONVERTED (PR #42 merged): #41 [logic v1]"
         );
         log.record("#41", outcome_a).unwrap();
 
@@ -3008,10 +3381,11 @@ mod tests {
             "PR #43 is not mergeable: status checks are still pending",
         )
         .unwrap();
-        let outcome_b = decide_publication("#42", &b, Some("#43")).unwrap();
+        let outcome_b =
+            decide_publication("#42", &b, Some("#43"), CONVERSION_LOGIC_VERSION).unwrap();
         assert_eq!(
             outcome_b.claim_line("#42"),
-            "CONVERTED (PR #43 open, merge deferred): #42"
+            "CONVERTED (PR #43 open, merge deferred): #42 [logic v1]"
         );
         log.record("#42", outcome_b).unwrap();
 
@@ -3026,9 +3400,9 @@ mod tests {
         .unwrap();
         // The run stopped at the failure: the merge was never run.
         c.pop();
-        let outcome_c = decide_publication("#43", &c, None).unwrap();
+        let outcome_c = decide_publication("#43", &c, None, CONVERSION_LOGIC_VERSION).unwrap();
         match &outcome_c {
-            PublicationOutcome::Held { step, output } => {
+            PublicationOutcome::Held { step, output, .. } => {
                 assert_eq!(*step, PublishStep::PrCreate);
                 assert_eq!(
                     output,
@@ -3038,7 +3412,10 @@ mod tests {
             other => panic!("expected Held, got {other:?}"),
         }
         let line_c = outcome_c.claim_line("#43");
-        assert!(line_c.starts_with("HELD at gh pr create: #43:"), "{line_c}");
+        assert!(
+            line_c.starts_with("HELD at gh pr create: #43 [logic v1]:"),
+            "{line_c}"
+        );
         assert!(
             line_c.contains("GraphQL: no commits between main and conv/issue-#43"),
             "{line_c}"
@@ -3052,9 +3429,9 @@ mod tests {
         assert_eq!(
             log.claim_lines(),
             vec![
-                "CONVERTED (PR #42 merged): #41",
-                "CONVERTED (PR #43 open, merge deferred): #42",
-                "HELD at gh pr create: #43: GraphQL: no commits between main and conv/issue-#43",
+                "CONVERTED (PR #42 merged): #41 [logic v1]",
+                "CONVERTED (PR #43 open, merge deferred): #42 [logic v1]",
+                "HELD at gh pr create: #43 [logic v1]: GraphQL: no commits between main and conv/issue-#43",
             ]
         );
         // A patch cannot be re-recorded over its first claim.
@@ -3064,6 +3441,7 @@ mod tests {
                 PublicationOutcome::Held {
                     step: PublishStep::PrCreate,
                     output: "x".into(),
+                    logic_version: CONVERSION_LOGIC_VERSION,
                 },
             )
             .unwrap_err();
@@ -3075,12 +3453,13 @@ mod tests {
         // A green run that cannot point at a PR number the remote
         // confirmed is not a converted run (#3972).
         let steps = green_steps("41", "42");
-        let err = decide_publication("#41", &steps, None).unwrap_err();
+        let err = decide_publication("#41", &steps, None, CONVERSION_LOGIC_VERSION).unwrap_err();
         assert!(
             err.contains("without a PR number the remote confirmed"),
             "{err}"
         );
-        let err = decide_publication("#41", &steps, Some("  ")).unwrap_err();
+        let err =
+            decide_publication("#41", &steps, Some("  "), CONVERSION_LOGIC_VERSION).unwrap_err();
         assert!(
             err.contains("without a PR number the remote confirmed"),
             "{err}"
@@ -3093,17 +3472,24 @@ mod tests {
         // order: nothing may be skipped, reordered, or reported past a
         // failure (#3972).
         let steps = green_steps("41", "42");
-        assert!(decide_publication("#41", &[], Some("#42")).is_err());
+        assert!(decide_publication("#41", &[], Some("#42"), CONVERSION_LOGIC_VERSION).is_err());
 
         let mut reordered = steps.clone();
         reordered.swap(0, 1);
-        let err = decide_publication("#41", &reordered, Some("#42")).unwrap_err();
+        let err = decide_publication("#41", &reordered, Some("#42"), CONVERSION_LOGIC_VERSION)
+            .unwrap_err();
         assert!(err.contains("run order"), "{err}");
 
         let mut pushed_after_commit_failure = steps.clone();
         pushed_after_commit_failure[0] =
             VerifiedStep::record(PublishStep::Commit, 1, "nothing to commit").unwrap();
-        let err = decide_publication("#41", &pushed_after_commit_failure, None).unwrap_err();
+        let err = decide_publication(
+            "#41",
+            &pushed_after_commit_failure,
+            None,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap_err();
         assert!(
             err.contains("failed but later steps were recorded"),
             "{err}"
@@ -3117,7 +3503,8 @@ mod tests {
         // itself (#3972).
         let steps = green_steps("41", "42");
         let early = &steps[..3];
-        let err = decide_publication("#41", early, Some("#42")).unwrap_err();
+        let err =
+            decide_publication("#41", early, Some("#42"), CONVERSION_LOGIC_VERSION).unwrap_err();
         assert!(err.contains("stopped after gh pr create"), "{err}");
     }
 
@@ -3128,14 +3515,20 @@ mod tests {
         let mut log = PublicationLog::new();
         log.record(
             "#41",
-            decide_publication("#41", &green_steps("41", "42"), Some("#42")).unwrap(),
+            decide_publication(
+                "#41",
+                &green_steps("41", "42"),
+                Some("#42"),
+                CONVERSION_LOGIC_VERSION,
+            )
+            .unwrap(),
         )
         .unwrap();
         let mut deferred = green_steps("42", "43");
         deferred[3] = VerifiedStep::record(PublishStep::PrMerge, 1, "checks pending").unwrap();
         log.record(
             "#42",
-            decide_publication("#42", &deferred, Some("#43")).unwrap(),
+            decide_publication("#42", &deferred, Some("#43"), CONVERSION_LOGIC_VERSION).unwrap(),
         )
         .unwrap();
 
@@ -3170,7 +3563,13 @@ mod tests {
         // This pass: patch #41 converts, PR #42 merged.
         log.record(
             "#41",
-            decide_publication("#41", &green_steps("41", "42"), Some("#42")).unwrap(),
+            decide_publication(
+                "#41",
+                &green_steps("41", "42"),
+                Some("#42"),
+                CONVERSION_LOGIC_VERSION,
+            )
+            .unwrap(),
         )
         .unwrap();
         // Patch #44 held at gh pr create: the old pass piped this to
@@ -3183,20 +3582,33 @@ mod tests {
         )
         .unwrap();
         held.pop();
-        log.record("#44", decide_publication("#44", &held, None).unwrap())
-            .unwrap();
+        log.record(
+            "#44",
+            decide_publication("#44", &held, None, CONVERSION_LOGIC_VERSION).unwrap(),
+        )
+        .unwrap();
 
         // The pass observed the open PR this pass: still mergeable, so
         // no transition is reported.
         assert_eq!(ledger.observe("#43", Mergeable::Mergeable, 9_000), Ok(None));
 
-        let summary = run_summary(&log, &ledger, &[], 10_000);
+        let summary = run_summary(
+            &log,
+            &ledger,
+            &[],
+            10_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
+        );
         assert!(summary.contains("converted: 1, held: 1"), "{summary}");
         assert!(
-            summary.contains("CONVERTED (PR #42 merged): #41"),
+            summary.contains("CONVERTED (PR #42 merged): #41 [logic v1]"),
             "{summary}"
         );
-        assert!(summary.contains("HELD at gh pr create: #44:"), "{summary}");
+        assert!(
+            summary.contains("HELD at gh pr create: #44 [logic v1]:"),
+            "{summary}"
+        );
         assert!(
             summary.contains("1 previously opened PR still open: #43 (age 2h 30m 0s, MERGEABLE)"),
             "{summary}"
@@ -3225,6 +3637,8 @@ mod tests {
             &ledger,
             std::slice::from_ref(&report),
             10_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
         );
         assert!(summary.contains(&report), "{summary}");
         assert!(
@@ -3239,7 +3653,14 @@ mod tests {
         // The next pass: a fresh transition list — the alarm is
         // surfaced once, in the pass that observed it; the line item
         // carries the state and the age keeps growing.
-        let next = run_summary(&PublicationLog::new(), &ledger, &[], 20_000);
+        let next = run_summary(
+            &PublicationLog::new(),
+            &ledger,
+            &[],
+            20_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
+        );
         assert!(!next.contains("mergeability transition"), "{next}");
         assert!(
             next.contains("1 previously opened PR still open: #43 (age 5h 16m 40s, CONFLICTING)"),
@@ -3257,7 +3678,14 @@ mod tests {
         let mut ledger = PrLedger::new();
         ledger.record_opened("#43", 1_000).unwrap();
 
-        let summary = run_summary(&PublicationLog::new(), &ledger, &[], 10_000);
+        let summary = run_summary(
+            &PublicationLog::new(),
+            &ledger,
+            &[],
+            10_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
+        );
         assert_eq!(
             summary,
             "converted: 0, held: 0\n1 previously opened PR still open: #43 (age 2h 30m 0s, MERGEABLE)"
@@ -3265,10 +3693,159 @@ mod tests {
 
         // An empty pass with an empty ledger prints the same shape
         // with the fallback line: the summary is printed, not omitted.
-        let summary = run_summary(&PublicationLog::new(), &PrLedger::new(), &[], 10_000);
+        let summary = run_summary(
+            &PublicationLog::new(),
+            &PrLedger::new(),
+            &[],
+            10_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
+        );
         assert_eq!(
             summary,
             "converted: 0, held: 0\nno previously opened PRs still open"
         );
+    }
+
+    #[test]
+    fn memo_results_are_attributable_to_their_logic_version() {
+        // Acceptance (#4041): a result is attributable to the logic that
+        // produced it. Two versions deciding the same (identity, base sha)
+        // pair leave two distinct, version-tagged records; the lookup the
+        // pass honors is scoped to the version it is running under.
+        let mut memo = ConversionMemo::new();
+        memo.record("p1", "base-1", ConversionClass::MemoizedHold, 0)
+            .unwrap();
+        memo.record(
+            "p1",
+            "base-1",
+            ConversionClass::ExistingPr,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+
+        // The records carry their versions, newest first.
+        let records = memo.records("p1", "base-1");
+        assert_eq!(
+            records,
+            vec![
+                MemoRecord {
+                    class: ConversionClass::ExistingPr,
+                    logic_version: CONVERSION_LOGIC_VERSION,
+                },
+                MemoRecord {
+                    class: ConversionClass::MemoizedHold,
+                    logic_version: 0,
+                },
+            ]
+        );
+
+        // A pass running under the current logic sees its own decision.
+        assert_eq!(
+            memo.lookup("p1", "base-1", CONVERSION_LOGIC_VERSION),
+            Some(ConversionClass::ExistingPr)
+        );
+        // The same pair queried under the superseded version sees the
+        // old decision — the two versions' results are distinguishable.
+        assert_eq!(
+            memo.lookup("p1", "base-1", 0),
+            Some(ConversionClass::MemoizedHold)
+        );
+        // A version that never decided the pair has no record.
+        assert_eq!(memo.lookup("p1", "base-1", 7), None);
+    }
+
+    #[test]
+    fn a_superseded_verdict_is_flagged_and_rejected_as_a_memo_hit() {
+        // Acceptance (#4041): a result produced by a superseded version of
+        // the logic stays queryable but is not honored as a memo hit — it
+        // requires re-verification. The plan flags it and the report
+        // names both versions (the #3866 gate pattern).
+        let mut memo = ConversionMemo::new();
+        memo.record("hold-patch", "263368c7", ConversionClass::MemoizedHold, 0)
+            .unwrap();
+
+        let patches = vec![patch(
+            "hold-patch",
+            "263368c7",
+            ConversionClass::MemoizedHold,
+        )];
+
+        // The pass is running the current logic: the recorded decision was
+        // made by an older one. Not a memo hit, flagged for re-verification.
+        let schedule = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &memo,
+            "263368c7",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert!(!schedule.assignments[0].memo_hit);
+        assert!(schedule.assignments[0].superseded_verdict);
+        let report =
+            superseded_verdict_report(&memo, &patches[0], CONVERSION_LOGIC_VERSION).unwrap();
+        assert!(report.contains("logic v0"), "{report}");
+        assert!(report.contains("running v1"), "{report}");
+
+        // The same decision re-recorded under the current logic is live:
+        // a memo hit, nothing superseded.
+        memo.record(
+            "hold-patch",
+            "263368c7",
+            ConversionClass::MemoizedHold,
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        let schedule = plan_pass(
+            &patches,
+            1,
+            "/root",
+            &memo,
+            "263368c7",
+            CONVERSION_LOGIC_VERSION,
+        )
+        .unwrap();
+        assert!(schedule.assignments[0].memo_hit);
+        assert!(!schedule.assignments[0].superseded_verdict);
+        assert!(superseded_verdict_report(&memo, &patches[0], CONVERSION_LOGIC_VERSION).is_none());
+    }
+
+    #[test]
+    fn the_run_summary_reports_a_mid_run_logic_change() {
+        // Acceptance (#4041): a pass that detects its own logic changed
+        // between the reading at start and the reading at finish reports
+        // it in the summary — with both operands (#3866).
+        let alarm = logic_change_report(0, CONVERSION_LOGIC_VERSION).unwrap();
+        assert!(alarm.contains("v0"), "{alarm}");
+        assert!(alarm.contains("v1"), "{alarm}");
+
+        let summary = run_summary(
+            &PublicationLog::new(),
+            &PrLedger::new(),
+            &[],
+            10_000,
+            0,
+            CONVERSION_LOGIC_VERSION,
+        );
+        let lines: Vec<&str> = summary.lines().collect();
+        // The alarm sits between the count line and the line item: it is
+        // part of the summary, printed with it, not after it.
+        assert_eq!(lines[0], "converted: 0, held: 0");
+        assert_eq!(lines[1], alarm);
+
+        // Same logic at both readings: no alarm, the summary is unchanged
+        // in shape.
+        let summary = run_summary(
+            &PublicationLog::new(),
+            &PrLedger::new(),
+            &[],
+            10_000,
+            CONVERSION_LOGIC_VERSION,
+            CONVERSION_LOGIC_VERSION,
+        );
+        assert!(logic_change_report(CONVERSION_LOGIC_VERSION, CONVERSION_LOGIC_VERSION).is_none());
+        assert_eq!(summary.lines().count(), 2);
     }
 }
