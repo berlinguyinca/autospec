@@ -9,6 +9,7 @@ pub mod digest;
 pub mod epoch;
 pub mod error;
 pub mod ids;
+pub mod promotion;
 pub mod qualification;
 pub mod record;
 pub mod statistics;
@@ -23,6 +24,10 @@ pub use error::{EvaluationError, EvaluationErrorKind};
 pub use ids::{
     AnchorCaseId, AnchorSuiteId, ChallengerTrialId, EpochId, EvaluationId, EvaluatorSlot,
     EvaluatorVersionRef, PromotionId,
+};
+pub use promotion::{
+    plan_pin, plan_promotion, Approval, ApprovalKind, ChallengerTrial, ChallengerVerdict,
+    PromotionEvent, PromotionPolicy, PromotionState,
 };
 pub use qualification::Verdict;
 pub use record::{
