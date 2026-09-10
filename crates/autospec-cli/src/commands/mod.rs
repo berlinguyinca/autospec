@@ -194,10 +194,6 @@ fn print_help() {
     println!("\nOPTIONS:\n    -h, --help       Print help");
 }
 
-fn not_implemented(command: &str) -> Result<(), String> {
-    Err(format!("autospec {command} is not yet implemented"))
-}
-
 fn is_json(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--json")
 }

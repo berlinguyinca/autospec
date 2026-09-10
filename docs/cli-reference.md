@@ -81,7 +81,9 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec anchor show <suite-id@version> [--role operator\|qualification\|mutation]` | yes | default `mutation` (protected-holdout labels redacted) |
 | `autospec anchor verify <suite-id@version>` | yes | recomputes artifact digests; exit 2 naming mismatched cases |
 | `autospec showcase --json` | yes | demo stub |
-| `autospec benchmark` | no | documented stub, exits non-zero |
+| `autospec benchmark validate-matrix <matrix.json>` | no | validates a Qwen3.8 benchmark matrix against the provider-neutral contract (#3328): every row identifies quantization, runtime, node, profile; speculative rows record `draft_tokens`/`accepted_draft_tokens`; a candidate wins only when `success: true`; only supported local cells run (Q3-Q8, supported runtimes/nodes) and skip reasons are preserved; the report compares the winner's median successful issue time to the baseline |
+| `autospec benchmark validate-matrix <matrix.json> --json` | yes | machine-readable form: `valid`, per-row `errors`, per-cell `cells` (run/skip + reason), and the `report` |
+| `autospec benchmark` | no | any other invocation exits non-zero with usage |
 | `autospec growth-report --json` | yes | local-only metrics stub |
 | `autospec repair-loop record --loop <name> [--expected <id>]... [--repaired <id>]... [--ticket <id=ticket>]... [--state-file <path>]` | no | records one repair sweep; exit 0 idle / 1 repaired / 2 persistent (ALERT) |
 | `autospec repair-loop status --loop <name> [--state-file <path>] [--json]` | yes | ledger summary: repair rate over the rolling window, active per-identity streaks, attached defect tickets |
