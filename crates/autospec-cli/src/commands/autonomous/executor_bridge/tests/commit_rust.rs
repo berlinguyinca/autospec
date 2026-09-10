@@ -313,48 +313,67 @@ fn contained_hook_rejects_linter_symlink_into_worktree() {
 )]
 #[test]
 fn rust_commit_runs_trusted_validation_hook_inside_containment() {
+    // A diagnostic must report the value it rejected, not that it rejected
+    // one (issue #4183): the CI log is the only artefact, so bind each probe
+    // and say which one failed and what it saw. The toolchain question is
+    // asked through `xcrun --find`, the supported lookup, instead of a
+    // hand-rolled `xcode-select -p` path stat, which can reject a host the
+    // supported query would accept.
     #[cfg(target_os = "macos")]
-    let developer_tools_valid = Command::new("/usr/bin/xcode-select")
-        .arg("-p")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|path| Path::new(path.trim()).join("usr/bin/xcrun").is_file());
+    fn probe_developer_tool(name: &str, command: Command) -> Option<String> {
+        match command.output() {
+            Err(error) => Some(format!("{name}: spawn failed: {error:?}")),
+            Ok(output) if !output.status.success() => Some(format!(
+                "{name}: exited {:?}, stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Ok(_) => None,
+        }
+    }
     #[cfg(target_os = "macos")]
-    if !developer_tools_valid
-        || !Command::new("/usr/bin/xcrun")
-            .args(["--find", "sandbox-exec"])
-            .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/xcrun")
-            .args(["--find", "git"])
-            .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/git")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        || !Command::new("/usr/bin/sandbox-exec")
-            .env_clear()
-            .env("HOME", "/tmp")
-            .env(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            )
-            .env("LANG", "C.UTF-8")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .args([
-                "-p",
-                "(version 1) (allow default)",
-                "/usr/bin/git",
-                "--version",
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping live containment proof: macOS developer tools are unavailable");
+    let unavailable_developer_tools: Vec<String> = [
+        probe_developer_tool(
+            "xcrun --find sandbox-exec",
+            Command::new("/usr/bin/xcrun").args(["--find", "sandbox-exec"]),
+        ),
+        probe_developer_tool(
+            "xcrun --find git",
+            Command::new("/usr/bin/xcrun").args(["--find", "git"]),
+        ),
+        probe_developer_tool(
+            "git --version",
+            Command::new("/usr/bin/git").arg("--version"),
+        ),
+        probe_developer_tool(
+            "sandbox-exec (version 1) (allow default) git --version",
+            Command::new("/usr/bin/sandbox-exec")
+                .env_clear()
+                .env("HOME", "/tmp")
+                .env(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                )
+                .env("LANG", "C.UTF-8")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-p",
+                    "(version 1) (allow default)",
+                    "/usr/bin/git",
+                    "--version",
+                ]),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    #[cfg(target_os = "macos")]
+    if !unavailable_developer_tools.is_empty() {
+        eprintln!(
+            "skipping live containment proof: macOS developer tools are unavailable: {}",
+            unavailable_developer_tools.join("; ")
+        );
         return;
     }
     let (_fixture, state, _snapshot, _closeout) =
