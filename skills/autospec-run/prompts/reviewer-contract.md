@@ -57,6 +57,7 @@ Skip Part 1 entirely if `AUTOSPEC_NO_GUARDIAN=1` (log
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`); LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
 | `PR_SIZE` | det | git diff/numstat | hard above 400 additions+deletions, 8 raw files, or 3 normalized logical units; binary rows are always hard |
+| `GATE_PROMOTION_UNEVIDENCED` | det | workflow diff scan | a `.github/workflows/*.yml` change promotes a job to a blocking gate (adds it to another job's `needs:` or removes `continue-on-error: true`) without a cited green run (GitHub Actions run/job URL or exit status 0) in the issue or PR body; finding names the file and job |
 
 ### Corrective directive map
 
@@ -78,6 +79,7 @@ so the implementer knows the fix on retry:
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 | `PR_SIZE` | "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff." |
+| `GATE_PROMOTION_UNEVIDENCED` | "Cite a green run of the promoted job in the issue or PR body (a GitHub Actions run/job URL or a captured exit status 0) before promoting it to a blocking gate, or revert the promotion. If the verification could not be executed, the implementer must record the command and why it could not run in the Closeout report and the PR body."
 
 ## Per-issue opt-out grammar
 

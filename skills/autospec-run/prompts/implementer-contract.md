@@ -58,6 +58,7 @@ blocking findings, capped at 200).
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`); LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
 | `PR_SIZE` | det | git diff/numstat | hard above 400 additions+deletions, 8 raw files, or 3 normalized logical units; binary rows are always hard |
+| `GATE_PROMOTION_UNEVIDENCED` | det | workflow diff scan | a `.github/workflows/*.yml` change promotes a job to a blocking gate (adds it to another job's `needs:` or removes `continue-on-error: true`) without a cited green run (GitHub Actions run/job URL or exit status 0) in the issue or PR body; finding names the file and job |
 
 ### Corrective directive map
 
@@ -79,6 +80,7 @@ implementer's retry prompt as cumulative context:
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 | `PR_SIZE` | "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff." |
+| `GATE_PROMOTION_UNEVIDENCED` | "Cite a green run of the promoted job in the issue or PR body (a GitHub Actions run/job URL or a captured exit status 0) before promoting it to a blocking gate, or revert the promotion. If the verification could not be executed, record the command and why it could not run in the Closeout report and the PR body instead."
 | `DESIGN_DRIFT` | "If the repo has a DESIGN.md, use its tokens (color/spacing/typography/component) instead of hardcoding values; match the adopted design language for any user-facing UI. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh` on changed UI files — it deterministically flags raw hex, off-grid spacing, ad-hoc z-index, and banned fonts. It also flags motion and input defects: motion with no `prefers-reduced-motion` fallback, infinite animation with no pause control (WCAG 2.2.2), a viewport blocking zoom (WCAG 1.4.4), and `:hover` styled without a `:focus` equivalent. Ship a reduced-motion fallback with every animation." |
 | `ANNOUNCE_STATE_CHANGE` | "When a UI change updates content without moving focus — a list reloading, a save succeeding, a validation failing, a filter narrowing results — announce it. Put an **empty** live region in the markup (`role=\"status\"` for routine results, `role=\"alert\"` for errors) and fill it when the state changes. A region created together with its text is not announced, because there is no change for a screen reader to observe. Clear `aria-busy` when the work finishes. Network-driven states are checked automatically by `ui-liveregion-evidence.mjs`, which fails the request to see whether the app says anything; **states no request produces — form validation, optimistic updates, client-side route changes, empty states — are only reachable if you declare them.** When you build one, add it to `.autospec/ui-test-hooks.json` and expose the hook, so the state stays checked rather than assumed. Keep the hook to dispatching states the app already has; it is a test seam, not a second code path." |
 
@@ -227,6 +229,13 @@ to the monitor log. Terse and result-first. Canonical contract: AGENTS.md
   `[likely-wrong]`.
 - **Proof type** — per `[verified]` claim, `runtime` or `static`. Runtime claims
   need runtime proof, not a build/read.
+- **Unexecuted verifications** — for any verification the issue's smoke test or
+  acceptance criteria asked for that you could NOT execute, record it here:
+  the exact command and why it could not run in this environment (no GPU, no
+  network, no credential, sandbox limit, …). Omit the field only if every
+  requested verification was executed. An unevidenced gate promotion (see
+  `GATE_PROMOTION_UNEVIDENCED`) without a cited green run is exactly the case
+  this field exists to make visible.
 - **Before/after** — the measurable delta, or `n/a — <reason>` (mandatory field).
 - **Artifacts** — exact paths + a re-runnable command.
 - **Scoped git status** — the files this issue touched.

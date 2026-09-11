@@ -1193,3 +1193,132 @@ cat_entry_repo() {
     [ "$status" -eq 0 ]
     ! echo "$output" | grep -q "CATALOG_ENTRY_INCOMPLETE"
 }
+
+
+# ── GATE_PROMOTION_UNEVIDENCED (#3990) ───────────────────────────────────────
+
+gp_diff_needs() {
+    cat > "$PR_SIZE_TMP/gp.diff" <<'DIFF'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 1111111..2222222 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,6 +1,6 @@
+ jobs:
+   publish:
+-    needs: [changes]
++    needs: [changes, reproducible-build]
+     runs-on: ubuntu-latest
+     steps:
+       - run: echo hi
+DIFF
+}
+
+gp_diff_coe() {
+    cat > "$PR_SIZE_TMP/gp.diff" <<'DIFF'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 1111111..2222222 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,7 +1,6 @@
+ jobs:
+   lint:
+-    continue-on-error: true
+     runs-on: ubuntu-latest
+     steps:
+       - run: echo hi
+DIFF
+}
+
+gp_issue() {
+    printf '%s\n' "$1" \
+        "Guardian: skip-OUT_OF_SCOPE # gate-promotion fixture intentionally omits implementation outline" \
+        > "$PR_SIZE_TMP/gp-issue.md"
+    mkdir -p "$PR_SIZE_TMP/bin"
+    cat > "$PR_SIZE_TMP/bin/gh" <<'GHSIM'
+#!/usr/bin/env bash
+cat "$PR_SIZE_ISSUE_BODY"
+GHSIM
+    chmod +x "$PR_SIZE_TMP/bin/gh"
+}
+
+run_gp() {
+    run env PATH="$PR_SIZE_TMP/bin:$PATH" PR_SIZE_ISSUE_BODY="$PR_SIZE_TMP/gp-issue.md" \
+        bash "$LINT" --diff-file "$PR_SIZE_TMP/gp.diff" --issue 3990
+}
+
+@test "gate promotion: needs: addition without green-run citation is rejected and names file and job" {
+    gp_diff_needs
+    gp_issue "Promote reproducible-build to a blocking gate."
+    run_gp
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED:.github/workflows/ci.yml:"
+    echo "$output" | grep -q "job 'reproducible-build'"
+    echo "$output" | grep -q "added to publish needs"
+}
+
+@test "gate promotion: needs: addition with cited green run URL is accepted" {
+    gp_diff_needs
+    gp_issue "Promote reproducible-build to a blocking gate. Green run of reproducible-build: https://github.com/owner/repo/actions/runs/12345"
+    run_gp
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED"
+}
+
+@test "gate promotion: continue-on-error removal without green-run citation is rejected and names file and job" {
+    gp_diff_coe
+    gp_issue "Make the lint job blocking."
+    run_gp
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED:.github/workflows/ci.yml:"
+    echo "$output" | grep -q "job 'lint'"
+    echo "$output" | grep -q "continue-on-error: true removed"
+}
+
+@test "gate promotion: continue-on-error removal with cited green run is accepted" {
+    gp_diff_coe
+    gp_issue "Make the lint job blocking. Verified locally: lint — exit status 0"
+    run_gp
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED"
+}
+
+@test "gate promotion: skip directive demotes finding to INFO without blocking" {
+    gp_diff_needs
+    {
+        echo "Promote reproducible-build to a blocking gate."
+        echo "Guardian: skip-OUT_OF_SCOPE, skip-GATE_PROMOTION_UNEVIDENCED # already green on main"
+    } > "$PR_SIZE_TMP/gp-issue.md"
+    mkdir -p "$PR_SIZE_TMP/bin"
+    cat > "$PR_SIZE_TMP/bin/gh" <<'GHSIM'
+#!/usr/bin/env bash
+cat "$PR_SIZE_ISSUE_BODY"
+GHSIM
+    chmod +x "$PR_SIZE_TMP/bin/gh"
+    run env PATH="$PR_SIZE_TMP/bin:$PATH" PR_SIZE_ISSUE_BODY="$PR_SIZE_TMP/gp-issue.md" \
+        bash "$LINT" --diff-file "$PR_SIZE_TMP/gp.diff" --issue 3990
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "INFO:GATE_PROMOTION_UNEVIDENCED"
+    ! echo "$output" | grep -qE "^GATE_PROMOTION_UNEVIDENCED"
+}
+
+@test "gate promotion: new workflow file is not a promotion" {
+    cat > "$PR_SIZE_TMP/gp.diff" <<'DIFF'
+diff --git a/.github/workflows/new.yml b/.github/workflows/new.yml
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/.github/workflows/new.yml
+@@ -0,0 +1,6 @@
++jobs:
++  build:
++    needs: [changes]
++    runs-on: ubuntu-latest
++    steps:
++      - run: echo hi
+DIFF
+    gp_issue "Add new workflow."
+    run_gp
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "GATE_PROMOTION_UNEVIDENCED"
+}
