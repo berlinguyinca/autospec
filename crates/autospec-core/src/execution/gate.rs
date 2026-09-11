@@ -37,6 +37,19 @@
 //!    repair is recorded in the verdict ([`Normalised`]) so the patch that
 //!    lands is the normalised one and the log says so, and a hold names
 //!    only the defects that survive normalisation.
+//! 5. **Unavailability is a third outcome, not a failure.** The caller
+//!    asserts each tool's precondition before running it (a fresh clone
+//!    has no `node_modules`, so `eslint` is `not found`); a check that
+//!    cannot run is recorded as [`CheckOutcome::Unavailable`] carrying the
+//!    tool's own message, and the verdict is [`GateVerdict::Unavailable`]
+//!    — `GATE-UNAVAILABLE: <why>` — not a hold. A missing tool is a
+//!    statement about the toolchain, not the patch: holding on it records
+//!    a defect that was never observed and spends the patch's retry
+//!    budget on nothing; converting on it ships code the gate never
+//!    verified. So unavailable is neither — the patch returns to the queue
+//!    untouched, and the pass summary reports converted, held, and
+//!    unavailable as three separate counts ([`GateCounts`]) (#4250, where
+//!    275 patches were held on `eslint: not found`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -130,6 +143,14 @@ pub enum CheckOutcome {
         /// The check's own detail line, carried verbatim into the record.
         detail: String,
     },
+    /// The check did not run: its tool or precondition was missing
+    /// (`eslint: not found` in a fresh clone without `node_modules`). This
+    /// is a state of the toolchain, not a finding about the patch — no
+    /// defect was observed — so it must not hold the patch, spend its
+    /// retry budget, or mark it known-bad; and it is not a clean run, so
+    /// the patch cannot convert on its strength either. The reason is the
+    /// tool's own message, verbatim (#4250).
+    Unavailable { reason: String },
 }
 
 /// A gate run plan: every check exactly once, in the order it must run.
@@ -223,6 +244,18 @@ pub struct HoldFinding {
     pub detail: String,
 }
 
+/// One check the gate could not run: its tool or precondition was missing.
+/// Unlike a [`HoldFinding`], this is a statement about the toolchain, not
+/// the patch — no defect was observed — so it never justifies a hold on
+/// its own and consumes no retry budget or known-bad slot (#4250).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableFinding {
+    /// The check that could not run.
+    pub check: String,
+    /// The tool's own message, verbatim: `eslint: not found`.
+    pub reason: String,
+}
+
 /// A check the pipeline did not evaluate because an earlier blocking
 /// finding made it impossible. A skip is recorded — never silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,9 +304,26 @@ pub enum GateVerdict {
     Convert { normalised: Vec<Normalised> },
     /// At least one blocking finding that *survives normalisation*. The
     /// record names all of them, most confident first, plus every repair
-    /// applied and every check a prior failure made impossible to evaluate.
+    /// applied, every check the gate could not run, and every check a
+    /// prior failure made impossible to evaluate. A real finding dominates
+    /// a broken toolchain: `unavailable` still names the missing tools, so
+    /// the operator sees the toolchain state in the same line that names
+    /// the defect (#4250).
     Hold {
         findings: Vec<HoldFinding>,
+        unavailable: Vec<UnavailableFinding>,
+        not_evaluated: Vec<NotEvaluated>,
+        normalised: Vec<Normalised>,
+    },
+    /// No blocking finding was observed, but at least one check could not
+    /// run: its tool or precondition was missing. The record names every
+    /// such check with the tool's own message, plus every repair applied
+    /// and every check the missing tool made impossible to evaluate. The
+    /// patch is not converted — it was never verified — and not held:
+    /// nothing about it is wrong. It returns to the queue untouched, and
+    /// no retry budget or known-bad slot is spent (#4250).
+    Unavailable {
+        unavailable: Vec<UnavailableFinding>,
         not_evaluated: Vec<NotEvaluated>,
         normalised: Vec<Normalised>,
     },
@@ -285,12 +335,38 @@ impl GateVerdict {
         matches!(self, Self::Hold { .. })
     }
 
+    /// Whether the patch may convert.
+    pub fn is_convert(&self) -> bool {
+        matches!(self, Self::Convert { .. })
+    }
+
+    /// Whether the gate could not verify the patch because a tool or
+    /// precondition was missing: neither held nor converted (#4250).
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable { .. })
+    }
+
     /// The names of the checks behind the blocking findings, record order.
-    /// A finding here always survived normalisation.
+    /// A finding here always survived normalisation. An unavailable gate
+    /// has none: no defect was observed.
     pub fn finding_checks(&self) -> Vec<&str> {
         match self {
             Self::Convert { .. } => Vec::new(),
             Self::Hold { findings, .. } => findings.iter().map(|f| f.check.as_str()).collect(),
+            Self::Unavailable { .. } => Vec::new(),
+        }
+    }
+
+    /// The names of the checks the gate could not run, record order.
+    pub fn unavailable_checks(&self) -> Vec<&str> {
+        match self {
+            Self::Convert { .. } => Vec::new(),
+            Self::Hold { unavailable, .. } => {
+                unavailable.iter().map(|f| f.check.as_str()).collect()
+            }
+            Self::Unavailable { unavailable, .. } => {
+                unavailable.iter().map(|f| f.check.as_str()).collect()
+            }
         }
     }
 
@@ -299,6 +375,7 @@ impl GateVerdict {
         match self {
             Self::Convert { normalised } => normalised,
             Self::Hold { normalised, .. } => normalised,
+            Self::Unavailable { normalised, .. } => normalised,
         }
     }
 
@@ -320,6 +397,7 @@ impl GateVerdict {
             }
             Self::Hold {
                 findings,
+                unavailable,
                 not_evaluated,
                 normalised,
             } => {
@@ -327,6 +405,9 @@ impl GateVerdict {
                     .iter()
                     .map(|finding| format!("{}: {}", finding.check, finding.detail))
                     .collect::<Vec<_>>();
+                if !unavailable.is_empty() {
+                    parts.push(unavailable_clause(unavailable));
+                }
                 if !normalised.is_empty() {
                     parts.push(normalised_clause(normalised));
                 }
@@ -338,8 +419,41 @@ impl GateVerdict {
                 }
                 format!("HELD: {}", parts.join("; "))
             }
+            Self::Unavailable {
+                unavailable,
+                not_evaluated,
+                normalised,
+            } => {
+                let mut parts = unavailable
+                    .iter()
+                    .map(|finding| format!("{}: {}", finding.check, finding.reason))
+                    .collect::<Vec<_>>();
+                if !normalised.is_empty() {
+                    parts.push(normalised_clause(normalised));
+                }
+                for skipped in not_evaluated {
+                    parts.push(format!(
+                        "not evaluated: {} (blocked by {})",
+                        skipped.check, skipped.because
+                    ));
+                }
+                format!("GATE-UNAVAILABLE: {}", parts.join("; "))
+            }
         }
     }
+}
+
+/// The record clause for checks the gate could not run:
+/// `unavailable: lint (eslint: not found)`.
+fn unavailable_clause(unavailable: &[UnavailableFinding]) -> String {
+    format!(
+        "unavailable: {}",
+        unavailable
+            .iter()
+            .map(|finding| format!("{} ({})", finding.check, finding.reason))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// The record clause for applied repairs: `normalised: format by cargo fmt`.
@@ -362,6 +476,10 @@ enum Decision {
     /// actually failed. A skipped check carries its dependency's reason,
     /// so a transitive skip still points at the real blocker.
     Blocked(String),
+    /// The gate could not run the named check at all: its tool or
+    /// precondition was missing. A skipped check carries its dependency's
+    /// name, so a transitive skip points at the check that never ran.
+    Unavailable(String),
 }
 
 /// Validate the normalisers and map each repaired check to the normaliser
@@ -429,6 +547,16 @@ fn normaliser_map<'a>(
 /// The hold record collects every blocking finding that *survives*
 /// normalisation, ordered by confidence (deterministic first, plan order
 /// within a tier), followed by the repair record and every recorded skip.
+///
+/// A check whose tool or precondition was missing reports
+/// [`CheckOutcome::Unavailable`]. That is a statement about the toolchain,
+/// not the patch: it is recorded, it makes its dependents not evaluated
+/// (named against it), and it produces [`GateVerdict::Unavailable`] —
+/// `GATE-UNAVAILABLE` — whenever no blocking finding survived. A blocking
+/// finding still dominates: a real defect holds the patch, and the record
+/// names the missing tools in the same line. An unavailable outcome with
+/// an empty reason is an error: the record must name what was missing,
+/// verbatim (#4250).
 pub fn evaluate_gate(
     plan: &GatePlan,
     normalisers: &[Normaliser],
@@ -442,6 +570,7 @@ pub fn evaluate_gate(
     }
     let mut decided: BTreeMap<&str, Decision> = BTreeMap::new();
     let mut findings: Vec<HoldFinding> = Vec::new();
+    let mut unavailable: Vec<UnavailableFinding> = Vec::new();
     let mut not_evaluated: Vec<NotEvaluated> = Vec::new();
     let mut normalised: Vec<Normalised> = Vec::new();
     for check in plan.checks() {
@@ -471,6 +600,28 @@ pub fn evaluate_gate(
                     }
                 }
             }
+            Some(CheckOutcome::Unavailable { reason }) => {
+                // The tool or its precondition was missing: a statement
+                // about the toolchain, not a finding about the patch.
+                // Recorded, never held on, never converted on.
+                let reason = reason.trim();
+                if reason.is_empty() {
+                    return Err(format!(
+                        "gate check {} is unavailable with no reason: the record must name \
+                         what was missing, verbatim — a skip is a recorded skip, not an \
+                         unrecorded absence",
+                        check.name
+                    ));
+                }
+                unavailable.push(UnavailableFinding {
+                    check: check.name.clone(),
+                    reason: reason.to_string(),
+                });
+                decided.insert(
+                    check.name.as_str(),
+                    Decision::Unavailable(check.name.clone()),
+                );
+            }
             None => {
                 let because = skip_reason(check, &decided)?;
                 not_evaluated.push(NotEvaluated {
@@ -483,14 +634,72 @@ pub fn evaluate_gate(
     }
     // Stable: plan order (and thus declared order) is preserved within a tier.
     findings.sort_by_key(|finding| finding.confidence);
-    if findings.is_empty() {
-        Ok(GateVerdict::Convert { normalised })
-    } else {
+    if !findings.is_empty() {
+        // A real finding dominates a broken toolchain: the patch is held on
+        // the defect, and the record still names the tools that were
+        // missing, in the same line.
         Ok(GateVerdict::Hold {
             findings,
+            unavailable,
             not_evaluated,
             normalised,
         })
+    } else if unavailable.is_empty() {
+        Ok(GateVerdict::Convert { normalised })
+    } else {
+        // No defect was observed, but the gate could not verify the patch:
+        // neither converted (never verified) nor held (nothing is wrong).
+        // The patch returns to the queue untouched; no retry budget or
+        // known-bad slot is spent (#4250).
+        Ok(GateVerdict::Unavailable {
+            unavailable,
+            not_evaluated,
+            normalised,
+        })
+    }
+}
+
+/// The three outcomes of a conversion pass, counted separately: converted
+/// (every check ran clean), held (a real finding), and unavailable (a tool
+/// or precondition was missing). Unavailable is its own count — never
+/// folded into held — because holding a patch on a broken toolchain spends
+/// its retry budget and marks it known-bad on a state of the toolchain,
+/// not the patch (#4250).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateCounts {
+    /// Patches the gate let through.
+    pub converted: usize,
+    /// Patches held on a blocking finding.
+    pub held: usize,
+    /// Patches the gate could not verify because a tool or precondition
+    /// was missing.
+    pub unavailable: usize,
+}
+
+impl GateCounts {
+    /// Count the outcomes of one pass.
+    pub fn of(verdicts: &[GateVerdict]) -> Self {
+        let mut counts = Self {
+            converted: 0,
+            held: 0,
+            unavailable: 0,
+        };
+        for verdict in verdicts {
+            match verdict {
+                GateVerdict::Convert { .. } => counts.converted += 1,
+                GateVerdict::Hold { .. } => counts.held += 1,
+                GateVerdict::Unavailable { .. } => counts.unavailable += 1,
+            }
+        }
+        counts
+    }
+
+    /// The pass summary line: `31 converted / 4 held / 240 unavailable`.
+    pub fn line(&self) -> String {
+        format!(
+            "{} converted / {} held / {} unavailable",
+            self.converted, self.held, self.unavailable
+        )
     }
 }
 
@@ -503,6 +712,7 @@ fn skip_reason(check: &GateCheck, decided: &BTreeMap<&str, Decision>) -> Result<
     for dep in &check.requires {
         match decided.get(dep.as_str()) {
             Some(Decision::Blocked(reason)) => return Ok(reason.clone()),
+            Some(Decision::Unavailable(reason)) => return Ok(reason.clone()),
             Some(Decision::Clean) => {}
             // A dependency with no recorded decision cannot explain a skip;
             // the plan guarantees dependencies run first, so this is only
@@ -516,8 +726,8 @@ fn skip_reason(check: &GateCheck, decided: &BTreeMap<&str, Decision>) -> Result<
     }
     inherited.ok_or_else(|| {
         format!(
-            "gate check {} was not evaluated and no prior blocking finding \
-             makes it impossible; a skip is a recorded skip, not an unrecorded absence",
+            "gate check {} was not evaluated and no prior blocking finding or unavailable \
+             check makes it impossible; a skip is a recorded skip, not an unrecorded absence",
             check.name
         )
     })
@@ -588,10 +798,12 @@ mod tests {
         match &verdict {
             GateVerdict::Hold {
                 findings,
+                unavailable,
                 not_evaluated,
                 normalised,
             } => {
                 assert!(normalised.is_empty(), "nothing is normalised here");
+                assert!(unavailable.is_empty(), "no tool was missing here");
                 assert!(not_evaluated.is_empty(), "every check ran here");
                 assert_eq!(findings.len(), 2);
                 assert_eq!(findings[0].check, "lint");
@@ -632,10 +844,12 @@ mod tests {
         match &verdict {
             GateVerdict::Hold {
                 findings,
+                unavailable,
                 not_evaluated,
                 normalised,
             } => {
                 assert!(normalised.is_empty(), "nothing is normalised here");
+                assert!(unavailable.is_empty(), "no tool was missing here");
                 assert_eq!(findings.len(), 1);
                 assert_eq!(findings[0].check, "build");
                 assert_eq!(
@@ -1034,5 +1248,261 @@ mod tests {
         }];
         let error = evaluate_gate(&plan, &empty, &outcome).unwrap_err();
         assert!(error.contains("nonempty"), "{error}");
+    }
+    // ---- Unavailability is a third outcome, not a failure -----------------
+
+    #[test]
+    fn a_missing_tool_is_unavailable_not_held() {
+        // Regression (#4250): the conversion pass ran `eslint .` in a fresh
+        // clone without `node_modules` and recorded 275 patches as failed.
+        // The tool was missing; no defect was observed. The verdict is
+        // GATE-UNAVAILABLE, naming the tool's own message verbatim.
+        let plan = GatePlan::new(vec![
+            check("lint", CheckCost::Deterministic),
+            check("build", CheckCost::Deterministic),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "lint",
+                CheckOutcome::Unavailable {
+                    reason: "eslint: not found".to_string(),
+                },
+            ),
+            ("build", CheckOutcome::Clean),
+        ]);
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
+        assert!(verdict.is_unavailable());
+        assert!(!verdict.is_hold(), "nothing about the patch is wrong");
+        assert!(verdict.finding_checks().is_empty());
+        let line = verdict.line();
+        assert_eq!(
+            line, "GATE-UNAVAILABLE: lint: eslint: not found",
+            "the record names the tool's own message verbatim"
+        );
+    }
+
+    #[test]
+    fn a_real_defect_still_holds_when_a_tool_is_missing() {
+        // A blocking finding dominates a broken toolchain: the patch is
+        // held on the defect, and the missing tool is named in the same
+        // line, so the operator sees the toolchain state next to the
+        // finding.
+        let plan = GatePlan::new(vec![
+            check("lint", CheckCost::Deterministic),
+            check("typecheck", CheckCost::Deterministic),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "lint",
+                CheckOutcome::Unavailable {
+                    reason: "eslint: not found".to_string(),
+                },
+            ),
+            (
+                "typecheck",
+                CheckOutcome::Blocking {
+                    detail: "src/x.ts(3,1): error TS2304: Cannot find name 'foo'".to_string(),
+                },
+            ),
+        ]);
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
+        assert!(verdict.is_hold());
+        assert!(!verdict.is_unavailable());
+        assert_eq!(verdict.finding_checks(), vec!["typecheck"]);
+        assert_eq!(verdict.unavailable_checks(), vec!["lint"]);
+        let line = verdict.line();
+        assert!(line.starts_with("HELD:"), "{line}");
+        assert!(line.contains("typecheck: src/x.ts(3,1)"), "{line}");
+        assert!(
+            line.contains("unavailable: lint (eslint: not found)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn unavailable_dependents_are_recorded_not_evaluated() {
+        // The typecheck stage cannot run without the lint tooling it sits
+        // behind. The skip is recorded, named against the check that never
+        // ran — never silently dropped, and never counted as a finding.
+        let plan = GatePlan::new(vec![
+            check("lint", CheckCost::Deterministic),
+            GateCheck::requires_all("typecheck", CheckCost::Deterministic, ["lint"]),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[(
+            "lint",
+            CheckOutcome::Unavailable {
+                reason: "eslint: not found".to_string(),
+            },
+        )]);
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
+        match &verdict {
+            GateVerdict::Unavailable {
+                unavailable,
+                not_evaluated,
+                normalised,
+            } => {
+                assert!(normalised.is_empty());
+                assert_eq!(
+                    unavailable,
+                    &[UnavailableFinding {
+                        check: "lint".to_string(),
+                        reason: "eslint: not found".to_string(),
+                    }]
+                );
+                assert_eq!(
+                    not_evaluated,
+                    &[NotEvaluated {
+                        check: "typecheck".to_string(),
+                        because: "lint".to_string(),
+                    }]
+                );
+            }
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+        let line = verdict.line();
+        assert_eq!(
+            line,
+            "GATE-UNAVAILABLE: lint: eslint: not found; not evaluated: typecheck (blocked by lint)"
+        );
+    }
+
+    #[test]
+    fn a_missing_tool_consumes_no_retry_budget_or_known_bad_slot() {
+        // The record must give the actor a basis for neither holding
+        // (no finding exists) nor converting (the patch was never
+        // verified): only the unavailable count moves, the patch returns
+        // to the queue untouched.
+        let plan = GatePlan::new(vec![
+            check("lint", CheckCost::Deterministic),
+            check("build", CheckCost::Deterministic),
+        ])
+        .unwrap();
+        let outcome = outcomes(&[
+            (
+                "lint",
+                CheckOutcome::Unavailable {
+                    reason: "eslint: not found".to_string(),
+                },
+            ),
+            ("build", CheckOutcome::Clean),
+        ]);
+        let verdict = evaluate_gate(&plan, &[], &outcome).unwrap();
+        assert!(verdict.is_unavailable());
+        assert!(!verdict.is_hold() && !verdict.is_convert());
+        let counts = GateCounts::of(&[verdict]);
+        assert_eq!(
+            counts,
+            GateCounts {
+                converted: 0,
+                held: 0,
+                unavailable: 1
+            }
+        );
+        assert_eq!(counts.line(), "0 converted / 0 held / 1 unavailable");
+    }
+
+    #[test]
+    fn an_unavailable_outcome_without_a_reason_is_an_error() {
+        // The record must name what was missing, verbatim. An unavailable
+        // outcome with no reason is a pipeline that stopped without a
+        // reason — an error, not a silent unavailable.
+        let plan = GatePlan::new(vec![check("lint", CheckCost::Deterministic)]).unwrap();
+        let outcome = outcomes(&[(
+            "lint",
+            CheckOutcome::Unavailable {
+                reason: "  ".to_string(),
+            },
+        )]);
+        let error = evaluate_gate(&plan, &[], &outcome).unwrap_err();
+        assert!(error.contains("no reason"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_tool_is_not_repaired_by_a_normaliser() {
+        // A normaliser repairs a defect the check observed; it cannot
+        // conjure a missing tool. A registered normaliser for an
+        // unavailable check is ignored: the verdict stays unavailable.
+        let plan = GatePlan::new(vec![check("format", CheckCost::Deterministic)]).unwrap();
+        let outcome = outcomes(&[(
+            "format",
+            CheckOutcome::Unavailable {
+                reason: "rustfmt not found".to_string(),
+            },
+        )]);
+        let normalisers = [Normaliser {
+            name: "cargo fmt".to_string(),
+            repairs: "format".to_string(),
+        }];
+        let verdict = evaluate_gate(&plan, &normalisers, &outcome).unwrap();
+        assert!(verdict.is_unavailable());
+        assert!(
+            verdict.normalised().is_empty(),
+            "nothing was repaired: no defect was observed"
+        );
+        assert_eq!(
+            verdict.line(),
+            "GATE-UNAVAILABLE: format: rustfmt not found"
+        );
+    }
+
+    #[test]
+    fn the_gate_counts_report_the_three_outcomes_separately() {
+        // 31 converted, 4 held, 240 unavailable — never 275 held.
+        let plan = GatePlan::new(vec![
+            check("lint", CheckCost::Deterministic),
+            check("build", CheckCost::Deterministic),
+        ])
+        .unwrap();
+        let convert = evaluate_gate(
+            &plan,
+            &[],
+            &outcomes(&[
+                ("lint", CheckOutcome::Clean),
+                ("build", CheckOutcome::Clean),
+            ]),
+        )
+        .unwrap();
+        let hold = evaluate_gate(
+            &plan,
+            &[],
+            &outcomes(&[
+                (
+                    "lint",
+                    CheckOutcome::Blocking {
+                        detail: "DOC_OUT_OF_SYNC: env var introduced".to_string(),
+                    },
+                ),
+                ("build", CheckOutcome::Clean),
+            ]),
+        )
+        .unwrap();
+        let unavailable = evaluate_gate(
+            &plan,
+            &[],
+            &outcomes(&[
+                (
+                    "lint",
+                    CheckOutcome::Unavailable {
+                        reason: "eslint: not found".to_string(),
+                    },
+                ),
+                ("build", CheckOutcome::Clean),
+            ]),
+        )
+        .unwrap();
+        let verdicts = vec![convert.clone(), convert, hold, unavailable];
+        let counts = GateCounts::of(&verdicts);
+        assert_eq!(
+            counts,
+            GateCounts {
+                converted: 2,
+                held: 1,
+                unavailable: 1
+            }
+        );
+        assert_eq!(counts.line(), "2 converted / 1 held / 1 unavailable");
     }
 }
