@@ -97,6 +97,7 @@ pub mod tractability;
 pub mod validation;
 pub mod verification;
 pub mod work_selection;
+pub mod workload_validation;
 
 // Test-only fixture-executable publisher (issue #3500). Compiled only when the
 // `test-support` feature is enabled, which happens solely in `autospec-cli`
