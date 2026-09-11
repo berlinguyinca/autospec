@@ -1,8 +1,9 @@
 //! AAR spec section 12: the InferWeave capability contract and routing.
 
 use autospec_core::aar::inferweave::{
-    classify_probe, route, CapabilityRequest, LatencyPriority, LivenessProbe, NodeOffer,
-    PoolAction, ProbeCheck, ProbeSignal, ProbeVerdict, SessionSeat,
+    admit, classify_probe, route, serves_model, AdmissionVerdict, CapabilityRequest, DeadReason,
+    LatencyPriority, LivenessProbe, NodeOffer, PoolAction, ProbeCheck, ProbeSignal, ProbeVerdict,
+    RefusalReason, RegistrationProbe, SessionSeat,
 };
 
 fn node(node_id: &str, free_context: u64, decode_tps: f64) -> NodeOffer {
@@ -456,4 +457,226 @@ fn the_model_list_check_is_constant_cost_and_legal_in_the_liveness_slot() {
     };
 
     probe.validate().expect("model list is constant-cost");
+}
+
+// Admission: the same probe signal drives keep/evict in the liveness loop
+// and admit/refuse at (re-)registration. The interpretation lives in the
+// one shared predicate (`classify_probe`) both paths consult, so the two
+// verdicts cannot disagree.
+
+/// The empty/unknown case, written first: the liveness step timed out (busy
+/// is not dead) but the identity step itself established nothing. "Nothing
+/// observed" must not cost the worker nothing — an endpoint that also timed
+/// out on `/v1/models` must not be admitted having proved nothing at all.
+#[test]
+fn admission_refuses_when_identity_itself_was_never_established() {
+    let probe = cheap_probe();
+
+    // The identity step timed out as well: no model list was observed.
+    let both_timed_out = RegistrationProbe {
+        identity: ProbeSignal::DeadlineExceeded,
+        observed_models: Vec::new(),
+        liveness: ProbeSignal::DeadlineExceeded,
+    };
+    assert_eq!(
+        admit(&probe, &both_timed_out, "qwen3.8-27b"),
+        AdmissionVerdict::Refused {
+            reason: RefusalReason::IdentityNeverEstablished
+        }
+    );
+
+    // The identity step answered but reported no identity and listed no
+    // models: still nothing established.
+    let answered_but_empty = RegistrationProbe {
+        identity: ProbeSignal::Live { identity: None },
+        observed_models: Vec::new(),
+        liveness: ProbeSignal::DeadlineExceeded,
+    };
+    assert_eq!(
+        admit(&probe, &answered_but_empty, "qwen3.8-27b"),
+        AdmissionVerdict::Refused {
+            reason: RefusalReason::IdentityNeverEstablished
+        }
+    );
+}
+
+/// The incident this rule exists for: the busiest worker's completion probe
+/// times out behind production traffic. Its identity was established, so
+/// admission proceeds and it re-registers instead of expiring at its TTL
+/// into `no worker for model`.
+#[test]
+fn a_busy_worker_whose_identity_was_established_may_re_register() {
+    let probe = cheap_probe();
+    let busy = RegistrationProbe {
+        identity: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+        observed_models: vec!["qwen3.8-27b".to_string()],
+        liveness: ProbeSignal::DeadlineExceeded,
+    };
+
+    let verdict = admit(&probe, &busy, "qwen3.8-27b");
+
+    assert_eq!(verdict, AdmissionVerdict::Admitted);
+    // And the liveness loop reads the same timeout the same way.
+    assert_eq!(
+        classify_probe(&probe, &ProbeSignal::DeadlineExceeded).pool_action(),
+        PoolAction::Keep
+    );
+}
+
+/// A definitive failure on either step — identity or liveness — refuses,
+/// regardless of what the other step established.
+#[test]
+fn a_definitive_failure_on_either_step_refuses() {
+    let probe = cheap_probe();
+    let signals = [
+        ProbeSignal::Refused,
+        ProbeSignal::Reset,
+        ProbeSignal::ErrorStatus { status: 503 },
+    ];
+
+    for signal in signals {
+        let liveness_dead = RegistrationProbe {
+            identity: ProbeSignal::Live {
+                identity: Some("worker-7".to_string()),
+            },
+            observed_models: vec!["qwen3.8-27b".to_string()],
+            liveness: signal.clone(),
+        };
+        assert!(
+            matches!(
+                admit(&probe, &liveness_dead, "qwen3.8-27b"),
+                AdmissionVerdict::Refused {
+                    reason: RefusalReason::WorkerDead { .. }
+                }
+            ),
+            "{signal:?} on the liveness step must refuse"
+        );
+
+        let identity_dead = RegistrationProbe {
+            identity: signal.clone(),
+            observed_models: vec!["qwen3.8-27b".to_string()],
+            liveness: ProbeSignal::Live {
+                identity: Some("worker-7".to_string()),
+            },
+        };
+        assert!(
+            matches!(
+                admit(&probe, &identity_dead, "qwen3.8-27b"),
+                AdmissionVerdict::Refused {
+                    reason: RefusalReason::WorkerDead { .. }
+                }
+            ),
+            "{signal:?} on the identity step must refuse"
+        );
+    }
+}
+
+/// An identity the worker reports that contradicts the expected one is
+/// definitive in admission, as in the liveness loop.
+#[test]
+fn an_unexpected_identity_refuses_admission() {
+    let probe = cheap_probe();
+    let impostor = RegistrationProbe {
+        identity: ProbeSignal::Live {
+            identity: Some("worker-9".to_string()),
+        },
+        observed_models: vec!["qwen3.8-27b".to_string()],
+        liveness: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+    };
+
+    assert_eq!(
+        admit(&probe, &impostor, "qwen3.8-27b"),
+        AdmissionVerdict::Refused {
+            reason: RefusalReason::WorkerDead {
+                reason: DeadReason::IdentityMismatch
+            }
+        }
+    );
+}
+
+/// A worker whose observed model list lacks the requested model is not
+/// admitted to serve it.
+#[test]
+fn a_worker_that_does_not_serve_the_requested_model_is_refused() {
+    let probe = cheap_probe();
+    let other = RegistrationProbe {
+        identity: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+        observed_models: vec!["some-other-model".to_string()],
+        liveness: ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+    };
+
+    assert_eq!(
+        admit(&probe, &other, "qwen3.8-27b"),
+        AdmissionVerdict::Refused {
+            reason: RefusalReason::DoesNotServeModel
+        }
+    );
+}
+
+/// The permissive-default lesson, checked directly on every input class:
+/// the identity predicate decides only from an observation.
+#[test]
+fn the_model_identity_check_decides_only_from_an_observation() {
+    // Unknown — the list was never established — is never "anything
+    // goes", not even for an unconstrained request.
+    assert!(!serves_model(&[], ""));
+    assert!(!serves_model(&[], "qwen3.8-27b"));
+    // An observed list decides normally.
+    assert!(serves_model(&["qwen3.8-27b".to_string()], ""));
+    assert!(serves_model(&["qwen3.8-27b".to_string()], "qwen3.8-27b"));
+    assert!(!serves_model(
+        &["some-other-model".to_string()],
+        "qwen3.8-27b"
+    ));
+}
+
+/// The comparison that was never made before: for every signal class,
+/// admission and the liveness loop agree. A signal that evicts refuses;
+/// a signal that keeps admits, given an established identity that serves
+/// the requested model.
+#[test]
+fn admission_and_the_liveness_loop_agree_on_every_signal() {
+    let probe = cheap_probe();
+    let signals = [
+        ProbeSignal::Refused,
+        ProbeSignal::Reset,
+        ProbeSignal::ErrorStatus { status: 503 },
+        ProbeSignal::Live {
+            identity: Some("worker-7".to_string()),
+        },
+        ProbeSignal::Live {
+            identity: Some("worker-9".to_string()),
+        },
+        ProbeSignal::Live { identity: None },
+        ProbeSignal::DeadlineExceeded,
+    ];
+
+    for signal in &signals {
+        let verdict = classify_probe(&probe, signal);
+        let registration = RegistrationProbe {
+            identity: signal.clone(),
+            observed_models: vec!["qwen3.8-27b".to_string()],
+            liveness: signal.clone(),
+        };
+        let admission = admit(&probe, &registration, "qwen3.8-27b");
+
+        match verdict {
+            ProbeVerdict::Dead { .. } => assert!(
+                !admission.is_admitted(),
+                "the pool evicts on {signal:?} but admission did not refuse"
+            ),
+            ProbeVerdict::Alive | ProbeVerdict::Inconclusive => assert!(
+                admission.is_admitted(),
+                "the pool keeps {signal:?} but admission refused: {admission:?}"
+            ),
+        }
+    }
 }

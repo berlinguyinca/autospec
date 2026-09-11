@@ -565,3 +565,126 @@ impl ProbeVerdict {
         }
     }
 }
+
+/// One registration probe: the two steps the gateway runs before it lets a
+/// worker (re-)register.
+///
+/// The identity step is a constant-cost inventory call; the liveness step
+/// is a one-token completion whose cost scales with load, so on a busy
+/// worker it queues behind production traffic and times out even though
+/// the worker is healthy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrationProbe {
+    /// What the identity step (`GET /v1/models`) returned.
+    pub identity: ProbeSignal,
+    /// The model list the identity step observed. An empty list means the
+    /// step established nothing — the endpoint may have timed out on this
+    /// step as well — and the worker's identity is unknown, not
+    /// "anything goes".
+    pub observed_models: Vec<String>,
+    /// What the liveness step (one-token completion) returned.
+    pub liveness: ProbeSignal,
+}
+
+/// Why a (re-)registration was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    /// Either probe step said something definitive about the worker:
+    /// refused, reset, error status, or a reported identity that
+    /// contradicts the expected one.
+    WorkerDead { reason: DeadReason },
+    /// The liveness step timed out (busy is not dead) but the identity step
+    /// established no model list: the worker proved nothing at all, and an
+    /// unknown identity must never route into the permissive branch.
+    IdentityNeverEstablished,
+    /// The observed model list does not include the requested model.
+    DoesNotServeModel,
+}
+
+impl RefusalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefusalReason::WorkerDead { reason } => reason.as_str(),
+            RefusalReason::IdentityNeverEstablished => "identity-never-established",
+            RefusalReason::DoesNotServeModel => "does-not-serve-model",
+        }
+    }
+}
+
+/// The admission decision for a (re-)registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionVerdict {
+    /// The worker may (re-)register; it serves the requested model.
+    Admitted,
+    /// Registration is refused.
+    Refused { reason: RefusalReason },
+}
+
+impl AdmissionVerdict {
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, AdmissionVerdict::Admitted)
+    }
+}
+
+/// Whether the worker's *observed* model list says it serves `model`.
+///
+/// Fails closed on an empty list. "Nothing observed costs nothing" was
+/// safe only relative to the callers that existed when the default was
+/// written: every one of them rejected on any probe error, so the
+/// permissive branch could never decide. The moment this predicate
+/// decides by itself — an admission that proceeds on an inconclusive
+/// liveness step — an empty list proves nothing, and "unknown" must never
+/// be routed into the permissive branch.
+///
+/// An unconstrained request (`model` empty) is satisfied only by a
+/// non-empty observed list, never by the absence of one.
+pub fn serves_model(observed: &[String], model: &str) -> bool {
+    if observed.is_empty() {
+        return false;
+    }
+    model.is_empty() || observed.iter().any(|m| m == model)
+}
+
+/// Decide whether a worker may (re-)register to serve `model`.
+///
+/// The same observation drives two decisions — the liveness loop's
+/// keep/evict verdict and this admission — and the interpretation belongs
+/// in the one shared predicate both consult: [`classify_probe`]. A
+/// deadline miss on the liveness step is "busy is not dead" here too, so
+/// the busiest worker can still re-register instead of expiring at its TTL
+/// and turning into `no worker for model`.
+///
+/// A definitive failure on either step refuses. A timed-out liveness step
+/// then rests on what the identity step actually established, and an
+/// identity that was never established refuses: the permissive branch
+/// decides only from an observation.
+pub fn admit(
+    probe: &LivenessProbe,
+    registration: &RegistrationProbe,
+    model: &str,
+) -> AdmissionVerdict {
+    let identity = classify_probe(probe, &registration.identity);
+    let liveness = classify_probe(probe, &registration.liveness);
+
+    if let ProbeVerdict::Dead { reason } = liveness {
+        return AdmissionVerdict::Refused {
+            reason: RefusalReason::WorkerDead { reason },
+        };
+    }
+    if let ProbeVerdict::Dead { reason } = identity {
+        return AdmissionVerdict::Refused {
+            reason: RefusalReason::WorkerDead { reason },
+        };
+    }
+
+    if !serves_model(&registration.observed_models, model) {
+        let reason = if registration.observed_models.is_empty() {
+            RefusalReason::IdentityNeverEstablished
+        } else {
+            RefusalReason::DoesNotServeModel
+        };
+        return AdmissionVerdict::Refused { reason };
+    }
+
+    AdmissionVerdict::Admitted
+}
