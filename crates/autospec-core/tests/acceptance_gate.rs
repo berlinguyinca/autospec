@@ -11,6 +11,7 @@ use autospec_core::execution::acceptance_gate::{
     assess, assess_report, closes_authorized, closure_body, follow_up_body,
     parse_acceptance_criteria, parse_criterion_statuses, verdict_line, CriterionStatus, Verdict,
 };
+use autospec_core::execution::closure::has_held_for_review_marker;
 
 /// The issue body the incident ran on: four individually checkable
 /// criteria.
@@ -37,15 +38,23 @@ fn a_spec_with_criteria_never_closes_from_a_report_without_statuses() {
             missing: vec![1, 2, 3, 4]
         }
     );
-    let error = closure_body(&verdict, 310, "converted the patch").unwrap_err();
-    assert!(error.contains("310"), "{error}");
-    assert!(error.contains("1, 2, 3, 4"), "{error}");
+    let body = closure_body(&verdict, 310, "converted the patch").unwrap();
+    assert!(has_held_for_review_marker(&body, 310), "{body:?}");
+    assert!(
+        matches!(
+            closure_authorized(&body, 310),
+            ClosureVerdict::NotAuthorized
+        ),
+        "unassessed body must not close the issue: {body:?}"
+    );
+    assert!(closes_authorized(&verdict, 310));
 }
 
 #[test]
 fn the_incident_report_is_unassessed_and_does_not_close() {
     // One recorded status for four criteria is not a partial close: the
-    // report never assessed three of the list, so the hold names them.
+    // report never assessed three of the list, so the patch is held for
+    // supervisor review.
     let verdict = assess_report(FOUR_CRITERIA_ISSUE, ONE_MET_REPORT).unwrap();
     assert_eq!(
         verdict,
@@ -53,9 +62,16 @@ fn the_incident_report_is_unassessed_and_does_not_close() {
             missing: vec![2, 3, 4]
         }
     );
-    let error = closure_body(&verdict, 310, "one of four done").unwrap_err();
-    assert!(error.contains("310"), "{error}");
-    assert!(!closes_authorized(&verdict, 310));
+    let body = closure_body(&verdict, 310, "one of four done").unwrap();
+    assert!(has_held_for_review_marker(&body, 310), "{body:?}");
+    assert!(
+        matches!(
+            closure_authorized(&body, 310),
+            ClosureVerdict::NotAuthorized
+        ),
+        "unassessed body must not close the issue: {body:?}"
+    );
+    assert!(closes_authorized(&verdict, 310));
 }
 
 #[test]
@@ -156,7 +172,7 @@ fn a_short_report_is_unassessed_not_partial() {
     )
     .unwrap();
     assert_eq!(verdict, Verdict::Unassessed { missing: vec![4] });
-    assert!(!closes_authorized(&verdict, 310));
+    assert!(closes_authorized(&verdict, 310));
 }
 
 #[test]

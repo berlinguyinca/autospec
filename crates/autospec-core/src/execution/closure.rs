@@ -12,8 +12,10 @@
 //!    [`closure_authorized`] on the generated body for every issue number.
 //! 2. **Not closing is a stated decision, not an accident.** A partial-fix
 //!    PR carries the explicit marker from [`partial_fix_pr_body`]
-//!    (`Refs #N (does not close it)`); a bare `Refs #N` is
-//!    indistinguishable from a missing `Closes` and is reported.
+//!    (`Refs #N (does not close it)`); a held-for-review PR carries the
+//!    marker from [`held_for_review_pr_body`] (`Refs #N (NOT closing: held
+//!    for supervisor review; ...)`); a bare `Refs #N` is indistinguishable
+//!    from a missing `Closes` and is reported.
 //! 3. **Reconciliation reports, it does not absorb.**
 //!    [`reconcile_tracker`] names every open issue a merged PR delivers and
 //!    every merged PR whose issue is open.
@@ -45,10 +47,35 @@ pub fn partial_fix_pr_body(issue_number: u64, summary: &str) -> String {
     format!("{summary}\n\nRefs #{issue_number} ({PARTIAL_FIX_MARKER})")
 }
 
+/// The exact phrase a PR uses to state that it is held for supervisor
+/// review: the patch converts but the issue stays open until the
+/// acceptance criteria are verified.
+pub const HELD_FOR_REVIEW_MARKER: &str =
+    "NOT closing: held for supervisor review; close it only once the acceptance criteria are verified";
+
+/// The body the conversion pass generates for a patch held for supervisor
+/// review: a `Refs` trailer that explicitly states the issue stays open.
+pub fn held_for_review_pr_body(issue_number: u64, summary: &str) -> String {
+    format!("{summary}\n\nRefs #{issue_number} ({HELD_FOR_REVIEW_MARKER})")
+}
+
 /// Whether `text` carries the explicit non-closure marker for
 /// `issue_number`: a `Refs #N` line stating the PR does not close the
 /// issue. Case-insensitive on the keyword and the marker phrase.
 pub fn has_partial_fix_marker(text: &str, issue_number: u64) -> bool {
+    has_refs_marker(text, issue_number, PARTIAL_FIX_MARKER)
+}
+
+/// Whether `text` carries the explicit held-for-review marker for
+/// `issue_number`: a `Refs #N` line stating the PR is held for supervisor
+/// review. Case-insensitive on the keyword and the marker phrase.
+pub fn has_held_for_review_marker(text: &str, issue_number: u64) -> bool {
+    has_refs_marker(text, issue_number, HELD_FOR_REVIEW_MARKER)
+}
+
+/// Shared detection for `Refs #N (marker)` lines. Case-insensitive on the
+/// keyword and the marker phrase.
+fn has_refs_marker(text: &str, issue_number: u64, marker: &str) -> bool {
     let reference = format!("#{issue_number}");
     for line in text.lines() {
         let line = line.trim_start();
@@ -70,7 +97,7 @@ pub fn has_partial_fix_marker(text: &str, issue_number: u64) -> bool {
         else {
             continue;
         };
-        if inner.eq_ignore_ascii_case(PARTIAL_FIX_MARKER) {
+        if inner.eq_ignore_ascii_case(marker) {
             return true;
         }
     }
@@ -95,8 +122,9 @@ pub enum TrackerDiscrepancyKind {
     /// the queue disagree about whether the issue is done.
     DeliveredButOpen,
     /// A merged PR references the issue with no closing keyword and no
-    /// explicit partial-fix marker: a `Refs` where a `Closes` was meant,
-    /// indistinguishable from the #4044 defect.
+    /// explicit non-closure marker (partial-fix or held-for-review): a
+    /// bare `Refs` where a `Closes` was meant, indistinguishable from the
+    /// #4044 defect.
     NoClosureDecision,
 }
 
@@ -109,7 +137,7 @@ impl TrackerDiscrepancy {
                 self.issue, self.pr_branch
             ),
             TrackerDiscrepancyKind::NoClosureDecision => format!(
-                "issue #{} is open and merged PR {} references it with no closing keyword and no partial-fix marker: state the decision (Closes, or the explicit marker)",
+                "issue #{} is open and merged PR {} references it with no closing keyword and no non-closure marker: state the decision (Closes, partial-fix, or held-for-review marker)",
                 self.issue, self.pr_branch
             ),
         }
@@ -123,8 +151,8 @@ impl TrackerDiscrepancy {
 /// - the body carries a closing keyword for the issue →
 ///   [`TrackerDiscrepancyKind::DeliveredButOpen`] (the tracker should have
 ///   closed it on merge);
-/// - the body carries the explicit partial-fix marker → no discrepancy
-///   (not closing is a stated decision);
+/// - the body carries an explicit non-closure marker (partial-fix or
+///   held-for-review) → no discrepancy (not closing is a stated decision);
 /// - otherwise → [`TrackerDiscrepancyKind::NoClosureDecision`].
 ///
 /// Open and closed-unmerged PRs are work in progress or abandoned work,
@@ -140,7 +168,9 @@ pub fn reconcile_tracker(open_issues: &BTreeSet<u64>, prs: &[PrRecord]) -> Vec<T
             }
             let kind = if closure_authorized(&pr.description, issue).is_authorized() {
                 TrackerDiscrepancyKind::DeliveredButOpen
-            } else if has_partial_fix_marker(&pr.description, issue) {
+            } else if has_partial_fix_marker(&pr.description, issue)
+                || has_held_for_review_marker(&pr.description, issue)
+            {
                 return None;
             } else {
                 TrackerDiscrepancyKind::NoClosureDecision
@@ -355,5 +385,59 @@ mod tests {
         // needs work and stays in the count.
         assert_eq!(reconciled_open_count(&open, &discrepancies), 3);
         assert_eq!(reconciled_open_count(&open, &[]), 4);
+    }
+
+    // ── AC4b: held-for-review marker is an explicit, detectable decision ─
+
+    #[test]
+    fn held_for_review_body_states_its_decision_and_does_not_authorize() {
+        let body = held_for_review_pr_body(4286, "converted the patch");
+        assert!(body.contains("Refs #4286"), "{body:?}");
+        assert!(body.contains(HELD_FOR_REVIEW_MARKER), "{body:?}");
+        // Held for review does NOT close: the keyword is deliberately absent.
+        assert_eq!(
+            closure_authorized(&body, 4286),
+            ClosureVerdict::NotAuthorized
+        );
+        assert!(has_held_for_review_marker(&body, 4286));
+    }
+
+    #[test]
+    fn held_marker_detection_requires_refs_the_issue_and_the_phrase() {
+        assert!(has_held_for_review_marker(
+            "Refs #50 (NOT closing: held for supervisor review; close it only once the acceptance criteria are verified)",
+            50
+        ));
+        assert!(has_held_for_review_marker(
+            "refs #50 (not closing: HELD FOR SUPERVISOR REVIEW; CLOSE IT ONLY ONCE THE ACCEPTANCE CRITERIA ARE VERIFIED)",
+            50
+        ));
+        // A bare Refs is the defect, not the decision.
+        assert!(!has_held_for_review_marker("Refs #50", 50));
+        // The marker is for the specific issue it references.
+        assert!(!has_held_for_review_marker(
+            "Refs #5 (NOT closing: held for supervisor review; close it only once the acceptance criteria are verified)",
+            50
+        ));
+        // "Refs" must be a whole word.
+        assert!(!has_held_for_review_marker(
+            "Refunds #50 (NOT closing: held for supervisor review; close it only once the acceptance criteria are verified)",
+            50
+        ));
+    }
+
+    #[test]
+    fn explicit_held_for_review_is_not_reported() {
+        // No keyword but the explicit held-for-review marker — a documented
+        // decision.
+        let found = reconcile_tracker(
+            &set(&[4286]),
+            &[merged(
+                "conv/4286-held",
+                None,
+                "converted the patch\n\nRefs #4286 (NOT closing: held for supervisor review; close it only once the acceptance criteria are verified)",
+            )],
+        );
+        assert!(found.is_empty(), "{found:?}");
     }
 }
