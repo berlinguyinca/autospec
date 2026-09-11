@@ -41,7 +41,10 @@ pub use fast_lane::{
     FastLanePolicy, FastLanePolicyError, GateSet, ImprovementError, ImprovementLedger,
     ImprovementRate, Schedule, Work, WorkClass, FAST_LANE_CONFIG_PATH,
 };
-pub use patch_apply::{captured_error, classify_apply, ApplyOutcome, ConflictObservation};
+pub use patch_apply::{
+    captured_error, classify_apply, rejected_binaries, stage_guard, ApplyOutcome,
+    ConflictObservation, StageVerdict,
+};
 pub use patch_conflicts::{
     hold_shape, resolve, HoldShape, Refusal, RefusalKind, ResolveOutcome, ResolvedFile,
     UnverifiedResolution,

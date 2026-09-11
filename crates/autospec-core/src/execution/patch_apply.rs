@@ -42,6 +42,49 @@
 //!    first lines of the output, capped at a byte budget, with an explicit
 //!    `…` when truncated and newlines folded so the record stays one log
 //!    line. The quote is non-empty by construction.
+//!
+//! The stage guard (#4294).
+//!
+//! The apply step's outcome is not the pass's verdict. After the apply,
+//! the pass asks what the patch staged — and an empty index is a symptom
+//! shared by two very different facts: the patch was already in main (a
+//! three-way no-op), and the apply failed all-or-nothing (a rejected
+//! binary hunk stages nothing even though the other hunks applied
+//! cleanly). The historical bug (#4294, InferWeave #288): a rejected
+//! binary patch aborted the whole apply, staged zero files, left no
+//! unmerged paths, and the pass fell through to the stage guard — which
+//! concluded "already in main" and skipped, routing intact, convertible
+//! work into the one bucket nobody revisits, under a reason that sounded
+//! like good news. The guard violated the invariant that "a failed
+//! operation never falls through to a benign conclusion" *while appearing
+//! to satisfy it*: it looked like a guard, and it was the defect. Four
+//! more invariants are encoded here:
+//!
+//! 4. **A fall-through must never be able to reach a benign conclusion**
+//!    ([`stage_guard`]). A non-applied [`ApplyOutcome`] can only produce
+//!    [`StageVerdict::Held`]: after a failed apply, every path terminates
+//!    in a recorded failure. "Apply failed" and "apply succeeded and
+//!    staged nothing" no longer reach the same line with different
+//!    meanings.
+//! 5. **Derive the outcome from the operation's own result, not from a
+//!    downstream symptom** ([`stage_guard`]). The guard takes the
+//!    classified [`ApplyOutcome`] — which carries the apply's exit status
+//!    — not the state of the index. The index is consulted only for what
+//!    it uniquely tells: which files the successful apply staged. An
+//!    empty index is a symptom, never a conclusion.
+//! 6. **A skip needs positive evidence; a hold does not**
+//!    ([`StageVerdict::AlreadyInMain`]). The only path to an "already in
+//!    main" skip runs through a successful apply that staged nothing
+//!    *and* the caller's positive confirmation that the content is in
+//!    main (e.g. the patch applies in reverse against the base). A failed
+//!    apply is never skipped: holding on uncertainty costs one human
+//!    glance; skipping on uncertainty costs the work.
+//! 7. **Generated binary artefacts are rebuilt, never patched**
+//!    ([`rejected_binaries`]). A strict failure that refused a binary
+//!    hunk names the artefact(s) in its hold record and says to
+//!    regenerate them with the repo's generator — agent patches exclude
+//!    generated binaries, and a hold that points at the regeneration is
+//!    actionable instead of opaque.
 
 use super::patch_conflicts::{hold_shape, HoldShape};
 
@@ -82,11 +125,16 @@ pub enum ApplyOutcome {
     /// The apply was refused outright and left nothing behind (typically
     /// the base blobs are unreachable). The hold record quotes the
     /// captured error; with no markers on disk the error text is the only
-    /// evidence (invariant 2).
+    /// evidence (invariant 2). When the failure refused a binary hunk,
+    /// the record also names the artefact(s) and the regeneration that
+    /// fixes them (invariant 7).
     StrictFailure {
         /// The captured output of the failed apply command, quoted
         /// (bounded, one line, non-empty).
         error: String,
+        /// The binary artefacts the apply refused to patch, in the order
+        /// observed (empty when the failure names none).
+        rejected_binaries: Vec<String>,
     },
 }
 
@@ -101,7 +149,9 @@ impl ApplyOutcome {
     /// The reason after `HELD: does not apply` is non-empty by
     /// construction in both hold arms: the conflicted arm carries at least
     /// one file shape, and the strict-failure arm carries a quote that
-    /// [`classify_apply`] guarantees is non-empty.
+    /// [`classify_apply`] guarantees is non-empty. A strict failure that
+    /// refused a binary hunk names the artefact(s) and the regeneration
+    /// that fixes them (invariant 7).
     pub fn hold_line(&self) -> Option<String> {
         match self {
             Self::Applied => None,
@@ -109,8 +159,19 @@ impl ApplyOutcome {
                 "HELD: does not apply — conflicted: {}",
                 conflict_list(files)
             )),
-            Self::StrictFailure { error } => {
-                Some(format!("HELD: does not apply — strict failure: {error}"))
+            Self::StrictFailure {
+                error,
+                rejected_binaries,
+            } => {
+                let mut line = format!("HELD: does not apply — strict failure: {error}");
+                if !rejected_binaries.is_empty() {
+                    let list = rejected_binaries.join(", ");
+                    line.push_str(&format!(
+                        " — generated binary artefact(s) `{list}` are rebuilt, not patched: \
+                         regenerate them with the repo's generator and exclude them from agent patches"
+                    ));
+                }
+                Some(line)
             }
         }
     }
@@ -181,7 +242,10 @@ pub fn classify_apply(
     }
     let quoted = quote_error(apply_error);
     if conflicted_files.is_empty() {
-        Ok(ApplyOutcome::StrictFailure { error: quoted })
+        Ok(ApplyOutcome::StrictFailure {
+            rejected_binaries: rejected_binaries(apply_error),
+            error: quoted,
+        })
     } else {
         let files = conflicted_files
             .iter()
@@ -221,6 +285,152 @@ fn quote_error(error: &str) -> String {
         quoted.push('…');
     }
     quoted
+}
+
+/// The stage-guard verdict (#4294): what the pass does once the apply
+/// step has run and the caller has read what the patch staged.
+///
+/// The guard is the only gate between the apply step and the "already in
+/// main" skip, and it derives the verdict from the apply's own result
+/// ([`ApplyOutcome`]) rather than from the state of the index alone
+/// (invariant 5): an empty index is a symptom shared by a no-change
+/// patch and a total failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageVerdict {
+    /// The apply succeeded and staged files; the conversion continues
+    /// with them.
+    Proceed {
+        /// The staged files, in the order observed.
+        files: Vec<String>,
+    },
+    /// The patch's content is already in main; the pass skips. Only
+    /// reachable when the apply succeeded and staged nothing, and only
+    /// with the caller's positive confirmation that the content is in
+    /// main (invariant 6): a skip needs positive evidence; a hold does
+    /// not. A failed apply is never skipped.
+    AlreadyInMain {
+        /// The caller's positive confirmation that the patch's content
+        /// is in main (e.g. "the patch applies in reverse against
+        /// origin/main"). Quoted in the skip record so the skip's
+        /// evidence survives the session that made it.
+        evidence: String,
+    },
+    /// The apply failed; the pass holds. A failed apply never reaches a
+    /// benign verdict (invariant 4): every path from a failure
+    /// terminates in this recorded failure, never in a skip.
+    Held {
+        /// The hold line for the failure (from
+        /// [`ApplyOutcome::hold_line`]), non-empty by construction.
+        reason: String,
+    },
+}
+
+impl StageVerdict {
+    /// The log line for a terminal verdict, or `None` when the
+    /// conversion continues ([`Self::Proceed`]).
+    pub fn line(&self) -> Option<String> {
+        match self {
+            Self::Proceed { .. } => None,
+            Self::AlreadyInMain { evidence } => Some(format!(
+                "SKIP: stages nothing (already in main) — {evidence}"
+            )),
+            Self::Held { reason } => Some(reason.clone()),
+        }
+    }
+}
+
+/// The stage guard (#4294): classify what happened once the apply step
+/// has run and the caller has read the staged-file list.
+///
+/// The guard takes the classified [`ApplyOutcome`] — the operation's own
+/// result — plus the staged files the caller observed, plus the caller's
+/// positive confirmation that the patch's content is in main, if the
+/// caller has one (invariant 5): the index state is a symptom, the
+/// outcome is the fact.
+///
+/// The rules:
+///
+/// - **Applied, files staged** → [`StageVerdict::Proceed`]. The
+///   conversion continues.
+/// - **Applied, nothing staged** → the patch was already in main (a
+///   three-way no-op). The skip is only reachable with non-blank
+///   `already_in_main_evidence`; without it the guard refuses to decide
+///   (invariant 6). An empty index is not evidence — it is the same
+///   symptom a total failure produces.
+/// - **Not applied** → [`StageVerdict::Held`] with the failure's hold
+///   line, unconditionally (invariant 4). `already_in_main_evidence` is
+///   ignored by construction: a failed apply never skips. A patch whose
+///   content is genuinely in main is a no-net-change the pass classifies
+///   before the apply step, not a discovery the stage guard makes after
+///   a failure. Holding on uncertainty costs one human glance; skipping
+///   on uncertainty costs the work.
+pub fn stage_guard(
+    outcome: &ApplyOutcome,
+    staged_files: &[String],
+    already_in_main_evidence: Option<&str>,
+) -> Result<StageVerdict, String> {
+    let evidence = already_in_main_evidence
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+
+    if !outcome.is_applied() {
+        let reason = outcome
+            .hold_line()
+            .expect("a non-applied outcome carries a hold line by construction");
+        return Ok(StageVerdict::Held { reason });
+    }
+
+    if !staged_files.is_empty() {
+        return Ok(StageVerdict::Proceed {
+            files: staged_files.to_vec(),
+        });
+    }
+
+    match evidence {
+        Some(e) => Ok(StageVerdict::AlreadyInMain {
+            evidence: e.to_string(),
+        }),
+        None => Err(
+            "the apply succeeded and staged nothing, but no positive evidence that the \
+             content is already in main was provided — an empty index is a symptom shared \
+             by a no-change patch and a failure; confirm the content is in main (e.g. that \
+             the patch applies in reverse against the base) before skipping, or hold"
+                .to_string(),
+        ),
+    }
+}
+
+/// Extract the paths of the binary artefacts the apply refused to patch,
+/// from the captured error output (invariant 7).
+///
+/// `git apply` names a rejected binary hunk as
+/// `error: cannot apply binary patch to '<path>' without full index
+/// line`; the plain `error: <path>: patch does not apply` form is not
+/// binary-specific and is deliberately not matched. Paths are
+/// de-duplicated in the order observed.
+pub fn rejected_binaries(error: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in error.lines() {
+        let rest = line
+            .trim()
+            .strip_prefix("cannot apply binary patch to '")
+            .or_else(|| {
+                line.trim()
+                    .strip_prefix("error: cannot apply binary patch to '")
+            });
+        let Some(rest) = rest else { continue };
+        let Some(path) = rest.split('\'').next() else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if !found.iter().any(|p| p == path) {
+            found.push(path.to_string());
+        }
+    }
+    found
 }
 
 #[cfg(test)]
