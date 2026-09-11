@@ -122,6 +122,7 @@ pub mod tractability;
 pub mod unfed_pass;
 pub mod untested_public_items;
 pub mod validation;
+pub mod verdict_shelf;
 pub mod verification;
 pub mod weight_acquisition;
 pub mod wire_fixture;
