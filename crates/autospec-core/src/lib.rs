@@ -53,6 +53,7 @@ pub mod failure_signatures;
 pub mod fix_surface;
 pub mod fleet_dispatch;
 pub mod fleet_models;
+pub mod frontier_actuation;
 pub mod gate_provenance;
 pub mod gate_serialization;
 pub mod gate_verdict;

@@ -1587,3 +1587,56 @@ Tests: `crates/autospec-core/tests/memo_key.rs`, including the regression
 case that reconstructs the incident: 62 fresh patches for 62
 "already attempted" issues — the subject-keyed filter yields
 `candidates=0`, the input-keyed filter yields `stale=62 ... candidates=62`.
+
+## Actuation gaps: a loop that decides but cannot act (issue #4268)
+
+The frontier loop reported **8 ready, 0 dispatched** every pass. Both numbers
+were true, and together they hid the only fact that mattered: dispatch was
+*impossible*. Dispatching an issue writes its body as a staged spec and starts
+a worker on it, and the script that staged specs (`iw-stage.sh`) was not part
+of the loop — it was a manual step, run by whoever remembered to run it. Every
+dependency closure was "ready" and nothing could ever be dispatched, forever,
+and the report was accurate the whole time. An accurate but incomplete report
+is not a safe report: "N ready, 0 dispatched" reads as an idle loop, and the
+state was a permanent stop.
+
+- **Report the gap between decided and done.** A loop that reports a decision
+  must also report whether it could act on it: `TickReport` carries the decided
+  count (`ready`), the done count (`dispatched`) and every item in between with
+  the reason it is held; `TickReport::line` renders
+  `N ready, M staged, K dispatched, X blocked: <reason>` with the blocked count
+  grouped by distinct reason, and `line_names_gap` refuses a line whose decided
+  count differs from its done count without naming the gap and every reason
+  behind it. The incident's line fails that check, which is the point: the old
+  report had no way to express the gap, so it said nothing.
+- **Every precondition an actuator enforces needs a producer.** A guard with no
+  component that satisfies it is not a stricter check, it is a stop with no
+  release: `Precondition` pairs a `Guard` with its producer,
+  `Actuator::producerless` / `FrontierLoop::preflight` list the guards that have
+  none (before any item needs them, when it is still a wiring mistake), and a
+  pass held by one is a `LoopVerdict::PermanentStop` naming its guard — never
+  rendered as idleness (`stop_line_names_guard`).
+- **The producer runs inside the loop's pass.** `FrontierLoop::tick` is
+  observe → decide → act, and the act stage invokes the guard's producer before
+  calling an item blocked, so staging is not a step a person has to remember.
+  The producer stays a refusal, not a bypass: `stage` refuses a body too short
+  to implement from (`MIN_STAGED_SPEC_BYTES`) rather than handing an agent
+  nothing to work from, and that refusal is reported as a block with
+  `producerless: false` — a real refusal is a state with a release, a missing
+  producer is a stop.
+- **Test the loop end to end against a real new item, not only the steady
+  state.** With everything staged every rule agrees and the loop dispatches; the
+  bug is invisible. The regression test reconstructs the incident's eight
+  dependency-closed issues with nothing staged and an unowned guard, then runs
+  the fix on a brand-new issue nobody pre-staged.
+- **A report whose numbers do not reconcile reports a state that cannot
+  exist.** `TickReport::reconciles()` asserts `ready == dispatched + blocked`;
+  ready work with neither a dispatch nor a block reason is a hole, and a report
+  with a gap and no blocked entries cannot render an honest line.
+
+Checkable in `autospec_core::frontier_actuation` (`Guard`, `Precondition`,
+`Actuator`, `FrontierLoop::tick`, `TickReport`, `line_names_gap`, `LoopVerdict`,
+`stop_line_names_guard`, `stage`). Tests:
+`crates/autospec-core/tests/frontier_actuation.rs`, including the incident
+reconstruction (`8 ready, 0 dispatched, 8 blocked: no staged spec`) and the
+end-to-end pass where the loop stages and dispatches a brand-new issue itself.
