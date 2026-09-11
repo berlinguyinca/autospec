@@ -37,6 +37,17 @@
 //!    The override is visible in the report as its own dimension
 //!    (`fresh=N`), as is the set the old filter would have wrongly
 //!    excluded (`stale=N`).
+//! 4. **A command that reports must not mutate (issue #4283).**
+//!    [`select_candidates`] is read-only: it never advances the memo, so
+//!    calling it twice returns the same answer, and any diagnostic
+//!    invocation, dry run, or `| head` is safe. The cursor advancement —
+//!    recording which patches were *offered* — is a separate, explicit
+//!    step ([`commit_offered`]) that belongs to the consumer that acted,
+//!    not the producer that listed. The defect this encodes: the selector
+//!    recorded what it had offered on every run, so the second call — the
+//!    obvious way to split the summary line from the batch — returned
+//!    nothing, and three completed patches were silently marked handled
+//!    and dropped.
 //!
 //! And the reconciliation that would have caught this: per-stage
 //! denominators prove each filter ran, not that the work reached its
@@ -245,6 +256,11 @@ pub struct Selection {
 /// recency override. The attempted filter excludes a patch only when a
 /// recorded attempt matches its *current* input; an artifact whose mtime
 /// is within `fresh_window` is a candidate even then.
+///
+/// This is the read-only half of the selector (issue #4283): it never
+/// records anything and never advances the memo, so it is safe to call
+/// twice — the answer is the same both times. The cursor advancement is
+/// [`commit_offered`], which the consumer that acted calls on purpose.
 pub fn select_candidates(
     patches: &[FinishedPatch],
     records: &[AttemptRecord],
@@ -303,6 +319,35 @@ pub fn select_candidates(
         decisions,
         report,
     }
+}
+
+/// The records a committed run appends to the memo: one per admitted
+/// candidate, keyed on the input it was actually offered
+/// (issue #4283).
+///
+/// This is the cursor advancement — the half the read-only invocation
+/// must never run. `select_candidates` reports; this function records.
+/// The caller appends the returned records to `records` only when it is
+/// the consumer that acted on the batch (its `--commit` flag, defaulting
+/// off). A run that only inspected, previewed, or piped the answer
+/// produces records it never applies, so the next selection — including
+/// the immediately following second call — sees the same candidates.
+///
+/// `patches` and `selection` come from the same `select_candidates`
+/// call (decisions are positional over the patches). Patches the
+/// selection did not admit — terminal buckets and the attempted filter —
+/// contribute no record.
+pub fn commit_offered(
+    patches: &[FinishedPatch],
+    selection: &Selection,
+    now: u64,
+) -> Vec<AttemptRecord> {
+    patches
+        .iter()
+        .zip(selection.decisions.iter())
+        .filter(|(_, decision)| decision.is_candidate())
+        .map(|(patch, _)| AttemptRecord::new(patch.issue, patch.input_key.clone(), now))
+        .collect()
 }
 
 /// Work an agent finished: the subject, the artifact it produced, and
