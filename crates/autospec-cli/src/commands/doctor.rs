@@ -2,10 +2,14 @@ use std::path::Path;
 
 pub mod code_intel;
 pub mod failures;
+pub mod resources;
 
 pub fn run(args: &[String]) -> Result<(), String> {
     if args.first().is_some_and(|argument| argument == "failures") {
         return failures_command(&args[1..]);
+    }
+    if args.first().is_some_and(|argument| argument == "resources") {
+        return resources_command(&args[1..]);
     }
     if args
         .first()
@@ -62,6 +66,17 @@ fn failures_command(args: &[String]) -> Result<(), String> {
 /// `Err` (the CLI maps them to exit 2); a gate verdict ends the process — 0 on
 /// pass, 1 on fail — because a failed mandatory gate must never return
 /// success to its caller.
+/// `autospec doctor resources` — per-type resource health (spec §24.3).
+/// Observation only: live git listings plus the core Docker and process
+/// observers, bucketed into the §24.3 counts with a reclaimable-disk
+/// estimate. Exits 0 even without a resource ledger.
+fn resources_command(args: &[String]) -> Result<(), String> {
+    let root = std::env::current_dir()
+        .map_err(|error| format!("could not resolve the current worktree: {error}"))?;
+    println!("{}", resources::run(&root, args)?);
+    Ok(())
+}
+
 fn gate(root: &Path, args: &[String]) -> Result<(), String> {
     let outcome = code_intel::run_gate(root, args)?;
     println!(
