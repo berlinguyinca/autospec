@@ -103,6 +103,7 @@ pub mod repair_loop;
 pub mod repairs;
 pub mod resources;
 pub mod restart_safety;
+pub mod result_soundness;
 pub mod review_checklist;
 pub mod run_status;
 pub mod runtime_env;
