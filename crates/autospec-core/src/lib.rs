@@ -70,6 +70,7 @@ pub mod rebaseline;
 pub mod repair_loop;
 pub mod repairs;
 pub mod resources;
+pub mod restart_safety;
 pub mod review_checklist;
 pub mod runtime_env;
 pub mod runtime_policy;
