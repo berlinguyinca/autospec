@@ -525,3 +525,74 @@ fn autonomous_executor_bridge_full_suite_revalidation_refuses_uncoherent_tree() 
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].commit_oid, resolved);
 }
+
+/// #4065: the prompt must instruct the agent to run the exact same commands
+/// that the verifier will grade. This test resolves the full suite using the
+/// same inputs the prompt assembly uses (worktree + issue_body, empty spec
+/// documents, empty env) and asserts every resolved command appears verbatim
+/// in the rendered prompt.
+#[test]
+fn autonomous_executor_bridge_prompt_instructs_verifier_gate_commands() {
+    // Use the real workspace root as the worktree so that `detected_full_suite`
+    // finds Cargo.toml and returns the Rust gate commands.
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("workspace root must exist");
+
+    let identity = bridge::BridgeIdentity {
+        repository: "owner/repo".to_string(),
+        repository_path: PathBuf::from("/safe/repo"),
+        issue: 42,
+        worker_id: "worker-1".to_string(),
+        branch: "feat/autonomous-issue-42".to_string(),
+        claim_id: "claim-42".to_string(),
+        invocation_id: "invocation-42".to_string(),
+        base_ref: "refs/remotes/origin/main".to_string(),
+        base_oid: "a".repeat(40),
+        worktree: workspace_root.clone(),
+        runtime_environment_dir: None,
+        runtime_session_id: None,
+    };
+
+    let issue_body = "Implement the feature described in the acceptance criteria.\n\n\
+        ### Operator/full verification\n\
+        ```\n\
+        cargo fmt --check\n\
+        cargo test --workspace --no-fail-fast\n\
+        cargo build --workspace --all-targets\n\
+        ```";
+    let closeout = workspace_root.join(".autospec/executor-closeout.md");
+
+    let prompt =
+        bridge::build_implementer_prompt(&identity, "Add a feature", issue_body, &closeout)
+            .expect("build bounded prompt");
+
+    // Independently resolve the full suite using the same inputs the prompt
+    // assembly uses internally (empty spec_documents, empty env).
+    let suite = bridge::resolve_full_suite(&workspace_root, issue_body, &[], &BTreeMap::new())
+        .expect("full suite must resolve from declared commands");
+
+    assert!(
+        !suite.plan.commands.is_empty(),
+        "resolved suite must not be empty"
+    );
+
+    for cmd in &suite.plan.commands {
+        let display = cmd.argv.join(" ");
+        assert!(
+            prompt.contains(&display),
+            "prompt omitted verifier gate command: {display}\nprompt was:\n{prompt}"
+        );
+    }
+
+    // The prompt must also label the gates as the grading standard.
+    assert!(
+        prompt.contains("Grading gates"),
+        "prompt missing the grading-gates header"
+    );
+    assert!(
+        prompt.contains("iteration only"),
+        "prompt missing the subset disclaimer"
+    );
+}
