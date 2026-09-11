@@ -1,0 +1,12 @@
+running `cargo test -p autospec-cli --test autonomous_conductor_commands -- foreground_recovers_with_integrated_inactive_local_branch autonomous_stale_startup_recovery::foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire --exact --nocapture`
+     Running tests/autonomous_conductor_commands.rs (target/debug/deps/autonomous_conductor_commands-0000000000000000)
+test foreground_recovers_with_integrated_inactive_local_branch ... FAILED
+test autonomous_stale_startup_recovery::foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire ... FAILED
+
+failures:
+
+failures:
+    autonomous_stale_startup_recovery::foreground_scan_recovers_stale_pending_startup_heartbeat_pending_before_acquire
+    foreground_recovers_with_integrated_inactive_local_branch
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 141 filtered out; finished in 4.77s
