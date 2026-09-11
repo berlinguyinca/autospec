@@ -30,6 +30,7 @@ pub mod guards;
 pub mod inferweave;
 pub mod isolation;
 pub mod knowledge;
+pub mod liveness_bound;
 pub mod memory;
 pub mod metric;
 pub mod outcome;

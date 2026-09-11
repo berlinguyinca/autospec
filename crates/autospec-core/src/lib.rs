@@ -27,6 +27,7 @@ pub mod autonomous_lifecycle;
 pub mod benchmark_matrix;
 pub mod ci_gate_promotion;
 pub mod ci_name_drift;
+pub mod circuit_breaker;
 pub mod claim;
 pub mod code_intel;
 pub mod config_fidelity;
