@@ -37,6 +37,7 @@ pub mod declaration_ownership;
 pub mod dispatch_guard;
 pub mod dispatch_outcomes;
 pub mod dispatch_pipeline;
+pub mod env_preconditions;
 pub mod error;
 pub mod evaluation;
 pub mod evidence;
